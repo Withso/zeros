@@ -19,8 +19,16 @@ import {
   HighlightStyle,
   syntaxHighlighting,
 } from "@codemirror/language";
-import { EditorState, type Extension } from "@codemirror/state";
 import {
+  EditorState,
+  RangeSetBuilder,
+  StateEffect,
+  StateField,
+  type Extension,
+} from "@codemirror/state";
+import {
+  Decoration,
+  type DecorationSet,
   drawSelection,
   EditorView,
   keymap,
@@ -41,11 +49,19 @@ import {
 } from "./design-computed-css";
 import {
   parseDesignCssDeclarations,
+  readDesignComputedStyle,
   serializeDesignCssDeclarations,
 } from "./design-style-values";
+import {
+  designCssDeclarationHints,
+  type DesignCssDeclarationHint,
+  type DesignStyleOriginLabel,
+} from "./design-style-provenance";
 
 interface DesignComputedCssEditorProps {
   details: DesignRuntimeNodeDetails;
+  /** Names where a winning declaration lives; hints omit sources without it. */
+  originLabel?: DesignStyleOriginLabel;
   disabled?: boolean;
   onPreviewStyles?: (styles: Record<string, string | null>) => Promise<void>;
   onCancelStylePreview?: () => Promise<void>;
@@ -100,6 +116,15 @@ function designCssEditorTheme(dark: boolean): Extension {
       ".cm-placeholder": {
         color: "var(--muted-fg)",
         fontStyle: "normal",
+      },
+      // Secondary detail after a declaration: computed value and source.
+      ".cm-line[data-design-css-hint]::after": {
+        content: "attr(data-design-css-hint)",
+        paddingLeft: "12px",
+        color: "var(--muted-fg)",
+        fontFamily: "var(--font-sans)",
+        fontSize: "11px",
+        pointerEvents: "none",
       },
       ".cm-tooltip": {
         overflow: "hidden",
@@ -201,6 +226,62 @@ const baseExtensions: readonly Extension[] = [
   ]),
 ];
 
+/** Each line's confirmed authored value with its computed value and source,
+ * shown after the declaration while the line still holds that value. */
+interface CssLineHints {
+  values: Readonly<Record<string, string>>;
+  hints: ReadonlyMap<string, DesignCssDeclarationHint>;
+}
+
+const setCssLineHints = StateEffect.define<CssLineHints>();
+
+function cssHintDecorations(
+  state: EditorState,
+  lineHints: CssLineHints,
+): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>();
+  if (lineHints.hints.size === 0) return builder.finish();
+  for (let number = 1; number <= state.doc.lines; number += 1) {
+    const line = state.doc.line(number);
+    const match = /^\s*([-\w]+)\s*:\s*(.*?)\s*;?\s*$/.exec(line.text);
+    if (!match) continue;
+    const [, property, value] = match;
+    const hint = lineHints.hints.get(property!);
+    if (!hint || lineHints.values[property!] !== value) continue;
+    const text = [hint.computed, hint.source].filter(Boolean).join(" · ");
+    if (!text) continue;
+    // Painted by CSS ::after: never part of the editable, copyable text.
+    builder.add(
+      line.from,
+      line.from,
+      Decoration.line({ attributes: { "data-design-css-hint": text } }),
+    );
+  }
+  return builder.finish();
+}
+
+const cssLineHintsField = StateField.define<{
+  lineHints: CssLineHints;
+  decorations: DecorationSet;
+}>({
+  create: (state) => {
+    const lineHints = { values: {}, hints: new Map() };
+    return { lineHints, decorations: cssHintDecorations(state, lineHints) };
+  },
+  update: (current, transaction) => {
+    let lineHints = current.lineHints;
+    for (const effect of transaction.effects)
+      if (effect.is(setCssLineHints)) lineHints = effect.value;
+    if (lineHints === current.lineHints && !transaction.docChanged) return current;
+    return {
+      lineHints,
+      decorations: cssHintDecorations(transaction.state, lineHints),
+    };
+  },
+  provide: (field) =>
+    EditorView.decorations.from(field, (value) => value.decorations),
+});
+
 function errorMessage(error: unknown): string {
   return error instanceof Error
     ? error.message
@@ -222,6 +303,7 @@ function validateSupportedCss(
  * so the Design surface's global Command-S can validate the newest source. */
 export function DesignComputedCssEditor({
   details,
+  originLabel,
   disabled = false,
   onPreviewStyles,
   onCancelStylePreview,
@@ -431,9 +513,28 @@ export function DesignComputedCssEditor({
     setError(null);
   }, [dirty, externalDeclarations, externalSource, focused, saving]);
 
+  const lineHints = useMemo<CssLineHints>(
+    () => ({
+      values: externalDeclarations,
+      hints: designCssDeclarationHints(
+        details,
+        (property) => readDesignComputedStyle(details.styles, property),
+        originLabel ?? (() => null),
+      ),
+    }),
+    [details, externalDeclarations, originLabel],
+  );
+  const viewRef = useRef<EditorView | null>(null);
+  const lineHintsRef = useRef(lineHints);
+  lineHintsRef.current = lineHints;
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: setCssLineHints.of(lineHints) });
+  }, [lineHints]);
+
   const extensions = useMemo(
     () => [
       ...baseExtensions,
+      cssLineHintsField,
       designCssEditorTheme(appearance === "dark"),
       EditorView.contentAttributes.of({
         "aria-label": "Computed CSS declarations",
@@ -474,6 +575,10 @@ export function DesignComputedCssEditor({
           style={{ height: "100%" }}
           extensions={extensions}
           onChange={handleChange}
+          onCreateEditor={(view) => {
+            viewRef.current = view;
+            view.dispatch({ effects: setCssLineHints.of(lineHintsRef.current) });
+          }}
         />
       </div>
       {error ? (

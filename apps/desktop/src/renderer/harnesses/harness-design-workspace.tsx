@@ -78,7 +78,42 @@ function withDesignRuntime(source: string, sourceVersion: string): string {
 const layoutGestureHarness = new URLSearchParams(window.location.search).has(
   "layoutGestures",
 );
-const homeSource = new URLSearchParams(window.location.search).has("autoLayout")
+// `?designTokens`: the home frame is styled by an imported source and the
+// linked tokens.css, as a composed document carries them, so the inspector
+// can name tokens and their sources.
+const designTokensHarness = new URLSearchParams(window.location.search).has(
+  "designTokens",
+);
+const DESIGN_TOKENS_HOME_SOURCE = `<!doctype html>
+<html>
+  <head>
+    <style data-zeros-layer-order="">@layer reset;</style>
+    <style data-zeros-style-source="app">
+      @layer theme, utilities;
+      @layer theme { :root { --primary-button-bg: darkslategray; --primary-button-fg: white; } }
+      @layer utilities {
+        .bg-primary-button-bg { background-color: var(--primary-button-bg); }
+        .text-primary-button-fg { color: var(--primary-button-fg); }
+      }
+    </style>
+    <style data-zeros-source="tokens.css">
+      :root { --brand: rebeccapurple; }
+      .title { color: var(--brand); }
+    </style>
+    <style>body { margin: 0; } main { padding: 72px; } button { border: 0; padding: 8px 12px; }</style>
+  </head>
+  <body>
+    <main data-oid="home-main" data-zeros-frame-root>
+      <h1 data-oid="home-heading" class="title">Make the next move unmistakable.</h1>
+      <div data-oid="home-cta" class="bg-primary-button-bg">
+        <button data-oid="home-button" class="text-primary-button-fg">Save</button>
+      </div>
+    </main>
+  </body>
+</html>`;
+const homeSource = designTokensHarness
+  ? DESIGN_TOKENS_HOME_SOURCE
+  : new URLSearchParams(window.location.search).has("autoLayout")
   ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0;background:white;color:black;font-family:system-ui}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="display:block;min-height:100vh;padding:72px"><div data-oid="home-hero" style="position:relative;display:block;width:300px;height:240px;max-width:none;padding:0;box-sizing:border-box">${["h1", "p", "span"].map((tag, index) => `<${tag} data-oid="${["home-heading", "home-copy", "home-action"][index]}" style="position:absolute;left:${16 + index * 90}px;top:20px;width:80px;height:40px;min-width:0;max-width:none;margin:0;padding:0;box-sizing:border-box;font-size:12px">${["Heading", "Copy", "Action"][index]}</${tag}>`).join("")}</div></main></body></html>`
   : layoutGestureHarness
   ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0} [data-oid]{margin:0}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="position:relative;display:block;width:100%;height:100vh;background:white"><div data-oid="home-hero" style="position:absolute;left:80px;top:80px;display:flex;width:600px;height:300px;gap:20px;padding:20px;align-items:flex-start"><div data-oid="home-heading" style="width:100px;height:80px;flex-shrink:0;background:red"></div><div data-oid="home-copy" style="width:100px;height:80px;flex-shrink:0;background:blue"></div><div data-oid="home-action" style="width:100px;height:80px;flex-shrink:0;background:green"></div></div></main></body></html>`
@@ -325,7 +360,12 @@ async function main() {
     tokenSourceVersion: "tokens-source-version-1",
     ...(styleSourcesHarness
       ? { styleSources: HARNESS_STYLE_SOURCES, styleSourceErrors: [] }
-      : {}),
+      : designTokensHarness
+        ? {
+            styleSources: [{ ...HARNESS_STYLE_SOURCES![0]!, title: "App styles", status: "ready" as const, messages: [] }],
+            styleSourceErrors: [],
+          }
+        : {}),
     assets: [],
     lint: {
       workspacePath,

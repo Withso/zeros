@@ -1,0 +1,9 @@
+{
+  "id": "design-snapshot-flight-joins-pre-save-read",
+  "kind": "replay",
+  "area": "engine-design-refresh",
+  "fixedBy": "pending",
+  "symptom": "A Design snapshot requested after a watcher-observed agent save could join an in-flight read that began before the save, so the canvas showed the older aggregate until the next event.",
+  "rule": "Share an in-flight snapshot read only within the change epoch it started in; the watcher fences the checkout when it observes a raw change, before its debounce. See engine/design/snapshot-epoch.ts.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/workspace/__tests__/service.test.ts -t \"observed source change\" && pnpm exec vitest run apps/desktop/src/engine/git/__tests__/watch.test.ts -t \"fences in-flight\""
+}

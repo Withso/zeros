@@ -1581,6 +1581,35 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   confirmed value on blur. Authored-versus-computed state, shorthands, logical
   properties, priority, and source target remain explicit; an unauthored
   (computed) value renders one text tier quieter than an authored one.
+- **Tokens and provenance:** the frame runtime reports, for each authored
+  property, the cascade's winning declaration as written, where it lives and
+  the tokens it reads (optional `DesignRuntimeNodeDetails.authoredStyles`;
+  older runtimes omit it, so `DESIGN_RUNTIME_VERSION` stays 2). The winner is
+  chosen by importance, then the `style` attribute, then cascade layers
+  (reversed for `!important`; unlayered styles follow their parent's
+  sublayers), then Selectors 4 specificity (`:where()` adds none; `:is()`,
+  `:not()`, `:has()` add their most specific argument), then order. A
+  shorthand is reported only while none of its longhands has another winner,
+  and a longhand set by a var()-based shorthand is not reported. Origins are
+  `source` (an imported style source id), `linked` (a Design stylesheet such
+  as `tokens.css`), `frame` and `inline`; each token carries its resolved
+  value and the winning declaration on the nearest element that sets it.
+  Bounds: 128 properties, 1,024-character values, 32 KiB per node, 8 tokens per
+  value, 256-character token values; one rule scan per element and generation,
+  reset with the existing authored-property cache. The renderer drops a
+  malformed field at the frame boundary rather than failing the details. The
+  CSS panel shows the written value (`background-color:
+  var(--primary-button-bg)`) and, after the line, the computed value when it
+  differs and the source of an imported or linked winner ("rgb(44, 40, 38) ·
+  App styles"), drawn with CSS so it is never editable or copied. Fill, text
+  color and stroke colors, and generic value fields such as type size, line
+  height and letter spacing (not the weight and font menus), show a token's
+  name in place of the value while unfocused and
+  unedited (`var(--a, var(--b))` shows the first token that resolves); the
+  title and accessible description add the source — the style source's title,
+  "Manual" for `tokens.css`, "Frame styles" or "Inline style" — and the
+  resolved value. Focusing a field edits its value exactly as before. A token
+  picker is a follow-up.
 - **Inspector UI:** one geometry for every Design surface — 28px fields on
   quiet `bg2` fills, 36px section headers, 13px values, 12px in-field labels,
   14px glyphs (`design-workspace-ui.css`, "Design UI standard v1", and

@@ -11,6 +11,7 @@ import {
   DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT,
   DESIGN_RUNTIME_PROTOCOL,
   DESIGN_RUNTIME_VERSION,
+  isDesignRuntimeAuthoredStyles,
   isDesignRuntimeFrameMessage,
   isRuntimeNodeLayout,
   type DesignRuntimeFrameMessage,
@@ -188,9 +189,22 @@ function runtimeError(
   return new DesignFrameRuntimeError(message, code, retryable);
 }
 
+/** Optional provenance is advisory: a malformed value from the untrusted
+ * frame is dropped rather than failing the whole details payload. */
+function dropMalformedAuthoredStyles(details: object): void {
+  const record = details as { authoredStyles?: unknown };
+  if (
+    record.authoredStyles !== undefined &&
+    !isDesignRuntimeAuthoredStyles(record.authoredStyles)
+  )
+    delete record.authoredStyles;
+}
+
 function isRuntimeSnapshot(value: unknown): value is DesignRuntimeSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const snapshot = value as Partial<DesignRuntimeSnapshot>;
+  if (snapshot.frame && typeof snapshot.frame === "object")
+    dropMalformedAuthoredStyles(snapshot.frame);
   return (
     typeof snapshot.sourceVersion === "string" &&
     typeof snapshot.revision === "number" &&
@@ -206,6 +220,7 @@ function isRuntimeSnapshot(value: unknown): value is DesignRuntimeSnapshot {
 function isNodeDetails(value: unknown): value is DesignRuntimeNodeDetails {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const details = value as Partial<DesignRuntimeNodeDetails>;
+  dropMalformedAuthoredStyles(details);
   return (
     typeof details.sourceVersion === "string" &&
     typeof details.oid === "string" &&

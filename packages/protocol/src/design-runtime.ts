@@ -166,6 +166,101 @@ export interface DesignRuntimeNodeDetails {
   /** Computed-style keys with a direct active declaration on this element.
    * Omitted by older runtimes; inspector chrome treats omission as unknown. */
   authoredStyleProperties?: string[];
+  /** The cascade's winning declaration for each authored property, as written
+   * (`var(--primary-button-bg)`), where it comes from, and the tokens it reads.
+   * Omitted by older runtimes and for any property whose winner is ambiguous
+   * (for example a shorthand partly overridden by a longhand); the inspector
+   * then shows the computed value, as before. */
+  authoredStyles?: Record<string, DesignRuntimeAuthoredStyle>;
+}
+
+/** Where a winning declaration lives in the rendered frame document. */
+export interface DesignRuntimeStyleOrigin {
+  /** `source`: an imported style source; `linked`: a Design stylesheet the
+   * frame links (tokens.css, a page stylesheet); `frame`: the frame's own
+   * `<style>`; `inline`: the element's `style` attribute. */
+  origin: "source" | "linked" | "frame" | "inline";
+  /** Imported style source id, for `source`. */
+  sourceId?: string;
+  /** Design-root-relative stylesheet, for `linked`. */
+  file?: string;
+}
+
+/** A custom property a winning value reads, with its resolved value and the
+ * winning declaration on the nearest element that sets it. */
+export interface DesignRuntimeStyleToken extends Partial<DesignRuntimeStyleOrigin> {
+  name: string;
+  value: string;
+}
+
+export interface DesignRuntimeAuthoredStyle extends DesignRuntimeStyleOrigin {
+  value: string;
+  important?: boolean;
+  tokens?: DesignRuntimeStyleToken[];
+}
+
+export const DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS = {
+  properties: 128,
+  value: 1024,
+  tokensPerValue: 8,
+  tokenValue: 256,
+} as const;
+
+const STYLE_ORIGINS = new Set(["source", "linked", "frame", "inline"]);
+
+function isRuntimeStyleOrigin(
+  value: Record<string, unknown>,
+  required: boolean,
+): boolean {
+  if (value.origin === undefined) return !required;
+  return (
+    typeof value.origin === "string" &&
+    STYLE_ORIGINS.has(value.origin) &&
+    (value.sourceId === undefined ||
+      (typeof value.sourceId === "string" && value.sourceId.length <= 64)) &&
+    (value.file === undefined ||
+      (typeof value.file === "string" && value.file.length <= 256))
+  );
+}
+
+/** Validate `DesignRuntimeNodeDetails.authoredStyles` at a trust boundary. */
+export function isDesignRuntimeAuthoredStyles(
+  value: unknown,
+): value is Record<string, DesignRuntimeAuthoredStyle> {
+  return isRuntimeAuthoredStyles(value);
+}
+
+function isRuntimeAuthoredStyles(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length > DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.properties)
+    return false;
+  return entries.every(([property, style]) => {
+    if (
+      property.length > 64 ||
+      !/^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
+      !isRecord(style) ||
+      typeof style.value !== "string" ||
+      style.value.length > DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value ||
+      (style.important !== undefined && typeof style.important !== "boolean") ||
+      !isRuntimeStyleOrigin(style, true)
+    )
+      return false;
+    if (style.tokens === undefined) return true;
+    return (
+      Array.isArray(style.tokens) &&
+      style.tokens.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokensPerValue &&
+      style.tokens.every(
+        (token) =>
+          isRecord(token) &&
+          typeof token.name === "string" &&
+          /^--[A-Za-z0-9_-]{1,126}$/.test(token.name) &&
+          typeof token.value === "string" &&
+          token.value.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue &&
+          isRuntimeStyleOrigin(token, false),
+      )
+    );
+  });
 }
 
 /** Direct children a gesture measures alongside their container. */
@@ -612,7 +707,9 @@ function isRuntimeNodeDetails(
         value.authoredStyleProperties.length <= 128 &&
         value.authoredStyleProperties.every(
           (property) => typeof property === "string" && property.length <= 64,
-        )))
+        ))) &&
+    (value.authoredStyles === undefined ||
+      isRuntimeAuthoredStyles(value.authoredStyles))
   );
 }
 
@@ -868,6 +965,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var committedTokenRulesByKey = new Map();
   var lastSnapshot = null;
   var authoredStylePropertiesCache = new WeakMap();
+  var authoredStylesCache = new WeakMap();
   var authoredStyleRuleMetadata = null;
   var oidStyleRuleIndex = null;
   var elementMapStale = true;
@@ -1481,6 +1579,378 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return result.slice();
   }
 
+  // ── Winning authored declarations ─────────────────────────
+  // The inspector shows what an author wrote (var(--primary-button-bg)), not
+  // only the computed color. For each authored property this finds the
+  // cascade's winner among the element's style attribute and the active rules
+  // that match it: importance, then the style attribute, then cascade layers
+  // (reversed for !important), then specificity, then order of appearance.
+  // Nested style rules are skipped, as authoredStylePropertiesOf skips them.
+
+  function styleOriginOf(sheet) {
+    var node = sheet && sheet.ownerNode;
+    if (!node || typeof node.getAttribute !== "function") return { origin: "frame" };
+    var sourceId = node.getAttribute("data-zeros-style-source");
+    if (sourceId) return { origin: "source", sourceId: sourceId.slice(0, 64) };
+    var file = node.getAttribute("data-zeros-source");
+    if (file) return { origin: "linked", file: file.slice(0, 256) };
+    return { origin: "frame" };
+  }
+
+  function splitTopLevel(text, separator) {
+    var parts = [];
+    var depth = 0;
+    var quote = "";
+    var start = 0;
+    for (var index = 0; index < text.length; index += 1) {
+      var character = text[index];
+      if (character === "\\") { index += 1; continue; }
+      if (quote) { if (character === quote) quote = ""; continue; }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === "(" || character === "[") depth += 1;
+      else if (character === ")" || character === "]") depth = Math.max(0, depth - 1);
+      else if (character === separator && depth === 0) {
+        parts.push(text.slice(start, index));
+        start = index + 1;
+      }
+    }
+    parts.push(text.slice(start));
+    return parts.map(function (part) { return part.trim(); }).filter(Boolean);
+  }
+
+  function identifierEnd(text, index) {
+    while (index < text.length) {
+      var code = text.charCodeAt(index);
+      if (text[index] === "\\") { index += 2; continue; }
+      if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 45 || code === 95 || code >= 128) {
+        index += 1;
+        continue;
+      }
+      break;
+    }
+    return index;
+  }
+
+  function closingIndex(text, index, open, close) {
+    var depth = 0;
+    var quote = "";
+    for (var cursor = index; cursor < text.length; cursor += 1) {
+      var character = text[cursor];
+      if (character === "\\") { cursor += 1; continue; }
+      if (quote) { if (character === quote) quote = ""; continue; }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === open) depth += 1;
+      else if (character === close) {
+        depth -= 1;
+        if (depth === 0) return cursor;
+      }
+    }
+    return text.length - 1;
+  }
+
+  function compareSpecificity(left, right) {
+    for (var index = 0; index < 3; index += 1) {
+      if (left[index] !== right[index]) return left[index] > right[index] ? 1 : -1;
+    }
+    return 0;
+  }
+
+  function maxListSpecificity(list) {
+    var best = [0, 0, 0];
+    splitTopLevel(list, ",").forEach(function (selector) {
+      var specificity = selectorSpecificity(selector);
+      if (compareSpecificity(specificity, best) > 0) best = specificity;
+    });
+    return best;
+  }
+
+  /** Selectors Level 4 specificity of one complex selector. */
+  function selectorSpecificity(selector) {
+    var text = String(selector);
+    var a = 0, b = 0, c = 0;
+    var index = 0;
+    while (index < text.length) {
+      var character = text[index];
+      if (character === "#") { a += 1; index = identifierEnd(text, index + 1); continue; }
+      if (character === ".") { b += 1; index = identifierEnd(text, index + 1); continue; }
+      if (character === "[") { b += 1; index = closingIndex(text, index, "[", "]") + 1; continue; }
+      if (character === ":") {
+        var pseudoElement = text[index + 1] === ":";
+        var start = index + (pseudoElement ? 2 : 1);
+        var end = identifierEnd(text, start);
+        var name = text.slice(start, end).toLowerCase();
+        var argument = null;
+        index = end;
+        if (text[index] === "(") {
+          var close = closingIndex(text, index, "(", ")");
+          argument = text.slice(index + 1, close);
+          index = close + 1;
+        }
+        if (pseudoElement || name === "before" || name === "after" || name === "first-line" || name === "first-letter") { c += 1; continue; }
+        if (name === "where") continue;
+        if (name === "is" || name === "not" || name === "has" || name === "matches" || name === "-webkit-any") {
+          var inner = maxListSpecificity(argument || "");
+          a += inner[0]; b += inner[1]; c += inner[2];
+          continue;
+        }
+        b += 1;
+        if ((name === "nth-child" || name === "nth-last-child") && argument) {
+          var ofIndex = argument.toLowerCase().indexOf(" of ");
+          if (ofIndex >= 0) {
+            var filtered = maxListSpecificity(argument.slice(ofIndex + 4));
+            a += filtered[0]; b += filtered[1]; c += filtered[2];
+          }
+        }
+        continue;
+      }
+      var code = text.charCodeAt(index);
+      if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95 || code >= 128 || character === "\\") {
+        var typeEnd = identifierEnd(text, index);
+        // A namespace prefix (ns|type) contributes only its type.
+        if (text[typeEnd] !== "|") c += 1;
+        index = typeEnd;
+        continue;
+      }
+      index += 1;
+    }
+    return [a, b, c];
+  }
+
+  var cascadeRuleIndex = null;
+  var longhandsByShorthand = new Map();
+
+  /** Every active style rule in document order with its layer position,
+   * origin and declared property names. Custom-property declarations are
+   * indexed by name so token lookups touch only the rules that set them. */
+  function cascadeRules() {
+    if (cascadeRuleIndex) return cascadeRuleIndex;
+    var rules = [];
+    var customRules = new Map();
+    var siblingsByParent = new Map();
+    var anonymousLayers = 0;
+    function layerPosition(parentKey, parentPath, dottedName) {
+      var key = parentKey;
+      var path = parentPath.slice();
+      dottedName.split(".").forEach(function (segment) {
+        var siblings = siblingsByParent.get(key);
+        if (!siblings) { siblings = new Map(); siblingsByParent.set(key, siblings); }
+        if (!siblings.has(segment)) siblings.set(segment, siblings.size);
+        path.push(siblings.get(segment));
+        key = key + "\u0000" + segment;
+      });
+      return { key: key, path: path };
+    }
+    function visit(list, active, layer, origin) {
+      for (var index = 0; index < list.length; index += 1) {
+        var rule = list[index];
+        var kind = rule.constructor && rule.constructor.name;
+        if (rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) {
+          var declared = declarationProperties(rule.style);
+          var entry = { rule: rule, selector: rule.selectorText, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared };
+          rules.push(entry);
+          declared.forEach(function (property) {
+            if (property.indexOf("--") !== 0) return;
+            var list = customRules.get(property);
+            if (!list) { list = []; customRules.set(property, list); }
+            list.push(entry);
+          });
+        } else if (kind === "CSSLayerStatementRule" && rule.nameList) {
+          for (var name = 0; name < rule.nameList.length; name += 1) layerPosition(layer.key, layer.path, rule.nameList[name]);
+        } else if (kind === "CSSLayerBlockRule") {
+          anonymousLayers += 1;
+          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin);
+        } else if (rule.cssRules) {
+          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin);
+        }
+      }
+    }
+    for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
+      var sheet = document.styleSheets[sheetIndex];
+      try {
+        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet));
+      } catch (_error) {
+        // Inaccessible sheets cannot provide trustworthy provenance.
+      }
+    }
+    cascadeRuleIndex = { rules: rules, customRules: customRules };
+    return cascadeRuleIndex;
+  }
+
+  /** Positive when left's layer outranks right's for normal declarations.
+   * Unlayered styles follow every sublayer of their parent. */
+  function compareLayers(left, right) {
+    for (var index = 0; ; index += 1) {
+      var leftIndex = index < left.length ? left[index] : Infinity;
+      var rightIndex = index < right.length ? right[index] : Infinity;
+      if (leftIndex !== rightIndex) return leftIndex > rightIndex ? 1 : -1;
+      if (leftIndex === Infinity) return 0;
+    }
+  }
+
+  function specificityFor(element, entry) {
+    var best = null;
+    splitTopLevel(entry.selector, ",").forEach(function (selector) {
+      var matches = false;
+      try { matches = element.matches(selector); } catch (_error) { matches = false; }
+      if (!matches) return;
+      var specificity = selectorSpecificity(selector);
+      if (!best || compareSpecificity(specificity, best) > 0) best = specificity;
+    });
+    return best || maxListSpecificity(entry.selector);
+  }
+
+  function matchingEntries(element, entries) {
+    var result = [];
+    for (var index = 0; index < entries.length; index += 1) {
+      var entry = entries[index];
+      if (!entry.active) continue;
+      var matches = false;
+      try { matches = element.matches(entry.selector); } catch (_error) { matches = false; }
+      if (matches) result.push({ entry: entry, specificity: null });
+    }
+    return result;
+  }
+
+  function longhandsOf(property) {
+    if (property.indexOf("--") === 0) return [];
+    var cached = longhandsByShorthand.get(property);
+    if (cached) return cached;
+    var probe = document.createElement("div").style;
+    var longhands = [];
+    try {
+      probe.setProperty(property, "inherit");
+      for (var index = 0; index < probe.length; index += 1) {
+        if (probe[index] !== property) longhands.push(probe[index]);
+      }
+    } catch (_error) {
+      longhands = [];
+    }
+    longhandsByShorthand.set(property, longhands);
+    return longhands;
+  }
+
+  function outranks(candidate, current, element) {
+    if (candidate.important !== current.important) return candidate.important;
+    if (!!candidate.inline !== !!current.inline) return !!candidate.inline;
+    if (candidate.inline) return false;
+    var layers = compareLayers(candidate.match.entry.layer, current.match.entry.layer);
+    if (layers !== 0) return candidate.important ? layers < 0 : layers > 0;
+    if (!candidate.match.specificity) candidate.match.specificity = specificityFor(element, candidate.match.entry);
+    if (!current.match.specificity) current.match.specificity = specificityFor(element, current.match.entry);
+    var specificity = compareSpecificity(candidate.match.specificity, current.match.specificity);
+    if (specificity !== 0) return specificity > 0;
+    return candidate.match.entry.order > current.match.entry.order;
+  }
+
+  /** The winning declaration of one property. A rule that sets it through a
+   * var()-based shorthand competes with an unknown value, so the inspector
+   * never claims a value the browser could not expand. */
+  function winningDeclaration(element, property, matches) {
+    var best = null;
+    var inlineValue = element.style.getPropertyValue(property);
+    if (inlineValue) best = { inline: true, value: inlineValue.trim(), important: element.style.getPropertyPriority(property) === "important" };
+    for (var index = 0; index < matches.length; index += 1) {
+      var match = matches[index];
+      var style = match.entry.rule.style;
+      var value = style.getPropertyValue(property);
+      var important = style.getPropertyPriority(property) === "important";
+      if (!value) {
+        // Declared through a shorthand whose value only resolves at computed time.
+        var shorthand = match.entry.declared.filter(function (name) {
+          return name !== property && longhandsOf(name).indexOf(property) >= 0 && style.getPropertyValue(name).indexOf("var(") >= 0;
+        })[0];
+        if (!shorthand) continue;
+        value = null;
+        important = style.getPropertyPriority(shorthand) === "important";
+      }
+      var candidate = { match: match, value: value === null ? null : value.trim(), important: important };
+      if (!best || outranks(candidate, best, element)) best = candidate;
+    }
+    return best;
+  }
+
+  function originOfWinner(winner) {
+    if (winner.inline) return { origin: "inline" };
+    var origin = winner.match.entry.origin;
+    var result = { origin: origin.origin };
+    if (origin.sourceId) result.sourceId = origin.sourceId;
+    if (origin.file) result.file = origin.file;
+    return result;
+  }
+
+  function sameWinner(left, right) {
+    if (!left || !right) return false;
+    if (left.inline || right.inline) return !!left.inline && !!right.inline;
+    return left.match.entry === right.match.entry;
+  }
+
+  /** The nearest element (this one or an ancestor) whose winning declaration
+   * sets a custom property, and where that declaration lives. */
+  function tokenOrigin(element, name, index) {
+    var entries = index.customRules.get(name) || [];
+    for (var current = element; current && current.nodeType === 1; current = current.parentElement) {
+      var winner = winningDeclaration(current, name, matchingEntries(current, entries));
+      if (winner && winner.value !== null) return originOfWinner(winner);
+    }
+    return null;
+  }
+
+  function authoredStylesOf(element, properties) {
+    // Cached like authoredStylePropertiesOf: one rule scan per element and
+    // generation; theme and style changes start a new generation.
+    var key = element.style.cssText + "\u0000" + properties.join(",");
+    var cached = authoredStylesCache.get(element);
+    if (cached && cached.key === key) return cached.styles;
+    var styles = authoredStylesUncached(element, properties);
+    authoredStylesCache.set(element, { key: key, styles: styles });
+    return styles;
+  }
+
+  function authoredStylesUncached(element, properties) {
+    var index = cascadeRules();
+    var matches = matchingEntries(element, index.rules);
+    var computed = getComputedStyle(element);
+    var result = {};
+    var count = 0;
+    var budget = 32768;
+    var origins = new Map();
+    for (var propertyIndex = 0; propertyIndex < properties.length && count < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.properties}; propertyIndex += 1) {
+      var property = properties[propertyIndex];
+      var winner = winningDeclaration(element, property, matches);
+      if (!winner || winner.value === null || !winner.value) continue;
+      if (winner.value.length > ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value} || winner.value.length > budget) continue;
+      var longhands = longhandsOf(property);
+      // A shorthand is authoritative only while none of its longhands has a
+      // different winner, such as a later utility that sets one side.
+      if (longhands.length > 0 && longhands.some(function (longhand) {
+        return !sameWinner(winningDeclaration(element, longhand, matches), winner);
+      })) continue;
+      var style = originOfWinner(winner);
+      style.value = winner.value;
+      if (winner.important) style.important = true;
+      var tokens = [];
+      var pattern = /var\(\s*(--[A-Za-z0-9_-]{1,126})/g;
+      for (var found = pattern.exec(winner.value); found && tokens.length < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokensPerValue}; found = pattern.exec(winner.value)) {
+        var name = found[1];
+        if (tokens.some(function (token) { return token.name === name; })) continue;
+        if (!origins.has(name)) origins.set(name, tokenOrigin(element, name, index));
+        var token = { name: name, value: computed.getPropertyValue(name).trim().slice(0, ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue}) };
+        var origin = origins.get(name);
+        if (origin) {
+          token.origin = origin.origin;
+          if (origin.sourceId) token.sourceId = origin.sourceId;
+          if (origin.file) token.file = origin.file;
+        }
+        tokens.push(token);
+      }
+      if (tokens.length > 0) style.tokens = tokens;
+      result[property] = style;
+      budget -= winner.value.length;
+      count += 1;
+    }
+    return result;
+  }
+
   /** Rebuild the oid → element map. Callers that only need to resolve a node
    * should use ensureElementMap: a full document walk per request is 1-3 walks
    * per gesture frame, and the observer already knows when the DOM changed. */
@@ -1678,7 +2148,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       authoredStyleProperties: authoredStyleProperties
     };
     if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);
+    if (!layoutOnly) attachAuthoredStyles(result, element, authoredStyleProperties);
     return result;
+  }
+
+  /** Provenance is advisory: a failure leaves the computed-only details. */
+  function attachAuthoredStyles(result, element, properties) {
+    try {
+      result.authoredStyles = authoredStylesOf(element, properties);
+    } catch (_error) {
+      // Older-runtime behavior: the inspector shows computed values.
+    }
   }
 
   function frameDetailsOf(element) {
@@ -1703,6 +2183,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       styles: stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
+    attachAuthoredStyles(result, element, authoredStyleProperties);
     return result;
   }
 
@@ -1853,7 +2334,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // A snapshot is the semantic cache generation. Theme changes and observed
     // DOM/style mutations both arrive through this boundary.
     authoredStylePropertiesCache = new WeakMap();
+    authoredStylesCache = new WeakMap();
     authoredStyleRuleMetadata = null;
+    cascadeRuleIndex = null;
     oidStyleRuleIndex = null;
     refreshElementMap();
     var roots = [];
@@ -1900,7 +2383,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function styleOnlySnapshot() {
     if (!lastSnapshot) return snapshot();
     authoredStylePropertiesCache = new WeakMap();
+    authoredStylesCache = new WeakMap();
     authoredStyleRuleMetadata = null;
+    cascadeRuleIndex = null;
     oidStyleRuleIndex = null;
     ensureElementMap();
     var result = {

@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDesignStyleTokensSmoke } from "./ui-smoke-design-style-tokens.mjs";
 
 async function openStyleDesign(page) {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -428,4 +429,6 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignEffectScrubCancellationSmoke(context);
   await runDesignEffectScrubCancellationSmoke({ ...context, holdOpeningAnimation: true });
   await runDesignInspectorPreviewOwnerSmoke(context);
+  // The inspector names the tokens and sources behind the selected styles.
+  await runDesignStyleTokensSmoke(context);
 }
