@@ -1,6 +1,6 @@
 // ============================================
 // COMMAND: process_metrics_snapshot, process_diagnostics_report
-// PURPOSE: Read one privacy-safe, whole-app CPU/memory process snapshot, and
+// PURPOSE: Read cheap Electron metrics or a full process tree on demand, and
 //          build the user-initiated diagnostics copy.
 // USED IN: The renderer's global resource monitor.
 // ============================================
@@ -45,8 +45,13 @@ const FOOTPRINT_REFRESH_MS = 10_000;
 const SYSTEM_REFRESH_MS = 5_000;
 /** CPU in the diagnostics report is measured over this window. */
 const REPORT_CPU_WINDOW_MS = 1_000;
+const METRICS_LOG_INTERVAL_MS = 10 * 60_000;
 
 const tracker = new ProcessMetricsTracker();
+// A lightweight caller cannot advance a detailed scan's CPU baseline, evict
+// its argv identities, or change the terminal-ownership key of its flight.
+const electronTracker = new ProcessMetricsTracker();
+let lastMetricsLogAt: number | null = null;
 let footprint: FootprintRead | null = null;
 let footprintRead: Promise<void> | null = null;
 let system: SystemResourceState | null = null;
@@ -60,7 +65,7 @@ function parseRequest(args: Record<string, unknown>): MetricsRequest {
 }
 
 function electronDescriptors(): ElectronProcessDescriptor[] {
-  return app.getAppMetrics().map((metric) => {
+  const descriptors = app.getAppMetrics().map((metric) => {
     const workingSetKb = metric.memory?.workingSetSize;
     return {
       pid: metric.pid,
@@ -76,6 +81,29 @@ function electronDescriptors(): ElectronProcessDescriptor[] {
         : {}),
     };
   });
+  // Reuse an explicitly requested observation for log attribution. There is
+  // no idle telemetry timer and no additional native/process-table sample.
+  const now = Date.now();
+  if (lastMetricsLogAt == null || now - lastMetricsLogAt >= METRICS_LOG_INTERVAL_MS) {
+    lastMetricsLogAt = now;
+    const groups = new Map<string, { count: number; bytes: number }>();
+    let total = 0;
+    for (const descriptor of descriptors) {
+      const bytes = descriptor.workingSetBytes ?? 0;
+      total += bytes;
+      const group = groups.get(descriptor.type) ?? { count: 0, bytes: 0 };
+      group.count += 1; group.bytes += bytes;
+      groups.set(descriptor.type, group);
+    }
+    const parts = [...groups].sort((a, b) => b[1].bytes - a[1].bytes)
+      .map(([type, group]) => `${type}=${group.count}/${(group.bytes / 1024 ** 2).toFixed(0)}MB`).join(" ");
+    try {
+      console.log(`[Zeros procmem] total=${(total / 1024 ** 2).toFixed(0)}MB ${parts}`);
+    } catch {
+      // A closed log sink cannot turn a usable observation into an IPC error.
+    }
+  }
+  return descriptors;
 }
 
 function thermalState(): SystemThermalState | null {
@@ -137,6 +165,27 @@ function logicalCpuCount(): number {
     : os.cpus().length;
 }
 
+function systemMemoryBytes(): number {
+  try {
+    return process.getSystemMemoryInfo().total * 1024;
+  } catch {
+    return os.totalmem();
+  }
+}
+
+/** Summary callers only need the Electron-owned processes. Full descendant
+ * accounting, terminal exclusion and OS context require an explicit detail
+ * request; never imply that the lightweight sample proves terminal ownership. */
+function sampleElectron(): ProcessMetricsSnapshot {
+  return electronTracker.capture({
+    sampledAt: Date.now(), scanDurationMs: 0,
+    appPid: process.pid, enginePid: null, samplerPid: null,
+    logicalCpuCount: logicalCpuCount(), systemMemoryBytes: systemMemoryBytes(),
+    terminalPids: [], terminalRootsKnown: false,
+    rows: [], electronProcesses: electronDescriptors(), appExecutable: process.execPath,
+  });
+}
+
 async function sample(
   latestRequest: () => MetricsRequest,
 ): Promise<ProcessMetricsSnapshot> {
@@ -186,12 +235,6 @@ async function sample(
   )
     void refreshFootprint();
 
-  let systemMemoryBytes = 0;
-  try {
-    systemMemoryBytes = process.getSystemMemoryInfo().total * 1024;
-  } catch {
-    systemMemoryBytes = os.totalmem();
-  }
   return tracker.capture({
     sampledAt,
     scanDurationMs: table.durationMs,
@@ -199,7 +242,7 @@ async function sample(
     enginePid: getEnginePid(),
     samplerPid: table.samplerPid,
     logicalCpuCount: logicalCpuCount(),
-    systemMemoryBytes,
+    systemMemoryBytes: systemMemoryBytes(),
     terminalPids: request.terminalPids,
     terminalRootsKnown: request.terminalRootsKnown,
     rows: table.rows,
@@ -216,12 +259,13 @@ async function sample(
 const coordinator = new ProcessMetricsScanCoordinator<
   MetricsRequest,
   ProcessMetricsSnapshot
->({ terminalPids: [], terminalRootsKnown: false, detail: false }, sample);
+>({ terminalPids: [], terminalRootsKnown: false, detail: true }, sample);
 
-export function processMetricsSnapshot(
+export async function processMetricsSnapshot(
   args: Record<string, unknown>,
 ): Promise<ProcessMetricsSnapshot> {
-  return coordinator.request(parseRequest(args));
+  const request = parseRequest(args);
+  return request.detail ? coordinator.request(request) : sampleElectron();
 }
 
 /** The Resources popover's Copy: a fresh footprint read and sample, Mac
