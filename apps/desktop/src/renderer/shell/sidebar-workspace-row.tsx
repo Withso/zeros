@@ -86,6 +86,7 @@ import {
   workspaceGlyphSeed,
   workspacePrTone,
 } from "./workspace-glyph";
+import { ActivityScope } from "../shared/ui/loading/activity-scope";
 import { workspaceLabel, workspaceTabDescription } from "./workspace-tabs";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { useCloudWorkspaceRestartAction } from "./conversation/cloud-workspace-restart-controls";
@@ -362,6 +363,7 @@ export function SidebarWorkspaceRow({
         {mixedRepositories && project && !archiving ? (
           <WorkspaceProjectIcon project={project} />
         ) : (
+          <ActivityScope.Provider value={isCloudWorkspace(workspace.path) ? undefined : true}>
           <span className={GLYPH_BOX_CLS} aria-hidden="true">
             {archiving ? (
               <ZerosSpinner size={16} label="Archiving workspace" />
@@ -385,6 +387,7 @@ export function SidebarWorkspaceRow({
               />
             )}
           </span>
+          </ActivityScope.Provider>
         )}
         {/* Only the name truncates; everything after it is shrink-0. */}
         <span className="min-w-0 flex-1 truncate">{label}</span>

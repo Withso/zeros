@@ -273,6 +273,7 @@ import {
   turnKey,
 } from "./turn-container";
 import { useLocalLiveTextSource } from "./local-live-text";
+import { ActivityScope } from "@/renderer/shared/ui/loading/activity-scope";
 import {
   TranscriptTurn,
   type TranscriptTurnActions,
@@ -353,8 +354,11 @@ interface AgentChatProps {
 
 export function AgentChat(props: AgentChatProps) {
   const chat = useChatById(props.chatId);
-  return <LocalLinksProvider cwd={chat?.folder ?? props.session.cwd} active={props.surfaceActive ?? true}>
-    <AgentChatBody {...props} />
+  const cwd = chat?.folder ?? props.session.cwd;
+  return <LocalLinksProvider cwd={cwd} active={props.surfaceActive ?? true}>
+    <ActivityScope.Provider value={cwd && !isCloudWorkspace(cwd) ? props.surfaceActive ?? true : undefined}>
+      <AgentChatBody {...props} />
+    </ActivityScope.Provider>
   </LocalLinksProvider>;
 }
 

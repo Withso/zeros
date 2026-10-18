@@ -15,7 +15,8 @@
 // rides currentColor; prefers-reduced-motion rests the square in place.
 // ──────────────────────────────────────────────────────────
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useElementActivity } from "./activity-scope";
 
 import { cn } from "@/renderer/shared/ui/cn";
 
@@ -60,6 +61,8 @@ export interface RunStreamProps {
 }
 
 export function RunStream({ size = 16, className, label }: RunStreamProps) {
+  const host = useRef<HTMLSpanElement>(null);
+  const active = useElementActivity(host);
   const reducedMotion = usePrefersReducedMotion();
   // One random entry point per mount, so two runs never stream in lockstep.
   const [phaseMs] = useState(() => Math.random() * RUN_STREAM_CYCLE_MS);
@@ -67,6 +70,7 @@ export function RunStream({ size = 16, className, label }: RunStreamProps) {
 
   return (
     <span
+      ref={host}
       className={cn("relative inline-block shrink-0 align-middle", className)}
       style={{ width: size, height: size }}
       data-run-stream=""
@@ -104,6 +108,7 @@ export function RunStream({ size = 16, className, label }: RunStreamProps) {
                 : {
                     animation: `zeros-run-stream ${RUN_STREAM_CYCLE_MS}ms linear infinite`,
                     animationDelay: `${row * RUN_STREAM_BEAT_MS - phaseMs}ms`,
+                    animationPlayState: active ? undefined : "paused",
                   }
             }
           />

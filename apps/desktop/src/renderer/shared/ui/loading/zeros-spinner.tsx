@@ -53,6 +53,7 @@ import { GlassTiles } from "./glass-square";
 import { pickGlassMotion, type GlassMotion } from "./glass-motion";
 import { PuzzleTiles } from "./puzzle-square";
 import { usePrefersReducedMotion } from "./use-prefers-reduced-motion";
+import { useElementActivity } from "./activity-scope";
 
 export type ZerosSpinnerVariant = "orbit" | "agent" | "glass";
 
@@ -111,6 +112,8 @@ export function ZerosSpinner({
   motion,
   className,
 }: ZerosSpinnerProps) {
+  const host = React.useRef<HTMLSpanElement>(null);
+  const active = useElementActivity(host, variant === "orbit");
   const reducedMotion = usePrefersReducedMotion();
   const colors = TONE_COLORS[tone];
   const { cell, extent, offset } = loaderFrame(size);
@@ -120,6 +123,7 @@ export function ZerosSpinner({
 
   return (
     <span
+      ref={host}
       role="status"
       aria-label={label}
       data-zeros-loader={variant}
@@ -152,7 +156,7 @@ export function ZerosSpinner({
           // A fresh random square per mount: no two live loaders match.
           <PuzzleTiles active reducedMotion={reducedMotion} tones={tones} />
         ) : (
-          <OrbitBands colors={colors} reducedMotion={reducedMotion} />
+          <OrbitBands colors={colors} reducedMotion={reducedMotion} active={active} />
         )}
       </svg>
     </span>
@@ -164,9 +168,11 @@ export function ZerosSpinner({
 function OrbitBands({
   colors,
   reducedMotion,
+  active,
 }: {
   colors: (typeof TONE_COLORS)[ZerosSpinnerTone];
   reducedMotion: boolean;
+  active: boolean;
 }) {
   // One random entry point per mount, so loaders mounted on the same frame
   // don't lap in lockstep. Every layer shares it: the snake stays one piece.
@@ -194,6 +200,7 @@ function OrbitBands({
                   opacity: alpha,
                   animation: `zeros-orbit-lap ${ORBIT_LAP_MS}ms linear infinite`,
                   animationDelay: `${-phaseMs}ms`,
+                  animationPlayState: active ? undefined : "paused",
                 }
           }
         />
