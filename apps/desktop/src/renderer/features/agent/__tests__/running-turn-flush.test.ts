@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BLANK, useSessionsStore } from "../sessions-store";
+import { BLANK, canBatchLocalTranscriptUpdate, useSessionsStore } from "../sessions-store";
 import { cloudScopedId, cloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import type { SessionNotification } from "../../../platform/bridge/agent-events";
 
@@ -44,7 +44,7 @@ function open(input: typeof cases[number], local: boolean) {
 }
 function flush(updates: SessionNotification[]) {
   const release = vi.fn(), finish = vi.fn(), reconcile = vi.fn(async () => {}), takeDirty = vi.fn(() => true);
-  vm.runInNewContext(code, { updates, stderrs: [], useSessionsStore,
+  vm.runInNewContext(code, { updates, stderrs: [], useSessionsStore, canBatchLocalTranscriptUpdate,
     releaseQueueRef: { current: release }, peekAgentPromptId: () => "current-diagnostic",
     sendingChatsRef: { current: new Set() }, trackAgentPromptFinished: finish,
     takePrebindDirty: takeDirty, prebindDirtySessionsRef: { current: new Map() }, reconcileChatMessagesRef: { current: reconcile } });
@@ -52,6 +52,27 @@ function flush(updates: SessionNotification[]) {
 }
 
 describe("only an accepted terminal event runs terminal effects", () => {
+  it.each(cases)("$owner / $agentId applies text before terminal effects in a mixed flush", input => {
+    open(input, false);
+    const completion = event(input, "current", "completed");
+    const text: SessionNotification = { sessionId: input.route, update: {
+      sessionUpdate: "agent_message_chunk", messageId: "answer", content: { type: "text", text: "Final answer" },
+    } };
+    const states: Array<{ status: string; text?: string }> = [];
+    const unsubscribe = useSessionsStore.subscribe(state => {
+      const slot = state.sessions[input.chat];
+      const last = slot.messages.at(-1);
+      states.push({ status: slot.status, text: last?.kind === "text" ? last.text : undefined });
+    });
+    const effects = flush([text, completion]);
+    unsubscribe();
+    expect(states[0]).toEqual({ status: "streaming", text: "Final answer" });
+    expect(states.at(-1)).toEqual({ status: "ready", text: "Final answer" });
+    expect(effects.release).toHaveBeenCalledExactlyOnceWith(input.chat);
+    expect(effects.reconcile).toHaveBeenCalledExactlyOnceWith(input.chat);
+    expect(effects.finish).toHaveBeenCalledOnce();
+  });
+
   it.each(cases.flatMap(input => [false, true].map(local => ({ ...input, local })) ))(
     "$owner / $agentId keeps the current review and queue after stale completion (local=$local)", input => {
       open(input, input.local);
