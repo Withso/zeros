@@ -911,15 +911,20 @@ describe("startGitWatcher", () => {
     const frame = join(root, "Design", "page-1", "home.html");
     await writeFile(frame, "before\n");
     let changes = 0;
+    let before = designSnapshotReadEpoch(root);
+    // Whether the checkout was already fenced when the debounced change (the
+    // renderer's refresh trigger) fired. Recorded in the callback, so a
+    // starved event loop cannot make the order ambiguous.
+    let fencedBeforeChange: boolean | null = null;
     const watcher = startGitWatcher(
       () => [{ root, workspaceId: "workspace-fence" }],
       () => {
         changes += 1;
+        fencedBeforeChange ??= designSnapshotReadEpoch(root) !== before;
       },
       {
         pollIntervalMs: 25,
-        // Long enough that the renderer refresh cannot precede the fence.
-        worktreeDebounceMs: 2_000,
+        worktreeDebounceMs: 200,
         awaitWriteFinishMs: 20,
         usePolling: true,
         worktreePollIntervalMs: 10,
@@ -929,14 +934,13 @@ describe("startGitWatcher", () => {
     await watcher.ready;
     const sibling = await mkdtemp(join(tmpdir(), "zeros-design-fence-other-"));
     roots.push(sibling);
-    const before = designSnapshotReadEpoch(root);
+    before = designSnapshotReadEpoch(root);
     const otherBefore = designSnapshotReadEpoch(sibling);
     await writeFile(frame, "after\n");
-    await waitFor(() => designSnapshotReadEpoch(root) !== before);
-    expect(changes).toBe(0);
+    await waitFor(() => changes > 0);
+    expect(fencedBeforeChange).toBe(true);
     // An exact workspace event fences only its own checkout.
     expect(designSnapshotReadEpoch(sibling)).toBe(otherBefore);
-    await waitFor(() => changes > 0, 5_000);
   });
 
   it("keeps a rowless repo-root event coarse without exposing its path", async () => {
