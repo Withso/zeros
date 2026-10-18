@@ -202,7 +202,9 @@ export function designLayoutTransform(details: DesignRuntimeNodeDetails) {
 export function preserveDesignLayoutPins(
   details: DesignRuntimeNodeDetails,
   styles: Record<string, string>,
+  subpixel = false,
 ): Record<string, string> {
+  const format = subpixel ? (value: number) => `${Math.round(value * 1_000_000) / 1_000_000 || 0}px` : px;
   const result = { ...styles };
   if (!details.layout || style(details, "position") !== "absolute")
     return result;
@@ -221,21 +223,22 @@ export function preserveDesignLayoutPins(
       styles[keys.start] === undefined
         ? numeric(details, keys.start)
         : Number.parseFloat(styles[keys.start]!);
+    const measuredSize = subpixel ? (details.box?.[keys.size as "width" | "height"] ?? details.rect[keys.size as "width" | "height"]) : borderSize(details, axis);
     const size =
       styles[keys.size] === undefined
-        ? borderSize(details, axis)
-        : borderSize(details, axis) +
+        ? measuredSize
+        : measuredSize +
           Number.parseFloat(styles[keys.size]!) -
           numeric(details, keys.size);
     if (!Number.isFinite(start) || !Number.isFinite(size)) continue;
     if (marker === "center") {
-      const offset = Math.round(start - parentSize / 2);
+      const offset = subpixel ? start - parentSize / 2 : Math.round(start - parentSize / 2);
       result[keys.start] =
         offset === 0
           ? "50%"
-          : `calc(50% ${offset < 0 ? "-" : "+"} ${px(Math.abs(offset))})`;
+          : `calc(50% ${offset < 0 ? "-" : "+"} ${format(Math.abs(offset))})`;
     } else {
-      result[keys.end] = px(
+      result[keys.end] = format(
         parentSize -
           start -
           numeric(details, keys.marginStart) -

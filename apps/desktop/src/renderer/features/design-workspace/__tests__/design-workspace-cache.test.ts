@@ -335,6 +335,59 @@ describe("design workspace cache", () => {
       },
     });
 
+    it.each(["ws_exact_move", "cloud://org-a/workspace-a"])(
+      "retires measured movement while its metadata read is held in %s",
+      async (owner) => {
+        const current = snapshot();
+        const frame = current.frames[0]!;
+        designWorkspaceSnapshotCache.setData(owner, current);
+        let finish!: (value: DesignFoundationOpenWire) => void;
+        let active = true;
+        platformMocks.foundationOpen.mockReturnValue(
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+        );
+        platformMocks.applyTransaction.mockResolvedValue({ result: null });
+        const pending = applyDesignEditCached(owner, frame, draft(), {
+          movementGuard: { sourceVersion: frame.sourceVersion },
+          isCurrent: () => active,
+        });
+        await vi.waitFor(() =>
+          expect(platformMocks.foundationOpen).toHaveBeenCalledOnce(),
+        );
+        active = false;
+        const refused = expect(pending).rejects.toThrow(/changed|retired/);
+        finish(opened("document:home", "home:1"));
+        await refused;
+        expect(platformMocks.applyTransaction).not.toHaveBeenCalled();
+      },
+    );
+
+    it("does not replay measured geometry against a fresh source revision", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      platformMocks.applyTransaction.mockRejectedValue(
+        new Error(
+          "Design frame changed before the mutation: home.html. Re-read it and retry.",
+        ),
+      );
+      platformMocks.readSnapshot.mockResolvedValue(current);
+      await expect(
+        applyDesignEditCached(workspaceId, frame, draft(), {
+          movementGuard: { sourceVersion: frame.sourceVersion },
+          isCurrent: () => true,
+        }),
+      ).rejects.toThrow(/changed/);
+      expect(platformMocks.applyTransaction).toHaveBeenCalledOnce();
+      expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
+    });
+
     it("joins the exact in-flight document read before committing the original targets once", async () => {
       const current = snapshot([
         { file: "home.html" },

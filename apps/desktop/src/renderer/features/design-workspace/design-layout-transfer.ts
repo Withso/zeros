@@ -4,6 +4,7 @@ import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
 import { transferDesignNodeCached } from "./state/design-workspace-cache";
 import { selectDesignFrame, selectDesignNode } from "./state/design-selection";
 import { designLayoutDrop } from "./design-layout-drag";
+import { designNodeRelocation } from "./design-movement-geometry";
 import {
   captureDesignPageOwner,
   designWorkspaceView,
@@ -20,13 +21,17 @@ export async function transferDesignLayerOnCanvas(input: {
   origin: { x: number; y: number };
   detach: boolean;
   isCurrent?: () => boolean;
+  canWrite?: () => boolean;
+  requireRelocation?: boolean;
   presented?: (frame: DesignCanvasFrameWire) => Promise<void>;
 }): Promise<boolean> {
   const { workspaceId, folder, frame, details, origin } = input;
   const owner = captureDesignPageOwner(workspaceId);
   const initialSelection = designWorkspaceView(workspaceId);
-  const hasIntent = () => isCurrentDesignPageOwner(owner) &&
-    designWorkspaceView(workspaceId).selectionEvent === initialSelection.selectionEvent &&
+  const hasIntent = () =>
+    isCurrentDesignPageOwner(owner) &&
+    designWorkspaceView(workspaceId).selectionEvent ===
+      initialSelection.selectionEvent &&
     input.isCurrent?.() !== false;
   const center = {
     x: origin.x + details.rect.width / 2,
@@ -45,7 +50,7 @@ export async function transferDesignLayerOnCanvas(input: {
     )
     // Match canvas painting: higher z wins; later siblings win ties.
     .reduce<DesignCanvasFrameWire | undefined>(
-      (top, candidate) => !top || candidate.z >= top.z ? candidate : top,
+      (top, candidate) => (!top || candidate.z >= top.z ? candidate : top),
       undefined,
     );
   if (!destination && !input.detach) return false;
@@ -55,7 +60,7 @@ export async function transferDesignLayerOnCanvas(input: {
   const targets = targetRuntime?.supports("getLayoutTargets")
     ? await targetRuntime.getLayoutTargets()
     : [];
-  if (!hasIntent()) return false;
+  if (!hasIntent() || input.canWrite?.() === false) return false;
   const drop = destination
     ? designLayoutDrop(
         { ...details, layout: undefined },
@@ -66,27 +71,107 @@ export async function transferDesignLayerOnCanvas(input: {
     : null;
   if (destination && !drop) return false;
   const sourceRuntime = designFrameRuntime(workspaceId, frame.file);
-  const result = await transferDesignNodeCached(workspaceId, {
-    frame: frame.file,
-    pageId: owner.pageId,
-    sourceVersion: sourceRuntime?.sourceVersion ?? frame.sourceVersion,
-    nodeId: details.oid,
-    ...(destination && drop
-      ? {
-          destinationFrame: destination.file,
-          destinationSourceVersion:
-            targetRuntime?.sourceVersion ?? destination.sourceVersion,
-          parentId: drop.parentId,
-          beforeId: drop.beforeId,
-          styles: drop.styles,
-        }
-      : {}),
-    x: Math.round(origin.x),
-    y: Math.round(origin.y),
-    w: Math.max(1, Math.round(details.rect.width)),
-    h: Math.max(1, Math.round(details.rect.height)),
-    z: Math.max(0, ...input.frames.map((candidate) => candidate.z + 1)),
-  });
+  if (input.requireRelocation && !details.relocationContext)
+    throw new Error(
+      "This runtime cannot measure inherited appearance for safe layer relocation.",
+    );
+  const relocation = details.relocationContext
+    ? designNodeRelocation(
+        details,
+        destination
+          ? { x: origin.x - destination.x, y: origin.y - destination.y }
+          : { x: 0, y: 0 },
+        destination
+          ? targets.find((target) => target.oid === drop?.parentId)
+              ?.childCoordinateSpace
+          : undefined,
+      )
+    : undefined;
+  if (
+    relocation &&
+    destination &&
+    !targets.find((target) => target.oid === drop?.parentId)
+      ?.childCoordinateSpace
+  )
+    throw new Error("The destination's editable coordinates are unavailable.");
+  const destinationParent = targets.find(
+    (target) => target.oid === drop?.parentId,
+  );
+  if (
+    relocation &&
+    destinationParent?.tag !== "body" &&
+    destinationParent?.styles.position === "static"
+  )
+    throw new Error(
+      "This destination does not provide a positioned container. Move the layer into an independent frame instead.",
+    );
+  if (relocation && sourceRuntime?.sourceVersion !== details.sourceVersion)
+    throw new Error("The source frame changed before the layer move.");
+  const result = await transferDesignNodeCached(
+    workspaceId,
+    {
+      frame: frame.file,
+      pageId: owner.pageId,
+      sourceVersion: relocation
+        ? details.sourceVersion
+        : (sourceRuntime?.sourceVersion ?? frame.sourceVersion),
+      ...(relocation
+        ? {
+            relocation,
+            movementGuard: {
+              sourceVersion: details.sourceVersion,
+              geometry: {
+                x: frame.x,
+                y: frame.y,
+                w: frame.width,
+                h: frame.height,
+                z: frame.z,
+              },
+            },
+          }
+        : {}),
+      nodeId: details.oid,
+      ...(destination && drop
+        ? {
+            destinationFrame: destination.file,
+            destinationSourceVersion:
+              targetRuntime?.sourceVersion ?? destination.sourceVersion,
+            parentId: drop.parentId,
+            beforeId: drop.beforeId,
+            styles: drop.styles,
+            ...(relocation
+              ? {
+                  destinationMovementGuard: {
+                    sourceVersion:
+                      targetRuntime?.sourceVersion ?? destination.sourceVersion,
+                    geometry: {
+                      x: destination.x,
+                      y: destination.y,
+                      w: destination.width,
+                      h: destination.height,
+                      z: destination.z,
+                    },
+                  },
+                }
+              : {}),
+          }
+        : {}),
+      x: relocation ? origin.x : Math.round(origin.x),
+      y: relocation ? origin.y : Math.round(origin.y),
+      w: Math.max(
+        1,
+        relocation ? details.rect.width : Math.round(details.rect.width),
+      ),
+      h: Math.max(
+        1,
+        relocation ? details.rect.height : Math.round(details.rect.height),
+      ),
+      z: Math.max(0, ...input.frames.map((candidate) => candidate.z + 1)),
+    },
+    ...(relocation
+      ? ([() => hasIntent() && input.canWrite?.() !== false] as const)
+      : []),
+  );
   const nextFrame = result.snapshot.frames.find(
     (candidate) => candidate.file === result.frame,
   );
@@ -131,7 +216,11 @@ export async function transferDesignLayerOnCanvas(input: {
         nodeId: result.nodeId,
         owner,
       });
-    else await selectDesignFrame(workspaceId, nextFrame, { selected: true, owner });
+    else
+      await selectDesignFrame(workspaceId, nextFrame, {
+        selected: true,
+        owner,
+      });
   }
   return true;
 }

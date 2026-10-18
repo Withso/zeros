@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   designConstraintReferenceGeometry,
+  designProjectedConstraintGuides,
   designConstraintGuidesApply,
   designConstraintReferenceRect,
   designFlexGaps,
@@ -23,6 +24,37 @@ import {
 } from "../design-layout-tools";
 
 describe("affine constraint references", () => {
+  it("projects each pin line through the parent's padding axes", () => {
+    const projected = designProjectedConstraintGuides(
+      { x: 40, y: 30, width: 20, height: 40 },
+      { x: 0, y: 10, width: 80, height: 190 },
+      { horizontal: ["left"], vertical: ["top"] },
+      { width: 95, height: 40, matrix: [0, 2, -2, 0, 80, 10] },
+      {
+        x: 60,
+        y: 30,
+        width: 20,
+        height: 10,
+        rotation: 90,
+        scaleX: 2,
+        scaleY: 2,
+        originX: 0.5,
+        originY: 0.5,
+      },
+    );
+    expect(projected.guides).toEqual([
+      {
+        side: "left",
+        axis: "horizontal",
+        x: 50,
+        y: 10,
+        length: 20,
+        rotation: 90,
+      },
+      { side: "top", axis: "vertical", x: 80, y: 50, length: 20, rotation: 90 },
+    ]);
+    expect(projected.center).toEqual({ x: 50, y: 50 });
+  });
   it("projects padding edges through scale and reflection instead of adding local borders to world bounds", () => {
     const reference = designConstraintReferenceGeometry({
       rect: { x: 72, y: 72, width: 600, height: 480 },

@@ -4,13 +4,27 @@ import type {
 } from "@zeros/protocol/design-runtime";
 import { canInsertDesignFrame } from "./design-frame-insertion";
 import { borderSize, cssSize, designLayoutMode } from "./design-layout-values";
-import { DESIGN_REPARENT_HYSTERESIS_PIXELS, designParentDelta, designRelocatedBorderStyles } from "./design-movement-geometry";
+import {
+  DESIGN_REPARENT_HYSTERESIS_PIXELS,
+  designNodeRelocation,
+  designParentDelta,
+  designRelocatedBorderStyles,
+} from "./design-movement-geometry";
+import {
+  designRelocationStyles,
+  type DesignRelocation,
+} from "@zeros/protocol/design-relocation";
+import {
+  designSelectionBox,
+  designSelectionBoxCorners,
+} from "./design-canvas-math";
 
 interface Point {
   x: number;
   y: number;
 }
 export interface DesignLayoutDrop extends DesignRuntimeNodeMove {
+  relocation?: DesignRelocation;
   styles: Record<string, string | null>;
   indicator?: { x: number; y: number; width: number; height: number };
 }
@@ -57,7 +71,11 @@ export function createDesignLayoutDropResolver(
         ),
     ]),
   );
-  const contains = (target: DesignRuntimeNodeDetails, point: Point, inset = 0) => {
+  const contains = (
+    target: DesignRuntimeNodeDetails,
+    point: Point,
+    inset = 0,
+  ) => {
     if (target.borderCoordinateSpace === null) return false;
     if (target.borderCoordinateSpace && target.box) {
       const [a, b, c, d, e, f] = target.borderCoordinateSpace;
@@ -65,9 +83,14 @@ export function createDesignLayoutDropResolver(
       if (Math.abs(determinant) < 0.000001) return false;
       const x = (d * (point.x - e) - c * (point.y - f)) / determinant;
       const y = (-b * (point.x - e) + a * (point.y - f)) / determinant;
-      const insetX = inset * Math.hypot(d, c) / Math.abs(determinant);
-      const insetY = inset * Math.hypot(b, a) / Math.abs(determinant);
-      return x >= insetX && y >= insetY && x <= target.box.width - insetX && y <= target.box.height - insetY;
+      const insetX = (inset * Math.hypot(d, c)) / Math.abs(determinant);
+      const insetY = (inset * Math.hypot(b, a)) / Math.abs(determinant);
+      return (
+        x >= insetX &&
+        y >= insetY &&
+        x <= target.box.width - insetX &&
+        y <= target.box.height - insetY
+      );
     }
     const rect = target.rect;
     return (
@@ -94,6 +117,13 @@ export function createDesignLayoutDropResolver(
       (target) =>
         target.visible &&
         !below(target) &&
+        !(
+          node.relocationContext &&
+          options?.preserveFreePosition &&
+          target !== original &&
+          target.tag !== "body" &&
+          target.styles.position === "static"
+        ) &&
         (canInsertDesignFrame(target) || target.tag === "body"),
     )
     .sort(
@@ -106,8 +136,15 @@ export function createDesignLayoutDropResolver(
             : targets.indexOf(b) - targets.indexOf(a)),
     );
   return (point, origin) => {
-    const anchor = options ? { x: origin.x + node.rect.width / 2, y: origin.y + node.rect.height / 2 } : point;
-    const hysteresis = options ? DESIGN_REPARENT_HYSTERESIS_PIXELS / options.zoom() : 0;
+    const anchor = options
+      ? {
+          x: origin.x + node.rect.width / 2,
+          y: origin.y + node.rect.height / 2,
+        }
+      : point;
+    const hysteresis = options
+      ? DESIGN_REPARENT_HYSTERESIS_PIXELS / options.zoom()
+      : 0;
     // Crossing a sibling in a flow means insertion. It must not accidentally
     // create a new nesting level just because that sibling is itself a frame.
     const parent =
@@ -117,20 +154,29 @@ export function createDesignLayoutDropResolver(
       contains(original, anchor, -hysteresis)
         ? original
         : parents.find((target) => {
-            if (!contains(target, anchor, target === currentParent ? -hysteresis : hysteresis)) return false;
+            if (
+              !contains(
+                target,
+                anchor,
+                target === currentParent ? -hysteresis : hysteresis,
+              )
+            )
+              return false;
             if (!options || target === currentParent) return true;
-            return [
-              origin,
-              { x: origin.x + node.rect.width, y: origin.y },
-              { x: origin.x, y: origin.y + node.rect.height },
-              { x: origin.x + node.rect.width, y: origin.y + node.rect.height },
-            ].every((corner) => contains(target, corner));
+            return designSelectionBoxCorners(designSelectionBox(node)).every(
+              (corner) =>
+                contains(target, {
+                  x: corner.x + origin.x - node.rect.x,
+                  y: corner.y + origin.y - node.rect.y,
+                }),
+            );
           });
     currentParent = parent;
     if (!parent) return null;
     const sameParent = parent.oid === node.layout?.parentId;
     const flow =
-      (sameParent || options?.preserveFreePosition) && node.styles.position === "absolute"
+      (sameParent || options?.preserveFreePosition) &&
+      node.styles.position === "absolute"
         ? "none"
         : designLayoutMode(parent.styles.display ?? "");
     const styles: Record<string, string | null> = {
@@ -168,8 +214,13 @@ export function createDesignLayoutDropResolver(
       if (Math.abs(determinant) < 0.000001) return null;
       styles.left = `${Math.round((d * (origin.x - e) - c * (origin.y - f)) / determinant - (parseFloat(node.styles.marginLeft ?? "0") || 0))}px`;
       styles.top = `${Math.round((-b * (origin.x - e) + a * (origin.y - f)) / determinant - (parseFloat(node.styles.marginTop ?? "0") || 0))}px`;
-      if (node.borderCoordinateSpace === null || node.parentCoordinateSpace === null)
-        throw new Error("This layer has unsupported or non-invertible coordinates and cannot be moved safely.");
+      if (
+        node.borderCoordinateSpace === null ||
+        node.parentCoordinateSpace === null
+      )
+        throw new Error(
+          "This layer has unsupported or non-invertible coordinates and cannot be moved safely.",
+        );
       if (sameParent && node.parentCoordinateSpace && node.layout) {
         const local = designParentDelta(node.parentCoordinateSpace, delta);
         const left = parseFloat(node.styles.left ?? "");
@@ -177,13 +228,39 @@ export function createDesignLayoutDropResolver(
         styles.left = `${(Number.isFinite(left) ? left : node.layout.x - margin.x) + local.x}px`;
         styles.top = `${(Number.isFinite(top) ? top : node.layout.y - margin.y) + local.y}px`;
       } else if (node.borderCoordinateSpace && parent.childCoordinateSpace) {
-        Object.assign(styles, designRelocatedBorderStyles({ border: node.borderCoordinateSpace, parent: parent.childCoordinateSpace, delta, margin }));
+        Object.assign(
+          styles,
+          designRelocatedBorderStyles({
+            border: node.borderCoordinateSpace,
+            parent: parent.childCoordinateSpace,
+            delta,
+            margin,
+          }),
+        );
       }
       const siblings = byParent.get(parent.oid) ?? [];
       const beforeId = sameParent
         ? (siblings[siblings.findIndex((target) => target.oid === node.oid) + 1]
             ?.oid ?? null)
         : null;
+      if (!sameParent && node.relocationContext) {
+        if (!parent.childCoordinateSpace)
+          throw new Error(
+            "The destination's editable coordinates are unavailable.",
+          );
+        const relocation = designNodeRelocation(
+          node,
+          origin,
+          parent.childCoordinateSpace,
+        );
+        return {
+          nodeId: node.oid,
+          parentId: parent.oid,
+          beforeId,
+          relocation,
+          styles: designRelocationStyles(relocation),
+        };
+      }
       return { nodeId: node.oid, parentId: parent.oid, beforeId, styles };
     }
     const children = flowChildren.get(parent.oid) ?? [];

@@ -86,7 +86,10 @@ import { legacyFrameId } from "./canvas-file";
 import { isDeepStrictEqual } from "node:util";
 import { assertDesignFrameRestorePage, designFramePage, designPageForWrite, designPageFrameFiles } from "./pages";
 import { designTitleSlug } from "./design-naming";
-import type { DesignRelocation } from "@zeros/protocol/design-relocation";
+import type {
+  DesignRelocation,
+  DesignMovementGuard,
+} from "@zeros/protocol/design-relocation";
 import { assertDesignRelocationSource, designRelocationRootStyles } from "./relocation-source";
 
 export async function createDesignFrame(
@@ -767,6 +770,8 @@ export async function transferDesignNode(
     beforeId?: string | null;
     styles?: Record<string, string | null>;
     relocation?: DesignRelocation;
+    movementGuard?: DesignMovementGuard;
+    destinationMovementGuard?: DesignMovementGuard;
     geometry: DesignFrameGeometry;
   },
 ): Promise<{ frame: string; nodeId: string; changes: DesignFrameChange[] }> {
@@ -776,18 +781,36 @@ export async function transferDesignNode(
       workspacePath,
       input.frame,
     );
-    const relocationStyles = input.relocation ? designRelocationRootStyles(input.relocation) : null;
-    const prepared = input.relocation
-      ? await prepareFrameRenderSourceForFile(workspacePath, from.file, from.source)
+    if (
+      input.movementGuard &&
+      (input.movementGuard.sourceVersion !== input.sourceVersion ||
+        (input.movementGuard.geometry &&
+          !isDeepStrictEqual(input.movementGuard.geometry, from.geometry)))
+    )
+      throw new Error(
+        "The source frame geometry changed before the layer move.",
+      );
+    const relocationStyles = input.relocation
+      ? designRelocationRootStyles(input.relocation)
       : null;
-    const identity = prepared ?? await readDesignFrameRenderIdentityFromSource(
-      workspacePath,
-      from.file,
-      from.source,
-    );
+    const prepared = input.relocation
+      ? await prepareFrameRenderSourceForFile(
+          workspacePath,
+          from.file,
+          from.source,
+        )
+      : null;
+    const identity =
+      prepared ??
+      (await readDesignFrameRenderIdentityFromSource(
+        workspacePath,
+        from.file,
+        from.source,
+      ));
     if (identity.sourceVersion !== input.sourceVersion)
       throw new Error("The source frame changed before the layer move.");
-    if (prepared) assertDesignRelocationSource(prepared.sanitized, input.nodeId);
+    if (prepared)
+      assertDesignRelocationSource(prepared.sanitized, input.nodeId);
     if (input.destinationFrame === from.file && !relocationStyles)
       throw new Error("Use a node move for layers in the same frame.");
     const fromSource = healDesignOids(from.source).html;
@@ -801,11 +824,28 @@ export async function transferDesignNode(
     if (input.destinationFrame === from.file && relocationStyles) {
       if (input.destinationSourceVersion !== input.sourceVersion)
         throw new Error("The destination frame changed before the layer move.");
-      const moved = mutateDesignNodeMoveSource(fromSource, input.nodeId, input.parentId ?? "::zeros-document-body", input.beforeId ?? null);
-      const state = createDesignWebDocumentState({ documentId: "transfer", entryFile: from.file, files: { [from.file]: moved } });
-      const source = mutateDesignNodeStyles(state, { nodeId: input.nodeId, styles: relocationStyles, scope: "inline" }).files[from.file]!;
+      const moved = mutateDesignNodeMoveSource(
+        fromSource,
+        input.nodeId,
+        input.parentId ?? "::zeros-document-body",
+        input.beforeId ?? null,
+      );
+      const state = createDesignWebDocumentState({
+        documentId: "transfer",
+        entryFile: from.file,
+        files: { [from.file]: moved },
+      });
+      const source = mutateDesignNodeStyles(state, {
+        nodeId: input.nodeId,
+        styles: relocationStyles,
+        scope: "inline",
+      }).files[from.file]!;
       const changes = [{ before: from, after: { ...from, source } }];
-      await applyDesignFrameChangesUnlocked(workspacePath, changes, new Map([[from.file, input.sourceVersion]]));
+      await applyDesignFrameChangesUnlocked(
+        workspacePath,
+        changes,
+        new Map([[from.file, input.sourceVersion]]),
+      );
       return { frame: from.file, nodeId: input.nodeId, changes };
     }
     let fragment = fromSource.slice(span.startOffset, span.endOffset);
@@ -840,8 +880,27 @@ export async function transferDesignNode(
           input.destinationFrame,
         )
       ).restorePoint;
-      if (input.pageId !== undefined && destination.pageId !== designPageForWrite(await readCanvas(workspacePath), input.pageId).id)
-        throw new Error("The destination frame does not belong to the requested Design page.");
+      if (
+        input.destinationMovementGuard &&
+        (input.destinationMovementGuard.sourceVersion !==
+          input.destinationSourceVersion ||
+          (input.destinationMovementGuard.geometry &&
+            !isDeepStrictEqual(
+              input.destinationMovementGuard.geometry,
+              destination.geometry,
+            )))
+      )
+        throw new Error(
+          "The destination frame geometry changed before the layer move.",
+        );
+      if (
+        input.pageId !== undefined &&
+        destination.pageId !==
+          designPageForWrite(await readCanvas(workspacePath), input.pageId).id
+      )
+        throw new Error(
+          "The destination frame does not belong to the requested Design page.",
+        );
       const destinationIdentity = await readDesignFrameRenderIdentityFromSource(
         workspacePath,
         destination.file,
@@ -850,17 +909,33 @@ export async function transferDesignNode(
       if (destinationIdentity.sourceVersion !== input.destinationSourceVersion)
         throw new Error("The destination frame changed before the layer move.");
       if (prepared) {
-        const target = await prepareFrameRenderSourceForFile(workspacePath, destination.file, destination.source);
+        const target = await prepareFrameRenderSourceForFile(
+          workspacePath,
+          destination.file,
+          destination.source,
+        );
         assertDesignRelocationSource(target.sanitized);
-        const sheets = (source: string) => elementRecords(parse(source)).filter(({ element }) => element.tagName === "style").map(({ element }) => element.childNodes.map((node) => "value" in node ? node.value : "").join(""));
-        if (!isDeepStrictEqual(sheets(prepared.sanitized), sheets(target.sanitized)))
-          throw new Error("These frames use different stylesheets and cannot be combined safely. Move the layer into an independent frame instead.");
+        const sheets = (source: string) =>
+          elementRecords(parse(source))
+            .filter(({ element }) => element.tagName === "style")
+            .map(({ element }) =>
+              element.childNodes
+                .map((node) => ("value" in node ? node.value : ""))
+                .join(""),
+            );
+        if (
+          !isDeepStrictEqual(
+            sheets(prepared.sanitized),
+            sheets(target.sanitized),
+          )
+        )
+          throw new Error(
+            "These frames use different stylesheets and cannot be combined safely. Move the layer into an independent frame instead.",
+          );
       }
       const destinationSource = healDesignOids(destination.source).html;
       const destinationIds = new Set(
-        designNodeRecords(parse(destinationSource)).map(
-          (record) => record.oid,
-        ),
+        designNodeRecords(parse(destinationSource)).map((record) => record.oid),
       );
       if (
         designNodeRecords(parse(fragment)).some(
@@ -879,7 +954,9 @@ export async function transferDesignNode(
       );
       // HTML insertion takes Design-root-relative fragments. Retain the
       // original source origin before adapting to that existing contract.
-      fragment = rebaseDesignHtmlReferences(fragment, from.file, "", { strict: true });
+      fragment = rebaseDesignHtmlReferences(fragment, from.file, "", {
+        strict: true,
+      });
       let source = mutateDesignNodeHtmlSource(
         destinationSource,
         input.parentId ?? "::zeros-document-body",
@@ -914,10 +991,12 @@ export async function transferDesignNode(
               location.endOffset <= span.endOffset)
           )
             return [];
-          const content = rebaseDesignHtmlReferences(fromSource.slice(
-            location.startOffset,
-            location.endOffset,
-          ), from.file, destination!.file, { strict: true });
+          const content = rebaseDesignHtmlReferences(
+            fromSource.slice(location.startOffset, location.endOffset),
+            from.file,
+            destination!.file,
+            { strict: true },
+          );
           return source.includes(content) ? [] : [content];
         });
       if (dependencies.length)
@@ -925,7 +1004,10 @@ export async function transferDesignNode(
       after = { ...destination, source };
     } else {
       const base = "frame";
-      const page = designPageForWrite(await readCanvas(workspacePath), input.pageId);
+      const page = designPageForWrite(
+        await readCanvas(workspacePath),
+        input.pageId,
+      );
       const prefix = page.folder ? page.folder + "/" : "";
       let file = `${prefix}${base}.html`;
       for (
@@ -946,27 +1028,37 @@ export async function transferDesignNode(
         pageId: page.id,
         source: rebaseDesignHtmlReferences(
           fromSource.slice(0, bodySpan.startTag.endOffset) +
-          fragment +
-          fromSource.slice(bodySpan.endTag.startOffset), from.file, file, { strict: true }),
+            fragment +
+            fromSource.slice(bodySpan.endTag.startOffset),
+          from.file,
+          file,
+          { strict: true },
+        ),
         geometry: normalizeGeometry(input.geometry, input.geometry),
-        metadata: { id: `frame_${randomUUID().replace(/-/g, "")}`, title: "Frame", kind: "frame" },
+        metadata: {
+          id: `frame_${randomUUID().replace(/-/g, "")}`,
+          title: "Frame",
+          kind: "frame",
+        },
       };
     }
-    const styles = relocationStyles ?? (input.destinationFrame
-      ? (input.styles ?? {})
-      : {
-          ...input.styles,
-          position: "relative",
-          left: "auto",
-          top: "auto",
-          right: "auto",
-          bottom: "auto",
-          width: "100%",
-          height: "100vh",
-          "flex-grow": "0",
-          "flex-shrink": "0",
-          "flex-basis": "auto",
-        });
+    const styles =
+      relocationStyles ??
+      (input.destinationFrame
+        ? (input.styles ?? {})
+        : {
+            ...input.styles,
+            position: "relative",
+            left: "auto",
+            top: "auto",
+            right: "auto",
+            bottom: "auto",
+            width: "100%",
+            height: "100vh",
+            "flex-grow": "0",
+            "flex-shrink": "0",
+            "flex-basis": "auto",
+          });
     if (Object.keys(styles).length) {
       const state = createDesignWebDocumentState({
         documentId: "transfer",
@@ -983,10 +1075,16 @@ export async function transferDesignNode(
       { before: from, after: remaining },
       { before: destination, after },
     ];
-    await applyDesignFrameChangesUnlocked(workspacePath, changes, new Map([
-      [from.file, input.sourceVersion],
-      ...(destination ? [[destination.file, input.destinationSourceVersion!] as const] : []),
-    ]));
+    await applyDesignFrameChangesUnlocked(
+      workspacePath,
+      changes,
+      new Map([
+        [from.file, input.sourceVersion],
+        ...(destination
+          ? [[destination.file, input.destinationSourceVersion!] as const]
+          : []),
+      ]),
+    );
     return { frame: after.file, nodeId: input.nodeId, changes };
   });
 }

@@ -1,5 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 
+it("keeps all four affine corners and the pivot when the parent chain is skewed", () => {
+  const box = designSelectionBox({
+    rect: { x: 10, y: 20, width: 280, height: 240 },
+    box: {
+      x: 10,
+      y: 20,
+      width: 100,
+      height: 80,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      originX: 0.5,
+      originY: 0.5,
+    },
+    borderCoordinateSpace: [2, 0, 1, 3, 10, 20],
+  });
+  expect(designSelectionBoxCorners(box)).toEqual([
+    { x: 10, y: 20 },
+    { x: 210, y: 20 },
+    { x: 290, y: 260 },
+    { x: expect.closeTo(90, 8), y: 260 },
+  ]);
+  expect(designSelectionPivot(box)).toEqual({ x: 150, y: 140 });
+  expect(designSelectionBoxBounds(box)).toEqual({
+    x: 10,
+    y: 20,
+    width: 280,
+    height: 240,
+  });
+  expect(designSelectionOverlayFrame(box)).toMatchObject({
+    left: 10,
+    top: 20,
+    width: 200,
+    height: 80 * Math.sqrt(10),
+    affine: [1, 0, 1 / Math.sqrt(10), 3 / Math.sqrt(10)],
+  });
+});
+
 import {
   DESIGN_ROTATION_CORNERS,
   clampDesignRectPosition,

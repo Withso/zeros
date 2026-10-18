@@ -1,10 +1,23 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as storage from "../metadata-storage";
 import * as transactions from "../document-transactions";
-import { captureDesignFrameRestorePoint, createDesignFrame, DESIGN_DIRECTORY_NAME, listDesignFrames, readDesignFrameRenderIdentity, restoreDesignFrameChanges, transferDesignNode } from "../document";
+import {
+  captureDesignFrameRestorePoint,
+  commitDesignWebDocumentState,
+  createDesignFrame,
+  DESIGN_DIRECTORY_NAME,
+  listDesignFrames,
+  readDesignFrameRenderIdentity,
+  readDesignWebDocumentState,
+  restoreDesignFrameChanges,
+  transferDesignNode,
+  updateDesignFrameGeometry,
+} from "../document";
+import { createDesignWebDocumentState } from "@zeros/design-web";
 
 describe("bounded source-preserving relocation", () => {
   let workspace: string;
@@ -62,6 +75,65 @@ describe("bounded source-preserving relocation", () => {
     await expect(transferDesignNode(workspace, input)).rejects.toThrow(/changed/);
     expect(await readFile(file, "utf8")).toContain("--accent:blue");
     expect(await listDesignFrames(workspace)).toHaveLength(1);
+  });
+
+  it("refuses relocation after a scene moved without changing its HTML", async () => {
+    const { source, file, before, input } = await fixture();
+    await updateDesignFrameGeometry(workspace, input.frame, {
+      ...before.geometry,
+      x: before.geometry.x + 10,
+    });
+    await expect(
+      transferDesignNode(workspace, {
+        ...input,
+        movementGuard: {
+          sourceVersion: input.sourceVersion,
+          geometry: before.geometry,
+        },
+      }),
+    ).rejects.toThrow(/geometry|changed/);
+    expect(await readFile(file, "utf8")).toBe(source);
+    expect(await listDesignFrames(workspace)).toHaveLength(1);
+  });
+
+  it("checks a measured semantic move again after asynchronous journal preparation", async () => {
+    const { source, file, input } = await fixture();
+    const css = path.join(workspace, DESIGN_DIRECTORY_NAME, "context.css");
+    await writeFile(css, ".child {color:red}");
+    const linked = source.replace(
+      "<head>",
+      '<head><link rel="stylesheet" href="../context.css">',
+    );
+    await writeFile(file, linked);
+    const current = await readDesignWebDocumentState(workspace, input.frame);
+    const identity = await readDesignFrameRenderIdentity(
+      workspace,
+      input.frame,
+    );
+    const next = createDesignWebDocumentState({
+      ...current,
+      files: {
+        ...current.files,
+        [input.frame]: linked.replace("margin:20px", "margin:21px"),
+      },
+    });
+    let checks = 0;
+    await expect(
+      commitDesignWebDocumentState(
+        workspace,
+        input.frame,
+        current.revision,
+        next,
+        {
+          movementGuard: { sourceVersion: identity.sourceVersion },
+          assertAuthorized: () => {
+            if (++checks === 2) writeFileSync(css, ".child {color:blue}");
+          },
+        },
+      ),
+    ).rejects.toThrow(/changed/);
+    expect(checks).toBeGreaterThanOrEqual(2);
+    expect(await readFile(file, "utf8")).toBe(linked);
   });
 
   it("rolls back a partial disk failure before reporting a failed relocation", async () => {

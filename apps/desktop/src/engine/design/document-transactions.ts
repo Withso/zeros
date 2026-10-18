@@ -100,6 +100,8 @@ import {
 import { readSafeRegularFile } from "./safe-files";
 import { safeLocalReference, listDesignAssets, MAX_DESIGN_ASSETS } from "./assets";
 import { assertDesignAssetUploadTarget, parseDesignUploadedAsset, publishDesignUploadedAsset, type DesignUploadedAsset } from "./asset-upload";
+import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
+import { readDesignFrameRenderIdentityFromSource } from "./frame-lifecycle";
 
 async function unlinkDesignArtifact(target: string): Promise<void> {
   await unlink(target);
@@ -901,7 +903,11 @@ export async function commitDesignWebDocumentState(
   frame: string,
   expectedRevision: string,
   next: DesignWebDocumentState,
-  options: { assertAuthorized?: () => void; asset?: DesignUploadedAsset } = {},
+  options: {
+    assertAuthorized?: () => void;
+    asset?: DesignUploadedAsset;
+    movementGuard?: DesignMovementGuard;
+  } = {},
 ): Promise<void> {
   const file = assertFrameFile(frame);
   await withDocumentWrite(workspacePath, async () => {
@@ -910,7 +916,12 @@ export async function commitDesignWebDocumentState(
     // A new transaction must capture its recovery identity in the current
     // storage format. Legacy migration can change authored revisions; the
     // ordinary comparison below then asks that caller to refresh first.
-    if (readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath))?.version !== 3)
+    if (
+      readDirectoryDesignManifest(
+        workspacePath,
+        designDirectoryNameFor(workspacePath),
+      )?.version !== 3
+    )
       await initializeDesignDocumentUnlocked(workspacePath);
     const current = await readDesignWebDocumentStateUnlocked(
       workspacePath,
@@ -1034,9 +1045,17 @@ export async function commitDesignWebDocumentState(
         },
       },
     };
-    const asset = options.asset ? parseDesignUploadedAsset(options.asset) : undefined;
-    if (asset && !assertDesignAssetUploadTarget(workspacePath, asset) && (await listDesignAssets(workspacePath)).length >= MAX_DESIGN_ASSETS)
-      throw new Error("This Design directory already has 128 images. Remove an unused image before uploading.");
+    const asset = options.asset
+      ? parseDesignUploadedAsset(options.asset)
+      : undefined;
+    if (
+      asset &&
+      !assertDesignAssetUploadTarget(workspacePath, asset) &&
+      (await listDesignAssets(workspacePath)).length >= MAX_DESIGN_ASSETS
+    )
+      throw new Error(
+        "This Design directory already has 128 images. Remove an unused image before uploading.",
+      );
     const journal: DesignTransactionJournal = {
       version: asset ? 2 : 1,
       ...(asset ? { asset } : {}),
@@ -1087,6 +1106,35 @@ export async function commitDesignWebDocumentState(
     // revoked while validation awaited I/O must not publish a new journal.
     // Once admitted, recovery finishes that transaction even after revocation.
     options.assertAuthorized?.();
+    if (options.movementGuard) {
+      const guard = options.movementGuard;
+      const source = await readBoundedDesignFrameSource(workspacePath, file);
+      const render = await readDesignFrameRenderIdentityFromSource(
+        workspacePath,
+        file,
+        source,
+      );
+      const latest = await readDesignWebDocumentStateUnlocked(
+        workspacePath,
+        file,
+      );
+      const geometry = latest.frames[file];
+      if (
+        render.sourceVersion !== guard.sourceVersion ||
+        latest.revision !== expectedRevision ||
+        (guard.geometry &&
+          (!geometry ||
+            geometry.x !== guard.geometry.x ||
+            geometry.y !== guard.geometry.y ||
+            geometry.width !== guard.geometry.w ||
+            geometry.height !== guard.geometry.h ||
+            geometry.z !== guard.geometry.z))
+      )
+        throw new Error(
+          "The source or frame geometry changed after this movement was measured.",
+        );
+      options.assertAuthorized?.();
+    }
     assertDesignWriteAuthorized();
     writePrivateDesignState(
       workspacePath,

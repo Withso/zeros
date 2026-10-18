@@ -2,7 +2,11 @@ import type React from "react";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import type { DesignCanvasFrameWire } from "../../platform/git";
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
-import { applyDesignEditCached } from "./state/design-workspace-cache";
+import {
+  applyDesignEditCached,
+  designWorkspaceSnapshotCache,
+  transferDesignNodeCached,
+} from "./state/design-workspace-cache";
 import { clearDesignNodeStylePreviewTransient } from "./state/design-selection";
 import { publishDesignGestureLivePreview } from "./state/design-live-preview";
 import {
@@ -14,6 +18,12 @@ import type { DesignOperation } from "@zeros/design-core";
 import { designBackgroundWork } from "./state/design-background-work";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { DESIGN_MOVE_ACTIVATION_PIXELS } from "./design-movement-geometry";
+import {
+  captureDesignPageOwner,
+  designWorkspaceView,
+  isCurrentDesignPageOwner,
+} from "./state/design-workspace-ui";
+import { useDesignRuntimeStore } from "./state/design-runtime-store";
 
 const dragOwners = new WeakMap<object, object>();
 
@@ -29,15 +39,17 @@ export function startDesignLayoutDrag(input: {
     details:
       | DesignRuntimeNodeDetails
       | { rect: DesignRuntimeNodeDetails["rect"] },
-    parentRect?: DesignRuntimeNodeDetails["rect"],
+    parent?: DesignRuntimeNodeDetails,
   ) => void;
   finished: () => void;
   clicked: () => void;
   failed: (error: unknown) => void;
+  isCurrent?: () => boolean;
   detach?: (
     origin: { x: number; y: number },
     details: DesignRuntimeNodeDetails,
     presented: (frame: DesignCanvasFrameWire) => Promise<void>,
+    canWrite: () => boolean,
   ) => Promise<boolean>;
 }): (() => void) | null {
   const { event, workspaceId, frame } = input;
@@ -53,6 +65,56 @@ export function startDesignLayoutDrag(input: {
   if (!article) return null;
   const ownership = {};
   dragOwners.set(runtime, ownership);
+  const pageOwner = captureDesignPageOwner(workspaceId);
+  const selection = designWorkspaceView(workspaceId);
+  const sourceVersion = runtime.sourceVersion;
+  const geometry = {
+    x: frame.x,
+    y: frame.y,
+    w: frame.width,
+    h: frame.height,
+    z: frame.z,
+  };
+  const frameIsCurrent = () => {
+    const current = designWorkspaceSnapshotCache
+      .peekSnapshot(workspaceId)
+      .data?.frames.find((item) => item.file === frame.file);
+    return (
+      !!current &&
+      current.sourceVersion === sourceVersion &&
+      current.x === frame.x &&
+      current.y === frame.y &&
+      current.width === frame.width &&
+      current.height === frame.height &&
+      current.z === frame.z
+    );
+  };
+  const revision =
+    useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
+      frame.file
+    ]?.snapshot?.revision;
+  const freePosition = details.styles.position === "absolute";
+  let cancelled = false;
+  const isCurrent = () =>
+    dragOwners.get(runtime) === ownership &&
+    designFrameRuntime(workspaceId, frame.file) === runtime &&
+    runtime.sourceVersion === sourceVersion &&
+    runtime.isActive?.() !== false &&
+    frameIsCurrent() &&
+    isCurrentDesignPageOwner(pageOwner) &&
+    input.isCurrent?.() !== false &&
+    designWorkspaceView(workspaceId).selectionEvent ===
+      selection.selectionEvent &&
+    designWorkspaceView(workspaceId).activeTheme === selection.activeTheme &&
+    useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
+      frame.file
+    ]?.snapshot?.revision === revision;
+  const assertCurrent = () => {
+    if (cancelled || !isCurrent())
+      throw new Error(
+        "The layer or its editing context changed during the move. Try the gesture again.",
+      );
+  };
   const bounds = article.getBoundingClientRect();
   const initialZoom = input.zoom();
   const grab = {
@@ -94,9 +156,10 @@ export function startDesignLayoutDrag(input: {
         height: `${Math.max(2 / input.zoom(), rect.height)}px`,
       });
   };
-  const flush = (): Promise<void> => {
+  const flush = async (): Promise<void> => {
     if (inFlight) return inFlight;
     if (!dirty || !targets || stopped) return Promise.resolve();
+    assertCurrent();
     dirty = false;
     latest = resolveDrop!(point, origin());
     paintLine(latest);
@@ -175,12 +238,13 @@ export function startDesignLayoutDrag(input: {
           ]) === key;
         if (
           !stopped &&
+          isCurrent() &&
           stillCurrent &&
           dragOwners.get(runtime) === ownership &&
           geometries[0]
         ) {
           presentation?.hide();
-          input.paint(geometries[0], parent?.rect);
+          input.paint(geometries[0], parent);
         }
       })
       .finally(() => {
@@ -209,27 +273,41 @@ export function startDesignLayoutDrag(input: {
   };
   let ready: Promise<void> | null = null;
   const prepare = () =>
-    (ready ??= runtime
-      .getLayoutTargets(undefined, details.oid)
-      .then((result) => {
-        targets = result;
-        // The last drag can already be visible while its inspector snapshot is
-        // settling. Use the same current DOM snapshot for the moving node and its
-        // destinations, including the cancellation baseline and pointer anchor.
-        const current = targets.find((target) => target.oid === details.oid);
-        if (current && !stopped) {
-          details = current;
-          grab.x = (start.x - bounds.left) / initialZoom - current.rect.x;
-          grab.y = (start.y - bounds.top) / initialZoom - current.rect.y;
-        }
-        resolveDrop = createDesignLayoutDropResolver(details, targets, { zoom: input.zoom, preserveFreePosition: !!input.details.relocationContext });
-        if (moved && !stopped) schedule();
-      }));
+    (ready ??= (async () => {
+      const [result, measured] = await Promise.all([
+        runtime.getLayoutTargets(undefined, details.oid),
+        freePosition
+          ? runtime.getNodeDetails(details.oid, undefined, { relocation: true })
+          : Promise.resolve(null),
+      ]);
+      assertCurrent();
+      targets = result;
+      // The last drag can already be visible while its inspector snapshot is
+      // settling. Use the same current DOM snapshot for the moving node and its
+      // destinations, including the cancellation baseline and pointer anchor.
+      const current =
+        measured ?? targets.find((target) => target.oid === details.oid);
+      if (current && !stopped) {
+        details = current;
+        grab.x = (start.x - bounds.left) / initialZoom - current.rect.x;
+        grab.y = (start.y - bounds.top) / initialZoom - current.rect.y;
+      }
+      if (freePosition && !details.relocationContext)
+        throw new Error(
+          "This runtime cannot measure inherited appearance for safe layer movement.",
+        );
+      resolveDrop = createDesignLayoutDropResolver(details, targets, {
+        zoom: input.zoom,
+        preserveFreePosition: freePosition,
+      });
+      if (moved && !stopped) schedule();
+    })());
   const move = (pointer: PointerEvent) => {
     if (pointer.pointerId !== event.pointerId || stopped) return;
     if (
       !moved &&
-      Math.hypot(pointer.clientX - start.x, pointer.clientY - start.y) < DESIGN_MOVE_ACTIVATION_PIXELS
+      Math.hypot(pointer.clientX - start.x, pointer.clientY - start.y) <
+        DESIGN_MOVE_ACTIVATION_PIXELS
     )
       return;
     moved = true;
@@ -262,7 +340,11 @@ export function startDesignLayoutDrag(input: {
   };
   const restore = async () => {
     await inFlight?.catch(() => {});
-    if (dragOwners.get(runtime) !== ownership) {
+    if (
+      dragOwners.get(runtime) !== ownership ||
+      designFrameRuntime(workspaceId, frame.file) !== runtime ||
+      runtime.sourceVersion !== sourceVersion
+    ) {
       presentation?.remove();
       return;
     }
@@ -279,19 +361,21 @@ export function startDesignLayoutDrag(input: {
         clearDesignNodeStylePreviewTransient({
           workspaceId,
           frame: frame.file,
-          sourceVersion: runtime.sourceVersion,
+          sourceVersion,
           nodeId,
         }).catch(() => {}),
       ),
     );
-    input.paint(
-      details,
-      targets?.find((target) => target.oid === details.layout?.parentId)?.rect,
-    );
+    if (isCurrent())
+      input.paint(
+        details,
+        targets?.find((target) => target.oid === details.layout?.parentId),
+      );
     presentation?.remove();
   };
   const cancel = () => {
     if (released || stopped) return;
+    cancelled = true;
     stopped = true;
     cleanup();
     void restore().finally(resumeBackground);
@@ -310,6 +394,7 @@ export function startDesignLayoutDrag(input: {
       await prepare();
       await inFlight;
       await flush();
+      assertCurrent();
       stopped = true;
       const drop = latest;
       if (!drop) {
@@ -317,9 +402,44 @@ export function startDesignLayoutDrag(input: {
           origin(),
           details,
           (target) => presentation?.handoff(target) ?? Promise.resolve(),
+          isCurrent,
         );
         if (!transferred) await restore();
         else presentation?.remove();
+        return;
+      }
+      if (
+        freePosition &&
+        drop.parentId === details.layout?.parentId &&
+        origin().x === details.rect.x &&
+        origin().y === details.rect.y
+      ) {
+        await restore();
+        return;
+      }
+      if (drop.relocation) {
+        await transferDesignNodeCached(
+          workspaceId,
+          {
+            frame: frame.file,
+            pageId: pageOwner.pageId,
+            sourceVersion,
+            destinationFrame: frame.file,
+            destinationSourceVersion: sourceVersion,
+            nodeId: details.oid,
+            parentId: drop.parentId,
+            beforeId: drop.beforeId,
+            relocation: drop.relocation,
+            movementGuard: { sourceVersion, geometry },
+            x: frame.x,
+            y: frame.y,
+            w: frame.width,
+            h: frame.height,
+            z: frame.z,
+          },
+          isCurrent,
+        );
+        presentation?.remove();
         return;
       }
       publishDesignGestureLivePreview(
@@ -367,7 +487,7 @@ export function startDesignLayoutDrag(input: {
         });
       await applyDesignEditCached(
         workspaceId,
-        { ...frame, sourceVersion: runtime.sourceVersion },
+        { ...frame, sourceVersion },
         {
           schemaVersion: 1,
           transactionId: `desktop:${crypto.randomUUID()}`,
@@ -376,6 +496,7 @@ export function startDesignLayoutDrag(input: {
           createdAt: Date.now(),
           operations,
         },
+        { movementGuard: { sourceVersion, geometry }, isCurrent },
       );
       presentation?.remove();
     })()

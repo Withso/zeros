@@ -77,6 +77,63 @@ beforeEach(() => {
 });
 
 describe("canvas transfer presentation", () => {
+  it("sends the measured affine appearance instead of the legacy flattening request", async () => {
+    await transferDesignLayerOnCanvas({
+      ...input,
+      frames: [source],
+      origin: { x: 700.25, y: 400.5 },
+      details: {
+        ...node,
+        sourceVersion: source.sourceVersion,
+        rect: { x: 40, y: 80, width: 240, height: 280 },
+        box: {
+          x: 40,
+          y: 80,
+          width: 100,
+          height: 80,
+          rotation: 0,
+          scaleX: 1,
+          scaleY: 1,
+          originX: 0.5,
+          originY: 0.5,
+        },
+        borderCoordinateSpace: [0, 2, -3, 1, 280, 80],
+        relocationContext: {
+          inheritedStyles: { color: "navy" },
+          unsupported: [],
+        },
+      },
+    });
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({
+      sourceVersion: source.sourceVersion,
+      x: 700.25,
+      y: 400.5,
+      relocation: {
+        width: 100,
+        height: 80,
+        matrix: [0, 2, -3, 1, 240, 0],
+        inheritedStyles: { color: "navy" },
+      },
+    });
+  });
+
+  it("refuses unsupported measured appearance before a transfer write", async () => {
+    await expect(
+      transferDesignLayerOnCanvas({
+        ...input,
+        frames: [source],
+        details: {
+          ...node,
+          sourceVersion: source.sourceVersion,
+          relocationContext: {
+            inheritedStyles: {},
+            unsupported: ["ancestor compositing"],
+          },
+        },
+      }),
+    ).rejects.toThrow(/measured|compositing/);
+    expect(mocks.transfer).not.toHaveBeenCalled();
+  });
   it.each(["workspace-a", "cloud://org-a/workspace-a"])("does not follow a fresh identical selection while saving in %s", async (workspaceId) => {
     useDesignWorkspaceUiStore.getState().setSelection(workspaceId, source.file, node.oid);
     let finish!: (value: typeof reply) => void;

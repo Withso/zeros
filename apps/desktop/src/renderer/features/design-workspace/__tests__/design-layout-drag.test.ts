@@ -47,6 +47,38 @@ const a = node("a", "root", 0, 0);
 const b = node("b", "root", 110, 0);
 const c = node("c", "root", 220, 0);
 describe("canvas layout drop intent", () => {
+  it("admits a rotated child's actual quad even when its AABB corners leave the rotated parent", () => {
+    const parent = {
+      ...node("parent", "outer", 0, 0, 400, 400),
+      box: { width: 200, height: 200 },
+      borderCoordinateSpace: [1, 1, -1, 1, 200, 0],
+      childCoordinateSpace: [1, 1, -1, 1, 200, 0],
+    } as DesignRuntimeNodeDetails;
+    const child = {
+      ...node("child", "outside", 80, 100, 240, 240),
+      styles: { position: "absolute" },
+      box: {
+        x: 200,
+        y: 100,
+        width: 120,
+        height: 120,
+        rotation: 45,
+        scaleX: Math.SQRT2,
+        scaleY: Math.SQRT2,
+        originX: 0.5,
+        originY: 0.5,
+      },
+      borderCoordinateSpace: [1, 1, -1, 1, 200, 100],
+      relocationContext: { inheritedStyles: {}, unsupported: [] },
+    } as DesignRuntimeNodeDetails;
+    const resolve = createDesignLayoutDropResolver(child, [parent, child], {
+      zoom: () => 1,
+      preserveFreePosition: true,
+    });
+    expect(resolve({ x: 200, y: 220 }, { x: 80, y: 100 })?.parentId).toBe(
+      "parent",
+    );
+  });
   it("keeps an absolute child's containing-block offsets when its immediate parent is static", () => {
     const parent = node("parent", "root", 100, 0, 400, 300);
     parent.styles.position = "static";

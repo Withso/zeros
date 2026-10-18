@@ -1,5 +1,8 @@
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
-import { designRelocationSchema } from "@zeros/protocol/design-relocation";
+import {
+  designMovementGuardSchema,
+  designRelocationSchema,
+} from "@zeros/protocol/design-relocation";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
 import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
@@ -116,6 +119,7 @@ import {
 import { DEFAULT_DESIGN_DIRECTORY_NAME } from "./directory-registry";
 import { stickyRecognizedDesignDirectories } from "./recognition-store";
 import { withDesignWorkspaceMutation } from "./document-write-lock";
+import { withMeasuredDesignMovement } from "./movement-guard";
 import { upsertDesignTheme } from "./theme-lifecycle";
 import { setDesignRuntimeAudit } from "./runtime-audits";
 import { normalizeDesignScreenshot, setDesignScreenshot } from "./screenshots";
@@ -470,7 +474,42 @@ export async function handleDesignWorkspaceRoute(
         return { result: await api.apply(transaction, { dryRun: true }) };
       }
 
-      const result = await api.apply(transaction);
+      if (params.movementGuard !== undefined) {
+        const guard = designMovementGuardSchema.parse(params.movementGuard);
+        const frame = reqStr(params, "frame");
+        const geometry = guard.geometry
+          ? (await captureDesignFrameRestorePoint(workspace.path, frame))
+              .geometry
+          : null;
+        const render = await readDesignFrameRenderIdentity(
+          workspace.path,
+          frame,
+        );
+        if (
+          render.sourceVersion !== guard.sourceVersion ||
+          (geometry &&
+            guard.geometry &&
+            (["x", "y", "w", "h", "z"] as const).some(
+              (key) => geometry[key] !== guard.geometry![key],
+            ))
+        ) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              "The source or frame geometry changed after this movement was measured.",
+          });
+        }
+      }
+
+      const result =
+        params.movementGuard === undefined
+          ? await api.apply(transaction)
+          : await withMeasuredDesignMovement(
+              workspace.path,
+              reqStr(params, "frame"),
+              designMovementGuardSchema.parse(params.movementGuard),
+              () => api.apply(transaction),
+            );
       if (result.receipt.status === "applied") {
         host.recordDesignHistory(
           workspace.path,
@@ -1394,7 +1433,23 @@ export async function handleDesignWorkspaceRoute(
         ...(params.styles
           ? { styles: designMutationStyles(params.styles) }
           : {}),
-        ...(params.relocation !== undefined ? { relocation: designRelocationSchema.parse(params.relocation) } : {}),
+        ...(params.relocation !== undefined
+          ? { relocation: designRelocationSchema.parse(params.relocation) }
+          : {}),
+        ...(params.movementGuard !== undefined
+          ? {
+              movementGuard: designMovementGuardSchema.parse(
+                params.movementGuard,
+              ),
+            }
+          : {}),
+        ...(params.destinationMovementGuard !== undefined
+          ? {
+              destinationMovementGuard: designMovementGuardSchema.parse(
+                params.destinationMovementGuard,
+              ),
+            }
+          : {}),
         geometry: {
           x: reqNum(params, "x"),
           y: reqNum(params, "y"),

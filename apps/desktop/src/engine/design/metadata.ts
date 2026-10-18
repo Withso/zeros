@@ -997,6 +997,34 @@ export function commitDesignMetadata(
     )
       throw new Error("Design metadata exceeds its size limit.");
   }
+  const source = JSON.stringify({
+    version: 1,
+    workspace: path.resolve(workspace),
+    directory,
+    changes,
+  });
+  const inverse = options?.rollbackOnFailure
+    ? [...changes]
+        .reverse()
+        .map(({ file, before, after }) => ({
+          file,
+          before: after,
+          after: before,
+        }))
+    : null;
+  const inverseSource = inverse
+    ? JSON.stringify({
+        version: 1,
+        workspace: path.resolve(workspace),
+        directory,
+        changes: inverse,
+      })
+    : null;
+  if (
+    Buffer.byteLength(source) > MAX_JOURNAL_BYTES ||
+    (inverseSource && Buffer.byteLength(inverseSource) > MAX_JOURNAL_BYTES)
+  )
+    throw new Error("Design metadata migration is too large.");
   // Repository configuration is repaired before starting a document write.
   // A higher-priority nested exclusion must not produce a successful save
   // whose metadata is hidden. The ignore edit stays reviewable on failure.
@@ -1011,14 +1039,6 @@ export function commitDesignMetadata(
   }
   assertDesignFilesNotIgnored(workspace, visibleFiles);
   if (!changes.length) return ignoreChanges;
-  const source = JSON.stringify({
-    version: 1,
-    workspace: path.resolve(workspace),
-    directory,
-    changes,
-  });
-  if (Buffer.byteLength(source) > MAX_JOURNAL_BYTES)
-    throw new Error("Design metadata migration is too large.");
   const journal = writePrivateDesignState(
     workspace,
     journalName(directory),
@@ -1027,10 +1047,9 @@ export function commitDesignMetadata(
   try {
     applyStorageChanges(workspace, directory, changes);
   } catch (error) {
-    if (!options?.rollbackOnFailure) throw error;
-    const inverse = [...changes].reverse().map(({ file, before, after }) => ({ file, before: after, after: before }));
+    if (!inverse || !inverseSource) throw error;
     try {
-      writePrivateDesignState(workspace, journalName(directory), JSON.stringify({ version: 1, workspace: path.resolve(workspace), directory, changes: inverse }));
+      writePrivateDesignState(workspace, journalName(directory), inverseSource);
       applyStorageChanges(workspace, directory, inverse);
       unlinkSync(journal);
       syncDirectory(path.dirname(journal));

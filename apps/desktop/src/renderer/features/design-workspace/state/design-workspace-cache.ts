@@ -1,4 +1,5 @@
 import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
+import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity } from "../../../platform/bridge/design-bridge";
 // ──────────────────────────────────────────────────────────
@@ -1266,18 +1267,20 @@ export async function deleteDesignPageCached(workspaceId: string, pageId: string
 export async function transferDesignNodeCached(
   workspaceId: string,
   input: Parameters<typeof designTransferNode>[1],
+  isCurrent?: () => boolean,
 ) {
   return runLocalDesignMutation(workspaceId, async () => {
+    if (isCurrent?.() === false) throw new Error("The layer move no longer owns the active selection.");
     const result = await designTransferNode(workspaceId, {
       ...input,
-      sourceVersion: resolveLocalFrameSourceVersion(
+      sourceVersion: input.relocation ? input.sourceVersion : resolveLocalFrameSourceVersion(
         workspaceId,
         input.frame,
         input.sourceVersion,
       ),
       ...(input.destinationFrame && input.destinationSourceVersion
         ? {
-            destinationSourceVersion: resolveLocalFrameSourceVersion(
+            destinationSourceVersion: input.relocation ? input.destinationSourceVersion : resolveLocalFrameSourceVersion(
               workspaceId,
               input.destinationFrame,
               input.destinationSourceVersion,
@@ -1701,6 +1704,10 @@ export async function updateDesignFrameGeometryCached(
 }
 
 type DesignEditIntent = Omit<DesignTransaction, "documentId" | "baseRevision">;
+interface DesignMeasuredMovement {
+  movementGuard: DesignMovementGuard;
+  isCurrent: () => boolean;
+}
 
 /** Capture an edit's owner/operations immediately, then join its exact document
  * read inside the mutation lane. A ready runtime does not imply the inspector's
@@ -1715,12 +1722,13 @@ export function applyDesignEditCached(
     sourceVersion,
   }: Pick<DesignFrameDocumentWire, "file" | "sourceVersion">,
   intent: DesignEditIntent | (() => DesignEditIntent),
+  measured?: DesignMeasuredMovement,
 ): Promise<DesignApiMutationReplyWire> {
   return applyPreparedDesignTransactionCached(workspaceId, file, async () => {
     const key = designFoundationKey(
       workspaceId,
       file,
-      resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion),
+      measured ? sourceVersion : resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion),
     );
     const foundation = await designFoundationCache.load(
       key,
@@ -1732,7 +1740,7 @@ export function applyDesignEditCached(
       documentId: foundation.summary.documentId,
       baseRevision: foundation.summary.revision,
     };
-  });
+  }, measured);
 }
 
 export function applyDesignTransactionCached(
@@ -1751,12 +1759,19 @@ async function applyPreparedDesignTransactionCached(
   workspaceId: string,
   frame: string,
   prepare: () => Promise<DesignTransaction>,
+  measured?: DesignMeasuredMovement,
 ): Promise<DesignApiMutationReplyWire> {
   return runLocalDesignMutation(workspaceId, async () => {
+    const assertCurrent = () => {
+      if (measured && (!measured.isCurrent() || currentFrameSourceVersion(workspaceId, frame) !== measured.movementGuard.sourceVersion))
+        throw new Error("The measured movement changed or retired. Select the layer again before moving it.");
+    };
+    assertCurrent();
     const transaction = await prepare();
+    assertCurrent();
     const revisionKey = frameMutationKey(workspaceId, frame);
     const execute = async () => {
-      const baseRevision = await resolveFoundationBaseRevision(
+      const baseRevision = measured ? transaction.baseRevision : await resolveFoundationBaseRevision(
         workspaceId,
         frame,
         transaction.baseRevision,
@@ -1771,11 +1786,10 @@ async function applyPreparedDesignTransactionCached(
       const beforeState = historyStateKey(
         designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
       );
-      const result = await designApplyTransaction(
-        workspaceId,
-        frame,
-        rebasedTransaction,
-      );
+      assertCurrent();
+      const result = measured
+        ? await designApplyTransaction(workspaceId, frame, rebasedTransaction, false, measured.movementGuard)
+        : await designApplyTransaction(workspaceId, frame, rebasedTransaction);
       recordLocalGeneration(
         localFoundationRevisionByFrame,
         revisionKey,
@@ -1846,7 +1860,7 @@ async function applyPreparedDesignTransactionCached(
     try {
       return await execute();
     } catch (error) {
-      if (!isStaleDesignGenerationError(error)) throw error;
+      if (measured || !isStaleDesignGenerationError(error)) throw error;
       // Refresh first so the retry opens the foundation for the engine's
       // current generation, then let the stale flag re-resolve the base
       // revision. The rejected transaction never applied, so one replay

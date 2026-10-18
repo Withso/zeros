@@ -509,6 +509,7 @@ export async function designApplyTransaction(
   frame: string,
   transaction: DesignTransaction,
   dryRun = false,
+  movementGuard?: import("@zeros/protocol/design-relocation").DesignMovementGuard,
 ): Promise<DesignApiMutationReplyWire> {
   return bridgeDesignApplyTransaction(
     requireBridge("apply a design transaction"),
@@ -516,6 +517,7 @@ export async function designApplyTransaction(
     frame,
     transaction,
     dryRun,
+    movementGuard,
   );
 }
 
