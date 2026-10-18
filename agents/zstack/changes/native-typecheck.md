@@ -1,4 +1,4 @@
-# The type-check gate runs the native compiler
+# Local type checks and test reruns reuse work
 
 Symptom: on the owner's Mac a single agent-run `pnpm typecheck` held a 3.96 GB
 `tsc` process at 127 % CPU, and several agents type-checking at once pushed the
@@ -19,3 +19,7 @@ removed `baseUrl`; the engine and Electron bundles are byte-identical without it
 Encoded by: `package.json` typecheck scripts, `tsconfig.typecheck.json`,
 `apps/desktop/electron/tsconfig.typecheck.json`, `tsconfig.json`, and the
 zstack-verify stale-state note.
+Vitest reruns outside CI reuse transformed modules (`experimental.fsModuleCache`).
+Full suite on the sandbox: 682 s → 533 s with a warm cache (transform 81 s → 11.5 s),
+with identical pass/fail results; a 40-file rerun 11.4 s → 9.9 s and its main
+process 320 MB → 240 MB. Encoded by `vitest.config.ts` and the zstack-verify note.

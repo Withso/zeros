@@ -125,6 +125,10 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   `/var` symlink, so path-safety suites fail with `zstack_source_unsafe`,
   `zstack_receipt_unsafe` or "not canonical". Rerun them with `TMPDIR` set to a
   directory under `/private/tmp`; Linux-only cloud fixtures still fail on macOS.
+- Outside CI, Vitest reuses transformed modules from
+  `node_modules/.experimental-vitest-cache` between runs. If a rerun behaves
+  differently from a fresh checkout, clear it with `pnpm exec vitest --clearCache`
+  before chasing the difference.
 - `pnpm test:ui-smoke` stops at the first scenario that throws, so one base
   failure hides every later scenario. Confirm the failure on the base commit,
   then run the rest from an untracked copy of `scripts/` without that scenario
