@@ -96,16 +96,41 @@ verification results cannot overwrite an A → B → A selection. Removing an
 account during sign-in prevents it from being re-added and cleans up credentials
 written by a late native login.
 
-An in-flight turn finishes under its original account. Before accepting its next
-message, the engine retires a process whose authentication identity has changed.
-The existing chat resumes under the current account. When native history is
-unavailable in the new profile, a bounded text replay supplies conversation
-context; queued messages and provider tool outputs are excluded. Blocked prompts
-and available attachments are included with the user's next ordinary message.
-Sign-in never automatically sends a prompt.
-The engine retains the empty-session marker across renderer reloads until the
-first completed provider prompt, then clears it so later reloads do not repeat
-the replay.
+An in-flight turn finishes under its original account. In a Local workspace the
+next message then runs under the current connection with no reconnect, chat
+restart or engine restart: the gateway hands the live execution the new API key,
+CLI login or saved account at that turn boundary. Claude and Codex restart only
+their native process and resume the same conversation (`resume`,
+`thread/resume`); Cursor resumes the same agent under the new key
+(`Agent.resume`). A tool-connection read adopts the
+connection the same way; concurrent callers share one restart. Background work
+owned by the old process ends with it. When the new connection uses another
+native root (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), the conversation's history
+file is first copied there once no process is still writing it. The source stays
+in place and a newer copy is never replaced, so A → B → A keeps the latest turns.
+An adapter without this capability keeps the previous retire-and-reconnect path.
+Cloud executions keep the credential their admission minted.
+Stop also applies while a send waits for the native process to restart. That
+send stays cancelled when the restart completes; a later send can use the new
+connection. Authentication failures are attributed to the attempted connection,
+so a late rejection cannot mark a newer selected account as requiring sign-in.
+
+When native history is still unavailable in the new profile (the copy failed),
+Claude falls back to a bounded text replay that supplies conversation context;
+queued messages and provider tool outputs are excluded. Codex starts a new
+thread, publishes its binding with an optional `resumedFresh` marker, and routes
+the pending send through the existing bounded conversation replay before native
+dispatch. Blocked prompts and available attachments are
+included with the user's next ordinary message. Sign-in never automatically
+sends a prompt. A forced registry refresh after a connection change waits for
+any earlier in-flight read, so the composer's sign-in check never keeps a
+verdict from before the change.
+The engine and renderer retain the empty-session marker across renderer reloads,
+Stop and further account switches until a prompt completes on that thread.
+Cancellation or completion on an older thread cannot acknowledge its history.
+After successful replay, later reloads do not repeat it. The new binding-update
+field is optional: legacy notifications retain their existing behavior, and
+older consumers still recover through `AGENT_SESSION_LOADED.resumedFresh`.
 
 Live model capabilities and pending model discovery belong to the selected
 authentication identity. Switching accounts clears the old model snapshot;
@@ -131,9 +156,9 @@ The pinned `@cursor/sdk` 1.0.31 owns access-token refresh, including during acti
 local runs. This incorporates the refresh correction documented in the
 [1.0.30 changelog](https://cursor.com/docs/sdk/changelog). Do not add a competing
 Zeros refresh timer or restart a healthy execution just to renew its token.
-Credential replacement still retires the old execution before its next send;
-late success or failure from that execution cannot change the replacement
-credential's authentication verdict.
+Credential replacement resumes the same agent under the new key before its next
+run; late success or failure from a run under the old key cannot change the
+replacement credential's authentication verdict.
 
 Qualification of 1.0.31 found that a failed local token exchange can reach
 `run.wait()` without its error code, while the native run store retains only the

@@ -31,6 +31,7 @@ import {
   type ReadFileResult,
 } from "@/renderer/platform/files";
 import { turnDiff } from "@/renderer/platform/turns";
+import { isCloudWorkspace } from "@/renderer/platform/bridge/cloud-workspace-key";
 import {
   KeyedAsyncCache,
   type AsyncCacheSnapshot,
@@ -65,8 +66,41 @@ export interface WorkspaceFileDiffQuery {
   turnId?: string;
 }
 
-const fileReadCache = new KeyedAsyncCache<ReadFileResult>(96);
-const fileDiffCache = new KeyedAsyncCache<string>(160);
+// Keep the existing entry counts for normal files, but also bound large Local
+// payloads (notably base64 images and full-context patches). String lengths
+// estimate retained UTF-16 bytes without allocating a serialized copy. These
+// are soft payload budgets, not file-size limits: subscribed retained viewers
+// and in-flight reads remain pinned. One oversized inactive result stays warm
+// outside the budget without flushing ordinary files; its exact key is retained
+// until a newer oversized result replaces it or the entry limit requires LRU.
+const fileReadCache = new KeyedAsyncCache<ReadFileResult>({
+  maxEntries: 96,
+  maxWeight: 128 * 1024 * 1024,
+  retainNewest: true,
+  weightOf: (value) => 64 + 2 * (
+    value.path.length + (value.content?.length ?? 0) +
+    (value.dataUrl?.length ?? 0) + (value.error?.length ?? 0)
+  ),
+});
+const fileDiffCache = new KeyedAsyncCache<string>({
+  maxEntries: 160,
+  maxWeight: 64 * 1024 * 1024,
+  retainNewest: true,
+  weightOf: (value) => value.length * 2,
+});
+// Local pressure must not evict Cloud snapshots or change their cache policy.
+const cloudFileReadCache = new KeyedAsyncCache<ReadFileResult>(96);
+const cloudFileDiffCache = new KeyedAsyncCache<string>(160);
+const fileReadCaches = [fileReadCache, cloudFileReadCache];
+const fileDiffCaches = [fileDiffCache, cloudFileDiffCache];
+
+function readCacheFor(cwd: string): KeyedAsyncCache<ReadFileResult> {
+  return isCloudWorkspace(cwd) ? cloudFileReadCache : fileReadCache;
+}
+
+function diffCacheFor(workspaceId: string): KeyedAsyncCache<string> {
+  return isCloudWorkspace(workspaceId) ? cloudFileDiffCache : fileDiffCache;
+}
 
 // A large Changes summary has no per-file patches to reuse. Pointer travel
 // must not start a Git process for every crossed row while earlier reads are
@@ -219,13 +253,13 @@ function useSnapshot<T>(
 export function useWorkspaceFileReadSnapshot(
   query: WorkspaceFileReadQuery,
 ): AsyncCacheSnapshot<ReadFileResult> {
-  return useSnapshot(fileReadCache, workspaceFileReadKey(query));
+  return useSnapshot(readCacheFor(query.cwd), workspaceFileReadKey(query));
 }
 
 export function useWorkspaceFileDiffSnapshot(
   query: WorkspaceFileDiffQuery,
 ): AsyncCacheSnapshot<string> {
-  return useSnapshot(fileDiffCache, workspaceFileDiffKey(query));
+  return useSnapshot(diffCacheFor(query.workspaceId), workspaceFileDiffKey(query));
 }
 
 export function loadWorkspaceFileRead(
@@ -236,7 +270,7 @@ export function loadWorkspaceFileRead(
   // finishes with (not after) the read. Deduplicated, so the revalidation calls
   // on a git refresh cost a map lookup.
   prewarmFileSyntax(query.path);
-  return fileReadCache.load(
+  return readCacheFor(query.cwd).load(
     workspaceFileReadKey(query),
     () => fetchWorkspaceFileRead(query),
     options,
@@ -251,7 +285,7 @@ export function loadWorkspaceFileDiff(
   if (queuedDiffPrefetch && workspaceFileDiffKey(queuedDiffPrefetch) === key) {
     queuedDiffPrefetch = null;
   }
-  return fileDiffCache.load(key, () => fetchWorkspaceFileDiff(query), options);
+  return diffCacheFor(query.workspaceId).load(key, () => fetchWorkspaceFileDiff(query), options);
 }
 
 export function prefetchWorkspaceFileRead(
@@ -304,7 +338,7 @@ export function primeWorkspaceFileRead(
   query: WorkspaceFileReadQuery,
   result: ReadFileResult,
 ): void {
-  fileReadCache.setData(workspaceFileReadKey(query), result);
+  readCacheFor(query.cwd).setData(workspaceFileReadKey(query), result);
 }
 
 /** Publish a per-file patch parsed from Changes' aggregate diff. */
@@ -312,19 +346,19 @@ export function primeWorkspaceFileDiff(
   query: WorkspaceFileDiffQuery,
   patch: string,
 ): void {
-  fileDiffCache.setData(workspaceFileDiffKey(query), patch);
+  diffCacheFor(query.workspaceId).setData(workspaceFileDiffKey(query), patch);
 }
 
 export function peekWorkspaceFileRead(
   query: WorkspaceFileReadQuery,
 ): ReadFileResult | undefined {
-  return fileReadCache.getSnapshot(workspaceFileReadKey(query)).data;
+  return readCacheFor(query.cwd).getSnapshot(workspaceFileReadKey(query)).data;
 }
 
 export function peekWorkspaceFileDiff(
   query: WorkspaceFileDiffQuery,
 ): string | undefined {
-  return fileDiffCache.getSnapshot(workspaceFileDiffKey(query)).data;
+  return diffCacheFor(query.workspaceId).getSnapshot(workspaceFileDiffKey(query)).data;
 }
 
 /** Mark renderer file snapshots stale after a Git/file generation changes.
@@ -338,38 +372,40 @@ export function invalidateWorkspaceFileData(
 ): void {
   if (cwd) {
     const normalizedCwd = normalizeCwd(cwd);
-    for (const key of fileReadCache.keys()) {
+    const cache = readCacheFor(cwd);
+    for (const key of cache.keys()) {
       try {
         const value = JSON.parse(key) as unknown[];
-        if (value[0] === normalizedCwd) fileReadCache.invalidate(key);
+        if (value[0] === normalizedCwd) cache.invalidate(key);
       } catch {
         // Cache keys are module-owned JSON; ignore a malformed legacy key.
       }
     }
   }
   if (workspaceId) {
-    for (const key of fileDiffCache.keys()) {
+    const cache = diffCacheFor(workspaceId);
+    for (const key of cache.keys()) {
       try {
         const value = JSON.parse(key) as unknown[];
-        if (value[0] === workspaceId) fileDiffCache.invalidate(key);
+        if (value[0] === workspaceId) cache.invalidate(key);
       } catch {
         // Cache keys are module-owned JSON; ignore a malformed legacy key.
       }
     }
   } else {
-    fileDiffCache.invalidateAll();
+    for (const cache of fileDiffCaches) cache.invalidateAll();
   }
 }
 
 export function invalidateAllWorkspaceFileData(): void {
-  fileReadCache.invalidateAll();
-  fileDiffCache.invalidateAll();
+  for (const cache of fileReadCaches) cache.invalidateAll();
+  for (const cache of fileDiffCaches) cache.invalidateAll();
 }
 
 /** Test-only reset. Cache instances stay module singletons in production. */
 export function resetWorkspaceFileDataCacheForTests(): void {
   queuedDiffPrefetch = null;
   diffPrefetches.clear();
-  fileReadCache.clear();
-  fileDiffCache.clear();
+  for (const cache of fileReadCaches) cache.clear();
+  for (const cache of fileDiffCaches) cache.clear();
 }

@@ -1,0 +1,9 @@
+{
+  "id": "local-file-payload-retention",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:570",
+  "symptom": "Count-bounded local file and diff caches retained hundreds of megabytes of inactive payloads after viewing large files.",
+  "rule": "Bound inactive payload weight while preserving active snapshots, exact-key warm intent and independent cloud policy. A single oversized hover must not flush ordinary warm data; verify retention and no extra read together.",
+  "check": "pnpm test:git apps/desktop/src/renderer/shell/__tests__/workspace-file-data-cache.test.ts"
+}

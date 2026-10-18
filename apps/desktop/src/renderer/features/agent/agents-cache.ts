@@ -219,16 +219,34 @@ export async function loadAgents(
   return inFlight;
 }
 
+let trailingRefresh: Promise<BridgeRegistryAgent[]> | null = null;
+
 /**
  * Force a fresh fetch, bypassing the TTL. Used by the heading
- * refresh icon and on window focus to pick up external login.
+ * refresh icon, on window focus to pick up external login, and after
+ * a provider credential change.
+ *
+ * A forced refresh asks for the registry AFTER the caller's change. A load
+ * that began earlier cannot answer that: joining it kept a stale "sign in
+ * required" verdict after switching an API key, CLI login or account. Such
+ * requests coalesce into one trailing load once the earlier one settles.
  */
 export async function refreshAgents(
   loadFn: LoadFn,
 ): Promise<BridgeRegistryAgent[]> {
-  if (inFlight) return inFlight;
-  inFlight = runLoad(loadFn, true);
-  return inFlight;
+  if (!inFlight) {
+    inFlight = runLoad(loadFn, true);
+    return inFlight;
+  }
+  trailingRefresh ??= inFlight
+    .catch(() => undefined)
+    .then(() => {
+      trailingRefresh = null;
+      // A load that started after the earlier one settled postdates the change.
+      inFlight ??= runLoad(loadFn, true);
+      return inFlight;
+    });
+  return trailingRefresh;
 }
 
 /**

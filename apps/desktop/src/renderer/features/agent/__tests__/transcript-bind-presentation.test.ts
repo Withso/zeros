@@ -3,8 +3,13 @@ import vm from "node:vm";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BLANK, useSessionsStore } from "../sessions-store";
-import { admissionRouteWithoutFlight, cancelGeneration, cancelledSince, executionActorForRecovery } from "../session-reload-lifecycle";
+import { admissionRouteWithoutFlight, bindFailureWasSuperseded, cancelGeneration, cancelledSince, executionActorForRecovery, statusForFailure, resumeFailureInvalidatesBinding } from "../session-reload-lifecycle";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { RuntimeClient } from "../../../platform/bridge/ws-client";
+import { WorkspaceRuntimeClient } from "../../../platform/bridge/workspace-runtime-client";
+import { resolveBridgeWorkspaceIdForCwd } from "../../../platform/bridge/workspace-id-resolver";
+import { classifyRpcError } from "../../../platform/bridge/failure";
+import { shouldCancelStalledSessionAdmission } from "../session-admission-policy";
 
 const ast = ts.createSourceFile("sessions-provider.tsx", readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8"),
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -18,9 +23,36 @@ visit(ast);
 if (Object.keys(callbacks).length !== 2) throw new Error("Admission callback missing");
 const code = ts.transpileModule(Object.entries(callbacks).map(([name, callback]) => `globalThis.${name} = ${callback};`).join("\n"),
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-afterEach(() => useSessionsStore.getState().clearAll());
+afterEach(() => { useSessionsStore.getState().clearAll(); vi.restoreAllMocks(); });
 
 describe("transcript presentation during session reattachment", () => {
+  it.each(["/personal/project", "/organization/project"])("reattaches silently when startup retires the workspace lookup for %s", async cwd => {
+    const chatId = "chat", agentId = "claude";
+    const messages = [{ id: "prior", kind: "text" as const, role: "agent" as const, text: "Prior output", createdAt: 1 }];
+    const providerBinding = { version: 1 as const, providerId: "claude", kind: "native" as const, resumeId: "durable-thread" };
+    useSessionsStore.getState().setSession(chatId, { ...BLANK, cwd, agentId, messages, transcriptState: "resident", providerBinding });
+    let finish!: (value: never) => void;
+    vi.spyOn(RuntimeClient.prototype, "request").mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const bridge = new WorkspaceRuntimeClient({ open: vi.fn(), workspaces: () => [] });
+    const context: Record<string, unknown> = { BLANK, isCloudWorkspace, cancelGeneration, cancelledSince, executionActorForRecovery,
+      classifyRpcError, bindFailureWasSuperseded, shouldCancelStalledSessionAdmission, statusForFailure, resumeFailureInvalidatesBinding,
+      getStore: useSessionsStore.getState, bridge, ensureInFlightRef: { current: new Map() },
+      loadFlightAdoptOnlyRef: { current: new Map() }, loadFlightKeysRef: { current: new Map() }, cancelGenerationsRef: { current: new Map() },
+      resolveSpawnCwd: () => cwd, getProviderBinaryOverride: () => undefined,
+      resolveSpawnWorkspaceId: resolveBridgeWorkspaceIdForCwd, evictUnretainedTranscripts: vi.fn(), drainOrDropQueue: vi.fn() };
+    vm.runInNewContext(code, context);
+    try {
+      const loading = (context.loadIntoChat as (...args: unknown[]) => Promise<unknown>)(chatId, agentId, providerBinding, { cwd });
+      (bridge as unknown as { setStatus(status: string): void }).setStatus("connected");
+      finish({ type: "WORKSPACE_RESPONSE", op: "workspace.list", result: { workspaces: [] } } as never);
+      await loading;
+      const settled = useSessionsStore.getState().sessions[chatId];
+      expect(settled).toMatchObject({ status: "reconnecting", error: null, failure: null, providerBinding, transcriptState: "resident" });
+      expect(settled.messages).toBe(messages);
+      expect(context.drainOrDropQueue).not.toHaveBeenCalled();
+    } finally { bridge.dispose(); }
+  });
+
   it.each(["claude", "codex", "cursor"].flatMap(agent => ["loadIntoChat", "ensureSession"].map(action => [agent, action])))(
     "retains exact %s transcript presentation during %s for each placement", async (agentId, action) => {
     for (const cwd of ["/personal/project", "/organization/project", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"]) {

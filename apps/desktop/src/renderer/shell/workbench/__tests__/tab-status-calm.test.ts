@@ -21,11 +21,11 @@ describe("calm workbench status", () => {
     expect(describeWorkspaceRuntimeStatus(current, 45_100)).toBe("Needs attention");
     expect(describeWorkspaceRuntimeStatus({ ...current, connection: "connected" }, 45_100)).toBe("Running");
     expect(describeWorkspaceRuntimeStatus({ ...current, state: "waking" }, 10_100)).toBe("Starting");
-    expect(describeWorkspaceRuntimeStatus({ ...current, cloud: false }, 10_100)).toBe("Starting");
+    expect(describeWorkspaceAvailability({ ...current, cloud: false }, 10_100)).toBeNull();
   });
 
   it.each([true, false])(
-    "uses the same gap thresholds (cloud=%s)",
+    "keeps Local reconnect quiet and retains cloud gap thresholds (cloud=%s)",
     async (cloud) => {
       const gap = {
         cloud,
@@ -36,13 +36,13 @@ describe("calm workbench status", () => {
       await vi.advanceTimersByTimeAsync(9_999);
       expect(describeWorkspaceAvailability(gap, Date.now())).toBeNull();
       await vi.advanceTimersByTimeAsync(1);
-      expect(describeWorkspaceAvailability(gap, Date.now())).toMatchObject({
-        tone: "pending",
+      expect(describeWorkspaceAvailability(gap, Date.now())).toEqual(cloud ? {
+        tone: "pending", message: "Reconnecting to the workspace…",
         connectionPhase: "reconnecting",
-      });
+      } : null);
       await vi.advanceTimersByTimeAsync(34_999);
       expect(describeWorkspaceAvailability(gap, Date.now())?.tone).toBe(
-        "pending",
+        cloud ? "pending" : undefined,
       );
       await vi.advanceTimersByTimeAsync(1);
       expect(describeWorkspaceAvailability(gap, Date.now())).toMatchObject({
@@ -59,7 +59,7 @@ describe("calm workbench status", () => {
   );
 
   it.each([true, false])(
-    "graces normal cold startup (cloud=%s)",
+    "only announces cloud cold startup (cloud=%s)",
     async (cloud) => {
       const cold = {
         cloud,
@@ -70,7 +70,7 @@ describe("calm workbench status", () => {
       expect(describeWorkspaceAvailability(cold, Date.now())).toBeNull();
       await vi.advanceTimersByTimeAsync(1);
       expect(describeWorkspaceAvailability(cold, Date.now())?.message).toBe(
-        "Connecting…",
+        cloud ? "Connecting…" : undefined,
       );
     },
   );

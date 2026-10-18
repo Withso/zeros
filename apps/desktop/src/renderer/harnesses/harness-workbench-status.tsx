@@ -21,6 +21,7 @@ import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { PanelHeader, TooltipProvider } from "../shared/ui/primitives";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { cn } from "../shared/ui/cn";
+import { setPrefs } from "../shared/theme/store";
 import {
   WorkbenchTabFrame,
   WorkbenchTabStatusProvider,
@@ -111,6 +112,13 @@ const listeners = new Set<() => void>();
 let revision = 0;
 
 class FixtureBridge extends WorkspaceRuntimeClient {
+  localConnection: ConnectionStatus = new URLSearchParams(location.search).has("cold") ? "disconnected" : "connected";
+  localStatusListeners = new Set<(status: ConnectionStatus) => void>();
+  override get status() { return this.localConnection; }
+  override onStatusChange(callback: (status: ConnectionStatus) => void) {
+    this.localStatusListeners.add(callback);
+    return () => { this.localStatusListeners.delete(callback); };
+  }
   connections = new Map(
     Object.values(targets).map((target) => [
       cloudWorkspaceKey(target),
@@ -130,6 +138,7 @@ class FixtureBridge extends WorkspaceRuntimeClient {
     });
   }
   override statusForWorkspace(folder?: string | null) {
+    if (!folder?.startsWith("cloud://")) return this.localConnection;
     return this.connections.get(folder ?? "") ?? "connected";
   }
   override onWorkspaceStatusChange(folder: string, callback: () => void) {
@@ -142,6 +151,12 @@ class FixtureBridge extends WorkspaceRuntimeClient {
     };
   }
   connection(folder: string, connection: ConnectionStatus) {
+    if (!folder.startsWith("cloud://")) {
+      this.localConnection = connection;
+      for (const callback of this.localStatusListeners) callback(connection);
+      publish();
+      return;
+    }
     this.connections.set(folder, connection);
     for (const callback of this.fixtureStatusListeners.get(folder) ?? [])
       callback();
@@ -479,17 +494,20 @@ const root = createRoot(document.getElementById("root")!);
 const fixture = {
   reads,
   bridge,
+  theme(mode: "dark" | "light") { setPrefs({ mode }); },
   render(
     type: WorkbenchTabType,
     options: Partial<Omit<typeof config, "type" | "folder">> & {
-      workspace?: "a" | "b";
+      workspace?: "a" | "b" | "local" | "organization-local";
     } = {},
   ) {
     config = {
       ...config,
       ...options,
       type,
-      folder: cloudWorkspaceKey(targets[options.workspace ?? "a"]),
+      folder: options.workspace === "local" ? "/local/personal"
+        : options.workspace === "organization-local" ? "/local/organization"
+        : cloudWorkspaceKey(targets[options.workspace ?? "a"]),
     };
     flushSync(() => root.render(<Harness />));
     publish();
