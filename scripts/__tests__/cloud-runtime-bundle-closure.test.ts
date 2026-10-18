@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
@@ -172,6 +173,29 @@ it("binds both offline phases to engine10003 and the exact pinned Host marker wi
 });
 
 describe("pnpm runtime closure", () => {
+  it("stages every transitive engine source import outside apps/desktop/src", async () => {
+    // Bundling discovers eager and lazy source edges without executing native
+    // modules. Bare packages belong to stageDependencyClosure instead.
+    const { metafile } = await build({
+      entryPoints: ["apps/desktop/src/engine/zeros-engine.ts"],
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      packages: "external",
+      write: false,
+      metafile: true,
+      logLevel: "silent",
+    });
+    const imports = Object.keys(metafile.inputs)
+      .filter(filename => !filename.startsWith("apps/desktop/src/"));
+    expect(imports.length).toBeGreaterThan(0);
+    const unstaged = imports.filter(filename =>
+      !SOURCE_FILES.includes(filename) && !ROOT_METADATA.includes(filename) &&
+      !SOURCE_SLICES.some(slice => filename === slice || filename.startsWith(`${slice}/`)),
+    );
+    expect(unstaged.sort()).toEqual([]);
+  });
+
   it("stages the neutral provider closure without deleted ZSR qualification sources", async () => {
     expect(SOURCE_SLICES).not.toContain("scripts/zsr-qualification");
     // Cloud agent context names this skill; the engine finds it under worker/.
