@@ -140,14 +140,13 @@ const HELPER_FAILURES: Readonly<
   settings_invalid: { code: "setup_settings_invalid", retryable: false },
 });
 
-// Treat completed refusals of these contract/qualification checks as terminal.
-// Missing inventory, identity churn, proof publication and process/lock failures
-// remain inconclusive and keep the existing bounded retry policy.
+// These names report completed predicates. Other attester checks also wrap
+// read/spawn failures: root_ownership can mean a missing manifest, and
+// engine_lifecycle/setup_exit can mean EAGAIN before the probe even starts.
+// Their closed names alone cannot prove permanence; keep bounded retries until
+// the producer distinguishes unavailable evidence from an observed refusal.
 const TERMINAL_ATTESTER_CHECKS = new Set([
-  "receipt_digest", "manifest_digest", "manifest_schema", "base_compatibility",
-  "root_ownership", "file_mode", "hard_link", "symlink_escape", "uid_map", "apparmor",
-  "cgroup_controllers", "finite_resources", "engine_lifecycle", "containment_smoke",
-  "seccomp", "setup_exit", "input_schema",
+  "receipt_digest", "manifest_schema", "file_mode", "hard_link", "uid_map", "seccomp",
 ]);
 
 function setupError(
@@ -473,8 +472,8 @@ function helperFailure(
             "checkpoint_seal_missing", "checkpoint_writer_unsealed"].includes(checkpointCode)
             ? "setup_checkpoint_incomplete" : "setup_checkpoint_restore_invalid", retryable: false };
         // Older helpers and a missing report cannot prove an immutable mismatch.
-        // Retain their bounded Boat restore retry, but end explicit contract or
-        // qualification refusals once, preserving the attester's closed cause.
+        // Retain bounded Boat retries unless a completed predicate proves the
+        // refusal, preserving the attester's closed cause in either case.
         const restoringBoatImage = execution.provider.name === "boat" && parsed.code === "image_contract_invalid" &&
           !diagnostic?.attester?.failedChecks.some(check => TERMINAL_ATTESTER_CHECKS.has(check));
         return Object.assign(setupError(

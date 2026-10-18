@@ -257,11 +257,15 @@ output remains private. Success still requires the complete report, successful
 completion, exact runtime witness and every admission gate.
 
 Boat retries remain bounded for legacy or missing reports, incomplete inventory,
-identity/proof publication changes and process/lock failures. Explicit digest,
-manifest, compatibility, ownership, isolation/resource or qualification refusals
-are terminal for that claim instead of repeating the same setup. The failed
-check is preserved alongside that decision. Missing-report admission booleans
-cannot authorize automatic replacement as immutable-inventory evidence.
+identity/proof publication changes and process/lock failures. Only completed
+receipt-digest, manifest-schema, file-mode, hard-link, UID or seccomp predicates
+are terminal for that claim. Other names also cover an unavailable read or a
+probe that never started: a missing manifest can report `root_ownership`, and
+spawn `EAGAIN` can report `engine_lifecycle` or `setup_exit`. Keep those ambiguous
+causes retryable until the producer distinguishes them; each attempt still needs
+full attestation. The failed check is preserved alongside that decision.
+Missing-report admission booleans cannot authorize automatic replacement as
+immutable-inventory evidence.
 
 This is additive diagnostic evidence, not an admission grant. Older helpers keep
 their existing behavior; older readers may omit unsupported evidence and still

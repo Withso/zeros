@@ -11,3 +11,9 @@
   automatic replacement. Keep older helpers fail-closed and bounded.
 - Encoding: real attester failure fixtures, strict schema parity and malformed
   output checks, plus the one-claim PostgreSQL qualification-refusal regression.
+- Review correction: a valid closed diagnostic does not prove the check ran.
+  Missing inventory and process-creation errors share names with completed
+  refusals. Classify only proven predicates as terminal; retain bounded retries
+  for ambiguous names. Test a real missing-file/spawn failure, then the same
+  unchanged fixture succeeding, through the helper and retry consumer. Keep
+  true refusal controls so retry eligibility never becomes admission success.

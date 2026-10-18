@@ -618,8 +618,12 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
   });
 
   it.each([
-    ["manifest_digest", false], ["base_compatibility", false], ["seccomp", false],
-    ["engine_lifecycle", false], ["setup_exit", false], ["file_mode", false],
+    ["receipt_digest", false], ["manifest_schema", false], ["seccomp", false],
+    ["uid_map", false], ["hard_link", false], ["file_mode", false],
+    ["root_ownership", true], ["manifest_digest", true], ["base_compatibility", true],
+    ["engine_lifecycle", true], ["setup_exit", true], ["apparmor", true],
+    ["cgroup_controllers", true], ["finite_resources", true], ["symlink_escape", true],
+    ["containment_smoke", true], ["input_schema", true],
     ["lock_busy", true], ["timeout", true], ["process_signal", true],
     ["diagnostic_missing", true], ["file_inventory", true], ["active_descriptor", true],
   ] as const)("uses closed attester %s evidence for Boat retry classification", async (check, retryable) => {
