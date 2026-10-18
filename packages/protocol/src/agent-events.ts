@@ -844,6 +844,9 @@ export interface ProviderBindingUpdateNotification {
   sessionUpdate: "provider_binding_update";
   providerBinding: ProviderBinding;
   providerMetadata?: ProviderMetadata;
+  /** The replacement thread has no history. Retain this optional replay
+   * request through load/re-adoption until a provider prompt completes. */
+  resumedFresh?: boolean;
 }
 
 /** A provider confirmed that one exact durable reference no longer exists.

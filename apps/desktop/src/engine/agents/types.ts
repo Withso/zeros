@@ -387,12 +387,29 @@ export interface AgentTurnControlCapabilityPort {
   compactContext?(opts: { sessionId: string }): Promise<void>;
 }
 
+/** The host's current provider connection for one live Local execution. */
+export interface ProviderCredentialUpdate {
+  sessionId: string;
+  /** Every provider credential variable this update owns. A name in `keys`
+   * but absent from `env` is removed from the execution's environment. */
+  keys: readonly string[];
+  env: Readonly<Record<string, string>>;
+  cliBinary?: string;
+  /** Private account identity for account-scoped caches. Never logged. */
+  authenticationContext: string;
+}
+
 export interface AgentRuntimeConfigurationCapabilityPort {
   setModel?(opts: { sessionId: string; model: string }): Promise<void>;
   updateConfig?(opts: {
     sessionId: string;
     env: Record<string, string>;
   }): Promise<void>;
+  /** Local only: adopt a changed API key, CLI login or saved account without
+   * a reconnect. A running turn keeps the process it started with; the next
+   * turn runs under the new connection and resumes the same provider
+   * conversation. */
+  updateCredentials?(opts: ProviderCredentialUpdate): Promise<void>;
 }
 
 export interface AgentInteractionCapabilityPort {

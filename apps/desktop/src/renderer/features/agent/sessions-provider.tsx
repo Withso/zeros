@@ -143,7 +143,7 @@ import {
   buildAdditionalDirsSystemInstruction,
   prependSystemInstruction,
 } from "@zeros/protocol/system-instructions";
-import { legacyProviderBinding } from "@zeros/protocol/identities";
+import { legacyProviderBinding, sameProviderBinding } from "@zeros/protocol/identities";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import { synthesizeReplayPrompt } from "./replay";
 import { startCloudSubmitSpan, finishCloudFirstText } from "../../state/cloud-workspace-latency";
@@ -3191,7 +3191,8 @@ export function AgentSessionsProvider({
           new Promise((resolve, reject) => {
             requestExecutionId = sessionId;
             const pendingIds = new Set(pendingAuth.map((message) => message.id));
-            const replay = getStore().sessions[chatId]?.needsConversationReplay
+            const replayAtDispatch = getStore().sessions[chatId];
+            const replay = replayAtDispatch?.needsConversationReplay
               ? synthesizeReplayPrompt(current.messages.filter((message) =>
                   message.id !== userMessage.id && !pendingIds.has(message.id)
                 ))
@@ -3223,6 +3224,9 @@ export function AgentSessionsProvider({
             ) => {
               if (settled) return;
               if (value.type === "AGENT_PROMPT_COMPLETE" &&
+                  value.stopReason !== "cancelled" &&
+                  replayAtDispatch?.needsConversationReplay &&
+                  sameProviderBinding(replayAtDispatch.providerBinding, getStore().sessions[chatId]?.providerBinding) &&
                   ownsPromptTurn() && getStore().sessions[chatId]?.sessionId === sessionId) {
                 getStore().patchSession(chatId, { needsConversationReplay: false });
               }

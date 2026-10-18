@@ -2524,6 +2524,7 @@ export class ZerosEngine {
             this.sessionLoadResponses.set(executionId, {
               ...cached,
               providerBinding: notification.update.providerBinding,
+              ...(notification.update.resumedFresh ? { resumedFresh: true } : {}),
               ...(notification.update.providerMetadata
                 ? { providerMetadata: notification.update.providerMetadata }
                 : {}),
@@ -7921,6 +7922,7 @@ export class ZerosEngine {
             preamble.mark("admit");
             const preambleLine = preamble.report();
             if (preambleLine) console.info(preambleLine);
+            const replayAtDispatch = this.sessionLoadResponses.get(msg.sessionId);
             const response: PromptResponse = activePrompt.cancelledByUser
               ? { stopReason: "cancelled" }
               : await this.agents
@@ -7936,7 +7938,11 @@ export class ZerosEngine {
                     activePrompt.adapterSettled = true;
                   });
             const loaded = this.sessionLoadResponses.get(msg.sessionId);
-            if (activePrompt.adapterSettled && loaded?.resumedFresh) {
+            // A tool read can replace an idle native thread while this older
+            // prompt is still settling. Only acknowledge the history it sent.
+            if (activePrompt.adapterSettled && response.stopReason !== "cancelled" &&
+                replayAtDispatch?.resumedFresh && loaded?.resumedFresh &&
+                sameProviderBinding(replayAtDispatch.providerBinding, loaded.providerBinding)) {
               this.sessionLoadResponses.set(msg.sessionId, {
                 ...loaded,
                 resumedFresh: false,

@@ -11,7 +11,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { mkdir, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ClaudeSdkAdapter } from "../adapter";
@@ -5792,6 +5792,166 @@ describe("ClaudeSdkAdapter", () => {
     expect(control.interrupts).toBe(0);
     expect(captured.length).toBe(1); // same query still running
     await adapter.dispose();
+  });
+
+  const CLAUDE_CONNECTION_KEYS = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CONFIG_DIR",
+  ];
+
+  it("updateCredentials runs the next turn under the new key and resumes the conversation", async () => {
+    const { queryFn, captured, control } = makeScriptedQuery(
+      [
+        [initMsg("sdk-1"), resultOk("sdk-1")],
+        [assistantText("more"), resultOk("sdk-1")],
+      ],
+      { keepAliveAfterResult: true },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp",
+      env: { ANTHROPIC_API_KEY: "old-fixture-key", ZEROS_FAST_MODE: "1" },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+    await tick(); // turn settled; the query stays alive (idle)
+
+    await adapter.capabilityPorts.runtimeConfiguration.updateCredentials({
+      sessionId: session.sessionId,
+      keys: CLAUDE_CONNECTION_KEYS,
+      env: { ANTHROPIC_API_KEY: "new-fixture-key" },
+      authenticationContext: "account-b",
+    });
+    // The idle process is retired, never interrupted mid-work.
+    expect(control.interrupts).toBe(0);
+
+    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("b")] as never });
+    expect(captured.length).toBe(2);
+    expect(captured[1]?.resume).toBe("sdk-1");
+    const env = captured[1]?.env as Record<string, string>;
+    expect(env.ANTHROPIC_API_KEY).toBe("new-fixture-key");
+    // Composer configuration rides along unchanged.
+    expect((captured[1]?.settings as { fastMode?: boolean }).fastMode).toBe(true);
+    await adapter.dispose();
+  });
+
+  it("updateCredentials removes a credential the new connection no longer uses", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+      [assistantText("more"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp",
+      env: { ANTHROPIC_API_KEY: "old-fixture-key", ANTHROPIC_AUTH_TOKEN: "old-fixture-token" },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+    await tick();
+    // API key → CLI login: the key is blanked and the token is gone.
+    await adapter.capabilityPorts.runtimeConfiguration.updateCredentials({
+      sessionId: session.sessionId,
+      keys: CLAUDE_CONNECTION_KEYS,
+      env: { ANTHROPIC_API_KEY: "" },
+      authenticationContext: "cli",
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("b")] as never });
+    const env = captured[1]?.env as Record<string, string>;
+    expect(env.ANTHROPIC_API_KEY).toBe("");
+    // Without a boundary this test query also sees the ambient environment.
+    expect(env.ANTHROPIC_AUTH_TOKEN).not.toBe("old-fixture-token");
+    expect(captured[1]?.resume).toBe("sdk-1");
+    await adapter.dispose();
+  });
+
+  it("updateCredentials does NOT interrupt or recreate an IN-FLIGHT turn", async () => {
+    const { queryFn, captured, control } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp",
+      env: { ANTHROPIC_API_KEY: "old-fixture-key" },
+    });
+    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await tick();
+    await adapter.capabilityPorts.runtimeConfiguration.updateCredentials({
+      sessionId: session.sessionId,
+      keys: CLAUDE_CONNECTION_KEYS,
+      env: { ANTHROPIC_API_KEY: "new-fixture-key" },
+      authenticationContext: "account-b",
+    });
+    expect(control.interrupts).toBe(0);
+    expect(control.closes).toBe(0);
+    expect(captured.length).toBe(1); // the running turn keeps its process
+    await adapter.dispose();
+  });
+
+  it("updateCredentials carries the conversation into another account's config root", async () => {
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-claude-switch-")));
+    try {
+      const accountA = path.join(root, "account-a"), accountB = path.join(root, "account-b");
+      const transcript = path.join("projects", "-private-tmp-fixture", "sdk-1.jsonl");
+      await mkdir(path.dirname(path.join(accountA, transcript)), { recursive: true });
+      await writeFile(path.join(accountA, transcript), '{"sessionId":"sdk-1"}\n');
+      const { queryFn } = makeScriptedQuery([[initMsg("sdk-1"), resultOk("sdk-1")]]);
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+      const { session } = await adapter.newSession({ cwd: "/tmp", env: { CLAUDE_CONFIG_DIR: accountA } });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+      await tick();
+      await adapter.capabilityPorts.runtimeConfiguration.updateCredentials({
+        sessionId: session.sessionId,
+        keys: CLAUDE_CONNECTION_KEYS,
+        env: { ANTHROPIC_API_KEY: "", CLAUDE_CONFIG_DIR: accountB },
+        authenticationContext: "account-b",
+      });
+      await expect(readFile(path.join(accountB, transcript), "utf8")).resolves.toBe('{"sessionId":"sdk-1"}\n');
+      await adapter.dispose();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("updateCredentials during a turn copies the finished history at the next turn", async () => {
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-claude-midturn-")));
+    try {
+      const accountA = path.join(root, "account-a"), accountB = path.join(root, "account-b");
+      const transcript = path.join("projects", "-private-tmp-fixture", "sdk-1.jsonl");
+      await mkdir(path.dirname(path.join(accountA, transcript)), { recursive: true });
+      await writeFile(path.join(accountA, transcript), "turn 1 started\n");
+      const { queryFn, captured } = makeScriptedQuery([
+        [initMsg("sdk-1"), assistantText("working")],
+        [assistantText("next"), resultOk("sdk-1")],
+      ]);
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+      const { session } = await adapter.newSession({ cwd: "/tmp", env: { CLAUDE_CONFIG_DIR: accountA } });
+      const running = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("long task")] as never });
+      // The turn is live once its native conversation id is known.
+      const live = (adapter as unknown as { sessions: Map<string, { claudeSessionId: string | null }> })
+        .sessions.get(session.sessionId)!;
+      await vi.waitFor(() => expect(live.claudeSessionId).toBe("sdk-1"));
+      await adapter.capabilityPorts.runtimeConfiguration.updateCredentials({
+        sessionId: session.sessionId,
+        keys: CLAUDE_CONNECTION_KEYS,
+        env: { ANTHROPIC_API_KEY: "", CLAUDE_CONFIG_DIR: accountB },
+        authenticationContext: "account-b",
+      });
+      // The running process still writes this conversation: nothing copied yet.
+      await expect(readFile(path.join(accountB, transcript), "utf8")).rejects.toThrow();
+      expect(captured.length).toBe(1);
+      await writeFile(path.join(accountA, transcript), "turn 1 started\nturn 1 finished\n");
+      await adapter.cancel({ sessionId: session.sessionId });
+      await running;
+
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("next")] as never });
+      await expect(readFile(path.join(accountB, transcript), "utf8")).resolves.toBe(
+        "turn 1 started\nturn 1 finished\n",
+      );
+      expect(captured.length).toBe(2);
+      expect(captured[1]?.resume).toBe("sdk-1");
+      await adapter.dispose();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("discards the old account's pending models and discovers a new account", async () => {
