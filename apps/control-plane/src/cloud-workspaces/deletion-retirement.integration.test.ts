@@ -8,12 +8,15 @@ import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { BoatWorkspaceProvider } from "./boat-provider.js";
 import { createCloudWorkspaceManagementRoutes } from "./management-routes.js";
 import { CloudWorkspaceDeletionRetirementSchema } from "./deletion-retirement-contract.js";
 import { copyGenerationPins } from "./generation-pins.js";
 import { DatabaseCloudWorkspaceBlobService, MemoryCloudWorkspaceObjectStore } from "./object-store.js";
 import { CloudWorkspaceOperationsWorker } from "./operations.js";
+import { CloudWorkspaceReconciler } from "./reconciler.js";
 import { CloudProviderError } from "./provider.js";
+import { DatabaseCloudProviderOperationStore } from "./provider-operation-store.js";
 import { requestCloudWorkspaceDeletion } from "./routes.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 
@@ -36,7 +39,7 @@ suite("authenticated compute retirement during storage deletion", () => {
 
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 2, connectionTimeoutMillis: 500 }); });
   afterAll(async () => { await pool.end(); });
-  beforeEach(async () => {
+  async function seed({ providerDeletionAccepted = true } = {}) {
     await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     actorId = fixture.userId;
@@ -51,7 +54,8 @@ suite("authenticated compute retirement during storage deletion", () => {
     await pool.query(`INSERT INTO cloud_workspace_provider_operations
       (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,resource_id,deletion_requested_at,deletion_operation_id)
       VALUES('boat','retirement-test',$1,1,$2,'create-receipt',repeat('a',64),$3,$4,$5)`,
-    [fixture.workspaceId, fixture.organizationId, RESOURCE, requestedAt, OPERATION]);
+    [fixture.workspaceId, fixture.organizationId, RESOURCE,
+      providerDeletionAccepted ? requestedAt : null, providerDeletionAccepted ? OPERATION : null]);
     observe = vi.fn(async () => ({
       workspaceId: fixture.workspaceId, generation: 1, resourceId: RESOURCE,
       deletionOperationId: OPERATION, stage: "waiting_for_uploads", requestedAt,
@@ -73,7 +77,8 @@ suite("authenticated compute retirement during storage deletion", () => {
       if (error instanceof HttpError) return c.json({ error: { code: error.code } }, error.status);
       throw error;
     });
-  });
+  }
+  beforeEach(() => seed());
 
   function read(body: unknown = { generation: 1, deleteIdempotencyKey: DELETE_KEY }, workspaceId = fixture.workspaceId, signal?: AbortSignal) {
     return app.request(`/v1/organizations/${fixture.organizationId}/cloud-workspaces/${workspaceId}/deletion-retirement`, {
@@ -181,6 +186,49 @@ suite("authenticated compute retirement during storage deletion", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ error: { code: "cloud_workspace_retirement_unconfirmed" } });
     expect(observe).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "queued", "in_progress", "failed"])("admits bounded storage debt after stopped Boat compute with a %s snapshot reaches blocked deletion", async lastSnapshotStatus => {
+    // Start before DELETE: accepted provider evidence cannot be unset later.
+    await seed({ providerDeletionAccepted: false });
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='archiving' WHERE workspace_id=$1", [fixture.workspaceId]);
+    const billingOrg = "team_11111111-1111-4111-8111-111111111111";
+    const receipt = { ok: true, operation: { id: OPERATION, kind: "sandbox", targetId: RESOURCE,
+      status: "blocked", stage: "waiting_for_uploads", requestedAt: new Date().toISOString(),
+      expectedBy: new Date(Date.now() + 6 * 3600_000).toISOString(), completedAt: null } };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ ok: true, sandbox: { id: RESOURCE, state: "archived", team: { id: billingOrg },
+        snapshotAvailable: lastSnapshotStatus === "completed", lastSnapshotStatus } }))
+      .mockResolvedValueOnce(Response.json(receipt))
+      .mockResolvedValueOnce(Response.json(receipt))
+      .mockResolvedValueOnce(Response.json(receipt))
+      .mockResolvedValueOnce(Response.json({ ok: false }, { status: 404 }));
+    const provider = new BoatWorkspaceProvider({ apiKey: "boat_retirement-test-credential", billingOrg, fetch: fetcher,
+      timeoutMs: 1_000, operations: new DatabaseCloudProviderOperationStore(pool, "boat", "retirement-test"),
+      access: { createSshAccess: vi.fn(), revokeSshAccess: vi.fn(async () => {}), getPreviewEndpoint: vi.fn() },
+      imageRef: `boat:zeros-linux-qualified@sha256:${"a".repeat(64)}`, qualifiedStorageMiB: storageMiB, ttlSeconds: null });
+    const inspect = vi.spyOn(provider, "inspect");
+    const remove = vi.spyOn(provider, "delete");
+    const retirement = vi.spyOn(provider, "observeDeletionRetirement");
+    resolve.mockResolvedValue({ provider, connectionId: providerConnectionId, connectionVersion: 1, credentialSource: "hosted" });
+    expect(await new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1_000 }).runOnce()).toBe(true);
+    await expect(inspect.mock.results[0]?.value).resolves.toMatchObject({ computeStopped: true,
+      state: lastSnapshotStatus === "completed" ? "archived" : lastSnapshotStatus === "failed" ? "failed" : "archiving" });
+    expect(remove).toHaveBeenCalledExactlyOnceWith(RESOURCE);
+    const response = await read();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "compute_retired_storage_pending", deletionConfirmed: false,
+      reserved: { cpuMillicores: 0, memoryMiB: 0, storageMiB }, generations: [{ generation: 1, storageStage: "waiting_for_uploads" }] });
+    expect(retirement).toHaveBeenCalledExactlyOnceWith(RESOURCE, { signal: expect.any(AbortSignal) });
+    expect(fetcher.mock.calls.map(([url, init]) => [init?.method ?? "GET", new URL(String(url)).pathname])).toEqual([
+      ["GET", `/api/v1/sandboxes/${RESOURCE}`], ["DELETE", `/api/v1/sandboxes/${RESOURCE}`],
+      ["GET", `/api/v1/deletion-operations/${OPERATION}`], ["GET", `/api/v1/deletion-operations/${OPERATION}`], ["GET", `/api/v1/sandboxes/${RESOURCE}`],
+    ]);
+    expect((await pool.query("SELECT observed_state,deletion_verified_at FROM cloud_workspace_provider_bindings WHERE workspace_id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ observed_state: lastSnapshotStatus === "completed" ? "archived" : "deleting", deletion_verified_at: null });
+    await deletionWorker().runOnce();
+    expect((await pool.query("SELECT state FROM workspace_deletion_jobs WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state).toBe("waiting_for_provider");
+    expect((await pool.query("SELECT data_deleted_at FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].data_deleted_at).toBeNull();
   });
 
   it("uses fresh deletion-only evidence when the durable binding still says deleting", async () => {

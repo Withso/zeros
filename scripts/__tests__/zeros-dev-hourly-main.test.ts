@@ -159,6 +159,44 @@ async function actionsFixture(deviceId?: string) {
 }
 
 describe("Actions orchestration through signed files", () => {
+  it.each(["storage pending", "physically deleted", "compute unconfirmed"])(
+    "reports cleanup debt separately from a working lifecycle: %s", async cleanupState => {
+      const f = await actionsFixture();
+      const runtime = {
+        terminal: vi.fn(async () => ({ exitCode: 0, truncated: false, output: "" })),
+        prompt: vi.fn(async (handle: RunHandle, input: { id: string; agent: "claude" | "codex" | "cursor"; model: string }) => {
+          const prompt = { id: input.id, agent: input.agent, model: input.model, conversationId: randomUUID(), sha256: "c".repeat(64), state: "succeeded" as const };
+          handle.run.prompts.push(prompt); return prompt;
+        }),
+        tail: vi.fn(async () => [{ msgId: "fixture", kind: "text", payload: JSON.stringify({ role: "assistant", text: "ZEROS_DEV_OK" }), createdAt: 1 }]),
+        dispose: vi.fn(async () => {}),
+      };
+      f.services.connect.mockResolvedValue(runtime as never);
+      if (cleanupState !== "physically deleted") f.services.api.cleanup.mockImplementation(async handle => {
+        if (cleanupState === "storage pending") retireFixtureCompute(handle, new Date().toISOString());
+        await handle.save(); return { planned: 1, confirmed: 0 };
+      });
+      const success = cleanupState !== "compute unconfirmed";
+      expect(await runActions(f.env, f.options as never)).toBe(success ? 0 : 1);
+      const artifact = await f.checkpoint();
+      expect(artifact.payload.result).toMatchObject({ success, code: success ? null : "cleanup_pending" });
+      expect(artifact.payload.cleanup).toMatchObject({
+        pendingWorkspaces: cleanupState === "storage pending" ? 1 : 0,
+        deletionConfirmed: cleanupState === "physically deleted",
+        unconfirmedWorkspaces: success ? 0 : 1,
+      });
+      const notices = stdout.filter(line => line.startsWith("::warning title=Zeros dev cleanup backlog::"));
+      if (cleanupState === "storage pending") {
+        expect(notices).toHaveLength(1);
+        expect(notices[0]).toContain("1 workspace(s), 1 generation(s), 16384 MiB reserved");
+        expect(notices[0]).toContain("8 workspace(s), 561800 MiB, 8 hours");
+        expect(artifact.payload.runs[0].lifecycle.at(-1)).toMatchObject({ operation: "delete", confirmed: false });
+      } else expect(notices).toHaveLength(0);
+      expect(f.services.connect).toHaveBeenCalledTimes(2);
+      expect(f.services.credentials.cleanup).toHaveBeenCalledOnce();
+    },
+  );
+
   it("keeps the first native predicate in the public result and artifact when logout also fails", async () => {
     const f = await actionsFixture();
     const env = { ...f.env, ZEROS_DEV_PROFILE: "infrastructure",
@@ -250,6 +288,7 @@ describe("Actions orchestration through signed files", () => {
     expect(f.output).toContainEqual(expect.objectContaining({ runId: localId, phase: "storage_pending", outcome: "pending" }));
     expect(f.output).toContainEqual(expect.objectContaining({ schema: "zeros.dev-hourly-result/v1", code: "runtime_unavailable",
       cleanup: expect.objectContaining({ pendingWorkspaces: 1 }) }));
+    expect(stdout.filter(line => line.startsWith("::warning title=Zeros dev cleanup backlog::"))).toHaveLength(1);
   });
 
   it("refuses an unverified handoff before login or any product operation", async () => {
