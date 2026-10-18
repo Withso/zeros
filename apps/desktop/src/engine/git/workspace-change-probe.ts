@@ -24,6 +24,55 @@ interface ProbeFlight<T> extends ProbeIdentity {
 // and, after invalidation, at most one follow-up for the latest requested state.
 const activeFlights = new Set<ProbeIdentity>();
 
+export function workspaceChangeKey(workspace: Workspace, remote: string): string {
+  return JSON.stringify([
+    workspace.id, workspace.path, workspace.repoRoot, workspace.branch,
+    workspace.baseBranch, remote, workspace.createdAt, workspace.archivedAt,
+    workspace.present, workspace.organizationId ?? null, workspace.placement ?? "local",
+  ]);
+}
+
+/** All consumers of a Local refresh lease the same lazy snapshot. Hold it
+ * through their comparisons, not just through the initial porcelain read.
+ * An invalidation queues the next generation until the old readers finish. */
+export function createWorkspaceChangeSnapshot<T>(create: (workspace: Workspace, remote: string) => T) {
+  interface Snapshot extends ProbeIdentity {
+    value: T;
+    initialRevision: number;
+    readers: number;
+    retired: Promise<void>;
+    retire: () => void;
+  }
+  const snapshots = new Map<string, Snapshot>();
+  return async function readSnapshot<R>(workspace: Workspace, remote: string, read: (snapshot: T) => Promise<R>): Promise<R> {
+    const key = workspaceChangeKey(workspace, remote);
+    let entry = snapshots.get(key);
+    while (entry && entry.initialRevision !== entry.revision) {
+      await entry.retired;
+      entry = snapshots.get(key);
+    }
+    if (!entry) {
+      let retire!: () => void;
+      const retired = new Promise<void>((done) => { retire = done; });
+      entry = { workspaceId: workspace.id, root: path.resolve(workspace.path), revision: 0,
+        initialRevision: 0, readers: 0, value: create(workspace, remote), retired, retire };
+      snapshots.set(key, entry);
+      activeFlights.add(entry);
+    }
+    entry.readers += 1;
+    try {
+      return await read(entry.value);
+    } finally {
+      entry.readers -= 1;
+      if (entry.readers === 0) {
+        if (snapshots.get(key) === entry) snapshots.delete(key);
+        activeFlights.delete(entry);
+        entry.retire();
+      }
+    }
+  };
+}
+
 function startProbe<T>(
   flights: Map<string, ProbeFlight<T>>,
   key: string,
@@ -56,19 +105,7 @@ export function createWorkspaceChangeProbe<T>(): (
   return (workspace, remote, read) => {
     // Resolve this identity for every caller, before sharing: a replacement
     // checkout or changed comparison target must never inherit an older read.
-    const key = JSON.stringify([
-      workspace.id,
-      workspace.path,
-      workspace.repoRoot,
-      workspace.branch,
-      workspace.baseBranch,
-      remote,
-      workspace.createdAt,
-      workspace.archivedAt,
-      workspace.present,
-      workspace.organizationId ?? null,
-      workspace.placement ?? "local",
-    ]);
+    const key = workspaceChangeKey(workspace, remote);
     const existing = flights.get(key);
     if (existing) {
       if (existing.queued) {

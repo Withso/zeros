@@ -51,8 +51,13 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function localPorcelain(status = ""): GitResult {
+  return { stdout: `# branch.oid ${HEAD}\0# branch.head feature\0${status.replaceAll("?? ", "? ")}`, stderr: "" };
+}
+
 function gitResult(args: string[], status = "", tracked = "M\0changed.txt\0"): GitResult {
-  if (args[0] === "status") return { stdout: status, stderr: "" };
+  if (args[0] === "status") return args.includes("--porcelain=v2") ? localPorcelain(status) : { stdout: status, stderr: "" };
+  if (args.includes("--raw")) return { stdout: (tracked ? `:100644 100644 ${HEAD} ${HEAD} M\0changed.txt\0` : "") + "2\t1\tchanged.txt\0", stderr: "" };
   if (args.includes("--numstat")) return { stdout: "2\t1\tchanged.txt\0", stderr: "" };
   if (args.includes("diff")) return { stdout: tracked, stderr: "" };
   if (args[0] === "merge-base") return { stdout: FLOOR, stderr: "" };
@@ -96,7 +101,7 @@ describe("local Git summary input sharing", () => {
       changeCounts("workspace-a"),
       changeLineCounts("workspace-a"),
     ];
-    status.resolve({ stdout: "", stderr: "" });
+    status.resolve(localPorcelain());
     await expect(Promise.all(reads)).resolves.toEqual([
       true, { all: 1, uncommitted: 1, staged: 1, unstaged: 1 },
       { additions: 2, deletions: 1 },
@@ -106,7 +111,7 @@ describe("local Git summary input sharing", () => {
     expect(fixture.readGit.mock.calls.filter(([, args]) => args[0] === "merge-base").map(([, args]) => args)).toEqual([
       ["merge-base", "main", "HEAD"], ["merge-base", "origin/main", "HEAD"],
     ]);
-    expect(fixture.readGit).toHaveBeenCalledTimes(11);
+    expect(fixture.readGit).toHaveBeenCalledTimes(8);
   });
 
   it("leaves cloud summary reads independent", async () => {
@@ -143,18 +148,18 @@ describe("local Git summary input sharing", () => {
     invalidateWorkspaceChangeProbes(["workspace-a"]);
     const replacements = [changeCounts("workspace-a"), changeLineCounts("workspace-a")];
     try {
-      oldStatus.resolve({ stdout: "", stderr: "" });
+      oldStatus.resolve(localPorcelain());
       await old;
       await vi.waitFor(() => expect(statusReads()).toHaveLength(2));
-      freshStatus.resolve({ stdout: "", stderr: "" });
+      freshStatus.resolve(localPorcelain());
       await expect(Promise.all(replacements)).resolves.toEqual([
         { all: 1, uncommitted: 1, staged: 1, unstaged: 1 },
         { additions: 2, deletions: 1 },
       ]);
       expect(statusReads()).toHaveLength(2);
     } finally {
-      oldStatus.resolve({ stdout: "", stderr: "" });
-      freshStatus.resolve({ stdout: "", stderr: "" });
+      oldStatus.resolve(localPorcelain());
+      freshStatus.resolve(localPorcelain());
       await Promise.all([old, ...replacements]);
     }
   });
@@ -191,7 +196,7 @@ describe("hasWorkspaceChanges read budget and ownership", () => {
       args[0] === "status" ? status.promise : gitResult(args),
     );
     const probes = Array.from({ length: 12 }, () => hasWorkspaceChanges("workspace-a"));
-    status.resolve({ stdout: "", stderr: "" });
+    status.resolve(localPorcelain());
     await expect(Promise.all(probes)).resolves.toEqual(Array(12).fill(true));
     expect(statusReads()).toHaveLength(1);
     expect(diffReads()).toHaveLength(1);
@@ -211,7 +216,7 @@ describe("hasWorkspaceChanges read budget and ownership", () => {
         "/fixture/workspace-b",
       ]);
     } finally {
-      status.resolve({ stdout: "", stderr: "" });
+      status.resolve(localPorcelain());
       await first;
     }
   });
@@ -253,17 +258,17 @@ describe("hasWorkspaceChanges read budget and ownership", () => {
     }
     try {
       expect(statusReads()).toHaveLength(1);
-      oldStatus.resolve({ stdout: "", stderr: "" });
+      oldStatus.resolve(localPorcelain());
       await expect(first).resolves.toBe(false);
       await vi.waitFor(() => expect(statusReads()).toHaveLength(2));
       // An old completion must not remove the successor's in-flight identity.
       refreshed.push(hasWorkspaceChanges("workspace-a"));
-      freshStatus.resolve({ stdout: "?? fresh.txt\0", stderr: "" });
+      freshStatus.resolve(localPorcelain("?? fresh.txt\0"));
       await expect(Promise.all(refreshed)).resolves.toEqual(Array(21).fill(true));
       expect(statusReads()).toHaveLength(2);
     } finally {
-      oldStatus.resolve({ stdout: "", stderr: "" });
-      freshStatus.resolve({ stdout: "?? fresh.txt\0", stderr: "" });
+      oldStatus.resolve(localPorcelain());
+      freshStatus.resolve(localPorcelain("?? fresh.txt\0"));
       await Promise.all([first, ...refreshed]);
     }
   });
@@ -277,7 +282,7 @@ describe("hasWorkspaceChanges read budget and ownership", () => {
     await vi.waitFor(() => expect(statusReads()).toHaveLength(1));
     invalidateWorkspaceChangeProbes(["workspace-a"]);
     const second = hasWorkspaceChanges("workspace-b");
-    status.resolve({ stdout: "", stderr: "" });
+    status.resolve(localPorcelain());
     await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
     expect(statusReads()).toHaveLength(1);
   });
@@ -303,7 +308,7 @@ describe("hasWorkspaceChanges read budget and ownership", () => {
       try {
         await vi.waitFor(() => expect(statusReads()).toHaveLength(2));
       } finally {
-        status.resolve({ stdout: "", stderr: "" });
+        status.resolve(localPorcelain());
         await Promise.all([first, replacement]);
       }
     },

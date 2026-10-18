@@ -1969,12 +1969,46 @@ export async function runGit(
 
 /** Engine-owned Git observation with optional index writes disabled. Keep this
  * explicit at read call sites: mutations retain runGit's lock/retry semantics. */
-export function runGitRead(
+export async function runGitRead(
   cwd: string,
   args: string[],
   opts: Omit<RunGitOptions, "readOnly"> = {},
 ): Promise<RunGitResult> {
-  return runGit(cwd, args, { ...opts, readOnly: true });
+  const read = () => runGit(cwd, args, { ...opts, readOnly: true });
+  // A qualified cloud engine keeps its existing scheduling. Local refreshes
+  // can otherwise multiply into dozens of competing Git processes per board.
+  return gitExecutionIdentity(opts.identity) ? read() : queueLocalGitRead(read, opts.signal);
+}
+
+const LOCAL_GIT_READ_CONCURRENCY = 4;
+let activeLocalGitReads = 0;
+const waitingLocalGitReads: Array<() => void> = [];
+
+function queueLocalGitRead(read: () => Promise<RunGitResult>, signal?: AbortSignal): Promise<RunGitResult> {
+  return new Promise((resolve, reject) => {
+    const cancelled = () => new GitError({ code: "GIT_COMMAND_FAILED", message: "Git observation was cancelled." });
+    if (signal?.aborted) { reject(cancelled()); return; }
+    const onAbort = () => {
+      const index = waitingLocalGitReads.indexOf(start);
+      if (index < 0) return;
+      waitingLocalGitReads.splice(index, 1);
+      signal?.removeEventListener("abort", onAbort);
+      reject(cancelled());
+    };
+    const start = () => {
+      signal?.removeEventListener("abort", onAbort);
+      activeLocalGitReads += 1;
+      void Promise.resolve().then(read).then(resolve, reject).finally(() => {
+        activeLocalGitReads -= 1;
+        waitingLocalGitReads.shift()?.();
+      });
+    };
+    if (activeLocalGitReads < LOCAL_GIT_READ_CONCURRENCY) start();
+    else {
+      waitingLocalGitReads.push(start);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
+  });
 }
 
 /** Best-effort classification of git's stderr into structured outcomes.
