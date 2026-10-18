@@ -395,11 +395,42 @@ performs only reads. Success requires both the mutation's merged result and a
 fresh matching readback, and prints the merge commit SHA. An unconfirmed outcome
 exits non-zero; inspect GitHub before deciding whether to retry.
 
+Immediate mode binds the REST `/user` human to the effective GraphQL viewer by
+login, node ID and database ID. Every GraphQL read, including each open-PR page
+and the final readback, must identify that same principal. The REST identity is
+also refreshed before the final preflight. GraphQL's `User` typename alone does
+not prove a human: bot accounts can have that typename. The mutation and readback
+receipts must identify the qualified human as the actual `mergedBy` actor.
+Missing, changed or mismatched principals refuse; an unconfirmed post-write
+actor cannot count as success. The wrapper retains the ordinary workspace `gh`
+transport and never substitutes credentials or changes authentication settings.
+A connection that supplies different REST and GraphQL principals is unsupported:
+even its immediate dry-run refuses, rather than claiming that it can land PRs.
+
+An eligible immediate run reads the effective author from normal
+`git var GIT_AUTHOR_IDENT`, pins its email across preflight and supplies the
+supported GraphQL `authorEmail` field explicitly. Both the mutation result and
+readback must show that exact `mergeCommit.author.email` before success is
+reported. Missing, malformed or changed local authorship refuses before the
+write; rejected or unconfirmed server authorship never falls back to a default
+or retries. The dry-run validates this metadata without printing the address.
+Configure and verify the actual workspace Git identity before invoking the
+command; saved config alone may differ from the effective identity.
+
+Author email is commit metadata, not authentication or a permission grant. It
+does not replace the independent human-principal checks. No personal address is
+hard-coded, and the wrapper does not change the workspace's authentication or
+author environment. GitHub controls generated committer metadata; the API has
+no corresponding committer-email input, and local Git config does not control
+that server-generated identity. The legacy mode remains unchanged and does not
+provide these immediate-mode authorship guarantees.
+
 Immediate mode preserves all shared guards below and additionally requires
 `MERGEABLE` / `CLEAN`, successful nonempty required CI, no pending/failed/unknown
 checks, and a satisfied GitHub review decision (`APPROVED`, or no review
-requirement). Known skipped/neutral optional checks are allowed; required checks
-must succeed. It does not invent a writer-approval requirement when repository
+requirement). Optional checks accept the CLI's `skipping/SKIPPED` and
+`skipping/NEUTRAL` pairs; required checks must be `pass/SUCCESS`. Unknown or
+malformed pairs, including `pass/NEUTRAL`, refuse. It does not invent a writer-approval requirement when repository
 policy requires none. Independent engineering review and merge authorization
 remain separate operator responsibilities.
 

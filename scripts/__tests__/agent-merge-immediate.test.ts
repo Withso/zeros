@@ -7,10 +7,23 @@ import { runAgentMerge } from "../agent-merge.mjs";
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const MERGE = "c".repeat(40);
+const AUTHOR_EMAIL = "workspace-author@example.test";
 
 function fixture() {
   return {
-    viewer: { login: "workspace-owner", type: "User" },
+    authorIdent: `Workspace Owner <${AUTHOR_EMAIL}> 1792320000 +0000\n`,
+    viewer: {
+      login: "workspace-owner",
+      type: "User",
+      id: 42,
+      node_id: "U_fixture",
+    },
+    graphqlViewer: {
+      login: "workspace-owner",
+      __typename: "User",
+      databaseId: 42,
+      id: "U_fixture",
+    },
     pr: {
       id: "PR_fixture",
       number: 123,
@@ -60,15 +73,42 @@ function fakeGh(snapshot = fixture()) {
   const writes: { query: string; variables: Record<string, unknown> }[] = [];
   let prReads = 0;
   let openReads = 0;
+  let graphqlReads = 0;
+  let restReads = 0;
+  let gitReads = 0;
+  let acceptedAuthorEmail = "server-default@example.test";
   const controls = {
+    beforeGitRead: (_read: number, _snapshot: Snapshot) => {},
+    gitResponse: null as Response | null,
+    readbackPatch: {} as Record<string, unknown>,
+    beforeGraphqlRead: (
+      _read: number,
+      _query: string,
+      _snapshot: Snapshot,
+    ) => {},
+    beforeRestRead: (_read: number, _snapshot: Snapshot) => {},
     beforePrRead: (_read: number, _snapshot: Snapshot) => {},
     beforeOpenRead: (_read: number, _snapshot: Snapshot) => {},
     mergeResponse: null as Response | null,
     badReadback: false,
   };
-  const spawn = vi.fn((_command: string, args: string[], _options: unknown) => {
+  const spawn = vi.fn((command: string, args: string[], _options: unknown) => {
     calls.push(args);
-    if (args[0] === "api" && args[1] === "user") return json(snapshot.viewer);
+    if (command === "git") {
+      expect(args).toEqual(["var", "GIT_AUTHOR_IDENT"]);
+      controls.beforeGitRead(++gitReads, snapshot);
+      return (
+        controls.gitResponse ?? {
+          status: 0,
+          stdout: snapshot.authorIdent,
+          stderr: "",
+        }
+      );
+    }
+    if (args[0] === "api" && args[1] === "user") {
+      controls.beforeRestRead(++restReads, snapshot);
+      return json(snapshot.viewer);
+    }
     if (args[0] === "pr" && args[1] === "checks")
       return json(
         args.includes("--required") ? snapshot.requiredChecks : snapshot.checks,
@@ -86,39 +126,52 @@ function fakeGh(snapshot = fixture()) {
           readFileSync(args[args.indexOf("--input") + 1], "utf8"),
         );
         writes.push(payload);
+        acceptedAuthorEmail =
+          payload.variables.input.authorEmail ?? "server-default@example.test";
         if (controls.mergeResponse) return controls.mergeResponse;
         return json({
           data: { mergePullRequest: { pullRequest: mergedPr() } },
         });
       }
       const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+      controls.beforeGraphqlRead(++graphqlReads, query, snapshot);
+      const data = (value: Record<string, unknown>) => ({
+        ...value,
+        ...(query.includes("viewer {")
+          ? { viewer: snapshot.graphqlViewer }
+          : {}),
+      });
       if (query.includes("ImmediateMergePreflight")) {
         controls.beforePrRead(++prReads, snapshot);
-        return json({ data: { repository: { pullRequest: snapshot.pr } } });
+        return json({
+          data: data({ repository: { pullRequest: snapshot.pr } }),
+        });
       }
       if (query.includes("ImmediateMergeQueue"))
         return json({
-          data: { repository: { mergeQueue: snapshot.mergeQueue } },
+          data: data({ repository: { mergeQueue: snapshot.mergeQueue } }),
         });
       if (query.includes("ImmediateMergeResult"))
         return json({
-          data: {
+          data: data({
             repository: {
-              pullRequest: controls.badReadback ? snapshot.pr : mergedPr(),
+              pullRequest: controls.badReadback
+                ? snapshot.pr
+                : { ...mergedPr(), ...controls.readbackPatch },
             },
-          },
+          }),
         });
       controls.beforeOpenRead(++openReads, snapshot);
       return json([
         {
-          data: {
+          data: data({
             repository: {
               pullRequests: {
                 nodes: snapshot.openPullRequests,
                 pageInfo: { hasNextPage: false, endCursor: null },
               },
             },
-          },
+          }),
         },
       ]);
     }
@@ -129,7 +182,8 @@ function fakeGh(snapshot = fixture()) {
       ...snapshot.pr,
       state: "MERGED",
       merged: true,
-      mergeCommit: { oid: MERGE },
+      mergeCommit: { oid: MERGE, author: { email: acceptedAuthorEmail } },
+      mergedBy: snapshot.graphqlViewer,
     };
   }
   return {
@@ -154,6 +208,349 @@ function expectNoWrite(gh: ReturnType<typeof fakeGh>) {
 }
 
 describe("immediate-only agent merge", () => {
+  it("pins the real workspace Git author email in the API request and both receipts", async () => {
+    const snapshot = fixture();
+    const selected = "another-operator+merge@example.test";
+    snapshot.authorIdent = `Workspace Owner <${selected}> 1792320000 +0000\n`;
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(0);
+    expect(gh.writes[0].variables).toMatchObject({
+      input: { authorEmail: selected },
+    });
+    expect(gh.calls.filter((args) => args[0] === "var")).toHaveLength(2);
+    expect(gh.writes[0].query).toContain("author { email }");
+  });
+
+  it.each([
+    "",
+    "private-output-fixture",
+    "Workspace Owner <> 1792320000 +0000\n",
+    "Workspace Owner <not-an-email> 1792320000 +0000\n",
+    "Workspace Owner <two words@example.test> 1792320000 +0000\n",
+    "Workspace Owner <one@example.test> 1792320000 +0000\nAnother Owner <two@example.test> 1792320000 +0000\n",
+    "Workspace Owner <one@example.test\u0000> 1792320000 +0000\n",
+    `Workspace Owner <${"a".repeat(255)}@example.test> 1792320000 +0000\n`,
+  ])(
+    "refuses an unavailable or malformed effective Git author: %j",
+    async (authorIdent) => {
+      const snapshot = fixture();
+      snapshot.authorIdent = authorIdent;
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expectNoWrite(gh);
+      expect(
+        JSON.stringify([...gh.stdout.mock.calls, ...gh.stderr.mock.calls]),
+      ).not.toContain("private-output-fixture");
+    },
+  );
+
+  it("refuses a failed normal Git identity read without exposing its output", async () => {
+    const gh = fakeGh();
+    gh.controls.gitResponse = {
+      status: 1,
+      stdout: "private-output-fixture",
+      stderr: "private-output-fixture",
+    };
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+    expectNoWrite(gh);
+    expect(
+      JSON.stringify([...gh.stdout.mock.calls, ...gh.stderr.mock.calls]),
+    ).not.toContain("private-output-fixture");
+  });
+
+  it("refuses a changed Git author email before mutation", async () => {
+    const gh = fakeGh();
+    gh.controls.beforeGitRead = (read, snapshot) => {
+      if (read === 2)
+        snapshot.authorIdent =
+          "Workspace Owner <replacement@example.test> 1792320000 +0000\n";
+    };
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+    expectNoWrite(gh);
+  });
+
+  it("rechecks Git authorship after the final PR authority fence", async () => {
+    const gh = fakeGh();
+    gh.controls.beforeGraphqlRead = (read, _query, snapshot) => {
+      if (read === 9)
+        snapshot.authorIdent =
+          "Workspace Owner <replacement@example.test> 1792320000 +0000\n";
+    };
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+    expectNoWrite(gh);
+  });
+
+  it.each([null, {}, { email: "other@example.test" }, { email: "" }])(
+    "does not claim success when the mutation's actual commit author is unconfirmed: %j",
+    async (author) => {
+      const snapshot = fixture();
+      const gh = fakeGh(snapshot);
+      gh.controls.mergeResponse = json({
+        data: {
+          mergePullRequest: {
+            pullRequest: {
+              ...snapshot.pr,
+              state: "MERGED",
+              merged: true,
+              mergedBy: snapshot.graphqlViewer,
+              mergeCommit: { oid: MERGE, author },
+            },
+          },
+        },
+      });
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expect(gh.writes).toHaveLength(1);
+      expect(JSON.stringify(gh.stdout.mock.calls)).not.toContain("Merged PR");
+    },
+  );
+
+  it.each([null, {}, { email: "other@example.test" }, { email: "" }])(
+    "does not claim success when readback commit authorship differs: %j",
+    async (author) => {
+      const gh = fakeGh();
+      gh.controls.readbackPatch = { mergeCommit: { oid: MERGE, author } };
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expect(gh.writes).toHaveLength(1);
+      expect(JSON.stringify(gh.stdout.mock.calls)).not.toContain("Merged PR");
+    },
+  );
+
+  it("validates and pins authorship during dry-run without logging the address or writing", async () => {
+    const gh = fakeGh();
+    expect(await runAgentMerge(["123", "--immediate", "--dry-run"], gh)).toBe(
+      0,
+    );
+    expect(gh.calls.filter((args) => args[0] === "var")).toHaveLength(2);
+    expect(JSON.stringify(gh.stdout.mock.calls)).not.toContain(AUTHOR_EMAIL);
+    expectNoWrite(gh);
+  });
+  it("refuses a bot GraphQL viewer even when its typename is User and REST qualifies a human", async () => {
+    const snapshot = fixture();
+    snapshot.graphqlViewer = {
+      login: "automation[bot]",
+      __typename: "User",
+      id: "BOT_fixture",
+      databaseId: 43,
+    };
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+    expectNoWrite(gh);
+    expect(gh.stderr).toHaveBeenCalledWith(
+      expect.stringContaining("same human workspace identity"),
+    );
+  });
+
+  it.each(["login", "id", "databaseId", "__typename"])(
+    "refuses absent GraphQL principal %s",
+    async (field) => {
+      const snapshot = fixture();
+      Reflect.deleteProperty(snapshot.graphqlViewer, field);
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expectNoWrite(gh);
+    },
+  );
+
+  it.each([
+    { login: "other-human" },
+    { id: "U_other" },
+    { databaseId: 43 },
+    { __typename: "Bot" },
+  ])(
+    "binds the effective GraphQL principal, not just its type: %j",
+    async (patch) => {
+      const snapshot = fixture();
+      Object.assign(snapshot.graphqlViewer, patch);
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expectNoWrite(gh);
+    },
+  );
+
+  it.each(["id", "node_id"])(
+    "requires the REST principal's immutable %s",
+    async (field) => {
+      const snapshot = fixture();
+      Reflect.deleteProperty(snapshot.viewer, field);
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expectNoWrite(gh);
+    },
+  );
+
+  it.each([1, 2, 3, 4, 5, 6, 7, 8, 9])(
+    "fences a GraphQL principal change at read %s before writing",
+    async (changeAt) => {
+      const gh = fakeGh();
+      gh.controls.beforeGraphqlRead = (read, _query, snapshot) => {
+        if (read === changeAt) snapshot.graphqlViewer.id = "U_other";
+      };
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expectNoWrite(gh);
+    },
+  );
+
+  it.each([2, 3])(
+    "refuses an identity switch even when REST and GraphQL agree on a new human at REST read %s",
+    async (changeAt) => {
+      const gh = fakeGh();
+      gh.controls.beforeRestRead = (read, snapshot) => {
+        if (read === changeAt) {
+          snapshot.viewer = {
+            login: "other-human",
+            type: "User",
+            id: 43,
+            node_id: "U_other",
+          };
+          snapshot.graphqlViewer = {
+            login: "other-human",
+            __typename: "User",
+            databaseId: 43,
+            id: "U_other",
+          };
+        }
+      };
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expectNoWrite(gh);
+    },
+  );
+
+  it("does not report success after the effective GraphQL readback identity changes", async () => {
+    const gh = fakeGh();
+    gh.controls.beforeGraphqlRead = (read, _query, snapshot) => {
+      if (read === 10) snapshot.graphqlViewer.id = "U_other";
+    };
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+    expect(gh.writes).toHaveLength(1);
+    expect(JSON.stringify(gh.stdout.mock.calls)).not.toContain("Merged PR");
+  });
+
+  it.each([2, 3])(
+    "pins immutable human IDs even when the login stays equal at REST read %s",
+    async (changeAt) => {
+      const gh = fakeGh();
+      gh.controls.beforeRestRead = (read, snapshot) => {
+        if (read === changeAt) {
+          snapshot.viewer.id = snapshot.graphqlViewer.databaseId = 43;
+          snapshot.viewer.node_id = snapshot.graphqlViewer.id = "U_replacement";
+        }
+      };
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expectNoWrite(gh);
+    },
+  );
+
+  it.each(["missing", "mismatched"])(
+    "validates a %s GraphQL principal on a later open-PR page",
+    async (state) => {
+      const snapshot = fixture();
+      const gh = fakeGh(snapshot);
+      const original = gh.spawn.getMockImplementation()!;
+      gh.spawn.mockImplementation((command, args, options) => {
+        const result = original(command, args, options);
+        if (
+          args[0] !== "api" ||
+          args[1] !== "graphql" ||
+          !args.includes("--paginate")
+        )
+          return result;
+        const pages = JSON.parse(result.stdout);
+        const second = structuredClone(pages[0]);
+        pages[0].data.repository.pullRequests.pageInfo = {
+          hasNextPage: true,
+          endCursor: "next",
+        };
+        second.data.repository.pullRequests.nodes = [];
+        if (state === "missing") delete second.data.viewer;
+        else second.data.viewer = { ...snapshot.graphqlViewer, id: "U_other" };
+        return json([...pages, second]);
+      });
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expectNoWrite(gh);
+    },
+  );
+
+  it("selects the effective principal with each immediate GraphQL read and the actual merger in its receipt", async () => {
+    const gh = fakeGh();
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(0);
+    const queries = gh.calls.filter(
+      (args) =>
+        args[0] === "api" && args[1] === "graphql" && !args.includes("--input"),
+    );
+    expect(queries).toHaveLength(10);
+    for (const query of queries)
+      expect(query.find((arg) => arg.startsWith("query="))).toContain(
+        "viewer {",
+      );
+    expect(gh.writes[0].query).toContain("mergedBy {");
+    expect(gh.writes[0].query).toContain("... on User { id databaseId }");
+  });
+
+  it("refuses an absent effective GraphQL viewer before writing", async () => {
+    const snapshot = fixture();
+    Reflect.deleteProperty(snapshot, "graphqlViewer");
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+    expectNoWrite(gh);
+  });
+
+  it.each([
+    null,
+    {
+      login: "automation[bot]",
+      __typename: "User",
+      id: "BOT_fixture",
+      databaseId: 43,
+    },
+    {
+      login: "workspace-owner",
+      __typename: "User",
+      id: "U_other",
+      databaseId: 42,
+    },
+    {
+      login: "workspace-owner",
+      __typename: "User",
+      id: "U_fixture",
+      databaseId: 43,
+    },
+  ])(
+    "does not report a merge by an unqualified effective principal: %j",
+    async (mergedBy) => {
+      const snapshot = fixture();
+      const gh = fakeGh(snapshot);
+      gh.controls.mergeResponse = json({
+        data: {
+          mergePullRequest: {
+            pullRequest: {
+              ...snapshot.pr,
+              state: "MERGED",
+              merged: true,
+              mergeCommit: { oid: MERGE, author: { email: AUTHOR_EMAIL } },
+              mergedBy,
+            },
+          },
+        },
+      });
+      expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+      expect(gh.writes).toHaveLength(1);
+      expect(JSON.stringify(gh.stdout.mock.calls)).not.toContain("Merged PR");
+    },
+  );
+
+  it.each([
+    ["pass", "NEUTRAL"],
+    ["skipping", "UNKNOWN"],
+    ["skipping", "FAILURE"],
+    ["skipping", ""],
+    ["pass", "SKIPPED"],
+  ])("refuses malformed optional check pairs %s/%s", async (bucket, state) => {
+    const snapshot = fixture();
+    snapshot.checks[1] = { name: "optional", bucket, state };
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
+    expectNoWrite(gh);
+  });
   it.each([
     "docs/navigation.md",
     "apps/control-plane/src/cloud-workspaces/routes.ts",
@@ -173,6 +570,7 @@ describe("immediate-only agent merge", () => {
           mergeMethod: "SQUASH",
           commitHeadline: `${snapshot.pr.title} (#123)`,
           commitBody: snapshot.pr.body,
+          authorEmail: AUTHOR_EMAIL,
         },
       });
       expect(gh.stdout).toHaveBeenCalledWith(
@@ -185,7 +583,9 @@ describe("immediate-only agent merge", () => {
         false,
       );
       for (const call of gh.spawn.mock.calls) {
-        expect(call[0]).toBe("gh");
+        if (call[0] === "git")
+          expect(call[1]).toEqual(["var", "GIT_AUTHOR_IDENT"]);
+        else expect(call[0]).toBe("gh");
         expect(call[2]).toMatchObject({ shell: false, stdio: "pipe" });
         expect(call[2]).not.toHaveProperty("env");
       }
@@ -222,6 +622,7 @@ describe("immediate-only agent merge", () => {
     ["unknown", "UNKNOWN"],
     ["pass", "UNKNOWN"],
     ["skipping", "SKIPPED"],
+    ["skipping", "NEUTRAL"],
   ])("refuses required CI %s/%s", async (bucket, state) => {
     const snapshot = fixture();
     snapshot.requiredChecks[0] = { name: "test", bucket, state };
@@ -498,11 +899,20 @@ describe("immediate-only agent merge", () => {
 
   it("allows a completed neutral optional check without treating a neutral required check as success", async () => {
     const snapshot = fixture();
-    snapshot.checks[1] = { name: "optional", bucket: "pass", state: "NEUTRAL" };
+    snapshot.checks[1] = {
+      name: "optional",
+      bucket: "skipping",
+      state: "NEUTRAL",
+    };
     const gh = fakeGh(snapshot);
     expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(0);
     expect(gh.writes).toHaveLength(1);
-    snapshot.requiredChecks[0].state = "NEUTRAL";
+    snapshot.requiredChecks[0] = {
+      name: "test",
+      bucket: "skipping",
+      state: "NEUTRAL",
+    };
+    snapshot.checks[0] = { ...snapshot.requiredChecks[0] };
     const required = fakeGh(snapshot);
     expect(await runAgentMerge(["123", "--immediate"], required)).toBe(1);
     expectNoWrite(required);
@@ -642,7 +1052,7 @@ describe("immediate-only agent merge", () => {
     { state: "OPEN" },
     { merged: false },
     { mergeCommit: null },
-    { mergeCommit: { oid: "invalid" } },
+    { mergeCommit: { oid: "invalid", author: { email: AUTHOR_EMAIL } } },
     { autoMergeRequest: { enabledAt: "2026-10-18T00:00:00Z" } },
     { isInMergeQueue: true },
   ])(
@@ -657,7 +1067,7 @@ describe("immediate-only agent merge", () => {
               ...snapshot.pr,
               state: "MERGED",
               merged: true,
-              mergeCommit: { oid: MERGE },
+              mergeCommit: { oid: MERGE, author: { email: AUTHOR_EMAIL } },
               ...patch,
             },
           },
@@ -682,6 +1092,7 @@ describe("immediate-only agent merge", () => {
     ["123", "--immediate", "--auto"],
     ["123", "--immediate", "--disable-auto"],
     ["123", "--immediate", "--delete-branch"],
+    ["123", "--immediate", "--author-email", "override@example.test"],
   ])("rejects unsafe flags before gh: %j", async (...argv) => {
     const gh = fakeGh();
     expect(await runAgentMerge(argv, gh)).toBe(2);

@@ -39,7 +39,13 @@ const OPEN_PULL_REQUESTS_QUERY = `query($endCursor: String) {
     }
   }
 }`;
+const IMMEDIATE_VIEWER_FIELDS = "viewer { id databaseId login __typename }";
+const IMMEDIATE_OPEN_PULL_REQUESTS_QUERY = OPEN_PULL_REQUESTS_QUERY.replace(
+  "  repository(",
+  `  ${IMMEDIATE_VIEWER_FIELDS}\n  repository(`,
+).replace("nodes { number", "nodes { isInMergeQueue number");
 const IMMEDIATE_PR_QUERY = `query ImmediateMergePreflight($number: Int!) {
+  ${IMMEDIATE_VIEWER_FIELDS}
   repository(owner: "Withso", name: "zeros") {
     pullRequest(number: $number) {
       id number title body state isDraft isCrossRepository changedFiles
@@ -50,14 +56,17 @@ const IMMEDIATE_PR_QUERY = `query ImmediateMergePreflight($number: Int!) {
   }
 }`;
 const IMMEDIATE_QUEUE_QUERY = `query ImmediateMergeQueue($branch: String!) {
+  ${IMMEDIATE_VIEWER_FIELDS}
   repository(owner: "Withso", name: "zeros") { mergeQueue(branch: $branch) { id } }
 }`;
 const MERGED_FIELDS = `id number state merged headRefOid baseRefName
-  mergeCommit { oid } autoMergeRequest { enabledAt } isInMergeQueue`;
+  mergedBy { login __typename ... on User { id databaseId } }
+  mergeCommit { oid author { email } } autoMergeRequest { enabledAt } isInMergeQueue`;
 const IMMEDIATE_MUTATION = `mutation ImmediateMerge($input: MergePullRequestInput!) {
   mergePullRequest(input: $input) { pullRequest { ${MERGED_FIELDS} } }
 }`;
 const IMMEDIATE_RESULT_QUERY = `query ImmediateMergeResult($number: Int!) {
+  ${IMMEDIATE_VIEWER_FIELDS}
   repository(owner: "Withso", name: "zeros") {
     pullRequest(number: $number) { ${MERGED_FIELDS} }
   }
@@ -69,6 +78,16 @@ const human = (user) =>
   user?.type === "User" &&
   typeof user.login === "string" &&
   /^[a-z\d][a-z\d-]{0,38}$/i.test(user.login);
+const sameImmediateViewer = (workspace, effective) =>
+  human(workspace) &&
+  positiveInteger(workspace.id) &&
+  typeof workspace.node_id === "string" &&
+  !!workspace.node_id &&
+  effective?.__typename === "User" &&
+  typeof effective.login === "string" &&
+  effective.login.toLowerCase() === workspace.login.toLowerCase() &&
+  effective.id === workspace.node_id &&
+  effective.databaseId === workspace.id;
 const validAutoMerge = (value) =>
   value === null ||
   (typeof value?.enabledAt === "string" &&
@@ -262,6 +281,11 @@ export function decideMerge(
     );
   }
   if (immediate) {
+    if (!sameImmediateViewer(viewer, pr.graphqlViewer))
+      return refuse(
+        "immediate-identity",
+        "Immediate merge requires the same human workspace identity for REST and GraphQL; no merge requested.",
+      );
     if (force || reason !== null)
       return refuse(
         "immediate-force",
@@ -307,11 +331,11 @@ export function decideMerge(
         (check) =>
           typeof check?.name !== "string" ||
           !check.name ||
-          (!(
-            check.bucket === "pass" &&
-            ["SUCCESS", "NEUTRAL"].includes(check.state)
-          ) &&
-            !(check.bucket === "skipping" && check.state === "SKIPPED")),
+          (!(check.bucket === "pass" && check.state === "SUCCESS") &&
+            !(
+              check.bucket === "skipping" &&
+              ["SKIPPED", "NEUTRAL"].includes(check.state)
+            )),
       ) ||
       requiredChecks.some(
         (required) =>
@@ -417,8 +441,8 @@ export async function runAgentMerge(
     stderr(USAGE);
     return 2;
   }
-  const execute = (args, statuses = [0]) => {
-    const result = spawn("gh", args, {
+  const execute = (args, statuses = [0], command = "gh") => {
+    const result = spawn(command, args, {
       encoding: "utf8",
       stdio: "pipe",
       shell: false,
@@ -430,26 +454,72 @@ export async function runAgentMerge(
     return result;
   };
   const json = (args, statuses) => JSON.parse(execute(args, statuses).stdout);
-  const graphql = (args) => {
+  const identityError = new Error("Immediate principal unconfirmed");
+  const authorError = new Error("Immediate Git author unconfirmed");
+  let immediateViewer = null;
+  let immediateAuthorEmail = null;
+  const readWorkspaceAuthorEmail = () => {
+    let ident;
+    try {
+      ident = execute(["var", "GIT_AUTHOR_IDENT"], [0], "git").stdout;
+    } catch {
+      throw authorError;
+    }
+    const match = /^([^<>\r\n]+) <([^<>\r\n]+)> \d+ [+-]\d{4}\r?\n?$/.exec(
+      ident,
+    );
+    if (
+      !match?.[1].trim() ||
+      /[\x00-\x1f\x7f]/.test(match[1]) ||
+      !/^[^\s<>@\x00-\x1f\x7f]+@[^\s<>@\x00-\x1f\x7f]+$/.test(match[2]) ||
+      match[2].length > 254 ||
+      (immediateAuthorEmail !== null && immediateAuthorEmail !== match[2])
+    )
+      throw authorError;
+    immediateAuthorEmail ??= match[2];
+    return immediateAuthorEmail;
+  };
+  const readWorkspaceViewer = () => {
+    const viewer = json(["api", "user"]);
+    if (options.immediate) {
+      const expected = immediateViewer ?? viewer;
+      if (
+        !human(viewer) ||
+        !sameImmediateViewer(expected, {
+          __typename: "User",
+          login: viewer.login,
+          id: viewer.node_id,
+          databaseId: viewer.id,
+        })
+      )
+        throw identityError;
+      immediateViewer ??= viewer;
+    }
+    return viewer;
+  };
+  const graphql = (args, { mutation = false } = {}) => {
     const result = json(["api", "graphql", ...args]);
     if (result?.errors || !result?.data)
       throw new Error("GraphQL result unavailable");
+    if (!mutation && !sameImmediateViewer(immediateViewer, result.data.viewer))
+      throw identityError;
     return result.data;
   };
   const prNumber = String(options.number);
   const readImmediatePr = () => {
-    const pr = graphql([
+    const data = graphql([
       "-f",
       `query=${IMMEDIATE_PR_QUERY}`,
       "-F",
       `number=${prNumber}`,
-    ]).repository?.pullRequest;
+    ]);
+    const pr = data.repository?.pullRequest;
     if (
       !Array.isArray(pr?.labels?.nodes) ||
       pr.labels.pageInfo?.hasNextPage !== false
     )
       throw new Error("Incomplete PR labels");
-    return { ...pr, labels: pr.labels.nodes };
+    return { ...pr, labels: pr.labels.nodes, graphqlViewer: data.viewer };
   };
   const samePr = (left, right) =>
     [
@@ -467,7 +537,7 @@ export async function runAgentMerge(
     ].every((key) => left[key] === right[key]) &&
     JSON.stringify(left.labels) === JSON.stringify(right.labels);
   const readSnapshot = () => {
-    const viewer = json(["api", "user"]);
+    const viewer = readWorkspaceViewer();
     const pr = options.immediate
       ? readImmediatePr()
       : json([
@@ -531,7 +601,7 @@ export async function runAgentMerge(
       "--paginate",
       "--slurp",
       "-f",
-      `query=${options.immediate ? OPEN_PULL_REQUESTS_QUERY.replace("nodes { number", "nodes { isInMergeQueue number") : OPEN_PULL_REQUESTS_QUERY}`,
+      `query=${options.immediate ? IMMEDIATE_OPEN_PULL_REQUESTS_QUERY : OPEN_PULL_REQUESTS_QUERY}`,
     ]);
     if (
       !Array.isArray(openPages) ||
@@ -551,6 +621,13 @@ export async function runAgentMerge(
         true
     )
       throw new Error("Incomplete open PR pages");
+    if (
+      options.immediate &&
+      openPages.some(
+        (page) => !sameImmediateViewer(immediateViewer, page.data.viewer),
+      )
+    )
+      throw identityError;
     const forceComment = options.force
       ? json([
           "api",
@@ -583,6 +660,7 @@ export async function runAgentMerge(
       return 1;
     }
     if (options.immediate) {
+      readWorkspaceAuthorEmail();
       const fresh = readSnapshot();
       if (
         !samePr(snapshot.pr, fresh.pr) ||
@@ -618,18 +696,21 @@ export async function runAgentMerge(
     }
     if (hourly.alert) stdout(`Noncloud PR alert: zeros-dev E2E is ${hourly.code}.`);
     if (options.immediate) {
+      const viewer = readWorkspaceViewer();
       const pr = readImmediatePr();
-      if (!samePr(snapshot.pr, pr)) throw new Error("PR changed after hourly gate");
-      snapshot = { ...snapshot, pr };
+      if (!samePr(snapshot.pr, pr))
+        throw new Error("PR changed after hourly gate");
+      snapshot = { ...snapshot, viewer, pr };
       decision = decideMerge(snapshot, policy);
       if (!decision.allowed) {
         stderr(decision.message);
         return 1;
       }
+      const authorEmail = readWorkspaceAuthorEmail();
       if (options.dryRun) {
         stdout(`Dry run: ${decision.message}`);
         stdout(
-          `GraphQL mergePullRequest, SQUASH, expectedHeadOid=${snapshot.pr.headRefOid} (using the checked PR title and body; no auto-merge or queue admission).`,
+          `GraphQL mergePullRequest, SQUASH, expectedHeadOid=${snapshot.pr.headRefOid} (using the checked PR title/body and pinned workspace Git author email; no auto-merge or queue admission).`,
         );
         return 0;
       }
@@ -639,13 +720,13 @@ export async function runAgentMerge(
         inputFile,
         JSON.stringify({
           query: IMMEDIATE_MUTATION,
-          variables: { input: decision.input },
+          variables: { input: { ...decision.input, authorEmail } },
         }),
         { mode: 0o600 },
       );
       immediateRequested = true;
-      const result = graphql(["--input", inputFile]).mergePullRequest
-        ?.pullRequest;
+      const result = graphql(["--input", inputFile], { mutation: true })
+        .mergePullRequest?.pullRequest;
       const confirmed = (pr) =>
         pr?.id === snapshot.pr.id &&
         pr.number === options.number &&
@@ -653,8 +734,10 @@ export async function runAgentMerge(
         pr.baseRefName === snapshot.pr.baseRefName &&
         pr.state === "MERGED" &&
         pr.merged === true &&
+        sameImmediateViewer(immediateViewer, pr.mergedBy) &&
         typeof pr.mergeCommit?.oid === "string" &&
         /^[a-f\d]{40}$/i.test(pr.mergeCommit.oid) &&
+        pr.mergeCommit.author?.email === immediateAuthorEmail &&
         pr.autoMergeRequest === null &&
         pr.isInMergeQueue === false;
       if (!confirmed(result)) throw new Error("Merged result unavailable");
@@ -699,13 +782,17 @@ export async function runAgentMerge(
       `Auto-merge requested for PR #${options.number} at ${snapshot.pr.headRefOid}.`,
     );
     return 0;
-  } catch {
+  } catch (error) {
     // gh errors, PR text and API responses can contain credentials. Never echo
     // subprocess output or caught exception text, even after a parse failure.
     stderr(
       immediateRequested
         ? "Unable to confirm the immediate merge result. Inspect the PR before retrying; no automatic retry, auto-merge or queue admission was requested."
-        : "Unable to complete the merge safety check or request; refusing to proceed. Check gh authentication, PR state and the reviewed head.",
+        : error === identityError
+          ? "Immediate merge requires the same human workspace identity for REST and GraphQL; unable to bind the effective GitHub principal. No merge requested."
+          : error === authorError
+            ? "Immediate merge requires a stable, valid workspace Git author email. No merge requested."
+            : "Unable to complete the merge safety check or request; refusing to proceed. Check gh authentication, PR state and the reviewed head.",
     );
     return 1;
   } finally {
