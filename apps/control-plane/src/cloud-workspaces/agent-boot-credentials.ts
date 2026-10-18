@@ -378,6 +378,20 @@ export async function readCurrentCloudAgentBootBinding(tx: Tx, supplied: unknown
     writerState: state.data, cacheRevision, desiredCacheRevision, initialAdoptions: initial.data, status } };
 }
 
+/** Nonsecret admission projection shared by legacy grants and S3 connect.
+ * The caller owns the workspace/engine authority fence. Only explicit legacy
+ * state omits it; an inactive or mismatched writer cannot admit a runtime. */
+export async function readActiveCloudAgentBootScope(tx: Tx, scope: {
+  organizationId: string; workspaceId: string; generation: number; engineInstanceId: string;
+}, inactive: () => never = rejected): Promise<CloudAgentBootScope | null> {
+  const current = await readCurrentCloudAgentBootBinding(tx, { organizationId: scope.organizationId, workspaceId: scope.workspaceId });
+  if (current.mode === "legacy") return null;
+  if (current.binding.writerState !== "active" || current.binding.generation !== scope.generation ||
+      current.binding.engineInstanceId !== scope.engineInstanceId) inactive();
+  return CloudAgentBootScopeSchema.parse(Object.fromEntries(
+    Object.keys(CloudAgentBootScopeSchema.shape).map(field => [field, current.binding[field as keyof typeof current.binding]])));
+}
+
 
 // The authenticated engine selects no account. The CP reserves a genuine
 // writer and freezes the actual funding owner before any positive delivery.

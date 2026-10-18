@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** S3 device stream wire constants (contract 1.1.0, Part 2). The CP mirrors
+/** S3 device stream wire constants (contract 1.3.0, Part 2). The CP mirrors
  * the frozen JSON schema here and never imports `@zeros/protocol`. */
 export const DEVICE_STREAM_PATH = "/v1/device-stream";
 export const DEVICE_STREAM_CONTRACT = 1;
@@ -11,6 +11,8 @@ export const DEVICE_STREAM_RESUME_RETENTION_MS = 10 * 60_000;
 /** A hello may carry up to 1000 known workspace versions. */
 export const DEVICE_STREAM_MAX_HELLO_BYTES = 96 * 1024;
 export const DEVICE_STREAM_MAX_FRAME_BYTES = 4 * 1024;
+/** Bounded by the account's membership/guest organization read. */
+export const DEVICE_STREAM_MAX_ORGANIZATION_FEATURES = 1_000;
 /** The ws ceiling sits above the hello cap so an oversized frame reaches the
  * parser and closes 4400 instead of an unspecified 1009. */
 export const DEVICE_STREAM_MAX_SOCKET_PAYLOAD_BYTES = DEVICE_STREAM_MAX_HELLO_BYTES + 1024;
@@ -35,6 +37,13 @@ export const DEVICE_STREAM_CLOSE = {
 const Uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const Version = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const Cursor = z.string().min(1).max(256);
+
+export const DeviceStreamOrganizationFeaturesSchema = z.array(z.object({
+  organizationId: Uuid,
+  deviceStream: z.boolean(),
+  presence: z.boolean(),
+}).passthrough()).max(DEVICE_STREAM_MAX_ORGANIZATION_FEATURES);
+export type DeviceStreamOrganizationFeature = z.infer<typeof DeviceStreamOrganizationFeaturesSchema>[number];
 
 export const DeviceStreamEnvelopeSchema = z.object({
   t: z.string().min(1).max(64),

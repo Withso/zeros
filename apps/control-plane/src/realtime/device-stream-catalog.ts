@@ -59,7 +59,7 @@ export async function readDeviceStreamOrganizations(tx: Tx, accountUserId: strin
     `SELECT org_id::text AS org_id FROM organization_members WHERE user_id = $1
      UNION SELECT org_id::text FROM cloud_workspace_guest_grants
        WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()
-     LIMIT ${MAX_ORGANIZATIONS}`, [accountUserId]);
+     ORDER BY org_id LIMIT ${MAX_ORGANIZATIONS}`, [accountUserId]);
   return rows.rows.map(row => row.org_id);
 }
 
