@@ -7,11 +7,15 @@ import {
   constants,
   existsSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
   realpathSync,
+  readFileSync,
+  renameSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
@@ -157,6 +161,177 @@ function exactHttpsUrl(value, maximumBytes = 4_096) {
     return parsed.toString();
   } catch {
     return null;
+  }
+}
+
+export const CLOUD_ENGINE_EXIT_REPORT_ENV = "ZEROS_CLOUD_ENGINE_EXIT_REPORT_B64";
+export const CLOUD_ENGINE_EXIT_PATH = "/internal/v1/cloud-workspaces/engine/exited";
+const EXIT_REPORT_KEYS = ["version", "audience", "reportId", "reason", "organizationId", "workspaceId", "generation",
+  "engineInstanceId", "setupRunId", "executionFence", "runtimeId", "bootId", "supervisorSessionId"];
+const MAX_EXIT_REPORTS = 16;
+const MAX_EXIT_JOURNAL_BYTES = 64 * 1024;
+
+/** Mirrors the engine/CP withdrawal wire. Neither caller time nor process
+ * output is evidence; only the original supervisor observes the child exit. */
+export function parseCloudEngineExitReport(value) {
+  if (!isRecord(value) || !exactKeys(value, EXIT_REPORT_KEYS) || value.version !== 1 ||
+      value.audience !== "zeros-cloud-engine-exit-v1" || value.reason !== "unexpected_exit" ||
+      !["reportId", "organizationId", "workspaceId", "engineInstanceId", "setupRunId", "bootId", "supervisorSessionId"]
+        .every(key => isUuid(value[key]) && value[key] === value[key].toLowerCase()) ||
+      !positiveInteger(value.generation, 2147483647) || !positiveInteger(value.executionFence) ||
+      !/^r1-[a-f0-9]{64}$/.test(value.runtimeId ?? "")) return null;
+  return immutable(value);
+}
+
+const journalFilesystem = { lstatSync, realpathSync, openSync, closeSync, fstatSync, readFileSync,
+  writeFileSync, fsyncSync, renameSync, unlinkSync };
+/** One root-owned, bounded journal. Atomic replacement survives a broker
+ * restart; an armed record alone is never interpreted as process death. */
+export class CloudEngineExitJournal {
+  constructor({ directory = "/run/zeros", filesystem = journalFilesystem } = {}) {
+    this.directory = directory;
+    this.file = path.join(directory, "cloud-engine-exits.json");
+    this.fs = filesystem;
+  }
+  assertDirectory() {
+    const stat = this.fs.lstatSync(this.directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== 0 || stat.gid !== 0 ||
+        (stat.mode & 0o7777) !== 0o700 || this.fs.realpathSync(this.directory) !== this.directory)
+      throw new Error("Cloud engine exit journal is unsafe");
+  }
+  read() {
+    this.assertDirectory();
+    let fd;
+    try { fd = this.fs.openSync(this.file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (error) { if (error?.code === "ENOENT") return []; throw new Error("Cloud engine exit journal is unsafe"); }
+    try {
+      const stat = this.fs.fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== 0 || stat.gid !== 0 ||
+          (stat.mode & 0o7777) !== 0o600 || stat.size > MAX_EXIT_JOURNAL_BYTES)
+        throw new Error();
+      const value = JSON.parse(this.fs.readFileSync(fd, "utf8"));
+      if (!isRecord(value) || !exactKeys(value, ["version", "records"]) || value.version !== 1 ||
+          !Array.isArray(value.records) || value.records.length > MAX_EXIT_REPORTS ||
+          value.records.some(record => !isRecord(record) || !exactKeys(record, ["report", "endpoint", "token", "state"]) ||
+            !parseCloudEngineExitReport(record.report) || !["armed", "exited"].includes(record.state) ||
+            !BRIDGE_TOKEN_PATTERN.test(record.token ?? "") || !exactHttpsUrl(record.endpoint) ||
+            new URL(record.endpoint).pathname !== CLOUD_ENGINE_EXIT_PATH) ||
+          new Set(value.records.map(record => record.report.reportId)).size !== value.records.length) throw new Error();
+      return value.records;
+    } catch { throw new Error("Cloud engine exit journal is unsafe"); }
+    finally { this.fs.closeSync(fd); }
+  }
+  write(records) {
+    // Validate any original path before replacing it, including hard links.
+    this.read();
+    const source = JSON.stringify({ version: 1, records });
+    if (records.length > MAX_EXIT_REPORTS || Buffer.byteLength(source) > MAX_EXIT_JOURNAL_BYTES)
+      throw new Error("Cloud engine exit journal is full");
+    const temporary = `${this.file}.${randomUUID()}`;
+    let fd;
+    try {
+      fd = this.fs.openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      this.fs.writeFileSync(fd, source);
+      this.fs.fsyncSync(fd);
+      this.fs.closeSync(fd); fd = undefined;
+      this.fs.renameSync(temporary, this.file);
+      const directory = this.fs.openSync(this.directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { this.fs.fsyncSync(directory); } finally { this.fs.closeSync(directory); }
+    } finally {
+      if (fd !== undefined) this.fs.closeSync(fd);
+      try { this.fs.unlinkSync(temporary); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    }
+  }
+}
+
+/** Single-flight withdrawal only. Network failure keeps the original scope
+ * and credential; a successful ACK can be replayed safely after a lost write. */
+export class CloudEngineExitReporter {
+  constructor({ journal = /** @type {Pick<CloudEngineExitJournal, 'read'|'write'>} */ (new CloudEngineExitJournal()),
+    fetch: request = globalThis.fetch, random = Math.random } = {}) {
+    this.journal = journal; this.request = request; this.random = random;
+    this.records = new Map(); this.initialized = false; this.closed = false;
+    this.timer = null; this.flight = null; this.abort = new AbortController(); this.failures = 0;
+  }
+  resume() {
+    if (this.initialized) return true;
+    try {
+      const records = this.journal.read().filter(record => record.state === "exited");
+      this.journal.write(records);
+      this.records = new Map(records.map(record => [record.report.reportId, record]));
+      this.initialized = true;
+      this.schedule(0);
+      return true;
+    } catch { return false; }
+  }
+  persist() { this.journal.write([...this.records.values()]); }
+  arm(report, endpoint, token) {
+    if (this.closed || !parseCloudEngineExitReport(report) || !exactHttpsUrl(endpoint) ||
+        new URL(endpoint).pathname !== CLOUD_ENGINE_EXIT_PATH || !BRIDGE_TOKEN_PATTERN.test(token ?? "") ||
+        !this.resume() || this.records.size >= MAX_EXIT_REPORTS || this.records.has(report.reportId)) return false;
+    this.records.set(report.reportId, { report: immutable(report), endpoint, token, state: "armed" });
+    try { this.persist(); return true; }
+    catch { this.records.delete(report.reportId); return false; }
+  }
+  disarm(reportId) {
+    if (this.records.get(reportId)?.state !== "armed") return;
+    this.records.delete(reportId);
+    try { this.persist(); } catch { /* An armed record is ignored on restart. */ }
+  }
+  exited(reportId) {
+    const record = this.records.get(reportId);
+    if (!record || record.state === "exited") return;
+    record.state = "exited";
+    try { this.persist(); } catch { /* Keep the positive observation in memory and retry. */ }
+    this.schedule(0);
+  }
+  schedule(delay) {
+    if (this.closed || this.timer || this.flight || ![...this.records.values()].some(record => record.state === "exited")) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.flight = this.flush().finally(() => {
+        this.flight = null;
+        const delay = this.failures ? Math.min(30_000, 1_000 * 2 ** Math.min(this.failures - 1, 5)) * (0.75 + this.random() * 0.25) : 0;
+        this.schedule(delay);
+      });
+    }, delay);
+    this.timer.unref?.();
+  }
+  async flush() {
+    const record = [...this.records.values()].find(record => record.state === "exited");
+    if (!record || this.closed) return;
+    try {
+      try { this.persist(); } catch { /* API withdrawal may still succeed. */ }
+      const response = await this.request(record.endpoint, { method: "POST", redirect: "error",
+        signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(10_000)]),
+        headers: { authorization: `Bearer ${record.token}`, "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(record.report) });
+      if (response.status !== 200 || response.headers.get("content-type")?.split(";", 1)[0] !== "application/json" || !response.body) {
+        await response.body?.cancel().catch(() => undefined); throw new Error();
+      }
+      let size = 0; const chunks = [];
+      for await (const chunk of response.body) {
+        size += chunk.length; if (size > 4096) throw new Error(); chunks.push(chunk);
+      }
+      const ack = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!isRecord(ack) || !exactKeys(ack, ["version", "audience", "accepted", "reportId", "engineInstanceId"]) ||
+          ack.version !== 1 || ack.audience !== "zeros-cloud-engine-exit-v1" || ack.accepted !== true ||
+          ack.reportId !== record.report.reportId || ack.engineInstanceId !== record.report.engineInstanceId) throw new Error();
+      this.records.delete(record.report.reportId);
+      try { this.persist(); } catch { /* Retained disk copies replay this exact ACK safely. */ }
+      this.failures = 0;
+    } catch {
+      this.failures += 1;
+      // An old refused report must not starve a newer engine's withdrawal.
+      this.records.delete(record.report.reportId);
+      this.records.set(record.report.reportId, record);
+    }
+  }
+  close() {
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.abort.abort();
   }
 }
 
@@ -470,6 +645,7 @@ export class CloudWorkerSupervisor {
   #engineOwner = null;
   #engineCustody = null;
   #engineRuntime = null;
+  #engineEpisode = null;
   #residentAuthority = null;
   #enrolledResident = null;
   #retiredResident = null;
@@ -495,6 +671,7 @@ export class CloudWorkerSupervisor {
     readBirth = readCloudRootProcessBirth,
     readEngineCustody: readCustody = readEngineCustody,
     createLegacyControl = createLegacyResidentControl,
+    exitReporter = /** @type {Pick<CloudEngineExitReporter, 'arm'|'disarm'|'exited'|'resume'|'close'>} */ (new CloudEngineExitReporter()),
   } = {}) {
     this.socketPath = socketPath;
     this.runtime = runtime;
@@ -509,6 +686,7 @@ export class CloudWorkerSupervisor {
     this.readBirth = readBirth;
     this.readEngineCustody = readCustody;
     this.createLegacyControl = createLegacyControl;
+    this.exitReporter = exitReporter;
     /** @type {SupervisorResident|null} */
     this.resident = null;
     this.preparedResident = null;
@@ -638,6 +816,7 @@ export class CloudWorkerSupervisor {
         throw new Error("Resident workload preservation was not confirmed");
     }
     const child = this.child;
+    const episode = this.#engineEpisode;
     let completion = null;
     const live = child && child.exitCode === null && child.signalCode === null;
     const kind = preserveWorkload !== undefined ? "preserve" : force ? "force" : live ? "normal" : this.#engineOwner ? "crash" : "empty";
@@ -664,9 +843,17 @@ export class CloudWorkerSupervisor {
             if (birth?.pid !== this.#engineOwner.pid || birth.startToken !== this.#engineOwner.startToken)
               throw new Error("Cloud engine launcher original custody changed");
           }
+          // Preflight/custody checks have passed. Mark only the exact child we
+          // are now committed to signalling; failed prepare leaves it armed.
+          const expecting = episode?.child === child && !episode.exited && !episode.expected;
+          if (expecting) episode.expected = true;
           try {
             process.kill(-child.pid, signal);
+            if (expecting && episode.armed) this.exitReporter.disarm(episode.report.reportId);
           } catch (error) {
+            // A refused signal (or an already missing process) did not cause
+            // its exit. Keep the original report armed for the exit event.
+            if (expecting) episode.expected = false;
             if (error?.code !== "ESRCH") throw error;
           }
         };
@@ -713,6 +900,7 @@ export class CloudWorkerSupervisor {
       this.#enrolledResident = null;
     }
     if (this.child === child) this.child = null;
+    if (this.#engineEpisode === episode) this.#engineEpisode = null;
   }
 
   async launch(environment) {
@@ -722,7 +910,14 @@ export class CloudWorkerSupervisor {
         throw new Error("Resident original custody unavailable");
       rootResident = Buffer.from(JSON.stringify(this.resident.rootCustody())).toString("base64url");
     }
-    const child = this.spawnProcess(this.launcher, [], {
+    const report = this.selectedRuntime && parseCloudEngineExitReport({ version: 1, audience: "zeros-cloud-engine-exit-v1",
+      reportId: randomUUID(), reason: "unexpected_exit", ...environment.runtime?.execution,
+      engineInstanceId: environment.runtime?.engine?.instanceId, runtimeId: this.selectedRuntime.runtimeId,
+      bootId: this.selectedRuntime.bootId, supervisorSessionId: this.selectedRuntime.supervisorSessionId });
+    const origin = exactHttpsUrl(environment.runtime?.registration?.endpoint);
+    const armed = !!(report && origin && this.exitReporter.arm(report, new URL(CLOUD_ENGINE_EXIT_PATH, origin).href, environment.bridgeToken));
+    let child;
+    try { child = this.spawnProcess(this.launcher, [], {
       cwd: "/",
       detached: true,
       stdio: "ignore",
@@ -742,14 +937,36 @@ export class CloudWorkerSupervisor {
         ZEROS_CLOUD_OWNER_SUB: environment.ownerSubject,
         ZEROS_CLOUD_PORT: String(environment.port),
         ZEROS_CLOUD_RUNTIME_B64: environment.runtimeB64,
+        ...(armed ? { [CLOUD_ENGINE_EXIT_REPORT_ENV]: Buffer.from(JSON.stringify(report)).toString("base64url") } : {}),
         ZEROS_CLOUD_SETUP_BOOT: "1",
         ZEROS_CLOUD_TOKEN: environment.bridgeToken,
         ZEROS_REQUIRE_ACCOUNT: "1",
         ...(environment.residentB64 ? { ZEROS_RESIDENT_PTY_B64: environment.residentB64 } : {}),
         ...(rootResident ? { ZEROS_ROOT_RESIDENT_CUSTODY_B64: rootResident } : {}),
       },
-    });
-    await new Promise((resolve, reject) => {
+    }); } catch (error) {
+      if (armed) this.exitReporter.disarm(report.reportId);
+      throw error;
+    }
+    const episode = { child, report, armed, expected: false, exited: false };
+    this.#engineEpisode = episode;
+    this.child = child;
+    const onExit = () => {
+      if (episode.exited) return;
+      episode.exited = true;
+      if (!episode.expected && armed) this.exitReporter.exited(report.reportId);
+      if (this.#engineEpisode !== episode) return;
+      if (this.child === child) this.child = null;
+      if (!episode.expected) {
+        // The original kernel scope, including descendants, still needs the
+        // serialized crash drain. A later episode must never be drained here.
+        void this.serialize(async () => {
+          if (this.#engineEpisode === episode) await this.stopChild();
+        }).catch(() => undefined);
+      }
+    };
+    child.once("exit", onExit);
+    try { await new Promise((resolve, reject) => {
       const onError = (error) => {
         child.off("spawn", onSpawn);
         reject(error);
@@ -760,8 +977,11 @@ export class CloudWorkerSupervisor {
       };
       child.once("error", onError);
       child.once("spawn", onSpawn);
-    });
-    this.child = child;
+    }); } catch (error) {
+      if (armed && !episode.exited) this.exitReporter.disarm(report.reportId);
+      if (this.child === child) this.child = null;
+      throw error;
+    }
     if (this.runtime.profile === "v4") {
       try {
         const birth = this.readBirth(child.pid);
@@ -776,9 +996,7 @@ export class CloudWorkerSupervisor {
       }
     }
     child.unref();
-    child.once("exit", () => {
-      if (this.child === child) this.child = null;
-    });
+    if (episode.exited) throw new Error("Cloud engine exited during launch");
     return child.pid;
   }
 
@@ -1055,6 +1273,7 @@ export class CloudWorkerSupervisor {
       this.#listenerLock = immutable({ fd: lock, path: `${this.socketPath}.lock`,
         dev: String(identity.dev), ino: String(identity.ino), owner: { pid: owner.pid, startToken: owner.startToken } });
       this.#assertListenerLock();
+      if (this.runtime.profile === "v4") this.exitReporter.resume();
       // A restarted systemd host begins idle only after the previous kernel
       // workload set is proven empty, including launchers it never observed.
       if (this.runtime.profile === "v4") await this.stopChild();
@@ -1101,7 +1320,7 @@ export class CloudWorkerSupervisor {
   }
 
   stop() {
-    return this.#stopFlight ??= this.#stop();
+    return this.#stopFlight ??= this.#stop().finally(() => this.exitReporter.close());
   }
 
   async #stop() {

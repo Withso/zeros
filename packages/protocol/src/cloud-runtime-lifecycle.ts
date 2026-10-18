@@ -1,6 +1,23 @@
 import { z } from "zod";
 import { RuntimeIdSchema } from "./cloud-runtime-bundle";
 
+export const CLOUD_ENGINE_EXIT_REPORT_ENV = "ZEROS_CLOUD_ENGINE_EXIT_REPORT_B64";
+export const CLOUD_ENGINE_EXIT_PATH = "/internal/v1/cloud-workspaces/engine/exited";
+/** Declarations use the original S2 feature grammar, including on old CPs. */
+export const CLOUD_ENGINE_EXIT_REPORT_FEATURE = "exit.report.v1";
+export const CLOUD_CHECKPOINT_FALLBACK_FEATURE = "checkpoint.fallback.v1";
+const exitUuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+/** Authenticated voluntary withdrawal of this exact VM engine. It grants no
+ * access, restart, checkpoint, provider-retirement or billing authority. */
+export const CloudEngineExitReportSchema = z.object({
+  version: z.literal(1), audience: z.literal("zeros-cloud-engine-exit-v1"),
+  reportId: exitUuid, reason: z.literal("unexpected_exit"),
+  organizationId: exitUuid, workspaceId: exitUuid, generation: z.number().int().positive().max(2_147_483_647),
+  engineInstanceId: exitUuid, setupRunId: exitUuid, executionFence: z.number().int().positive().safe(),
+  runtimeId: RuntimeIdSchema, bootId: exitUuid, supervisorSessionId: exitUuid,
+}).strict();
+export type CloudEngineExitReport = z.infer<typeof CloudEngineExitReportSchema>;
+
 /** Passive receipt of an authorized history gap; never admission authority. */
 export const CloudWorkspaceHistoryRecoverySchema = z.object({
   recoveryId: z.string().uuid(), code: z.literal("history_recovered_with_gap"), coverage: z.literal("unknown"),

@@ -79,6 +79,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "packages/protocol/src/cloud-local-mirror.ts",
   "packages/protocol/src/cloud-runtime-bundle.ts",
   "packages/protocol/src/cloud-runtime-connection.ts",
+  "packages/protocol/src/cloud-runtime-lifecycle.ts",
   "packages/protocol/src/containment.ts",
   "packages/protocol/src/github-auth.ts",
   "packages/protocol/src/messages.ts",

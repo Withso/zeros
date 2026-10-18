@@ -3923,7 +3923,7 @@ export class ZerosEngine {
       auth: capabilityAuth,
       readiness: () => this.cloudEngineUplinkReadiness(),
       activity: () => this.cloudEngineUplinkActivity(),
-      features: ["cred.v1", "lease.v1", "checkpoint.v1", "idle.v1", "turns.v1"],
+      features: registration.uplinkFeatures(),
       // Credential-control push (P0.10 C01): a pushed revision runs the same
       // credential-controls exchange the 500 ms poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).

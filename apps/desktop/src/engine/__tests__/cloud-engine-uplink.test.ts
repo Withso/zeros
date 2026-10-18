@@ -1290,7 +1290,7 @@ describe("engine uplink client against the real control-plane server", () => {
       legacy.stop();
       checkpointEnabled = true;
       const a = await start({ extensions: [push] });
-      const client = makeClient({ endpoint: a.url, features: ["checkpoint.v1"],
+      const client = makeClient({ endpoint: a.url, features: ["checkpoint.v1", "checkpoint.fallback.v1"],
         onCheckpointRequest: request => { requests.push(request); }, onCheckpointPushChange: active => { changes.push(active); } });
       client.start();
       await until(() => requests.length === 1);
@@ -1438,7 +1438,7 @@ describe("engine uplink client against the real control-plane server", () => {
       const renewals: UplinkIdentity[] = [];
       const a = await start({ lease: { renew: async renewed => { renewals.push(renewed); return { ok: true, leaseExpiresAtMs: renewedTo }; } } });
       const leases: Array<[number, number]> = [];
-      const client = makeClient({ endpoint: a.url, features: ["cred.v1", "lease.v1"],
+      const client = makeClient({ endpoint: a.url, features: ["cred.v1", "lease.v1", "exit.report.v1"],
         onLease: (lease, sentAt) => { leases.push([lease, sentAt]); } });
       const dialedAt = Date.now();
       client.start();

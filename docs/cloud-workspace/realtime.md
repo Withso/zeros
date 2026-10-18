@@ -226,8 +226,9 @@ authority supplies keys, epochs and engine tokens
   a full re-read of every owned uplink after 1 s, doubling to 30 s while
   reads keep failing.
 - **Lease (`lease.v1`).** `uplink-lease.ts` renews the engine lease of an
-  uplink that negotiated `lease.v1` (S2 1.2.0). The engine offers it, the
-  server selects it while the organization's `engine_lease_over_uplink`
+  uplink that negotiated `lease.v1` (S2 1.3.0). The engine offers it only
+  with an exact armed-supervisor declaration, `exit.report.v1`; the server
+  requires that declaration and the organization's `engine_lease_over_uplink`
   flag is on ([rollout flags](rollout-flags.md)), and a flip closes the
   affected uplinks with `1001 features_changed`. The server renews once the
   gate opens, unless more than 31 min remain (a drain redial), and on each
@@ -246,14 +247,20 @@ authority supplies keys, epochs and engine tokens
   heartbeat (`setup-materials.ts`) moves the lease to
   `greatest(lease_expires_at, now + 90 s)`, so it never shortens an
   uplink-renewed lease. Without `lease.v1` the HTTP heartbeat owns the
-  lease and the uplink reports the lease it read. Trade-off: a lost uplink
-  never shortens the lease (decision G), so an engine that dies while its
-  VM keeps running holds its workspace for up to 36 min instead of about
-  90 s (S2, failure and outage behavior).
+  lease and the uplink reports the lease it read. A lost uplink never
+  shortens the lease (decision G). An armed supervisor reports a positive
+  child exit through `POST /internal/v1/cloud-workspaces/engine/exited`,
+  authenticated with that engine's original bridge secret. The API revokes
+  the exact launch and admits safe Stop, or retains its existing lifecycle
+  owner. It does not infer provider retirement, billing settlement or a
+  completed checkpoint. If reporting is unavailable, lease expiry remains
+  the fallback. The [S2 withdrawal contract](contracts/s2-uplink.md#supervisor-exit-withdrawal-exitreportv1)
+  defines journal custody, setup/enrollment fences and lifecycle overlaps.
 - **Checkpoint requests (`checkpoint.v1`).** `uplink-checkpoint.ts` pushes
   queued checkpoint requests to an uplink that negotiated `checkpoint.v1`
-  (S2 1.2.0), selected while the organization's `checkpoint_push` flag is
-  on; a flip closes the affected uplinks with `1001 features_changed`. One
+  (S2 1.3.0), selected only with the engine's `checkpoint.fallback.v1`
+  declaration and the organization's `checkpoint_push` flag on; a flip
+  closes the affected uplinks with `1001 features_changed`. One
   system statement (`withSystemStatement`) reads the queued, unexpired
   requests of each uplink's exact workspace, organization and generation,
   oldest first and at most eight per uplink, for up to 500 uplinks at a
@@ -529,7 +536,10 @@ registration there is no uplink client at all.
   `cred.ack`. The poll stays as the fallback: 500 ms while the uplink's
   gate is closed, a 30 s safety cadence once it is open
   (`controlsPollIntervalMs` in `cloud-local-command-queue-boot.ts`).
-- **Lease (`lease.v1`).** The engine also offers `lease.v1`. The client
+- **Lease (`lease.v1`).** Registration offers `lease.v1` with
+  `exit.report.v1` only when its actual supervisor armed this exact launch.
+  A new engine under an old supervisor omits both and keeps HTTP renewal.
+  The client
   passes on, through `onLease`, the lease in the current connection's
   welcome (with the hello's send time) and in each pong that echoes one of
   its last four pings (with that ping's send time).
@@ -553,7 +563,16 @@ registration there is no uplink client at all.
   fields are never used as the directive. While `checkpointPushActive`
   holds (current connection welcomed, gate open, `checkpoint.v1`
   negotiated), the checkpoint-hint wait sends nothing, and the skip rule
-  counts the push in place of an answering hint wait. Each flip of
+  counts the push in place of an answering hint wait only while the last
+  successful API heartbeat's monotonic request-start is less than 60 s old.
+  The same heartbeat scheduler caps that silence; pongs, lease reports and
+  push callbacks cannot reset it. Optional port discovery has a 1 s bound
+  and at most one underlying read, with late results discarded. Together
+  with the 15 s HTTP bound, a healthy API discovers a request within 76 s
+  even when realtime's pool fails. Capture/upload must still finish within
+  the request's original deadline. Failure keeps the existing bounded
+  heartbeat backoff and lease. The engine declares this behavior with
+  `checkpoint.fallback.v1`. Each flip of
   `checkpointPushActive` wakes the paused wait
   (`uplinkCheckpointPushChanged`), and it re-checks every 30 s regardless,
   so the long-poll resumes, with a fresh backoff, as soon as the uplink is

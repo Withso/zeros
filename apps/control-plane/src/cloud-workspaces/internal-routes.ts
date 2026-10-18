@@ -61,6 +61,7 @@ import type { RolloutFlagReader } from "../rollout-flags.js";
 import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema,
   CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER, parseCloudCheckpointSealRefusal } from "./checkpoint-progress-contract.js";
 import { CloudEngineCheckpointProgressRejected, CloudEngineCheckpointProgressUnavailable, type CloudEngineCheckpointProgressInput } from "./checkpoint-progress.js";
+import { CLOUD_ENGINE_EXIT_PATH, CloudEngineExitReportSchema, CloudEngineExitRejected, type CloudEngineExitInput } from "./engine-exit.js";
 
 export const CLOUD_WORKSPACE_SETUP_ADMISSION_PATH =
   "/internal/v1/cloud-workspaces/setup/admission";
@@ -411,6 +412,7 @@ export interface CloudWorkspaceInternalSetupService {
     input: CloudWorkspaceEngineRegistrationInput,
   ): Promise<unknown>;
   heartbeat(input: CloudWorkspaceEngineHeartbeatInput): Promise<unknown>;
+  reportEngineExit?(input: CloudEngineExitInput): Promise<unknown>;
   /** Optional timing hint; absent services answer 404 and engines keep their cadence. */
   waitForCheckpointHint?(input: CloudEngineCheckpointHintInput, signal: AbortSignal): Promise<unknown>;
   /** Optional evidence; absent services preserve the old engine/CP pairing. */
@@ -597,7 +599,8 @@ function recoveryCursor(raw: string | undefined): string | null | undefined {
 
 /** Capability-authenticated, non-browser endpoints used only by the immutable
  * sandbox helper and engine. They intentionally sit outside `/v1/*` account
- * middleware: the one-use/heartbeat bearer is the complete authority. */
+ * middleware: each route checks its exact capability. The VM bridge secret
+ * also authorizes withdrawal of its original engine, never new access. */
 export const CLOUD_WORKSPACE_INTERNAL_PATHS = [
   "/internal/v1/cloud-workspaces/*",
   "/internal/v2/cloud-workspaces/*",
@@ -754,6 +757,20 @@ export function createCloudWorkspaceInternalRoutes(
       return c.json(registered);
     } catch {
       return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
+    }
+  });
+
+  routes.post(CLOUD_ENGINE_EXIT_PATH, async c => {
+    const token = bearerToken(c.req.header("authorization"), /^zwb_[A-Za-z0-9_-]{43}$/);
+    if (!token) return c.json({ error: { code: "invalid_capability" } }, 401);
+    const input = await strictJson(c.req, CloudEngineExitReportSchema);
+    if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+    if (!service.reportEngineExit) return c.json({ error: { code: "engine_exit_unavailable" } }, 503);
+    try { return c.json(await service.reportEngineExit({ ...input, token })); }
+    catch (error) {
+      if (error instanceof CloudEngineExitRejected) return c.json({ error: { code: "engine_exit_rejected" } }, 403);
+      // A database outage is not a refusal; the supervisor retains its report.
+      return c.json({ error: { code: "engine_exit_unavailable" } }, 503);
     }
   });
 

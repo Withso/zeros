@@ -73,12 +73,27 @@ without it and the engines return to the 10 s HTTP heartbeat. A lease the
 uplink already renewed stays in force until it ends (up to 36 min), because
 the heartbeat never shortens it.
 
+Keep this flag off until every `api` serves the exact engine-exit withdrawal
+endpoint, every `realtime` requires `exit.report.v1`, and the runtime has passed
+supervisor exit, retry, setup/transfer enrollment and lifecycle-overlap drills.
+The actual supervisor must be qualified: controller H can remain running while
+it launches engine T, so qualifying T alone proves no exit reporter. A launcher
+with an unsafe/full retry journal does not arm the declaration. New engines
+under old supervisors and old engines under new CPs retain the legacy lease.
+For rollback, disable the flag and retain the withdrawal API and supervisor
+until already granted long leases are gone; a flag flip does not revoke them.
+
 `checkpoint_push` requires `realtime_uplink`: `realtime` pushes queued
 checkpoint requests (S2 `checkpoint.v1`) and engines pause their
 checkpoint-hint long-poll while the push is active. The push is only a
 timing hint: delivery, fencing and acknowledgement stay on the HTTP
-heartbeat, so unlike `engine_lease_over_uplink` it needs no particular
-`api` version. Turning the flag off
+heartbeat. New realtime selects it only when the engine also declares
+`checkpoint.fallback.v1`: the engine requires an independent successful API
+heartbeat at least every 60 s while push is active. Cached pongs cannot hide
+a failed realtime pool. With the bounded port scan and HTTP request, a healthy
+API discovers queued capture within 76 s; upload time remains in the same
+five-minute deadline. Old engines keep their hint wait. Keep the flag off until
+the independent-pool drill and qualified runtime checks pass. Turning the flag off
 closes the organization's `checkpoint.v1` uplinks with
 `1001 features_changed`; the redial negotiates without it and the engines
 return to the long-poll.

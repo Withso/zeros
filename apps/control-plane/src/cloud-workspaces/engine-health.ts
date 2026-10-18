@@ -2,7 +2,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { audit } from "../audit.js";
 import { tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
+import { recordCloudWorkspaceStopUnsealed } from "./stop-seal.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 
 /** Runtime authority already fails closed at lease expiry. Converge the
@@ -70,54 +71,50 @@ export async function stopUnavailableCloudEngine(
       );
       if (pending.rowCount) continue;
 
-      const intentId = randomUUID();
-      const incidentId = await tryRetainCloudDiagnosticTx(tx, {
-        workspaceId:candidate.id,organizationId:candidate.org_id,generation:workspace.current_generation,
-        operationKind:"engine",operationId:intentId,
-      }, { phase:"authority_check",code:"engine_unavailable",errorClass:"unknown",retryable:false,decision:"direct_stop",claim:"current" });
-      await retireCloudWorkspaceRuntimeAccess(tx, {
-        workspaceId: candidate.id,
-        organizationId: candidate.org_id,
-        generation: workspace.current_generation,
-        reason: "engine_unavailable",
+      await admitUnavailableCloudEngineStopTx(tx, {
+        workspaceId: candidate.id, organizationId: candidate.org_id,
+        generation: workspace.current_generation, reason: "engine_unavailable",
       });
-      await tx.query(
-        `INSERT INTO cloud_workspace_lifecycle_intents
-      (id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace)
-      VALUES($1,$2,$3,$4,NULL,'stop',$5,$6,true)`,
-        [
-          intentId,
-          candidate.id,
-          workspace.current_generation,
-          candidate.org_id,
-          `system:engine-stop:${randomUUID()}`,
-          randomBytes(32),
-        ],
-      );
-      await tx.query(
-        `UPDATE cloud_workspaces SET desired_state='stopped',status='stopping',
-      authority_epoch=authority_epoch+1,version=version+1,updated_at=now(),
-      last_error_code='engine_unavailable',last_error_message=$3
-      WHERE id=$1 AND org_id=$2`,
-        [candidate.id, candidate.org_id, `Workspace stopped because its engine lease expired${incidentId ? ` (incident ${incidentId})` : ''}`],
-      );
-      await audit(
-        tx,
-        candidate.org_id,
-        null,
-        "cloud_workspace.engine_unavailable",
-        {
-          workspaceId: candidate.id,
-          generation: workspace.current_generation,
-          intentId,
-          incidentId,
-          stopReason: "engine_expired",
-          finalCheckpointSkipped: true,
-          automaticReplay: false,
-        },
-      );
       return true;
     }
     return false;
+  });
+}
+
+/** Caller holds organization then workspace and has ruled out a replacement or
+ * competing lifecycle owner. Runtime retirement keeps access -> endpoint ->
+ * engine lock order; provider work happens later in the ordinary reconciler. */
+export async function admitUnavailableCloudEngineStopTx(tx: Tx, input: {
+  workspaceId: string; organizationId: string; generation: number;
+  reason: "engine_unavailable" | "engine_exited"; engineInstanceId?: string;
+  adoptedIntent?: { id: string; operation: "stop" | "archive" };
+  checkpointRequestId?: string | null;
+}): Promise<void> {
+  const intentId = input.adoptedIntent?.id ?? randomUUID();
+  const exited = input.reason === "engine_exited";
+  const incidentId = await tryRetainCloudDiagnosticTx(tx, {
+    workspaceId: input.workspaceId, organizationId: input.organizationId, generation: input.generation,
+    operationKind: "engine", operationId: input.engineInstanceId ?? intentId,
+  }, { phase: "authority_check", code: input.reason, errorClass: "unknown", retryable: false, decision: "direct_stop", claim: "current" });
+  await retireCloudWorkspaceRuntimeAccess(tx, { ...input, reason: input.reason });
+  if (!input.adoptedIntent) await tx.query(
+    `INSERT INTO cloud_workspace_lifecycle_intents
+      (id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace)
+      VALUES($1,$2,$3,$4,NULL,'stop',$5,$6,true)`,
+    [intentId, input.workspaceId, input.generation, input.organizationId,
+      exited ? `system:engine-exit:${input.engineInstanceId}` : `system:engine-stop:${randomUUID()}`, randomBytes(32)],
+  );
+  if (exited) await recordCloudWorkspaceStopUnsealed(tx, {
+    ...input, intentId, checkpointRequestId: input.checkpointRequestId ?? null, reason: "authority_closed",
+  });
+  const archive = input.adoptedIntent?.operation === "archive";
+  await tx.query(`UPDATE cloud_workspaces SET desired_state=$4::cloud_workspace_desired_state,status=$5::cloud_workspace_status,
+    authority_epoch=authority_epoch+1,version=version+1,updated_at=now(),last_error_code=$6,last_error_message=$3
+    WHERE id=$1 AND org_id=$2`, [input.workspaceId, input.organizationId,
+    `${exited ? "Workspace stopped because its engine exited" : "Workspace stopped because its engine lease expired"}${incidentId ? ` (incident ${incidentId})` : ""}`,
+    archive ? "archived" : "stopped", archive ? "archiving" : "stopping", input.reason]);
+  await audit(tx, input.organizationId, null, `cloud_workspace.${input.reason}`, {
+    workspaceId: input.workspaceId, generation: input.generation, intentId, incidentId,
+    stopReason: exited ? "engine_exited" : "engine_expired", finalCheckpointSkipped: true, automaticReplay: false,
   });
 }

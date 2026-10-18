@@ -1,0 +1,9 @@
+{
+  "id": "cloud-positive-engine-exit",
+  "kind": "replay",
+  "area": "control-plane-lifecycle",
+  "fixedBy": "pr:596",
+  "symptom": "An engine process died while its VM kept running, but its live 36-minute uplink lease left the workspace ready and a final capture waiting until its deadline.",
+  "rule": "zstack-review requires exact positive-exit withdrawal, setup and transfer enrollment fences, and capture/withdrawal lock-order tests. Transport loss and Stop admission are not retirement or erasure proof.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/engine-exit.integration.test.ts"
+}

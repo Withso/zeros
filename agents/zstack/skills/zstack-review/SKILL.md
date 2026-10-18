@@ -39,6 +39,12 @@ failing input, or a reproduction. Drop anything you can't substantiate.
   checks and revocation publication.
 - Deadlines are anchored at the start of the observation, so a slow response
   can't extend authority.
+- An open push connection or cached pong does not prove its backing pool is
+  healthy. Exercise an independent API deadline with only that pool failed;
+  bound optional I/O and keep timed-out reads from accumulating.
+- Positive process exit withdraws only the original launch. Cover setup and
+  runtime-transfer enrollment, failed signalling, and final capture on both
+  sides of the authority lock; neither exit nor Stop admission proves erasure.
 - Windows tolerate ordinary clock skew and are compared against documented
   bounds.
 - A jittered retry has a minimum delay. Full jitter can draw zero, and a

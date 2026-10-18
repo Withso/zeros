@@ -1,4 +1,6 @@
 import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import { CloudEngineExitReportSchema, CLOUD_ENGINE_EXIT_REPORT_ENV, CLOUD_ENGINE_EXIT_REPORT_FEATURE,
+  CLOUD_CHECKPOINT_FALLBACK_FEATURE, type CloudEngineExitReport } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { isCloudAgentPreviewTarget } from "@zeros/protocol/containment";
 import { configureNativeGithubTransport } from "./git/github-native-client";
 import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
@@ -52,6 +54,10 @@ const HEARTBEAT_RETRY_CAP_MS = 60_000;
 /** While the uplink pushes checkpoint requests (S2 `checkpoint.v1`), the
  * paused hint wait re-checks this often in case a change report was missed. */
 const CHECKPOINT_PUSH_RECHECK_MS = 30_000;
+/** Push and API use independent database pools. An open uplink is not proof
+ * that checkpoint delivery still works; periodically read through the API. */
+export const CHECKPOINT_PUSH_HTTP_MAX_SILENCE_MS = 60_000;
+const CHECKPOINT_PORT_SCAN_TIMEOUT_MS = 1_000;
 
 // This module is also imported by server-side setup contracts. Keep the wire
 // check pure; only the engine's attester may read the installed runtime.
@@ -90,6 +96,8 @@ export type CloudCheckpointDirective = {
 };
 
 export type CloudRuntimeConfig = {
+  /** Local launch metadata, never sent in the registration document. */
+  exitReport?: CloudEngineExitReport;
   version: 1;
   audience: typeof RUNTIME_AUDIENCE;
   execution: {
@@ -431,7 +439,9 @@ export function consumeCloudRuntimeEnvironment(
   now: () => number = Date.now,
 ): CloudRuntimeConfig | null {
   const encoded = env[CLOUD_RUNTIME_ENV];
+  const exitReport = env[CLOUD_ENGINE_EXIT_REPORT_ENV];
   delete env[CLOUD_RUNTIME_ENV];
+  delete env[CLOUD_ENGINE_EXIT_REPORT_ENV];
   if (encoded === undefined) return null;
   if (
     encoded.length < 2 ||
@@ -448,7 +458,16 @@ export function consumeCloudRuntimeEnvironment(
     ) {
       throw new Error("cloud engine runtime material is invalid");
     }
-    return parseRuntime(JSON.parse(decoded.toString("utf8")), now());
+    const config = parseRuntime(JSON.parse(decoded.toString("utf8")), now());
+    if (exitReport && exitReport.length <= 4096 && /^[A-Za-z0-9_-]+$/.test(exitReport)) {
+      try {
+        const report = CloudEngineExitReportSchema.parse(JSON.parse(Buffer.from(exitReport, "base64url").toString("utf8")));
+        if (report.engineInstanceId === config.engine.instanceId &&
+            (Object.keys(config.execution) as Array<keyof CloudRuntimeConfig["execution"]>).every(key => report[key] === config.execution[key]))
+          config.exitReport = report;
+      } catch { /* An older/unarmed launcher retains the HTTP lease. */ }
+    }
+    return config;
   } catch {
     throw new Error("cloud engine runtime material is invalid");
   } finally {
@@ -541,6 +560,10 @@ export class CloudRuntimeRegistration {
   private readonly agentRuntime: CloudAgentRuntimeAttestation;
   private readonly abortController = new AbortController();
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatDueAt = 0;
+  /** Monotonic request-start time, advanced only by a validated API beat. */
+  private lastHeartbeatStartedAt: number | null = null;
+  private observedPortsFlight: ReturnType<CloudRuntimeRegistration["observedPorts"]> | null = null;
   private document: RegistrationDocument | null = null;
   private started = false;
   private stopped = false;
@@ -684,6 +707,15 @@ export class CloudRuntimeRegistration {
     return Math.max(0, this.document.leaseExpiresAtMs - this.now() - 1000);
   }
   get runtimeBootId(): string { return this.agentRuntime.bootId; }
+  /** The actual supervisor can remain older than this engine after an upgrade.
+   * Offer a long lease only when that supervisor armed this exact episode. */
+  uplinkFeatures(): readonly string[] {
+    const report = this.config.exitReport;
+    const armed = report && report.runtimeId === this.agentRuntime.runtimeId && report.bootId === this.agentRuntime.bootId &&
+      report.supervisorSessionId === this.agentRuntime.supervisorSessionId;
+    return ["cred.v1", ...(armed ? ["lease.v1", CLOUD_ENGINE_EXIT_REPORT_FEATURE] : []),
+      "checkpoint.v1", CLOUD_CHECKPOINT_FALLBACK_FEATURE, "idle.v1", "turns.v1"];
+  }
   /** Authenticated history provenance, never execution or retirement authority. */
   get agentSourceWriterEpoch(): string | null { return this.sourceWriterEpoch; }
 
@@ -1179,6 +1211,8 @@ export class CloudRuntimeRegistration {
     const wake = this.checkpointPushWake;
     this.checkpointPushWake = null;
     wake?.();
+    if (this.timer && this.checkpointPushActive() && this.heartbeatFailures === 0)
+      this.scheduleHeartbeat(Math.max(0, this.heartbeatDueAt - performance.now()));
   }
 
   /** S2 `checkpoint.request`: timing only, like a hint answer. The next beat
@@ -1205,8 +1239,20 @@ export class CloudRuntimeRegistration {
       Math.min(leaseExpiresAtMs, sentAtMs + UPLINK_ENGINE_LEASE_MS));
   }
 
-  private scheduleHeartbeat(delayMs: number): void {
+  private checkpointHeartbeatDueIn(): number {
+    return this.lastHeartbeatStartedAt === null ? 0 :
+      Math.max(0, this.lastHeartbeatStartedAt + CHECKPOINT_PUSH_HTTP_MAX_SILENCE_MS - performance.now());
+  }
+
+  private scheduleHeartbeat(delayMs: number, retry = false): void {
     if (this.stopped || this.authorityLost) return;
+    // A failed attempt stays due, but retains the ordinary retry backoff.
+    // Clamping retries to an expired watchdog would create a zero-delay loop.
+    if (!retry && this.checkpointPushActive())
+      delayMs = Math.min(delayMs, this.lastHeartbeatStartedAt === null
+        ? CHECKPOINT_PUSH_HTTP_MAX_SILENCE_MS : this.checkpointHeartbeatDueIn());
+    if (this.timer) clearTimeout(this.timer);
+    this.heartbeatDueAt = performance.now() + delayMs;
     this.timer = setTimeout(() => {
       // A timer callback has no caller to observe a rejected heartbeat. The
       // normal path handles protocol/network failures in runHeartbeat; this
@@ -1234,7 +1280,7 @@ export class CloudRuntimeRegistration {
     let finish: ((outcome: RenewalOutcome) => void) | undefined;
     try {
       const credentialRefresh = this.readCredentialRefresh();
-      const observedPorts = await this.observedPorts();
+      const observedPorts = await this.heartbeatObservedPorts();
       if (this.document !== document || this.stopped || this.authorityLost) return;
       if (!forced && this.heartbeatCarriesNothing(document, credentialRefresh, observedPorts)) {
         // The uplink renews the lease; the tick still keeps the durable
@@ -1248,6 +1294,7 @@ export class CloudRuntimeRegistration {
       }
       finish = this.renewalTimings.begin("engine-heartbeat");
       const sentAt = this.now();
+      const startedAt = performance.now();
       const raw = await this.post(
         document.heartbeat.endpoint,
         document.heartbeat.token,
@@ -1262,6 +1309,10 @@ export class CloudRuntimeRegistration {
           ...(observedPorts === undefined ? {} : { observedPorts }),
         },
       );
+      if (this.document !== document || this.stopped || this.authorityLost) {
+        finish("failed");
+        return;
+      }
       const now = this.now();
       const responseKeys = [
         "accepted",
@@ -1306,6 +1357,7 @@ export class CloudRuntimeRegistration {
       document.leaseExpiresAtMs = Math.min(Number(raw.leaseExpiresAtMs), sentAt + UPLINK_ENGINE_LEASE_MS);
       if (observedPorts !== undefined) this.reportedPorts = JSON.stringify(observedPorts);
       this.checkpointRedelivered = checkpointRequest !== null;
+      this.lastHeartbeatStartedAt = startedAt;
       this.heartbeatFailures = 0;
       // A checkpoint hint that arrived during this beat asks for one more now.
       this.scheduleHeartbeat(this.heartbeatAgain ? 0 : document.heartbeat.intervalMs);
@@ -1320,6 +1372,7 @@ export class CloudRuntimeRegistration {
       finish("completed");
     } catch (error) {
       finish?.("failed");
+      if (this.document !== document || this.stopped || this.authorityLost) return;
       // The reason for a forced beat still stands for its retry.
       if (forced) this.heartbeatForced = true;
       const terminal =
@@ -1334,7 +1387,7 @@ export class CloudRuntimeRegistration {
         // The last retry runs one second before the lease ends.
         ? Math.min(5_000, Math.max(250, remainingMs - 1_000))
         // A long (uplink-renewed) lease rides out an outage without a 5 s storm.
-        : Math.min(HEARTBEAT_RETRY_CAP_MS, 5_000 * 2 ** Math.min(this.heartbeatFailures - 1, 4)));
+        : Math.min(HEARTBEAT_RETRY_CAP_MS, 5_000 * 2 ** Math.min(this.heartbeatFailures - 1, 4)), true);
     } finally {
       this.heartbeatInFlight = false;
     }
@@ -1344,9 +1397,8 @@ export class CloudRuntimeRegistration {
    * only when it carries something: a first or changed port scan, a
    * repository credential refresh, a checkpoint request the control plane
    * redelivers, or a renewal once 25 minutes or less of the lease remain.
-   * The checkpoint hint wait must be answering or the uplink must push
-   * checkpoint requests, since only they then ask for the beat that fetches
-   * a newly queued request. */
+   * The checkpoint hint wait must be answering, or push must have a recent
+   * independent API observation. A pong cannot establish that freshness. */
   private heartbeatCarriesNothing(
     document: RegistrationDocument,
     credentialRefresh: unknown,
@@ -1354,6 +1406,8 @@ export class CloudRuntimeRegistration {
   ): boolean {
     return this.uplinkLeaseActive?.() === true &&
       (this.checkpointHintsAnswering || this.checkpointPushActive()) &&
+      (!this.checkpointPushActive() || this.checkpointHeartbeatDueIn() > 0) &&
+      this.heartbeatFailures === 0 &&
       !this.checkpointRedelivered &&
       credentialRefresh === null &&
       (observedPorts === undefined || JSON.stringify(observedPorts) === this.reportedPorts) &&
@@ -1505,6 +1559,35 @@ export class CloudRuntimeRegistration {
     return [...ports]
       .sort((left, right) => left - right)
       .map((port) => ({ port, protocol: "tcp" as const }));
+  }
+
+  /** Optional discovery must not hold a checkpoint probe. The race's late
+   * scan result is discarded; stopping also releases its timer immediately. */
+  private async heartbeatObservedPorts(): ReturnType<CloudRuntimeRegistration["observedPorts"]> {
+    // Bound even a scan begun before push activates: the mode can change
+    // while it is held, and that old scan must not starve the new watchdog.
+    const signal = this.abortController.signal;
+    if (signal.aborted || this.observedPortsFlight) return undefined;
+    // A timed-out filesystem read can still be held by the OS. Do not pile up
+    // another read on every tick; discard its late result before trying again.
+    const flight = this.observedPorts().finally(() => { this.observedPortsFlight = null; });
+    this.observedPortsFlight = flight;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cancel!: () => void;
+    try {
+      return await Promise.race([
+        flight,
+        new Promise<undefined>(resolve => {
+          cancel = () => resolve(undefined);
+          timeout = setTimeout(cancel, CHECKPOINT_PORT_SCAN_TIMEOUT_MS);
+          timeout.unref?.();
+          signal.addEventListener("abort", cancel, { once: true });
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", cancel);
+    }
   }
 
   private parseCheckpointRequest(

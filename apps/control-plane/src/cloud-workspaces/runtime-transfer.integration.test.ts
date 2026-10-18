@@ -26,6 +26,7 @@ import { DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
 import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
+import { reportCloudEngineExit } from "./engine-exit.js";
 
 (process.env.TEST_DATABASE_URL ? describe : describe.skip)("retained cloud runtime transitions", () => {
   let pool: pg.Pool;
@@ -674,6 +675,28 @@ import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
     schema:"zeros.runtime-update/v1" as const,transitionId:claim.transitionId,fence:claim.executionFence,
     scope:{workspaceId:claim.workspaceId,organizationId:claim.organizationId,sourceGeneration:1,candidateGeneration:2,sourceEngineInstanceId:fixture.engineInstanceId},
     operation:"activate" as const,outcome:rollback?"rolled_back" as const:"healthy" as const,active});
+  it.each([false, true])("withdraws an enrolled engine by its original enrollment without overriding an unfinished transfer (finished=%s)", async finished => {
+    const { claim, active, enrollment } = await registered();
+    if (finished) {
+      expect(await service.verifyHealth(claim, async challenge => ({ challenge, executionFence: claim.executionFence, active,
+        engineInstanceId: enrollment.engineInstanceId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        health: "ready", durableRecordConnected: true }))).toBe(true);
+      expect(await service.finish(claim, receipt(claim, active))).toBe(true);
+    }
+    const before = (await pool.query("SELECT phase FROM cloud_workspace_runtime_transitions WHERE transition_id=$1", [claim.transitionId])).rows[0];
+    const exit = { version: 1 as const, audience: "zeros-cloud-engine-exit-v1" as const, reason: "unexpected_exit" as const,
+      reportId: randomUUID(), workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 2,
+      engineInstanceId: enrollment.engineInstanceId, setupRunId: enrollment.id, executionFence: enrollment.executionFence,
+      runtimeId: active.runtimeId, bootId: active.bootId, supervisorSessionId: active.supervisorSessionId, token: enrollment.bridgeToken };
+    await expect(reportCloudEngineExit(pool, { ...exit, executionFence: exit.executionFence + 1 })).rejects.toThrow("engine_exit_rejected");
+    await expect(reportCloudEngineExit(pool, exit)).resolves.toMatchObject({ accepted: true, engineInstanceId: enrollment.engineInstanceId });
+    expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [enrollment.engineInstanceId])).rows[0].state).toBe("revoked");
+    expect((await pool.query("SELECT phase FROM cloud_workspace_runtime_transitions WHERE transition_id=$1", [claim.transitionId])).rows[0]).toEqual(before);
+    const intents = (await pool.query("SELECT generation,operation FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1", [fixture.workspaceId])).rows;
+    expect(intents).toEqual(finished ? [{ generation: 2, operation: "stop" }] : []);
+    expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].status)
+      .toBe(finished ? "stopping" : "setting_up");
+  });
   it("opens admissions and a fresh proof epoch only after a bound health challenge",async()=>{
     const {claim,active,enrollment,result}=await registered();
     const scope={...claim,generation:2};

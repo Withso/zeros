@@ -873,7 +873,14 @@ describe("engine uplink server", () => {
   });
 
   describe("engine lease over the uplink (lease.v1)", () => {
-    const LEASE = ["lease.v1"];
+    const LEASE = ["lease.v1", "exit.report.v1"];
+    it("withholds a long lease without the armed exit-reporter declaration", async () => {
+      leaseFlag = true;
+      await start({ lease });
+      const { welcome } = await connect({ features: ["lease.v1"] });
+      expect(welcome.d!.features).toEqual([]);
+      expect(lease.calls).toEqual([]);
+    });
     const WATERMARK_MS = 5 * 60_000;
     const leaseLeft = (ms: number) => { authority.result = { ok: true, accountUserId: randomUUID(), leaseExpiresAtMs: Date.now() + ms }; };
     const ping = async (peer: Peer) => {
@@ -883,7 +890,7 @@ describe("engine uplink server", () => {
     const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 
     it.each([
-      ["offered, configured and on for the organization", true, true, true, LEASE],
+      ["offered, configured and on for the organization", true, true, true, ["lease.v1"]],
       ["not offered", false, true, true, []],
       ["off for the organization", true, false, true, []],
       ["offered to a server without a lease store", true, true, false, []],
@@ -907,7 +914,7 @@ describe("engine uplink server", () => {
       const peer = dial();
       await peer.opened;
       peer.send(hello({ features: LEASE }));
-      expect(await peer.next("sys.welcome")).toMatchObject({ d: { features: LEASE, leaseExpiresAtMs: verified } });
+      expect(await peer.next("sys.welcome")).toMatchObject({ d: { features: ["lease.v1"], leaseExpiresAtMs: verified } });
       await peer.next("auth.keys");
       const sync = await peer.next("auth.sync");
       await settle();
@@ -1009,7 +1016,7 @@ describe("engine uplink server", () => {
       for (const listener of flagListeners) listener();
       await expect(off.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
       const on = await connect({ features: LEASE });
-      expect(on.welcome.d!.features).toEqual(LEASE);
+      expect(on.welcome.d!.features).toEqual(["lease.v1"]);
       leaseFlag = false;
       for (const listener of flagListeners) listener();
       await expect(on.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
@@ -1087,7 +1094,7 @@ describe("engine uplink server", () => {
   });
 
   describe("checkpoint request push (checkpoint.v1)", () => {
-    const CHECKPOINT = ["checkpoint.v1"];
+    const CHECKPOINT = ["checkpoint.v1", "checkpoint.fallback.v1"];
     let reads: UplinkIdentity[][];
     let queued: Map<string, UplinkCheckpointRequest[]>;
     let failReads: number;
@@ -1114,8 +1121,16 @@ describe("engine uplink server", () => {
     });
     afterEach(() => { push.close(); });
 
+    it("withholds checkpoint push without the HTTP-fallback declaration", async () => {
+      checkpointPush = true;
+      await start({ extensions: [push] });
+      const { welcome } = await connect({ features: ["checkpoint.v1"] });
+      expect(welcome.d!.features).toEqual([]);
+      expect(reads).toEqual([]);
+    });
+
     it.each([
-      ["offered and on for the organization", true, true, CHECKPOINT],
+      ["offered and on for the organization", true, true, ["checkpoint.v1"]],
       ["not offered", false, true, []],
       ["off for the organization", true, false, []],
     ] as const)("negotiates checkpoint.v1 only when %s, and then pushes every queued request once the gate opens", async (_name, offered, flag, features) => {
@@ -1265,7 +1280,7 @@ describe("engine uplink server", () => {
       for (const listener of flagListeners) listener();
       await expect(off.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
       const on = await connect({ features: CHECKPOINT });
-      expect(on.welcome.d!.features).toEqual(CHECKPOINT);
+      expect(on.welcome.d!.features).toEqual(["checkpoint.v1"]);
       await until(() => reads.length === 1);
     });
   });

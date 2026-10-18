@@ -135,7 +135,7 @@ it("labels forced retirement without inventing a checkpoint or reading completio
 });
 it("records an exited launcher as crash, never a committed checkpoint", async () => {
   const f = await fixture(); f.child.exitCode = 0; f.child.emit("exit", 0);
-  await f.supervisor.stopChild();
+  await f.supervisor.operation;
   expect(f.requestEngineFinalCompletion).not.toHaveBeenCalled();
   expect(f.order).toEqual(["resident-stop", "tree-kill-empty"]);
   expect(f.supervisor.lastRetirement).toMatchObject({ kind: "crash", completion: null, checkpoint: null, retired: true });
