@@ -115,7 +115,12 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   cannot run the `/proc`-based portable cloud fixtures at all.
 - `pnpm typecheck` keeps incremental state in `node_modules/.cache/zeros-typecheck`.
   An error in a file you did not touch may be stale state: confirm with
-  `tsc --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
+  `pnpm exec tsgo --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
+  `typecheck:app` and `typecheck:electron` run the native TypeScript 7 compiler
+  (`tsgo`); editors, ESLint and compiler-API scripts stay on `typescript` 5.x,
+  so keep code valid under both. Its DOM types are narrower (for example
+  `WebSocket.readyState` is `0 | 1 | 2 | 3`): re-read state after an `await`
+  through a method instead of a narrowed property.
 - On macOS the default `TMPDIR` (`/var/folders/…`) is reached through the
   `/var` symlink, so path-safety suites fail with `zstack_source_unsafe`,
   `zstack_receipt_unsafe` or "not canonical". Rerun them with `TMPDIR` set to a
