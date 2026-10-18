@@ -12,11 +12,16 @@
 // ──────────────────────────────────────────────────────────
 
 import { isElementActuallyVisible } from "@/renderer/shared/lib/element-visibility";
+import { observeElementActivity } from "@/renderer/shared/lib/element-activity";
 
 export interface LoaderRun {
   /** The element whose visibility gates this run's turns. */
   host: Element;
   tick: (now: number) => void;
+  /** Local owners opt into event-driven foreground/viewport observation. */
+  local?: boolean;
+  /** Land finite animations when hidden and restart their model on reveal. */
+  onActivity?: (active: boolean) => void;
 }
 
 const loaderRuns = new Set<LoaderRun>();
@@ -25,7 +30,7 @@ let loaderFrameId = 0;
 function runLoaders(now: number) {
   loaderFrameId = 0;
   loaderRuns.forEach((run) => {
-    if (!isElementActuallyVisible(run.host)) return;
+    if (!run.local && !isElementActuallyVisible(run.host)) return;
     run.tick(now);
   });
   if (loaderRuns.size) loaderFrameId = window.requestAnimationFrame(runLoaders);
@@ -33,13 +38,26 @@ function runLoaders(now: number) {
 
 /** Add a run to the shared loop; the returned function takes it out. */
 export function startLoaderRun(run: LoaderRun): () => void {
-  loaderRuns.add(run);
-  if (!loaderFrameId) loaderFrameId = window.requestAnimationFrame(runLoaders);
-  return () => {
+  const remove = () => {
     loaderRuns.delete(run);
     if (!loaderRuns.size && loaderFrameId) {
       window.cancelAnimationFrame(loaderFrameId);
       loaderFrameId = 0;
     }
+  };
+  const add = () => {
+    loaderRuns.add(run);
+    if (!loaderFrameId) loaderFrameId = window.requestAnimationFrame(runLoaders);
+  };
+  if (!run.local) { add(); return remove; }
+  const stop = observeElementActivity(run.host, active => {
+    run.onActivity?.(active);
+    if (active) add(); else remove();
+  });
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    stop(); remove(); run.onActivity?.(false);
   };
 }

@@ -28,6 +28,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 
 import { LOADER_GRID, loaderFrame } from "./loader-frame";
 import { startLoaderRun } from "./loader-loop";
+import { ActivityScope } from "./activity-scope";
 import {
   PUZZLE_CORNERS,
   PUZZLE_MOVE_MS,
@@ -40,10 +41,17 @@ import { usePrefersReducedMotion } from "./use-prefers-reduced-motion";
 /** Run a board's hands in the shared loader loop, drawing each move. The
  *  loop skips hidden retained surfaces (background chats, collapsed panels),
  *  so their hands wait until the surface is visible again. */
-function startPuzzle(host: Element, board: PuzzleBoard, draw: (moves: PuzzleMove[]) => void) {
+function startPuzzle(host: Element, board: PuzzleBoard, draw: (moves: PuzzleMove[]) => void, local: boolean) {
   board.start(performance.now());
   return startLoaderRun({
     host,
+    local,
+    onActivity: local ? active => {
+      if (active) board.start(performance.now());
+      else for (const animation of host.getAnimations?.({ subtree: true }) ?? []) {
+        try { animation.finish(); } catch { /* Only finite tile transitions. */ }
+      }
+    } : undefined,
     tick: (now) => {
       const moves = board.step(now);
       if (moves.length) draw(moves);
@@ -115,6 +123,7 @@ export function PuzzleTiles({
   /** Light the square from the top in these tones (puzzleRowFills). */
   tones?: readonly [string, string, string];
 }) {
+  const activityScope = React.useContext(ActivityScope);
   // The board outlives every start/stop, so a paused square resumes where it
   // came to rest; a remounted seeded square picks up where its last board
   // rested. Callers remount (key) to change the seed.
@@ -139,7 +148,7 @@ export function PuzzleTiles({
 
   React.useEffect(() => {
     const group = groupRef.current;
-    if (!active || reducedMotion || !group) return;
+    if (!active || reducedMotion || !group || activityScope === false) return;
     const tiles = Array.from(group.children) as SVGElement[];
     const stop = startPuzzle(group, board, (moves) => {
       // Tiles glide by transform; React never re-renders for a move.
@@ -149,12 +158,12 @@ export function PuzzleTiles({
         tile.style.transform = tileTransform(move.to);
         if (rowFills) tile.style.fill = rowFills[tileRow(move.to)];
       }
-    });
+    }, activityScope === true);
     return () => {
       stop();
       if (seed !== undefined) rememberRestingSquare(seed, board.cellOf);
     };
-  }, [board, seed, active, reducedMotion, rowFills]);
+  }, [board, seed, active, reducedMotion, rowFills, activityScope]);
 
   return (
     <g ref={groupRef} fill="currentColor">

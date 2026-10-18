@@ -32,6 +32,8 @@ import {
   type WorkbenchNotice,
 } from "./tab-status-model";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
+import { ActivityScope } from "../../shared/ui/loading/activity-scope";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 interface TabStatusContext {
   sources: WorkbenchStatusSources;
@@ -247,6 +249,7 @@ export function WorkbenchTabFrame({
   ]);
   return (
     <StatusContext.Provider value={context}>
+      <ActivityScope.Provider value={folder && !isCloudWorkspace(folder) ? visible : undefined}>
       <div
         data-workbench-frame={tab.type}
         data-terminal-workbench={terminalWorkbench ? "" : undefined}
@@ -287,6 +290,7 @@ export function WorkbenchTabFrame({
           )}
         </div>
       </div>
+      </ActivityScope.Provider>
     </StatusContext.Provider>
   );
 }
