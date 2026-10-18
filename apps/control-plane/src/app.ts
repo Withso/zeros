@@ -59,6 +59,8 @@ import { createZerosDevAuthRoutes, zerosDevAuthEnabled, ZEROS_DEV_AUTH_PATHS, ty
 import { DatabaseZerosDevAuthRepository } from "./zeros-dev-auth-repository.js";
 import { ZerosDevWorkOSPasswordProvider } from "./zeros-dev-auth-workos.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
+import { AuthSessionProofService } from "./auth-session-proof.js";
+import { DatabaseCloudAcceptedWorkService } from "./cloud-workspaces/accepted-work.js";
 import {
   createCloudWorkspaceInternalRoutes,
   CLOUD_WORKSPACE_ENGINE_CHECKPOINT_HINT_PATH,
@@ -505,14 +507,21 @@ export function createApp(
             : internalPreAuthLimit)(c, next),
       );
     }
+    const clientCapabilities = dependencies.cloudCapabilities
+      ? createEngineClientCapabilityGate(dependencies.cloudCapabilities) : undefined;
+    const acceptedWork = dependencies.cloudCapabilities && clientCapabilities && workosProvider
+      ? new DatabaseCloudAcceptedWorkService({ pool, flags: dependencies.cloudCapabilities.flags,
+        verifier: clientCapabilities.verifier, proof: new AuthSessionProofService(pool, workosProvider),
+        workosEnabled: config.auth.provider === "workos" }) : undefined;
     app.route(
       "/",
       createCloudWorkspaceInternalRoutes(
         dependencies.cloudWorkspaceInternalSetupService,
         {
           ...(dependencies.cloudWorkspaceEngineUplink ? { engineUplink: dependencies.cloudWorkspaceEngineUplink } : {}),
-          ...(dependencies.cloudCapabilities ? { engineCapabilities: createEngineCapabilityGate(dependencies.cloudCapabilities),
-            clientCapabilities: createEngineClientCapabilityGate(dependencies.cloudCapabilities) } : {}),
+          ...(dependencies.cloudCapabilities ? { engineCapabilities: createEngineCapabilityGate(dependencies.cloudCapabilities) } : {}),
+          ...(clientCapabilities ? { clientCapabilities } : {}),
+          ...(acceptedWork ? { acceptedWork } : {}),
         },
       ),
     );

@@ -10,6 +10,8 @@ import {
   CapabilitySessionAdmissionRequestSchema, CapabilitySessionRenewalRequestSchema,
 } from "./capability-actor-contract.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
+import type { DatabaseCloudAcceptedWorkService } from "./accepted-work.js";
+import { CloudAcceptedWorkEnrollRequestSchema } from "./accepted-work-contract.js";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { CloudRuntimeWitnessSchema, CloudAgentRuntimeSchema } from "./runtime-contract.js";
@@ -94,6 +96,7 @@ export const CLOUD_WORKSPACE_USAGE_PATH =
   "/internal/v1/cloud-workspaces/engine/usage";
 export const CLOUD_WORKSPACE_SETUP_RECOVERY_PATH =
   "/internal/v1/cloud-workspaces/setup/recovery";
+export const CLOUD_ACCEPTED_WORK_PATH = "/internal/v2/cloud-workspaces/engine/accepted-work";
 
 /** Registration-time uplink advertisement (S2): the response gains
  * `uplink.endpoint` only for an engine that opted in with
@@ -624,7 +627,7 @@ export const cloudWorkspaceInternalResponseHeaders: MiddlewareHandler = async (c
 export function createCloudWorkspaceInternalRoutes(
   service: CloudWorkspaceInternalSetupService,
   options?: { engineUplink?: CloudWorkspaceEngineUplinkAdvertisement; engineCapabilities?: EngineCapabilityGate;
-    clientCapabilities?: EngineClientCapabilityGate },
+    clientCapabilities?: EngineClientCapabilityGate; acceptedWork?: Pick<DatabaseCloudAcceptedWorkService, "enroll"> },
 ): Hono {
   const routes = new Hono();
   /** The additive `uplink` member, only for an opted-in engine of an
@@ -663,6 +666,7 @@ export function createCloudWorkspaceInternalRoutes(
     CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH,
     CAPABILITY_SESSION_ADMISSION_PATH,
     CAPABILITY_SESSION_RENEWAL_PATH,
+    CLOUD_ACCEPTED_WORK_PATH,
   ]) {
     routes.use(path, bodyLimit({ maxSize: INTERNAL_BODY_BYTES }));
   }
@@ -903,6 +907,22 @@ export function createCloudWorkspaceInternalRoutes(
         if (!(error instanceof HttpError) && !(error instanceof CloudWorkspaceEngineAuthorityError) &&
             !(error instanceof CloudWorkspaceEngineClientAdmissionError)) throw error;
         return c.json({ error: { code: "cloud_actor_admission_rejected" } }, 401);
+      }
+    });
+  }
+  if (options?.acceptedWork) {
+    const acceptedWork = options.acceptedWork;
+    routes.post(CLOUD_ACCEPTED_WORK_PATH, async c => {
+      const heartbeatToken = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
+      if (!heartbeatToken) return c.json({ error: { code: "invalid_capability" } }, 401);
+      const input = await strictJson(c.req, CloudAcceptedWorkEnrollRequestSchema);
+      if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+      const { workspaceId, organizationId, generation, engineInstanceId } = input.scope;
+      try {
+        return c.json(await acceptedWork.enroll({ workspaceId, organizationId, generation, engineInstanceId, heartbeatToken }, input, c.req.raw.signal));
+      } catch (error) {
+        if (!(error instanceof HttpError)) throw error;
+        return c.json({ error: { code: error.code } }, error.status);
       }
     });
   }

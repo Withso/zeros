@@ -12,6 +12,7 @@
     "./cloud-computer-v2": "./src/cloud-computer-v2.ts",
     "./cloud-agent-execution": "./src/cloud-agent-execution.ts",
     "./cloud-agent-bootstrap": "./src/cloud-agent-bootstrap.ts",
+    "./cloud-accepted-work": "./src/cloud-accepted-work.ts",
     "./cloud-local-mirror": "./src/cloud-local-mirror.ts",
     "./cloud-customization": "./src/cloud-customization.ts",
     "./cloud-actors": "./src/cloud-actors.ts",

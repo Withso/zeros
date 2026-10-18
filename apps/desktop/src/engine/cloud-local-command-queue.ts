@@ -23,6 +23,7 @@ import { CloudLocalCommandHistorySchema, CloudLocalCommandHistoryHeadSchema, can
   type CloudLocalCommandMirrorAck as SharedAck } from "@zeros/protocol/cloud-local-mirror";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { openSqlite } from "./db/sqlite";
+import { CloudAcceptedWorkLedger } from "./cloud-accepted-work-ledger";
 import type { CloudLocalCommandHistoryCapture, CloudLocalCommandHistoryDocument } from "./cloud-local-command-queue-history";
 
 // This store is selected only by the explicitly negotiated cloud mode. Local
@@ -103,6 +104,7 @@ type Options = { file: string; scope: CloudLocalCommandWriter; actors: ActorAuth
  * legacy CP command dispatch are untouched. */
 export class CloudLocalCommandQueue {
   readonly scope: Readonly<CloudLocalCommandWriter>;
+  readonly acceptedWork: CloudAcceptedWorkLedger;
   private readonly db: Sqlite.Database;
   private readonly limits: Limits;
   private readonly now: () => number;
@@ -167,6 +169,12 @@ export class CloudLocalCommandQueue {
         this.db.exec("ALTER TABLE local_commands ADD COLUMN mirror_history_head TEXT");
       if (!(this.db.prepare("PRAGMA table_info(local_command_outbox_jobs)").all() as { name: string }[]).some(column => column.name === "history_manifest_sha256"))
         this.db.exec("ALTER TABLE local_command_outbox_jobs ADD COLUMN history_manifest_sha256 TEXT");
+      this.acceptedWork = new CloudAcceptedWorkLedger(this.db, { scope: this.scope, now: this.now, canonical,
+        assertCurrent: () => { if (!this.accepting) throw new CloudCommandRuntimeError("cloud_command_writer_retired"); },
+        prepare: (_mutation, sessionId) => { this.live(); this.assertWriterWritable(); return this.actor(sessionId, "run"); },
+        commit: (mutation, actor) => this.mutate(mutation, actor, null), snapshot: conversationId => this.snapshot(conversationId),
+        retire: commandId => this.retireAcceptedWork(commandId), pendingLimit: this.limits.pending, commandLimit: this.limits.commands,
+        changed: () => this.options.pendingActorsChanged?.() });
       this.transaction(() => {
         // Older retained ledgers have no read-fence counter. Seed them before
         // any recovery installs; a live populated ledger may never read as new.
@@ -211,6 +219,7 @@ export class CloudLocalCommandQueue {
             this.setMetadata("historyProjectionParts",this.metadata("sealedWriter") === writer.writerEpoch ? "0" : "1");
           }
         }
+        this.acceptedWork.quarantine();
         this.setMetadata("writer", canonical(this.scope));
         this.setMetadata("schema", "1");
         this.materializeDirty();
@@ -280,6 +289,7 @@ export class CloudLocalCommandQueue {
       const listener = this.options.turnJournalChanged;
       if (listener) queueMicrotask(() => { if (!this.closed) try { listener(); } catch { /* an observer never fails a commit */ } });
     }
+    this.acceptedWork.publishChanges();
     return value;
   }
   private live(): void {
@@ -332,7 +342,11 @@ export class CloudLocalCommandQueue {
       return this.transaction(() => this.snapshot(request.conversationId));
     }
     const actor = this.actor(context.actorSessionId,request.kind === "mutate" && request.mutation.action.kind === "edit" ? "edit" : "run");
-    if (request.kind === "stop") return this.stop(request.conversationId,request.operationId,actor);
+    if (request.kind === "stop") {
+      const result = this.stop(request.conversationId,request.operationId,actor);
+      this.options.pendingActorsChanged?.();
+      return result;
+    }
     if (value.kind !== "mutate" || ![null,"command_context_changed","command_not_found"].includes(value.admissionError))
       throw new CloudCommandRuntimeError("invalid_command");
     const result = this.mutate(request.mutation,actor,value.admissionError);
@@ -344,9 +358,10 @@ export class CloudLocalCommandQueue {
    * cache, owns detached work's actor references. Terminal receipts do not. */
   pendingActorSessions(): ReadonlySet<string> {
     this.live();
-    const rows = this.db.prepare("SELECT actor FROM local_commands WHERE writer_epoch=? AND state IN ('queued','dispatching')")
+    const rows = this.db.prepare(`SELECT actor FROM local_commands command WHERE writer_epoch=? AND state IN ('queued','dispatching')
+      AND NOT EXISTS(SELECT 1 FROM local_accepted_work accepted WHERE accepted.id=command.id AND accepted.receipt IS NOT NULL)`)
       .all(this.scope.writerEpoch) as Array<{ actor: string }>;
-    return new Set(rows.map(row => CloudActorProvenanceSchema.parse(JSON.parse(row.actor)).actorSessionId));
+    return new Set([...rows.map(row => CloudActorProvenanceSchema.parse(JSON.parse(row.actor)).actorSessionId), ...this.acceptedWork.pendingActorSessions()]);
   }
 
   private control(conversationId: string): ControlRow {
@@ -435,7 +450,7 @@ export class CloudLocalCommandQueue {
           throw new CloudCommandRuntimeError("command_limit");
       }
       if (action.kind === "enqueue" || action.kind === "fork") {
-        if (this.count("local_commands", "WHERE state IN ('queued','dispatching')") >= this.limits.pending ||
+        if (this.count("local_commands", "WHERE state IN ('queued','dispatching')") + this.acceptedWork.reservedCount() >= this.limits.pending ||
             this.count("local_commands") >= this.limits.commands) throw new CloudCommandRuntimeError("command_limit");
         const retained = this.db.prepare("SELECT coalesce(sum(bytes),0) AS n FROM local_command_history_documents").get() as { n: number };
         const pending = this.count("local_commands", "WHERE state IN ('queued','dispatching')");
@@ -443,7 +458,8 @@ export class CloudLocalCommandQueue {
           throw new CloudCommandRuntimeError("command_limit");
         const duplicate = this.db.prepare("SELECT 1 FROM local_commands WHERE id=? OR (conversation_id=? AND user_message_id=?)")
           .get(action.commandId,parsed.conversationId,action.payload.userMessageId);
-        if (duplicate) throw new CloudCommandRuntimeError("command_conflict");
+        if (duplicate || this.db.prepare("SELECT 1 FROM local_accepted_work WHERE id=? AND receipt IS NULL").get(action.commandId))
+          throw new CloudCommandRuntimeError("command_conflict");
         const timestamp = this.timestamp();
         this.db.prepare(`INSERT INTO local_commands(id,conversation_id,position,state,payload,actor,user_message_id,agent_id,writer_epoch,generation,created_at,updated_at)
           VALUES(?,?,?,'queued',?,?,?,?,?,?,?,?)`).run(action.commandId,parsed.conversationId,control.next_position,
@@ -456,12 +472,14 @@ export class CloudLocalCommandQueue {
       } else {
         const previous = this.row(action.commandId);
         if (!previous || previous.conversation_id !== parsed.conversationId || previous.state !== "queued" ||
-          (action.kind === "edit" && action.payload.userMessageId !== previous.user_message_id)) throw new CloudCommandRuntimeError("command_conflict");
+          (action.kind === "edit" && (this.acceptedWork.has(previous.id) || action.payload.userMessageId !== previous.user_message_id)))
+          throw new CloudCommandRuntimeError("command_conflict");
         this.db.prepare("UPDATE local_commands SET state=?,payload=?,actor=?,result_code=?,updated_at=?,history=? WHERE id=?")
           .run(action.kind === "edit" ? "queued" : "cancelled", action.kind === "edit" ? canonical(action.payload) : null,
             action.kind === "edit" ? canonical(actor) : previous.actor,action.kind === "remove" ? "removed_before_dispatch" : null,this.timestamp(),
             action.kind === "remove" ? canonicalCloudLocalCommandHistoryJson(this.incompleteHistory(previous, "capture_unavailable").history) : previous.history,action.commandId);
         changed = this.row(action.commandId)!;
+        if (action.kind === "remove") this.acceptedWork.close(action.commandId);
       }
       this.bump(parsed.conversationId);
       this.remember(parsed.operationId,parsed.conversationId,parsed,actor);
@@ -469,11 +487,26 @@ export class CloudLocalCommandQueue {
       return { ...this.snapshot(parsed.conversationId), replayed: false };
     });
   }
+  private retireAcceptedWork(commandId: string): void {
+    this.assertWriterWritable();
+    const row = this.row(commandId);
+    // Running work needs process-exit proof before settlement; this seam can
+    // retire only a command that never reached native dispatch.
+    if (!row || row.state !== "queued") return;
+    this.transaction(() => {
+      const history = this.incompleteHistory(row, "capture_unavailable");
+      this.db.prepare("UPDATE local_commands SET state='cancelled',payload=NULL,result_code='accepted_work_retired',history=?,updated_at=? WHERE id=?")
+        .run(canonicalCloudLocalCommandHistoryJson(history.history), this.timestamp(), row.id);
+      this.bump(row.conversation_id);
+      this.journal(row.conversation_id, this.row(row.id)!, true);
+    });
+  }
   private stop(conversationId: string, operationId: string, actor: ActorProvenance): CloudBootCommandSnapshot {
     const content = { kind: "stop", conversationId };
     return this.transaction(() => {
       const replay = this.replay(operationId,conversationId,content,actor);
       if (replay) return replay;
+      this.acceptedWork.closeConversation(conversationId);
       const control = this.control(conversationId);
       const capacity = this.count("local_command_operations") < this.limits.operations;
       // Receipt exhaustion is permanent for new mutations. Repeated unrecorded
@@ -497,7 +530,7 @@ export class CloudLocalCommandQueue {
         if (previous) {
           if (previous.conversation_id !== input.conversationId || previous.execution_id !== input.executionId || previous.writer_epoch !== this.scope.writerEpoch)
             throw new CloudCommandRuntimeError("command_conflict");
-          return previous.state === "dispatching" ? this.claimView(previous) : null;
+          return previous.state === "dispatching" && !this.acceptedWork.has(previous.id) ? this.claimView(previous) : null;
         }
       }
       if (this.claimsPaused) return null;
@@ -506,6 +539,9 @@ export class CloudLocalCommandQueue {
       const queued = this.db.prepare("SELECT * FROM local_commands WHERE conversation_id=? AND state='queued' ORDER BY position").all(input.conversationId) as CommandRow[];
       const row = queued.find(row => !control.paused || JSON.parse(row.payload!).operation?.kind === "goal");
       if (!row) return null;
+      // Accepted work cannot borrow a legacy actor at dispatch. The qualified
+      // execution consumer must explicitly adopt its distinct principal.
+      if (this.acceptedWork.has(row.id)) return null;
       if (row.writer_epoch !== this.scope.writerEpoch) throw new CloudCommandRuntimeError("cloud_command_writer_retired");
       const provenance: ActorProvenance = JSON.parse(row.actor);
       // A revoked actor is still durably claimed and settled cancelled; an
@@ -539,6 +575,7 @@ export class CloudLocalCommandQueue {
     }
   }
   private claimView(row: CommandRow): CloudBootCommandClaim {
+    if (this.acceptedWork.has(row.id)) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
     let actor: CloudCommandActor | undefined;
     try {
       const provenance: ActorProvenance = JSON.parse(row.actor);
@@ -554,7 +591,7 @@ export class CloudLocalCommandQueue {
    * turns, so neither a native ID nor user-message ID alone is a lookup key. */
   authorizeClaim(value: CloudBootCommandClaim) {
     this.live(); const claim = CloudBootCommandClaimSchema.parse(value), row = this.row(claim.commandId);
-    if (!row || row.state !== "dispatching" || row.writer_epoch !== this.scope.writerEpoch ||
+    if (!row || this.acceptedWork.has(row.id) || row.state !== "dispatching" || row.writer_epoch !== this.scope.writerEpoch ||
         row.conversation_id !== claim.conversationId || row.claim_id !== claim.claimId || row.execution_id !== claim.executionId ||
         canonical(JSON.parse(row.payload!)) !== canonical(claim.payload)) throw new CloudCommandRuntimeError("command_conflict");
     try {
@@ -1240,7 +1277,9 @@ export class CloudLocalCommandQueue {
       return !!main?.file && realpathSync(main.file) === realpathSync(file);
     } catch { return false; }
   }
-  close(): void { if (!this.closed) { this.closed = true; this.db.close(); } }
+  close(): void {
+    if (!this.closed) { this.closed = true; this.acceptedWork.publishChanges(); this.db.close(); }
+  }
 }
 
 function hash(value: unknown): string { return createHash("sha256").update(canonical(value)).digest("hex"); }
