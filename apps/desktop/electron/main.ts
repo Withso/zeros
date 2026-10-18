@@ -15,6 +15,7 @@ if (LOCAL_DEVELOPMENT_BUILD_ERROR) {
 
 import { hydrateShellPath } from "./shell-path";
 import { desktopUserPresence } from "./desktop-user-presence";
+import { rendererProcessOwners } from "./renderer-process-owners";
 import { handleSharedCloudAccessSessionChange } from "./cloud-workspace-access-runtime";
 import { startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
@@ -888,6 +889,8 @@ function createMainWindow(): BrowserWindow {
     },
   });
 
+  rendererProcessOwners.track(win.webContents, "Main window");
+
   // Finish the reopen-as-closed restore: the discrete states can't be
   // constructor options. macOS fullscreen (the green button / its own
   // Space) wins over maximized (title-bar double-click zoom) — both
@@ -1696,6 +1699,7 @@ app.whenReady().then(async () => {
               path.join(__dirname, "agent-control-preload.cjs"),
             ),
           });
+          rendererProcessOwners.track(panelWindow.webContents, "Agent-control overlay");
           // Above the controlled app's own floating panels, below its menus.
           panelWindow.setAlwaysOnTop(true, "status");
           panelWindow.setContentProtection(true);
