@@ -19,6 +19,7 @@ import { GitError } from "./errors";
 import { mapBounded } from "./bounded-parallel";
 import { createWorkspaceChangeSnapshot, shareWorkspaceChangeProbe } from "./workspace-change-probe";
 import { readLocalGitGraph } from "./local-git-graph";
+import { withBackgroundGitReads } from "./git-read-lane";
 import type {
   Commit,
   FileChange,
@@ -272,6 +273,7 @@ function parseRawNumstat(output: string): { files: FileChange[]; numstat: string
  * only when a line-total consumer has joined before that comparison starts. */
 class LocalChangeSnapshot {
   private statusFlight?: Promise<LocalStatus>;
+  private statusSettledAt?: number;
   private floorFlight?: Promise<string | null>;
   private trackingRequested = false;
   private linesRequested = false;
@@ -282,12 +284,19 @@ class LocalChangeSnapshot {
 
   requestLines() { this.linesRequested = true; }
 
+  canJoin() {
+    if (this.statusSettledAt === undefined) return true;
+    const age = Date.now() - this.statusSettledAt;
+    return age >= 0 && age <= 250;
+  }
+
   readStatus(tracking = false): Promise<LocalStatus> {
     if (tracking) this.trackingRequested = true;
     return this.statusFlight ??= Promise.resolve().then(async () => {
       const trackingMeasured = this.trackingRequested;
       const { stdout } = await runGitRead(this.workspace.path, ["status", "--porcelain=v2", "-z", "-uall", "--branch",
         ...(!trackingMeasured ? ["--no-ahead-behind"] : [])]);
+      this.statusSettledAt = Date.now();
       return parseLocalStatus(stdout, trackingMeasured);
     });
   }
@@ -329,7 +338,14 @@ class LocalChangeSnapshot {
   }
 }
 
-const withLocalChangeSnapshot = createWorkspaceChangeSnapshot((workspace, remote) => new LocalChangeSnapshot(workspace, remote));
+const leaseLocalChangeSnapshot = createWorkspaceChangeSnapshot(
+  (workspace, remote) => new LocalChangeSnapshot(workspace, remote),
+  (snapshot) => snapshot.canJoin(),
+);
+
+function withLocalChangeSnapshot<T>(workspace: Workspace, remote: string, read: (snapshot: LocalChangeSnapshot) => Promise<T>): Promise<T> {
+  return withBackgroundGitReads(() => leaseLocalChangeSnapshot(workspace, remote, read));
+}
 
 export async function status(
   workspaceId: string,

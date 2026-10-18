@@ -35,7 +35,10 @@ export function workspaceChangeKey(workspace: Workspace, remote: string): string
 /** All consumers of a Local refresh lease the same lazy snapshot. Hold it
  * through their comparisons, not just through the initial porcelain read.
  * An invalidation queues the next generation until the old readers finish. */
-export function createWorkspaceChangeSnapshot<T>(create: (workspace: Workspace, remote: string) => T) {
+export function createWorkspaceChangeSnapshot<T>(
+  create: (workspace: Workspace, remote: string) => T,
+  canJoin: (snapshot: T) => boolean = () => true,
+) {
   interface Snapshot extends ProbeIdentity {
     value: T;
     initialRevision: number;
@@ -51,6 +54,9 @@ export function createWorkspaceChangeSnapshot<T>(create: (workspace: Workspace, 
       await entry.retired;
       entry = snapshots.get(key);
     }
+    // A slow existing reader may finish its own snapshot, but cannot keep
+    // lending an old observation to newly mounted or refreshing consumers.
+    if (entry && !canJoin(entry.value)) entry = undefined;
     if (!entry) {
       let retire!: () => void;
       const retired = new Promise<void>((done) => { retire = done; });

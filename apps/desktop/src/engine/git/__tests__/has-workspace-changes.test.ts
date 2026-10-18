@@ -170,6 +170,30 @@ describe("local Git summary input sharing", () => {
     await expect(hasWorkspaceChanges("workspace-a")).resolves.toBe(false);
     expect(statusReads()).toHaveLength(2);
   });
+
+  it("starts fresh status after the join window even while an older scope comparison is pending", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000);
+    const held = deferred<GitResult>();
+    const comparing = deferred<void>();
+    let scans = 0;
+    fixture.readGit.mockImplementation(async (_cwd: string, args: string[]) => {
+      if (args[0] === "status") return localPorcelain(++scans === 1 ? "" : "?? fresh.txt\0");
+      if (args.includes("diff") && args.includes("--cached")) { comparing.resolve(); return held.promise; }
+      return gitResult(args, "", "");
+    });
+    const old = changeCounts("workspace-a");
+    try {
+      await comparing.promise;
+      vi.setSystemTime(1_251);
+      await expect(hasWorkspaceChanges("workspace-a")).resolves.toBe(true);
+      expect(statusReads()).toHaveLength(2);
+    } finally {
+      held.resolve({ stdout: "", stderr: "" });
+      await old;
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("hasWorkspaceChanges read budget and ownership", () => {
