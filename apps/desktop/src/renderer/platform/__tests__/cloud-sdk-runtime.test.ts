@@ -6,6 +6,8 @@ vi.mock("../cloud-workspace-access", () => ({ closeCloudWorkspaceRuntime: state.
 import { cloudSdkRuntimeIdentity, openCloudSdkWorkspaceRuntime, refreshCloudSdkWorkspaceRuntime,
   fallbackCloudSdkWorkspaceRuntime, signCloudSdkRuntimeProof, renewCloudSdkRuntimeCapabilities } from "../cloud-sdk-runtime";
 import type { CloudSdkRuntimeTarget } from "../../../../shared/cloud-sdk-contract";
+import { CloudSdkTargetSchema } from "../../../../shared/cloud-sdk-contract";
+import { parseCloudWorkspaceKey } from "../bridge/cloud-workspace-key";
 
 const id = (n: number) => `${String(n).padStart(8, "0")}-1111-4111-8111-111111111111`;
 const target = { organizationId: id(1), workspaceId: id(2) }, now = 1_800_000_000_000;
@@ -21,6 +23,13 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 beforeEach(() => { state.epoch = 1; vi.clearAllMocks(); });
 
 describe("renderer native SDK boundary", () => {
+  it("reduces a parsed cloud navigation key to the closed native target before admission", async () => {
+    state.invoke.mockImplementationOnce(async (_command, input) => { CloudSdkTargetSchema.parse(input); return runtime; });
+    const parsed = parseCloudWorkspaceKey(`cloud://${target.organizationId}/${target.workspaceId}/src/index.ts`)!;
+    expect(await openCloudSdkWorkspaceRuntime(parsed)).toEqual(runtime);
+    expect(state.invoke).toHaveBeenLastCalledWith("cloud_workspace_sdk_runtime_open", target);
+  });
+
   it("opens explicit cloud targets and keeps capabilities out of every return identity", async () => {
     state.invoke.mockResolvedValue(runtime);
     expect(await openCloudSdkWorkspaceRuntime(target)).toEqual(runtime);

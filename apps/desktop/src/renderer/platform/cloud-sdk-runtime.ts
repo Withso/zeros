@@ -28,7 +28,8 @@ async function admitted(value: unknown, accountEpoch: number): Promise<CloudSdkR
 /** Cloud callers opt into this seam only after installing the SDK peer. */
 export async function openCloudSdkWorkspaceRuntime(target: CloudSdkTarget): Promise<CloudSdkRuntimeAdmission> {
   const epoch = getOrganizationStoreGeneration();
-  return admitted(await nativeInvoke("cloud_workspace_sdk_runtime_open", target), epoch);
+  const { organizationId, workspaceId } = target;
+  return admitted(await nativeInvoke("cloud_workspace_sdk_runtime_open", { organizationId, workspaceId }), epoch);
 }
 
 export async function refreshCloudSdkWorkspaceRuntime(target: CloudSdkRuntimeTarget): Promise<CloudSdkRuntimeTarget> {
