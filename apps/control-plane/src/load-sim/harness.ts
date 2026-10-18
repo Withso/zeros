@@ -35,6 +35,7 @@ import { DatabaseCloudWorkspaceSetupMaterialService } from "../cloud-workspaces/
 import { computerTestAccount, computerTestWallet } from "../cloud-workspaces/computer-workspace-test-fixtures.js";
 import { runtimeBase } from "../cloud-workspaces/runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace, withCloudFixtureOwnerTx, type ReadyCloudWorkspaceFixture } from "../cloud-workspaces/test-fixtures.js";
+import { DatabaseUplinkCheckpointStore } from "../realtime/uplink-checkpoint.js";
 import { DatabaseUplinkLeaseStore } from "../realtime/uplink-lease.js";
 import { DatabaseCostMeter } from "./instrument.js";
 import { AUTHORITY_CACHE_CHANNEL } from "../cloud-workspaces/engine-authority-cache.js";
@@ -199,8 +200,10 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
   const reconciler = new CloudWorkspaceReconciler({
     pool: worker, provider: boat, providerResolver: workerResolver, workosEnabled, logger: quiet,
   });
-  // `realtime` runs the lease.v1 renewals; the API pool measures them the same.
+  // `realtime` runs the lease.v1 renewals and checkpoint.v1 reads; the API
+  // pool measures them the same.
   const leases = new DatabaseUplinkLeaseStore({ pool: api, workosEnabled });
+  const checkpointQueue = new DatabaseUplinkCheckpointStore(api);
   // A zero-length wait is exactly one of the reads a held wait repeats.
   const checkpointHints = new CloudEngineCheckpointHints(api, { waitMs: 0 });
 
@@ -297,6 +300,11 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
       const renewed = await leases.renew({ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
         engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }, w.engine.heartbeatToken);
       if (!renewed.ok) throw new Error(`uplink lease renewal was refused (${renewed.reason})`);
+    },
+    // S2 checkpoint.v1: one uplink's read of queued checkpoint requests.
+    "engine.uplinkCheckpointSweep": async (w: SimulatedWorkspace) => {
+      await checkpointQueue.queued([{ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
+        engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }]);
     },
     // One read of the engine's checkpoint-hint wait; a held 25 s wait reads six times.
     "engine.checkpointHintWait": (w: SimulatedWorkspace) => checkpointHints.wait({ token: w.engine.heartbeatToken,

@@ -72,7 +72,7 @@ otherwise. It takes about 10 seconds and checks:
 | --- | --- |
 | Migrated schema, SQL, transactions and stored functions on PostgreSQL 18 | Network distance to the database (see the round-trip floor column) |
 | `createPool` API and worker pools with production pool settings | Boat provider (`FakeBoatProvider` returns immediately) |
-| Engine services: heartbeat, uplink lease renewal, checkpoint-hint wait, durable record head, credential controls, actor confirmation | Engine and desktop processes, relay sockets and HTTP framing (except the catalog route) |
+| Engine services: heartbeat, uplink lease renewal, uplink checkpoint-request read, checkpoint-hint wait, durable record head, credential controls, actor confirmation | Engine and desktop processes, relay sockets and HTTP framing (except the catalog route) |
 | Desktop paths: actor-session renew, relay authority revalidation, catalog through the Hono route with `resolveAuthenticatedUser` | WorkOS network calls |
 | Provider resolver, reconciler job claim/intent claim/drift/orphan sweep, access revocation, checkpoint request and security-event workers | WorkOS sync, outbox and other workers not listed |
 
@@ -88,7 +88,7 @@ Per active workspace, one running engine and one connected desktop:
 | --- | --- | --- | --- |
 | `engine.credentialControls` | engine | 500 ms after completion | `apps/desktop/src/engine/cloud-local-command-queue-boot.ts` |
 | `engine.uplinkLeaseRenewal` | engine | 300 s | `UPLINK_WATERMARK_INTERVAL_MS` in `apps/control-plane/src/realtime/uplink-protocol.ts` (S2 `lease.v1`) |
-| `engine.checkpointHintWait` | engine | 25/6 s (six reads per 25 s wait) | `apps/control-plane/src/cloud-workspaces/engine-checkpoint-hints.ts` |
+| `engine.uplinkCheckpointSweep` | engine | 30 s (one read per uplink, an upper bound: one statement serves up to 500) | `SWEEP_TICKS` in `apps/control-plane/src/realtime/uplink-checkpoint.ts` (S2 `checkpoint.v1`) |
 | `engine.durableRecordHead` | engine | 10 s, every heartbeat tick, posted or skipped | `synchronizeDurableRecord` in cloud runtime registration |
 | `engine.actorConfirm` | client | 5 s (half of `confirmedUntil`) | engine actor confirmation |
 | `client.renew` | client | 5 s (lease / 2) | `apps/desktop/src/engine/transport/cloud.ts` |
@@ -100,8 +100,12 @@ cadence: with `lease.v1` the uplink renews the lease and a periodic beat posts
 only when it carries something (S2 1.2.0). An engine without `lease.v1` still
 posts every 10 s (`DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS` in
 `apps/control-plane/src/cloud-workspaces/engine-heartbeat.ts`), 0.1 tx/s more
-per running engine. Engines already ran the checkpoint-hint wait; the
-simulator counts it since the 2026-10-18 re-run.
+per running engine. `engine.checkpointHintWait` likewise keeps its
+per-request budget without a cadence: with `checkpoint.v1` the uplink pushes
+queued checkpoint requests and the engine pauses its hint wait (S2 1.2.0).
+An engine without `checkpoint.v1` still runs the wait (six reads per 25 s,
+`apps/control-plane/src/cloud-workspaces/engine-checkpoint-hints.ts`),
+0.24 tx/s more per running engine.
 
 The background workers run once per process at their configured intervals
 (`apps/control-plane/src/worker-polling-config.ts`). Lifecycle due work runs as
@@ -189,6 +193,7 @@ PostgreSQL 18.6 on loopback, Node 24, 4 CPUs, WorkOS authority on.
 | `engine.heartbeat` | 1 | 9 | 7 | 9.5 | 35 |
 | `engine.durableRecordHead` | 1 | 7 | 5 | 3.2 | 25 |
 | `engine.uplinkLeaseRenewal` (2026-10-18) | 1 | 7 | 5 | 3.3 | 25 |
+| `engine.uplinkCheckpointSweep`, one uplink (2026-10-18) | 1 | 5 | 1 | 0.6 | 5 |
 | `engine.checkpointHintWait`, one read (2026-10-18) | 1 | 5 | 3 | 0.9 | 15 |
 | `engine.credentialControls` | 1 | 10 | 8 | 4.6 | 40 |
 | `engine.actorConfirm` | 1 | 11 | 9 | 10.1 | 45 |
@@ -235,6 +240,16 @@ checkpoint-hint wait (0.24 tx/s per running engine); the lease renewal adds
 0.003 tx/s. The steady-state budgets moved to 3.32 tx/s per active workspace
 and 2.59 tx/s per running engine.
 
+With `checkpoint.v1` (re-run 2026-10-18) one active workspace projects to
+**2.81 tx/s** and 28.0 statements/s, and a running engine alone to
+2.14 tx/s. The checkpoint-hint wait (0.24 tx/s per running engine) leaves
+the steady state, and the uplink's queued-request read adds at most
+0.033 tx/s per running engine: one statement every 30 s serves up to 500
+uplinks of a `realtime` instance, so the model's one read per engine is an
+upper bound. In real time, 10 active workspaces ran at 27.7 tx/s (2.77 per
+active workspace) with no failures. The steady-state budgets moved to
+3.09 tx/s per active workspace and 2.36 tx/s per running engine.
+
 ### Findings
 
 1. `engine.credentialControls` polls every 500 ms: 2.0 tx/s per running engine,
@@ -250,7 +265,9 @@ and 2.59 tx/s per running engine.
    paged listing confirms every binding; its marginal per-workspace cost is
    zero in steady state.
 6. The checkpoint-hint wait reads the database every 5 s per running engine
-   (0.24 tx/s); `checkpoint.request` over the uplink (S2) replaces it.
+   (0.24 tx/s). With `checkpoint.v1` the uplink pushes `checkpoint.request`
+   instead and the wait pauses, leaving one queued-request read per uplink
+   every 30 s (at most 0.033 tx/s).
 
 The provider resolver's connection query took 9.5 ms mean on loopback,
 compared with 25.4 ms measured on Alpha.

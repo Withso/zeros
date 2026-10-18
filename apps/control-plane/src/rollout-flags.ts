@@ -42,6 +42,7 @@ export const ROLLOUT_FLAGS = {
   // never shortens a lease: an older one would cut a 36-minute uplink lease
   // back to 90 s while the engine skips its periodic heartbeat.
   engine_lease_over_uplink: { whileFeedUnavailable: "retain", summary: "Renew the engine lease over the uplink (lease.v1)", requires: ["realtime_uplink"] },
+  checkpoint_push: { whileFeedUnavailable: "retain", summary: "Push checkpoint requests over the uplink (checkpoint.v1)", requires: ["realtime_uplink"] },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

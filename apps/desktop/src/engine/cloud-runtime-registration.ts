@@ -49,6 +49,9 @@ const UPLINK_LEASE_HEARTBEAT_FLOOR_MS = 25 * 60_000;
  * further out it backs off 5, 10, 20 and 40 s, then retries every minute. */
 const HEARTBEAT_URGENT_RETRY_WINDOW_MS = 2 * 60_000;
 const HEARTBEAT_RETRY_CAP_MS = 60_000;
+/** While the uplink pushes checkpoint requests (S2 `checkpoint.v1`), the
+ * paused hint wait re-checks this often in case a change report was missed. */
+const CHECKPOINT_PUSH_RECHECK_MS = 30_000;
 
 // This module is also imported by server-side setup contracts. Keep the wire
 // check pure; only the engine's attester may read the installed runtime.
@@ -559,6 +562,10 @@ export class CloudRuntimeRegistration {
   private heartbeatFailures = 0;
   /** S2 `lease.v1`: whether the uplink currently renews the lease. */
   private uplinkLeaseActive: (() => boolean) | null = null;
+  /** S2 `checkpoint.v1`: whether the uplink currently pushes checkpoint requests. */
+  private uplinkCheckpointPushActive: (() => boolean) | null = null;
+  /** Resumes a hint wait paused for the checkpoint push. */
+  private checkpointPushWake: (() => void) | null = null;
   /** The port scan the control plane last accepted. */
   private reportedPorts: string | null = null;
   /** The last accepted beat delivered a checkpoint request; the control
@@ -1158,6 +1165,32 @@ export class CloudRuntimeRegistration {
     this.uplinkLeaseActive = active;
   }
 
+  /** S2 `checkpoint.v1`: reports whether the uplink currently pushes
+   * queued checkpoint requests (`CloudEngineUplinkClient.checkpointPushActive`).
+   * While it does, the checkpoint-hint wait pauses. */
+  attachUplinkCheckpointPush(active: () => boolean): void {
+    this.uplinkCheckpointPushActive = active;
+    this.uplinkCheckpointPushChanged();
+  }
+
+  /** The push started or ended; a hint wait paused for it re-checks at once,
+   * so a request queued after the uplink was lost is seen by its first read. */
+  uplinkCheckpointPushChanged(): void {
+    const wake = this.checkpointPushWake;
+    this.checkpointPushWake = null;
+    wake?.();
+  }
+
+  /** S2 `checkpoint.request`: timing only, like a hint answer. The next beat
+   * fetches the durable directive through the fenced heartbeat. */
+  checkpointRequested(): void {
+    this.heartbeatSoon();
+  }
+
+  private checkpointPushActive(): boolean {
+    return this.uplinkCheckpointPushActive?.() === true;
+  }
+
   /** S2 `lease.v1`: a lease the control plane reported over the uplink in
    * answer to a frame this engine sent at `sentAtMs` (its hello or a ping).
    * It only raises the lease, never beyond what one renewal at that time
@@ -1311,15 +1344,16 @@ export class CloudRuntimeRegistration {
    * only when it carries something: a first or changed port scan, a
    * repository credential refresh, a checkpoint request the control plane
    * redelivers, or a renewal once 25 minutes or less of the lease remain.
-   * The checkpoint hint wait must be answering, since only it then asks for
-   * the beat that fetches a newly queued request. */
+   * The checkpoint hint wait must be answering or the uplink must push
+   * checkpoint requests, since only they then ask for the beat that fetches
+   * a newly queued request. */
   private heartbeatCarriesNothing(
     document: RegistrationDocument,
     credentialRefresh: unknown,
     observedPorts: readonly { port: number; protocol: "tcp" }[] | undefined,
   ): boolean {
     return this.uplinkLeaseActive?.() === true &&
-      this.checkpointHintsAnswering &&
+      (this.checkpointHintsAnswering || this.checkpointPushActive()) &&
       !this.checkpointRedelivered &&
       credentialRefresh === null &&
       (observedPorts === undefined || JSON.stringify(observedPorts) === this.reportedPorts) &&
@@ -1351,6 +1385,13 @@ export class CloudRuntimeRegistration {
   private async checkpointHintLoop(document: RegistrationDocument): Promise<void> {
     let failures = 0;
     while (this.document === document && !this.stopped && !this.authorityLost) {
+      if (this.checkpointPushActive()) {
+        // The uplink pushes every queued request; a wait would repeat them.
+        this.checkpointHintsAnswering = false;
+        failures = 0;
+        await this.pauseForCheckpointPush();
+        continue;
+      }
       let pending = false;
       try {
         const raw = await this.post(
@@ -1400,6 +1441,24 @@ export class CloudRuntimeRegistration {
       );
     }
     this.checkpointHintsAnswering = false;
+  }
+
+  /** Until the push changes, the engine stops, or the safety re-check. */
+  private pauseForCheckpointPush(): Promise<void> {
+    const signal = this.abortController.signal;
+    if (signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        if (this.checkpointPushWake === done) this.checkpointPushWake = null;
+        resolve();
+      };
+      const timer = setTimeout(done, CHECKPOINT_PUSH_RECHECK_MS);
+      timer.unref?.();
+      this.checkpointPushWake = done;
+      signal.addEventListener("abort", done, { once: true });
+    });
   }
 
   private pauseCheckpointHints(delayMs: number): Promise<void> {

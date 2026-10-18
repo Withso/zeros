@@ -117,6 +117,8 @@ closes with `4426 protocol_unsupported`. Features are additive flags; neither
 side sends a frame type behind a feature the other did not list. A feature
 can also change behavior without a new frame type: `lease.v1` moves the
 engine lease renewal onto the uplink ([Engine lease](#engine-lease-leasev1)).
+`checkpoint.request` is sent only behind `checkpoint.v1`
+([Checkpoint requests](#checkpoint-requests-checkpointv1)).
 
 ### Supersede and the heartbeat credential
 
@@ -208,7 +210,7 @@ not survive a reconnect.
 | activity | `activity.report` | E | R | Every 60 s and on edge: `{ clients, runningTurns, liveTerminals, lastInputAtMs, windowMs }` | Idle timers (track D input) |
 | cred | `cred.revision` | C | R | `{ kind: "agent-controls" \| "repository", revision }` | 500 ms poll, `cloud-local-command-queue-boot.ts:323-358` |
 | cred | `cred.ack` | E | R | `{ kind, revision, result: "applied" \| "failed", code? }` after fetching from `api` | — |
-| checkpoint | `checkpoint.request` | C | R | `{ requestId, reason, deadlineAtMs }` (an absolute timestamp; durations use `…Ms`, timestamps use `…AtMs`) | Checkpoint-hint long-poll, `cloud-runtime-registration.ts:1129` |
+| checkpoint | `checkpoint.request` | C | R | `{ requestId, reason, deadlineAtMs }` (an absolute timestamp; durations use `…Ms`, timestamps use `…AtMs`), with `checkpoint.v1` only; a timing hint the engine answers with one heartbeat, which delivers the request | Checkpoint-hint long-poll, `checkpointHintLoop` in `cloud-runtime-registration.ts` |
 | turns | `turns.event` | E | R | `{ journalSeq, chatId, turnId, state: started \| completed \| failed \| needs_attention \| interrupted, atMs, actorUserId? }` | Notification and presence inference from history mirror |
 | turns | `turns.ack` | C | R | `{ journalSeq }` durable on the CP side | — |
 | relay | `relay.open` | C | U | `{ channel, clientSessionId, capability, proof }` (the `engine` pair of the client's S3 `auth` frame, forwarded; PoP signed with `route: relay`) | Separate relay socket pair, `runtime-bridge.ts` |
@@ -262,8 +264,9 @@ not survive a reconnect.
   `sys.welcome.resumed = false` and both sides resync after the `auth`
   exchange of the [handshake](#handshake-and-version-negotiation), which
   happens on every connection:
-  - CP sends current `cred.revision` values and any pending
-    `checkpoint.request`.
+  - CP sends current `cred.revision` values and, with `checkpoint.v1`,
+    a `checkpoint.request` for every queued request (at every gate open,
+    resumed or not).
   - Engine re-sends `status.ready`, `status.report`, `activity.report`, and
     `turns.event` from the last `turns.ack` (`lastJournalSeq` in hello).
 - Every reliable frame type is idempotent by content (revisions, journal
@@ -344,17 +347,52 @@ rule:
   `lease.v1` negotiated), the engine skips a periodic beat that carries
   nothing: no first or changed port scan, no repository credential
   refresh, no redelivered checkpoint request, a checkpoint-hint wait that
-  is answering, and more than 25 min of lease left. A beat requested out of
-  cadence (by a checkpoint hint, a `4409` re-verification or a `4401` or
-  `4403` park) is always sent. When the uplink is lost, the periodic beats
-  resume at their normal cadence. A failed beat retries every 5 s only in
-  the last 2 min of the lease; earlier it backs off 5, 10, 20 and 40 s,
-  then retries every 60 s.
+  is answering or a `checkpoint.v1` push in place of it, and more than
+  25 min of lease left. A beat requested out of cadence (by a checkpoint
+  hint, a pushed `checkpoint.request`, a `4409` re-verification or a
+  `4401` or `4403` park) is always sent. When the uplink is lost, the
+  periodic beats resume at their normal cadence. A failed beat retries
+  every 5 s only in the last 2 min of the lease; earlier it backs off 5,
+  10, 20 and 40 s, then retries every 60 s.
 - **No shortening on loss.** A lost uplink does not shorten the lease: an
   ingress or network outage looks like many lost uplinks, and decision G
   never stops a workspace on an unknown error. The cost is an engine that
   dies while its VM keeps running: it holds its workspace until the lease
   ends ([Failure and outage behavior](#failure-and-outage-behavior)).
+
+### Checkpoint requests (`checkpoint.v1`)
+
+A checkpoint request (`workspace_checkpoint_requests`) is delivered, fenced
+and acknowledged only through the HTTP heartbeat. Without `checkpoint.v1`
+the engine learns that one is queued from its checkpoint-hint wait, a 25 s
+long-poll that reads the database every 5 s (about 0.24 transactions/s per
+running engine). With `checkpoint.v1` `realtime` tells the engine instead:
+
+- **Negotiation.** The engine offers `checkpoint.v1` in `sys.hello`.
+  `realtime` selects it only while the organization's `checkpoint_push`
+  rollout flag is on (that flag requires `realtime_uplink`). A flag change
+  closes the affected uplinks with `1001 features_changed`, and the redial
+  renegotiates.
+- **Push.** `realtime` sends one `checkpoint.request` for each queued,
+  unexpired request of the uplink's exact workspace, organization and
+  generation, oldest first and at most eight per read. It reads when the
+  gate opens (resumed or not), when a request is queued for that workspace
+  generation (`zeros_cloud_checkpoint_request`, the checkpoint-hint
+  notification), after its notification listener reconnects, every 5 s
+  while that listener is not current, and every 30 s otherwise. One
+  statement reads up to 500 uplinks of an instance. A failed read is
+  retried on the next 5 s tick, never at once. A request stays queued until
+  a heartbeat delivers it, so later reads push it again.
+- **Timing only.** The frame grants nothing. The engine answers it with one
+  heartbeat, which fetches, fences and acknowledges the request exactly as
+  before, so a stale, duplicate or foreign frame costs one beat at most. A
+  malformed frame closes the uplink with `4400 frame_invalid`; one on a
+  connection that did not negotiate the feature is acked and ignored.
+- **Hint wait.** While the current uplink pushes (gate open,
+  `checkpoint.v1` negotiated) the engine sends no checkpoint-hint wait. It
+  re-checks when the push starts or ends and at least every 30 s, so the
+  wait resumes the moment the uplink is lost and its first read sees a
+  request queued meanwhile.
 
 ## Lifetimes and limits
 
@@ -395,14 +433,14 @@ rule:
 
 | Failure | Behavior |
 | --- | --- |
-| Uplink down, `api` up | Engine keeps running; direct client sessions continue under S1 normal rules (5 min worst case, renewed in band from REST-issued tokens); after 30 s down the engine obtains engine tokens through the S1 REST fallback, so credential reads, history mirroring and checkpoints keep working; it refetches the JWKS at least every 5 min. With `lease.v1` the periodic HTTP heartbeat resumes at its next tick and keeps the lease from lapsing |
+| Uplink down, `api` up | Engine keeps running; direct client sessions continue under S1 normal rules (5 min worst case, renewed in band from REST-issued tokens); after 30 s down the engine obtains engine tokens through the S1 REST fallback, so credential reads, history mirroring and checkpoints keep working; it refetches the JWKS at least every 5 min. With `lease.v1` the periodic HTTP heartbeat resumes at its next tick and keeps the lease from lapsing; with `checkpoint.v1` the checkpoint-hint wait resumes at once |
 | `realtime` up, database down | Hellos that cannot be verified close with `1011`, never `4401`/`4403`; established uplinks stay open |
 | `realtime` and `api` down (full CP outage) | S1 outage rule: pre-outage sessions up to 30 min; no new sessions; agents keep running until the lease deadline; turn events buffer in the journal. With `lease.v1` about 31 min or more of lease remain when the outage begins, so an outage of up to 30 min lets no lease lapse; without it the lease lapses after about 90 s |
 | `realtime` redeploy | Drain, reconnect, resume or resync; relay clients re-route |
 | Engine restart (same generation) | New `bootId`, recorded by a fresh registration; resume rejected (`resumed: false`); full resync |
 | Superseded uplink (4409) | Re-verify registration, reconnect; a matching `bootId` supersedes back, an alert fires otherwise |
 | Engine dies while its VM keeps running | The uplink is lost at once or after the 45 s offline detection, and presence records the loss. With `lease.v1` the durable lease still runs to its deadline (up to 36 min, against about 90 s without): until then engine health does not stop the workspace, a stop that needs a final checkpoint fails when the checkpoint request's 5 min deadline passes, and recovery waits for the lease to lapse. A lost uplink does not shorten the lease, because an ingress or network outage also looks like many lost uplinks (decision G) |
-| Database slow or down | `realtime` keeps uplinks and liveness in memory; transition writes retry with jitter through a bounded queue; no uplink is closed because a write failed; a `lease.v1` renewal that cannot complete is retried at the next watermark |
+| Database slow or down | `realtime` keeps uplinks and liveness in memory; transition writes retry with jitter through a bounded queue; no uplink is closed because a write failed; a `lease.v1` renewal that cannot complete is retried at the next watermark; a failed `checkpoint.v1` read is retried on the next 5 s tick |
 
 ## Code paths this replaces
 
@@ -411,7 +449,7 @@ rule:
 | Engine heartbeat timer, `apps/desktop/src/engine/cloud-runtime-registration.ts:997-1106`; default 10 s, `apps/control-plane/src/cloud-workspaces/engine-heartbeat.ts:6-8` | `sys.ping` + `status.report` | C |
 | Heartbeat DB writes, `apps/control-plane/src/cloud-workspaces/setup-materials.ts:1536-1599` | Transition writes + 5 min watermark | C |
 | Credential-control poll every 500 ms, `apps/desktop/src/engine/cloud-local-command-queue-boot.ts:323-358`; endpoint `agent-credential-routes.ts:203` | `cred.revision` push, fetch, `cred.ack` | C |
-| Checkpoint-hint long-poll (25 s hold), `cloud-runtime-registration.ts:1129` | `checkpoint.request` | C |
+| Checkpoint-hint long-poll (25 s hold), `checkpointHintLoop` in `cloud-runtime-registration.ts` | `checkpoint.request` (`checkpoint.v1`) | C |
 | Relay socket pairs and revalidation, `apps/control-plane/src/cloud-workspaces/runtime-bridge.ts:351,753-794` | Relay channels over the uplink | C |
 | Actor-confirm and warm-context renewals, `cloud-local-command-queue-boot.ts:380-435` | `auth.capability` | B, C |
 
@@ -430,7 +468,7 @@ obtain a registration document (`scripts/electron-local.mjs:54-82`).
 | S2-Q1 | JSON for everything, or a binary encoding for control frames? | JSON text for control (debuggable, schema-validated, low rate); binary only for relay data. | Accepted. |
 | S2-Q2 | One sequence space per direction, or per channel? | One per direction; channels are few and ordering across `auth` and other frames matters for recovery. | Accepted, for the reliable channels only. `auth` and `relay` are unsequenced per-connection channels; `auth` ordering is enforced by the `auth.applied` gate, which a cumulative ack could not do across a resume gap. |
 | S2-Q3 | Resume across `realtime` instances (shared buffer in Redis or the DB)? | No in v1: resync is cheap and fully idempotent. Revisit if resync load shows up in measurements. | Accepted. |
-| S2-Q4 | Keep the HTTP heartbeat as a fallback during rollout? | Yes, behind the per-org flag, for one release; the engine uses it only when `sys.welcome` was never received. Delete it at the end of the slice. | Accepted. Amended in 1.2.0: the heartbeat stays as the fallback lease renewal and for what only it carries today (port scans, repository credential refreshes, checkpoint request delivery); with `lease.v1` the engine skips a periodic beat that carries nothing ([Engine lease](#engine-lease-leasev1)). |
+| S2-Q4 | Keep the HTTP heartbeat as a fallback during rollout? | Yes, behind the per-org flag, for one release; the engine uses it only when `sys.welcome` was never received. Delete it at the end of the slice. | Accepted. Amended in 1.2.0: the heartbeat stays as the fallback lease renewal and for what only it carries today (port scans, repository credential refreshes, checkpoint request delivery); with `lease.v1` the engine skips a periodic beat that carries nothing ([Engine lease](#engine-lease-leasev1)), and with `checkpoint.v1` a pushed `checkpoint.request` asks for the beat that delivers it. |
 | S2-Q5 | Should repository credentials move from the heartbeat response to the uplink? | Revision over the uplink, secret fetched from `api` with the engine token; secrets never pass through `realtime`. | Accepted. |
 | S2-Q6 | Watermark write interval | 5 min; drift jobs already tolerate minutes. | Accepted. |
 | S2-Q7 | Permessage-deflate | Off in v1; measure relay CPU first. | Accepted. |
@@ -921,6 +959,14 @@ review aid until freeze; the frozen source of truth will be Zod in
   lease lapse. No frame or schema change: `sys.welcome` and `sys.pong`
   already carried `leaseExpiresAtMs`. Also recorded that `1001` carries
   `features_changed` when a rollout flag changes the negotiated features.
+  Also added the `checkpoint.v1` feature
+  ([Checkpoint requests](#checkpoint-requests-checkpointv1)). Negotiated
+  only while the organization's `checkpoint_push` flag is on, it has
+  `realtime` push every queued, unexpired checkpoint request of the
+  engine's exact workspace and generation as `checkpoint.request` (a timing
+  hint: delivery stays on the heartbeat), and the engine pauses its
+  checkpoint-hint wait while the push is active. No schema change: the
+  frame was already defined; it is now sent only behind `checkpoint.v1`.
 - **1.1.0** (2026-10-16, additive): added close `4404 uplink_disabled` —
   the rollout flag is off for the organization; the engine parks, the HTTP
   heartbeat and the credential poll continue, and the engine re-dials only

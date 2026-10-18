@@ -1,5 +1,6 @@
 import type pg from "pg";
 
+import { CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL } from "../cloud-workspaces/engine-checkpoint-hints.js";
 import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import type { DatabaseUplinkPresenceStore } from "./uplink-presence.js";
 import type { CloudEngineUplinkServer } from "./uplink-server.js";
@@ -7,7 +8,10 @@ import type { CloudEngineUplinkServer } from "./uplink-server.js";
 export const UPLINK_OWNER_CHANNEL = "zeros_cloud_engine_uplink_owner";
 export const UPLINK_AUTHORITY_CHANNEL = "zeros_cloud_engine_uplink_authority";
 export const UPLINK_CRED_REVISION_CHANNEL = "zeros_cloud_agent_credential_revision";
+/** Notified by every checkpoint-request enqueue (the hint wait's channel). */
+export const UPLINK_CHECKPOINT_REQUEST_CHANNEL = CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CHECKPOINT_KEY = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([1-9][0-9]{0,9})$/;
 
 /** The credential-push surface the listener routes revision bumps to. */
 export interface UplinkCredNotificationSink {
@@ -16,8 +20,22 @@ export interface UplinkCredNotificationSink {
   resync?(engineInstanceIds: readonly string[]): Promise<void>;
 }
 
+/** The checkpoint-push surface the listener routes queued requests to. */
+export interface UplinkCheckpointNotificationSink {
+  requested(workspaceId: string, generation: number): void;
+  /** Re-reads the queued requests of the given owned engines. */
+  resync?(engineInstanceIds: readonly string[]): Promise<void>;
+}
+
 export function handleUplinkNotification(server: Pick<CloudEngineUplinkServer, "ownerChanged" | "revalidate" | "revalidateWorkspace">,
-  channel: string, payload: string, cred?: UplinkCredNotificationSink): void {
+  channel: string, payload: string, cred?: UplinkCredNotificationSink, checkpoint?: UplinkCheckpointNotificationSink): void {
+  if (channel === UPLINK_CHECKPOINT_REQUEST_CHANNEL) {
+    // Exactly `checkpointHintKey(workspaceId, generation)`, as every enqueue
+    // writes it.
+    const match = CHECKPOINT_KEY.exec(payload);
+    if (match) checkpoint?.requested(match[1]!, Number(match[2]));
+    return;
+  }
   if (channel === UPLINK_CRED_REVISION_CHANNEL) {
     // Exactly `<engine uuid>:<decimal revision>`, as migration 0154's trigger
     // writes it; anything else is not ours to interpret.
@@ -44,19 +62,22 @@ export function handleUplinkNotification(server: Pick<CloudEngineUplinkServer, "
 }
 
 /** Shares the process's LISTEN session. After every (re)connect, owners,
- * authority and (with `cred`) credential revisions are re-read for every
- * owned uplink, so a notification lost while the listener was down is
- * repaired rather than trusted. */
+ * authority, (with `cred`) credential revisions and (with `checkpoint`)
+ * queued checkpoint requests are re-read for every owned uplink, so a
+ * notification lost while the listener was down is repaired rather than
+ * trusted. */
 export function startUplinkNotifications(
   pool: pg.Pool,
   server: CloudEngineUplinkServer,
   presence: Pick<DatabaseUplinkPresenceStore, "owners">,
   logger: Pick<Console, "warn"> = console,
   cred?: UplinkCredNotificationSink,
+  checkpoint?: UplinkCheckpointNotificationSink,
 ): () => Promise<void> {
   const listener = postgresNotificationSubscription(pool, {
-    channels: [UPLINK_OWNER_CHANNEL, UPLINK_AUTHORITY_CHANNEL, ...(cred ? [UPLINK_CRED_REVISION_CHANNEL] : [])],
-    onNotification: notice => handleUplinkNotification(server, notice.channel, notice.payload ?? "", cred),
+    channels: [UPLINK_OWNER_CHANNEL, UPLINK_AUTHORITY_CHANNEL, ...(cred ? [UPLINK_CRED_REVISION_CHANNEL] : []),
+      ...(checkpoint ? [UPLINK_CHECKPOINT_REQUEST_CHANNEL] : [])],
+    onNotification: notice => handleUplinkNotification(server, notice.channel, notice.payload ?? "", cred, checkpoint),
     onReady: () => {
       server.notificationsCurrent = true;
       server.revalidate();
@@ -67,6 +88,7 @@ export function startUplinkNotifications(
       // re-gate get the current revision at their gate; already-connected
       // ones get it here.
       void cred?.resync?.(server.ownedEngineInstances()).catch(() => {});
+      void checkpoint?.resync?.(server.ownedEngineInstances()).catch(() => {});
     },
     onUnavailable: () => {
       server.notificationsCurrent = false;

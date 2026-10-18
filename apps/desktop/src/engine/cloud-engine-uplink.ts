@@ -200,6 +200,12 @@ export type EngineUplinkCredentialRevision = Readonly<{ kind: "agent-controls" |
 /** The outcome the engine reports back in `cred.ack` after its exchange. */
 export type EngineUplinkCredentialAck = Readonly<{ result: "applied" | "failed"; code?: string }>;
 
+/** A pushed checkpoint request (S2 `checkpoint.request`): a timing hint only. */
+export type EngineUplinkCheckpointRequest = Readonly<{ requestId: string; reason: string; deadlineAtMs: number }>;
+
+const CHECKPOINT_REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UPLINK_CODE = /^[a-z][a-z0-9_]{2,63}$/;
+
 /** The S2 `code` shape (`^[a-z][a-z0-9_]{2,63}$`). Any other value maps to
  * `cred_fetch_failed`: a non-conforming code would 4400 the connection
  * into a resync re-push loop, so the engine side never emits one. */
@@ -214,7 +220,8 @@ export type CloudEngineUplinkOptions = {
   identity: EngineUplinkIdentity;
   runtimeVersion: string;
   /** Additive feature flags offered in the hello; `cred.v1` negotiates the
-   * credential-control push, `lease.v1` the lease renewal. */
+   * credential-control push, `lease.v1` the lease renewal, `checkpoint.v1`
+   * the checkpoint-request push. */
   features?: readonly string[];
   auth: EngineUplinkAuthSink;
   /** Current engine readiness, sent as `status.ready` once the gate opens. */
@@ -240,6 +247,13 @@ export type CloudEngineUplinkOptions = {
    * hello, or a ping of that connection), which bounds what the control
    * plane can have granted. */
   onLease?: (leaseExpiresAtMs: number, sentAtMs: number) => void;
+  /** `checkpoint.v1`: a pushed checkpoint request. The engine answers it
+   * with one heartbeat, which delivers, fences and acknowledges the
+   * directive; the frame itself grants nothing. */
+  onCheckpointRequest?: (request: EngineUplinkCheckpointRequest) => void;
+  /** Reports flips of `checkpointPushActive`, so the checkpoint-hint wait
+   * resumes the moment the push ends. */
+  onCheckpointPushChange?: (active: boolean) => void;
   /** 4409: re-verify registration authority before the redial (S2 rule 4). */
   onReverifyAuthority?: () => void;
   /** Terminal close: the client parks and never redials (HTTP stays up). */
@@ -322,6 +336,7 @@ export class CloudEngineUplinkClient {
    * poll can back off to its slow fallback cadence. */
   get established(): boolean { return this.computeEstablished(); }
   private lastEstablished = false;
+  private lastCheckpointPush = false;
 
   /** A pushed cred.revision failed to apply. While outstanding, established
    * stays false so the fallback poll (500 ms) retries what the CP does not
@@ -342,6 +357,14 @@ export class CloudEngineUplinkClient {
     return connection?.welcomed === true && connection.gateOpen && connection.features.has("lease.v1");
   }
 
+  /** True while the current connection negotiated `checkpoint.v1` and its
+   * gate is open: the control plane pushes queued checkpoint requests, so
+   * the engine needs no checkpoint-hint wait. */
+  get checkpointPushActive(): boolean {
+    const connection = this.connection;
+    return connection?.welcomed === true && connection.gateOpen && connection.features.has("checkpoint.v1");
+  }
+
   /** A credential-control exchange succeeded outside a push (the fallback
    * poll): clears a failed-push-outstanding mark so `established` recovers
    * without waiting for the CP to push again. */
@@ -351,13 +374,19 @@ export class CloudEngineUplinkClient {
     this.noteEstablished();
   }
 
-  /** @internal Recompute `established` at every input change (gate open,
-   * connection loss, stop) and report a flip exactly once. */
+  /** @internal Recompute `established` and `checkpointPushActive` at
+   * every input change (gate open, connection loss, stop) and report each
+   * flip exactly once. */
   noteEstablished(): void {
     const value = this.computeEstablished();
-    if (value === this.lastEstablished) return;
-    this.lastEstablished = value;
-    this.options.onEstablishedChange?.(value);
+    if (value !== this.lastEstablished) {
+      this.lastEstablished = value;
+      this.options.onEstablishedChange?.(value);
+    }
+    const push = this.checkpointPushActive;
+    if (push === this.lastCheckpointPush) return;
+    this.lastCheckpointPush = push;
+    this.options.onCheckpointPushChange?.(push);
   }
 
   start(): void {
@@ -572,6 +601,14 @@ export class CloudEngineUplinkClient {
     if (connection !== this.connection || this.stopped || this.parked) return;
     if (typeof leaseExpiresAtMs !== "number" || !Number.isSafeInteger(leaseExpiresAtMs)) return;
     this.options.onLease?.(leaseExpiresAtMs, sentAtMs);
+  }
+
+  /** @internal A `checkpoint.request` on a connection that negotiated
+   * `checkpoint.v1`. Any such connection counts, a draining one included:
+   * the hint costs one heartbeat at most. */
+  checkpointRequested(request: EngineUplinkCheckpointRequest): void {
+    if (this.stopped || this.parked) return;
+    this.options.onCheckpointRequest?.(request);
   }
 
   /** @internal Simulates an unannounced network loss (failover tests). */
@@ -866,6 +903,18 @@ class Connection {
             typeof d.revision !== "number" || !Number.isSafeInteger(d.revision) || d.revision < 1)
           return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
         this.uplink.pushCredentialRevision({ kind: d.kind, revision: d.revision });
+        return;
+      }
+      case "checkpoint.request": {
+        // Never sent behind a feature this connection did not negotiate;
+        // one that is anyway was acked above and is ignored.
+        if (!this.features.has("checkpoint.v1")) return;
+        const d = frame.d ?? {};
+        if (typeof d.requestId !== "string" || !CHECKPOINT_REQUEST_ID.test(d.requestId) ||
+            typeof d.reason !== "string" || !UPLINK_CODE.test(d.reason) ||
+            typeof d.deadlineAtMs !== "number" || !Number.isSafeInteger(d.deadlineAtMs) || d.deadlineAtMs < 0)
+          return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
+        this.uplink.checkpointRequested({ requestId: d.requestId, reason: d.reason, deadlineAtMs: d.deadlineAtMs });
         return;
       }
       default:

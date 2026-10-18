@@ -69,6 +69,7 @@ import { RolloutFlagSnapshot } from "./rollout-flags.js";
 import { EngineAuthorityCache, installEngineAuthorityCache } from "./cloud-workspaces/engine-authority-cache.js";
 import { CapabilitySigningKeyStore } from "./cloud-workspaces/capability-keys.js";
 import { AuditUplinkSecurityAlerts } from "./realtime/uplink-alerts.js";
+import { DatabaseUplinkCheckpointStore, UplinkCheckpointPush } from "./realtime/uplink-checkpoint.js";
 import { DatabaseUplinkCredentialStore, UplinkCredentialPush } from "./realtime/uplink-cred.js";
 import { uplinkCapabilityAuthority } from "./realtime/uplink-auth-source.js";
 import { DatabaseUplinkAuthority } from "./realtime/uplink-authority.js";
@@ -877,6 +878,7 @@ if (servesApi && cloudWorkspaceAccessService && migrationResult.status.state !==
 // flags-off deployment never mounts the socket.
 let cloudEngineUplink: CloudEngineUplinkServer | undefined;
 let uplinkPresence: UplinkPresenceWriter | undefined;
+let uplinkCheckpointPush: UplinkCheckpointPush | undefined;
 let stopUplinkNotifications: () => Promise<void> = async () => {};
 // One security-event feed per realtime process, shared by the device stream
 // and the S1 revocation producer (auth.epochs to owned uplinks,
@@ -919,6 +921,14 @@ const mountEngineUplink = () => {
     readRevision: identity => uplinkCredStore.desiredRevision(identity.engineInstanceId),
     readRevisions: engineInstanceIds => uplinkCredStore.desiredRevisions(engineInstanceIds),
   });
+  // Checkpoint-request push (S2 checkpoint channel): a timing hint only;
+  // the engine's heartbeat still delivers and fences the directive.
+  const uplinkCheckpointStore = new DatabaseUplinkCheckpointStore(pool);
+  const checkpointPush = new UplinkCheckpointPush({
+    readQueued: identities => uplinkCheckpointStore.queued(identities),
+    notificationsCurrent: () => cloudEngineUplink?.notificationsCurrent === true,
+  });
+  uplinkCheckpointPush = checkpointPush;
   cloudEngineUplink = new CloudEngineUplinkServer({
     authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),
     lease: new DatabaseUplinkLeaseStore({ pool, workosEnabled: config.auth.provider === "workos" }),
@@ -928,11 +938,11 @@ const mountEngineUplink = () => {
     realtimeInstance: realtimeInstanceId(),
     presence: uplinkPresence,
     alerts,
-    extensions: [uplinkCredPush],
+    extensions: [uplinkCredPush, checkpointPush],
   });
   uplinkAuthSource = uplinkAuth;
   startCapabilityRevocationPush();
-  const stopNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore, console, uplinkCredPush);
+  const stopNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore, console, uplinkCredPush, checkpointPush);
   stopUplinkNotifications = async () => {
     capabilityRevocationPush?.stop();
     await Promise.allSettled([stopNotifications(), realtimeSecurityEvents?.stop()]);
@@ -1031,6 +1041,7 @@ function closeServer(backgroundStopped: Promise<unknown>, deadline: ReturnType<t
   cloudPreviewWebSocketRelay?.close();
   cloudRuntimeServiceRelay?.close();
   cloudEngineUplink?.close();
+  uplinkCheckpointPush?.close();
   // The uplink LISTEN outlives the drain: engines still on this instance keep
   // credential pushes and authority teardown until their uplink is closed.
   const uplinkNotificationsStopped = stopUplinkNotifications();
