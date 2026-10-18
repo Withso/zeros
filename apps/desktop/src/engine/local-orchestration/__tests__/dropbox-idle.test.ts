@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -46,13 +46,80 @@ function deferred() {
 }
 
 describe("Local dropbox idle cost", () => {
-  it("does no periodic directory reads while its native watcher is healthy", async () => {
+  it("bounds the safety scans during a synthetic idle minute", async () => {
     const scan = spySweep().mockResolvedValue(undefined);
     await dropbox.open(scope);
     scan.mockClear();
     await vi.advanceTimersByTimeAsync(60_000);
     console.info("Local dropbox synthetic idle minute", JSON.stringify({ scans: scan.mock.calls.length, timers: vi.getTimerCount() }));
-    expect(scan.mock.calls.length).toBe(0);
+    expect(scan.mock.calls.length).toBe(33);
+    expect(vi.getTimerCount()).toBe(1);
+    await dropbox.closeAll();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("backs off to the safety interval while idle and still answers with a silent watcher", async () => {
+    const scan = spySweep().mockResolvedValue(undefined);
+    const handle = await dropbox.open(scope);
+    const box = [...dropbox["boxes"]][0]!;
+    // Reach the maximum idle interval without relying on real filesystem
+    // scheduling while the fake clock advances. The watcher never emits.
+    await vi.advanceTimersByTimeAsync(5_100);
+    scan.mockRestore();
+    const handler = vi.spyOn(dropbox as unknown as { handler: LocalCallHandler }, "handler");
+    const id = "e".repeat(24);
+    const response = path.join(handle.dir, `${id}.res`);
+    await writeFile(path.join(handle.dir, `${id}.req`), JSON.stringify({
+      token: registry.mint(scope), body: { command: "whoami", args: {} },
+    }));
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(handler).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await box.sweeping;
+    await Promise.all(box.active.values());
+    expect(JSON.parse(await readFile(response, "utf8"))).toEqual(localOk({}, { engine: "fixture" }));
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    // Discovering a request also resets the cadence without a watch event.
+    const followup = spySweep().mockResolvedValue(undefined);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(followup).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(followup).toHaveBeenCalledTimes(1);
+    await dropbox.closeAll();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("resets the safety cadence on any notification after idle backoff", async () => {
+    const scan = spySweep().mockResolvedValue(undefined);
+    await dropbox.open(scope);
+    await vi.advanceTimersByTimeAsync(5_100);
+    scan.mockClear();
+    listener();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(scan).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(scan).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(scan).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(scan).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(scan).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not rearm a safety timer when a pending scan finishes after close", async () => {
+    const scan = spySweep().mockResolvedValue(undefined);
+    await dropbox.open(scope);
+    const gate = deferred();
+    scan.mockReturnValueOnce(gate.promise);
+    await vi.advanceTimersByTimeAsync(100);
+    const box = [...dropbox["boxes"]][0]!;
+    const pending = box.sweeping;
+    expect(pending).not.toBeNull();
+    await dropbox.closeAll();
+    gate.resolve();
+    await pending;
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -69,10 +136,13 @@ describe("Local dropbox idle cost", () => {
     if (phase === "opening") watchers.watch.mockImplementationOnce(() => { throw new Error("watch unavailable"); });
     const scan = spySweep().mockResolvedValue(undefined);
     await dropbox.open(scope);
+    if (phase === "running") await vi.advanceTimersByTimeAsync(5_100);
     scan.mockClear();
     if (phase === "running") watcher.emit("error", new Error("watch unavailable"));
     await vi.advanceTimersByTimeAsync(100);
     expect(scan).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(900);
+    expect(scan).toHaveBeenCalledTimes(10);
     await dropbox.closeAll();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -149,11 +219,13 @@ describe("Local dropbox idle cost", () => {
     await writeFile(response, "{}");
     box.responses.set(id, Date.now());
     dropbox["scheduleOrphanSweep"](box);
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(2);
     await vi.advanceTimersByTimeAsync(600_001);
     await box.sweeping;
     expect(fs.existsSync(response)).toBe(false);
     expect(box.responses.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(1);
+    await dropbox.closeAll();
     expect(vi.getTimerCount()).toBe(0);
   });
 
