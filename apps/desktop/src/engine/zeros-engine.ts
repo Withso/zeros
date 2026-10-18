@@ -10757,7 +10757,7 @@ export class ZerosEngine {
       }
     }
 
-    const finishLoopObservation = this.cloudWorker ? null : this.slowWorkspaceOperations?.beginEventLoopObservation();
+    const finishLoopObservation = this.cloudWorker ? null : this.slowWorkspaceOperations?.beginEventLoopObservation?.();
     try {
       // Keep the original NORMAL rows and FULL head in one read snapshot across
       // image migration and the outer dispatch awaits. A changed writer or head
