@@ -117,7 +117,7 @@ suite("uncapped staff machine-hour funding", () => {
       inspect: vi.fn(async () => resource(360)), find: vi.fn(async () => [resource()]),
       verifyAbsence: vi.fn(async () => false), stop: vi.fn(), archive: vi.fn(), delete: vi.fn(),
     };
-    const coordinator = new CloudWorkspaceComputeLeaseCoordinator({ pool: runtime, workosEnabled: false, policy,
+    const coordinator = new CloudWorkspaceComputeLeaseCoordinator({ pool: runtime, workosEnabled: false, policy, usageMeterWindowMs: 0,
       providerResolver: { resolve: async () => ({ provider }) } as unknown as CloudWorkspaceProviderResolver });
     return { input, provider, coordinator,
       start: () => coordinator.allocate(input, provider as unknown as CloudWorkspaceProvider, null) };
@@ -378,7 +378,7 @@ suite("uncapped staff machine-hour funding", () => {
     await Promise.all([first.start(), second.start()]);
     await Promise.all([bindAndAge(first), bindAndAge(second)]);
     const providers = new Map([[first.input.workspaceId, first.provider], [second.input.workspaceId, second.provider]]);
-    const worker = () => new CloudWorkspaceComputeLeaseCoordinator({ pool: runtime, workosEnabled: false, policy,
+    const worker = () => new CloudWorkspaceComputeLeaseCoordinator({ pool: runtime, workosEnabled: false, policy, usageMeterWindowMs: 0,
       providerResolver: { resolve: async ({ workspaceId }: { workspaceId: string }) => ({ provider: providers.get(workspaceId) }) } as unknown as CloudWorkspaceProviderResolver });
     await admin.query("UPDATE users SET staff_role=NULL WHERE id=$1", [fixture.userId]);
     const before = await totals();

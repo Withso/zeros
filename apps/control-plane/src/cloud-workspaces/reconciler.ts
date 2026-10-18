@@ -101,6 +101,7 @@ export type CloudWorkspaceReconcilerOptions = {
   provider: CloudWorkspaceProvider;
   providerResolver?: CloudWorkspaceProviderResolver;
   computePolicy?: ManagedComputePolicy;
+  computeUsageMeterWindowMs?: number;
   intervalMs?: number;
   leaseMs?: number;
   orphanGraceMs?: number;
@@ -341,7 +342,9 @@ export class CloudWorkspaceReconciler {
     this.workosEnabled = options.workosEnabled === true;
     this.computeLeases = new CloudWorkspaceComputeLeaseCoordinator({pool:options.pool,provider:options.provider,
       ...(options.providerResolver?{providerResolver:options.providerResolver}:{}),workosEnabled:options.workosEnabled===true,
-      ...(options.computePolicy?{policy:options.computePolicy}:{}),logger:options.logger??console});
+      ...(options.computePolicy?{policy:options.computePolicy}:{}),
+      ...(options.computeUsageMeterWindowMs !== undefined ? { usageMeterWindowMs: options.computeUsageMeterWindowMs } : {}),
+      logger:options.logger??console});
     this.intervalMs = options.intervalMs ?? 60_000;
     this.stoppedDriftIntervalMs = options.stoppedDriftIntervalMs ?? DEFAULT_STOPPED_DRIFT_INTERVAL_MS;
     this.inventoryFallbackMs = options.inventoryFallbackMs ?? DEFAULT_STOPPED_DRIFT_INTERVAL_MS;
