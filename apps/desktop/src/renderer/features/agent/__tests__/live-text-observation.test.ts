@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   observeLiveAgentText,
+  observeLiveToolOutput,
   type LiveAgentTextSource,
 } from "../local-live-text";
-import type { AgentTextMessage } from "../use-agent-session";
+import type { AgentTextMessage, AgentToolMessage } from "../use-agent-session";
 
 function fixture() {
   let message: AgentTextMessage = {
@@ -79,6 +80,35 @@ function fixture() {
 }
 
 describe("Local live text publication", () => {
+  it("keeps command output immediate, hidden-inert and releases both listeners", () => {
+    let message: AgentToolMessage = { id: "command", toolCallId: "command", kind: "tool", toolKind: "execute",
+      title: "Run checks", status: "in_progress", rawOutput: "First", createdAt: 1, updatedAt: 1 };
+    let visible = true;
+    const listeners = new Set<() => void>(), watchers = new Set<() => void>();
+    const source: LiveAgentTextSource = { read: (initial) => initial, readTool: () => message,
+      subscribe: (changed) => { listeners.add(changed); return () => { listeners.delete(changed); }; } };
+    const observer = observeLiveToolOutput(source, message, { visible: () => visible,
+      watch: (changed) => { watchers.add(changed); return () => { watchers.delete(changed); }; } });
+    const changed = vi.fn(), release = observer.subscribe(changed);
+    message = { ...message, rawOutput: "First grows" };
+    for (const notify of listeners) notify();
+    expect(changed).toHaveBeenCalledOnce();
+    expect(observer.getSnapshot().message).toBe(message);
+    for (const notify of listeners) notify();
+    expect(changed).toHaveBeenCalledOnce();
+    visible = false;
+    message = { ...message, rawOutput: "First grows while hidden" };
+    for (const notify of listeners) notify();
+    expect(changed).toHaveBeenCalledOnce();
+    expect(observer.getSnapshot().message).toBe(message);
+    visible = true;
+    for (const notify of watchers) notify();
+    expect(changed).toHaveBeenCalledTimes(2);
+    release();
+    expect(listeners.size).toBe(0);
+    expect(watchers.size).toBe(0);
+  });
+
   it("keeps the first token immediate and publishes only advancing paced text", () => {
     const h = fixture();
     expect(h.text()).toBe("First token");

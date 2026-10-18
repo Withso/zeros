@@ -12,7 +12,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { memo, useCallback, useMemo, useSyncExternalStore } from "react";
-import { observeLiveAgentText } from "../local-live-text";
+import { observeLiveAgentText, observeLiveToolOutput } from "../local-live-text";
 import type { AgentMessage } from "../use-agent-session";
 import type { RendererContext, RendererRegistry } from "./types";
 import { defaultRegistry, resolveRenderer } from "./registry";
@@ -32,10 +32,18 @@ export const MessageView = memo(
     registry = defaultRegistry,
   }: MessageViewProps) {
     const source = ctx.attachmentImagesActive !== false && ctx.isStreaming &&
-      ctx.lastMessageId === suppliedMessage.id && suppliedMessage.kind === "text" && suppliedMessage.role === "agent"
+      ((ctx.lastMessageId === suppliedMessage.id && suppliedMessage.kind === "text" &&
+        (suppliedMessage.role === "agent" || suppliedMessage.role === "thought")) ||
+       (suppliedMessage.kind === "tool" && suppliedMessage.toolKind === "execute" &&
+        suppliedMessage.status === "in_progress" && typeof suppliedMessage.rawOutput === "string"))
       ? ctx.liveTextSource : undefined;
-    const observation = useMemo(() => source && suppliedMessage.kind === "text" ? observeLiveAgentText(source, suppliedMessage) : undefined,
-      [source, suppliedMessage]);
+    const observation = useMemo(() => {
+      if (!source) return undefined;
+      if (suppliedMessage.kind === "tool") return observeLiveToolOutput(source, suppliedMessage);
+      if (suppliedMessage.kind === "text") return observeLiveAgentText(source, suppliedMessage,
+        suppliedMessage.role === "thought" ? { reducedMotion: () => true } : undefined);
+      return undefined;
+    }, [source, suppliedMessage]);
     const fallback = useMemo(() => ({ message: suppliedMessage, pending: false }), [suppliedMessage]);
     const read = useCallback(() => observation?.getSnapshot() ?? fallback, [observation, fallback]);
     const snapshot = useSyncExternalStore(observation?.subscribe ?? noSubscription, read, read);
@@ -65,7 +73,8 @@ export const MessageView = memo(
       || prev.ctx.liveTextSource !== next.ctx.liveTextSource
     )
       return false;
-    if (prev.message.kind === "text" && prev.message.role === "agent") {
+    if (prev.ctx.liveTextSource && prev.ctx.isStreaming !== next.ctx.isStreaming) return false;
+    if (prev.message.kind === "text" && (prev.message.role === "agent" || prev.message.role === "thought")) {
       const wasStreaming = prev.ctx.isStreaming && prev.ctx.lastMessageId === prev.message.id;
       const isStreaming = next.ctx.isStreaming && next.ctx.lastMessageId === next.message.id;
       if (wasStreaming !== isStreaming) return false;
