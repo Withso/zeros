@@ -3,6 +3,7 @@ import type { DesignContextReference } from "@zeros/protocol/design-context";
 import type { RuntimeClient } from "../../platform/bridge/ws-client";
 import { captureDesignFrameContext, createDesignFrameContext, inspectDesignFrameContext } from "../../platform/bridge/design-context-bridge";
 import { filesToAttachments, textFileAttachment } from "./composer-editor/attachment-io";
+import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 
 export interface DesignFrameAttachmentTarget {
   workspaceId: string;
@@ -13,6 +14,19 @@ export interface DesignFrameAttachmentTarget {
   frameId?: string;
   revision?: string;
   includeScreenshot?: boolean;
+  pageId?: string;
+  organizationId?: string | null;
+  placement?: "local" | "cloud";
+  selectionEvent?: number;
+  ownerRevision?: number;
+}
+
+export type DesignFrameAttachmentSelection = DesignFrameAttachmentTarget | DesignFrameAttachmentTarget[];
+
+export function designFrameAttachmentTargets(selection: DesignFrameAttachmentSelection): DesignFrameAttachmentTarget[] {
+  const targets = Array.isArray(selection) ? selection : [selection];
+  if (targets.length > DESIGN_SELECTION_NODE_LIMIT) throw new Error("Too many selected Design targets.");
+  return [...new Map(targets.map(target => [JSON.stringify([target.workspaceId, target.directoryId, target.frame, target.nodeId ?? null]), { ...target }])).values()];
 }
 
 function sameReference(left: DesignContextReference, right: DesignContextReference): boolean {
@@ -25,8 +39,20 @@ function sameReference(left: DesignContextReference, right: DesignContextReferen
  * this request; the result uses normal attachment persistence and delivery. */
 export async function prepareDesignFrameAttachments(
   bridge: RuntimeClient,
-  input: DesignFrameAttachmentTarget,
+  input: DesignFrameAttachmentSelection,
 ) {
+  const requested = Array.isArray(input) ? input : [input];
+  const first = requested[0];
+  if (requested.some(target => target.workspaceId !== first.workspaceId || target.directoryId !== first.directoryId || target.pageId !== first.pageId ||
+    target.organizationId !== first.organizationId || target.placement !== first.placement))
+    throw new Error("The selected Design targets belong to different workspaces or pages.");
+  const targets = designFrameAttachmentTargets(input);
+  const attachments = [];
+  for (const target of targets) attachments.push(...await prepareDesignFrameTargetAttachments(bridge, target));
+  return attachments;
+}
+
+async function prepareDesignFrameTargetAttachments(bridge: RuntimeClient, input: DesignFrameAttachmentTarget) {
   const target = { ...input };
   const reference = await createDesignFrameContext(
     bridge, target.workspaceId, target.frame, target.nodeId, target.directoryId,

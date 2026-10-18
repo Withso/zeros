@@ -201,7 +201,7 @@ export function cloudOutgoing(
   if (message.params) {
     const original = record(message.params);
     const params = mapFields(scope, original, "out");
-    if (message.op === "design.context.inspect" && original.reference)
+    if (["design.context.inspect", "design.context.capture"].includes(String(message.op)) && original.reference)
       params.reference = cloudDesignReference(scope, original.reference, "out");
     // Desktop directory lifecycle calls identify their repository by root.
     // The cloud worker additionally fences them to its admitted primary row.
@@ -285,7 +285,7 @@ export function cloudIncoming(
     const result = mapFields(scope, record(message.result), "in");
     if (typeof message.op === "string" &&
         (message.op.startsWith("design.") || message.op === "workspace.setMode")) {
-      if (["design.context.create", "design.context.inspect", "design.verification.open"].includes(message.op) && result.reference)
+      if (["design.context.create", "design.context.inspect", "design.context.capture", "design.verification.open"].includes(message.op) && result.reference)
         result.reference = cloudDesignReference(scope, result.reference, "in");
       if (result.snapshot) {
         const snapshot = record(result.snapshot);

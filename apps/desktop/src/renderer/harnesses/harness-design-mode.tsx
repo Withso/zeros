@@ -7,7 +7,7 @@ import { createRoot } from "react-dom/client";
 import { ComposerAttachmentMenu } from "../features/agent/composer-attachment-menu";
 import { ComposerDesignTag } from "../features/agent/composer-design-tag";
 import { ComposerDesignFrame, useComposerDesignFrame } from "../features/agent/composer-design-frame";
-import type { DesignFrameAttachmentTarget } from "../features/agent/design-frame-attachment";
+import type { DesignFrameAttachmentSelection } from "../features/agent/design-frame-attachment";
 import { useDesignWorkspaceUiStore } from "../features/design-workspace/state/design-workspace-ui";
 import { designWorkspaceSnapshotCache } from "../features/design-workspace/state/design-workspace-cache";
 import { upsertProject } from "../state/projects-store";
@@ -80,9 +80,9 @@ const tools = [
   "design_history_undo",
 ];
 
-const parked = new Map<string, DesignFrameAttachmentTarget | null | undefined>();
+const parked = new Map<string, DesignFrameAttachmentSelection | null | undefined>();
 function FrameContextFixture({ chatId, mode, concealed }: { chatId: string; mode: "code" | "design"; concealed: boolean }) {
-  const [submitted, setSubmitted] = useState<DesignFrameAttachmentTarget | null>(null);
+  const [submitted, setSubmitted] = useState<DesignFrameAttachmentSelection | null>(null);
   const context = useComposerDesignFrame({
     chatId, cwd: chatId === "a" ? folder : `${folder}/other`, intent: mode, active: !concealed,
     initialFrame: parked.get(chatId), onPin: useCallback(target => { parked.set(chatId, target); }, [chatId]),

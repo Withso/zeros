@@ -423,7 +423,7 @@ function AgentChatBody({
     text: string;
     attachments: ComposerAttachment[];
     json: object | null;
-    designFrame?: import("./design-frame-attachment").DesignFrameAttachmentTarget | null;
+    designFrame?: import("./design-frame-attachment").DesignFrameAttachmentSelection | null;
   }>({
     text: seededDraft?.text ?? "",
     attachments: seededDraft?.attachments ?? [],
@@ -924,7 +924,7 @@ function AgentChatBody({
     active: interactive && !readOnly,
     intent: chatThread?.composerMode ?? "code",
     initialFrame: seededDraft?.designFrame,
-    onPin: useCallback((target: import("./design-frame-attachment").DesignFrameAttachmentTarget | null | undefined) => {
+    onPin: useCallback((target: import("./design-frame-attachment").DesignFrameAttachmentSelection | null | undefined) => {
       composerLiveRef.current.designFrame = target;
       if (chatId && !readOnly) setLiveChatDraft(chatId, { ...composerLiveRef.current });
     }, [chatId, readOnly]),
@@ -1877,7 +1877,7 @@ function AgentChatBody({
     insertTextAttachment: stageTextAttachment,
     removeAttachmentBySourceKey: unstageAttachment,
     stagedSourceKeys,
-    clear: clearComposer,
+    clear: clearComposerEditor,
     setContent: setComposerContent,
     appendText: appendComposerText,
     focus: focusComposer,
@@ -1888,6 +1888,7 @@ function AgentChatBody({
     dragActive,
     dragHandlers,
   } = composer;
+  const clearComposer = () => { clearComposerEditor(); designFrameContext.clear(); };
   composerFocusRef.current = focusComposer;
   // The composer stays editable in EVERY session state. `failed` /
   // `auth-required` used to flip the editor read-only here (mirroring the old
@@ -3130,7 +3131,7 @@ function AgentChatBody({
     if (readOnly || !chatId) return;
     const s = serializeComposerState();
     if (!s || s.isEmpty) {
-      composerLiveRef.current = { text: "", attachments: [], json: null };
+      composerLiveRef.current = { text: "", attachments: [], json: null, designFrame: composerLiveRef.current.designFrame };
       setLiveChatDraft(chatId, composerLiveRef.current);
       return;
     }
@@ -3147,7 +3148,7 @@ function AgentChatBody({
   const persistComposerDraft = useCallback(() => {
     if (readOnly || !chatId) return;
     const { text, attachments: atts, json, designFrame } = composerLiveRef.current;
-    if (text.trim() === "" && atts.length === 0) {
+    if (text.trim() === "" && atts.length === 0 && designFrame === undefined) {
       dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
       return;
     }
@@ -3816,7 +3817,7 @@ function AgentChatBody({
       (extras?.extraAttachments?.length ?? 0) +
       (extras?.stagedAttachments?.length ?? 0);
     const commandHasAttachments =
-      localAttachments.length > 0 || importCount > 0 || extraAttachCount > 0;
+      localAttachments.length > 0 || importCount > 0 || extraAttachCount > 0 || submittedDesignFrame !== null;
     const bareCommand = displayText.match(/^\/([A-Za-z0-9_-]+)$/);
     const inlineCommand = bareInlineSlashCommand(
       session.agentId ?? chatThread?.agentId,
@@ -3835,6 +3836,7 @@ function AgentChatBody({
       localAttachments.length === 0 &&
       importCount === 0 &&
       extraAttachCount === 0
+      && !submittedDesignFrame
     ) {
       return;
     }
@@ -3865,7 +3867,7 @@ function AgentChatBody({
       await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent, extras?.followUpBehavior ?? getFollowUpBehavior());
       const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
       if (unchanged) {
-        clearComposer(); designFrameContext.pin(undefined);
+        clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
       }
       if (override !== undefined || unchanged)
         dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
@@ -4108,8 +4110,8 @@ function AgentChatBody({
     const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
     if (submittedDraftUnchanged) {
-      clearComposer();
-      designFrameContext.pin(undefined);
+      clearComposerEditor();
+      designFrameContext.consume(submittedDesignFrame);
     }
     // Drop any stashed draft for this chat —
     // the user just sent it. Defensive against the cleanup-on-unmount

@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDesignSelectionReferencesSmoke } from "./ui-smoke-design-selection-references.mjs";
 
 export async function runDesignModeSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -118,4 +119,5 @@ export async function runDesignModeSmoke({ page, check }) {
   await page
     .locator("[data-design-mode-fixture]")
     .screenshot({ path: ".context/design-mode-v1.png" });
+  await runDesignSelectionReferencesSmoke({ page, check });
 }

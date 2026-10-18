@@ -50,20 +50,21 @@ import {
   designWorkspaceView,
   isCurrentDesignPageOwner,
   isValidDesignNodeId,
+  normalizeDesignSelectedTargets,
   useDesignWorkspaceUiStore,
   type DesignPageOwner,
 } from "./design-workspace-ui";
 import { requestDesignLayerReveal } from "./design-layer-disclosure";
+import { designSelectionTargetKey, type DesignSelectionTarget } from "../design-selected-targets";
 import {
   resolveDesignFrameBodyTarget,
   type DesignFrameBodyIntent,
 } from "../design-layer-tree";
 
 function selectionPageOwnerIsCurrent(owner: DesignPageOwner): boolean {
-  // Legacy callers may begin a runtime read before their first directory bind.
-  // Once a page is confirmed, ownership is always exact.
+  const current = designWorkspaceView(owner.workspaceId);
   return owner.pageId === undefined && owner.directoryId === undefined
-    ? designWorkspaceView(owner.workspaceId).activePageId === undefined
+    ? current.activePageId === undefined && (owner.revision === undefined || owner.revision === (current.ownerRevision ?? 0))
     : isCurrentDesignPageOwner(owner);
 }
 
@@ -96,6 +97,7 @@ interface DesignSelectionDetailDemand {
   folder: string;
   directoryId: string | undefined;
   pageId: string | undefined;
+  ownerRevision: number;
   frame: DesignCanvasFrameWire;
   nodeIds: readonly string[];
   generation: number;
@@ -340,6 +342,7 @@ function selectionDetailDemandIsCurrent(
     selectionDetailDemandByWorkspace.get(demand.workspaceId) === demand &&
     !demand.controller.signal.aborted &&
     view.activePageId === demand.pageId &&
+    (view.ownerRevision ?? 0) === demand.ownerRevision &&
     selectionIsCurrent(
       demand.workspaceId,
       demand.frame.file,
@@ -390,6 +393,7 @@ function requestDesignSelectionDetails(input: {
     workspaceId: input.workspaceId,
     folder: input.folder,
     pageId: designWorkspaceView(input.workspaceId).activePageId,
+    ownerRevision: designWorkspaceView(input.workspaceId).ownerRevision ?? 0,
     directoryId:
       readSelectionSnapshot(input.workspaceId)?.directoryId ??
       designWorkspaceView(input.workspaceId).directoryId,
@@ -609,6 +613,7 @@ useDesignWorkspaceUiStore.subscribe((state) => {
     const view = state.byWorkspace[demand.workspaceId];
     if (
       !view ||
+      (view.ownerRevision ?? 0) !== demand.ownerRevision ||
       view.selectedFrame !== demand.frame.file ||
       view.selectedNodeIds.join("\u0000") !== demand.nodeIds.join("\u0000")
     )
@@ -819,6 +824,9 @@ export async function selectDesignFrame(
   frame: DesignCanvasFrameWire | null,
   options?: {
     selected?: boolean;
+    additive?: boolean;
+    explicit?: boolean;
+    targets?: readonly DesignSelectionTarget[];
     /** A user gesture on the canvas: bring the frame's Layers row into view.
      * Off by default, because the resting activation republishes on every
      * snapshot and must not pull the list away from where the user left it. */
@@ -829,6 +837,15 @@ export async function selectDesignFrame(
   const owner = options?.owner ?? captureDesignPageOwner(workspaceId);
   if (owner.workspaceId !== workspaceId || !selectionPageOwnerIsCurrent(owner) ||
     (frame?.pageId && owner.pageId && frame.pageId !== owner.pageId)) return;
+  if (frame && options?.additive) {
+    const current = designWorkspaceView(workspaceId);
+    const target = { frame: frame.file };
+    const selected = current.selectedTargets.some(candidate => designSelectionTargetKey(candidate) === designSelectionTargetKey(target));
+    await selectDesignTargets({ workspaceId, folder: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.folder ?? "", owner,
+      frames: [frame, ...(readSelectionSnapshot(workspaceId)?.frames ?? [])],
+      targets: selected ? current.selectedTargets.filter(candidate => designSelectionTargetKey(candidate) !== designSelectionTargetKey(target)) : [target, ...current.selectedTargets] });
+    return;
+  }
   clearSelectionDetailDemand(workspaceId);
   nextGeneration(selectionGenerationByWorkspace, workspaceId);
   const version = nextSelectionVersion();
@@ -842,15 +859,20 @@ export async function selectDesignFrame(
   const frameSelected = options?.selected === true;
   const current = designWorkspaceView(workspaceId);
   if (
+    options?.explicit !== false ||
+    options?.targets ||
     current.selectedFrame !== frame.file ||
     current.selectedNodeId !== null ||
     current.frameSelected !== frameSelected
   ) {
-    useDesignWorkspaceUiStore
-      .getState()
-      .setSelection(workspaceId, frame.file, null, undefined, {
+    const store = useDesignWorkspaceUiStore.getState();
+    if (options?.targets) store.setSelectedTargets(workspaceId, options.targets, { owner, activeFrame: frame.file, explicit: options.explicit });
+    else store.setSelection(workspaceId, frame.file, null, undefined, {
         frameSelected,
         owner,
+        additive: options?.additive,
+        toggle: options?.additive,
+        explicit: options?.explicit,
       });
   }
   if (options?.reveal) revealDesignSelectionPath(workspaceId, frame, []);
@@ -875,6 +897,7 @@ export async function selectDesignNode(input: {
    * an unchanged node passes false so the user's folds and scroll survive. */
   reveal?: boolean;
   owner?: DesignPageOwner;
+  targets?: readonly DesignSelectionTarget[];
 }): Promise<DesignRuntimeNodeDetails | null> {
   const { workspaceId, folder, nodeId } = input;
   const owner = input.owner ?? captureDesignPageOwner(workspaceId);
@@ -888,14 +911,15 @@ export async function selectDesignNode(input: {
   const version = nextSelectionVersion();
   const current = designWorkspaceView(workspaceId);
   if (
+    input.reveal !== false || input.targets ||
     current.selectedFrame !== frame.file ||
     current.selectedNodeId !== nodeId ||
     current.selectedNodeIds.length !== 1 ||
     current.selectedNodeIds[0] !== nodeId
   ) {
-    useDesignWorkspaceUiStore
-      .getState()
-      .setSelection(workspaceId, frame.file, nodeId, undefined, { owner });
+    const store = useDesignWorkspaceUiStore.getState();
+    if (input.targets) store.setSelectedTargets(workspaceId, input.targets, { owner, explicit: input.reveal !== false });
+    else store.setSelection(workspaceId, frame.file, nodeId, undefined, { owner, explicit: input.reveal !== false });
   }
   if (input.reveal !== false) {
     revealDesignSelectionPath(workspaceId, frame, [nodeId]);
@@ -907,7 +931,7 @@ export async function selectDesignNode(input: {
     frame,
     nodeIds: [nodeId],
     generation,
-    ...(input.details ? { details: [input.details] } : {}),
+    details: input.details ? [input.details] : undefined,
     forceRuntimeRead: input.forceRuntimeRead,
   });
   const details = (await demand.read)?.[0];
@@ -973,6 +997,7 @@ export async function selectDesignNodes(input: {
   /** Open and scroll to the primary Layers row (default); see selectDesignNode. */
   reveal?: boolean;
   owner?: DesignPageOwner;
+  targets?: readonly DesignSelectionTarget[];
 }): Promise<DesignRuntimeNodeDetails[] | null> {
   const owner = input.owner ?? captureDesignPageOwner(input.workspaceId);
   if (owner.workspaceId !== input.workspaceId || !selectionPageOwnerIsCurrent(owner) ||
@@ -998,9 +1023,9 @@ export async function selectDesignNodes(input: {
     input.workspaceId,
   );
   const version = nextSelectionVersion();
-  useDesignWorkspaceUiStore
-    .getState()
-    .setSelection(input.workspaceId, frame.file, primary, nodeIds, { owner });
+  const store = useDesignWorkspaceUiStore.getState();
+  if (input.targets) store.setSelectedTargets(input.workspaceId, input.targets, { owner, explicit: input.reveal !== false });
+  else store.setSelection(input.workspaceId, frame.file, primary, nodeIds, { owner, explicit: input.reveal !== false });
   if (input.reveal !== false) {
     revealDesignSelectionPath(input.workspaceId, frame, nodeIds);
   }
@@ -1069,31 +1094,63 @@ export async function toggleDesignNodeSelection(input: {
   frame: DesignCanvasFrameWire;
   nodeId: string;
   details?: DesignRuntimeNodeDetails;
+  owner?: DesignPageOwner;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
   const current = designWorkspaceView(input.workspaceId);
-  const existing =
-    current.selectedFrame === input.frame.file ? current.selectedNodeIds : [];
-  const wasSelected = existing.includes(input.nodeId);
-  const nextIds = wasSelected
-    ? existing.filter((nodeId) => nodeId !== input.nodeId)
-    : [...existing, input.nodeId];
-  if (nextIds.length === 0) {
-    await selectDesignFrame(input.workspaceId, input.frame);
+  const target = { frame: input.frame.file, nodeId: input.nodeId };
+  const key = designSelectionTargetKey(target);
+  const existing = current.selectedTargets;
+  const wasSelected = existing.some(candidate => designSelectionTargetKey(candidate) === key);
+  return selectDesignTargets({ ...input,
+    targets: wasSelected ? existing.filter(candidate => designSelectionTargetKey(candidate) !== key) : [target, ...existing],
+    frames: [input.frame, ...(readSelectionSnapshot(input.workspaceId)?.frames ?? [])],
+    details: input.details ? [input.details] : undefined,
+  });
+}
+
+export async function selectDesignTargets(input: {
+  workspaceId: string;
+  folder: string;
+  targets: readonly DesignSelectionTarget[];
+  frames?: readonly DesignCanvasFrameWire[];
+  details?: readonly DesignRuntimeNodeDetails[];
+  owner?: DesignPageOwner;
+  explicit?: boolean;
+}): Promise<DesignRuntimeNodeDetails[] | null> {
+  const owner = input.owner ?? captureDesignPageOwner(input.workspaceId);
+  if (!selectionPageOwnerIsCurrent(owner)) return null;
+  const targets = normalizeDesignSelectedTargets(input.targets);
+  const primary = targets[0];
+  const frame = (input.frames ?? readSelectionSnapshot(input.workspaceId)?.frames)?.find(candidate => candidate.file === primary?.frame);
+  if (primary?.nodeId && frame) return selectDesignNodes({ ...input, targets, frame,
+    nodeIds: targets.filter(target => target.frame === frame.file && target.nodeId).map(target => target.nodeId!),
+    primaryNodeId: primary.nodeId, reveal: input.explicit !== false,
+  });
+  if (primary && frame) {
+    await selectDesignFrame(input.workspaceId, frame, { selected: true, targets, owner, explicit: input.explicit, reveal: input.explicit !== false });
     return [];
   }
-  const primary = wasSelected
-    ? current.selectedNodeId && nextIds.includes(current.selectedNodeId)
-      ? current.selectedNodeId
-      : nextIds[0]
-    : input.nodeId;
-  return selectDesignNodes({
-    workspaceId: input.workspaceId,
-    folder: input.folder,
-    frame: input.frame,
-    nodeIds: nextIds,
-    primaryNodeId: primary,
-    ...(input.details ? { details: [input.details] } : {}),
-  });
+  clearSelectionDetailDemand(input.workspaceId);
+  nextGeneration(selectionGenerationByWorkspace, input.workspaceId);
+  useDesignWorkspaceUiStore.getState().setSelectedTargets(input.workspaceId, targets, { owner, explicit: input.explicit });
+  await designSetSelection(input.workspaceId, null, nextSelectionVersion());
+  return [];
+}
+
+export function clearDesignCanvasSelection(workspaceId: string, owner: DesignPageOwner, targets: readonly DesignSelectionTarget[]): void {
+  if (!selectionPageOwnerIsCurrent(owner)) return;
+  const current = designWorkspaceView(workspaceId);
+  const removed = new Set(targets.map(designSelectionTargetKey));
+  const remaining = current.selectedTargets.filter(target => !removed.has(designSelectionTargetKey(target)));
+  if (remaining.length === current.selectedTargets.length) return;
+  if (remaining.length) {
+    void selectDesignTargets({ workspaceId, folder: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.folder ?? "", targets: remaining, owner, explicit: false }).catch(() => {});
+    return;
+  }
+  clearSelectionDetailDemand(workspaceId);
+  nextGeneration(selectionGenerationByWorkspace, workspaceId);
+  useDesignWorkspaceUiStore.getState().setSelectedTargets(workspaceId, remaining, { owner, explicit: false });
+  void designSetSelection(workspaceId, null, nextSelectionVersion()).catch(() => {});
 }
 
 export async function selectDesignNodeAtLocation(input: {
@@ -1156,7 +1213,7 @@ export async function selectDesignFrameBodyAtLocation(
   const labeledFrame = frame.kind !== "text";
   const selectFrame = async () => {
     // Empty-space Shift-click must not replace an existing group of layers.
-    if (input.additive && current.selectedNodeIds.length > 0) return null;
+    if (input.additive && current.selectedFrame === frame.file && current.selectedNodeIds.length > 0) return null;
     const selected = !(
       input.additive &&
       current.selectedFrame === frame.file &&
@@ -1164,7 +1221,7 @@ export async function selectDesignFrameBodyAtLocation(
     );
     // A click on the frame is a user gesture: bring its Layers row into view,
     // even when the frame was already the selection.
-    await selectDesignFrame(workspaceId, frame, { selected, reveal: selected, owner });
+    await selectDesignFrame(workspaceId, frame, { selected: input.additive ? true : selected, additive: input.additive, reveal: selected, owner });
     return null;
   };
   if (labeledFrame && input.intent === "plain" && !selectedNodeId) {
@@ -1379,6 +1436,39 @@ export async function selectDesignNodesInRect(input: {
     if (!isCurrent()) return null;
     throw error;
   }
+}
+
+export async function selectDesignTargetsInRect(input: {
+  workspaceId: string;
+  folder: string;
+  frames: readonly DesignCanvasFrameWire[];
+  rect: DesignRuntimeRect;
+  startFrame?: DesignCanvasFrameWire;
+  scopeNodeId?: string | null;
+  additive?: boolean;
+  owner?: DesignPageOwner;
+}): Promise<DesignRuntimeNodeDetails[] | null> {
+  const owner = input.owner ?? captureDesignPageOwner(input.workspaceId);
+  if (!selectionPageOwnerIsCurrent(owner)) return null;
+  const generation = nextGeneration(selectionGenerationByWorkspace, input.workspaceId);
+  const initial = designWorkspaceView(input.workspaceId);
+  const overlaps = (frame: DesignCanvasFrameWire) => frame.x < input.rect.x + input.rect.width && frame.y < input.rect.y + input.rect.height &&
+    frame.x + frame.width > input.rect.x && frame.y + frame.height > input.rect.y;
+  const frames = input.frames.filter(frame => (!frame.pageId || !owner.pageId || frame.pageId === owner.pageId) && overlaps(frame)).slice(0, DESIGN_SELECTION_NODE_LIMIT);
+  const targets: DesignSelectionTarget[] = [];
+  const startFrame = frames.find(frame => frame.file === input.startFrame?.file);
+  const runtime = startFrame ? designFrameRuntime(input.workspaceId, startFrame.file) : null;
+  const runtimeSource = runtime?.sourceVersion;
+  let details: DesignRuntimeNodeDetails[] = [];
+  if (startFrame) {
+    details = await inspectDesignNodesInRect({ workspaceId: input.workspaceId, frame: startFrame, scopeNodeId: input.scopeNodeId,
+      rect: { ...input.rect, x: input.rect.x - startFrame.x, y: input.rect.y - startFrame.y } });
+    targets.push(...details.map(node => ({ frame: startFrame.file, nodeId: node.oid })));
+  }
+  targets.push(...frames.filter(frame => frame !== startFrame).map(frame => ({ frame: frame.file })));
+  if (!selectionPageOwnerIsCurrent(owner) || selectionGenerationByWorkspace.get(input.workspaceId) !== generation ||
+    (startFrame && (designFrameRuntime(input.workspaceId, startFrame.file) !== runtime || runtime?.sourceVersion !== runtimeSource || runtime?.isActive?.() === false))) return null;
+  return selectDesignTargets({ ...input, owner, details, targets: input.additive ? [...targets, ...initial.selectedTargets] : targets });
 }
 
 /** Everything one gesture frame paints from, in one round trip.
@@ -1921,68 +2011,34 @@ export function reconcileDesignRuntimeSnapshot(input: {
     warnings: snapshot.warnings,
   });
   const view = designWorkspaceView(workspaceId);
-  if (view.selectedFrame !== frame.file) return;
-  const nodeId = view.selectedNodeId;
-  if (
-    nodeId &&
-    nodeId !== snapshot.frame.oid &&
-    !treeContainsOid(snapshot.tree, nodeId)
-  ) {
-    void selectDesignFrame(workspaceId, frame).catch(() => {
-      // The local authoritative fallback remains valid if engine publication
-      // is briefly unavailable; the next ready event republishes it.
-    });
+  const survivingTargets = view.selectedTargets.filter(target => target.frame !== frame.file || !target.nodeId ||
+    target.nodeId === snapshot.frame.oid || treeContainsOid(snapshot.tree, target.nodeId));
+  if (survivingTargets.length !== view.selectedTargets.length) {
+    void selectDesignTargets({ workspaceId, folder, targets: survivingTargets, frames: readSelectionSnapshot(workspaceId)?.frames ?? [frame], explicit: false }).catch(() => {});
     return;
   }
-  if (nodeId) {
-    const survivingNodeIds = view.selectedNodeIds.filter(
-      (candidate) =>
-        candidate === snapshot.frame.oid ||
-        treeContainsOid(snapshot.tree, candidate),
-    );
-    if (
-      survivingNodeIds.join("\u0000") === view.selectedNodeIds.join("\u0000")
-    ) {
-      refreshDesignSelectionDetails({
-        workspaceId,
-        folder,
-        frame,
-        nodeIds: survivingNodeIds,
-        generation:
-          selectionGenerationByWorkspace.get(workspaceId) ??
-          nextGeneration(selectionGenerationByWorkspace, workspaceId),
-        ...(nodeId === snapshot.frame.oid ? { details: [snapshot.frame] } : {}),
-        forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
-      });
-      return;
+  if (view.selectedFrame !== frame.file) {
+    const runtime = designFrameRuntime(workspaceId, frame.file);
+    const owner = captureDesignPageOwner(workspaceId);
+    const wanted = view.selectedTargets.filter(target => target.frame === frame.file && target.nodeId);
+    for (const target of wanted) {
+      if (!runtime || designRuntimeFrameState(workspaceId, frame.file)?.detailsByNode[target.nodeId!]?.sourceVersion === frame.sourceVersion) continue;
+      void runtime.getNodeDetails(target.nodeId!).then(details => {
+        if (!selectionPageOwnerIsCurrent(owner) || designFrameRuntime(workspaceId, frame.file) !== runtime ||
+          details.sourceVersion !== frame.sourceVersion || !designWorkspaceView(workspaceId).selectedTargets.some(candidate => designSelectionTargetKey(candidate) === designSelectionTargetKey(target))) return;
+        useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, folder, frame.file, details, frame.sourceVersion);
+      }).catch(() => {});
     }
-    if (survivingNodeIds.length > 1) {
-      void selectDesignNodes({
-        workspaceId,
-        folder,
-        frame,
-        nodeIds: survivingNodeIds,
-        primaryNodeId: nodeId,
-        ...(nodeId === snapshot.frame.oid ? { details: [snapshot.frame] } : {}),
-        forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
-        reveal: false,
-      }).catch(() => {
-        // Last confirmed exact-key group remains visible during revalidation.
-      });
-      return;
-    }
-    void selectDesignNode({
-      workspaceId,
-      folder,
-      frame,
-      nodeId,
-      ...(nodeId === snapshot.frame.oid ? { details: snapshot.frame } : {}),
-      forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
-      reveal: false,
-    }).catch(() => {
-      // Last confirmed exact-key details remain visible during revalidation.
-    });
   }
+  if (view.selectedFrame !== frame.file) return;
+  const nodeId = view.selectedNodeId;
+  if (!nodeId) return;
+  refreshDesignSelectionDetails({
+    workspaceId, folder, frame, nodeIds: view.selectedNodeIds,
+    generation: selectionGenerationByWorkspace.get(workspaceId) ?? nextGeneration(selectionGenerationByWorkspace, workspaceId),
+    ...(nodeId === snapshot.frame.oid ? { details: [snapshot.frame] } : {}),
+    forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
+  });
 }
 
 /** Share one exact-generation runtime-audit publication between ready events,

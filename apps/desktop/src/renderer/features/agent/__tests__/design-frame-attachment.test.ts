@@ -54,7 +54,7 @@ describe("submitted Design frame attachments", () => {
     expect(await file.text()).toBe("fixture pixels");
   });
 
-  it.each(["workspaceId", "directoryId", "frame", "frameId", "revision"] as const)("rejects stale capture %s before encoding an image", async (key) => {
+  it.each(["workspaceId", "directoryId", "frame", "frameId", "nodeId", "revision"] as const)("rejects stale capture %s before encoding an image", async (key) => {
     mocks.capture.mockResolvedValue({ reference: { ...reference, [key]: "replaced" }, mimeType: "image/png", data: btoa("stale") });
     await expect(prepareDesignFrameAttachments(bridge, { ...target, includeScreenshot: true })).rejects.toThrow(/changed while capturing/);
     expect(mocks.images).not.toHaveBeenCalled();
@@ -63,5 +63,24 @@ describe("submitted Design frame attachments", () => {
   it("does not attach inspection source from a different reference", async () => {
     mocks.inspect.mockResolvedValue({ status: "ready", reference: { ...reference, directoryId: "other" }, source: "Wrong source", directory: "Other", width: 390, height: 844 });
     await expect(prepareDesignFrameAttachments(bridge, target)).rejects.toThrow(/changed/);
+  });
+
+  it("delivers every unique frame and nested element in a frozen selection", async () => {
+    const targets = [target, { ...target, frame: "tablet.html", nodeId: "parent" }, { ...target, frame: "tablet.html", nodeId: "child" }];
+    mocks.create.mockImplementation(async (_bridge, workspaceId, frame, nodeId, directoryId) => ({ ...reference, workspaceId, directoryId, frame, ...(nodeId ? { nodeId } : {}) }));
+    mocks.inspect.mockImplementation(async (_bridge, ref) => ({ status: "ready", reference: ref, directory: "Design", source: `<main>${ref.nodeId ?? ref.frame}</main>`, width: 390, height: 844 }));
+    const sending = prepareDesignFrameAttachments(bridge, [...targets, targets[1]]);
+    targets[1].frame = "replaced.html";
+    const attachments = await sending;
+    expect(mocks.create).toHaveBeenCalledTimes(3);
+    expect(attachments).toHaveLength(3);
+    expect(attachments.map(item => item.text).join("\n")).toContain('"nodeId":"parent"');
+    expect(attachments.map(item => item.text).join("\n")).toContain('"nodeId":"child"');
+    expect(attachments.map(item => item.text).join("\n")).not.toContain("replaced.html");
+  });
+
+  it.each(["workspaceId", "directoryId", "pageId"])("rejects a mixed %s group before preparing any source", async key => {
+    await expect(prepareDesignFrameAttachments(bridge, [target, { ...target, [key]: "foreign" }])).rejects.toThrow(/different workspaces or pages/);
+    expect(mocks.create).not.toHaveBeenCalled();
   });
 });

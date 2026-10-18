@@ -167,6 +167,7 @@ async function main() {
     return;
   }
   const workbenchHarness = new URLSearchParams(location.search).has("workbench");
+  const selectionReferencesHarness = new URLSearchParams(location.search).has("selectionReferences");
   const pagesHarness = new URLSearchParams(location.search).has("pages");
   const workspaceId = pagesHarness ? "ws_design_pages_harness" : "ws_design_harness";
   const workspacePath =
@@ -209,6 +210,7 @@ async function main() {
   const React = await import("react");
   const WorkbenchPane = workbenchHarness ? (await import("../shell/workbench/workbench-pane")).WorkbenchPane : null;
   const ConversationPane = workbenchHarness ? (await import("../shell/conversation/conversation-pane")).ConversationPane : null;
+  const ReferenceFixture = selectionReferencesHarness ? (await import("./harness-design-selection-reference")).DesignSelectionReferenceFixture : null;
   const { ActionsCtx } = await import("../features/agent/sessions-context");
   const { createRoot } = await import("react-dom/client");
   const { flushSync } = await import("react-dom");
@@ -274,6 +276,7 @@ async function main() {
   }));
   designWorkspaceSnapshotCache.setData(workspaceId, {
     protocolCapability: null,
+    ...(selectionReferencesHarness ? { directoryId: "design_harness", directory: "North One - Design" } : {}),
     frames: [
       {
         file: "home.html",
@@ -1784,6 +1787,7 @@ async function main() {
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
         <main className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
           {WorkbenchPane && ConversationPane ? <><ConversationPane workspace={workspace} /><WorkbenchPane surfaceActive onToggleWorkbench={() => {}} /></> : <>
+          {ReferenceFixture && <ReferenceFixture folder={workspacePath} />}
           <DesignWorkspaceColumn
             workspace={workspace}
             folder={workspacePath}

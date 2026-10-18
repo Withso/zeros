@@ -37,6 +37,8 @@ import {
   selectDesignNode,
   selectDesignNodes,
   selectDesignNodesInRect,
+  selectDesignTargetsInRect,
+  clearDesignCanvasSelection,
   selectDesignNodeAtLocation,
   selectDesignFrameBodyAtLocation,
   setDesignNodeVisibility,
@@ -111,6 +113,65 @@ describe("design selection workflows", () => {
     resetDesignLayerDisclosureForTests();
     mocks.designFrameRuntime.mockReset();
     vi.clearAllMocks();
+  });
+
+  it("publishes repeated explicit selection events but not resting frame refreshes", async () => {
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    const first = designWorkspaceView("workspace-a").selectionEvent;
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    expect(designWorkspaceView("workspace-a").selectionEvent).toBeGreaterThan(first!);
+    const second = designWorkspaceView("workspace-a").selectionEvent;
+    await selectDesignFrame("workspace-a", FRAME, { selected: true, explicit: false });
+    expect(designWorkspaceView("workspace-a").selectionEvent).toBe(second);
+  });
+
+  it("keeps explicit frame and node references across additive clicks", async () => {
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    const other = { ...FRAME, file: "other.html" };
+    await toggleDesignNodeSelection({ workspaceId: "workspace-a", folder: "/design", frame: other, nodeId: "nested", details: details("nested") });
+    expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: "other.html", nodeId: "nested" }, { frame: FRAME.file }]);
+    await selectDesignFrame("workspace-a", FRAME, { selected: true, additive: true });
+    expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: "other.html", nodeId: "nested" }]);
+  });
+
+  it("selects every intersecting scene frame from an outer marquee", async () => {
+    const other = { ...FRAME, file: "other.html", x: 1600 };
+    await selectDesignTargetsInRect({ workspaceId: "workspace-a", folder: "/design", frames: [FRAME, other], rect: { x: -1, y: -1, width: 3200, height: 1000 } });
+    expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: "home.html" }, { frame: "other.html" }]);
+    expect(mocks.designFrameRuntime).not.toHaveBeenCalled();
+  });
+
+  it("keeps a held inner marquee from restoring selection after composer removal", async () => {
+    let release!: (nodes: DesignRuntimeNodeDetails[]) => void;
+    mocks.designFrameRuntime.mockReturnValue({ getElementsInRect: () => new Promise(resolve => { release = resolve; }) });
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    const pending = selectDesignTargetsInRect({ workspaceId: "workspace-a", folder: "/design", frames: [FRAME], startFrame: FRAME, rect: { x: 0, y: 0, width: 100, height: 100 } });
+    clearDesignCanvasSelection("workspace-a", captureDesignPageOwner("workspace-a"), [{ frame: FRAME.file }]);
+    release([details("late")]);
+    expect(await pending).toBeNull();
+    expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([]);
+  });
+
+  it("removes only corresponding targets and preserves source-view focus state", async () => {
+    const store = useDesignWorkspaceUiStore.getState();
+    store.setSelection("workspace-a", FRAME.file, "parent");
+    store.setSelection("workspace-a", "other.html", null, [], { additive: true, frameSelected: true });
+    store.setCodeView("workspace-a", true);
+    store.setSelection("workspace-b", FRAME.file, "unrelated");
+    clearDesignCanvasSelection("workspace-a", captureDesignPageOwner("workspace-a"), [{ frame: "other.html" }]);
+    expect(designWorkspaceView("workspace-a")).toMatchObject({ selectedTargets: [{ frame: FRAME.file, nodeId: "parent" }], codeView: true });
+    expect(designWorkspaceView("workspace-b").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "unrelated" }]);
+  });
+
+  it("prunes a deleted secondary node without discarding the primary frame", async () => {
+    const store = useDesignWorkspaceUiStore.getState();
+    store.setSelection("workspace-a", FRAME.file, "deleted");
+    store.setSelection("workspace-a", "other.html", null, [], { additive: true, frameSelected: true });
+    reconcileDesignRuntimeSnapshot({ workspaceId: "workspace-a", folder: "/design", frame: FRAME, snapshot: {
+      sourceVersion: FRAME.sourceVersion, revision: 1, frame: details("root"), tree: [], warnings: [],
+      viewport: { width: FRAME.width, height: FRAME.height, scrollX: 0, scrollY: 0 },
+    } });
+    expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: "other.html" }]);
   });
 
   it("ignores a late frame activation and null reply owned by a page the user left", async () => {
