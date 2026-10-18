@@ -23,6 +23,7 @@ import {
 import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./linux-setup-executor.js";
 import { runtimeBase } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { executeBoatPinnedSsh } from "./boat-pinned-ssh.js";
 
 const keyBytes = Buffer.concat([
   Buffer.from([0, 0, 0, 11]),
@@ -111,6 +112,182 @@ describe("Boat bootstrap transport", () => {
     return { ...f, input, prepared };
   }
   afterEach(() => { vi.useRealTimers(); });
+
+  function heldAccess(f: ReturnType<typeof fixture>, prepared: Record<string, unknown>) {
+    const deferred = () => {
+      let resolve!: (value: Record<string, unknown>) => void, reject!: (error: unknown) => void;
+      const promise = new Promise<Record<string, unknown>>((yes, no) => { resolve = yes; reject = no; });
+      return { promise, resolve, reject };
+    };
+    const preparation = deferred(), host = deferred(), endpoint = deferred();
+    const signals: Partial<Record<"host" | "endpoint", AbortSignal>> = {};
+    const ordinary = fixture().request.getMockImplementation()!;
+    let subsequent = false;
+    f.request.mockReset().mockImplementation(async (resource, input) => {
+      const init = input as { signal: AbortSignal; body?: { command?: string } };
+      const command = init.body?.command ?? "";
+      if (subsequent) return command.includes("bootstrap.py status")
+        ? prepared as Awaited<ReturnType<typeof f.request>> : ordinary(resource, input);
+      if (command.includes("bootstrap.py status") || command.includes("ensure-cloud-worker-supervisor.mjs"))
+        return await preparation.promise as Awaited<ReturnType<typeof f.request>>;
+      if (command.includes("ssh_host_ed25519_key.pub")) {
+        signals.host = init.signal;
+        return await host.promise as Awaited<ReturnType<typeof f.request>>;
+      }
+      if (resource === `/sandboxes/${RESOURCE}`) {
+        signals.endpoint = init.signal;
+        return await endpoint.promise as Awaited<ReturnType<typeof f.request>>;
+      }
+      return ordinary(resource, input);
+    });
+    const hostReply = { success: true, exitCode: 0, stdout: HOST_KEY, timedOut: false };
+    const endpointReply = { sandbox: { id: RESOURCE, ip: "208.67.222.222" } };
+    const installed = () => f.request.mock.calls.filter(([, input]) =>
+      String((input as { body?: { command?: string } })?.body?.command).includes("authorized_keys"));
+    return { preparation, prepared, host, endpoint, signals, hostReply, endpointReply, installed,
+      nextExecution: () => { subsequent = true; } };
+  }
+
+  it.each(["host", "endpoint"] as const)("joins both v4 access reads before installing a key when %s finishes first", async first => {
+    vi.useFakeTimers();
+    const f = v4Fixture(), held = heldAccess(f, f.prepared);
+    const operation = f.runner.execute(f.input, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(held.signals).toEqual({});
+    held.preparation.resolve(held.prepared);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(held.signals).sort()).toEqual(["endpoint", "host"]);
+    expect(held.installed()).toHaveLength(0);
+    held[first].resolve(first === "host" ? held.hostReply : held.endpointReply);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(held.installed()).toHaveLength(0);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(f.channel.dispose).not.toHaveBeenCalled();
+    const last = first === "host" ? "endpoint" : "host";
+    held[last].resolve(last === "host" ? held.hostReply : held.endpointReply);
+    await expect(operation).resolves.toMatchObject({ exitCode: 0 });
+    expect(f.channel.execute).toHaveBeenCalledWith(expect.objectContaining({ hostPublicKey: HOST_KEY,
+      host: "208.67.222.222", stdin: f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64 }), expect.any(AbortSignal));
+    expect(held.installed()).toHaveLength(2);
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.request.mock.calls)).not.toContain(f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64);
+  });
+
+  it.each(["host", "endpoint"] as const)("cancels and joins the other read after a v4 %s timeout without losing the failure", async failed => {
+    vi.useFakeTimers();
+    const f = v4Fixture(), held = heldAccess(f, f.prepared);
+    const error = new CloudProviderError("provider_request_timeout", "closed", true);
+    const operation = f.runner.execute(f.input, new AbortController().signal).catch(error => error);
+    held.preparation.resolve(held.prepared);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(held.signals).sort()).toEqual(["endpoint", "host"]);
+    held[failed].reject(error);
+    await vi.advanceTimersByTimeAsync(0);
+    const other = failed === "host" ? "endpoint" : "host";
+    expect(held.signals[other]?.aborted).toBe(true);
+    expect(f.channel.dispose).not.toHaveBeenCalled();
+    expect(held.installed()).toHaveLength(0);
+    held[other].reject(new Error("cancelled sibling read"));
+    expect(await operation).toBe(error);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["host", { success: true, exitCode: 0, stdout: "private-invalid-key" }],
+    ["host", { success: true, exitCode: 0, stdout: HOST_KEY, timedOut: true }],
+    ["endpoint", { sandbox: { id: "bx_98765432", ip: "208.67.222.222" } }],
+    ["endpoint", { sandbox: { id: RESOURCE, ip: "169.254.169.254" } }],
+  ] as const)("refuses invalid v4 %s access before installing anything", async (failed, response) => {
+    vi.useFakeTimers();
+    const f = v4Fixture(), held = heldAccess(f, f.prepared);
+    const operation = f.runner.execute(f.input, new AbortController().signal).catch(error => error);
+    held.preparation.resolve(held.prepared);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(held.signals).sort()).toEqual(["endpoint", "host"]);
+    held[failed].resolve(response);
+    await vi.advanceTimersByTimeAsync(0);
+    const other = failed === "host" ? "endpoint" : "host";
+    expect(held.signals[other]?.aborted).toBe(true);
+    expect(f.channel.dispose).not.toHaveBeenCalled();
+    held[other].resolve(other === "host" ? held.hostReply : held.endpointReply);
+    expect(await operation).toMatchObject({ code: "provider_access_response_invalid" });
+    expect(held.installed()).toHaveLength(0);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("joins late v4 reads after abort and cannot carry them into another execution", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture(), held = heldAccess(f, f.prepared), controller = new AbortController();
+    const operation = f.runner.execute(f.input, controller.signal).catch(error => error);
+    held.preparation.resolve(held.prepared);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(held.signals).sort()).toEqual(["endpoint", "host"]);
+    controller.abort();
+    expect(held.signals.host?.aborted).toBe(true);
+    expect(held.signals.endpoint?.aborted).toBe(true);
+    held.host.resolve(held.hostReply);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(held.installed()).toHaveLength(0);
+    expect(f.channel.dispose).not.toHaveBeenCalled();
+    const next = v4Fixture();
+    held.nextExecution();
+    f.openChannel.mockResolvedValueOnce(next.channel);
+    await expect(f.runner.execute(next.input, new AbortController().signal)).resolves.toMatchObject({ exitCode: 0 });
+    expect(held.installed()).toHaveLength(2);
+    held.endpoint.resolve(held.endpointReply);
+    expect(await operation).toMatchObject({ code: "provider_command_unconfirmed" });
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(held.installed()).toHaveLength(2);
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+    expect(next.channel.execute).toHaveBeenCalledOnce();
+    expect(next.channel.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not begin v4 access reads after preparation completes for an aborted execution", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture(), held = heldAccess(f, f.prepared), controller = new AbortController();
+    const operation = f.runner.execute(f.input, controller.signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    held.preparation.resolve(held.prepared);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(held.signals).toEqual({});
+    expect(await operation).toMatchObject({ code: "provider_command_unconfirmed" });
+    expect(held.installed()).toHaveLength(0);
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("retains serial access reads for the legacy setup caller", async () => {
+    vi.useFakeTimers();
+    const f = fixture(), held = heldAccess(f, { success: true, exitCode: 0, stdout: "ready\n" });
+    const operation = f.runner.execute(f.input, new AbortController().signal);
+    held.preparation.resolve(held.prepared);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(held.signals)).toEqual(["host"]);
+    held.host.resolve(held.hostReply);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(held.signals).sort()).toEqual(["endpoint", "host"]);
+    expect(held.installed()).toHaveLength(0);
+    held.endpoint.resolve(held.endpointReply);
+    await expect(operation).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it("keeps the shared Computer/update transport serial without setup's opt-in", async () => {
+    vi.useFakeTimers();
+    const f = fixture(), held = heldAccess(f, {});
+    const operation = executeBoatPinnedSsh({ resourceId: RESOURCE, command: "/fixed-command", stdin: SECRET, timeoutSeconds: 60 },
+      { client: { request: f.request }, openChannel: f.openChannel, maxOutputBytes: 1024 }, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(held.signals)).toEqual(["host"]);
+    held.host.resolve(held.hostReply);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(held.signals).sort()).toEqual(["endpoint", "host"]);
+    expect(held.installed()).toHaveLength(0);
+    held.endpoint.resolve(held.endpointReply);
+    await expect(operation).resolves.toMatchObject({ exitCode: 0 });
+  });
 
   it.each([
     { status: 409, code: "sandbox_starting", message: "sandbox_starting", details: undefined },
@@ -629,8 +806,8 @@ describe("Boat bootstrap transport", () => {
     expect(f.channel.dispose).toHaveBeenCalledOnce();
   });
 
-  it("retains uncertainty after a lost SSH reply and always destroys the private key", async () => {
-    const f = fixture();
+  it.each(["legacy", "v4"])("retains uncertainty after a lost %s SSH reply and always destroys the private key", async version => {
+    const f = version === "v4" ? v4Fixture() : fixture();
     f.channel.execute.mockRejectedValueOnce(new Error(`secret ${SECRET}`));
     await expect(
       f.runner.execute(f.input, new AbortController().signal),
@@ -640,10 +817,10 @@ describe("Boat bootstrap transport", () => {
     expect(JSON.stringify(f.request.mock.calls)).not.toContain(SECRET);
   });
 
-  it("does not report setup success when bootstrap-key revocation failed", async () => {
-    const f = fixture();
-    const original = f.request.getMockImplementation()!;
-    f.request.mockImplementation(async (path, input) => {
+  it.each(["legacy", "v4"])("does not report %s setup success when bootstrap-key revocation failed", async version => {
+    const f = version === "v4" ? v4Fixture() : fixture();
+    const original = fixture().request.getMockImplementation()!;
+    f.request.mockReset().mockImplementation(async (path, input) => {
       if (
         String(
           (input as { body?: { command?: string } })?.body?.command,
@@ -652,6 +829,7 @@ describe("Boat bootstrap transport", () => {
         throw new Error("unavailable");
       return original(path, input);
     });
+    if ("prepared" in f) f.request.mockResolvedValueOnce(f.prepared);
     await expect(
       f.runner.execute(f.input, new AbortController().signal),
     ).rejects.toMatchObject({ code: "provider_bootstrap_cleanup_unconfirmed" });
