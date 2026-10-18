@@ -270,6 +270,44 @@ authority supplies keys, epochs and engine tokens
   foreign or stale frame costs one heartbeat. Without `checkpoint.v1` the
   engine keeps its checkpoint-hint long-poll on `api`.
 
+## Turn journal (`turns.v1`)
+
+`uplink-turns.ts` stores the engine's turn journal (S2 1.2.0). The uplink
+negotiates `turns.v1` while the organization's `turn_journal` flag is on,
+which requires `realtime_uplink` ([rollout flags](rollout-flags.md)). Each
+`turns.event` is one turn transition the engine committed locally
+(`started`, `completed`, `failed`, `needs_attention` or `interrupted`).
+Migration 0161 stores it in `cloud_workspace_turn_events`, one row per
+engine instance, boot and `journal_seq`, with the chat and turn identifiers
+and the state. No prompt, result or other content is stored. The table is
+system-only with forced row security. Rows are never pruned yet: they are
+deleted only with their workspace (a follow-up).
+
+- **Storage.** A frame is handled in receive order and stored only once the
+  previous sequence of its boot is stored, so each boot's journal is
+  contiguous from 1. A sequence at or below the stored high-water mark is a
+  duplicate: it is acked again and stores nothing. A sequence beyond the
+  next one is a gap: it is refused with one non-fatal
+  `sys.error turn_journal_gap` carrying `expectedJournalSeq` per session and
+  expected value, and nothing is acked. The engine resends from there. An
+  unreachable database stores and acks nothing; the engine's stall resend
+  repairs it. `turns.ack` is cumulative.
+- **Rate bound.** An uplink may store 128 events at once and 10 per second
+  after that: a token bucket that starts full at 128 and refills at 10 per
+  second. Frames beyond the bucket, or beyond 128 waiting for the store, are
+  dropped unacked. The engine keeps at most 64 unacked and a turn makes two
+  or three transitions, so only a misbehaving engine reaches the bound. A
+  dropped frame is repaired by the engine's gap or stall resend.
+- **Notifications.** A stored `completed`, `failed` or `needs_attention`
+  notifies `turn.completed`, `turn.failed` or `turn.needs_attention` in the
+  same transaction, but only for the first such transition of its workspace,
+  chat, turn and state. It is sent with `pg_notify` on
+  `zeros_cloud_turn_notifications`, which every realtime instance listens
+  on; each instance delivers it to the device sessions of the workspace's
+  current holders. The title carries no content. `started` and `interrupted`
+  notify nothing. A notice is best effort: one sent while the listener is
+  down is not replayed.
+
 ## Device stream server
 
 `apps/control-plane/src/realtime/device-stream-server.ts` serves the S3

@@ -43,6 +43,9 @@ export const ROLLOUT_FLAGS = {
   // back to 90 s while the engine skips its periodic heartbeat.
   engine_lease_over_uplink: { whileFeedUnavailable: "retain", summary: "Renew the engine lease over the uplink (lease.v1)", requires: ["realtime_uplink"] },
   checkpoint_push: { whileFeedUnavailable: "retain", summary: "Push checkpoint requests over the uplink (checkpoint.v1)", requires: ["realtime_uplink"] },
+  // Off, turns.v1 is never negotiated: the engine keeps its journal and
+  // sends it once an uplink negotiates it. No other path reads it.
+  turn_journal: { whileFeedUnavailable: "retain", summary: "Deliver the engine turn journal over the uplink (turns.v1)", requires: ["realtime_uplink"] },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

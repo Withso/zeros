@@ -37,6 +37,7 @@ import { runtimeBase } from "../cloud-workspaces/runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace, withCloudFixtureOwnerTx, type ReadyCloudWorkspaceFixture } from "../cloud-workspaces/test-fixtures.js";
 import { DatabaseUplinkCheckpointStore } from "../realtime/uplink-checkpoint.js";
 import { DatabaseUplinkLeaseStore } from "../realtime/uplink-lease.js";
+import { DatabaseUplinkTurnStore } from "../realtime/uplink-turns.js";
 import { DatabaseCostMeter } from "./instrument.js";
 import { AUTHORITY_CACHE_CHANNEL } from "../cloud-workspaces/engine-authority-cache.js";
 
@@ -203,6 +204,7 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
   // `realtime` runs the lease.v1 renewals and checkpoint.v1 reads; the API
   // pool measures them the same.
   const leases = new DatabaseUplinkLeaseStore({ pool: api, workosEnabled });
+  const turnEvents = new DatabaseUplinkTurnStore(api);
   const checkpointQueue = new DatabaseUplinkCheckpointStore(api);
   // A zero-length wait is exactly one of the reads a held wait repeats.
   const checkpointHints = new CloudEngineCheckpointHints(api, { waitMs: 0 });
@@ -305,6 +307,15 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
     "engine.uplinkCheckpointSweep": async (w: SimulatedWorkspace) => {
       await checkpointQueue.queued([{ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
         engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }]);
+    },
+    // S2 turns.v1: one stored terminal transition, the first for its turn,
+    // so the device-stream notice is included. A fresh boot per call keeps
+    // every call on the stored path (sequence 1 of a new stream).
+    "engine.uplinkTurnEvent": async (w: SimulatedWorkspace) => {
+      const result = await turnEvents.record({ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId,
+        generation: 1, engineInstanceId: w.engine.engineInstanceId, bootId: randomUUID() },
+        { journalSeq: 1, chatId: "load-sim-chat", turnId: randomUUID(), state: "completed", atMs: Date.now() });
+      if (result.result !== "stored") throw new Error(`uplink turn event answered ${result.result}`);
     },
     // One read of the engine's checkpoint-hint wait; a held 25 s wait reads six times.
     "engine.checkpointHintWait": (w: SimulatedWorkspace) => checkpointHints.wait({ token: w.engine.heartbeatToken,

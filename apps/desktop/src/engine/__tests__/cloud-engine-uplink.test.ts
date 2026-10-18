@@ -97,6 +97,16 @@ function fakeClient(extra: Partial<CloudEngineUplinkOptions> & { now?: () => num
   return { client, sockets, auth };
 }
 
+function turnSource(count: number) {
+  const entries = Array.from({ length: count }, (_, index) => ({ journalSeq: index + 1, chatId: "chat",
+    turnId: `turn-${index + 1}`, state: "completed" as const, atMs: 1_000 + index }));
+  let acked = 0;
+  const turns = { read: (afterSeq: number, limit: number) => entries.filter(entry => entry.journalSeq > afterSeq).slice(0, limit),
+    acked: () => acked, ack: vi.fn((journalSeq: number) => { acked = Math.max(acked, journalSeq); }) };
+  return { entries, turns, setAcked: (value: number) => { acked = value; } };
+}
+const turnSeqs = (socket: FakeSocket) => socket.ofType("turns.event").map(frame => frame.d!.journalSeq);
+
 /** Plays the server side of the frozen handshake on a fake socket. */
 async function serveHandshake(socket: FakeSocket, options: { resumed?: boolean; token?: string; pingIntervalMs?: number; cursor?: string; features?: string[] } = {}) {
   socket.frame({ t: "sys.welcome", d: {
@@ -986,6 +996,51 @@ describe("engine uplink client (socket level)", () => {
     expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 4400, reason: "frame_invalid" });
     await vi.advanceTimersByTimeAsync(250); // backoff redial after the initiated close
     expect(sockets).toHaveLength(2);
+    client.stop();
+  });
+
+  it("sends the turn journal from the persisted ack at the gate, 64 at a time, only with turns.v1", async () => {
+    const source = turnSource(70); source.setAcked(2);
+    const { client, sockets } = fakeClient({ features: ["cred.v1", "turns.v1"], turns: source.turns });
+    client.start(); await flush();
+    expect(sockets[0]!.ofType("sys.hello")[0]!.d!.lastJournalSeq).toBe(2);
+    await serveHandshake(sockets[0]!, { features: ["cred.v1", "turns.v1"] });
+    expect(turnSeqs(sockets[0]!)).toEqual(Array.from({ length: 64 }, (_, index) => index + 3));
+    expect(sockets[0]!.ofType("turns.event")[0]!.d).toEqual(source.entries[2]);
+    sockets[0]!.frame({ t: "turns.ack", s: 1, d: { journalSeq: 10 } }); await flush();
+    expect(source.turns.ack).toHaveBeenCalledWith(10);
+    expect(turnSeqs(sockets[0]!).slice(64)).toEqual([67, 68, 69, 70]);
+    client.stop();
+  });
+  it("sends nothing when turns.v1 is not negotiated", async () => {
+    const source = turnSource(3);
+    const { client, sockets } = fakeClient({ features: ["cred.v1", "turns.v1"], turns: source.turns });
+    client.start(); await flush(); await serveHandshake(sockets[0]!, { features: ["cred.v1"] });
+    client.noteTurnJournal(); await flush();
+    expect(turnSeqs(sockets[0]!)).toEqual([]);
+    client.stop();
+  });
+  it("sends new entries when noted, rewinds on turn_journal_gap and resends after the ack stalls", async () => {
+    const source = turnSource(5);
+    const { client, sockets } = fakeClient({ features: ["turns.v1"], turns: source.turns, turnsResendMs: 5_000 });
+    source.entries.splice(3);
+    client.start(); await flush(); await serveHandshake(sockets[0]!, { features: ["turns.v1"] });
+    expect(turnSeqs(sockets[0]!)).toEqual([1, 2, 3]);
+    source.entries.push({ journalSeq: 4, chatId: "chat", turnId: "turn-4", state: "completed", atMs: 1_003 });
+    client.noteTurnJournal(); await flush();
+    expect(turnSeqs(sockets[0]!)).toEqual([1, 2, 3, 4]);
+    sockets[0]!.frame({ t: "sys.error", d: { code: "turn_journal_gap", message: "gap", fatal: false, expectedJournalSeq: 3 } }); await flush();
+    expect(turnSeqs(sockets[0]!)).toEqual([1, 2, 3, 4, 3, 4]);
+    sockets[0]!.frame({ t: "turns.ack", s: 1, d: { journalSeq: 2 } }); await flush();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(turnSeqs(sockets[0]!)).toEqual([1, 2, 3, 4, 3, 4, 3, 4]);
+    client.stop();
+  });
+  it("closes 4400 on an invalid turns.ack", async () => {
+    const { client, sockets } = fakeClient({ features: ["turns.v1"], turns: turnSource(1).turns });
+    client.start(); await flush(); await serveHandshake(sockets[0]!, { features: ["turns.v1"] });
+    sockets[0]!.frame({ t: "turns.ack", s: 1, d: { journalSeq: "1" } }); await flush();
+    expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 4400 });
     client.stop();
   });
 });

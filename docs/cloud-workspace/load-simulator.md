@@ -107,6 +107,9 @@ An engine without `checkpoint.v1` still runs the wait (six reads per 25 s,
 `apps/control-plane/src/cloud-workspaces/engine-checkpoint-hints.ts`),
 0.24 tx/s more per running engine.
 
+Turn events (`engine.uplinkTurnEvent`, S2 `turns.v1`) cost one transaction per
+turn transition, two or three per turn, and are not part of the steady state.
+
 The background workers run once per process at their configured intervals
 (`apps/control-plane/src/worker-polling-config.ts`). Lifecycle due work runs as
 jobs (docs/cloud-workspace/job-queue.md): one engine-health cycle per running
@@ -195,6 +198,7 @@ PostgreSQL 18.6 on loopback, Node 24, 4 CPUs, WorkOS authority on.
 | `engine.uplinkLeaseRenewal` (2026-10-18) | 1 | 7 | 5 | 3.3 | 25 |
 | `engine.uplinkCheckpointSweep`, one uplink (2026-10-18) | 1 | 5 | 1 | 0.6 | 5 |
 | `engine.checkpointHintWait`, one read (2026-10-18) | 1 | 5 | 3 | 0.9 | 15 |
+| `engine.uplinkTurnEvent`, stored with notice (2026-10-18) | 1 | 9 | 7 | 1.5 | 35 |
 | `engine.credentialControls` | 1 | 10 | 8 | 4.6 | 40 |
 | `engine.actorConfirm` | 1 | 11 | 9 | 10.1 | 45 |
 | `client.renew` | 1 | 12 | 10 | 9.7 | 50 |

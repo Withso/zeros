@@ -77,7 +77,8 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
     isAdmittedCwd: (cwd: string) => cwd === f.input.cwd, resolveConversation: () => ({ cwd: f.input.cwd, provider: f.input.provider, model: f.input.model }),
     history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed,
     controlsPollIntervalMs: undefined as (() => number) | undefined,
-    controlsExchange: undefined as ((ok: boolean) => void) | undefined };
+    controlsExchange: undefined as ((ok: boolean) => void) | undefined,
+    turnJournalChanged: undefined as (() => void) | undefined };
   const boot = new CloudLocalAgentBootRuntime(options); cleanups.push(() => boot.dispose());
   const admission = { accountUserId: f.provenance.actor.userId, authorityEpoch: f.provenance.authorityEpoch,
     actor: { sessionId: f.provenance.actorSessionId, deviceId: f.provenance.actor.deviceId,
@@ -1058,5 +1059,14 @@ describe("engine boot-mode orchestration", () => {
       .rejects.toMatchObject({ code: "cloud_actor_authority_rejected" });
     f.retire(); expect(f.boot.active).toBe(false);
     expect(() => f.boot.metadata).toThrow();
+  });
+  it("exposes the turn journal only while authority is active and notes it at activation", async () => {
+    const f = await fixture(); const noted = vi.fn(); f.options.turnJournalChanged = noted;
+    expect(f.boot.turnJournal).toBeNull();
+    await expect(f.boot.initialize()).resolves.toBe(true);
+    expect(noted).toHaveBeenCalled();
+    expect(f.boot.turnJournal!.turnJournal(0, 10)).toEqual([]);
+    f.retire();
+    expect(f.boot.turnJournal).toBeNull();
   });
 });

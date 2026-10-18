@@ -39,6 +39,7 @@ describe("rollout flag snapshot", () => {
     expect(Object.keys(ROLLOUT_FLAGS).sort()).toEqual([
       "authority_cache_enforce", "authority_cache_shadow", "capabilities", "checkpoint_push", "credential_push",
       "device_stream", "engine_lease_over_uplink", "presence_in_memory", "realtime_uplink", "relay_over_uplink", "runtime_connect",
+      "turn_journal",
     ]);
     expect(isRolloutFlagName("capabilities")).toBe(true);
     expect(isRolloutFlagName("toString")).toBe(false);
