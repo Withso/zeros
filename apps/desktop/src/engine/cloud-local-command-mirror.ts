@@ -200,9 +200,11 @@ async function requestPrivateCommandProjection<T>(authority: CloudRuntimeAuthori
     signal: requestSignal, headers: { "content-type": "application/json", authorization: `Bearer ${authority.heartbeatToken}` },
     body: JSON.stringify({ organizationId, workspaceId, generation, engineInstanceId, ...payload }) }); }
   catch { throw new CloudCommandRuntimeError("command_service_unavailable"); }
+  const httpClass = response.status >= 200 && response.status < 300 ? "2xx"
+    : response.status >= 400 && response.status < 500 ? "4xx" : response.status >= 500 && response.status < 600 ? "5xx" : "other";
   const maximum = response.ok ? 16 * 1024 : 1024;
   if (!response.body || Number(response.headers.get("content-length")) > maximum) {
-    await response.body?.cancel().catch(() => undefined); throw new CloudCommandRuntimeError("command_response_invalid");
+    await response.body?.cancel().catch(() => undefined); throw new CloudCommandRuntimeError("command_response_invalid", httpClass);
   }
   const reader = response.body.getReader(), chunks: Uint8Array[] = []; let size = 0;
   try {
@@ -213,14 +215,14 @@ async function requestPrivateCommandProjection<T>(authority: CloudRuntimeAuthori
     if (!document || typeof document !== "object" || Array.isArray(document)) throw new Error();
     if (!response.ok) {
       const code = (document as { error?: unknown }).error;
-      const allowed = ["engine_authority_rejected", "command_conflict", "command_context_changed", "invalid_command", "command_limit"];
+      const allowed = ["engine_authority_rejected", "cloud_actor_authority_rejected", "command_conflict", "command_context_changed", "invalid_command", "command_limit"];
       throw new CloudCommandRuntimeError(typeof code === "string" && allowed.includes(code) ? code : "command_service_unavailable");
     }
     if (Object.keys(document).length !== 1) throw new Error();
     return validate((document as { result?: unknown }).result);
   } catch (error) {
     await reader.cancel().catch(() => undefined);
-    if (error instanceof CloudCommandRuntimeError) throw error;
-    throw new CloudCommandRuntimeError("command_response_invalid");
+    if (error instanceof CloudCommandRuntimeError) throw new CloudCommandRuntimeError(error.code, httpClass);
+    throw new CloudCommandRuntimeError("command_response_invalid", httpClass);
   } finally { reader.releaseLock(); }
 }

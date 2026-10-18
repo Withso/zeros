@@ -1,0 +1,9 @@
+{
+  "id": "checkpoint-seal-refusal-evidence",
+  "kind": "replay",
+  "area": "cloud-engine-stop",
+  "fixedBy": "pr:593",
+  "symptom": "Seal request conflicts, transport/server failures, invalid ACKs and local frozen-head or persistence refusals collapsed into an unknown checkpoint failure.",
+  "rule": "Trace the dedicated seal transport and local ACK boundary, retain the first closed refusal without changing acceptance, and preserve strict old request and receipt compatibility.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-seal.test.ts apps/desktop/src/engine/__tests__/cloud-local-command-queue-lifecycle.test.ts"
+}

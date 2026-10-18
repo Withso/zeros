@@ -56,7 +56,8 @@ import {
   type DatabaseCloudRuntimeAccessAdmissionService,
 } from "./runtime-access-admission.js";
 import { CloudEngineCheckpointHintRejected, type CloudEngineCheckpointHintInput } from "./engine-checkpoint-hints.js";
-import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema } from "./checkpoint-progress-contract.js";
+import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema,
+  CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER, parseCloudCheckpointSealRefusal } from "./checkpoint-progress-contract.js";
 import { CloudEngineCheckpointProgressRejected, CloudEngineCheckpointProgressUnavailable, type CloudEngineCheckpointProgressInput } from "./checkpoint-progress.js";
 
 export const CLOUD_WORKSPACE_SETUP_ADMISSION_PATH =
@@ -762,8 +763,10 @@ export function createCloudWorkspaceInternalRoutes(
       if (!token) return c.json({ error: { code: "invalid_capability" } }, 401);
       const input = await strictJson(c.req, CloudCheckpointProgressSchema);
       if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+      const sealRefusal = input.stage === "seal_ack" && input.state === "failed"
+        ? parseCloudCheckpointSealRefusal(c.req.header(CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER)) : undefined;
       try {
-        await service.reportCheckpointProgress!({ ...input, token });
+        await service.reportCheckpointProgress!({ ...input, token, ...(sealRefusal ? { sealRefusal } : {}) });
         return c.json({ version: 1, accepted: true }, 202);
       } catch (error) {
         if (error instanceof CloudEngineCheckpointProgressUnavailable) return c.json({ error: { code: error.code } }, 503);
