@@ -1,4 +1,4 @@
-import type { McpServerRegistration } from "./types";
+import { AgentFailureError, type McpServerRegistration } from "./types";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 
 /** A trusted product handler bound once to a registered workspace owner. */
@@ -13,6 +13,9 @@ export interface AgentWorkspaceTools {
 export interface AgentSessionTools {
   readonly env: Readonly<Record<string, string>>;
   readonly mcpServers: readonly McpServerRegistration[];
+  /** Absolute directories to put first on the provider's PATH (the bundled
+   * `zeros` launcher). Prepended to the merged PATH, never replacing it. */
+  readonly pathPrepend?: readonly string[];
   /** Revoke authority synchronously before awaiting transport teardown. */
   revoke(): void;
   dispose(): Promise<void>;
@@ -83,6 +86,7 @@ export function composeAgentSessionToolFactories(
     return {
       env,
       mcpServers: admitted.flatMap((tools) => tools.mcpServers),
+      pathPrepend: admitted.flatMap((tools) => tools.pathPrepend ?? []),
       preparePrompt: async () => {
         const parts = await Promise.all(admitted.map((tools) => tools.preparePrompt?.()));
         return parts.filter((part): part is string => typeof part === "string" && part.length > 0).join("\n\n");
@@ -106,7 +110,20 @@ export function composeAgentSessionToolFactories(
   };
 }
 
+/** Put admitted directories first on PATH without dropping or duplicating the
+ * existing entries. */
+export function prependPath(
+  env: Record<string, string>,
+  dirs: readonly string[] | undefined,
+): void {
+  const add = (dirs ?? []).filter((dir) => typeof dir === "string" && dir.startsWith("/") && !dir.includes(":"));
+  if (add.length === 0) return;
+  const current = (env.PATH ?? process.env.PATH ?? "").split(":").filter((p) => p.length > 0 && !add.includes(p));
+  env.PATH = [...new Set(add), ...current].join(":");
+}
+
 interface Entry {
+  agentId?: string;
   workspaceId?: string;
   controller: AbortController;
   preparation: AbortController;
@@ -142,6 +159,7 @@ export class AgentSessionToolRegistry {
       void this.stop(input.executionId).catch(() => {});
     };
     const entry: Entry = {
+      agentId: input.agentId,
       workspaceId: input.workspaceId,
       controller,
       preparation: new AbortController(),
@@ -172,6 +190,7 @@ export class AgentSessionToolRegistry {
         return servers;
       }
       Object.assign(env, tools.env);
+      prependPath(env, tools.pathPrepend);
       const reserved = new Set(tools.mcpServers.map((server) => server.name));
       return [
         ...tools.mcpServers,
@@ -204,9 +223,9 @@ export class AgentSessionToolRegistry {
     const entry = this.entries.get(executionId);
     if (!entry) return undefined;
     const signal = AbortSignal.any([entry.controller.signal, entry.preparation.signal]);
-    signal.throwIfAborted();
     let abort!: () => void;
     try {
+      signal.throwIfAborted();
       // Discovery can outlive Stop or execution disposal. Retire its waiter
       // immediately; a late result must never continue into a native send.
       return await Promise.race([
@@ -219,6 +238,18 @@ export class AgentSessionToolRegistry {
           signal.addEventListener("abort", abort, { once: true });
         }),
       ]);
+    } catch (error) {
+      // Stop keeps its cancellation. Retired tools mean this execution is being
+      // replaced before the prompt reached the provider, so it can be resent.
+      if (entry.controller.signal.aborted && !entry.preparation.signal.aborted)
+        throw new AgentFailureError({
+          kind: "lifecycle-superseded",
+          stage: "prompt",
+          ...(entry.agentId ? { agentId: entry.agentId } : {}),
+          message:
+            "This agent execution's tools were retired before the prompt was sent. Reconnecting to its provider conversation.",
+        });
+      throw error;
     } finally {
       signal.removeEventListener("abort", abort);
     }

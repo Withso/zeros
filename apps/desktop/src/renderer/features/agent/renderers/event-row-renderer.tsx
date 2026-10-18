@@ -56,6 +56,7 @@ import {
 import { nativeAgentWait, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
 import { toolPresentationReady } from "./tool-readiness";
+import { isTransientConnectionNotice } from "../transcript-notices";
 import { AgentNotice, AgentNoticeText, AGENT_NOTICE_ACTION } from "../agent-notice";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
@@ -112,8 +113,7 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
     // static compact row from event-meta, so a settled transcript never
     // shimmers.
     if (
-      message.kind === "error_notice" &&
-      (message as { code?: string }).code === "api_retry" &&
+      isTransientConnectionNotice(message) &&
       ctx.isStreaming &&
       ctx.lastMessageId === message.id
     ) {
@@ -132,7 +132,7 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
         </div>
       );
     }
-    if (message.kind === "error_notice" && message.code !== "api_retry") {
+    if (message.kind === "error_notice" && !isTransientConnectionNotice(message)) {
       if (message.code?.startsWith("claude-rate-limit:"))
         return <div role="status" className="text-fg2 py-1 text-sm" data-provider-usage-notice="">
           <AgentNoticeText message={message.message} />

@@ -30,6 +30,7 @@ import {
 } from "./adopted-worktrees";
 import {
   loadProjects,
+  normalizeProjectRoot,
   syncProjectsToEngine,
   type Project,
 } from "./projects-store";
@@ -204,6 +205,17 @@ export function useSyncProjectsToEngine(): void {
 
 type WorkspacesListener = (repoSlug: string) => void;
 const workspaceListeners = new Set<WorkspacesListener>();
+
+/** Metadata consumers also need mutations made by this renderer: those do
+ * not echo a DB_CHANGED broadcast back to the originating connection. */
+export function subscribeProjectCatalogChanges(listener: () => void): () => void {
+  projectListeners.add(listener);
+  workspaceListeners.add(listener);
+  return () => {
+    projectListeners.delete(listener);
+    workspaceListeners.delete(listener);
+  };
+}
 
 // Workspace lists are renderer-wide server state. TopBar, Conversation pane, Workbench,
 // useActiveWorkspace, and repo pages all read the same slug; one keyed cache
@@ -453,6 +465,47 @@ function ingestWorkspaceRows(repoSlug: string, rows: Workspace[], cloudConfirmed
   reindexWorkspaceSlugs(repoSlug, stable);
   persistWorkspaceList(repoSlug, stable);
   notifyLiveUnion();
+}
+
+/** Capture before a native Local catalog read. Publish only its destination
+ * repository, and only if no mutation or newer exact-key snapshot won the race.
+ * This makes adopted paths resolvable before navigation without retaining a
+ * second workspace snapshot that could outlive an archive or deletion. */
+export function beginLocalWorkspaceRead(): (
+  project: Pick<Project, "repoRoot" | "repoSlug">,
+  rows: readonly Workspace[],
+) => boolean {
+  const bridge = getActiveBridge();
+  const epoch = workspaceMutationEpoch;
+  const revisions = new Map(workspaceRevisionBySlug);
+  return (project, rows) => {
+    const { repoSlug, repoRoot } = project;
+    if (
+      !repoSlug ||
+      isCloudRepositorySlug(repoSlug) ||
+      isCloudWorkspace(repoRoot) ||
+      !bridge ||
+      bridge !== getActiveBridge() ||
+      bridge.status !== "connected" ||
+      bridge.executionIdentity.kind !== "local" ||
+      epoch !== workspaceMutationEpoch ||
+      (revisions.get(repoSlug) ?? 0) !==
+        (workspaceRevisionBySlug.get(repoSlug) ?? 0)
+    )
+      return false;
+    ingestWorkspaceRows(
+      repoSlug,
+      rows.filter(
+        (row) =>
+          row.repoSlug === repoSlug &&
+          normalizeProjectRoot(row.repoRoot) === normalizeProjectRoot(repoRoot) &&
+          row.archivedAt == null &&
+          row.placement !== "cloud" &&
+          !isCloudWorkspace(row.path),
+      ),
+    );
+    return !provisionalWorkspaceSlugs.has(repoSlug);
+  };
 }
 
 function patchArchivedCollections(

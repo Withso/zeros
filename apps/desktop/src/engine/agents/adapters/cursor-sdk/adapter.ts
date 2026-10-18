@@ -25,7 +25,9 @@ import {
   type SessionToolsSnapshot,
 } from "@zeros/protocol/agent-extensions";
 import { providerBindingForResume } from "@zeros/protocol/identities";
-import type { AdvertisedModel } from "@zeros/protocol/agent-events";
+import type { AdvertisedModel, ModelSettingsSummary } from "@zeros/protocol/agent-events";
+import { redactLogSecrets } from "@zeros/protocol/scrub";
+import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 import { isDevRuntime } from "../../../runtime";
 
 import { AgentFailureError } from "../../types";
@@ -55,10 +57,12 @@ import type {
   NativePromptStage,
   NativePromptOutputKind,
   PromptResponse,
+  ProviderCredentialUpdate,
   SessionMode,
   StopReason,
   TurnUsage,
 } from "../../types";
+import { withProviderConnection } from "../shared/provider-connection";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { CursorSdkTranslator } from "./translator";
 import { CursorSubagentTranscriptReader } from "./subagent-transcript-reader";
@@ -94,22 +98,30 @@ const AGENT_ID = "cursor";
  *  Overridable per-chat via the CURSOR_MODEL env the model pill writes. */
 const DEFAULT_MODEL = "composer-2.5";
 const CURSOR_AUTO_IDS = new Set(["auto", "default"]);
-/** Preferred concrete fallbacks, in order, when the resolved model isn't in
- *  the account's live catalog. Native Composer models need no external auth. */
-const FALLBACK_MODEL_PREFERENCE = [
-  "composer-2.5",
-  "composer-2",
-  "composer-1.5",
-];
 
-/** Models to RETRY with when the selected model can't actually RUN on this
- *  account's local runtime — distinct from the catalog check above, because a
- *  model can be in the catalog (api.cursor.com) yet be rejected by the local
- *  RunSSE backend. `composer-2` is confirmed to run on local SDK agents on all
- *  plans (forum.cursor.com #160019); the frontier "Max Mode" models silently
- *  error on plan-gated accounts. composer-1.5 is the older concrete fallback.
- *  Ordered most-capable-confirmed-good first. */
-const LOCAL_RETRY_MODELS = ["composer-2", "composer-1.5"];
+/** The curated Cursor rows in `catalogs/models-v1.json`. The adapter never
+ *  chooses a model outside this set on the user's behalf. */
+const CURATED_CURSOR_MODELS: ReadonlySet<string> = new Set(
+  modelCatalogJson.families.cursor.map((model) => model.value),
+);
+
+/** Ordered substitutes when the selected model can't run for this account:
+ *  stale picks (absent from the account's list) and models Cursor refuses at
+ *  run time alike. Owned by the catalog's `fallbacks.cursor`; the catalog
+ *  validator requires curated, cold-startable rows, and anything else is
+ *  dropped here rather than run. A model can be listed by api.cursor.com yet
+ *  refused by the run backend, so each substitute must also be in the
+ *  account's live list before it is tried. */
+export const CURSOR_FALLBACK_MODELS: readonly string[] = (
+  (modelCatalogJson as { fallbacks?: Record<string, readonly string[]> })
+    .fallbacks?.cursor ?? []
+).filter((id) => CURATED_CURSOR_MODELS.has(id));
+
+/** Native attempts one turn may make before any model output: the requested
+ *  settings, up to three advertised registry settings, and the two curated
+ *  fallbacks. Every rejection arrives before inference, so retrying costs a
+ *  round trip, never a duplicated answer. */
+const CURSOR_MAX_TURN_ATTEMPTS = 6;
 
 /** Process-local salt for account cache partitions. The corresponding model
  * state is memory-only, so a fresh salt on every engine start preserves all
@@ -154,6 +166,9 @@ const CURSOR_RUN_CONTROL_FRAMES = new Set(["request", "status"]);
 function isCursorRunControlFrame(type: string | undefined): boolean {
   return CURSOR_RUN_CONTROL_FRAMES.has(type ?? "");
 }
+/** Stream frames only a running model produces. Their arrival proves Cursor
+ *  accepted the attempt's model selection. */
+const CURSOR_MODEL_CONTENT_FRAMES = new Set(["assistant", "thinking", "tool_call", "task"]);
 
 /** True when a Cursor run's recovered error reason means the chosen MODEL
  *  can't run on this account's local runtime (vs an auth/network/transient
@@ -163,6 +178,14 @@ function isCursorRunControlFrame(type: string | undefined): boolean {
  *  retrying an auth/plan/network failure would not, so those are NOT matched. */
 export function isCursorModelGatedError(message: string): boolean {
   return normalizeProviderError("cursor", message).category === "model-unavailable";
+}
+
+/** Cursor's run backend refuses a registry model's parameter set with "AI
+ *  Model Not Found Invalid parameters for registry model: "grok-4.7"" (seen
+ *  2026-10-14…17 for Extra High). It names the settings sent with the model,
+ *  not the account's access to it: the same id has run with other settings. */
+export function isCursorRegistrySettingsRejection(message: string): boolean {
+  return /invalid\s+parameters?\s+for\s+registry\s+model/i.test(message);
 }
 
 /** TLS / certificate verification failures (Node's ERR_TLS_* family + the
@@ -184,21 +207,17 @@ export function resolveCursorModelId(envModel: string | undefined): string {
 }
 
 /** Validate a concrete model id against the account's live catalog, falling
- *  back to a known-good one when it isn't offered. Pure (exported for tests).
- *  `available === null` means "catalog not discovered yet" → trust the id
- *  (the SDK still validates and we surface its error cleanly). */
+ *  back to the first curated fallback the account offers when it isn't.
+ *  Pure (exported for tests). `available === null` means "catalog not
+ *  discovered yet" → trust the id (the SDK still validates and we surface its
+ *  error cleanly). With no curated fallback offered, the id is kept: an
+ *  account-only model the picker never shows is not a substitute. */
 export function resolveValidModelId(
   modelId: string,
   available: Set<string> | null,
 ): string {
   if (!available || available.has(modelId)) return modelId;
-  for (const pref of FALLBACK_MODEL_PREFERENCE) {
-    if (available.has(pref)) return pref;
-  }
-  // Last resort: any concrete Composer model the account offers, else the
-  // first listed model, including Auto when the account offers it.
-  const composer = [...available].find((id) => /^composer/i.test(id));
-  return composer ?? [...available][0] ?? modelId;
+  return CURSOR_FALLBACK_MODELS.find((id) => available.has(id)) ?? modelId;
 }
 
 /** Compatibility mapper for older Cursor catalogs that bake reasoning depth +
@@ -771,6 +790,105 @@ export function cursorModelSelection(
   return { id, ...(params.length > 0 ? { params } : {}) };
 }
 
+/** Order-insensitive identity of a native selection, for de-duplication. */
+function cursorSelectionKey(selection: CursorModelSelection): string {
+  return JSON.stringify([
+    selection.id,
+    (selection.params ?? []).map((p) => `${p.id}=${p.value}`).sort(),
+  ]);
+}
+
+function cursorEffortValue(value: string | undefined | null): string | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return null;
+  return normalized === "extra-high" ? "xhigh" : normalized;
+}
+
+/** The effort and Fast a native selection actually runs. `null` means the
+ *  selection leaves that setting to Cursor's defaults. */
+export function cursorSelectionSettings(
+  selection: CursorModelSelection,
+): Required<ModelSettingsSummary> {
+  let effort: string | null = null;
+  let fast: boolean | null = null;
+  for (const parameter of selection.params ?? []) {
+    if (effort === null && CURSOR_EFFORT_PARAMETER_RX.test(parameter.id)) {
+      effort = cursorEffortValue(parameter.value);
+    } else if (fast === null && CURSOR_FAST_PARAMETER_RX.test(parameter.id)) {
+      fast = ["true", "fast", "on", "1"].includes(parameter.value.trim().toLowerCase());
+    }
+  }
+  return { effort, fast };
+}
+
+function cursorVariantSelection(id: string, variant: CursorModelVariant): CursorModelSelection {
+  const params = (variant.params ?? []).flatMap((parameter) =>
+    parameter && typeof parameter.id === "string" && typeof parameter.value === "string"
+      ? [{ id: parameter.id, value: parameter.value }]
+      : [],
+  );
+  return { id, ...(params.length > 0 ? { params } : {}) };
+}
+
+/** Settings to try, in order, after Cursor refuses a registry model's
+ *  requested settings: the advertised variant closest to the requested effort
+ *  and Fast, the advertised default variant, then the bare id so Cursor applies
+ *  its own defaults. Every candidate comes from the account's own record —
+ *  nothing is synthesized — and the requested selection is never repeated. */
+export function cursorRegistrySettingsLadder(
+  requested: CursorModelSelection,
+  model: CursorModelListItem | undefined,
+  effort: string | undefined,
+  fast: boolean,
+): CursorModelSelection[] {
+  const id = requested.id;
+  const wantedEffort = cursorEffortValue(effort);
+  const variants = (model?.variants ?? []).filter(
+    (variant): variant is CursorModelVariant => !!variant && Array.isArray(variant.params),
+  );
+  const closest = variants
+    .map((variant, index) => {
+      const settings = cursorSelectionSettings(cursorVariantSelection(id, variant));
+      const score =
+        (wantedEffort !== null && settings.effort === wantedEffort ? 4 : 0) +
+        ((settings.fast ?? false) === fast ? 2 : 0) +
+        (variant.isDefault === true ? 1 : 0);
+      return { variant, index, score };
+    })
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.variant;
+  const defaultVariant = variants.find((variant) => variant.isDefault === true);
+  const seen = new Set([cursorSelectionKey(requested)]);
+  const ladder: CursorModelSelection[] = [];
+  for (const candidate of [
+    closest && cursorVariantSelection(id, closest),
+    defaultVariant && cursorVariantSelection(id, defaultVariant),
+    { id },
+  ]) {
+    if (!candidate) continue;
+    const key = cursorSelectionKey(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ladder.push(candidate);
+  }
+  return ladder;
+}
+
+/** One line describing an advertised registry schema, for the dev log. */
+function describeCursorSchema(model: CursorModelListItem): string {
+  const parameters = (model.parameters ?? [])
+    .map((parameter) => `${parameter.id}=[${(parameter.values ?? []).map((value) => value.value).join("|")}]`)
+    .join(" ");
+  const variants = (model.variants ?? [])
+    .map((variant) => `${variant.isDefault ? "*" : ""}{${(variant.params ?? []).map((p) => `${p.id}=${p.value}`).join(",")}}`)
+    .join(" ");
+  return `parameters ${parameters || "(none)"}; variants ${variants || "(none)"}`;
+}
+
+function describeCursorSelection(selection: CursorModelSelection): string {
+  const params = (selection.params ?? []).map((p) => `${p.id}=${p.value}`).join(",");
+  return params ? `${selection.id} {${params}}` : selection.id;
+}
+
 /** Preserve the SDK's explicit remote transport, including SSE. */
 type CursorMcpConfig = import("@cursor/sdk").McpServerConfig;
 /** Compatibility view of local run records. Current SDKs return the error
@@ -947,6 +1065,9 @@ interface Session {
   zerosSessionId: string;
   cwd: string;
   apiKey: string;
+  /** The key `agent` was created or resumed with. A Local connection change
+   *  replaces `apiKey`; the next run resumes the agent under it. */
+  appliedApiKey: string;
   /** Account-scoped discovery and runtime denylist captured at admission. The
    * adapter may later activate another API key without changing this session's
    * model semantics. */
@@ -1008,6 +1129,10 @@ interface CursorModelState {
   discoveredModelAliases: Map<string, string>;
   deniedModels: Set<string>;
   deniedUntil: number;
+  /** Advertised settings Cursor ran after refusing the requested settings of a
+   *  registry model, keyed by the requested selection. Later turns start from
+   *  them for the denial window instead of repeating a known refusal. */
+  acceptedSettings: Map<string, { selection: CursorModelSelection; until: number }>;
   cache: AccountModelDiscovery<CursorModelCatalog>;
   confirmed?: CursorModelCatalog;
 }
@@ -1028,6 +1153,7 @@ function createCursorModelState(fingerprint: string | null, authenticationContex
     discoveredModelAliases: new Map(),
     deniedModels: new Set(),
     deniedUntil: 0,
+    acceptedSettings: new Map(),
     cache: new AccountModelDiscovery(() => fingerprint ?? "undiscovered", {
       ttlMs: ACCOUNT_MODEL_TTL_MS,
       timeoutMs: 5_000,
@@ -1059,6 +1185,9 @@ export class CursorSdkAdapter implements AgentAdapter {
           ),
         };
       },
+    },
+    runtimeConfiguration: {
+      updateCredentials: (opts) => this.updateCredentials(opts),
     },
     configuration: {
       readProvenance: async (opts) =>
@@ -1239,6 +1368,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (state.deniedUntil && Date.now() >= state.deniedUntil) {
       state.deniedModels.clear();
       state.deniedUntil = 0;
+      state.cache.invalidate(state.cache.current());
     }
     const snapshot = state.cache.current();
     await state.cache.discover(snapshot, async () => {
@@ -1255,17 +1385,28 @@ export class CursorSdkAdapter implements AgentAdapter {
           const advertised = cursorAdvertisedModel(m);
           if (!advertised) throw new Error("Cursor returned an invalid model catalog");
           const id = advertised.value;
+          // Execution denials expire independently of the registry. Retain
+          // native eligibility so a saved pick can retry while refresh waits.
+          const selectable = advertised.selectable;
           if (state.deniedModels.has(id) || advertised.aliases?.some(alias => state.deniedModels.has(alias)))
             advertised.selectable = false;
           records.set(id, m);
           models.push(advertised);
-          if (advertised.selectable) ids.add(id);
+          if (selectable) ids.add(id);
           for (const alias of advertised.aliases ?? []) {
             aliases.set(alias, id);
-            if (advertised.selectable) ids.add(alias);
+            if (selectable) ids.add(alias);
           }
         }
         models.sort((a, b) => a.label.localeCompare(b.label));
+        // Registry settings are validated only by Cursor's run backend. Keep
+        // the account's advertised schema in the dev log next to any refusal.
+        if (isDevRuntime()) {
+          for (const id of CURSOR_REGISTRY_PARAMETER_MODELS) {
+            const record = records.get(id);
+            if (record) console.info(`[cursor-sdk] ${id} advertises ${describeCursorSchema(record)}`);
+          }
+        }
         return { ids, records, aliases, models };
       } catch (err) {
         this.ctx.emit.onAgentStderr(
@@ -1558,9 +1699,15 @@ export class CursorSdkAdapter implements AgentAdapter {
     const effort = env?.ZEROS_THINKING_EFFORT;
     const fast = env?.ZEROS_FAST_MODE === "1";
     const requested = envModel?.trim();
-    if (requested && CURSOR_REGISTRY_PARAMETER_MODELS.has(requested) &&
-        (state.deniedModels.has(requested) || state.discoveredModelIds && !state.discoveredModelIds.has(requested)))
-      throw unavailableCursorModelSettings(stage);
+    if (requested && CURSOR_REGISTRY_PARAMETER_MODELS.has(requested)) {
+      if (state.deniedModels.has(requested)) {
+        const retry = this.pickRetryModel(requested, state);
+        if (retry) return retry;
+        throw unavailableCursorModelSettings(stage);
+      }
+      if (state.discoveredModelIds && !state.discoveredModelIds.has(requested))
+        throw unavailableCursorModelSettings(stage);
+    }
     // Cursor SDK 1.0.31 exposes Auto as canonical `default` plus alias `auto`.
     // Discovery canonicalizes the alias, while a cold selection stays intact
     // for the SDK's own model-list validator to canonicalize. Only an absent
@@ -1597,19 +1744,92 @@ export class CursorSdkAdapter implements AgentAdapter {
     return this.pickRetryModel(resolved, state) ?? resolved;
   }
 
-  /** Pick a confirmed-good local model different from `failed` (and not
-   *  already denied, and present in the account's catalog when known). null
-   *  when there's nothing else worth trying. */
+  /** Pick the first curated fallback that differs from `failed`, isn't
+   *  denied, and is in the account's discovered catalog. null when there's
+   *  nothing else worth trying — never a model outside the curated catalog. */
   private pickRetryModel(
     failed: string,
     state: CursorModelState = this.modelState,
   ): string | null {
-    for (const m of LOCAL_RETRY_MODELS) {
-      if (m === failed || state.deniedModels.has(m)) continue;
+    const canonical = (id: string) => state.discoveredModelAliases.get(id) ?? id;
+    for (const m of CURSOR_FALLBACK_MODELS) {
+      if (canonical(m) === canonical(failed) || state.deniedModels.has(m) || state.deniedModels.has(canonical(m))) continue;
       if (state.discoveredModelIds?.has(m))
         return m;
     }
     return null;
+  }
+
+  /** The selection a turn sends for `modelId`: the requested settings, or the
+   *  advertised settings Cursor ran after refusing them in this window. */
+  private turnSelection(
+    modelId: string,
+    state: CursorModelState,
+    env: Record<string, string> | undefined,
+  ): { requested: CursorModelSelection; selection: CursorModelSelection; substituted: boolean } {
+    const requested = this.modelSelection(modelId, state, env, "prompt");
+    if (requiresExactModel(env)) return { requested, selection: requested, substituted: false };
+    const key = cursorSelectionKey(requested);
+    const accepted = state.acceptedSettings.get(key);
+    if (accepted && accepted.until > Date.now()) return { requested, selection: accepted.selection, substituted: true };
+    if (accepted) state.acceptedSettings.delete(key);
+    return { requested, selection: requested, substituted: false };
+  }
+
+  /** After an attempt is refused before any model output, choose the next
+   *  bounded attempt. A registry model whose settings Cursor refused first
+   *  tries the account's other advertised settings; only when none remain is
+   *  the model denied for this account and a curated fallback chosen. Exact
+   *  model mode records the refusal and never substitutes. */
+  private nextAttemptAfterRefusal(
+    session: Session,
+    attempt: { modelId: string; requested: CursorModelSelection; selection: CursorModelSelection },
+    error: unknown,
+    tried: ReadonlySet<string>,
+  ): { modelId: string; requested: CursorModelSelection; selection: CursorModelSelection; substitute: "settings" | "model" } | null {
+    const native = normalizeProviderError("cursor", error);
+    if (native.category !== "model-unavailable") return null;
+    const state = session.modelState;
+    const env = session.env;
+    const canonical = state.discoveredModelAliases.get(attempt.modelId) ?? attempt.modelId;
+    if (isDevRuntime()) {
+      console.info(
+        `[cursor-sdk] refused ${describeCursorSelection(attempt.selection)}: ` +
+          redactLogSecrets(native.message).slice(0, 240),
+      );
+    }
+    const exact = requiresExactModel(env);
+    if (
+      !exact &&
+      isCursorRegistrySettingsRejection(native.message) &&
+      CURSOR_REGISTRY_PARAMETER_MODELS.has(canonical)
+    ) {
+      const key = cursorSelectionKey(attempt.requested);
+      if (state.acceptedSettings.get(key)?.selection === attempt.selection) state.acceptedSettings.delete(key);
+      // A turn may start from a cached substitute. Its refusal says nothing
+      // about the user's original settings until this turn has tried them.
+      const next = [attempt.requested, ...cursorRegistrySettingsLadder(
+        attempt.requested,
+        state.discoveredModels.get(canonical),
+        env?.ZEROS_THINKING_EFFORT,
+        env?.ZEROS_FAST_MODE === "1",
+      )].find((candidate) => !tried.has(cursorSelectionKey(candidate)));
+      if (next) return { modelId: attempt.modelId, requested: attempt.requested, selection: next, substitute: "settings" };
+    }
+    // No advertised setting runs: the model itself is refused for this account.
+    this.absorbModelRejection(state, attempt.modelId, error);
+    void this.discoverModels(session.apiKey, state, session.sdk);
+    if (exact) return null;
+    const retry = this.pickRetryModel(attempt.modelId, state);
+    if (!retry) return null;
+    let requested: CursorModelSelection;
+    try {
+      requested = this.modelSelection(retry, state, env, "prompt");
+    } catch {
+      return null;
+    }
+    if (tried.has(cursorSelectionKey(requested))) return null;
+    return { modelId: retry, requested, selection: requested, substitute: "model" };
   }
 
   /** Fold a "Cannot use this model: <id>. Available models: …" rejection from
@@ -1792,8 +2012,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env, modelState);
       const sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
       // ID-only discovery is detached, so a retired pick can reach the SDK;
-      // withModelRecovery keeps the existing listed-model fallback. Explicit
-      // parameterized registry selections never silently switch models.
+      // withModelRecovery keeps the existing listed-model fallback. A denied
+      // registry pick uses a confirmed retry and reports it on the next turn.
       const created = await this.withModelRecovery(
         {
           state: modelState,
@@ -1837,6 +2057,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
+      appliedApiKey: apiKey,
       modelState,
       modelId,
       modeId: initialMode,
@@ -2037,6 +2258,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
+      appliedApiKey: apiKey,
       modelState,
       modelId,
       modeId: initialMode,
@@ -2174,24 +2396,57 @@ export class CursorSdkAdapter implements AgentAdapter {
       session.agent.agentId,
       opts.turnId,
     );
+    const requestedModel = session.env?.CURSOR_MODEL?.trim() || session.modelId;
+    const fallbackNoticeId = `cursor-${opts.sessionId}-${opts.turnId ?? randomUUID()}`;
+    const canonicalModel = (id: string) =>
+      session.modelState.discoveredModelAliases.get(id) ??
+      (CURSOR_AUTO_IDS.has(id.toLowerCase()) ? "default" : id);
 
     // Prefer RunResult.error; legacy hosts can still require the local store
-    // fallback. Retry a model rejection once, only before any model output.
-    const MAX_ATTEMPTS = requiresExactModel(session.env) ? 1 : 2;
+    // fallback. A refusal before any model output moves to the next bounded
+    // attempt (nextAttemptAfterRefusal): the account's other advertised
+    // settings for a registry model, then the catalog's curated fallbacks.
+    const MAX_ATTEMPTS = requiresExactModel(session.env) ? 1 : CURSOR_MAX_TURN_ATTEMPTS;
+    const tried = new Set<string>();
+    let planned: {
+      modelId: string;
+      requested: CursorModelSelection;
+      selection: CursorModelSelection;
+      substitute: "settings" | "model" | null;
+    } | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const lastAttempt = attempt >= MAX_ATTEMPTS;
-      // attempt 1 honours the chat's pick (minus anything already denied this
-      // session); attempt 2 forces a confirmed-good fallback.
-      const modelId =
-        attempt === 1
-          ? this.resolveModel(
-              session.env?.CURSOR_MODEL ?? session.modelId,
-              session.env,
-              session.modelState,
-              "prompt",
-            )
-          : (this.pickRetryModel(session.modelId, session.modelState) ??
-            session.modelId);
+      // Attempt 1 honours the chat's pick (minus anything already refused for
+      // this account); later attempts run the planned substitute.
+      let current: NonNullable<typeof planned>;
+      try {
+        if (planned) current = planned;
+        else {
+          const modelId = this.resolveModel(
+            session.env?.CURSOR_MODEL ?? session.modelId,
+            session.env,
+            session.modelState,
+            "prompt",
+          );
+          const chosen = this.turnSelection(modelId, session.modelState, session.env);
+          current = {
+            modelId,
+            requested: chosen.requested,
+            selection: chosen.selection,
+            substitute:
+              canonicalModel(modelId) !== canonicalModel(requestedModel) &&
+              CURSOR_FALLBACK_MODELS.includes(modelId)
+                ? "model"
+                : chosen.substituted ? "settings" : null,
+          };
+        }
+      } catch (err) {
+        if (session.cancelRequested) return { stopReason: "cancelled", response: { stopReason: "cancelled" } };
+        throw this.classify(err, "prompt");
+      }
+      planned = null;
+      const modelId = current.modelId;
+      tried.add(cursorSelectionKey(current.selection));
 
       // Fresh translator per attempt so a retried run doesn't inherit the
       // failed run's partial state. A model-gated run errors before emitting
@@ -2220,7 +2475,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       // turn's model/mode could only be inferred from the renderer's telemetry.
       if (isDevRuntime()) {
         console.info(
-          `[cursor-sdk] turn: model=${modelId} mode=${session.modeId} ` +
+          `[cursor-sdk] turn: model=${describeCursorSelection(current.selection)} mode=${session.modeId} ` +
             `attempt=${attempt}/${MAX_ATTEMPTS}`,
         );
       }
@@ -2240,6 +2495,42 @@ export class CursorSdkAdapter implements AgentAdapter {
         acceptingUpdates &&
         !session.cancelRequested &&
         this.sessions.get(opts.sessionId) === session;
+      // Cursor ran this attempt: its first model output (or a quiet success)
+      // proves the selection. Only then remember settings it accepted and
+      // narrate a substitute, so a refused attempt never claims it ran. The
+      // saved pick stays: this turn's recovery is not a sticky model switch.
+      let accepted = false;
+      const acceptAttempt = () => {
+        if (accepted || session.cancelRequested || this.sessions.get(opts.sessionId) !== session) return;
+        accepted = true;
+        if (current.substitute === "settings") {
+          const key = cursorSelectionKey(current.requested);
+          if (!session.modelState.acceptedSettings.has(key))
+            session.modelState.acceptedSettings.set(key, { selection: current.selection, until: Date.now() + ACCOUNT_MODEL_TTL_MS });
+          const fromSettings = cursorSelectionSettings(current.requested);
+          const toSettings = cursorSelectionSettings(current.selection);
+          // A substitute differing only in settings the composer doesn't
+          // control (such as context) changes nothing the user chose.
+          if (fromSettings.effort === toSettings.effort && fromSettings.fast === toSettings.fast) return;
+          this.ctx.emit.onSessionUpdate(AGENT_ID, {
+            sessionId: opts.sessionId,
+            update: {
+              sessionUpdate: "model_fallback", noticeId: fallbackNoticeId,
+              provider: "cursor", fromModel: requestedModel, toModel: modelId,
+              scope: "local", reason: "settings", fromSettings, toSettings,
+            },
+          });
+        } else if (current.substitute === "model") {
+          this.ctx.emit.onSessionUpdate(AGENT_ID, {
+            sessionId: opts.sessionId,
+            update: {
+              sessionUpdate: "model_fallback", noticeId: fallbackNoticeId,
+              provider: "cursor", fromModel: requestedModel, toModel: modelId,
+              scope: "local", reason: "unavailable",
+            },
+          });
+        }
+      };
 
       let run: SdkRun;
       try {
@@ -2252,7 +2543,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           // Auto & Full access both run as sdk "agent"; they differ only by the
           // (create-time) autoReview already baked in via ensureSessionConfiguration().
           mode: sdkModeFor(session.modeId),
-          model: this.modelSelection(modelId, session.modelState, session.env, "prompt"),
+          model: current.selection,
           local: { force: true },
           ...(cloud?.mode === "boot-owner-v1" ? { beforeNativeWrite: () => {
             if (!ownsUpdates() || !reservation)
@@ -2288,7 +2579,10 @@ export class CursorSdkAdapter implements AgentAdapter {
                 try { void Promise.resolve(opts.onNativeOutput(kind)).catch(() => {}); } catch { /* observation is inert */ }
               }
             }
-            if (isRecord(update) && typeof update.type === "string" && /^(?:text-|thinking-|tool-call-|partial-tool-call)/.test(update.type)) sawModelOutput = true;
+            if (isRecord(update) && typeof update.type === "string" && /^(?:text-|thinking-|tool-call-|partial-tool-call)/.test(update.type)) {
+              sawModelOutput = true;
+              acceptAttempt();
+            }
             if (isRecord(update) && update.type === "turn-ended") {
               callbackUsage = sumCursorUsage(callbackUsage, cursorTokenUsage(update.usage));
             }
@@ -2297,6 +2591,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           onStep: ({ step }) => {
             if (ownsUpdates()) {
               sawModelOutput = true;
+              acceptAttempt();
               translator.feedStep(step);
             }
           },
@@ -2310,10 +2605,15 @@ export class CursorSdkAdapter implements AgentAdapter {
             response: { stopReason: "cancelled" },
           };
         }
-        const modelRejected = this.absorbModelRejection(session.modelState, modelId, err);
-        if (modelRejected) void this.discoverModels(session.apiKey, session.modelState, session.sdk);
-        if (!lastAttempt && !sawModelOutput && modelRejected && this.pickRetryModel(modelId, session.modelState)) {
-          continue;
+        if (sawModelOutput) {
+          if (this.absorbModelRejection(session.modelState, modelId, err))
+            void this.discoverModels(session.apiKey, session.modelState, session.sdk);
+        } else {
+          const next = this.nextAttemptAfterRefusal(session, current, err, tried);
+          if (next && !lastAttempt) {
+            planned = next;
+            continue;
+          }
         }
         throw this.classify(err, "prompt");
       }
@@ -2372,6 +2672,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           if (sdkMessage.type === "usage") {
             streamedUsage = sumCursorUsage(streamedUsage, cursorTokenUsage(sdkMessage.usage));
           }
+          if (CURSOR_MODEL_CONTENT_FRAMES.has(sdkMessage.type ?? "")) acceptAttempt();
           translator.feed(msg);
         }
         waitResult = await run.wait();
@@ -2451,6 +2752,9 @@ export class CursorSdkAdapter implements AgentAdapter {
 
       // Success.
       if (streamError == null && !runErrored && !translator.sawError) {
+        // A quiet success still proves the selection; narrate it before the
+        // recovered answer so the notice keeps its place in source order.
+        acceptAttempt();
         // The final result is authoritative even after commentary or partial
         // output. Reconcile it within this run instead of dropping it merely
         // because some assistant text was visible.
@@ -2479,25 +2783,24 @@ export class CursorSdkAdapter implements AgentAdapter {
       const native = normalizeProviderError("cursor", recovered ?? {
         message: `Cursor run ended in "${runStatus ?? "error"}" without an error message.`,
       });
-      if (this.absorbModelRejection(session.modelState, modelId, recovered ?? { message: native.message }))
-        void this.discoverModels(session.apiKey, session.modelState, session.sdk);
-
-      // Model gated for this account → denylist it and retry with a
-      // confirmed-good model so the user's turn still completes.
-      if (
-        !lastAttempt &&
-        !sawModelOutput &&
-        native.category === "model-unavailable" &&
-        this.pickRetryModel(modelId, session.modelState)
-      ) {
-        session.modelState.deniedModels.add(modelId);
-        this.ctx.emit.onAgentStderr(
-          AGENT_ID,
-          `[cursor-sdk] model "${modelId}" can't run locally on this ` +
-            `account (${native.message.slice(0, 160)}); retrying with ` +
-            `${this.pickRetryModel(modelId, session.modelState)}.`,
-        );
-        continue;
+      const refusal = recovered ?? { message: native.message };
+      if (sawModelOutput) {
+        if (this.absorbModelRejection(session.modelState, modelId, refusal))
+          void this.discoverModels(session.apiKey, session.modelState, session.sdk);
+      } else if (native.category === "model-unavailable") {
+        // Refused before any output: try the account's other advertised
+        // settings, then a curated fallback, so the user's turn still runs.
+        const next = this.nextAttemptAfterRefusal(session, current, refusal, tried);
+        if (next && !lastAttempt) {
+          this.ctx.emit.onAgentStderr(
+            AGENT_ID,
+            `[cursor-sdk] ${describeCursorSelection(current.selection)} can't run locally on this ` +
+              `account (${native.message.slice(0, 160)}); retrying with ` +
+              `${describeCursorSelection(next.selection)}.`,
+          );
+          planned = next;
+          continue;
+        }
       }
 
       this.ctx.emit.onAgentStderr(AGENT_ID, `[cursor-sdk] turn failed: ${native.message}`);
@@ -2521,6 +2824,8 @@ export class CursorSdkAdapter implements AgentAdapter {
             noticeId: `cursor-neterr-${randomUUID()}`,
             severity: "error",
             recoverable: true,
+            // Live reconnect status, then a quiet row; never a lasting banner.
+            code: "connection_lost",
             message: "Connection lost — reconnecting…",
           },
         });
@@ -2680,13 +2985,15 @@ export class CursorSdkAdapter implements AgentAdapter {
       const want = autoReviewFor(session.modeId);
       const catalog = this.mcpCatalog(session.mcpServers);
       const catalogChanged = catalog.key !== session.appliedMcpCatalog;
-      if (!catalogChanged && want === session.appliedAutoReview) return;
+      const credentialChanged = session.apiKey !== session.appliedApiKey;
+      if (!catalogChanged && !credentialChanged && want === session.appliedAutoReview) return;
       if (session.activeRun) throw new Error("Cursor MCP configuration cannot refresh during an active run.");
       const previous = session.agent;
+      const apiKey = session.apiKey;
       const refresh = async () => {
         const sessionMcp = this.mcpServers(catalog.servers, session.env, session.cwd);
         const agent = await session.sdk.Agent.resume(previous.agentId, {
-          apiKey: session.apiKey,
+          apiKey,
           model: this.modelSelection(session.modelId, session.modelState, session.env, "loadSession"),
           cwd: session.cwd,
           local: this.buildLocalOpts(session.cwd, session.env, want, session.settingSources),
@@ -2699,6 +3006,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         // The host proxy owns an individual native handle, not just agentId;
         // releasing the old executor cannot close the replacement conversation.
         session.agent = agent;
+        session.appliedApiKey = apiKey;
         session.appliedAutoReview = want;
         session.appliedMcpCatalog = catalog.key;
         if (previous !== agent) previous.close?.();
@@ -2708,9 +3016,11 @@ export class CursorSdkAdapter implements AgentAdapter {
       try {
         await pending;
       } catch (err) {
-        // Keep the prior mode-only recovery behavior. A stale tool catalog must
-        // instead fail before submitting the prompt and retry via existing UI.
-        if (catalogChanged || this.mcpCatalog(session.mcpServers).key !== session.appliedMcpCatalog) throw err;
+        // Keep the prior mode-only recovery behavior. A stale tool catalog or
+        // a replaced credential must instead fail before submitting the
+        // prompt: the old handle would keep running under the previous key.
+        if (catalogChanged || credentialChanged || session.apiKey !== session.appliedApiKey ||
+            this.mcpCatalog(session.mcpServers).key !== session.appliedMcpCatalog) throw err;
         this.ctx.emit.onAgentStderr(AGENT_ID,
           `[cursor-sdk] Auto-review rebuild (autoReview=${want}) failed; keeping current agent: ${err instanceof Error ? err.message : String(err)}`);
         return;
@@ -2721,9 +3031,28 @@ export class CursorSdkAdapter implements AgentAdapter {
       // a handle created with the first revision. Bound pathological churn.
     }
     if (this.mcpCatalog(session.mcpServers).key !== session.appliedMcpCatalog ||
+        session.apiKey !== session.appliedApiKey ||
         autoReviewFor(session.modeId) !== session.appliedAutoReview) {
       throw new Error("Cursor MCP configuration kept changing. Please retry the message.");
     }
+  }
+
+  /** Local connection change (API key or Cursor account). An agent handle is
+   * bound to its key, so the next run resumes this agent under the new one
+   * (ensureSessionConfiguration); a running turn keeps its handle. */
+  async updateCredentials(opts: ProviderCredentialUpdate): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session) return;
+    if (session.cloudExecution)
+      throw new Error("A cloud execution keeps the credential it was admitted with");
+    const env = withProviderConnection(session.env, opts);
+    // A removed key or signed-out account asks for a connection, exactly as a
+    // new session would; it never falls back to the previous key.
+    const apiKey = this.resolveApiKey(env);
+    session.env = env;
+    if (apiKey === session.apiKey) return;
+    session.apiKey = apiKey;
+    session.modelState = await this.activateModelState(apiKey);
   }
 
   async disposeSession(sessionId: string): Promise<void> {

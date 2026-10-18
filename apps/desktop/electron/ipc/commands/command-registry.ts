@@ -112,7 +112,7 @@ import {
   windowSetBackground,
   windowZoomToggle,
 } from "./window";
-import { appInfo, appSettingGet, appSettingSet, engineRestart } from "./app";
+import { appInfo, appSettingGet, appSettingSet, engineRestart, localNavigationReady } from "./app";
 import { logSubmit, logsExportOpen, logsRecent } from "./logs";
 import {
   cloudWorkspaceAccessContext,
@@ -146,6 +146,7 @@ export function registerAllCommands(): void {
   // renderer analytics layer to route events to the right PostHog
   // project (Zeros Dev vs Zeros). Metadata only.
   setCommand("app_info", appInfo);
+  setCommand("local_navigation_ready", localNavigationReady);
   setCommand("cursor_subscription", cursorSubscription);
   setCommand("provider_subscription", providerSubscription);
   setCommand("cloud_provider_auth", cloudProviderAuth);

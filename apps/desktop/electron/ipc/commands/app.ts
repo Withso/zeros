@@ -19,7 +19,7 @@ import { app } from "electron";
 import { IS_DEV, IS_LOCAL_DEVELOPMENT } from "../../runtime-mode";
 import { channel, type Channel } from "../../../src/engine/runtime";
 import { currentRoot, spawnEngine } from "../../sidecar";
-import { emitEvent } from "../events";
+import { emitEvent, getMainWindow, suspendLocalNavigation, takePendingLocalNavigation } from "../events";
 import type { CommandHandler } from "../router";
 
 export interface AppInfo {
@@ -45,6 +45,18 @@ export const appInfo: CommandHandler = async (): Promise<AppInfo> => {
     platform: process.platform,
     arch: process.arch,
   };
+};
+
+export const localNavigationReady: CommandHandler = (args, event) => {
+  const win = getMainWindow();
+  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) {
+    throw new Error("Local navigation requires the app window.");
+  }
+  if (args.ready === false) {
+    suspendLocalNavigation();
+    return null;
+  }
+  return takePendingLocalNavigation();
 };
 
 // ──────────────────────────────────────────────────────────

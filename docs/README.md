@@ -50,6 +50,7 @@ references to consult before changing their area, not temporary task plans.
 | Browser                       | [Browser service](browser-service.md): page hosting, identity, isolation, Codex’s IAB host and artifacts                                              |
 | Native computer use           | [Computer and browser use](native-computer-use.md): the opt-in Cua driver runtime, its packaging and staging, official Codex plugin ownership, host permissions and transcript behavior |
 | Simulators                    | [Simulators](simulators.md): the Simulator tab, DeviceHub, idle shutdown, `zeros_device` tools and Settings → Simulators                              |
+| Local CLI                     | [Zeros Local CLI](local-cli.md): `zeros local` agent orchestration in Local workspaces — admission, visibility, inheritance, delivery, cards, links, records and rollout |
 
 ## Operations and active programs
 

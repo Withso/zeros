@@ -35,6 +35,7 @@ function setup() {
   });
   const prompt = vi.fn<AgentAdapter["prompt"]>().mockResolvedValue(completed);
   const disposeSession = vi.fn(async () => {});
+  const updateCredentials = vi.fn(async () => {});
   const internal = gateway as unknown as {
     adapters: Map<string, AgentAdapter>;
     executionToAgent: Map<string, string>;
@@ -47,6 +48,7 @@ function setup() {
     prompt,
     disposeSession,
     dispose: async () => {},
+    capabilityPorts: { runtimeConfiguration: { updateCredentials } },
   } as unknown as AgentAdapter);
   internal.executionToAgent.set("execution", "cursor");
   internal.executionAuthFingerprint.set(
@@ -58,6 +60,7 @@ function setup() {
     internal,
     prompt,
     disposeSession,
+    updateCredentials,
     replaceCredential: () => {
       selectedKey = "replacement-fixture-key";
     },
@@ -87,15 +90,20 @@ describe("Cursor credentials across active gateway turns", () => {
       reject(failure);
       await rejected;
       expect(c.internal.runtimeAuthFailed.has("cursor")).toBe(false);
-      // A subsequent send must reconnect before dispatching under the new key.
+      // The next send runs under the replacement key in the same execution.
       await expect(
         c.gateway.prompt("cursor", "execution", message),
-      ).rejects.toMatchObject({
-        failure: { kind: "session-expired" },
-      });
-      expect(c.prompt).toHaveBeenCalledOnce();
-      expect(c.disposeSession).toHaveBeenCalledWith("execution");
-      expect(c.internal.executionToAgent.has("execution")).toBe(false);
+      ).resolves.toEqual(completed.response);
+      expect(c.updateCredentials).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          sessionId: "execution",
+          keys: ["CURSOR_API_KEY"],
+          env: { CURSOR_API_KEY: "replacement-fixture-key" },
+        }),
+      );
+      expect(c.prompt).toHaveBeenCalledTimes(2);
+      expect(c.disposeSession).not.toHaveBeenCalled();
+      expect(c.internal.executionToAgent.get("execution")).toBe("cursor");
     } finally {
       reject(failure);
       await pending.catch(() => {});

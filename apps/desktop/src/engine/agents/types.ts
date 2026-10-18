@@ -127,8 +127,29 @@ export class AgentFailureError extends Error {
 // Every adapter emits into this channel. The gateway translates to
 // AGENT_* wire messages and broadcasts over the WebSocket.
 
+/** One streamed piece of a tool call's arguments, before the provider
+ * finishes the call's input. Engine-local and transient: it is never routed to
+ * clients or persisted, and the transcript keeps its complete-input contract. */
+export interface AgentToolInputEvent {
+  /** Provider-native tool call id. */
+  nativeToolId: string;
+  /** Zeros transcript tool call id, when already minted. */
+  toolCallId?: string;
+  name: string;
+  /** Native parent for subagent calls. */
+  parentToolUseId?: string;
+  phase: "start" | "delta" | "stop";
+  chunk?: string;
+}
+
 export interface AgentGatewayEvents {
   onSessionUpdate: (agentId: string, notification: SessionNotification) => void;
+  /** Optional observer of streamed tool arguments (see AgentToolInputEvent). */
+  onToolInput?: (
+    agentId: string,
+    sessionId: string,
+    event: AgentToolInputEvent,
+  ) => void;
   /** Engine-authoritative status for the exact live execution. Contains only
    * stable categories and counts, never paths, endpoints, refs, or errors. */
   onBoundaryStatusChanged?: (
@@ -239,6 +260,10 @@ export interface McpRemoteServerRegistration<T extends "http" | "sse"> {
   /** Provider wait for one tool call. Only Codex has a short default (60 s);
    * other providers already wait for the server. */
   toolTimeoutSec?: number;
+  /** Engine-registered servers that make their own allow/deny decision (the
+   * Zeros Local CLI tool) skip the provider's per-call approval. Never set
+   * from user or repository configuration. */
+  defaultToolsApproval?: "approve";
 }
 
 // ── Gateway construction shape (drop-in with AgentSessionManager) ──
@@ -383,12 +408,29 @@ export interface AgentTurnControlCapabilityPort {
   compactContext?(opts: { sessionId: string }): Promise<void>;
 }
 
+/** The host's current provider connection for one live Local execution. */
+export interface ProviderCredentialUpdate {
+  sessionId: string;
+  /** Every provider credential variable this update owns. A name in `keys`
+   * but absent from `env` is removed from the execution's environment. */
+  keys: readonly string[];
+  env: Readonly<Record<string, string>>;
+  cliBinary?: string;
+  /** Private account identity for account-scoped caches. Never logged. */
+  authenticationContext: string;
+}
+
 export interface AgentRuntimeConfigurationCapabilityPort {
   setModel?(opts: { sessionId: string; model: string }): Promise<void>;
   updateConfig?(opts: {
     sessionId: string;
     env: Record<string, string>;
   }): Promise<void>;
+  /** Local only: adopt a changed API key, CLI login or saved account without
+   * a reconnect. A running turn keeps the process it started with; the next
+   * turn runs under the new connection and resumes the same provider
+   * conversation. */
+  updateCredentials?(opts: ProviderCredentialUpdate): Promise<void>;
 }
 
 export interface AgentInteractionCapabilityPort {

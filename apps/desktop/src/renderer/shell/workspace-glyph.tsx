@@ -66,6 +66,8 @@ const PR_TONE_CLS: Record<WorkspacePrTone, string> = {
 };
 
 export interface WorkspaceGlyphProps {
+  size?: number;
+  className?: string;
   /** workspaceGlyphSeed(repoSlug, branch). */
   seed: string;
   /** The workspace's agent is working: the square animates. */
@@ -74,10 +76,10 @@ export interface WorkspaceGlyphProps {
   pr?: WorkspacePrTone | null;
 }
 
-export function WorkspaceGlyph({ seed, working = false, pr = null }: WorkspaceGlyphProps) {
+export function WorkspaceGlyph({ seed, working = false, pr = null, size = 16, className }: WorkspaceGlyphProps) {
   return (
     <PuzzleSquare
-      size={16}
+      size={size}
       seed={seed}
       active={working}
       // Depth while it works: three close tones of the same colour.
@@ -85,6 +87,7 @@ export function WorkspaceGlyph({ seed, working = false, pr = null }: WorkspaceGl
       className={cn(
         "transition-colors duration-200",
         pr ? PR_TONE_CLS[pr] : working ? "text-fg2" : "text-fg3/25",
+        className,
       )}
     />
   );

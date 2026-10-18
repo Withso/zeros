@@ -301,6 +301,8 @@ import {
   withDesignDirectoryNameLease,
 } from "../design/directory-registry";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
+import { designSnapshotReadEpoch } from "../design/snapshot-epoch";
+import { noteDesignSnapshotDirectory } from "../design/change-poller";
 import { readDirectoryDesignLayout } from "../design/metadata";
 import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
@@ -336,6 +338,7 @@ import {
   listChats,
   listChatsSince,
   summariesForFolder,
+  chatTitleSeeds,
   getChat,
   setChatComposerMode,
   wasChatDeleted,
@@ -1453,6 +1456,13 @@ export class WorkspaceService {
     string,
     Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>
   >();
+  /** The snapshot-read fence epoch each in-flight read started in. A request
+   * made after the watcher (or an agent edit) fenced the checkout never joins
+   * an older flight; see `design/snapshot-epoch.ts`. */
+  private readonly designSnapshotFlightEpochs = new WeakMap<
+    Promise<unknown>,
+    string
+  >();
   /** One bounded workspace-wide ordering layer sits above DesignApi's
    * per-frame stacks. It lets Command-Z restore a deleted frame even when the
    * selected frame changed—or when deletion left the canvas empty. */
@@ -2204,12 +2214,16 @@ export class WorkspaceService {
     // can point synchronous document readers at different Design documents
     // under the same workspace root.
     const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}`;
+    const epoch = designSnapshotReadEpoch(root);
     const current = this.designSnapshotFlights.get(key);
-    if (current && !options.fresh) return current;
+    if (current && !options.fresh && this.joinsDesignSnapshotFlight(current, epoch))
+      return current;
     const request = (async () => {
       const snapshot = await readDesignWorkspaceSnapshot(root, {
         writeBack,
       });
+      // The directory this desktop's canvas shows, for prompt change polling.
+      if (!remote) noteDesignSnapshotDirectory(root, designDirectory);
       return {
         ...snapshot,
         directoryId: designDirectoryEntry(root, designDirectory)?.id,
@@ -2220,6 +2234,7 @@ export class WorkspaceService {
           : null,
       };
     })();
+    this.designSnapshotFlightEpochs.set(request, epoch);
     this.designSnapshotFlights.set(key, request);
     try {
       return await request;
@@ -2228,6 +2243,12 @@ export class WorkspaceService {
         this.designSnapshotFlights.delete(key);
       }
     }
+  }
+
+  /** Share an in-flight snapshot only within the fence epoch it started in. */
+  private joinsDesignSnapshotFlight(flight: Promise<unknown>, epoch: string): boolean {
+    const started = this.designSnapshotFlightEpochs.get(flight);
+    return started === undefined || started === epoch;
   }
 
   private async readDesignSnapshotRequest(
@@ -2239,8 +2260,9 @@ export class WorkspaceService {
     const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000read\u0000${designDirectoryNameFor(workspace.path)}\u0000${
       hostLocalResources ? "host-resources" : "bridge-resources"
     }`;
+    const epoch = designSnapshotReadEpoch(workspace.path);
     const current = this.designSnapshotRequestFlights.get(key);
-    if (current) return current;
+    if (current && this.joinsDesignSnapshotFlight(current, epoch)) return current;
     const request = this.withDesignReadWorkspace(
       workspaceId,
       remote,
@@ -2252,6 +2274,7 @@ export class WorkspaceService {
           hostLocalResources,
         }),
     );
+    this.designSnapshotFlightEpochs.set(request, epoch);
     this.designSnapshotRequestFlights.set(key, request);
     try {
       return await request;
@@ -3962,6 +3985,12 @@ export class WorkspaceService {
           // resurrects a chat deleted while that renderer was offline.
           chatDeletions: tombstonesSince("chat", 0),
         };
+      }
+      // What names an Untitled chat (desktop only: relay clients are refused
+      // by the deny-by-default remote gate, which does not list this op).
+      case "chats.titleSeeds": {
+        const ids = Array.isArray(params.chatIds) ? params.chatIds.filter((id): id is string => typeof id === "string") : [];
+        return { seeds: chatTitleSeeds(ids.slice(0, 50)) };
       }
       case "chats.summariesForFolder": {
         const exclude = optStr(params, "excludeChatId");

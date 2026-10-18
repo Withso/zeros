@@ -9,12 +9,12 @@ import { CursorSdkAdapter } from "../adapter";
 import * as cloudExecution from "../../../cloud-provider-execution";
 import { cloudCursorStateRoot, durableCursorStateRoot } from "../state-overlay";
 
-const { createRuntimeSpy, createSpy, resumeSpy, prewarmSpy } = vi.hoisted(() => ({
-  createRuntimeSpy: vi.fn(), createSpy: vi.fn(), resumeSpy: vi.fn(), prewarmSpy: vi.fn(),
+const { createRuntimeSpy, createSpy, resumeSpy, prewarmSpy, modelsListSpy } = vi.hoisted(() => ({
+  createRuntimeSpy: vi.fn(), createSpy: vi.fn(), resumeSpy: vi.fn(), prewarmSpy: vi.fn(), modelsListSpy: vi.fn(),
 }));
 vi.mock("../host/host-client", () => {
   const module = { Agent: { create: createSpy, resume: resumeSpy, list: vi.fn(async () => ({ items: [] })) },
-    Cursor: { models: { list: vi.fn(async () => [{ id: "grok-4.6", parameters: [] }]) } }, platform: { prewarm: prewarmSpy } };
+    Cursor: { models: { list: modelsListSpy } }, platform: { prewarm: prewarmSpy } };
   return { createCursorHostRuntime: createRuntimeSpy, getCursorHostModule: vi.fn(() => module),
     CURSOR_HOST_EXITED_CODE: "CURSOR_HOST_EXITED", CURSOR_HOST_CRASH_LOOP_CODE: "CURSOR_HOST_CRASH_LOOP", CURSOR_HOST_CRASH_LOOP_ADVICE: "Restart Cursor" };
 });
@@ -53,8 +53,9 @@ beforeEach(async () => {
   createSpy.mockReset().mockResolvedValue(agent); resumeSpy.mockReset().mockResolvedValue(agent);
   agent.send.mockReset().mockImplementation(async () => ({ id: "run-1", stream: async function* () {}, wait: async () => ({ status: "finished" }) }));
   prewarmSpy.mockReset().mockResolvedValue({ prewarmed: true });
+  modelsListSpy.mockReset().mockResolvedValue([{ id: "grok-4.6", parameters: [] }]);
   createRuntimeSpy.mockReset().mockImplementation(() => ({
-    module: { Agent: { create: createSpy, resume: resumeSpy, list: vi.fn(async () => ({ items: [] })) }, Cursor: { models: { list: vi.fn(async () => [{ id: "grok-4.6", parameters: [] }]) } }, platform: { prewarm: prewarmSpy } },
+    module: { Agent: { create: createSpy, resume: resumeSpy, list: vi.fn(async () => ({ items: [] })) }, Cursor: { models: { list: modelsListSpy } }, platform: { prewarm: prewarmSpy } },
     dispose: vi.fn(async () => {}),
   }));
   // Every admitted execution carries a lease; this one has no customization.
@@ -67,6 +68,45 @@ afterEach(async () => {
 });
 
 describe("Cursor cloud product tools", () => {
+  it("keeps cloud registry denials exact and isolated from Local and other executions", async () => {
+    modelsListSpy.mockResolvedValue([{ id: "grok-4.7", parameters: [] }, { id: "composer-2", parameters: [] }]);
+    const context = ctx();
+    const updates = vi.fn();
+    context.emit.onSessionUpdate = updates;
+    const adapter = new CursorSdkAdapter(context);
+    const env = { CURSOR_API_KEY: "key", CURSOR_MODEL: "grok-4.7" };
+    const selected = vi.spyOn(cloudExecution, "cloudProviderExecution");
+    try {
+      selected.mockReturnValue(null);
+      await adapter.newSession({ ...sessionOptions(), executionId: "local", env, mcpServers: [] });
+      const firstCloud = execution({ executionId: "cloud-a", cwd: root });
+      selected.mockReturnValue(firstCloud);
+      await adapter.newSession({ ...sessionOptions(), executionId: "cloud-a", env: { ...env, ZEROS_REQUIRE_EXACT_MODEL: "1" } });
+      agent.send.mockRejectedValueOnce({ code: "invalid_model", message: "Selection rejected." });
+      await expect(adapter.prompt({ sessionId: "cloud-a", prompt: [{ type: "text", text: "inspect" }] })).rejects.toBeDefined();
+      await expect(adapter.prompt({ sessionId: "cloud-a", prompt: [{ type: "text", text: "continue" }] })).rejects.toThrow(/substitution is disabled/);
+      expect(agent.send).toHaveBeenCalledOnce();
+      expect((await adapter.initializeSession("cloud-a"))._meta?.models).toEqual(expect.arrayContaining([
+        expect.objectContaining({ value: "grok-4.7", selectable: false }),
+      ]));
+
+      selected.mockReturnValue(execution({ executionId: "cloud-b", cwd: root }));
+      await adapter.newSession({ ...sessionOptions(), executionId: "cloud-b", env: { ...env, ZEROS_REQUIRE_EXACT_MODEL: "1" } });
+      await adapter.prompt({ sessionId: "cloud-b", prompt: [{ type: "text", text: "inspect" }] });
+      await adapter.prompt({ sessionId: "local", prompt: [{ type: "text", text: "inspect" }] });
+      for (const call of agent.send.mock.calls) expect(call[1].model.id).toBe("grok-4.7");
+      for (const sessionId of ["cloud-b", "local"]) {
+        expect((await adapter.initializeSession(sessionId))._meta?.models).toEqual(expect.arrayContaining([
+          expect.objectContaining({ value: "grok-4.7", selectable: true }),
+        ]));
+      }
+      expect((await adapter.initializeSession("cloud-a"))._meta?.models).toEqual(expect.arrayContaining([
+        expect.objectContaining({ value: "grok-4.7", selectable: false }),
+      ]));
+      expect(updates.mock.calls.some(call => call[1].update.sessionUpdate === "model_fallback")).toBe(false);
+    } finally { await adapter.dispose(); }
+  });
+
   it.each(["new", "resume"])("%s uses the original physical history store instead of a caller root or workspace hash", async operation => {
     const nativeHome = await createCloudNativeHome({ dataRoot: root,
       conversationId: "original-store", provider: "cursor", executionId: "original-store" });

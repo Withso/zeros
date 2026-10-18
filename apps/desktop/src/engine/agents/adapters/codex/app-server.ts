@@ -1698,6 +1698,9 @@ export function buildMcpServerOverrides(
       ) {
         args.push("-c", `${base}.tool_timeout_sec=${s.toolTimeoutSec}`);
       }
+      if (s.defaultToolsApproval === "approve") {
+        args.push("-c", `${base}.default_tools_approval_mode="approve"`);
+      }
     } else {
       args.push("-c", `${base}.command="${escapeTomlString(s.command)}"`);
       if (s.args && s.args.length > 0) {

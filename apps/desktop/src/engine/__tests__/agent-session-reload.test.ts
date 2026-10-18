@@ -204,7 +204,7 @@ describe("agent session continuity across a local renderer reload", () => {
     state.clearPendingAgentInteractions("session-1");
     expect(state.pendingQuestionRequests.has("ask")).toBe(false);
   });
-  it.each([true, false])("retains empty-session replay across reload only until a successful prompt: %s", async (succeeds) => {
+  it.each(["end_turn", "cancelled", "failed"] as const)("retains empty-session replay across reload only until a successful prompt: %s", async (outcome) => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_899 });
     const state = internals(engine);
     const { client, messages } = testClient();
@@ -212,11 +212,63 @@ describe("agent session continuity across a local renderer reload", () => {
     state.sessionAgent.set("session-1", "codex");
     state.sessionLoadResponses.set("session-1", { resumedFresh: true });
     const prompt = vi.spyOn(state.agents, "prompt");
-    if (succeeds) prompt.mockResolvedValue({ stopReason: "end_turn" });
-    else prompt.mockRejectedValue(new Error("Sign in required"));
+    if (outcome === "failed") prompt.mockRejectedValue(new Error("Sign in required"));
+    else prompt.mockResolvedValue({ stopReason: outcome });
     await state.handleMessage({ type: "AGENT_PROMPT", id: "replay-once", source: "browser", timestamp: 1, agentId: "codex", sessionId: "session-1", prompt: [{ type: "text", text: "hi" }] } as EngineMessage, client);
-    expect(messages.some(message => message.type === (succeeds ? "AGENT_PROMPT_COMPLETE" : "AGENT_PROMPT_FAILED"))).toBe(true);
-    expect(state.sessionLoadResponses.get("session-1")?.resumedFresh).toBe(!succeeds);
+    expect(messages.some(message => message.type === (outcome === "failed" ? "AGENT_PROMPT_FAILED" : "AGENT_PROMPT_COMPLETE"))).toBe(true);
+    expect(state.sessionLoadResponses.get("session-1")?.resumedFresh).toBe(outcome !== "end_turn");
+  });
+  it.each([true, undefined])("carries a replacement thread's optional replay marker through live re-adoption: %s", async (resumedFresh) => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_899 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "codex");
+    state.sessionLoadResponses.set("session-1", { modes: { currentModeId: "ask", availableModes: [] } });
+    const binding = { version: 1, providerId: "codex", kind: "native", resumeId: "replacement-thread" } as const;
+    const load = vi.spyOn(state.agents, "loadSession");
+    state.agents.events.onSessionUpdate("codex", {
+      executionId: "session-1", sessionId: "session-1",
+      update: { sessionUpdate: "provider_binding_update", providerBinding: binding, ...(resumedFresh ? { resumedFresh } : {}) },
+    });
+    expect(state.sessionLoadResponses.get("session-1")?.resumedFresh).toBe(resumedFresh);
+    // A later legacy-shaped binding update must not erase a pending replay.
+    state.agents.events.onSessionUpdate("codex", {
+      executionId: "session-1", sessionId: "session-1",
+      update: { sessionUpdate: "provider_binding_update", providerBinding: binding },
+    });
+    await state.handleMessage({
+      type: "AGENT_LOAD_SESSION", id: "replacement-adopt", source: "browser", timestamp: 1,
+      agentId: "codex", sessionId: "session-1",
+    }, client);
+    expect(load).not.toHaveBeenCalled();
+    const loaded = messages.find(message => message.type === "AGENT_SESSION_LOADED");
+    expect(loaded).toMatchObject({ response: { providerBinding: binding, modes: { currentModeId: "ask" } } });
+    expect(loaded?.type === "AGENT_SESSION_LOADED" ? loaded.response.resumedFresh : null).toBe(resumedFresh);
+  });
+  it.each([false, true])("does not let an older turn clear a replacement thread's replay (previous replay: %s)", async (previousReplay) => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_899 });
+    const state = internals(engine);
+    const { client } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "codex");
+    const binding = { version: 1, providerId: "codex", kind: "native", resumeId: "old-thread" } as const;
+    state.sessionLoadResponses.set("session-1", { providerBinding: binding, resumedFresh: previousReplay });
+    const prompt = vi.spyOn(state.agents, "prompt").mockImplementationOnce(async () => {
+      // A tool read can restart the now-idle child before the old gateway
+      // prompt has finished releasing its borrowed surfaces.
+      state.agents.events.onSessionUpdate("codex", {
+        executionId: "session-1", sessionId: "session-1",
+        update: { sessionUpdate: "provider_binding_update", providerBinding: { ...binding, resumeId: "new-thread" }, resumedFresh: true },
+      });
+      return { stopReason: "end_turn" };
+    }).mockResolvedValue({ stopReason: "end_turn" });
+    const request = { type: "AGENT_PROMPT", id: "old-turn", source: "browser", timestamp: 1, agentId: "codex", sessionId: "session-1", prompt: [{ type: "text", text: "hi" }] } as EngineMessage;
+    await state.handleMessage(request, client);
+    expect(state.sessionLoadResponses.get("session-1")?.resumedFresh).toBe(true);
+    await state.handleMessage({ ...request, id: "replay-turn" }, client);
+    expect(state.sessionLoadResponses.get("session-1")?.resumedFresh).toBe(false);
+    expect(prompt).toHaveBeenCalledTimes(2);
   });
   it.each(["Original message", ""])(
     "continues a saved authentication prompt in place without duplicating its text: %j",
@@ -1962,6 +2014,8 @@ describe("in-flight prompt staleness", () => {
       expect.objectContaining({
         type: "AGENT_PROMPT_FAILED",
         error: "The agent is already responding to this chat.",
+        // The sender queues behind this exact turn instead of failing.
+        activeTurn: { turnId: "user-1", startedAt: 1_234 },
       }),
     ]);
     expect(state.activePromptContexts.has("session-1")).toBe(true);

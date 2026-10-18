@@ -47,6 +47,10 @@ export function materializeMcpServerRegistration(
     transport: registration.transport,
     url: registration.url,
     headers,
+    // Non-secret per-server policy survives materialization (a Local CLI wait
+    // needs its longer deadline in the SDK config too).
+    ...(registration.toolTimeoutSec !== undefined ? { toolTimeoutSec: registration.toolTimeoutSec } : {}),
+    ...(registration.defaultToolsApproval !== undefined ? { defaultToolsApproval: registration.defaultToolsApproval } : {}),
   };
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AgentSessionToolRegistry,
   composeAgentSessionToolFactories,
+  prependPath,
   type AgentSessionTools,
 } from "../session-tools";
 
@@ -43,6 +44,27 @@ describe("session tool ownership", () => {
     registry.beginPrompt("one");
     await expect(registry.preparePrompt("one")).resolves.toBe("new instructions");
     expect(first.preparePrompt).toHaveBeenCalledTimes(2);
+    await registry.dispose();
+  });
+
+  it("reports tools retired during preparation as a recoverable supersession, not a raw abort", async () => {
+    let finish!: (value: string) => void;
+    const tools = {
+      ...resource(),
+      preparePrompt: vi.fn(() => new Promise<string>((resolve) => { finish = resolve; })),
+    };
+    const registry = new AgentSessionToolRegistry(async () => tools);
+    await registry.admit({ agentId: "codex", executionId: "one", cwd: "/a" }, [], {});
+    const pending = registry.preparePrompt("one");
+    await vi.waitFor(() => expect(tools.preparePrompt).toHaveBeenCalledOnce());
+    const stopped = registry.stop("one");
+    // The prompt never reached the provider, so the sender may resume and resend it.
+    await expect(pending).rejects.toMatchObject({
+      name: "AgentFailureError",
+      failure: { kind: "lifecycle-superseded", stage: "prompt", agentId: "codex" },
+    });
+    finish("obsolete instructions");
+    await stopped;
     await registry.dispose();
   });
 
@@ -237,5 +259,22 @@ describe("composed session tools", () => {
     await expect(composeAgentSessionToolFactories([async () => left, async () => right])(input)).rejects.toThrow(/same/i);
     expect(left.dispose).toHaveBeenCalledOnce();
     expect(right.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("puts admitted launcher directories first on PATH without dropping the user's", async () => {
+    const env: Record<string, string> = { PATH: "/usr/bin:/opt/zeros/bin:/bin" };
+    prependPath(env, ["/opt/zeros/bin", "relative/bin", "/bad:dir"]);
+    expect(env.PATH).toBe("/opt/zeros/bin:/usr/bin:/bin");
+    const untouched: Record<string, string> = { PATH: "/usr/bin" };
+    prependPath(untouched, undefined);
+    expect(untouched.PATH).toBe("/usr/bin");
+
+    const local = { ...resource(), env: { LOCAL_TOKEN: "t" }, mcpServers: [{ ...server, name: "zeros_local" }], pathPrepend: ["/opt/zeros/bin"] };
+    const registry = new AgentSessionToolRegistry(composeAgentSessionToolFactories([async () => resource(), async () => local]));
+    const spawnEnv: Record<string, string> = { PATH: "/usr/bin" };
+    await registry.admit({ executionId: "path", cwd: "/a" }, [], spawnEnv);
+    expect(spawnEnv.PATH).toBe("/opt/zeros/bin:/usr/bin");
+    expect(spawnEnv.LOCAL_TOKEN).toBe("t");
+    await registry.dispose();
   });
 });

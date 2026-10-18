@@ -10,6 +10,50 @@
         "foundations_tokens"
       ],
       "folder": "page-1"
+    },
+    {
+      "id": "page_components",
+      "title": "Components",
+      "frames": [
+        "cmp_index",
+        "cmp_button",
+        "cmp_icon_button",
+        "cmp_split_button",
+        "cmp_toolbar",
+        "cmp_input",
+        "cmp_textarea",
+        "cmp_select",
+        "cmp_checkbox",
+        "cmp_radio",
+        "cmp_switch",
+        "cmp_slider",
+        "cmp_dropdown_menu",
+        "cmp_context_menu",
+        "cmp_command",
+        "cmp_popover",
+        "cmp_hover_card",
+        "cmp_tooltip",
+        "cmp_dialog",
+        "cmp_toast",
+        "cmp_tabs",
+        "cmp_panel_header",
+        "cmp_list_row",
+        "cmp_sidebar_row",
+        "cmp_badge",
+        "cmp_pills",
+        "cmp_kbd",
+        "cmp_avatar",
+        "cmp_status_icon",
+        "cmp_progress",
+        "cmp_card",
+        "cmp_tile",
+        "cmp_separator",
+        "cmp_alert",
+        "cmp_banner",
+        "cmp_settings",
+        "cmp_compare"
+      ],
+      "folder": "ui-components"
     }
   ],
   "frames": {
@@ -21,6 +65,339 @@
       "y": 0,
       "width": 1440,
       "height": 1400
+    },
+    "cmp_index": {
+      "kind": "html",
+      "source": "ui-components/index.html",
+      "title": "Components — index",
+      "x": 0,
+      "y": 0,
+      "width": 1040,
+      "height": 976
+    },
+    "cmp_button": {
+      "kind": "html",
+      "source": "ui-components/button.html",
+      "title": "Button — variants and states",
+      "x": 0,
+      "y": 1216,
+      "width": 1040,
+      "height": 1648
+    },
+    "cmp_icon_button": {
+      "kind": "html",
+      "source": "ui-components/icon-button.html",
+      "title": "Icon button — sizes and states",
+      "x": 1120,
+      "y": 1216,
+      "width": 1040,
+      "height": 1152
+    },
+    "cmp_split_button": {
+      "kind": "html",
+      "source": "ui-components/split-button.html",
+      "title": "Split button — variants and states",
+      "x": 2240,
+      "y": 1216,
+      "width": 1040,
+      "height": 720
+    },
+    "cmp_toolbar": {
+      "kind": "html",
+      "source": "ui-components/toolbar.html",
+      "title": "Toolbar — floating tool group",
+      "x": 3360,
+      "y": 1216,
+      "width": 1040,
+      "height": 672
+    },
+    "cmp_input": {
+      "kind": "html",
+      "source": "ui-components/input.html",
+      "title": "Input — states",
+      "x": 0,
+      "y": 3104,
+      "width": 1040,
+      "height": 936
+    },
+    "cmp_textarea": {
+      "kind": "html",
+      "source": "ui-components/textarea.html",
+      "title": "Textarea — states",
+      "x": 1120,
+      "y": 3104,
+      "width": 1040,
+      "height": 520
+    },
+    "cmp_select": {
+      "kind": "html",
+      "source": "ui-components/select.html",
+      "title": "Select — trigger and menu",
+      "x": 2240,
+      "y": 3104,
+      "width": 1040,
+      "height": 1328
+    },
+    "cmp_checkbox": {
+      "kind": "html",
+      "source": "ui-components/checkbox.html",
+      "title": "Checkbox — states",
+      "x": 3360,
+      "y": 3104,
+      "width": 1040,
+      "height": 784
+    },
+    "cmp_radio": {
+      "kind": "html",
+      "source": "ui-components/radio-group.html",
+      "title": "Radio group — states",
+      "x": 0,
+      "y": 4512,
+      "width": 1040,
+      "height": 728
+    },
+    "cmp_switch": {
+      "kind": "html",
+      "source": "ui-components/switch.html",
+      "title": "Switch (toggle) — states",
+      "x": 1120,
+      "y": 4512,
+      "width": 1040,
+      "height": 744
+    },
+    "cmp_slider": {
+      "kind": "html",
+      "source": "ui-components/slider.html",
+      "title": "Slider — values",
+      "x": 2240,
+      "y": 4512,
+      "width": 1040,
+      "height": 632
+    },
+    "cmp_dropdown_menu": {
+      "kind": "html",
+      "source": "ui-components/dropdown-menu.html",
+      "title": "Dropdown menu — items",
+      "x": 0,
+      "y": 5496,
+      "width": 1040,
+      "height": 976
+    },
+    "cmp_context_menu": {
+      "kind": "html",
+      "source": "ui-components/context-menu.html",
+      "title": "Context menu — items",
+      "x": 1120,
+      "y": 5496,
+      "width": 1040,
+      "height": 888
+    },
+    "cmp_command": {
+      "kind": "html",
+      "source": "ui-components/command.html",
+      "title": "Command — palette and inline list",
+      "x": 2240,
+      "y": 5496,
+      "width": 1040,
+      "height": 984
+    },
+    "cmp_popover": {
+      "kind": "html",
+      "source": "ui-components/popover.html",
+      "title": "Popover — surfaces",
+      "x": 3360,
+      "y": 5496,
+      "width": 1040,
+      "height": 720
+    },
+    "cmp_hover_card": {
+      "kind": "html",
+      "source": "ui-components/hover-card.html",
+      "title": "Hover card — surface",
+      "x": 0,
+      "y": 6560,
+      "width": 1040,
+      "height": 656
+    },
+    "cmp_tooltip": {
+      "kind": "html",
+      "source": "ui-components/tooltip.html",
+      "title": "Tooltip — variants",
+      "x": 1120,
+      "y": 6560,
+      "width": 1040,
+      "height": 680
+    },
+    "cmp_dialog": {
+      "kind": "html",
+      "source": "ui-components/dialog.html",
+      "title": "Dialog — anatomy",
+      "x": 2240,
+      "y": 6560,
+      "width": 1040,
+      "height": 1128
+    },
+    "cmp_toast": {
+      "kind": "html",
+      "source": "ui-components/toast.html",
+      "title": "Toast — variants",
+      "x": 3360,
+      "y": 6560,
+      "width": 1040,
+      "height": 1056
+    },
+    "cmp_tabs": {
+      "kind": "html",
+      "source": "ui-components/tabs.html",
+      "title": "Tabs — every tab style",
+      "x": 0,
+      "y": 7928,
+      "width": 1040,
+      "height": 1040
+    },
+    "cmp_panel_header": {
+      "kind": "html",
+      "source": "ui-components/panel-header.html",
+      "title": "Panel header — sizes",
+      "x": 1120,
+      "y": 7928,
+      "width": 1040,
+      "height": 760
+    },
+    "cmp_list_row": {
+      "kind": "html",
+      "source": "ui-components/list-row.html",
+      "title": "List row — states",
+      "x": 2240,
+      "y": 7928,
+      "width": 1040,
+      "height": 616
+    },
+    "cmp_sidebar_row": {
+      "kind": "html",
+      "source": "ui-components/sidebar-row.html",
+      "title": "Sidebar row — states",
+      "x": 3360,
+      "y": 7928,
+      "width": 1040,
+      "height": 752
+    },
+    "cmp_badge": {
+      "kind": "html",
+      "source": "ui-components/badge.html",
+      "title": "Badge — variants",
+      "x": 0,
+      "y": 9208,
+      "width": 1040,
+      "height": 1312
+    },
+    "cmp_pills": {
+      "kind": "html",
+      "source": "ui-components/pills.html",
+      "title": "Pills — every type",
+      "x": 1120,
+      "y": 9208,
+      "width": 1040,
+      "height": 1912
+    },
+    "cmp_kbd": {
+      "kind": "html",
+      "source": "ui-components/kbd.html",
+      "title": "Kbd — shortcuts",
+      "x": 2240,
+      "y": 9208,
+      "width": 1040,
+      "height": 608
+    },
+    "cmp_avatar": {
+      "kind": "html",
+      "source": "ui-components/avatar.html",
+      "title": "Avatar — sizes",
+      "x": 3360,
+      "y": 9208,
+      "width": 1040,
+      "height": 528
+    },
+    "cmp_status_icon": {
+      "kind": "html",
+      "source": "ui-components/status-icon.html",
+      "title": "Status icon — lifecycle",
+      "x": 0,
+      "y": 11200,
+      "width": 1040,
+      "height": 888
+    },
+    "cmp_progress": {
+      "kind": "html",
+      "source": "ui-components/progress-bar.html",
+      "title": "Progress bar — values",
+      "x": 1120,
+      "y": 11200,
+      "width": 1040,
+      "height": 576
+    },
+    "cmp_card": {
+      "kind": "html",
+      "source": "ui-components/card.html",
+      "title": "Card — surfaces",
+      "x": 2240,
+      "y": 11200,
+      "width": 1040,
+      "height": 744
+    },
+    "cmp_tile": {
+      "kind": "html",
+      "source": "ui-components/tile.html",
+      "title": "Tile — states",
+      "x": 3360,
+      "y": 11200,
+      "width": 1040,
+      "height": 648
+    },
+    "cmp_separator": {
+      "kind": "html",
+      "source": "ui-components/separator-scrollbar.html",
+      "title": "Separator and scroll bar",
+      "x": 0,
+      "y": 12168,
+      "width": 1040,
+      "height": 664
+    },
+    "cmp_alert": {
+      "kind": "html",
+      "source": "ui-components/alert.html",
+      "title": "Alert — variants",
+      "x": 0,
+      "y": 13072,
+      "width": 1040,
+      "height": 592
+    },
+    "cmp_banner": {
+      "kind": "html",
+      "source": "ui-components/banner-empty-state.html",
+      "title": "Banner and empty state",
+      "x": 1120,
+      "y": 13072,
+      "width": 1040,
+      "height": 1128
+    },
+    "cmp_settings": {
+      "kind": "html",
+      "source": "ui-components/settings-rows.html",
+      "title": "Settings rows — flat and grouped",
+      "x": 2240,
+      "y": 13072,
+      "width": 1040,
+      "height": 936
+    },
+    "cmp_compare": {
+      "kind": "html",
+      "source": "ui-components/controls-compared.html",
+      "title": "Audit — controls side by side",
+      "x": 0,
+      "y": 14440,
+      "width": 1040,
+      "height": 1176
     }
   },
   "foundation": {
@@ -45,19 +422,6 @@
       "title": "App semantic tokens",
       "kind": "css",
       "path": "styles/semantic-tokens.css",
-      "themes": {
-        "light": "[data-theme=\"light\"]"
-      }
-    },
-    {
-      "id": "tokens-live",
-      "title": "Token preview",
-      "kind": "build",
-      "path": ".zeros/design-styles/zeros-tokens.css",
-      "command": "node scripts/design-system/build-tokens.mjs --preview .zeros/design-styles/zeros-tokens.css",
-      "inputs": [
-        "styles/tokens"
-      ],
       "themes": {
         "light": "[data-theme=\"light\"]"
       }

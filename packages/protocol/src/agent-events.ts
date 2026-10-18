@@ -32,6 +32,7 @@ import type {
   ExecutionBoundaryPortsSnapshot,
   ExecutionBoundaryStatus,
 } from "./containment";
+import type { AgentTextMessage } from "./agent-messages";
 
 /** @deprecated Agent "session" on the Zeros wire is an execution route. */
 export type SessionId = ExecutionId;
@@ -535,7 +536,17 @@ export type SessionUpdate =
   | ProviderBindingDetachedNotification
   | GoalUpdate
   | SafetyReviewRetryAvailabilityUpdate
-  | TurnStateUpdateNotification;
+  | TurnStateUpdateNotification
+  | UserMessageRecordedUpdate;
+
+/** Engine-only: a complete user message the engine recorded on its own — an
+ * agent's message or a note the Zeros Local CLI delivered — so every open
+ * view shows it live, mid-turn included. Renderers insert it by `id`
+ * (replacing an existing row) and never coalesce it into a neighbour. */
+export interface UserMessageRecordedUpdate {
+  sessionUpdate: "user_message_recorded";
+  message: AgentTextMessage;
+}
 
 /** Full replacement snapshot for the goal attached to this exact session. */
 export interface GoalUpdate {
@@ -671,12 +682,25 @@ export interface CurrentEffortUpdate {
   effort: string;
 }
 
+/** The composer-controlled settings a model selection runs. `null` leaves the
+ *  setting to the provider's defaults. */
+export interface ModelSettingsSummary {
+  effort?: string | null;
+  fast?: boolean | null;
+}
+
 export interface ModelFallbackInfo {
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "cursor";
   fromModel: string | null;
   toModel: string;
   scope: "local" | "session";
-  reason: "refusal" | "overloaded" | "cybersecurity" | "unknown";
+  /** `unavailable`: the provider refused the selected model for this account,
+   *  so a curated fallback ran. `settings`: the same model ran with other
+   *  provider-advertised settings after the selected ones were refused. */
+  reason: "refusal" | "overloaded" | "cybersecurity" | "unavailable" | "settings" | "unknown";
+  /** Present with `reason: "settings"`: what was selected and what ran. */
+  fromSettings?: ModelSettingsSummary;
+  toSettings?: ModelSettingsSummary;
 }
 
 /** Provider facts displayed as ordinary in-between prose, never tool calls. */
@@ -820,6 +844,9 @@ export interface ProviderBindingUpdateNotification {
   sessionUpdate: "provider_binding_update";
   providerBinding: ProviderBinding;
   providerMetadata?: ProviderMetadata;
+  /** The replacement thread has no history. Retain this optional replay
+   * request through load/re-adoption until a provider prompt completes. */
+  resumedFresh?: boolean;
 }
 
 /** A provider confirmed that one exact durable reference no longer exists.

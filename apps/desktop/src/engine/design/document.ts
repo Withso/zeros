@@ -113,7 +113,13 @@ import {
 } from "./frame-lifecycle";
 import { getDesignRuntimeAudit } from "./runtime-audits";
 import { readSafeRegularFile } from "./safe-files";
-import { readDesignStyleSourceCatalog, readDesignStyleSources } from "./style-sources";
+import {
+  DESIGN_FONTS_SOURCE_ID,
+  frameStyleSourceIds,
+  readDesignStyleSourceCatalog,
+  readDesignStyleSources,
+} from "./style-sources";
+import { readDesignFontCatalog } from "./style-fonts";
 import { mergeDesignThemes, readDesignThemeCatalog } from "./themes";
 
 export { listDesignAssets,type DesignAssetSummary } from "./assets";
@@ -407,7 +413,7 @@ async function mutationResultUnlocked(
     width: geometry.w,
     height: geometry.h,
   }, file);
-  const knownTokens = await knownTokenNames(workspacePath);
+  const knownTokens = (await designKnownTokens(workspacePath))(file);
   const linted = await lintFrame(
     workspacePath,
     file,
@@ -501,7 +507,7 @@ async function mutateDesignFrameSource(
     const healed = healDesignOids(updated).html;
     const changed = updated !== source;
     if (changed) {
-      const knownTokens = await knownTokenNames(workspacePath);
+      const knownTokens = (await designKnownTokens(workspacePath))(file);
       const [baseline, linted] = await Promise.all([
         lintFrame(
           workspacePath,
@@ -922,6 +928,8 @@ async function designFrameSelectionIdentityFromSource(
     workspacePath,
     file,
     source,
+    // Selection and CAS need the same generation, not a full CSS build.
+    { identityOnly: true },
   );
   return {
     file,
@@ -1180,6 +1188,55 @@ async function knownTokenNames(
     if (source) collectDeclaredCustomProperties(source, names);
   }
   return names;
+}
+
+/** Tokens each frame can resolve: tokens.css and Design CSS, plus the tokens
+ * declared by every imported style source that frame receives (Tailwind
+ * `@theme` and `:root` declarations of the application's own files included).
+ * Tailwind's stock theme and package defaults are not application tokens, so
+ * they still warn. Lint is advisory: an unreadable catalog keeps the base set. */
+async function designKnownTokens(
+  workspacePath: string,
+  context?: DesignCanvasReadContext,
+): Promise<(file: string) => Set<string>> {
+  const base = await knownTokenNames(workspacePath, context);
+  let canvas: CanvasDocument;
+  let sources: Awaited<ReturnType<typeof readDesignStyleSources>>["sources"];
+  try {
+    canvas = context?.canvas ?? (await readCanvas(workspacePath));
+    if (
+      readDesignStyleSourceCatalog(canvas).declarations.length === 0 &&
+      readDesignFontCatalog(canvas).fonts.length === 0
+    )
+      return () => base;
+    sources = (await readDesignStyleSources(workspacePath, canvas)).sources;
+  } catch {
+    return () => base;
+  }
+  const catalog = readDesignStyleSourceCatalog(canvas);
+  const tokensById = new Map(
+    sources.map((source) => [source.id, source.tokens.map((token) => token.name)]),
+  );
+  const byFrame = new Map<string, Set<string>>();
+  return (file) => {
+    const ids = frameStyleSourceIds(canvas, catalog, file);
+    const optedOut =
+      ids.length === 0 &&
+      Array.isArray(
+        (canvas.frame_info[file] as Record<string, unknown> | undefined)?.styles,
+      );
+    const key = optedOut ? "" : ids.join("\0");
+    let names = byFrame.get(key);
+    if (!names) {
+      names = new Set(base);
+      if (!optedOut) {
+        for (const id of [DESIGN_FONTS_SOURCE_ID, ...ids])
+          for (const name of tokensById.get(id) ?? []) names.add(name);
+      }
+      byFrame.set(key, names);
+    }
+    return names;
+  };
 }
 
 function collectDeclaredCustomProperties(
@@ -1477,7 +1534,7 @@ async function lintDesignDocumentUnlocked(
   const files = frame
     ? [(await designFrameTarget(workspacePath, frame)).file]
     : await discoverFrameFiles(workspacePath, context);
-  const knownTokens = await knownTokenNames(workspacePath, context);
+  const knownTokens = await designKnownTokens(workspacePath, context);
   const violations: DesignLintViolation[] = [];
   let healedOids = 0;
   for (const file of files) {
@@ -1487,7 +1544,7 @@ async function lintDesignDocumentUnlocked(
         workspacePath,
         file,
         { healOids: options.healOids !== false },
-        knownTokens,
+        knownTokens(file),
       );
     } catch (error) {
       if (!(error instanceof DesignRenderBudgetError)) throw error;

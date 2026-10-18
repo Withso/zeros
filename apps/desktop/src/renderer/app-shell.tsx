@@ -58,6 +58,9 @@ import {
 } from "./features/settings/migrate-legacy";
 import { AgentSessionsProvider } from "./features/agent/sessions-provider";
 import { startChatUnreadTracking } from "./features/agent/chat-unread";
+import { requestAiChatTitle } from "./features/agent/chat-title";
+import { startChatTitleBackfill } from "./features/agent/chat-title-backfill";
+import { bridgeChatTitleSeeds } from "./platform/bridge/workspace-bridge";
 import { useAgentSessions } from "./features/agent/sessions-hooks";
 import {
   getAgentsSnapshot,
@@ -104,6 +107,7 @@ import {
 import { DispatcherPage } from "./shell/dispatcher/dispatcher-modal";
 import { NoProjectsView } from "./shell/no-projects-view";
 import { useActiveWorkspace } from "./state/use-active-workspace";
+import { LocalLinkNavigation } from "./shell/local-link-navigation";
 import { useProjects } from "./state/use-projects";
 import { SettingsPage } from "./features/settings/settings-page";
 import { DashboardPage } from "./features/dashboard/dashboard-page";
@@ -452,6 +456,30 @@ function rowToThread(r: ChatRowWire): ChatThread {
  *  app session (chat-unread.ts). */
 function ChatUnreadTracking() {
   useEffect(() => startChatUnreadTracking(), []);
+  return null;
+}
+
+/** Names Untitled Local chats that are not on screen — agent-started tabs,
+ *  background tabs, long reopened chats (chat-title-backfill.ts). The chat
+ *  surface names the one in view; both share one deduplicated request. */
+function ChatTitleBackfill() {
+  const bridge = useBridge();
+  const dispatch = useWorkspaceDispatch();
+  useEffect(() => {
+    if (!bridge || bridge.executionIdentity.kind !== "local") return;
+    return startChatTitleBackfill({
+      getChats: () => useWorkspaceStore.getState().chats,
+      subscribeChats: (listener) =>
+        useWorkspaceStore.subscribe((state, previous) => {
+          if (state.chats !== previous.chats) listener();
+        }),
+      onDbChanged: (listener) => bridge.on("DB_CHANGED", listener),
+      connected: () => bridge.status === "connected",
+      seeds: (chatIds) => bridgeChatTitleSeeds(bridge, chatIds),
+      request: requestAiChatTitle,
+      dispatch,
+    });
+  }, [bridge, dispatch]);
   return null;
 }
 
@@ -1296,8 +1324,10 @@ export function AppShellBody() {
           <PreWarmAgents />
           <ReloadOnProjectChange />
           <ChatsPersistence />
+          <LocalLinkNavigation readChat={rowToThread} />
           <CloudWorkspaceLifecycle />
           <ChatUnreadTracking />
+          <ChatTitleBackfill />
           <BrowserConfirmationController />
           <AgentControlConfirmationController />
           <ComputerUseController />

@@ -133,6 +133,15 @@ const deferred = new Set([
 const textResult = (value: unknown): CallToolResult => ({
   content: [{ type: "text", text: JSON.stringify(value) }],
 });
+const DIRECTORY_CHANGING =
+  "The Design directory is changing. Retry after the directory operation finishes.";
+function resumeWaiter(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
 
 /** Stable MCP schemas allow native providers to switch within a running turn.
  * Schema discovery is not mutation authority: every write checks the current
@@ -145,6 +154,8 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
   private ready?: Promise<DesignCodeTools | null>;
   private document = new AbortController();
   private paused = 0;
+  /** Settles when the last directory transition resumes these grants. */
+  private resumed?: { promise: Promise<void>; resolve: () => void };
   private directoryAcknowledged = false;
 
   constructor(
@@ -190,7 +201,8 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
 
   suspend(): () => void {
     this.paused += 1;
-    this.document.abort();
+    // Name the transition so an interrupted tool call explains itself.
+    this.document.abort(new DOMException(DIRECTORY_CHANGING, "AbortError"));
     this.handler?.dispose();
     this.handler = undefined;
     this.directoryAcknowledged = false;
@@ -199,15 +211,57 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
     return () => {
       if (resumed) return;
       resumed = true;
-      if (--this.paused === 0) this.document = new AbortController();
+      if (--this.paused > 0) return;
+      this.document = new AbortController();
+      this.resumed?.resolve();
+      this.resumed = undefined;
     };
   }
 
+  /** A transition always resumes the grants it suspends, so hold the prompt
+   * until then instead of failing it. Stop and disposal still end the wait. */
+  private async untilResumed(turn: AbortSignal): Promise<void> {
+    const ended = AbortSignal.any([this.abort.signal, turn]);
+    ended.throwIfAborted();
+    this.resumed ??= resumeWaiter();
+    const resumed = this.resumed.promise;
+    await new Promise<void>((resolve, reject) => {
+      const end = () => reject(ended.reason);
+      ended.addEventListener("abort", end, { once: true });
+      void resumed.then(() => {
+        ended.removeEventListener("abort", end);
+        resolve();
+      });
+    });
+  }
+
   async preparePrompt(): Promise<string> {
-    this.assertActive(this.token);
-    this.turn.signal.throwIfAborted();
+    // Every attempt belongs to the turn this preparation started in.
+    const turn = this.turn.signal;
+    for (;;) {
+      this.assertActive(this.token);
+      turn.throwIfAborted();
+      if (this.paused) {
+        await this.untilResumed(turn);
+        continue;
+      }
+      const document = this.document.signal;
+      try {
+        return await this.prepareCurrentPrompt(turn, document);
+      } catch (error) {
+        // A transition that began mid-preparation retires only this attempt.
+        if (!document.aborted || this.abort.signal.aborted || turn.aborted)
+          throw error;
+      }
+    }
+  }
+
+  private async prepareCurrentPrompt(
+    turn: AbortSignal,
+    document: AbortSignal,
+  ): Promise<string> {
     const snapshot = this.options.mode.get();
-    const generation = AbortSignal.any([this.turn.signal, this.document.signal]);
+    const generation = AbortSignal.any([turn, document]);
     const assertCurrent = () => {
       this.assertActive(this.token);
       generation.throwIfAborted();
@@ -268,10 +322,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
     signal: AbortSignal,
   ): Promise<CallToolResult> {
     this.assertActive(this.token);
-    if (this.paused)
-      throw new Error(
-        "The Design directory is changing. Retry after the directory operation finishes.",
-      );
+    if (this.paused) throw new Error(DIRECTORY_CHANGING);
     const joined = AbortSignal.any([
       signal,
       this.abort.signal,

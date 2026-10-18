@@ -36,6 +36,41 @@ function identities() {
 }
 
 describe("scoped navigation memory", () => {
+  it("distinguishes navigation from boot hydration when retiring a pending link", () => {
+    const { dispatch } = useWorkspaceStore.getState();
+    dispatch({ type: "OPEN_WORKSPACE", folder: "/boot", repoRoot: "/boot", chatId: null });
+    const before = useWorkspaceStore.getState().navigationVersion ?? 0;
+    const chat = { id: "boot-hydrated", folder: "/boot", agentId: "codex", agentName: "Codex",
+      model: null, effort: "high", permissionMode: "auto", title: "Boot", createdAt: 1, updatedAt: 1 } as ChatThread;
+    dispatch({ type: "HYDRATE_CHATS", chats: [chat], activeChatId: chat.id });
+    expect(useWorkspaceStore.getState().navigationVersion ?? 0).toBe(before);
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "workspace" });
+    expect(useWorkspaceStore.getState().navigationVersion).toBe(before + 2);
+  });
+  it("publishes a linked chat, its workspace and the passive fence atomically", () => {
+    const workspace = { id: "ws_link", path: "/linked", repoRoot: "/repo", repoSlug: "repo" } as import("../../platform/git").Workspace;
+    const chat = { id: "linked-chat", folder: "/linked", title: "Linked", createdAt: 1, updatedAt: 1,
+      agentId: "codex", agentName: "Codex", model: null, effort: "high", permissionMode: "auto" } as ChatThread;
+    const notifications: unknown[] = [];
+    const stop = useWorkspaceStore.subscribe(state => notifications.push({
+      folder: state.lastWorkspaceFolder, id: state.activeChatId,
+      exists: state.chats.some(row => row.id === chat.id), passive: state.localLinkNavigation?.passive,
+    }));
+    useWorkspaceStore.getState().dispatch({ type: "OPEN_LOCAL_LINK", workspace, folder: workspace.path, chat });
+    stop();
+    expect(notifications).toEqual([{ folder: "/linked", id: chat.id, exists: true, passive: true }]);
+    const count = useWorkspaceStore.getState().chats.length;
+    useWorkspaceStore.getState().dispatch({ type: "OPEN_LOCAL_LINK", workspace, folder: workspace.path, chat: null });
+    expect(useWorkspaceStore.getState().chats).toHaveLength(count);
+    expect(useWorkspaceStore.getState().activeChatId).toBeNull();
+    useWorkspaceStore.getState().dispatch({ type: "ACTIVATE_LOCAL_LINK", folder: "/other" });
+    expect(useWorkspaceStore.getState().localLinkNavigation?.passive).toBe(true);
+    useWorkspaceStore.getState().dispatch({ type: "ACTIVATE_LOCAL_LINK", folder: "/linked" });
+    expect(useWorkspaceStore.getState().localLinkNavigation?.passive).toBe(false);
+    useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: "/ordinary", repoRoot: "/repo", chatId: null });
+    expect(useWorkspaceStore.getState().localLinkNavigation).toBeUndefined();
+  });
   it("retargets a repository-only top-bar filter in the same workspace-open notification", () => {
     const { projectA, projectB, rootA, rootB } = identities();
     const projects = [

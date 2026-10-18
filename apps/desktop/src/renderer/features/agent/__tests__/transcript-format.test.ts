@@ -34,27 +34,29 @@ describe("provider status in copied transcripts", () => {
     expect(recovered).not.toContain("Failed to authenticate");
   });
 
-  it("places one usage status after every segment of a steered provider turn", () => {
+  it("copies usage status where it arrived, once per steered provider turn", () => {
     const prompt = text("user", "Inspect the workspace");
     const usage = text("agent", "Claude is nearing its usage limit.", { messageId: "claude-feedback-first", phase: "commentary" });
     const steer = text("user", "Check the renderer too", { steeredTurnId: prompt.id });
     const answer = text("agent", "Report after steering", { phase: "final_answer" });
     const output = formatTranscript([prompt, usage, steer, answer, { ...usage, id: "second-usage", messageId: "claude-feedback-second" }], "full").text;
     expect(output.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
-    expect(output.indexOf("Report after steering")).toBeLessThan(output.indexOf("Claude is nearing"));
+    expect(output).toContain("### Warning\n\nClaude is nearing its usage limit.");
+    expect(output.indexOf("Claude is nearing")).toBeLessThan(output.indexOf("Check the renderer too"));
   });
 
-  it("copies one usage status at the tail and omits errors superseded by real work", () => {
+  it("copies usage status before the work it preceded and omits errors superseded by real work", () => {
     const prompt = text("user", "Inspect the workspace");
     const failure: AgentMessage = { id: "retry-error", kind: "error_notice", createdAt: 2, severity: "error", recoverable: false,
       message: "No conversation found with session ID missing", turnFailure: { turnId: prompt.id, kind: "session-expired" } };
     const usage = text("agent", "Claude is nearing its usage limit.", { messageId: "claude-feedback-first", phase: "commentary" });
     const answer = text("agent", "Confirmed report", { phase: "final_answer" });
-    const output = formatTranscript([prompt, failure, { ...failure, id: "retry-error-again" }, usage, tool(), answer,
+    const output = formatTranscript([prompt, failure, { ...failure, id: "retry-error-again" }, usage, tool({ title: "Read router" }), answer,
       { ...usage, id: "second-usage", messageId: "claude-feedback-second" }], "full").text;
     expect(output).not.toContain("No conversation found");
     expect(output.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
-    expect(output.indexOf("Confirmed report")).toBeLessThan(output.indexOf("Claude is nearing"));
+    expect(output.indexOf("Claude is nearing")).toBeLessThan(output.indexOf("Read router"));
+    expect(output.trimEnd().endsWith("Confirmed report")).toBe(true);
   });
 });
 
@@ -355,6 +357,18 @@ describe("formatTranscript — full", () => {
     ]).text;
     expect(out).toContain("## User · sent by Zeros (create-pr)");
     expect(out).toContain("Attachments: shot.png (image/png)");
+  });
+
+  it("names another agent's message and a Zeros Local note instead of calling them the user's", () => {
+    const from = { chatId: "lead", title: "Lead", agentId: "codex", link: "zeros-dev://chat/lead" };
+    const out = run([
+      text("user", "Write the docs", { localFrom: from }),
+      text("agent", "On it."),
+      text("user", 'Chat "Worker" finished its turn: completed.', { localNote: { ...from, chatId: "w", title: "Worker", link: "zeros-dev://chat/w", event: "done", status: "completed" } }),
+    ]).text;
+    expect(out).toContain('## Agent message · from "Lead" (zeros-dev://chat/lead)');
+    expect(out).toContain('## Zeros note\n\nChat "Worker" finished its turn: completed.');
+    expect(out).not.toContain("## User");
   });
 
   it("renders an error notice", () => {

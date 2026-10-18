@@ -138,3 +138,56 @@ it.each(["local", "cloud"])("opens a %s static sandboxed frame offscreen, then r
     await service.stop(); forgetDesignDirectoryName(root); await rm(root, { recursive: true, force: true });
   }
 });
+
+it("keeps the seeded tokens.css reset below an imported Tailwind source's utilities", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "zeros-frame-reset-layer-"));
+  const service = await startDesignVerificationService({ renderer: () => undefined });
+  const page = await browser.newPage();
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    // The seed (and every directory created before this fix) declares
+    // `@layer reset`; it must never outrank the application's utilities.
+    await initializeDesignDocument(root);
+    const frame = (await createDesignFrame(root, { title: "Buttons", geometry: { x: 0, y: 0, w: 390, h: 844, z: 0 } })).file;
+    const directory = designDirectoryNameFor(root);
+    expect(await readFile(path.join(root, directory, "tokens.css"), "utf8")).toContain("@layer reset");
+    await writeFile(
+      path.join(root, directory, frame),
+      '<!doctype html><html><head><link rel="stylesheet" href="../tokens.css"></head><body style="font-size:20px;font-weight:400;color:darkgreen"><main data-oid="screen"><h1 data-oid="title" class="mt-4">Title</h1><button data-oid="go" class="text-sm font-bold text-brand">Go</button></main></body></html>',
+    );
+    await mkdir(path.join(root, "styles"));
+    await writeFile(path.join(root, "styles/app.css"), '@import "tailwindcss"; @theme { --color-brand: rebeccapurple; }');
+    const canvasFile = path.join(root, directory, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    canvas.styles = [{ id: "app", kind: "tailwind", path: "styles/app.css" }];
+    await writeFile(canvasFile, JSON.stringify(canvas));
+    const reference = await createDesignContextReference(root, "workspace", frame);
+    const access = service.register({ workspaceId: "workspace", workspacePath: root, directory, directoryId: reference.directoryId });
+    await page.goto(`${access.url}/${frame}/?frameId=${reference.frameId}`);
+    await page.waitForFunction(() => (window as unknown as { __ZEROS_FRAME_PREVIEW__: { ready: boolean } }).__ZEROS_FRAME_PREVIEW__?.ready, undefined, { timeout: 5000 });
+    const computed = await page.locator("iframe").evaluate((element: HTMLIFrameElement) => {
+      const doc = element.contentDocument!;
+      const view = doc.defaultView!;
+      const button = view.getComputedStyle(doc.querySelector("button")!);
+      const reference = doc.createElement("span");
+      reference.style.color = "rebeccapurple";
+      doc.body.append(reference);
+      const brand = view.getComputedStyle(reference).color;
+      reference.remove();
+      return {
+        buttonColorIsBrand: button.color === brand,
+        buttonFontSize: button.fontSize,
+        buttonFontWeight: button.fontWeight,
+        headingMarginTop: view.getComputedStyle(doc.querySelector("h1")!).marginTop,
+      };
+    });
+    expect(computed).toEqual({
+      buttonColorIsBrand: true,
+      buttonFontSize: "14px",
+      buttonFontWeight: "700",
+      headingMarginTop: "16px",
+    });
+  } finally {
+    await page.close(); await service.stop(); forgetDesignDirectoryName(root); await rm(root, { recursive: true, force: true });
+  }
+});

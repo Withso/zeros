@@ -162,6 +162,7 @@ function showHelp() {
     serve         Start the Zeros engine (design server)
     status        Check if the engine is running
     design        Validate, capture or preview an authored Design frame
+    local         Coordinate agents in Zeros Local workspaces
 
   \x1b[1mServe Options:\x1b[0m
     --port <n>        Channel footprint base (stable 24193; beta 24203; dev 24293)
@@ -208,6 +209,13 @@ if (command === "serve") {
     runDesignVerificationCli(args.slice(1)),
   ).then((code) => { process.exitCode = code; }).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : "Design verification failed.");
+    process.exitCode = 1;
+  });
+} else if (command === "local") {
+  void import("./engine/local-orchestration/cli").then(({ runLocalCli }) =>
+    runLocalCli(args.slice(1)),
+  ).then((code) => { process.exitCode = code; }).catch(() => {
+    console.error("Local CLI could not start. Reopen this chat in the current Zeros app.");
     process.exitCode = 1;
   });
 } else if (command === "status") {

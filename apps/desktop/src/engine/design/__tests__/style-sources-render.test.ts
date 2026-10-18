@@ -1,17 +1,21 @@
 import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DESIGN_DIRECTORY_NAME,
   initializeDesignDocument,
+  lintDesignDocument,
+  readDesignFrameRenderIdentity,
   readDesignFrameRenderIdentityFromSource,
   readDesignFrameRenderSourceFromSource,
+  readDesignFrameSelectionIdentity,
   readDesignWorkspaceSnapshot,
   updateDesignFrameGeometry,
 } from "../document";
 import { prepareFrameRenderSource } from "../render-preparation";
 import { readCanvas } from "../document-storage";
+import * as tailwind from "../style-tailwind";
 
 describe("imported style sources in rendered frames", () => {
   let root: string;
@@ -39,6 +43,7 @@ describe("imported style sources in rendered frames", () => {
     });
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -176,6 +181,98 @@ describe("imported style sources in rendered frames", () => {
     expect(identity.sourceVersion).toBe(rendered!.sourceVersion);
     const restyled = source.replace("p-3", "p-4");
     expect((await readDesignFrameRenderIdentityFromSource(root, frame, restyled)).sourceVersion).not.toBe(identity.sourceVersion);
+  });
+
+  it("counts tokens the frame's imported Tailwind and CSS sources declare as known", async () => {
+    await writeFile(
+      path.join(root, "styles/app.css"),
+      '@import "tailwindcss" source(none); @theme inline { --color-brand: var(--brand); --radius-card: 6px; --text-tiny--line-height: 1.2; } :root { --fg1: black; --brand: red; } [data-theme="light"] { --fg1: white; }',
+    );
+    await writeFile(
+      path.join(root, "styles/semantic.css"),
+      ':root { --switch-on-bg: var(--fg1); } [data-theme="light"] { --switch-thumb: white; }',
+    );
+    const uses = [
+      "--fg1",
+      "--radius-card",
+      "--text-tiny--line-height",
+      "--switch-on-bg",
+      "--switch-thumb",
+      // Tailwind's stock theme: the application never declares it.
+      "--shadow-xl",
+      "--made-up",
+    ];
+    const source = `<!doctype html><html><head><style>main { ${uses
+      .map((name, index) => `--use-${index}: var(${name});`)
+      .join(" ")} }</style></head><body><main data-oid="main">Hi</main></body></html>`;
+    await writeFile(path.join(folder, frame), source);
+    await writeFile(path.join(folder, "page-1/opted-out.html"), source);
+    await writeCanvas((canvas) => {
+      canvas.styles = [
+        { id: "app", title: "App", kind: "tailwind", path: "styles/app.css", themes: { light: '[data-theme="light"]' } },
+        { id: "semantic", title: "Semantic", kind: "css", path: "styles/semantic.css", themes: { light: '[data-theme="light"]' } },
+      ];
+      canvas.frames.opted = {
+        kind: "html",
+        source: "page-1/opted-out.html",
+        title: "Opted out",
+        x: 500,
+        y: 0,
+        width: 390,
+        height: 844,
+        styles: ["semantic"],
+      };
+      canvas.pages[0].frames.push("opted");
+    });
+    const unknown = (report: Awaited<ReturnType<typeof lintDesignDocument>>, file: string) =>
+      report.violations
+        .filter((violation) => violation.ruleId === "unknown-token" && violation.file === file)
+        .map((violation) => /"(--[^"]+)"/.exec(violation.message)?.[1]);
+    const report = await lintDesignDocument(root, undefined, { healOids: false });
+    expect(unknown(report, frame)).toEqual(["--shadow-xl", "--made-up"]);
+    // A frame that receives only the CSS source does not see Tailwind's tokens.
+    expect(unknown(report, "page-1/opted-out.html")).toEqual([
+      "--fg1",
+      "--radius-card",
+      "--text-tiny--line-height",
+      "--shadow-xl",
+      "--made-up",
+    ]);
+    const single = await lintDesignDocument(root, frame, { healOids: false });
+    expect(unknown(single, frame)).toEqual(["--shadow-xl", "--made-up"]);
+  });
+
+  it.each(["selection", "render"] as const)("reads %s identity without compiling a frame's Tailwind CSS", async (kind) => {
+    await writeFile(path.join(root, "styles/app.css"), '@import "tailwindcss" source(none);');
+    await writeCanvas((canvas) => {
+      canvas.styles = [{ id: "app", kind: "tailwind", path: "styles/app.css" }];
+      Object.assign(canvas.frames.home, { x: 12, y: 34 });
+    });
+    const source = html.replace('data-oid="main"', 'data-oid="main" class="p-3"');
+    await writeFile(path.join(folder, frame), source);
+    // Resolve the shared stylesheet generation, as the canvas snapshot does,
+    // but leave this frame's utility build cold.
+    const expected = await readDesignFrameRenderIdentityFromSource(root, frame, source);
+    const compile = vi.spyOn(tailwind, "compileDesignTailwind");
+    const identity = kind === "selection"
+      ? await readDesignFrameSelectionIdentity(root, frame)
+      : await readDesignFrameRenderIdentity(root, frame);
+    expect(identity).toMatchObject(expected);
+    if (kind === "selection") {
+      expect(identity).toMatchObject({ title: "Home", width: 390, height: 844, x: 12, y: 34 });
+      expect((identity as Awaited<ReturnType<typeof readDesignFrameSelectionIdentity>>).nodeIds).toContain("main");
+    }
+    expect(compile).not.toHaveBeenCalled();
+    const rendered = await readDesignFrameRenderSourceFromSource(root, frame, source);
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(rendered.sourceVersion).toBe(identity.sourceVersion);
+    expect(rendered.html).toContain(".p-3");
+    // Authored changes still invalidate selection/CAS, even before rendering.
+    await writeFile(path.join(folder, frame), source.replace("p-3", "p-4"));
+    const edited = await readDesignFrameSelectionIdentity(root, frame);
+    expect(edited.sourceVersion).not.toBe(identity.sourceVersion);
+    expect(edited.nodeIds).toEqual(expect.arrayContaining(["main"]));
+    expect(compile).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the declaration through canvas writes, as older engines do", async () => {

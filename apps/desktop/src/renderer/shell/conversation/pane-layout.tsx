@@ -270,6 +270,8 @@ export function ConversationPaneLayout({
   const pendingChatHydrationFolder = useWorkspaceStore(
     (state) => state.pendingChatHydrationFolder,
   );
+  const navigationOnly = useWorkspaceStore((state) =>
+    state.localLinkNavigation?.passive && state.localLinkNavigation.folder === activeFolder);
   const project = useProjectForFolder(activeFolder);
   const { projects } = useProjects();
   const { workspaces } = useWorkspacesFor(project?.repoSlug ?? null);
@@ -350,7 +352,7 @@ export function ConversationPaneLayout({
   // renders a dead pane for a null selection. See the original comment
   // block in conversation/chat-tabs (pre-panes) for the full history.
   useEffect(() => {
-    if (readOnly) return;
+    if (readOnly || navigationOnly) return;
     if (
       activePage !== "workspace" ||
       !activeWorkspacePath ||
@@ -385,6 +387,7 @@ export function ConversationPaneLayout({
     }
   }, [
     readOnly,
+    navigationOnly,
     activeChatId,
     activePage,
     visibleChats,

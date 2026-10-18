@@ -53,6 +53,7 @@ function deferred<T>() {
 
 function gitResult(args: string[], status = "", tracked = "M\0changed.txt\0"): GitResult {
   if (args[0] === "status") return { stdout: status, stderr: "" };
+  if (args.includes("--numstat")) return { stdout: "2\t1\tchanged.txt\0", stderr: "" };
   if (args.includes("diff")) return { stdout: tracked, stderr: "" };
   if (args[0] === "merge-base") return { stdout: FLOOR, stderr: "" };
   if (args.includes("--abbrev-ref")) return { stdout: "feature", stderr: "" };
@@ -68,6 +69,8 @@ function diffReads() {
 }
 
 let hasWorkspaceChanges: typeof import("../diff").hasWorkspaceChanges;
+let changeCounts: typeof import("../diff").changeCounts;
+let changeLineCounts: typeof import("../diff").changeLineCounts;
 let invalidateWorkspaceChangeProbes: typeof import("../workspace-change-probe").invalidateWorkspaceChangeProbes;
 
 beforeEach(async () => {
@@ -75,8 +78,93 @@ beforeEach(async () => {
   fixture.resolveWorkspace.mockReset().mockImplementation(async (id: string) => workspace(id));
   fixture.resolveGit.mockReset().mockReturnValue({ remote: "origin" });
   fixture.readGit.mockReset().mockImplementation(async (_cwd: string, args: string[]) => gitResult(args));
-  ({ hasWorkspaceChanges } = await import("../diff"));
+  ({ hasWorkspaceChanges, changeCounts, changeLineCounts } = await import("../diff"));
   ({ invalidateWorkspaceChangeProbes } = await import("../workspace-change-probe"));
+});
+
+describe("local Git summary input sharing", () => {
+  it.each([null, "organization-a"])("shares status and fork-point work across concurrent summaries for owner %s", async (organizationId) => {
+    fixture.resolveWorkspace.mockImplementation(async (id: string) => ({
+      ...workspace(id), placement: "local", organizationId,
+    }));
+    const status = deferred<GitResult>();
+    fixture.readGit.mockImplementation(async (_cwd: string, args: string[]) =>
+      args[0] === "status" ? status.promise : gitResult(args),
+    );
+    const reads = [
+      hasWorkspaceChanges("workspace-a"),
+      changeCounts("workspace-a"),
+      changeLineCounts("workspace-a"),
+    ];
+    status.resolve({ stdout: "", stderr: "" });
+    await expect(Promise.all(reads)).resolves.toEqual([
+      true, { all: 1, uncommitted: 1, staged: 1, unstaged: 1 },
+      { additions: 2, deletions: 1 },
+    ]);
+    expect(statusReads()).toHaveLength(1);
+    // Local and remote base variants still each participate in the comparison.
+    expect(fixture.readGit.mock.calls.filter(([, args]) => args[0] === "merge-base").map(([, args]) => args)).toEqual([
+      ["merge-base", "main", "HEAD"], ["merge-base", "origin/main", "HEAD"],
+    ]);
+    expect(fixture.readGit).toHaveBeenCalledTimes(11);
+  });
+
+  it("leaves cloud summary reads independent", async () => {
+    fixture.resolveWorkspace.mockImplementation(async (id: string) => ({
+      ...workspace(id), placement: "cloud", organizationId: "organization-a",
+    }));
+    await Promise.all([
+      hasWorkspaceChanges("workspace-a"),
+      changeCounts("workspace-a"),
+      changeLineCounts("workspace-a"),
+    ]);
+    expect(statusReads()).toHaveLength(3);
+  });
+
+  it("applies each caller's path filter after sharing local inputs", async () => {
+    const [counts, lines] = await Promise.all([
+      changeCounts("workspace-a", () => false),
+      changeLineCounts("workspace-a"),
+    ]);
+    expect(counts).toEqual({ all: 0, uncommitted: 0, staged: 0, unstaged: 0 });
+    expect(lines).toEqual({ additions: 2, deletions: 1 });
+    expect(statusReads()).toHaveLength(1);
+  });
+
+  it("fences a summary of another kind after an exact mutation and coalesces its replacement", async () => {
+    const oldStatus = deferred<GitResult>();
+    const freshStatus = deferred<GitResult>();
+    let scans = 0;
+    fixture.readGit.mockImplementation(async (_cwd: string, args: string[]) =>
+      args[0] === "status" ? (++scans === 1 ? oldStatus.promise : freshStatus.promise) : gitResult(args),
+    );
+    const old = changeCounts("workspace-a");
+    await vi.waitFor(() => expect(statusReads()).toHaveLength(1));
+    invalidateWorkspaceChangeProbes(["workspace-a"]);
+    const replacements = [changeCounts("workspace-a"), changeLineCounts("workspace-a")];
+    try {
+      oldStatus.resolve({ stdout: "", stderr: "" });
+      await old;
+      await vi.waitFor(() => expect(statusReads()).toHaveLength(2));
+      freshStatus.resolve({ stdout: "", stderr: "" });
+      await expect(Promise.all(replacements)).resolves.toEqual([
+        { all: 1, uncommitted: 1, staged: 1, unstaged: 1 },
+        { additions: 2, deletions: 1 },
+      ]);
+      expect(statusReads()).toHaveLength(2);
+    } finally {
+      oldStatus.resolve({ stdout: "", stderr: "" });
+      freshStatus.resolve({ stdout: "", stderr: "" });
+      await Promise.all([old, ...replacements]);
+    }
+  });
+
+  it("releases settled shared inputs so the next summary reads the current checkout", async () => {
+    await changeCounts("workspace-a");
+    fixture.readGit.mockImplementation(async (_cwd: string, args: string[]) => gitResult(args, "", ""));
+    await expect(hasWorkspaceChanges("workspace-a")).resolves.toBe(false);
+    expect(statusReads()).toHaveLength(2);
+  });
 });
 
 describe("hasWorkspaceChanges read budget and ownership", () => {
@@ -194,7 +282,7 @@ describe("hasWorkspaceChanges read budget and ownership", () => {
     expect(statusReads()).toHaveLength(1);
   });
 
-  it.each(["path", "repoRoot", "baseBranch", "createdAt", "remote"] as const)(
+  it.each(["path", "repoRoot", "baseBranch", "createdAt", "remote", "organizationId", "placement"] as const)(
     "does not reuse a running read after its %s identity changes",
     async (changed) => {
       const status = deferred<GitResult>();
@@ -206,6 +294,7 @@ describe("hasWorkspaceChanges read budget and ownership", () => {
       const first = hasWorkspaceChanges("workspace-a");
       await vi.waitFor(() => expect(statusReads()).toHaveLength(1));
       if (changed === "remote") fixture.resolveGit.mockReturnValue({ remote: "upstream" });
+      else if (changed === "placement") current = { ...current, placement: "cloud" };
       else current = {
         ...current,
         [changed]: changed === "createdAt" ? 2 : `${current[changed]}-replacement`,

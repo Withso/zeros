@@ -37,6 +37,7 @@ import {
   type ChatThread,
 } from "../../state/store";
 import { useWorkspaceStore } from "../../state/workspace-store";
+import { folderIsWithinRoot } from "../../state/workspace-resolution";
 import {
   getLiveChatDraft,
   liveChatDraftHasText,
@@ -428,6 +429,8 @@ function ChatBody({
   const isFocusedChat = useWorkspaceStore(
     (state) => state.activeChatId === chatId,
   );
+  const navigationOnly = useWorkspaceStore((state) =>
+    state.localLinkNavigation?.passive && folderIsWithinRoot(cwd, state.localLinkNavigation.workspace.path));
 
   // Typing is intent, and it is the earliest honest signal of it. A deferred
   // pristine-switch spawn starts here rather than at Send, so the admission
@@ -575,6 +578,7 @@ function ChatBody({
       // lazy-boot-resume.ts for why, and AgentLoadSessionMessage.adoptOnly for
       // what the engine does with it.
       const adoptOnly = deferBootSessionAdmission({
+        navigationOnly,
         isFocusedChat,
         pendingAutoSend,
         composerHasText,
@@ -618,7 +622,7 @@ function ChatBody({
         const hasPriorContext =
           existing?.hasTranscript === true ||
           (existing?.messages.length ?? 0) > 0;
-        if (!hasPriorContext) {
+        if (!hasPriorContext && !navigationOnly) {
           // Nothing durable to adopt and nothing on screen to keep warm — an
           // unfocused pane in that state simply waits for its first touch.
           if (!adoptOnly) {
@@ -656,6 +660,7 @@ function ChatBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     readOnly,
+    navigationOnly,
     chatId,
     agentId,
     cwd,
@@ -731,7 +736,7 @@ function ChatBody({
   // never landed — see the appliedChatEnvKey stamp, which is deliberately only
   // written when the agent really applied it.
   useEffect(() => {
-    if (readOnly || !surfaceActive) return;
+    if (readOnly || navigationOnly || !surfaceActive) return;
     if (envKey === envKeyRef.current) return;
     // Bail BEFORE stamping (2026-07-13 fix): stamping first meant a change
     // that landed while `chat` was momentarily null was recorded as applied
@@ -751,7 +756,7 @@ function ChatBody({
       force: true,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [envKey, surfaceActive, readOnly]);
+  }, [envKey, surfaceActive, readOnly, navigationOnly]);
 
   // Auto-retry on bridge reconnect. The chat lands in `failed` state
   // when its initial load hits a transient bridge error (queue full
@@ -789,12 +794,13 @@ function ChatBody({
         // The prior `cwd || undefined` collapse hid the bug.
         cwd,
         env,
+        ...(navigationOnly ? { adoptOnly: true } : {}),
       });
     } else {
       void sessions
-        .loadIntoChat(chatId, agentId, null, { agentName, cwd, env })
+        .loadIntoChat(chatId, agentId, null, { agentName, cwd, env, ...(navigationOnly ? { adoptOnly: true } : {}) })
         .then((adopted) => {
-          if (cancelled || adopted) return;
+          if (cancelled || adopted || navigationOnly) return;
           void session.ensureSession(agentId, { agentName, cwd, env });
         });
     }
@@ -806,6 +812,7 @@ function ChatBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     readOnly,
+    navigationOnly,
     bridgeStatus,
     chatId,
     agentId,

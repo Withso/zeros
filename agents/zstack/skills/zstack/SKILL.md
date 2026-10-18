@@ -29,6 +29,9 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
   - A contract or interface change reaches a running subagent only when you
     tell it. Stop it and resume it with the delta before it builds on the old
     text.
+  - Sending a step is not idempotent. Read the host's documented reply
+    shape before treating a send as failed, check the transcript before
+    resending, and pass the host's message id flag when it has one.
 - Write the mode, models and the user's instruction into your first progress
   note.
 

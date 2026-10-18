@@ -126,6 +126,19 @@
   font-weight: var(--weight-medium);
 }
 
+/* The Sources label shares its row with the Update icon. */
+.zd-theme-rail-heading {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.zd-theme-rail-heading > .zd-theme-rail-label {
+  padding-top: 0;
+}
+
 .zd-theme-source-name {
   display: flex;
   min-width: 0;

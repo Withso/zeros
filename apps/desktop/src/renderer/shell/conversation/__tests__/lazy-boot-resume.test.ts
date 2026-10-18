@@ -10,6 +10,11 @@ const base = {
 };
 
 describe("deferBootSessionAdmission", () => {
+  it("keeps a link navigation adopt-only despite focus, saved text, or a queued draft", () => {
+    expect(deferBootSessionAdmission({ ...base, navigationOnly: true, isFocusedChat: true,
+      composerHasText: true, pendingAutoSend: true })).toBe(true);
+    expect(deferBootSessionAdmission({ ...base, navigationOnly: false, isFocusedChat: true })).toBe(false);
+  });
   it("lets the focused chat admit eagerly", () => {
     expect(
       deferBootSessionAdmission({ ...base, isFocusedChat: true }),

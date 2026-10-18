@@ -51,6 +51,22 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     );
   });
 
+  it("lists only curated, cold-startable models as fallbacks", () => {
+    // An adapter runs these on the user's behalf, so a fallback outside the
+    // curated family (the retired hard-coded `composer-2`) or a liveRequired row
+    // would put a model in the transcript that the picker never offers.
+    expect(catalog.fallbacks.cursor).toEqual(["composer-2.5", "default"]);
+    const invalid = {
+      ...catalog,
+      fallbacks: { cursor: ["composer-2", "grok-4.5", "default", "default"] },
+    };
+    expect(validateCatalog(invalid).errors).toEqual([
+      'fallbacks.cursor[0] → "composer-2" is not a curated cursor model',
+      'fallbacks.cursor[1] → "grok-4.5" is liveRequired and cannot be a fallback',
+      'fallbacks.cursor[3] "default" is a duplicate',
+    ]);
+  });
+
   it("gates each Claude generation so none ever silently downgrades", () => {
     // BUILD-TIME gate only (models:verify --strict + this vitest): on an older
     // CLI it warns so we never ship a curated model the pinned CLI can't run.

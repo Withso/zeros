@@ -539,3 +539,37 @@ describe("applyUpdate — error_notice rows", () => {
     expect(out).toHaveLength(0);
   });
 });
+
+describe("applyUpdate — engine-recorded user rows (Zeros Local CLI)", () => {
+  const recorded = (message: AgentTextMessage): SessionNotification => ({
+    sessionId: "s",
+    update: { sessionUpdate: "user_message_recorded", message },
+  });
+  const from = { chatId: "chat-b", title: "Audit", agentId: "codex", link: "zeros-dev://chat/chat-b" };
+
+  it("appends a whole row mid-turn without coalescing into the prompt before it", () => {
+    const prompt = applyUpdate([], { sessionId: "s", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "Go" } } });
+    const row: AgentTextMessage = { id: "u2", kind: "text", role: "user", text: "Progress", createdAt: 2, steeredTurnId: prompt[0]!.id, localFrom: from };
+    const next = applyUpdate(prompt, recorded(row));
+    expect(next).toHaveLength(2);
+    expect(next[1]).toEqual(row);
+    // The same row again (a second view, a replay) replaces it in place.
+    expect(applyUpdate(next, recorded({ ...row, text: "Progress!" }))).toHaveLength(2);
+  });
+
+  it("keeps a provider-adopted native id and lets a later echo adopt the row", () => {
+    const row: AgentTextMessage = { id: "u1", kind: "text", role: "user", text: "Note", createdAt: 1, localNote: { ...from, event: "done", status: "completed" } };
+    const echoed = applyUpdate(applyUpdate([], recorded(row)), {
+      sessionId: "s",
+      update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "[Zeros] Chat" }, messageId: "native-1" },
+    });
+    expect(echoed).toHaveLength(1);
+    expect(echoed[0]).toMatchObject({ id: "u1", messageId: "native-1", localNote: { event: "done" } });
+    expect(applyUpdate(echoed, recorded(row))[0]).toMatchObject({ messageId: "native-1" });
+  });
+
+  it("ignores malformed rows", () => {
+    expect(applyUpdate([], recorded({ id: "", kind: "text", role: "user", text: "x", createdAt: 1 }))).toEqual([]);
+    expect(applyUpdate([], recorded({ id: "a", kind: "text", role: "agent", text: "x", createdAt: 1 }))).toEqual([]);
+  });
+});

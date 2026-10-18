@@ -1,5 +1,5 @@
 import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
-import { cloudAdmissionForTurn } from "./cloud-admission-failure";
+import { LocalLinksProvider } from "./local-links/provider";
 import { TurnFailureCard } from "./turn-failure-card";
 import { AgentNotice } from "./agent-notice";
 import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
@@ -182,7 +182,7 @@ import type {
   AgentTextMessage,
   MessageContentSegment,
 } from "./use-agent-session";
-import { MessageView, type RendererContext } from "./renderers";
+import type { RendererContext } from "./renderers";
 import { computeEditBaselines } from "./renderers/tool-edit";
 import { Button, cn } from "../../shared/ui";
 import {
@@ -263,29 +263,26 @@ import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/clou
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
 import { isSubscriptionProvider } from "../settings/subscription-connection";
-import { AuthenticationNotice } from "./authentication-notice";
-import {
-  authenticationTurnState,
-  authenticationTurnOutput,
-  authenticationFailureMessage,
-  latestAuthenticationRecoveryTurn,
-} from "./auth-prompt-recovery";
+import { latestAuthenticationRecoveryTurn } from "./auth-prompt-recovery";
 import { useAgentSessions } from "./sessions-hooks";
 import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
 import {
-  TurnContainer,
-  TurnPromptHeader,
   groupMessagesIntoTurns,
   isProviderTurnTail,
   isTailProviderTurnSegment,
   turnKey,
 } from "./turn-container";
-import { TurnEventList } from "./turn-event-list";
-import { pickStartedAt } from "./activity-hud";
+import {
+  TranscriptTurn,
+  type TranscriptTurnActions,
+  type TranscriptTurnShared,
+  type TranscriptTurnTail,
+} from "./transcript-turn";
+import { shareMap, shareMessageBuckets, shareSet } from "./transcript-stability";
+import { useLatestCallback } from "@/renderer/shared/lib/use-latest-callback";
 import { tailTurnInFlight } from "./tail-indicators";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
-import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
 import { turnFailureForCard } from "./turn-failure";
 import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
 import {
@@ -322,6 +319,9 @@ const TRANSCRIPT_LIST_GRACE_MS = 400;
 // isPlanMode both key off this so they work for BOTH agents.
 const PLAN_MODE_RX = /plan|read.?only/i;
 
+/** Read-only transcripts never pend on a question. Shared and never mutated. */
+const NO_PENDING_QUESTION_TOOL_CALL_IDS = new Set<string>();
+
 interface AgentChatProps {
   /** Saved workspace history shares the transcript, with all writing disabled. */
   readOnly?: boolean;
@@ -348,7 +348,14 @@ interface AgentChatProps {
   workspaceProvisioning?: boolean;
 }
 
-export function AgentChat({
+export function AgentChat(props: AgentChatProps) {
+  const chat = useChatById(props.chatId);
+  return <LocalLinksProvider cwd={chat?.folder ?? props.session.cwd} active={props.surfaceActive ?? true}>
+    <AgentChatBody {...props} />
+  </LocalLinksProvider>;
+}
+
+function AgentChatBody({
   readOnly = false,
   composerReplacement,
   session,
@@ -430,17 +437,12 @@ export function AgentChat({
   const composerCardRef = useRef<HTMLDivElement>(null);
   // Stable ctx object for MessageView memoization. Without useMemo, every
   // parent re-render hands a new ref to every message and the per-message
-  // memo can never short-circuit.
-  //
-  // isStreaming + lastMessageId let in-flight-aware renderers detect "am I
-  // the active in-flight message" without reaching back into session state.
+  // memo can never short-circuit. In-flight-aware renderers learn "am I the
+  // active in-flight message" from the isStreaming + lastMessageId their
+  // TurnEventList derives for its own turn.
   //
   // activeTurnStartedAt = createdAt of the last user message. Drives the
   // "am I in the current turn?" check for turn-scoped chrome.
-  const lastMessageId =
-    session.messages.length > 0
-      ? session.messages[session.messages.length - 1].id
-      : null;
   const activeTurnStartedAt = useMemo(() => {
     for (let i = session.messages.length - 1; i >= 0; i--) {
       const m = session.messages[i];
@@ -530,26 +532,32 @@ export function AgentChat({
   const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
   const backgroundContinuationActive = agentFamily(session.agentId) === "claude" && activity !== null && session.status !== "streaming";
   const waitingForBackgroundTasks = activity === "waiting";
+  const untitled = chatThread?.title === "Untitled" || chatThread?.title === "New chat";
+  // Recomputed per streamed chunk, but the request below re-arms only when
+  // the chosen prompt itself changes.
+  const titleCandidate = useMemo(
+    () => (untitled ? settledFirstPromptForTitle({ status: session.status, messages: session.messages }) : null),
+    [untitled, session.status, session.messages],
+  );
+  const titleMessageId = titleCandidate?.messageId ?? null;
+  const titlePrompt = titleCandidate?.prompt ?? null;
+  const seededTitle = chatThread?.title ?? null;
   useEffect(() => {
     if (
       readOnly ||
       !surfaceActive ||
       !chatId ||
-      !chatThread ||
+      !seededTitle ||
       backgroundContinuationActive ||
-      (chatThread.title !== "Untitled" && chatThread.title !== "New chat")
+      !titleMessageId ||
+      !titlePrompt
     )
       return;
-    const candidate = settledFirstPromptForTitle({
-      status: session.status,
-      messages: session.messages,
-    });
-    if (!candidate) return;
     return startChatTitleRequest({
       chatId,
-      messageId: candidate.messageId,
-      prompt: candidate.prompt,
-      expectedTitle: chatThread.title,
+      messageId: titleMessageId,
+      prompt: titlePrompt,
+      expectedTitle: seededTitle,
       dispatch,
     });
   }, [
@@ -557,11 +565,10 @@ export function AgentChat({
     backgroundContinuationActive,
     surfaceActive,
     chatId,
-    chatThread,
+    seededTitle,
     dispatch,
-    session.agentId,
-    session.messages,
-    session.status,
+    titleMessageId,
+    titlePrompt,
   ]);
   const isStreaming =
     !readOnly &&
@@ -803,27 +810,66 @@ export function AgentChat({
     requestUserSettingsSection("browser-use");
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   }, [dispatch, interactive]);
-  const messageCtx: RendererContext = useMemo(
+  // Every streamed chunk re-renders AgentChat with a new session object and
+  // re-derives these collections from the whole message list. Share unchanged
+  // collections and route session-bound handlers through their newest closure,
+  // so the renderer context (and every memoized turn reading it) stays
+  // referentially stable while another message streams. Only a committed
+  // render becomes the sharing baseline.
+  const sharedCtxRef = useRef<{
+    subagentChildren?: Map<string, AgentMessage[]>;
+    editBaselines?: Map<string, string>;
+    pendingQuestionToolCallIds?: Set<string>;
+  }>({});
+  const stableSubagentChildren = useMemo(
+    () => shareMessageBuckets(sharedCtxRef.current.subagentChildren, subagentChildren),
+    [subagentChildren],
+  );
+  const stableEditBaselines = useMemo(
+    () => shareMap(sharedCtxRef.current.editBaselines, editBaselines),
+    [editBaselines],
+  );
+  const stablePendingQuestionToolCallIds = useMemo(
+    () => shareSet(sharedCtxRef.current.pendingQuestionToolCallIds, pendingQuestionToolCallIds),
+    [pendingQuestionToolCallIds],
+  );
+  useLayoutEffect(() => {
+    sharedCtxRef.current = {
+      subagentChildren: stableSubagentChildren,
+      editBaselines: stableEditBaselines,
+      pendingQuestionToolCallIds: stablePendingQuestionToolCallIds,
+    };
+  }, [stableSubagentChildren, stableEditBaselines, stablePendingQuestionToolCallIds]);
+  const respondToQuestionThroughRef = useLatestCallback(respondToQuestion);
+  const respondToPermissionThroughRef = useLatestCallback(respondToPermission);
+  const editAndResubmitThroughRef = useLatestCallback(editAndResubmit);
+  const setModeThroughRef = useLatestCallback((modeId: string) => {
+    setModeForCtx?.(modeId);
+  });
+  const setModeAvailable = setModeForCtx !== null;
+  // Turns read this context; each TurnEventList derives its own isStreaming
+  // and lastMessageId, so those two never re-render settled turns.
+  const transcriptCtx: RendererContext = useMemo(
     () => ({
       transcriptReadOnly,
-      isStreaming,
-      lastMessageId,
+      isStreaming: false,
+      lastMessageId: null,
       activeTurnStartedAt,
-      subagentChildren,
-      editBaselines,
-      respondToQuestion,
+      subagentChildren: stableSubagentChildren,
+      editBaselines: stableEditBaselines,
+      respondToQuestion: respondToQuestionThroughRef,
       pendingQuestionToolCallIds: transcriptReadOnly
-        ? new Set<string>()
-        : pendingQuestionToolCallIds,
+        ? NO_PENDING_QUESTION_TOOL_CALL_IDS
+        : stablePendingQuestionToolCallIds,
       hasBlockingQuestion: !transcriptReadOnly && hasBlockingQuestion,
       pendingPermission: transcriptReadOnly ? null : session.pendingPermission,
-      respondToPermission,
+      respondToPermission: respondToPermissionThroughRef,
       retrySafetyReview: retrySafetyReviewThroughRef,
       safetyReviewRetries: transcriptReadOnly ? undefined : session.safetyReviewRetries,
       recordPolicy,
       chatId: chatId ?? null,
-      setMode: setModeForCtx,
-      editAndResubmit,
+      setMode: setModeAvailable ? setModeThroughRef : null,
+      editAndResubmit: editAndResubmitThroughRef,
       previewImage: previewImageThroughRef,
       attachmentCwd: chatThread?.folder ?? session.cwd ?? null,
       attachmentImagesActive: surfaceActive,
@@ -834,24 +880,23 @@ export function AgentChat({
       openBrowserSettings: interactive ? openBrowserSettings : undefined,
     }),
     [
-      isStreaming,
       openBrowserSettings,
       interactive,
-      lastMessageId,
       activeTurnStartedAt,
-      subagentChildren,
-      editBaselines,
-      respondToQuestion,
-      pendingQuestionToolCallIds,
+      stableSubagentChildren,
+      stableEditBaselines,
+      respondToQuestionThroughRef,
+      stablePendingQuestionToolCallIds,
       hasBlockingQuestion,
       session.pendingPermission,
-      respondToPermission,
+      respondToPermissionThroughRef,
       retrySafetyReviewThroughRef,
       session.safetyReviewRetries,
       recordPolicy,
       chatId,
-      setModeForCtx,
-      editAndResubmit,
+      setModeAvailable,
+      setModeThroughRef,
+      editAndResubmitThroughRef,
       previewImageThroughRef,
       chatThread?.folder,
       session.cwd,
@@ -864,6 +909,7 @@ export function AgentChat({
       openPreviewUrlThroughRef,
     ],
   );
+
   // Scroll + active-prompt elements tracked via state so the
   // sticky-bottom hook + JumpPills re-run when they mount. Plain
   // useRef wouldn't trigger a re-render on .current changes.
@@ -3242,13 +3288,14 @@ export function AgentChat({
   ]);
   // Use the footer's exact cached row to decide whether it can present this
   // failure. Completed/cancelled history cannot own a later startup failure.
+  // Local notification turns have a recorded ID without a user prompt.
   // The read is shared with that footer and remains inert on hidden surfaces.
   const preparationTurn = turns.at(-1);
   const preparationTurnRead = useCachedRead(
     turnRowCache,
-    !readOnly && !provisionalTranscript && chatId && preparationTurn?.userPrompt &&
+    !readOnly && !provisionalTranscript && chatId && preparationTurn?.recordedTurnId &&
       session.status === "failed" && session.failure?.stage !== "prompt"
-      ? turnRowKey(chatId, preparationTurn.recordedTurnId ?? preparationTurn.userPrompt.id)
+      ? turnRowKey(chatId, preparationTurn.recordedTurnId)
       : null,
     (key) => {
       const [ownerChatId, turnId] = key.split("\u0000");
@@ -3256,19 +3303,19 @@ export function AgentChat({
     },
     { maxAgeMs: 30_000, enabled: surfaceActive },
   );
-  const preparationTurnFailure = !provisionalTranscript && chatId && preparationTurn?.userPrompt &&
+  const preparationTurnFailure = !provisionalTranscript && chatId && preparationTurn?.recordedTurnId &&
     session.status === "failed" && session.failure?.stage !== "prompt"
     ? turnFailureForCard({
         events: preparationTurn.providerEvents,
-        turnId: preparationTurn.recordedTurnId ?? preparationTurn.userPrompt.id,
+        turnId: preparationTurn.recordedTurnId,
         fallback: session.failure,
-        recoveryFailure: preparationTurn.userPrompt.recoveryFailure,
+        recoveryFailure: preparationTurn.userPrompt?.recoveryFailure,
         status: preparationTurnRead.data?.status,
         stopReason: session.lastStopReason ?? preparationTurnRead.data?.stopReason,
         live: tailTurnInFlight({ sessionStreaming: isStreaming,
-          pendingLocalTurn: pendingLocalTurnId === preparationTurn.userPrompt.id,
+          pendingLocalTurn: pendingLocalTurnId === preparationTurn.userPrompt?.id,
           hasEvents: preparationTurn.events.length > 0 }),
-        retrying: pendingLocalTurnId === preparationTurn.userPrompt.id,
+        retrying: pendingLocalTurnId === preparationTurn.userPrompt?.id,
       }) : null;
   // Keep terminal startup failures in this chat exactly once, while normal
   // reconnects and superseded preparation stay quiet.
@@ -4670,6 +4717,127 @@ export function AgentChat({
   // auth-required / stop-reason signals are already surfaced through the
   // composer state chip + toast layer.
 
+  // ── Memoized transcript turns ─────────────────────────────
+  // Everything below stays equal while the live turn streams, so React skips
+  // every settled turn (see transcript-turn.tsx). Handlers route through their
+  // newest closure; tail-only session state reaches only the visual tail.
+  const retryTurnThroughRef = useLatestCallback(retryTurn);
+  const warmRetryTranscriptThroughRef = useLatestCallback(
+    (prompt: AgentTextMessage, events: AgentMessage[]) => {
+      if (chatThread) warmRetryTranscript(chatThread, prompt, events);
+    },
+  );
+  const continueTurnThroughRef = useLatestCallback(() => {
+    void handleSend("Continue");
+  });
+  const forkToNewTabThroughRef = useLatestCallback(forkToNewTab);
+  const warmForkToNewTabThroughRef = useLatestCallback(warmForkToNewTab);
+  const signInThroughRef = useLatestCallback(handleSignIn);
+  const stopWorkflow = session.stopBackgroundTask;
+  const transcriptActions = useMemo<TranscriptTurnActions>(
+    () => ({
+      editAndResubmit: editAndResubmitThroughRef,
+      retryTurn: retryTurnThroughRef,
+      warmRetryTranscript: warmRetryTranscriptThroughRef,
+      continueTurn: continueTurnThroughRef,
+      forkToNewTab: forkToNewTabThroughRef,
+      warmForkToNewTab: warmForkToNewTabThroughRef,
+      signIn: signInThroughRef,
+      stopWorkflow,
+    }),
+    [
+      editAndResubmitThroughRef,
+      retryTurnThroughRef,
+      warmRetryTranscriptThroughRef,
+      continueTurnThroughRef,
+      forkToNewTabThroughRef,
+      warmForkToNewTabThroughRef,
+      signInThroughRef,
+      stopWorkflow,
+    ],
+  );
+  const transcriptFolder = chatThread?.folder ?? session.cwd;
+  const transcriptAgentId = chatThread?.agentId ?? session.agentId;
+  const transcriptAgentName =
+    session.agentName ?? chatThread?.agentName ?? signInAgentId ?? "Agent";
+  const transcriptNativeFork =
+    isCloudWorkspace(chatThread?.folder) &&
+    chatThread?.agentId === "codex" &&
+    cloudNativeCapabilities?.nativeFork === true;
+  const transcriptHasChatThread = !!chatThread;
+  const transcriptDesignRole = session.agentRole === "design";
+  const transcriptShared = useMemo<TranscriptTurnShared>(
+    () => ({
+      chatId,
+      folder: transcriptFolder,
+      footerAgentId: transcriptAgentId,
+      agentDisplayName: transcriptAgentName,
+      signInAgentId,
+      cloudAdmissionFailure: session.cloudAdmissionFailure,
+      surfaceActive,
+      deferContent: provisionalTranscript,
+      scrollRoot: scrollEl,
+      readOnly,
+      transcriptReadOnly,
+      interactive,
+      hasChatThread: transcriptHasChatThread,
+      designRole: transcriptDesignRole,
+      nativeFork: transcriptNativeFork,
+      setEditingMessageId,
+      setActivePromptEl,
+      ctx: transcriptCtx,
+      actions: transcriptActions,
+    }),
+    [
+      chatId,
+      transcriptFolder,
+      transcriptAgentId,
+      transcriptAgentName,
+      signInAgentId,
+      session.cloudAdmissionFailure,
+      surfaceActive,
+      provisionalTranscript,
+      scrollEl,
+      readOnly,
+      transcriptReadOnly,
+      interactive,
+      transcriptHasChatThread,
+      transcriptDesignRole,
+      transcriptNativeFork,
+      setEditingMessageId,
+      setActivePromptEl,
+      transcriptCtx,
+      transcriptActions,
+    ],
+  );
+  const tailBackgroundStartedAt =
+    session.backgroundActivity?.startedAt ?? session.backgroundTasksWaitingSince;
+  const tailBackgroundTasks = waitingForBackgroundTasks ? session.backgroundTasks : undefined;
+  const transcriptTail = useMemo<TranscriptTurnTail>(
+    () => ({
+      failure: session.failure,
+      failureKind: session.failure?.kind,
+      sessionStreaming: session.status === "streaming",
+      lastStopReason: session.lastStopReason,
+      activeTurnStartedAt: session.activeTurnStartedAt,
+      backgroundContinuationActive,
+      backgroundStartedAt: tailBackgroundStartedAt,
+      backgroundTasks: tailBackgroundTasks,
+      workflow: activeWorkflow,
+    }),
+    [
+      session.failure,
+      session.status,
+      session.lastStopReason,
+      session.activeTurnStartedAt,
+      backgroundContinuationActive,
+      tailBackgroundStartedAt,
+      tailBackgroundTasks,
+      activeWorkflow,
+    ],
+  );
+
+
   return (
     <div
       // Runtime-generated markdown and scrollbars require this style scope.
@@ -4862,261 +5030,48 @@ export function AgentChat({
               // UI, while every segment sharing that provider turn stays live
               // so its streaming tool group does not collapse mid-run.
               const isVisualTail = i === turns.length - 1;
-              const isActiveProviderSegment = isTailProviderTurnSegment(
-                turns,
-                i,
-              );
-              const ownsProviderFooter = isProviderTurnTail(turns, i);
               // One answer for the shimmer AND the footer (see tailTurnInFlight):
               // they are two halves of the same claim, and computing them apart
               // is what let a reopened chat show the working shimmer while
               // hiding this turn's own STOPPED BY USER pill.
               const turnIsPendingLocal =
                 !!turn.userPrompt && pendingLocalTurnId === turn.userPrompt.id;
-              const turnInFlight = tailTurnInFlight({
-                sessionStreaming: isStreaming,
-                pendingLocalTurn: turnIsPendingLocal,
-                hasEvents: turn.events.length > 0,
-              });
-              const cloudAdmission = cloudAdmissionForTurn({ folder: chatThread?.folder ?? session.cwd,
-                turnId: turn.userPrompt?.id, recoveryFailure: turn.userPrompt?.recoveryFailure,
-                current: session.cloudAdmissionFailure, agentId: signInAgentId });
-              const authState = cloudAdmission ? null : authenticationTurnState({
-                userPrompt: turn.userPrompt,
-                events: turn.events,
-                failureKind: session.failure?.kind,
-                isTail: isVisualTail,
-                inFlight: turnInFlight,
-                recovered: authenticationRecoveredAt > i,
-                readOnly: transcriptReadOnly,
-              });
-              const authRequired = !transcriptReadOnly && authState === "sign-in";
-              const authStopped = authState === "stopped" || authState === "signed-in";
-              const visibleEvents = cloudAdmission ? [] : authState
-                ? authenticationTurnOutput(turn.events)
-                : turn.events;
+              const editing = !!turn.userPrompt && turn.userPrompt.id === editingMessageId;
               return (
-                <React.Fragment key={turnKey(turn)}>
-                  <TurnContainer turn={turn} isActive={isVisualTail}
-                    deferContent={provisionalTranscript} surfaceActive={surfaceActive} scrollRoot={scrollEl}
-                    initialContent={initialCachedTurnIndex >= 0 ? Math.abs(i - initialCachedTurnIndex) <= 4 : i >= turns.length - 6}>
-                    {() => <>
-                    {/* Follow-up queue rows do not render here. A first prompt
-                        awaiting only provider admission does: it is already
-                        presented as this active turn, before wire dispatch. */}
-                    {turn.userPrompt && (
-                      // Every turn's user prompt is sticky: as the
-                      // user scrolls up through history each turn's prompt
-                      // pins until the next turn's prompt arrives at the top
-                      // and pushes it off. Previously only the active turn
-                      // pinned, so scrolling back up lost the "what did I
-                      // ask?" anchor that long sessions need.
-                      //
-                      // Click-to-edit is enabled for ALL turns including the
-                      // active one ("regenerate this prompt with a tweak").
-                      // For the active turn, editAndResubmit cancels the
-                      // in-flight stream before truncating + resending.
-                      <TurnPromptHeader
-                        chatId={chatId}
-                        messageId={turn.userPrompt.id}
-                        createdAt={turn.userPrompt.createdAt}
-                        // Keep-alive deck (conversation/chat-deck.tsx) keeps hidden
-                        // chats mounted, so the prompt's "More"-expanded state
-                        // needs the surfacing signal to collapse on tab switch.
-                        surfaceActive={surfaceActive}
-                        editingMessageId={editingMessageId}
-                        onRequestEdit={setEditingMessageId}
-                        originalText={turn.userPrompt.text}
-                        originalAttachments={turn.userPrompt.attachments}
-                        originalSegments={turn.userPrompt.segments}
-                        autoAction={turn.userPrompt.autoAction}
-                        // Auto-sent messages are copy-only because their short
-                        // label cannot round-trip. Mid-turn steers are also
-                        // copy-only: their reset boundary is the opening
-                        // provider prompt, not the steer message id.
-                        onEdit={
-                          transcriptReadOnly ||
-                          turn.userPrompt.autoAction ||
-                          turn.userPrompt.queued ||
-                          turn.isSteer
-                            ? undefined
-                            : (editedText, attachments, segments) => {
-                                return editAndResubmit(
-                                  turn.userPrompt!.id,
-                                  editedText,
-                                  attachments,
-                                  segments,
-                                );
-                              }
+                <TranscriptTurn
+                  key={turnKey(turn)}
+                  turn={turn}
+                  isVisualTail={isVisualTail}
+                  isActiveProviderSegment={isTailProviderTurnSegment(turns, i)}
+                  ownsProviderFooter={isProviderTurnTail(turns, i)}
+                  turnIsPendingLocal={turnIsPendingLocal}
+                  turnInFlight={tailTurnInFlight({
+                    sessionStreaming: isStreaming,
+                    pendingLocalTurn: turnIsPendingLocal,
+                    hasEvents: turn.events.length > 0,
+                  })}
+                  recovered={authenticationRecoveredAt > i}
+                  initialContent={initialCachedTurnIndex >= 0 ? Math.abs(i - initialCachedTurnIndex) <= 4 : i >= turns.length - 6}
+                  editing={editing}
+                  editToolbarPills={editing ? editToolbarPills : undefined}
+                  editAgentContext={
+                    editing && chatThread
+                      ? {
+                          agentId: chatThread.agentId,
+                          agentName: chatThread.agentName,
+                          agentSupportsImage:
+                            session.initialize?.agentCapabilities
+                              ?.promptCapabilities?.image !== false,
+                          modelId: chatThread.model,
+                          availableCommands: session.availableCommands,
+                          cwd: session.cwd ?? chatThread.folder ?? null,
+                          originUrl: composerOriginUrl,
                         }
-                        editToolbarPills={editToolbarPills}
-                        editAgentContext={
-                          chatThread
-                            ? {
-                                agentId: chatThread.agentId,
-                                agentName: chatThread.agentName,
-                                agentSupportsImage:
-                                  session.initialize?.agentCapabilities
-                                    ?.promptCapabilities?.image !== false,
-                                modelId: chatThread.model,
-                                availableCommands: session.availableCommands,
-                                cwd: session.cwd ?? chatThread.folder ?? null,
-                                originUrl: composerOriginUrl,
-                              }
-                            : undefined
-                        }
-                      >
-                        <div ref={isVisualTail ? setActivePromptEl : null}>
-                          {/* The user prompt renders as a right-aligned,
-                        fit-to-content bubble.
-                        TurnPromptHeader paints the bg-highlighted-bg +
-                        border chrome and the hover edit/copy/age row; the
-                        inner TextMessage flips its <MessageContent> to
-                        variant="flat" when role === "user" so it
-                        contributes just the text. (No longer sticky — the
-                        prompt scrolls with the transcript.) */}
-                          <MessageView
-                            message={turn.userPrompt}
-                            ctx={messageCtx}
-                          />
-                        </div>
-                      </TurnPromptHeader>
-                    )}
-                    {/* No plan/task card renders here (or anywhere): the plan
-                    dock was removed 2026-07-02 as too agent-dependent to trust. */}
-                    {/* Per-turn footer (run time, copy output, "…" Reset to this
-                    point, authored file pills) renders INSIDE TurnEventList's
-                    800 lane so it hugs the answer instead of inheriting the
-                    TurnContainer's gap-4. Only turns with a user prompt (the
-                    turn id) get one — the rare leading "system turn" has nothing
-                    to reset to. */}
-                    {/* A turn counts as IN FLIGHT while streaming — and also
-                    while THIS renderer's own send for it is still pending
-                    session (re)creation (Cursor's newSession takes seconds;
-                    engine-respawn rebuilds too), which would otherwise flash
-                    the just-sent turn as SETTLED ("0s ⧉ …", no shimmer) until
-                    the first event arrived. Keyed on the pending TURN, never on
-                    session status: reopening a chat warms the session too, and
-                    that is how a stopped turn used to come back to life. */}
-                    {(!authRequired || visibleEvents.length > 0) && (
-                      <TurnEventList
-                        events={visibleEvents}
-                        usageEvents={ownsProviderFooter ? turn.providerEvents : null}
-                        failureTurnId={!cloudAdmission && !authRequired && chatId ? turn.recordedTurnId ?? undefined : undefined}
-                        isActive={isActiveProviderSegment}
-                        isStreaming={turnInFlight && !authStopped}
-                        showActivity={isVisualTail}
-                        backgroundTasks={isVisualTail && waitingForBackgroundTasks ? session.backgroundTasks : undefined}
-                        surfaceActive={surfaceActive}
-                        activityEvents={turn.providerEvents}
-                        activityStartedAt={pickStartedAt(
-                          turn.providerEvents,
-                          turn.recordedStartedAt,
-                          isVisualTail ? session.activeTurnStartedAt : null,
-                          isVisualTail && backgroundContinuationActive && !turnIsPendingLocal
-                            ? session.backgroundActivity?.startedAt ?? session.backgroundTasksWaitingSince
-                            : null,
-                        )}
-                        workflow={activeWorkflow}
-                        onStopWorkflow={
-                          transcriptReadOnly ? undefined : session.stopBackgroundTask
-                        }
-                        ctx={messageCtx}
-                        footer={
-                          // Cached rows have no native turn/usage authority.
-                          // Do not mount turn metadata reads or reset/fork
-                          // controls until the transcript has validated.
-                          !provisionalTranscript &&
-                          !authState &&
-                          turn.userPrompt &&
-                          chatId &&
-                          ownsProviderFooter ? (
-                            <TurnFooter
-                              folder={chatThread?.folder ?? session.cwd}
-                              agentId={chatThread?.agentId ?? session.agentId}
-                              readOnly={readOnly}
-                              surfaceActive={surfaceActive}
-                              chatId={chatId}
-                              turnId={turn.recordedTurnId ?? turn.userPrompt.id}
-                              failure={isVisualTail ? session.failure : null}
-                              recoveryFailure={turn.userPrompt.recoveryFailure}
-                              onRetryNewChatIntent={
-                                interactive && chatThread
-                                  ? () => warmRetryTranscript(chatThread, turn.userPrompt!, turn.providerEvents)
-                                  : undefined
-                              }
-                              onRetry={
-                                interactive && isVisualTail
-                                  ? () => retryTurn(turn.userPrompt!, turn.providerEvents, false)
-                                  : undefined
-                              }
-                              onRetryNewChat={
-                                interactive && isVisualTail && session.agentRole !== "design"
-                                  ? () => retryTurn(turn.userPrompt!, turn.providerEvents, true)
-                                  : undefined
-                              }
-                              events={turn.providerEvents}
-                              startedAt={turn.recordedStartedAt}
-                              live={isVisualTail && turnInFlight}
-                              fallbackStopReason={
-                                isVisualTail && session.status !== "streaming"
-                                  ? session.lastStopReason
-                                  : null
-                              }
-                              fallbackStatusLabel={
-                                isVisualTail && session.status !== "streaming"
-                                  ? turnFooterFailureLabel(session.failure)
-                                  : null
-                              }
-                              // "An auto-rebuild is re-running THIS turn" — which
-                              // only happens while this renderer's own send owns
-                              // it (rebuildAndRetry / the resume-and-retry hop).
-                              // It used to read session status, so merely
-                              // REOPENING a chat suppressed a genuinely failed
-                              // turn's AGENT STOPPED pill until the resume landed.
-                              retrying={isVisualTail && turnIsPendingLocal}
-                              isLastTurn={isVisualTail}
-                              // One-click resume after a token-cap /
-                              // budget stop: functionally the user typing
-                              // "Continue" and hitting send (same session, full
-                              // context). The stop pill / budget card stays on
-                              // this turn as history.
-                              onContinue={() => void handleSend("Continue")}
-                              onFork={() =>
-                                forkToNewTab(
-                                  turn.userPrompt!.id,
-                                  turn.userPrompt!.text,
-                                  isCloudWorkspace(chatThread?.folder)&&chatThread?.agentId==="codex"&&isVisualTail&&cloudNativeCapabilities?.nativeFork===true,
-                                )
-                              }
-                              onForkIntent={() =>
-                                warmForkToNewTab(
-                                  turn.userPrompt!.id,
-                                  turn.userPrompt!.text,
-                                )
-                              }
-                            />
-                          ) : null
-                        }
-                      />
-                    )}
-                    {(authRequired || authStopped) && (
-                      <AuthenticationNotice
-                        historical={authStopped}
-                        resolved={authState === "signed-in"}
-                        message={authenticationFailureMessage(turn.events, isVisualTail ? session.failure : null)}
-                        name={
-                          session.agentName ??
-                          chatThread?.agentName ??
-                          signInAgentId ??
-                          "Agent"
-                        }
-                        onSignIn={handleSignIn}
-                      />
-                    )}
-                    </>}
-                  </TurnContainer>
-                </React.Fragment>
+                      : undefined
+                  }
+                  shared={transcriptShared}
+                  tail={isVisualTail ? transcriptTail : null}
+                />
               );
             })}
             {preparationFailure && (
@@ -5293,7 +5248,7 @@ export function AgentChat({
             <PermissionCard
               request={permissionRequest}
               onRespond={respondToVisiblePermission}
-              onRecordPolicy={messageCtx.recordPolicy}
+              onRecordPolicy={recordPolicy}
               chatId={chatId}
               cwd={session.cwd ?? chatThread?.folder ?? null}
             />

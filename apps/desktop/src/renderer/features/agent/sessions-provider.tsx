@@ -21,6 +21,7 @@ import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPr
 // ──────────────────────────────────────────────────────────
 
 import { SendQueue } from "./send-queue";
+import { AGENT_UPDATE_BACKLOG_LIMIT, createAgentUpdateFlushScheduler } from "./agent-update-flush-scheduler";
 import { notifyAgentSendFailure } from "./agent-send-failure-toast";
 import { notifyAgentCapabilityNotice } from "./agent-capability-notice-toast";
 import { hasPromptAttachmentReferences, refreshPromptAttachments } from "./refresh-prompt-attachments";
@@ -142,7 +143,7 @@ import {
   buildAdditionalDirsSystemInstruction,
   prependSystemInstruction,
 } from "@zeros/protocol/system-instructions";
-import { legacyProviderBinding } from "@zeros/protocol/identities";
+import { legacyProviderBinding, sameProviderBinding } from "@zeros/protocol/identities";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import { synthesizeReplayPrompt } from "./replay";
 import { startCloudSubmitSpan, finishCloudFirstText } from "../../state/cloud-workspace-latency";
@@ -196,6 +197,7 @@ import {
   takePrebindGoalSnapshot,
   takePrebindDirty,
 } from "./session-reload-lifecycle";
+import { queueBehindRunningTurn } from "./busy-turn-queue";
 import {
   trackAgentSessionStarted,
   trackAgentTurnStarted,
@@ -636,13 +638,15 @@ export function AgentSessionsProvider({
   // One warning per exact session/task/timestamp; bounded against task-id churn.
   const warnedLongWakeupsRef = useRef(new Set<string>());
 
-  // Bridge listeners feed the store. Notifications are
-  // buffered into a ring of arrays and flushed once per animation frame
-  // inside `startTransition`. Token-rate inputs (10–100/s during a
-  // streaming response) collapse to ≤60 store updates per second, and
-  // React tags those updates as non-urgent so typing/clicks always
-  // pre-empt them. Pre-buffer the path was: 1 setState per chunk
-  // = render storm; now: 1 setState per frame = smooth.
+  // Bridge listeners feed the store. Transcript content is buffered and
+  // drained in one frame-aligned flush inside `startTransition`, so token-rate
+  // inputs (10–100/s during a streaming response) are applied together once
+  // per frame; each notification still updates the store.
+  // Frames stop while the window is minimized, hidden or occluded;
+  // the flush scheduler's deadline timer and backlog bound keep background
+  // streams draining instead of parking until the turn ends. Permissions,
+  // questions, agent exits and turn boundaries drain synchronously: a policy
+  // auto-answer or a parked agent must never wait for the window to paint.
   useEffect(() => {
     if (!bridge) return;
 
@@ -677,10 +681,7 @@ export function AgentSessionsProvider({
       signal: string | null;
     }> = [];
 
-    let rafHandle: number | null = null;
-
     const flush = () => {
-      rafHandle = null;
       if (
         updateBuffer.length === 0 &&
         permBuffer.length === 0 &&
@@ -860,7 +861,9 @@ export function AgentSessionsProvider({
             }
           }
         }
-        for (const t of stderrs) s.applyBridgeStderr(t.agentId, t.line);
+        // One store pass per flush: every line otherwise re-copies the slot of
+        // each resident chat on that agent and notifies every subscriber.
+        s.applyBridgeStderrLines(stderrs);
       });
 
       // Push an adopted effort into the LIVE session, exactly as the composer's
@@ -880,11 +883,7 @@ export function AgentSessionsProvider({
       }
     };
 
-    const schedule = () => {
-      if (rafHandle === null) {
-        rafHandle = requestAnimationFrame(flush);
-      }
-    };
+    const scheduler = createAgentUpdateFlushScheduler(flush);
 
     const admissionMetadata = (raw: AgentSessionCreatedMessage | AgentSessionLoadedMessage) => {
       const state = useSessionsStore.getState();
@@ -1078,13 +1077,13 @@ export function AgentSessionsProvider({
         // callback, as one transition. Otherwise the awaited prompt response
         // can publish `ready` while those chunks still sit in the next-frame
         // buffer, briefly mounting partial prose as a bright final answer.
-        if (rafHandle !== null) {
-          cancelAnimationFrame(rafHandle);
-          rafHandle = null;
-        }
-        flush();
+        scheduler.flushNow();
+      } else if (updateBuffer.length >= AGENT_UPDATE_BACKLOG_LIMIT) {
+        // Codex repeats the whole command log with every output delta. A
+        // throttled background timer must not let those snapshots pile up.
+        scheduler.flushNow();
       } else {
-        schedule();
+        scheduler.schedule();
       }
     });
 
@@ -1129,7 +1128,7 @@ export function AgentSessionsProvider({
         permissionId: msg.permissionId,
         request: msg.request,
       });
-      schedule();
+      scheduler.flushNow();
     });
 
     const unsubPermissionSettled = bridge.on(
@@ -1143,7 +1142,7 @@ export function AgentSessionsProvider({
           permissionId: msg.permissionId,
           sessionId: msg.sessionId,
         });
-        schedule();
+        scheduler.flushNow();
       },
     );
 
@@ -1164,7 +1163,7 @@ export function AgentSessionsProvider({
         questionId: msg.questionId,
         request: msg.request,
       });
-      schedule();
+      scheduler.flushNow();
     });
 
     const unsubQuestionSettled = bridge.on("AGENT_QUESTION_SETTLED", (raw) => {
@@ -1191,7 +1190,7 @@ export function AgentSessionsProvider({
         outcome: msg.outcome,
         chatId: msg.chatId ?? chatId,
       });
-      schedule();
+      scheduler.flushNow();
     });
 
     const unsubProviderQuota = bridge.on(
@@ -1205,7 +1204,8 @@ export function AgentSessionsProvider({
     const unsubStderr = bridge.on("AGENT_AGENT_STDERR", (raw) => {
       const msg = raw as { agentId: string; line: string };
       stderrBuffer.push({ agentId: msg.agentId, line: msg.line });
-      schedule();
+      if (stderrBuffer.length >= AGENT_UPDATE_BACKLOG_LIMIT) scheduler.flushNow();
+      else scheduler.schedule();
     });
 
     const unsubCapabilityNotice = bridge.on(
@@ -1241,18 +1241,14 @@ export function AgentSessionsProvider({
         code: msg.code,
         signal: msg.signal,
       });
-      schedule();
+      scheduler.flushNow();
     });
 
     return () => {
       // Flush anything still queued so a tear-down (e.g. provider remount,
       // bridge swap on engine respawn) doesn't drop final permission
       // prompts or exit events that the next listener can't observe.
-      if (rafHandle !== null) {
-        cancelAnimationFrame(rafHandle);
-        rafHandle = null;
-      }
-      flush();
+      scheduler.flushNow();
       unsubUpdate();
       unsubCreated();
       unsubLoaded();
@@ -1266,6 +1262,9 @@ export function AgentSessionsProvider({
       unsubStderr();
       unsubCapabilityNotice();
       unsubExit();
+      // Anything buffered during that final flush drains now; no frame or
+      // timer callback outlives this listener set.
+      scheduler.dispose();
       // Answer-ack watchdogs are deliberately NOT cleared here: a bridge swap
       // is the very failure the watchdog guards against (the send dropped on
       // the dying socket). The timer's own status guard ("streaming" only)
@@ -1510,13 +1509,15 @@ export function AgentSessionsProvider({
    * stopped. The engine's close-flight barrier also keeps an immediate manual
    * retry from racing that teardown. */
   const cancelStalledAdmission = useCallback(
-    (agentId: string, chatId: string): void => {
+    (agentId: string, chatId: string, options: { userStop?: true } = {}): void => {
       void bridge
         ?.request<AgentSessionClosedMessage | AgentErrorMessage>(
           {
             type: "AGENT_CLOSE_SESSION",
             agentId,
             chatId,
+            // Only the user's Stop says so; failure cleanup closes do not.
+            ...(options.userStop ? { userStop: true } : {}),
           },
           { timeoutMs: 15_000 },
         )
@@ -2762,6 +2763,9 @@ export function AgentSessionsProvider({
         startedAt: number;
       } | null = null;
       let promptRetryCount = 0;
+      // Set when the engine refused this send because another turn already
+      // runs and the message went back to the queue (queueBehindRunningTurn).
+      let requeuedBehindTurn = false;
       let recoveredLocalExecution: string | null = null;
       let cloudSendOwner: { cwd: string | null; agentId: string | null; sessionId: string | null } | null = null;
       let cloudTerminalFailure: AgentFailure | null = null;
@@ -2972,6 +2976,7 @@ export function AgentSessionsProvider({
             ?.additionalDirectories ?? [];
         const announced = announcedDirsRef.current.get(chatId);
         let dirNotice = "";
+        let announcedNow: string[] = [];
         if (!announced) {
           // First send for this chat (new OR reopened): seed with the current set
           // — already announced by the preamble / present in the resumed history.
@@ -2981,6 +2986,7 @@ export function AgentSessionsProvider({
           if (fresh.length > 0) {
             dirNotice = buildAdditionalDirsSystemInstruction(fresh);
             for (const d of fresh) announced.add(d);
+            announcedNow = fresh;
           }
         }
         const pendingAuth = pendingAuthenticationPrompts(
@@ -3185,7 +3191,8 @@ export function AgentSessionsProvider({
           new Promise((resolve, reject) => {
             requestExecutionId = sessionId;
             const pendingIds = new Set(pendingAuth.map((message) => message.id));
-            const replay = getStore().sessions[chatId]?.needsConversationReplay
+            const replayAtDispatch = getStore().sessions[chatId];
+            const replay = replayAtDispatch?.needsConversationReplay
               ? synthesizeReplayPrompt(current.messages.filter((message) =>
                   message.id !== userMessage.id && !pendingIds.has(message.id)
                 ))
@@ -3217,6 +3224,9 @@ export function AgentSessionsProvider({
             ) => {
               if (settled) return;
               if (value.type === "AGENT_PROMPT_COMPLETE" &&
+                  value.stopReason !== "cancelled" &&
+                  replayAtDispatch?.needsConversationReplay &&
+                  sameProviderBinding(replayAtDispatch.providerBinding, getStore().sessions[chatId]?.providerBinding) &&
                   ownsPromptTurn() && getStore().sessions[chatId]?.sessionId === sessionId) {
                 getStore().patchSession(chatId, { needsConversationReplay: false });
               }
@@ -3755,6 +3765,35 @@ export function AgentSessionsProvider({
               return;
             }
             if (settleCloudAdmission(resp.error)) return;
+            // Another turn already runs on this session: an agent's message
+            // through the Zeros Local CLI, or another window's send. Nothing
+            // was delivered, so this is not a failure. Queue the message behind
+            // that turn (its terminal turn_state releases the queue) instead
+            // of showing a banner under the other turn's output.
+            if (resp.activeTurn && !cloudSend) {
+              const slot = getStore().sessions[chatId];
+              const queued = slot && queueBehindRunningTurn({
+                messages: slot.messages,
+                bubbleId: userMessage.id,
+                editable: !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
+                activeTurn: resp.activeTurn,
+              });
+              if (queued) {
+                requeuedBehindTurn = true;
+                // The resend announces any directory this attempt claimed.
+                for (const dir of announcedNow) announcedDirsRef.current.get(chatId)?.delete(dir);
+                getStore().patchSession(chatId, queued);
+                if (getStore().pendingLocalTurns[chatId] === userMessage.id) getStore().setPendingLocalTurn(chatId, null);
+                const queue = sendQueueRef.current.get(chatId) ?? [];
+                queue.unshift({
+                  args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction],
+                  bubbleId: userMessage.id,
+                });
+                sendQueueRef.current.set(chatId, queue);
+                if (followUpBehavior === "steer") steerSubmission(userMessage.id);
+                return;
+              }
+            }
             const failure = failureFromAgentError(
               { ...resp, message: resp.error } as unknown as AgentErrorMessage,
               "prompt",
@@ -4035,7 +4074,7 @@ export function AgentSessionsProvider({
           const terminal = getStore().sessions[chatId];
           const stopReason =
             promptResult?.stopReason ?? (ownsTerminalSlot ? terminal?.lastStopReason : undefined) ?? undefined;
-          const cancelled = stopReason === "cancelled" || (!!cloudSendOwner && lifecycleCancelled);
+          const cancelled = stopReason === "cancelled" || (!!cloudSendOwner && lifecycleCancelled) || requeuedBehindTurn;
           const healthy =
             ownsTerminalSlot &&
             !promptInterruptedAfterOutput &&
@@ -4396,7 +4435,7 @@ export function AgentSessionsProvider({
           pendingPermissions: [],
           pendingQuestions: [],
         });
-        cancelStalledAdmission(current.agentId, chatId);
+        cancelStalledAdmission(current.agentId, chatId, { userStop: true });
         return;
       }
       if (!bridge || cancellationAction !== "cancel-session") return;

@@ -261,7 +261,7 @@ describe("agent-control admissions with simulators", () => {
     placement: "local",
     archivedAt: null,
   } as Workspace;
-  const OPEN = { zerosBrowser: true, computerUse: true, simulators: true };
+  const OPEN = { zerosBrowser: true, computerUse: true, simulators: true, localOrchestration: true };
 
   beforeEach(() => setAgentControlAvailability(OPEN));
   afterEach(() =>

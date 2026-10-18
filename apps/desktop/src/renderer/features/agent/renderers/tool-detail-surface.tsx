@@ -21,8 +21,8 @@ export function ToolDetailSurface({
       className={cn(
         "border-border2 bg-bg2 text-fg1 focus-visible:ring-highlighted-bright max-h-[320px] min-w-0 select-text overflow-auto overscroll-contain rounded-md border text-sm focus-visible:ring-1 focus-visible:outline-none",
         failed &&
-          // Shiki uses inline token colors; failure styling must override them.
-          "border-red-primary/25 bg-red-bg text-red-primary [&_*]:text-red-primary!",
+          // Override Shiki's inline colors, but retain link-pill identity colors.
+          "border-red-primary/25 bg-red-bg text-red-primary [&_*:not([data-local-link-pill],[data-local-link-pill]_*)]:text-red-primary!",
       )}
     >
       {children}

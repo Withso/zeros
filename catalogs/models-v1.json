@@ -166,6 +166,9 @@
     "codex": "gpt-6.1-sol",
     "cursor": "grok-4.7"
   },
+  "fallbacks": {
+    "cursor": ["composer-2.5", "default"]
+  },
   "aliases": {
     "claude": {
       "opus": "claude-opus-4-8",

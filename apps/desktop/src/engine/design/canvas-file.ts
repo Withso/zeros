@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   designFrameFileSchema,
-  isDesignPageFolder,
+  designPageFolderProblem,
   portableDesignName,
 } from "@zeros/protocol/design-path";
 
@@ -43,9 +43,19 @@ const canvasSchema = z
       .refine((frames) => Object.keys(frames).length <= 256),
   })
   .passthrough();
+const PAGE_FOLDER_ISSUE = "zeros-design-page-folder";
+const pageFolderSchema = z.string().superRefine((folder, context) => {
+  const problem = designPageFolderProblem(folder);
+  if (problem)
+    context.addIssue({
+      code: "custom",
+      message: problem,
+      params: { kind: PAGE_FOLDER_ISSUE },
+    });
+});
 const pagedCanvasSchema = canvasSchema.extend({
   version: z.literal(2),
-  pages: z.array(pageSchema.extend({ folder: z.string().refine(isDesignPageFolder) })).min(1).max(64),
+  pages: z.array(pageSchema.extend({ folder: pageFolderSchema })).min(1).max(64),
 });
 
 type RecordValue = Record<string, unknown>;
@@ -64,10 +74,25 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
   if (options && options.version !== value.version)
     throw new Error(`Design layout requires canvas version ${options.version}; found ${value.version}.`);
   const result = (value.version === 2 ? pagedCanvasSchema : canvasSchema).safeParse(value);
-  if (!result.success)
+  if (!result.success) {
+    // A page folder an agent chose natively gets its own explanation and a
+    // valid replacement; other schema failures keep the established detail.
+    const folders = result.error.issues.filter(
+      (issue) =>
+        issue.code === "custom" &&
+        (issue as { params?: { kind?: unknown } }).params?.kind ===
+          PAGE_FOLDER_ISSUE,
+    );
+    if (folders.length > 0)
+      throw new Error(
+        `Invalid Design canvas page folder: ${folders
+          .map((issue) => issue.message)
+          .join(" ")}`,
+      );
     throw new Error(
       `Invalid Design canvas frame geometry or metadata: ${result.error.message}`,
     );
+  }
   const parsed = result.data;
   const {
     frames,

@@ -80,6 +80,16 @@ describe("engine-owned fallback persistence", () => {
     });
     expect(getChat("chat")?.model).toBe("claude-haiku-4-5");
   });
+  it("never saves a model outside the curated catalog as the chat's model", () => {
+    const emit = setup();
+    emit({
+      sessionUpdate: "current_model_update",
+      model: "claude-sonnet-4-5-20250929",
+      previousModel: "claude-opus-5",
+      turnStartedAt: 1,
+    });
+    expect(getChat("chat")?.model).toBe("claude-opus-5");
+  });
   it("upserts payload-free retractions so reopening cannot recover withdrawn content", () => {
     const emit = setup();
     emit({

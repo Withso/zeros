@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentGateway } from "../gateway";
+import * as providerEnv from "../../settings/provider-env";
 import type { AgentAdapter, NewSessionResponse } from "../types";
 import { cloudProviderExecution, cloudBootTurnReservation, assertCloudBootNativeHandoff,
   markCloudBootNativeHandoff, type CloudBootNativeAuthority } from "../cloud-provider-execution";
@@ -100,6 +101,23 @@ async function setup(provider: "cursor" | "codex" = "cursor", initialFactory: "b
 }
 
 describe("gateway genuine boot mode", () => {
+  it("keeps the admitted credential when the Local provider connection changes", async () => {
+    const f = await setup();
+    const updateCredentials = vi.fn(async () => {});
+    Object.assign(f.adapter, { capabilityPorts: { runtimeConfiguration: { updateCredentials } } });
+    const session = await f.gateway.newSession("cursor", f.options);
+    const internal = f.gateway as unknown as {
+      executionConnectionSources: Map<string, unknown>;
+    };
+    expect(internal.executionConnectionSources.has(session.executionId)).toBe(false);
+    // A Local key change is the Mac's selection; it never reaches the VM run.
+    vi.spyOn(providerEnv, "applyUserProviderConfig").mockImplementation((_cwd, _agentId, base) => ({
+      ...base, env: { ...base.env, CURSOR_API_KEY: "replacement-local-fixture-key" },
+    }));
+    await expect(f.gateway.prompt("cursor", session.executionId, blocks, "first")).resolves.toMatchObject({ stopReason: "end_turn" });
+    expect(updateCredentials).not.toHaveBeenCalled();
+    expect(f.writes).toHaveBeenCalledOnce();
+  });
   it("pins only the original cloud history redactor and retains it after positive native retirement", async () => {
     const f = await setup();
     expect(f.gateway.pinCloudHistoryRedactor("cursor", f.selection.executionId)).toBeNull();

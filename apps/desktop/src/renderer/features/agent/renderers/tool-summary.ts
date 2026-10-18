@@ -61,6 +61,10 @@ export function countEventSummary(events: AgentMessage[]): EventSummaryCounts {
   let agents = 0;
   let messages = 0;
   for (const e of events) {
+    if (e.kind === "text" && e.localNote) {
+      toolCalls++;
+      continue;
+    }
     if (e.kind !== "tool") {
       messages++;
       continue;
@@ -110,6 +114,13 @@ export function summaryIcons(
   let hasAgent = false;
   let hasThinking = false;
   for (const e of events) {
+    if (e.kind === "text" && e.localNote) {
+      if (!seenKinds.has("execute")) {
+        seenKinds.add("execute");
+        out.push(Terminal);
+      }
+      continue;
+    }
     if (e.kind === "tool") {
       if (!toolPresentationReady(e)) continue;
       if (designToolLabel(e)) {

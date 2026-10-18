@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import chokidar, { type FSWatcher } from "chokidar";
 import { serializeDesignRegistration } from "../../design/manifest";
+import { designSnapshotReadEpoch } from "../../design/snapshot-epoch";
 
 import {
   onWorktreeContentChange,
@@ -897,6 +898,49 @@ describe("startGitWatcher", () => {
     before = changes;
     await rm(editedPath);
     await waitFor(() => changes > before);
+  });
+
+  it("fences in-flight Design snapshot reads when a save is observed, before the debounced refresh", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-design-fence-watch-"));
+    roots.push(root);
+    await mkdir(join(root, ".git", "logs"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(root, ".git", "index"), "index");
+    await writeFile(join(root, ".git", "logs", "HEAD"), "");
+    await mkdir(join(root, "Design", "page-1"), { recursive: true });
+    const frame = join(root, "Design", "page-1", "home.html");
+    await writeFile(frame, "before\n");
+    let changes = 0;
+    let before = designSnapshotReadEpoch(root);
+    // Whether the checkout was already fenced when the debounced change (the
+    // renderer's refresh trigger) fired. Recorded in the callback, so a
+    // starved event loop cannot make the order ambiguous.
+    let fencedBeforeChange: boolean | null = null;
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "workspace-fence" }],
+      () => {
+        changes += 1;
+        fencedBeforeChange ??= designSnapshotReadEpoch(root) !== before;
+      },
+      {
+        pollIntervalMs: 25,
+        worktreeDebounceMs: 200,
+        awaitWriteFinishMs: 20,
+        usePolling: true,
+        worktreePollIntervalMs: 10,
+      },
+    );
+    watchers.push(watcher);
+    await watcher.ready;
+    const sibling = await mkdtemp(join(tmpdir(), "zeros-design-fence-other-"));
+    roots.push(sibling);
+    before = designSnapshotReadEpoch(root);
+    const otherBefore = designSnapshotReadEpoch(sibling);
+    await writeFile(frame, "after\n");
+    await waitFor(() => changes > 0);
+    expect(fencedBeforeChange).toBe(true);
+    // An exact workspace event fences only its own checkout.
+    expect(designSnapshotReadEpoch(sibling)).toBe(otherBefore);
   });
 
   it("keeps a rowless repo-root event coarse without exposing its path", async () => {

@@ -82,6 +82,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_CONFIGURATION_PROVENANCE",
   "AGENT_PROVIDER_QUOTA",
   "AGENT_PROVIDER_QUOTA_UPDATED",
+  "DESIGN_AGENT_DRAFT",
   "AGENT_GOAL_CHANGED",
   "AGENT_SAFETY_REVIEW_RETRIED",
   "AGENT_SESSIONS_LIST",
@@ -476,6 +477,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       if (!isNonEmptyStr(executionRoute(env)) && !isNonEmptyStr(env.chatId))
         bad("executionId/chatId");
       if (env.chatId !== undefined && !isNonEmptyStr(env.chatId)) bad("chatId");
+      if (env.userStop !== undefined && env.userStop !== true) bad("userStop");
       break;
     case "AGENT_LOAD_SESSION":
       if (!isNonEmptyStr(env.agentId)) bad("agentId");

@@ -64,6 +64,46 @@ describe("fallback transcript persistence", () => {
       "Model fallback to Sol 5.6 because of a cybersecurity-related safety check",
     );
   });
+  it("says why a Cursor account fallback ran, with curated names", () => {
+    const messages = applyUpdate([], {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "model_fallback",
+        noticeId: "cursor",
+        provider: "cursor",
+        scope: "local",
+        reason: "unavailable",
+        fromModel: "grok-4.7",
+        toModel: "composer-2.5",
+      },
+    });
+    expect(formatTranscript(messages, "full").text).toContain(
+      "Model fallback to Composer 2.5 because Grok 4.7 isn't available for this account",
+    );
+  });
+  it("names the settings Cursor ran instead of the refused ones", () => {
+    const fallback = (toSettings: { effort?: string | null; fast?: boolean | null }) =>
+      formatTranscript(applyUpdate([], {
+        sessionId: "s",
+        update: {
+          sessionUpdate: "model_fallback",
+          noticeId: "settings",
+          provider: "cursor",
+          scope: "local",
+          reason: "settings",
+          fromModel: "grok-4.7",
+          toModel: "grok-4.7",
+          fromSettings: { effort: "xhigh", fast: false },
+          toSettings,
+        },
+      }), "full").text;
+    expect(fallback({ effort: "high", fast: true })).toContain(
+      "Model fallback to Grok 4.7 High Fast because Cursor rejected Extra High",
+    );
+    expect(fallback({ effort: null, fast: null })).toContain(
+      "Model fallback to Grok 4.7 default settings because Cursor rejected Extra High",
+    );
+  });
   it("keeps a withdrawn tool tombstone over stale history in either order", () => {
     const old = applyUpdate([], {
       sessionId: "s",

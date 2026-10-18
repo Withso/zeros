@@ -30,6 +30,10 @@ import { insertWorkspace } from "../../git/state";
 import type { Workspace } from "../../git/types";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
 import {
+  designSnapshotReadEpoch,
+  fenceDesignSnapshotReads,
+} from "../../design/snapshot-epoch";
+import {
   commitDesignWebDocumentState,
   createDesignFrame,
   initializeDesignDocument,
@@ -1227,6 +1231,63 @@ describe("WorkspaceService", () => {
         workspaceId: design.workspaceId,
         includeBranch: true,
       });
+    }
+  });
+
+  it("never answers a read requested after an observed source change from an older flight", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-snapshot-change-fence",
+      kind: "design",
+    });
+    const target = { workspaceId: design.workspaceId };
+    const internals = svc as unknown as {
+      designSnapshotFlights: Map<string, Promise<unknown>>;
+      designSnapshotFlightEpochs: WeakMap<Promise<unknown>, string>;
+    };
+    let release = () => {};
+    try {
+      await svc.handle("design.frame.create", { ...target, title: "Home" });
+      const before = (await svc.handle("design.snapshot", target)) as {
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      // A read is in flight, then an agent saves a new frame and the
+      // worktree watcher observes it before the renderer asks again.
+      const blocked = new Promise<typeof before.snapshot>((resolve) => {
+        release = () => resolve(before.snapshot);
+      });
+      const key = `${design.workspaceId}\u0000${path.resolve(design.path)}\u0000read\u0000${designDirectoryNameFor(design.path)}\u0000host-resources`;
+      internals.designSnapshotFlights.set(key, blocked);
+      internals.designSnapshotFlightEpochs.set(
+        blocked,
+        designSnapshotReadEpoch(design.path),
+      );
+      await svc.handle("design.frame.create", { ...target, title: "Card" });
+      fenceDesignSnapshotReads(design.path);
+      const after = (await svc.handle("design.snapshot", target)) as {
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(after.snapshot).not.toBe(before.snapshot);
+      expect(after.snapshot.frames).toHaveLength(2);
+      // Without a newer observed change, concurrent readers still share it.
+      internals.designSnapshotFlights.set(key, blocked);
+      internals.designSnapshotFlightEpochs.set(
+        blocked,
+        designSnapshotReadEpoch(design.path),
+      );
+      const joined = svc.handle("design.snapshot", target) as Promise<{
+        snapshot: unknown;
+      }>;
+      release();
+      expect((await joined).snapshot).toBe(before.snapshot);
+    } finally {
+      release();
+      internals.designSnapshotFlights.clear();
+      await svc.handle("workspace.delete", { ...target, includeBranch: true });
     }
   });
 

@@ -54,6 +54,10 @@ export const AGENT_CONTROL_FEATURE_ROWS: Readonly<
     label: "Simulators",
     hint: "Simulator tabs, simulator tools for agents and key frames from dropped videos.",
   },
+  localOrchestration: {
+    label: "Zeros Local CLI",
+    hint: "Agents in Local chats can start, message and follow other chats with zeros local.",
+  },
 };
 
 /** The features whose switch lives at `stage`, in display order. */
@@ -105,6 +109,7 @@ export function agentControlAvailability(): AgentControlAvailability {
     zerosBrowser: isAgentControlFeatureActive("zerosBrowser"),
     computerUse: isAgentControlFeatureActive("computerUse"),
     simulators: isAgentControlFeatureActive("simulators"),
+    localOrchestration: isAgentControlFeatureActive("localOrchestration"),
   };
 }
 
@@ -113,8 +118,9 @@ export function useAgentControlAvailability(): AgentControlAvailability {
   const zerosBrowser = useAgentControlFeatureActive("zerosBrowser");
   const computerUse = useAgentControlFeatureActive("computerUse");
   const simulators = useAgentControlFeatureActive("simulators");
+  const localOrchestration = useAgentControlFeatureActive("localOrchestration");
   return useMemo(
-    () => ({ zerosBrowser, computerUse, simulators }),
-    [zerosBrowser, computerUse, simulators],
+    () => ({ zerosBrowser, computerUse, simulators, localOrchestration }),
+    [zerosBrowser, computerUse, simulators, localOrchestration],
   );
 }

@@ -759,6 +759,13 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         agentId: "claude",
       }),
     ).toThrow(/executionId\/chatId/);
+    // The user's Stop during admission is an explicit `true`, nothing else.
+    expect(
+      parseBridgeMessage({ ...b, type: "AGENT_CLOSE_SESSION", agentId: "claude", chatId: "conversation-1", userStop: true }).type,
+    ).toBe("AGENT_CLOSE_SESSION");
+    expect(() =>
+      parseBridgeMessage({ ...b, type: "AGENT_CLOSE_SESSION", agentId: "claude", chatId: "conversation-1", userStop: "yes" }),
+    ).toThrow(/userStop/);
   });
 
   it("validates live model changes against the execution route", () => {

@@ -74,6 +74,13 @@ failing input, or a reproduction. Drop anything you can't substantiate.
 - Replay provider updates through the shared history reducer as well as the
   producer. An emitted replacement can look correct while an immutable consumer
   silently ignores it.
+- Hold advisory previews across authoritative document replacement in both
+  save-event orders. A lingering saved preview cannot overwrite a newer saved
+  generation. Check memory bounds through every retained payload reference,
+  including status metadata, rather than only the field the UI reads.
+- Verify authored CSS provenance against browser-computed results for inline
+  variable shorthands, nesting and element-dependent conditions. If the winner
+  cannot be established, keep computed output and omit the source claim.
 
 ## Output
 

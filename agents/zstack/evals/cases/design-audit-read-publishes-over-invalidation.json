@@ -1,0 +1,9 @@
+{
+  "id": "design-audit-read-publishes-over-invalidation",
+  "kind": "replay",
+  "area": "desktop-design-state",
+  "fixedBy": "pr:579",
+  "symptom": "A frame-ready runtime-audit reconcile published its direct aggregate read with setData after a newer watcher invalidation, cancelling the refetch and hiding an agent's saved step.",
+  "rule": "A direct read publishes only when neither the cache's invalidation version nor its data changed while it ran; otherwise the pending refresh owns the snapshot, or one fresh read is requested.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-workspace-cache.test.ts -t \"runtime audit\""
+}

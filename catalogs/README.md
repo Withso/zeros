@@ -49,6 +49,16 @@ model's effort ladder; live empty or narrower ladders remain authoritative.
 - `defaultFavorites` and `aliases` participate in persisted model selection.
   Do not retarget them silently. Add a compatibility migration and regression
   test if an existing selection must resolve differently.
+- `fallbacks` lists, per family and in order, the only models an adapter may
+  run instead of the selected one when the provider refuses it for the
+  account. Each entry must be a curated, non-`liveRequired` row of that family;
+  `models:verify` and the catalog test enforce this. Cursor falls back to
+  Composer 2.5, then Auto, and only to entries the account currently lists.
+  Before falling back, a Cursor registry model whose settings were refused
+  first retries the account's own advertised settings for the same model.
+  Claude and Codex never substitute models themselves. A provider's own
+  safety or overload fallback is narrated for that response, but only a
+  curated model can become the chat's saved model.
 - Optional `defaultEffort` supplies a model's born effort only without a valid
   remembered exact-model choice. It must belong to that model's effort ladder;
   narrower live capabilities remain authoritative.

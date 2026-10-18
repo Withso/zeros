@@ -6,6 +6,7 @@ import { AgentGateway } from "../gateway";
 import type { AgentAdapter } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 import type { AgentSessionTools } from "../session-tools";
+import { ConversationDesignTools } from "../../design/conversation-tools";
 
 describe("native Code product tool admission", () => {
   let root: string;
@@ -151,5 +152,124 @@ describe("native Code product tool admission", () => {
     ).rejects.toThrow("Provider failed");
     expect(admitted[0]!.endPrompt).toHaveBeenCalledTimes(2);
     expect(admitted[0]!.dispose).not.toHaveBeenCalled();
+  });
+});
+
+describe("native Code prompts across Design directory transitions", () => {
+  let root: string;
+  let gateway: AgentGateway;
+  let adapter: AgentAdapter;
+  const unsettled = async () => {
+    for (let turn = 0; turn < 5; turn += 1)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  beforeEach(async () => {
+    root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-product-transition-")),
+    );
+    gateway = new AgentGateway({
+      projectRoot: root,
+      executionBoundary: testExecutionBoundary(),
+      events: {
+        onSessionUpdate() {},
+        onPermissionRequest() {},
+        onQuestionRequest() {},
+        onAgentStderr() {},
+        onAgentExit() {},
+      },
+      sessionToolFactory: async () => {
+        const design = new ConversationDesignTools({
+          mode: {
+            get: () => ({ mode: "code", revision: 0 }),
+            set: () => {
+              throw new Error("unused");
+            },
+          },
+          assertOwner: () => {},
+          resolveTarget: async () => null,
+        });
+        return {
+          env: {},
+          mcpServers: [],
+          preparePrompt: () => design.preparePrompt(),
+          beginPrompt: () => design.beginPrompt(),
+          cancel: () => design.cancel(),
+          suspend: () => design.suspend(),
+          revoke: () => design.dispose(),
+          dispose: async () => design.dispose(),
+        };
+      },
+    });
+    adapter = {
+      agentId: "fixture",
+      newSession: async (options: { executionId?: string }) => ({
+        session: {
+          sessionId: options.executionId,
+          executionId: options.executionId,
+        },
+        initialize: {},
+      }),
+      disposeSession: vi.fn(async () => {}),
+      prompt: vi.fn(async () => ({ response: { stopReason: "end_turn" } })),
+      cancel: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    (
+      gateway as unknown as { adapters: Map<string, AgentAdapter> }
+    ).adapters.set("fixture", adapter);
+  });
+  afterEach(async () => {
+    await gateway.dispose();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("holds a prompt while every workspace's grants are suspended, then sends it", async () => {
+    const created = await gateway.newSession("fixture", {
+      cwd: root,
+      conversationId: "branch-review",
+      workspaceId: "ws_sending-owner",
+    });
+    // A registry-wide owner change suspends grants in every workspace.
+    const resume = gateway.suspendSessionTools();
+    const pending = gateway.prompt("fixture", created.executionId, [
+      { type: "text", text: "/review the branch changes" },
+    ]);
+    const outcome = vi.fn();
+    pending.then(
+      () => outcome("sent"),
+      (error: unknown) => outcome(error),
+    );
+    await unsettled();
+    expect(outcome).not.toHaveBeenCalled();
+    expect(adapter.prompt).not.toHaveBeenCalled();
+    resume();
+    await expect(pending).resolves.toMatchObject({ stopReason: "end_turn" });
+    expect(adapter.prompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.stringContaining("Current composer mode: Code"),
+          }),
+        ]),
+      }),
+    );
+  });
+
+  it("does not hold a prompt for another workspace's lifecycle", async () => {
+    const created = await gateway.newSession("fixture", {
+      cwd: root,
+      conversationId: "branch-review",
+      workspaceId: "ws_sending-owner",
+    });
+    const resume = gateway.suspendSessionTools("ws_archived-owner");
+    try {
+      await expect(
+        gateway.prompt("fixture", created.executionId, [
+          { type: "text", text: "/review the branch changes" },
+        ]),
+      ).resolves.toMatchObject({ stopReason: "end_turn" });
+    } finally {
+      resume();
+    }
   });
 });

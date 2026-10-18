@@ -1,0 +1,25 @@
+#!/bin/sh
+if [ "${1-}" != local ]; then
+  printf '%s\n' 'Only `zeros local …` is available here.' >&2
+  exit 2
+fi
+
+launcher=$0
+case "$launcher" in
+  */*) ;;
+  *) launcher=$(command -v "$launcher") || exit 1 ;;
+esac
+case "$launcher" in
+  /*) ;;
+  *) launcher=$PWD/$launcher ;;
+esac
+while [ -L "$launcher" ]; do
+  dir=$(CDPATH= cd -P "$(dirname "$launcher")" && pwd) || exit 1
+  target=$(readlink "$launcher") || exit 1
+  case "$target" in
+    /*) launcher=$target ;;
+    *) launcher=$dir/$target ;;
+  esac
+done
+dir=$(CDPATH= cd -P "$(dirname "$launcher")" && pwd) || exit 1
+exec "$dir/../zeros-engine" "$@"

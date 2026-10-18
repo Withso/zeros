@@ -49,6 +49,7 @@ import {
   Columns2,
   Copy,
   Ellipsis,
+  Link,
   Pencil,
   Rows2,
   Terminal as TerminalIcon,
@@ -94,6 +95,10 @@ import { CloudTerminalIndicator } from "../terminal/cloud-terminal-indicator";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { NewChatMenu } from "./new-chat-menu";
 import { copyChatTranscript } from "../copy-chat-transcript";
+import { copyLocalLink, useCanCopyLocalLink } from "../../state/local-link-actions";
+import { useActiveWorkspace } from "../../state/use-active-workspace";
+import { folderIsWithinRoot } from "../../state/workspace-resolution";
+import type { Workspace } from "../../platform/git";
 import type { TranscriptMode } from "../../features/agent/transcript-format";
 import {
   CHAT_TAB_DRAG_MIME,
@@ -291,6 +296,9 @@ export function ChatTabs({
   leading,
   trailing,
 }: ChatTabsProps) {
+  const { workspace } = useActiveWorkspace();
+  const canCopyLink = useCanCopyLocalLink(workspace);
+  const linkWorkspace = canCopyLink ? workspace : null;
   // Sticky strip refs + compositor-synced fade/hover machinery. All of
   // this is unchanged from the single-strip era — just scoped per pane.
   const chatNavRef = useRef<HTMLDivElement | null>(null);
@@ -543,6 +551,7 @@ export function ChatTabs({
                 <TabRow
                   key={chat.id}
                   readOnly={readOnly}
+                  linkWorkspace={linkWorkspace}
                   chat={chat}
                   paneId={paneId}
                   isActive={chat.id === activeChatId}
@@ -683,6 +692,7 @@ function UntitledTab({ onSelect }: { onSelect: () => void }) {
 
 interface TabRowProps {
   readOnly: boolean;
+  linkWorkspace: Workspace | null;
   chat: ChatThread;
   paneId: string;
   isActive: boolean;
@@ -695,6 +705,7 @@ interface TabRowProps {
 
 function TabRow({
   readOnly,
+  linkWorkspace,
   chat,
   paneId,
   isActive,
@@ -705,6 +716,8 @@ function TabRow({
   registerRef,
 }: TabRowProps) {
   const dispatch = useWorkspaceDispatch();
+  const canCopyLink = linkWorkspace && !chat.archived &&
+    folderIsWithinRoot(chat.folder, linkWorkspace.path);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(chat.title || "");
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -975,6 +988,12 @@ function TabRow({
               <Copy />
               <span>Copy full transcript</span>
             </ContextMenuItem>
+            {canCopyLink && (
+              <ContextMenuItem onSelect={() => void copyLocalLink(linkWorkspace, chat.id)}>
+                <Link />
+                <span>Copy link</span>
+              </ContextMenuItem>
+            )}
           </>
         )}
         {!readOnly && (

@@ -514,8 +514,13 @@ export async function runQueueSmoke({ page, check }) {
     await expect(page.locator("#queue-prompts")).toHaveText('["A"]');
     await action("C", "Send now");
     await expect(page.locator("#queue-prompts")).toHaveText('["A","C"]');
+    // The fixture's load creates an empty native thread. Stop can settle A
+    // before any history was delivered, so C must still carry that context.
+    expect(await page.evaluate(() => window.__queueReplayRequests)).toEqual([false, true]);
     await page.getByRole("button", { name: "Finish turn", exact: true }).click();
     await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B"]');
+    expect(await page.evaluate(() => window.__queueReplayRequests)).toEqual([false, true, false]);
+    check(`${provider}: Stop preserves fresh-thread replay and successful delivery clears it`, true);
     await page.getByRole("button", { name: "Finish turn", exact: true }).click();
     await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D"]');
     await expect(page.locator("[data-queued-id]")).toHaveCount(0);

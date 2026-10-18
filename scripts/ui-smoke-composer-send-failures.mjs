@@ -237,6 +237,8 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await expect(editor).toBeVisible();
   const { checkRunningTurnPresentation } = await import("./ui-smoke-running-turn.mjs");
   await checkRunningTurnPresentation({ page, check, screenshotDir });
+  const { checkStreamingRenderScope } = await import("./ui-smoke-transcript-render-scope.mjs");
+  await checkStreamingRenderScope({ page, check });
 
   // A fresh renderer acknowledgement lets the deliberate toast action exercise
   // the shared production restart against synthetic lifecycle responses.

@@ -178,6 +178,16 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     });
   }
 
+  /** An explicit Local navigation needs a fresh Local snapshot even when a
+   * warm cloud catalog lets ordinary aggregate reads publish early. These
+   * metadata reads never open or wake a cloud peer. */
+  requestLocalMetadata(op: "project.list" | "workspace.list" | "chats.list"): Promise<BridgeMessage> {
+    if (this.executionIdentity.kind !== "local") {
+      return Promise.reject(new Error("Local navigation requires the Local engine."));
+    }
+    return super.request({ type: "WORKSPACE_REQUEST", op } as Message, 10_000);
+  }
+
   private confirmedCloudChats(): Map<string, WireRecord> {
     const confirmed = new Map([...this.peers.values()]
       .filter(entry => entry.hasChatSnapshot && (!this.routing.canAccess || this.routing.canAccess(entry.scope)))
@@ -249,6 +259,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const wire = message as unknown as WireRecord;
     const params = record(wire.params);
     const epoch = this.accountEpoch;
+    const localEpoch = this.localEpoch;
     const catalogRows = this.routing.workspaces();
     if (catalogRows.length) this.sawCloudCatalog = true;
     // Retain bounded ownership for injected/legacy catalogs with opaque slugs.
@@ -302,6 +313,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     if (epoch !== this.accountEpoch || this.closed)
       throw Object.assign(new Error("Cloud account changed while loading conversations"), { code: "WORKSPACE_READ_SUPERSEDED" });
+    // Startup/reconnect retires the Local flight without confirming a result.
+    // Preserve that ownership cancellation so session reattachment retries
+    // silently instead of reporting a missing snapshot as a provider failure.
+    // Independently confirmed cloud data can still publish during Local boot.
+    if (local && localEpoch !== this.localEpoch && !hasCloud())
+      throw Object.assign(new Error("Local engine changed while loading the workspace snapshot"), { code: "WORKSPACE_READ_SUPERSEDED" });
     if (!local?.result && !hasCloud() && !cloudOnly)
       throw local?.error ?? new Error("No confirmed workspace snapshot is available");
     const result = local?.result ?? {};

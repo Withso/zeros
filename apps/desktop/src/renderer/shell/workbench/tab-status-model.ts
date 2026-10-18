@@ -123,8 +123,8 @@ export interface WorkspaceAvailability {
   canWake?: boolean;
 }
 
-// Transient gaps (<10s) keep the workbench quiet. Persistent gaps share one
-// pending decision at 10s and actionable failure at 45s, for both placements.
+// Cloud gaps become pending at 10s. Local engine startup/reconnection stays
+// quiet; both placements expose actionable failure at 45s.
 export const WORKBENCH_RECONNECT_GRACE_MS = 10_000;
 export const WORKBENCH_RECONNECT_ERROR_MS = 45_000;
 export const WORKBENCH_SILENT_RETRY_MS = 1_500;
@@ -223,14 +223,15 @@ export function describeWorkspaceAvailability(
       action: "Retry",
     };
   if (input.connection === "connected") return null;
+  // Local transport startup is on-device housekeeping, not a workspace
+  // loading state. Keep its content in place without a connection banner.
+  if (!input.cloud) return null;
   if (elapsed < WORKBENCH_RECONNECT_GRACE_MS) return null;
   return {
     tone: "pending",
     message: !input.previouslyConnected
       ? "Connecting…"
-      : input.cloud
-        ? "Reconnecting to the workspace…"
-        : "Reconnecting to the Zeros engine…",
+      : "Reconnecting to the workspace…",
     connectionPhase: input.previouslyConnected ? "reconnecting" : "connecting",
   };
 }

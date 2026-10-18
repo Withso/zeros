@@ -44,6 +44,7 @@ import {
 } from "./design-inspector-kit";
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
 import { readDesignComputedStyle } from "./design-style-values";
+import { useDesignStyleToken } from "./design-style-provenance";
 
 type RenderField = (
   label: string,
@@ -278,6 +279,7 @@ export function DesignTypographySection({
 }: DesignTypographySectionProps) {
   const read = (property: string, fallback = "") =>
     readDesignComputedStyle(details.styles, property) || fallback;
+  const colorToken = useDesignStyleToken(details, "color");
   const authoredTypography = TYPOGRAPHY_PROPERTIES.some((property) =>
     isAuthored(property),
   );
@@ -389,6 +391,7 @@ export function DesignTypographySection({
                     label="Text color"
                     property="color"
                     disabled={disabled}
+                    {...colorToken}
                     onPreview={(value) => onPreview?.({ color: value })}
                     onCancelPreview={onCancelPreview}
                     onCommit={(value) =>

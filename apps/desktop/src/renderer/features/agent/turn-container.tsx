@@ -27,6 +27,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
+import type { LocalMessageChatRef } from "@zeros/protocol/agent-messages";
 import { Plus, Pencil, Copy, Check } from "lucide-react";
 import type {
   AgentTextMessageAttachment,
@@ -65,6 +66,7 @@ import { editSeedSource } from "./edit-seed";
 import { isPristineEditDraft } from "./edit-draft-content";
 import { registerLiveEditDraft } from "./edit-live-drafts";
 import type { Turn } from "./turn-grouping";
+import { LocalLinkPill } from "./local-links/pill";
 
 export {
   groupMessagesIntoTurns,
@@ -224,6 +226,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   editToolbarPills,
   editAgentContext,
   autoAction,
+  localFrom,
   surfaceActive = true,
 }: {
   children: React.ReactNode;
@@ -279,6 +282,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
    *  action's icon. Callers also omit `onEdit` for these — the wire text is a
    *  generated brief the short label can't round-trip. */
   autoAction?: string;
+  /** Provenance belongs above the bubble, including steers and saved history. */
+  localFrom?: LocalMessageChatRef;
   /** Whether this chat is currently surfaced in its pane. The retained edit
    *  composer uses this to keep hidden attachment previews inert. Defaults
    *  true for callers that do not track surfacing. */
@@ -308,7 +313,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     dispatch({ type: "CLEAR_EDIT_DRAFT", chatId, messageId });
   }, [chatId, messageId, dispatch]);
 
-  const editable = !!onEdit && typeof originalText === "string";
+  const editable = !localFrom && !!onEdit && typeof originalText === "string";
   // Editing is derived from the lifted parent state — only the
   // header whose messageId matches editingMessageId is in edit mode.
   // Switching to another header auto-closes this one (the parent
@@ -404,38 +409,56 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   // attachment before send, but legacy and intentionally typed prose still
   // renders without a truncation overlay.
   const AutoIcon = autoAction ? autoActionIcon(autoAction) : null;
-  return (
-    <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
-      <div
-        className={cn(
-          "w-fit max-w-[min(800px,100%)] cursor-text border px-3 py-2 select-text",
-          PROMPT_SURFACE_RADIUS,
-          autoAction
-            ? // font-medium (500) sets the auto-sent label apart from typed
-              // prose — only these "Create a PR" / "Commit & Push" bubbles.
-              "bg-brown-bg text-brown-fg border-transparent font-medium"
-            : "border-border1 bg-highlighted-bg",
-        )}
-      >
-        {/* Preserve the former reveal component's two block wrappers so
-            removing the clamp does not change fit-content width geometry. */}
-        <div className="relative">
-          <div>
-            {AutoIcon ? (
-              // 16px icon at 2px stroke, with a tight 6px gap to the label.
-              <div className="flex items-start gap-1.5">
-                <AutoIcon
-                  className="text-brown-fg mt-0.5 size-4 shrink-0"
-                  strokeWidth={2}
-                />
-                <div className="min-w-0">{children}</div>
-              </div>
-            ) : (
-              children
-            )}
-          </div>
+  const bubble = (
+    <div
+      data-user-bubble=""
+      className={cn(
+        "w-fit max-w-[min(800px,100%)] cursor-text border px-3 py-2 select-text",
+        PROMPT_SURFACE_RADIUS,
+        autoAction
+          ? // font-medium (500) sets the auto-sent label apart from typed
+            // prose — only these "Create a PR" / "Commit & Push" bubbles.
+            "bg-brown-bg text-brown-fg border-transparent font-medium"
+          : "border-border1 bg-highlighted-bg",
+      )}
+    >
+      {/* Preserve the former reveal component's two block wrappers so
+          removing the clamp does not change fit-content width geometry. */}
+      <div className="relative">
+        <div>
+          {AutoIcon ? (
+            // 16px icon at 2px stroke, with a tight 6px gap to the label.
+            <div className="flex items-start gap-1.5">
+              <AutoIcon
+                className="text-brown-fg mt-0.5 size-4 shrink-0"
+                strokeWidth={2}
+              />
+              <div className="min-w-0">{children}</div>
+            </div>
+          ) : (
+            children
+          )}
         </div>
       </div>
+    </div>
+  );
+  return (
+    <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
+      {localFrom ? (
+        // Provenance and its bubble form one right-aligned group. The bubble
+        // fits its text and stays flush right; the header keeps its own width
+        // at the group's left edge — the bubble's left edge when the message
+        // is wider, flush right above a shorter message.
+        <div data-local-from-group="" className="flex w-fit max-w-[min(800px,100%)] min-w-0 flex-col items-end">
+          <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center gap-1 self-start text-xs text-fg3">
+            <span className="shrink-0">Sent from</span>
+            <LocalLinkPill href={localFrom.link} fallback={localFrom} className="mr-0 shrink" />
+          </div>
+          {bubble}
+        </div>
+      ) : (
+        bubble
+      )}
       {typeof originalText === "string" && (
         <UserMessageActions
           text={originalText}

@@ -11,6 +11,7 @@
 //   • json        — editor.getJSON() for draft / edit-in-place persistence
 // ──────────────────────────────────────────────────────────
 
+import { linkNeedsSpaceBefore, textNeedsSpaceAfterLink } from "./local-link-node";
 import type { Editor } from "@tiptap/core";
 import type { MessageContentSegment } from "@zeros/protocol/agent-messages";
 
@@ -91,6 +92,16 @@ export function textToDoc(text: string): object {
   };
 }
 
+/** The last character the displayed text ends with (attachments add none). */
+function lastDisplayChar(segs: ComposerSegment[]): string {
+  for (let index = segs.length - 1; index >= 0; index--) {
+    const segment = segs[index]!;
+    if (segment.type === "text" && segment.text) return segment.text.at(-1)!;
+    if (segment.type === "mention" && segment.token) return segment.token.at(-1)!;
+  }
+  return "";
+}
+
 function pushText(segs: ComposerSegment[], text: string): void {
   if (!text) return;
   const last = segs[segs.length - 1];
@@ -105,13 +116,25 @@ export function serializeComposer(
   const segments: ComposerSegment[] = [];
   const attachments: ComposerAttachment[] = [];
   let firstParagraph = true;
+  // A link atom just ended: the next text must not run into its URL.
+  let afterLink = false;
 
   editor.state.doc.descendants((node) => {
     if (node.isText) {
-      pushText(segments, node.text ?? "");
+      const text = node.text ?? "";
+      pushText(segments, afterLink && textNeedsSpaceAfterLink(text) ? " " + text : text);
+      afterLink = false;
       return false;
     }
     const name = node.type.name;
+    if (name === "localLink") {
+      if (linkNeedsSpaceBefore(lastDisplayChar(segments))) pushText(segments, " ");
+      pushText(segments, String(node.attrs.href ?? ""));
+      afterLink = true;
+      return false;
+    }
+    if (afterLink && name === "mention") pushText(segments, " ");
+    if (name !== "attachment") afterLink = false;
     if (name === "mention") {
       segments.push({
         type: "mention",

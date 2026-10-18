@@ -152,6 +152,7 @@ import {
 import {
   getMainWindow,
   setMainWindow,
+  setLocalNavigationWindowOpener,
   emitEvent,
   whenRendererReady,
 } from "./ipc/events";
@@ -2081,28 +2082,36 @@ app.whenReady().then(async () => {
   // for the picker chip's element thumbnail.
   registerIframePickerCommands({ mainWindow: win });
 
-  // macOS: re-create the window when the dock icon is clicked and no
-  // windows are open.
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      const next = createMainWindow();
+  // Dock activation and a Local chat/workspace link use the same window
+  // lifecycle. Other windows (e.g. detached DevTools) are not the app window.
+  const ensureMainWindow = () => {
+    const existing = getMainWindow();
+    if (existing) return existing;
+    const next = createMainWindow();
+    browserRendererEpoch += 1;
+    setMainWindow(next);
+    next.on("closed", () => {
       browserRendererEpoch += 1;
-      setMainWindow(next);
-      next.on("closed", () => {
+      revokeConfirmationSurfaces();
+    });
+    next.webContents.on("did-start-navigation", (details) => {
+      if (shouldRevokeBrowserSurfaceForNavigation(details)) {
         browserRendererEpoch += 1;
         revokeConfirmationSurfaces();
-      });
-      next.webContents.on("did-start-navigation", (details) => {
-        if (shouldRevokeBrowserSurfaceForNavigation(details)) {
-          browserRendererEpoch += 1;
-          revokeConfirmationSurfaces();
-        }
-      });
-      registerIframeSessionCommands({ mainWindow: next });
-      registerBrowserPreviewWindowCommands({ mainWindow: next, isAppUrl: isAppDocumentUrl });
-      registerBrowserFrameDevToolsCommand({ mainWindow: next });
-      registerIframePickerCommands({ mainWindow: next });
-    }
+      }
+    });
+    registerIframeSessionCommands({ mainWindow: next });
+    registerBrowserPreviewWindowCommands({ mainWindow: next, isAppUrl: isAppDocumentUrl });
+    registerBrowserFrameDevToolsCommand({ mainWindow: next });
+    registerIframePickerCommands({ mainWindow: next });
+    return next;
+  };
+  app.on("activate", () => { ensureMainWindow(); });
+  setLocalNavigationWindowOpener(() => {
+    const target = ensureMainWindow();
+    if (target.isMinimized()) target.restore();
+    target.show();
+    target.focus();
   });
 });
 

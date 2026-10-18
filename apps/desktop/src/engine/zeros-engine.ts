@@ -12,8 +12,10 @@ import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
-import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
+import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, presentDesignStyleBuildRoots, stopDesignStyleBuilds } from "./design/style-builds";
+import { DesignChangePoller, designSnapshotDirectory } from "./design/change-poller";
 import { configureDesignFonts } from "./design/style-fonts";
+import { fenceDesignSnapshotReads } from "./design/snapshot-epoch";
 import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
@@ -31,6 +33,7 @@ import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 
 import { SteeringReceiptCapacityError, SteeringReceipts } from "./agents/steering-receipts";
+import { isCuratedModel } from "./agents/adapters/shared/curated-models";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -81,6 +84,7 @@ import {
   engineBasePort,
   ENGINE_PORT_SPAN,
   isDevRuntime,
+  schemeForChannel,
 } from "./runtime";
 import { shouldLogAgentDispatch } from "./agent-dispatch-logging";
 import { engineRuntimeDir, zerosDataDir } from "./db/paths";
@@ -126,6 +130,25 @@ import {
 import { NativeComputerUseReports } from "./agent-control/native-computer-use";
 import { deviceToolRouteForWorkspace } from "./agent-control/simulator-settings";
 import { composeAgentSessionToolFactories } from "./agents/session-tools";
+import { recoverLocalRequestsAtBoot } from "./db/local-orchestration";
+import {
+  LocalOrchestrationAdmissions,
+  stripInheritedLocalCliEnv,
+} from "./local-orchestration/admission";
+import {
+  createLocalEnginePorts,
+  isLocalOrchestrationReceiver,
+  type LocalEnginePorts,
+} from "./local-orchestration/engine-ports";
+import type { LocalMessagePresentation } from "./local-orchestration/types";
+import { ensureLocalCliBinDir } from "./local-orchestration/launcher";
+import { LocalDropbox } from "./local-orchestration/dropbox";
+import {
+  LocalCapabilityRegistry,
+  LocalOrchestrationServer,
+} from "./local-orchestration/server";
+import { LocalOrchestrationService } from "./local-orchestration/service";
+import { localCliSkillFile } from "./local-orchestration/skill";
 import {
   acquireZerosBrowserToolSession,
   browserRouteForWorkspace,
@@ -138,8 +161,19 @@ import { codeReviewAgentActor, codeReviewProfileName } from "./code-review/actor
 import { CodeReviewError } from "./code-review/errors";
 import {
   DESIGN_CANVAS_FILE,
+  activeDesignDirectoryNameFor,
   designDirectoryNameFor,
+  withDesignDirectoryNameLease,
 } from "./design/directory-registry";
+import {
+  DesignAgentActivity,
+  type DesignAgentTarget,
+} from "./design/agent-drafts";
+import {
+  composeDesignAgentDraftPreview,
+  composeDesignAgentStylesheetPreview,
+  readDesignAgentDraftBase,
+} from "./design/agent-draft-preview";
 import {
   discoverDesignDirectories,
   resolveDesignDirectoryPointerState,
@@ -318,7 +352,7 @@ import {
   findProjectRoot,
   type Framework,
 } from "./framework-detector";
-import { createMessage, type EngineMessage } from "./types";
+import { createMessage, type CardAnsweredBy, type EngineMessage } from "./types";
 import { scrubError } from "@zeros/protocol/scrub";
 import {
   PROTOCOL_VERSION,
@@ -370,6 +404,7 @@ import {
   type ProviderMetadata,
 } from "@zeros/protocol/identities";
 import {
+  clearChatMessages,
   flushStreamingChatMessages,
   queueStreamingChatMessages,
   upsertChatMessagesBulk,
@@ -383,6 +418,7 @@ import {
   getTurn as getTurnRow,
   turnsWithSnapshotsBeyond,
   clearTurnSnapshots,
+  deleteTurnsForChat,
   type TurnFile,
 } from "./db/turns";
 import {
@@ -390,6 +426,7 @@ import {
   clearChatProviderIdentity,
   getChat,
   coerceChatRow,
+  deleteChat,
   wasChatDeleted,
   getChatLocation,
   updateChatProviderIdentity,
@@ -536,6 +573,13 @@ const SLOW_WORKSPACE_REPORT_WINDOW_MS = 10_000;
  *  chat's own admission to clear the gate, short enough that the first Setup/Run
  *  of a session still finds the PATH cached. Nothing awaits this. */
 const BOOT_LOGIN_SHELL_PATH_WARM_DELAY_MS = 20_000;
+
+/** Native agents the Local CLI can start before the registry has answered. */
+const LOCAL_AGENT_NAMES: Readonly<Record<string, string>> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor Agent",
+};
 
 /** Renderer-authored Zeros controls with a documented session-scoped meaning.
  * Every other `ZEROS_*` name is engine authority or an implementation detail
@@ -883,6 +927,12 @@ export class ZerosEngine {
   private gitWatcher: GitWatcher | null = null;
   /** Forwards worktree content events to live one-shot style builds. */
   private stopStyleBuildInputs: (() => void) | null = null;
+  /** Live canvas feedback for Local agents' native Design edits. Never
+   * constructed for a cloud worker. */
+  private designAgentActivity: DesignAgentActivity | null = null;
+  /** Packaged Local engines poll the Design directory a Design tab shows on
+   * a short interval; see design/change-poller.ts. */
+  private designChangePoller: DesignChangePoller | null = null;
   /** Coalesce filesystem invalidations behind one authority-reconciliation
    * lane. Settings and Git watchers can fire together for one checkout; this
    * prevents overlapping session retirement/territory publication. */
@@ -1089,6 +1139,9 @@ export class ZerosEngine {
    * immutable-boundary handoff. Native sessions never stop or change backend
    * for this set. */
   private readonly designTerritoryTransitions = new Set<string>();
+  /** Settles when an owner leaves designTerritoryTransitions. */
+  private designTerritoryOwnerRelease: Promise<void> | null = null;
+  private wakeDesignTerritoryOwnerWaiters: (() => void) | null = null;
   /** Serializes changes to the app-wide Design owner map and tool authority.
    * Only cloud Code process admission depends on this count. */
   private globalDesignTerritoryTransitionCount = 0;
@@ -1127,6 +1180,30 @@ export class ZerosEngine {
     string,
     { agentId: string; request: QuestionRequest }
   >();
+  /** Zeros Local CLI: agents in Local chats start, message and follow other
+   * Local chats (local-orchestration/). Null on a cloud worker. */
+  private readonly localOrchestration: {
+    ports: LocalEnginePorts;
+    registry: LocalCapabilityRegistry;
+    service: LocalOrchestrationService;
+    server: LocalOrchestrationServer;
+    dropbox: LocalDropbox;
+    admissions: LocalOrchestrationAdmissions;
+  } | null;
+  /** PATH directory with the `zeros` launcher, once prepared at start. */
+  private localCliBinDir: string | null = null;
+  /** Workspaces the Local CLI is creating: setup runs, run-on-create doesn't. */
+  private readonly localOrchestrationWorkspaces = new Set<string>();
+  /** Accepted prompts whose terminal turn state has been published, before the
+   * prompt handler releases them. */
+  private readonly terminalPromptContexts = new WeakSet<ActivePromptContext>();
+  /** Cards a Local CLI agent answered, until their settle event carries it. */
+  private readonly localCardAnswerers = new Map<string, CardAnsweredBy>();
+  /** Registry agents (id → name) for Local CLI agent checks and labels. */
+  private localAgentRegistry: { at: number; agents: Map<string, string> } | null = null;
+  /** How the next Local CLI input under each message id is shown (an agent's
+   * message or a Zeros note), staged by the facade just before dispatch. */
+  private readonly localPresentations = new Map<string, LocalMessagePresentation>();
   /** Agent sessionId → ms timestamp when its LOCAL owner last disconnected.
    *  Within LOCAL_REOWN_GRACE_MS a relay client may not adopt the session. */
   private readonly recentlyLocalOwned = new Map<string, number>();
@@ -1479,6 +1556,9 @@ export class ZerosEngine {
       // Only Design re-reads; Files and Changes ignore a rebuilt output.
       changed: (workspacePath) => {
         const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        // Outputs live in ignored .zeros/design-styles/, so no watcher event
+        // fences an aggregate read that began before this rebuild.
+        fenceDesignSnapshotReads(workspacePath);
         this.broadcast(
           createMessage({
             type: "DB_CHANGED",
@@ -1494,6 +1574,7 @@ export class ZerosEngine {
     configureDesignFonts({
       onReady: (roots) => {
         const workspaceIds = roots.flatMap((root) => getWorkspaceByPath(root)?.id ?? []);
+        for (const root of roots) fenceDesignSnapshotReads(root);
         this.broadcast(
           createMessage({
             type: "DB_CHANGED",
@@ -1580,7 +1661,7 @@ export class ZerosEngine {
         ? { agentAuthIdentity: { uid: cloudWorker.uid, gid: cloudWorker.gid } }
         : undefined,
     );
-    // Warm the login-shell PATH probe (`$SHELL -ilc 'echo $PATH'`) off the
+    // Warm the login-shell PATH probe (`$SHELL -ilc 'printf …'`) off the
     // critical path. It's cached process-wide and every one-shot command shell
     // — Setup script, Run action — awaits it before spawning; resolving it here
     // keeps that from showing up as a stall on the FIRST Run of a session.
@@ -2260,6 +2341,7 @@ export class ZerosEngine {
       supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
       onRepositoryMcpNotice: context => this.publishCloudRepositoryMcpNotice(context),
     }) : null;
+    this.localOrchestration = this.cloudWorker ? null : this.createLocalOrchestration();
     const backendOpts: AgentGatewayOptions = {
       projectRoot: this.root,
       executionBoundary: this.executionBoundary,
@@ -2319,7 +2401,7 @@ export class ZerosEngine {
           invoke: (request, signal) => invokeZerosDeviceTool(request, { signal }),
           release: (owner, reason) => releaseZerosDeviceUse(owner, reason),
         },
-      }).admit]),
+      }).admit, (input) => this.localOrchestration?.admissions.admit(input) ?? Promise.resolve(null)]),
       ...(this.cloud
         ? { previewGatewayFactory: this.cloudWorker?.version === 4
             ? new CloudNativePreviewGatewayFactory() : new CloudPreviewGatewayFactory() }
@@ -2376,6 +2458,11 @@ export class ZerosEngine {
               quota,
             }),
           );
+        },
+        onToolInput: (agentId, sessionId, event) => {
+          // Local Design drafts only; a cloud worker never constructs this.
+          if (this.sessionAgent.get(sessionId) !== agentId) return;
+          this.designAgentActivity?.observeToolInput(sessionId, event);
         },
         onSessionUpdate: (
           agentId: string,
@@ -2442,7 +2529,9 @@ export class ZerosEngine {
             const chat = chatId ? getChat(chatId) : null;
             // Preserve a later explicit selection and every unrelated chat
             // field. Persist before delivery, including with no UI connected.
-            if (chat && chat.agentId === agentId && executionAgentId === agentId && (!chat.model || chat.model === update.previousModel)) {
+            // Only a curated catalog model can become the chat's model.
+            if (chat && chat.agentId === agentId && executionAgentId === agentId && (!chat.model || chat.model === update.previousModel) &&
+                isCuratedModel(agentId, update.model)) {
               upsertChat({ ...chat, model: update.model, updatedAt: Date.now() });
               this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"] }));
             }
@@ -2488,6 +2577,7 @@ export class ZerosEngine {
             this.sessionLoadResponses.set(executionId, {
               ...cached,
               providerBinding: notification.update.providerBinding,
+              ...(notification.update.resumedFresh ? { resumedFresh: true } : {}),
               ...(notification.update.providerMetadata
                 ? { providerMetadata: notification.update.providerMetadata }
                 : {}),
@@ -2560,6 +2650,10 @@ export class ZerosEngine {
             }
           }
           if (notification.update.sessionUpdate !== "turn_usage_update") this.touchActivePrompt(executionId);
+          // A finished Design edit refreshes the Local canvas now, and a
+          // streaming draft settles; see design/agent-drafts.ts.
+          if (executionAgentId === agentId)
+            this.designAgentActivity?.observeSessionUpdate(executionId, normalizedNotification.update);
           this.routeSessionScoped(
             executionId,
             createMessage({
@@ -2608,6 +2702,7 @@ export class ZerosEngine {
               request: request as never,
             }),
           );
+          this.localCardOpened({ id: permissionId, type: "permission", agentId, executionId: sessionId, permission: request });
         },
         onPermissionSettled: (
           agentId: string,
@@ -2631,8 +2726,10 @@ export class ZerosEngine {
               permissionId,
               executionId: sessionId,
               sessionId,
+              ...this.localAnsweredBy(permissionId),
             }),
           );
+          this.localChatChanged(sessionId);
         },
         onQuestionRequest: (
           agentId: string,
@@ -2656,6 +2753,7 @@ export class ZerosEngine {
               request: request as never,
             }),
           );
+          this.localCardOpened({ id: questionId, type: "question", agentId, executionId: sessionId, question: request });
         },
         onQuestionSettled: (
           agentId: string,
@@ -2677,8 +2775,10 @@ export class ZerosEngine {
               agentId,
               questionId,
               outcome: outcome as never,
+              ...this.localAnsweredBy(questionId),
             }),
           );
+          this.localChatChanged(sessionId);
         },
         onAgentStderr: (agentId: string, line: string) => {
           this.broadcast(
@@ -2974,6 +3074,9 @@ export class ZerosEngine {
   private async startRuntime(): Promise<void> {
     if (this.running) return;
 
+    // Nothing this engine starts inherits an outer chat's Local CLI access.
+    stripInheritedLocalCliEnv(process.env);
+
     const startTime = Date.now();
     const bootPhases = new BootPhaseTimer();
 
@@ -3248,6 +3351,22 @@ export class ZerosEngine {
     // attribution finishTurn never got to do (post snapshot at boot + authored
     // paths from the persisted transcript), so the crashed turn's file changes
     // stay visible to "Reset to this point" instead of silently escaping it.
+    // Local CLI receipts that were mid-dispatch when the engine stopped are
+    // reported as unknown/interrupted, never resent.
+    if (this.localOrchestration) {
+      try {
+        recoverLocalRequestsAtBoot();
+      } catch {
+        /* best-effort — receipts only shape later replies */
+      }
+      try {
+        this.localCliBinDir = await ensureLocalCliBinDir({ dataDir: zerosDataDir() });
+      } catch (error) {
+        console.warn(
+          `[Zeros] Local CLI launcher unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     try {
       const { repairUnattributedFinishedTurns, settleOrphanRunningTurns } =
         await import("./git/turn-recovery");
@@ -3416,6 +3535,13 @@ export class ZerosEngine {
     // One-shot Design style builds re-run on their inputs from this watcher,
     // rather than each running a watcher of its own.
     this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
+    if (!this.cloudWorker) this.designAgentActivity = this.createDesignAgentActivity();
+    // Development engines receive native file events within ~120 ms; the
+    // packaged engine's worktree poll below runs every 1.5 s.
+    if (!this.cloudWorker && !isDevRuntime()) {
+      this.designChangePoller = this.createDesignChangePoller();
+      this.designChangePoller.start();
+    }
     this.gitWatcher = startGitWatcher(
       () => this.cloudRuntimeHandoffFenced ? [] : this.workspace.gitWatchTargets(),
       (change) => {
@@ -3578,6 +3704,11 @@ export class ZerosEngine {
     // The CP records the not-ready transition before the uplink closes
     // (the uplink itself is stopped a few steps below).
     this.cloudEngineUplink?.reportReadiness();
+    if (this.localOrchestration) {
+      this.localOrchestration.registry.clear();
+      await settle(() => this.localOrchestration?.server.stop());
+      await settle(() => this.localOrchestration?.dropbox.closeAll());
+    }
     this.cloud?.setHumanServicesPaused(true);
     const humanServicesRetired = settle(() => this.cloudHumanServices?.pause());
     const languageServicesRetired = settle(() => this.cloudLanguageServices?.pause());
@@ -3685,6 +3816,10 @@ export class ZerosEngine {
     this.gitWatcher = null;
     this.stopStyleBuildInputs?.();
     this.stopStyleBuildInputs = null;
+    this.designAgentActivity?.dispose();
+    this.designAgentActivity = null;
+    this.designChangePoller?.stop();
+    this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
@@ -5862,9 +5997,7 @@ export class ZerosEngine {
         try { return await mutation(); } finally { resumeTools.forEach((resume) => resume()); }
       } finally {
         release();
-        for (const target of validated) {
-          this.designTerritoryTransitions.delete(target.workspaceId);
-        }
+        this.releaseDesignTerritoryOwners(validated);
       }
     }
     const validated: typeof ordered = [];
@@ -5989,10 +6122,27 @@ export class ZerosEngine {
       for (const workspaceRoot of suspendedUtilityRoots) {
         this.agents.resumePooledUtilityWorkspaceTerritory(workspaceRoot);
       }
-      for (const target of validated) {
-        this.designTerritoryTransitions.delete(target.workspaceId);
-      }
+      this.releaseDesignTerritoryOwners(validated);
     }
+  }
+
+  private designTerritoryOwnerReleased(): Promise<void> {
+    this.designTerritoryOwnerRelease ??= new Promise<void>((resolve) => {
+      this.wakeDesignTerritoryOwnerWaiters = resolve;
+    });
+    return this.designTerritoryOwnerRelease;
+  }
+
+  private releaseDesignTerritoryOwners(
+    targets: readonly { workspaceId: string }[],
+  ): void {
+    for (const target of targets) {
+      this.designTerritoryTransitions.delete(target.workspaceId);
+    }
+    const wake = this.wakeDesignTerritoryOwnerWaiters;
+    this.designTerritoryOwnerRelease = null;
+    this.wakeDesignTerritoryOwnerWaiters = null;
+    wake?.();
   }
 
   /** Qualified-cloud Code authority is creation-time state. The local desktop
@@ -6961,6 +7111,9 @@ export class ZerosEngine {
    *  filtered like the renderer's tabs; best-effort — a run failure must
    *  never surface on the create flow. */
   private startRunOnCreateActions(workspaceId: string): void {
+    // A workspace an agent created gets its setup, not the user's auto-run
+    // processes (dev servers per child would compete for ports and memory).
+    if (this.localOrchestrationWorkspaces.delete(workspaceId)) return;
     try {
       const ws = getWorkspaceById(workspaceId);
       if (!ws?.path || !this.workspaceAllowsProcessStart(workspaceId)) return;
@@ -7838,6 +7991,9 @@ export class ZerosEngine {
                   executionId: msg.sessionId,
                   sessionId: msg.sessionId,
                   error: "The agent is already responding to this chat.",
+                  // Typed so the sender can queue behind this exact turn
+                  // instead of showing a failure for a prompt never delivered.
+                  activeTurn: { turnId: inFlight.turnId, startedAt: inFlight.startedAt },
                 }),
               );
               return;
@@ -7927,13 +8083,19 @@ export class ZerosEngine {
             // (ordered user→agent) for every adapter — see persistUserPrompt.
             // `bubble` carries the composer's inline pills/chips so a reopened
             // chat re-renders them faithfully (else they'd reload as plain text).
-            this.persistUserPrompt(
-              msg.sessionId,
-              msg.prompt,
-              msg.bubble,
-              msg.userMessageId,
-              activePrompt.startedAt,
-            );
+            if (isLocalOrchestrationReceiver(client) && msg.userMessageId) {
+              // A Local CLI input is one whole row, streamed to every view.
+              this.recordLocalUserMessage(msg.agentId, msg.sessionId, msg.prompt, msg.userMessageId, activePrompt.startedAt);
+            } else {
+              this.persistUserPrompt(
+                msg.sessionId,
+                msg.prompt,
+                msg.bubble,
+                msg.userMessageId,
+                activePrompt.startedAt,
+              );
+            }
+            this.localUserMessagePersisted(msg.sessionId, activePrompt.turnId, msg.prompt, client, msg.bubble);
             preamble.mark("persist");
             // Record this turn: snapshot the work tree BEFORE the agent runs.
             turnCtx = await this.beginTurn(
@@ -8026,6 +8188,7 @@ export class ZerosEngine {
             preamble.mark("admit");
             const preambleLine = preamble.report();
             if (preambleLine) console.info(preambleLine);
+            const replayAtDispatch = this.sessionLoadResponses.get(msg.sessionId);
             const response: PromptResponse = activePrompt.cancelledByUser
               ? { stopReason: "cancelled" }
               : await this.agents
@@ -8041,7 +8204,11 @@ export class ZerosEngine {
                     activePrompt.adapterSettled = true;
                   });
             const loaded = this.sessionLoadResponses.get(msg.sessionId);
-            if (activePrompt.adapterSettled && loaded?.resumedFresh) {
+            // A tool read can replace an idle native thread while this older
+            // prompt is still settling. Only acknowledge the history it sent.
+            if (activePrompt.adapterSettled && response.stopReason !== "cancelled" &&
+                replayAtDispatch?.resumedFresh && loaded?.resumedFresh &&
+                sameProviderBinding(replayAtDispatch.providerBinding, loaded.providerBinding)) {
               this.sessionLoadResponses.set(msg.sessionId, {
                 ...loaded,
                 resumedFresh: false,
@@ -8219,6 +8386,7 @@ export class ZerosEngine {
           // that lands while the turn is still being prepared is honoured
           // instead of dispatched-then-forgotten.
           this.markCancelIntent(msg.sessionId);
+          if (!isLocalOrchestrationReceiver(client)) this.localHumanStop(msg.sessionId);
           await this.agents.cancel(msg.agentId, msg.sessionId);
           return;
         }
@@ -8294,13 +8462,18 @@ export class ZerosEngine {
                       outcome = "interrupted";
                     }
                     if (outcome !== "queued") {
-                      this.persistSteeredUserPrompt(
-                        msg.sessionId,
-                        msg.prompt,
-                        msg.bubble,
-                        msg.userMessageId,
-                        turnId,
-                      );
+                      if (isLocalOrchestrationReceiver(client) && msg.userMessageId) {
+                        this.recordLocalUserMessage(msg.agentId, msg.sessionId, msg.prompt, msg.userMessageId, Date.now(), turnId);
+                      } else {
+                        this.persistSteeredUserPrompt(
+                          msg.sessionId,
+                          msg.prompt,
+                          msg.bubble,
+                          msg.userMessageId,
+                          turnId,
+                        );
+                      }
+                      this.localUserMessagePersisted(msg.sessionId, msg.userMessageId ?? attemptId, msg.prompt, client, msg.bubble);
                     }
                     return { outcome, turnId };
                   },
@@ -8364,6 +8537,11 @@ export class ZerosEngine {
           ) {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
+          }
+          // Stop pressed while the provider was still starting: the user's
+          // Stop, exactly as AGENT_CANCEL records it for a running turn.
+          if (msg.userStop === true && msg.chatId && !isLocalOrchestrationReceiver(client)) {
+            this.localOrchestration?.service.onHumanStop(msg.chatId);
           }
           const candidateExecutionIds = new Set<string>();
           if (requestedExecutionId) {
@@ -10220,6 +10398,49 @@ export class ZerosEngine {
     }
   }
 
+  /** A Zeros Local CLI input — an agent's message or a note — as one whole
+   * user row: the text and provenance the facade staged, folded by the shared
+   * reducer and pushed to every view at once, mid-turn included. */
+  private recordLocalUserMessage(
+    agentId: string,
+    sessionId: string,
+    prompt: ContentBlock[],
+    messageId: string,
+    createdAt: number,
+    steeredTurnId?: string,
+  ): void {
+    const chatId = this.sessionChat.get(sessionId);
+    const presentation = this.localPresentations.get(messageId);
+    this.localPresentations.delete(messageId);
+    if (!chatId) return;
+    const message: AgentTextMessage = {
+      id: messageId,
+      kind: "text",
+      role: "user",
+      text: presentation?.displayText ?? prompt.map((block) => (block.type === "text" ? block.text : "")).join(""),
+      createdAt,
+      ...(steeredTurnId ? { steeredTurnId } : {}),
+      ...(presentation?.localFrom ? { localFrom: presentation.localFrom } : {}),
+      ...(presentation?.localNote ? { localNote: presentation.localNote } : {}),
+    };
+    const notification = {
+      sessionId,
+      update: { sessionUpdate: "user_message_recorded", message },
+    } as SessionNotification;
+    this.persistSessionUpdate(sessionId, notification);
+    this.routeSessionScoped(
+      sessionId,
+      createMessage({
+        type: "AGENT_SESSION_UPDATE",
+        source: "engine",
+        agentId,
+        executionId: sessionId,
+        chatId,
+        notification: notification as never,
+      }),
+    );
+  }
+
   private persistSessionUpdate(
     sessionId: string,
     notification: SessionNotification,
@@ -10972,9 +11193,15 @@ export class ZerosEngine {
         ) {
           return null;
         }
-        if (!lifecycleMutationWorkspaceId) return null;
+        // These lifecycles own the barrier that lifecycleMutationWorkspaceId
+        // feeds, so it is always null for them; their exact owner is the
+        // request's workspaceId. The global gate would suspend Design tools in
+        // every workspace's chats. A rowless owner (the cloud primary checkout)
+        // keeps the global gate.
+        const workspaceId = params.workspaceId;
+        if (typeof workspaceId !== "string" || !workspaceId) return null;
         try {
-          return getWorkspaceById(lifecycleMutationWorkspaceId);
+          return getWorkspaceById(workspaceId);
         } catch {
           return null;
         }
@@ -11061,15 +11288,29 @@ export class ZerosEngine {
         }
       }
       const operation = managedLifecycleRegistryTarget
-        ? this.withDesignTerritoryTransition(
-            [
-              {
-                workspaceId: managedLifecycleRegistryTarget.id,
-                designDirectory: designDirOf(managedLifecycleRegistryTarget),
-              },
-            ],
-            dispatch,
-          )
+        ? (async () => {
+            // A repeat or follow-up lifecycle for this owner (another window,
+            // archive then restore) queues behind its transition, as it did
+            // behind the app-wide gate, instead of failing the owner check.
+            // Lifecycles never run inside a transition, so this cannot wait on
+            // itself.
+            while (
+              this.designTerritoryTransitions.has(
+                managedLifecycleRegistryTarget.id,
+              )
+            ) {
+              await this.designTerritoryOwnerReleased();
+            }
+            return this.withDesignTerritoryTransition(
+              [
+                {
+                  workspaceId: managedLifecycleRegistryTarget.id,
+                  designDirectory: designDirOf(managedLifecycleRegistryTarget),
+                },
+              ],
+              dispatch,
+            );
+          })()
         : changesDesignOwnerRegistry
           ? this.withGlobalDesignTerritoryTransition(dispatch)
           : recognitionMutationTarget
@@ -11348,6 +11589,88 @@ export class ZerosEngine {
     );
   }
 
+  /** The Local managed workspace and active Design directory an agent
+   * execution writes into, or null. Cloud workers never ask. */
+  private designAgentTarget(executionId: string): DesignAgentTarget | null {
+    if (this.cloudWorker) return null;
+    const chatId = this.sessionChat.get(executionId);
+    if (!chatId) return null;
+    let cwd: string | undefined;
+    try {
+      cwd = getChat(chatId)?.folder;
+    } catch {
+      return null;
+    }
+    if (!cwd) return null;
+    const workspaceId = this.workspace.workspaceIdForCwd(cwd);
+    if (!workspaceId || workspaceId === LOCAL_MAIN_WORKSPACE_ID) return null;
+    let workspace: ReturnType<typeof getWorkspaceById>;
+    try {
+      workspace = getWorkspaceById(workspaceId);
+    } catch {
+      return null;
+    }
+    if (!workspace || workspace.archivedAt != null) return null;
+    const directory = activeDesignDirectoryNameFor(workspace.path);
+    if (!directory) return null;
+    return { workspaceId, workspacePath: workspace.path, cwd, directory, chatId };
+  }
+
+  private createDesignAgentActivity(): DesignAgentActivity {
+    return new DesignAgentActivity({
+      target: (executionId) => this.designAgentTarget(executionId),
+      compose: (target, file, html) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          composeDesignAgentDraftPreview(target.workspacePath, file, html),
+        ),
+      composeStylesheet: (target, file, css) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          composeDesignAgentStylesheetPreview(target.workspacePath, file, css),
+        ),
+      readSource: (target, file) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          readDesignAgentDraftBase(target.workspacePath, file),
+        ),
+      // Drafts carry authored content: only the trusted local desktop gets them.
+      publish: (workspaceId, draft) =>
+        this.router.broadcastLocal(
+          createMessage({ type: "DESIGN_AGENT_DRAFT", source: "engine", workspaceId, draft }),
+        ),
+      // The same Design-only revalidation a rebuilt style output uses, ahead
+      // of the worktree watcher (a 1.5 s stat poll in packaged builds).
+      saved: (target) => {
+        this.refreshDesignCanvas(target.workspacePath, target.workspaceId);
+        // That refresh covers these files: the poller must not repeat it.
+        void this.designChangePoller?.absorb(target.workspacePath);
+      },
+      // A shell command or script may have written Design files itself.
+      toolSettled: (target) => void this.designChangePoller?.check(target.workspacePath),
+    });
+  }
+
+  private createDesignChangePoller(): DesignChangePoller {
+    return new DesignChangePoller({
+      presentRoots: presentDesignStyleBuildRoots,
+      directory: (root) => designSnapshotDirectory(root) ?? activeDesignDirectoryNameFor(root) ?? null,
+      changed: (root) => this.refreshDesignCanvas(root, getWorkspaceByPath(root)?.id),
+    });
+  }
+
+  /** Re-read one checkout's Design canvas now: the Design-only revalidation
+   * a rebuilt style output uses, ahead of the worktree watcher. A checkout
+   * without a workspace row (the main checkout) refreshes every canvas. */
+  private refreshDesignCanvas(workspacePath: string, workspaceId: string | undefined): void {
+    fenceDesignSnapshotReads(workspacePath);
+    this.broadcast(
+      createMessage({
+        type: "DB_CHANGED",
+        source: "engine",
+        kinds: ["designStyles"],
+        ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
+      }),
+    );
+  }
+
   /** Publish prompt lifecycle independently of the request/response socket.
    * The current owner may be a renderer that adopted the session after the
    * prompt began, which is precisely why the original RPC response is not
@@ -11357,6 +11680,7 @@ export class ZerosEngine {
     state: "running" | "completed" | "failed" | "cancelled",
     stopReason: StopReason | null = null,
   ): void {
+    if (state !== "running") this.designAgentActivity?.endExecution(prompt.sessionId);
     this.routeSessionScoped(
       prompt.sessionId,
       createMessage({
@@ -11377,6 +11701,223 @@ export class ZerosEngine {
           },
         },
       }),
+    );
+    this.localTurnState(prompt, state);
+  }
+
+  // ── Zeros Local CLI (local-orchestration/) ────────────────
+
+  /** The service, its loopback endpoint and per-execution admission, over
+   * ports that reuse this engine's own handlers (engine-ports.ts). */
+  private createLocalOrchestration(): NonNullable<ZerosEngine["localOrchestration"]> {
+    const ports = createLocalEnginePorts({
+      linkScheme: () => schemeForChannel(channel()),
+      isCloudWorker: () => this.cloudWorker !== null,
+      featureOpen: () => agentControlFeatureAvailable("localOrchestration"),
+      executionForChat: (chatId) => this.localExecutionForChat(chatId),
+      activePrompt: (executionId) => {
+        const prompt = this.activePromptContexts.get(executionId);
+        if (!prompt) return null;
+        return {
+          turnId: prompt.turnId,
+          startedAt: prompt.startedAt,
+          cancelled: prompt.cancelledByUser === true,
+          ended: this.terminalPromptContexts.has(prompt) || !this.activePromptIsLive(prompt),
+        };
+      },
+      currentModeId: (executionId) =>
+        this.sessionLoadResponses.get(executionId)?.modes?.currentModeId ?? null,
+      chatForExecution: (executionId) => this.sessionChat.get(executionId) ?? null,
+      pendingPermissions: () => this.pendingPermissionRequests.entries(),
+      pendingQuestions: () => this.pendingQuestionRequests.entries(),
+      // Same bookkeeping as AGENT_PERMISSION_RESPONSE / AGENT_QUESTION_RESPONSE
+      // from the desktop; the settle callbacks tell every renderer.
+      answerPermission: (permissionId, executionId, response, answeredBy) => {
+        const pending = this.pendingPermissionRequests.get(permissionId);
+        if (!pending || pending.request.sessionId !== executionId) return false;
+        this.permissionOwner.delete(permissionId);
+        this.pendingPermissionRequests.delete(permissionId);
+        this.localCardAnswerers.set(permissionId, answeredBy);
+        const handled = this.agents.answerPermission(permissionId, response);
+        if (!handled) this.localCardAnswerers.delete(permissionId);
+        return handled;
+      },
+      answerQuestion: (questionId, executionId, response, answeredBy, nativeRequestId) => {
+        const pending = this.pendingQuestionRequests.get(questionId);
+        if (!pending || pending.request.sessionId !== executionId) return false;
+        this.questionOwner.delete(questionId);
+        this.pendingQuestionRequests.delete(questionId);
+        this.localCardAnswerers.set(questionId, answeredBy);
+        const handled = this.agents.answerQuestion(questionId, response, nativeRequestId);
+        if (!handled) this.localCardAnswerers.delete(questionId);
+        return handled;
+      },
+      initializeSnapshot: (agentId) => this.agents.agentInitializeSnapshot(agentId),
+      currentInitialize: (agentId) => this.agents.currentAgentInitialize(agentId),
+      warmInitialize: (agentId) => {
+        void this.agents.initializeAgent(agentId).catch(() => {});
+      },
+      agentDisplayName: (agentId) =>
+        this.localAgentNames().get(agentId) ?? LOCAL_AGENT_NAMES[agentId] ?? null,
+      dispatchAgent: (message, client) => this.handleAgentMessage(message, client),
+      dispatchWorkspace: (message, client) => this.handleWorkspaceMessage(message, client),
+      chatsChanged: () =>
+        this.router.broadcast(
+          createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"] }),
+        ),
+      markOrchestrationWorkspace: (workspaceId, created) => {
+        if (created) this.localOrchestrationWorkspaces.add(workspaceId);
+        else this.localOrchestrationWorkspaces.delete(workspaceId);
+      },
+      stagePresentation: (messageId, presentation) => {
+        this.localPresentations.delete(messageId);
+        this.localPresentations.set(messageId, presentation);
+        while (this.localPresentations.size > 256) this.localPresentations.delete(this.localPresentations.keys().next().value!);
+      },
+      agentAccountConnected: (agentId) => this.agents.selectedAccountConnected(agentId),
+      removeChat: (chatId) => {
+        // Only a tab whose agent never ran: no turn, snapshot or tool lease.
+        try {
+          clearChatMessages(chatId);
+          deleteTurnsForChat(chatId);
+          deleteChat(chatId);
+        } finally {
+          this.router.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"] }));
+        }
+      },
+    });
+    const registry = new LocalCapabilityRegistry();
+    const service = new LocalOrchestrationService(ports, {
+      skillFile: () => localCliSkillFile(),
+      isKnownAgent: (agentId) =>
+        agentId in LOCAL_AGENT_NAMES || this.localAgentNames().has(agentId),
+    });
+    const server = new LocalOrchestrationServer(
+      registry,
+      (scope, body, signal) => service.call(scope, body, signal),
+      () => ports.engineId(),
+    );
+    // A sandboxed shell cannot open the endpoint; it reaches the same
+    // service through its execution's private drop folder.
+    const dropbox = new LocalDropbox(
+      registry,
+      (scope, body, signal) => service.call(scope, body, signal),
+      () => ports.engineId(),
+    );
+    const admissions = new LocalOrchestrationAdmissions({
+      ports,
+      service,
+      registry,
+      server,
+      dropbox,
+      binDir: () => this.localCliBinDir,
+      skillFile: () => localCliSkillFile(),
+    });
+    return { ports, registry, service, server, dropbox, admissions };
+  }
+
+  /** The chat's live execution, repairing a missing reverse index the same way
+   * AGENT_LOAD_SESSION does. */
+  private localExecutionForChat(chatId: string): { executionId: string; agentId: string } | null {
+    let executionId = this.conversationExecution.get(chatId);
+    if (!executionId) {
+      for (const [candidate, boundChatId] of this.sessionChat) {
+        if (boundChatId === chatId && this.sessionAgent.has(candidate)) {
+          executionId = candidate;
+          break;
+        }
+      }
+    }
+    const agentId = executionId ? this.sessionAgent.get(executionId) : undefined;
+    return executionId && agentId ? { executionId, agentId } : null;
+  }
+
+  /** Registry names (refreshed in the background at most once a minute). */
+  private localAgentNames(): Map<string, string> {
+    const now = Date.now();
+    if (!this.localAgentRegistry || now - this.localAgentRegistry.at > 60_000) {
+      const current = this.localAgentRegistry ?? { at: now, agents: new Map<string, string>() };
+      current.at = now;
+      this.localAgentRegistry = current;
+      void this.agents
+        .listAgents()
+        .then((agents) => {
+          current.agents = new Map(agents.map((agent) => [agent.id, agent.name] as const));
+        })
+        .catch(() => {});
+    }
+    return this.localAgentRegistry.agents;
+  }
+
+  private localUserMessagePersisted(
+    executionId: string,
+    messageId: string,
+    prompt: ContentBlock[],
+    client: TransportClient,
+    bubble?: AgentPromptBubble,
+  ): void {
+    const local = this.localOrchestration;
+    const chatId = this.sessionChat.get(executionId);
+    if (!local || !chatId) return;
+    local.service.onUserMessagePersisted({
+      chatId,
+      messageId,
+      // Replay and attachment expansion are provider context, not a share
+      // written by the human. Match the displayed message we just persisted.
+      text: bubble?.displayText ?? prompt.map((block) => (block.type === "text" ? block.text : "")).join("\n"),
+      // A Local CLI delivery is an agent's message; anything else is a person
+      // on one of their devices.
+      human: !isLocalOrchestrationReceiver(client),
+    });
+  }
+
+  private localHumanStop(executionId: string): void {
+    const chatId = this.sessionChat.get(executionId);
+    if (chatId) this.localOrchestration?.service.onHumanStop(chatId);
+  }
+
+  /** The settle event's answerer when a Local CLI agent answered the card. */
+  private localAnsweredBy(cardId: string): { answeredBy?: CardAnsweredBy } {
+    const answeredBy = this.localCardAnswerers.get(cardId);
+    this.localCardAnswerers.delete(cardId);
+    return answeredBy ? { answeredBy } : {};
+  }
+
+  private localChatChanged(executionId: string): void {
+    const chatId = this.sessionChat.get(executionId);
+    if (chatId) this.localOrchestration?.service.onChatChanged(chatId);
+  }
+
+  private localCardOpened(card: {
+    id: string;
+    type: "permission" | "question";
+    agentId: string;
+    executionId: string;
+    permission?: RequestPermissionRequest;
+    question?: QuestionRequest;
+  }): void {
+    const local = this.localOrchestration;
+    if (!local) return;
+    local.service.onCardOpened({ ...card, chatId: this.sessionChat.get(card.executionId) ?? null });
+  }
+
+  private localTurnState(
+    prompt: ActivePromptContext,
+    state: "running" | "completed" | "failed" | "cancelled",
+  ): void {
+    if (state === "running") this.terminalPromptContexts.delete(prompt);
+    else this.terminalPromptContexts.add(prompt);
+    const local = this.localOrchestration;
+    const chatId = prompt.chatId;
+    if (!local || !chatId) return;
+    if (state === "running") {
+      local.service.onChatChanged(chatId);
+      return;
+    }
+    // After the prompt handler has released the turn, so a note for a
+    // follower that just went idle can start its next turn.
+    setImmediate(() =>
+      local.service.onTurnTerminal({ chatId, turnId: prompt.turnId, status: state }),
     );
   }
 
