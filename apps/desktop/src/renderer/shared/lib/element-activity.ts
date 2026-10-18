@@ -20,6 +20,26 @@ export function observeForeground(changed: () => void): () => void {
   };
 }
 
+/** Opt-in Local observation. The caller owns request sharing and late replies;
+ * this owns only the foreground timer and refresh-on-return boundary. */
+export function pollWhileForeground(poll: () => void, intervalMs: number): () => void {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let disposed = false;
+  const stop = () => { if (timer !== undefined) clearInterval(timer); timer = undefined; };
+  const resume = () => {
+    stop();
+    if (disposed || !documentIsForeground()) return;
+    poll();
+    timer = setInterval(() => {
+      if (documentIsForeground()) poll();
+      else stop();
+    }, intervalMs);
+  };
+  const unwatch = observeForeground(resume);
+  resume();
+  return () => { disposed = true; stop(); unwatch(); };
+}
+
 type Entry = { listeners: Set<(active: boolean) => void>; intersects: boolean; active?: boolean };
 const entries = new Map<Element, Entry>();
 let intersection: IntersectionObserver | undefined;
