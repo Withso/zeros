@@ -41,6 +41,7 @@ export const LOCAL_DROPBOX_RESPONSE = ".res";
 export const LOCAL_DROPBOX_ID = /^[a-f0-9]{24}$/;
 
 const SWEEP_MS = 100;
+const MAX_IDLE_SWEEP_MS = 2_000;
 const MAX_ACTIVE_PER_BOX = 16;
 /** A response the CLI never collected (it timed out) is cleared after this. */
 const ORPHAN_MS = 10 * 60_000;
@@ -59,7 +60,8 @@ interface Box {
   closed: boolean;
   controller: AbortController;
   watcher: FSWatcher | null;
-  timer: ReturnType<typeof setInterval> | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  sweepDelayMs: number;
   orphanTimer: ReturnType<typeof setTimeout> | null;
   sweeping: Promise<void> | null;
   dirty: boolean;
@@ -124,33 +126,51 @@ export class LocalDropbox {
       controller: new AbortController(),
       watcher: null,
       timer: null,
+      sweepDelayMs: this.options.sweepMs ?? SWEEP_MS,
       orphanTimer: null,
       sweeping: null,
       dirty: false,
       responses: new Map(),
     };
     try {
-      box.watcher = watch(directory.path, () => this.requestSweep(box));
+      box.watcher = watch(directory.path, () => {
+        this.scheduleSafetySweep(box, true);
+        this.requestSweep(box);
+      });
       box.watcher.on("error", () => {
         box.watcher?.close();
         box.watcher = null;
-        this.startFallbackSweep(box);
+        this.scheduleSafetySweep(box, true);
       });
     } catch {
       box.watcher = null;
-      this.startFallbackSweep(box);
+      this.scheduleSafetySweep(box, true);
     }
     this.boxes.add(box);
     // Close the watch-installation race before exposing the folder to a CLI.
     await this.sweep(box);
+    this.scheduleSafetySweep(box);
     return { dir, close: () => this.close(box) };
   }
 
-  /** A healthy directory watcher is push-driven. Keep the established 100 ms
-   * fallback only if the OS cannot supply notifications for this folder. */
-  private startFallbackSweep(box: Box): void {
-    if (box.closed || box.timer) return;
-    box.timer = setInterval(() => this.requestSweep(box), this.options.sweepMs ?? SWEEP_MS);
+  /** A watcher can arm without delivering events in the packaged runtime.
+   * Keep a safety read, backing off only while notifications appear available;
+   * activity or an explicit watcher failure restores the fast cadence. */
+  private scheduleSafetySweep(box: Box, reset = false): void {
+    if (box.closed) return;
+    if (reset) {
+      box.sweepDelayMs = this.options.sweepMs ?? SWEEP_MS;
+      if (box.timer) clearTimeout(box.timer);
+      box.timer = null;
+    }
+    if (box.timer) return;
+    box.timer = setTimeout(() => {
+      box.timer = null;
+      box.sweepDelayMs = box.watcher
+        ? Math.min(box.sweepDelayMs * 2, MAX_IDLE_SWEEP_MS)
+        : this.options.sweepMs ?? SWEEP_MS;
+      this.requestSweep(box);
+    }, box.sweepDelayMs);
     box.timer.unref?.();
   }
 
@@ -170,6 +190,7 @@ export class LocalDropbox {
       box.sweeping = null;
       if (box.dirty) this.requestSweep(box);
       this.scheduleOrphanSweep(box);
+      this.scheduleSafetySweep(box);
     });
   }
 
@@ -196,7 +217,7 @@ export class LocalDropbox {
     this.boxes.delete(box);
     box.controller.abort();
     box.watcher?.close();
-    if (box.timer) clearInterval(box.timer);
+    if (box.timer) clearTimeout(box.timer);
     if (box.orphanTimer) clearTimeout(box.orphanTimer);
     box.responses.clear();
     try {
@@ -267,6 +288,7 @@ export class LocalDropbox {
         if (!name.endsWith(LOCAL_DROPBOX_REQUEST)) continue;
         const id = name.slice(0, -LOCAL_DROPBOX_REQUEST.length);
         if (!LOCAL_DROPBOX_ID.test(id) || box.active.has(id)) continue;
+        this.scheduleSafetySweep(box, true);
         // Drain this directory listing as capacity becomes available. Retrying
         // the entire listing after every completion would spin forever on a
         // request the filesystem refuses to claim.
