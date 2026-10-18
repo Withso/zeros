@@ -138,6 +138,28 @@ describe("automatic update check cadence", () => {
     expect(fixture.fetch).toHaveBeenCalledTimes(3);
   });
 
+  it.each([
+    { label: "a backward wall-clock step", skewMs: -1 },
+    { label: "no clock skew", skewMs: 0 },
+  ])("keeps the background chain running with closed windows after $label", async ({ skewMs }) => {
+    await setup();
+    expect(fixture.check).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() + skewMs);
+    await vi.advanceTimersByTimeAsync(35 * 60_000);
+    expect(fixture.check.mock.calls.length).toBeGreaterThanOrEqual(5);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("keeps the staged metadata chain running after a backward wall-clock step", async () => {
+    await setup();
+    stage();
+    await settle();
+    const polls = fixture.fetch.mock.calls.length;
+    vi.setSystemTime(Date.now() - 1);
+    await vi.advanceTimersByTimeAsync(35 * 60_000);
+    expect(fixture.fetch.mock.calls.length).toBeGreaterThanOrEqual(polls + 5);
+  });
+
   it("does not create checks or timers for an unpackaged app", async () => {
     fixture.packaged = false;
     await setup();

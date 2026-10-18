@@ -364,6 +364,8 @@ function checkForNewerThanStaged(reason: string, force = false): void {
     !updateDownloaded ||
     !stagedVersion
   ) {
+    // Whatever skipped this poll, the background chain keeps one next check.
+    if (!stagedFeedPollInFlight && !automaticCheckTimer) scheduleAutomaticCheck();
     return;
   }
   clearAutomaticCheckTimer();
@@ -440,8 +442,12 @@ function updaterEnabled(): boolean {
 
 function checkAutomatically(reason: string): void {
   if (!updaterEnabled()) return;
+  // The interval timer is itself the cadence: it is armed only when a check
+  // completes, so its own tick is never throttled. A small wall-clock step
+  // could otherwise read the tick as "too soon" and end the background chain.
+  const due = reason === "required" || reason === "interval";
   if (updateDownloaded) {
-    checkForNewerThanStaged(reason, reason === "required");
+    checkForNewerThanStaged(reason, due);
     return;
   }
   // A newer feed is already downloading. Let that single attempt finish before
@@ -452,7 +458,11 @@ function checkAutomatically(reason: string): void {
     return;
   }
   if (checkInFlight) return;
-  if (reason !== "required" && automaticCheckThrottled(lastCheckStartedAt, lastCheckSucceededAt)) return;
+  if (!due && automaticCheckThrottled(lastCheckStartedAt, lastCheckSucceededAt)) {
+    // A throttled focus/resume leaves the next automatic check scheduled.
+    if (!automaticCheckTimer) scheduleAutomaticCheck();
+    return;
+  }
   console.log(`[updater] automatic check (${reason})`);
   void checkForUpdatesShared().catch((err) => {
     // Offline/feed failures are expected background conditions. The updater's
