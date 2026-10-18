@@ -48,6 +48,12 @@ export type WorkspaceDocument = {
   placement: "cloud";
 };
 
+export type OrganizationFeatures = {
+  organizationId: Uuid;
+  deviceStream: boolean;
+  presence: boolean;
+}[];
+
 export type ClientHello = Frame & {
   t: "hello";
   d: {
@@ -107,6 +113,7 @@ export type ServerReady = Frame & {
     resumed: boolean;
     heartbeatIntervalMs: number;
     contract: number;
+    organizationFeatures?: OrganizationFeatures;
   };
 };
 

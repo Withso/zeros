@@ -14,6 +14,7 @@ import {
   RUNTIME_AUTH_FIXTURES,
   WORKSPACE,
   WORKSPACE_DOCUMENT,
+  BOOT_SCOPE,
 } from "./fixtures";
 
 import Ajv2020 from "ajv/dist/2020.js";
@@ -155,10 +156,22 @@ describe("contract mock REST", () => {
     expect(response.status).toBe(201);
     const body = await json(response);
     expect(validator("ConnectResponse")(body)).toBe(true);
+    expect(body.runtimeBinding).toEqual({ authorityEpoch: 3, bootScope: BOOT_SCOPE });
     const routes = body.routes as { kind: string; url: string }[];
     expect(routes.map((route) => route.kind).sort()).toEqual(["direct", "relay"]);
     // The returned routes must be dialable against the mock itself.
     expect(routes.every((route) => route.url.startsWith(m.restUrl.replace("http", "wss")))).toBe(true);
+  });
+
+  it("can emulate the older response without boot metadata", async () => {
+    mock = await createContractMock({ legacyMetadata: true });
+    const response = await fetch(`${mock.restUrl}/v1/organizations/${ORGANIZATION}/cloud-workspaces/${WORKSPACE}/runtime/connect`, {
+      method: "POST", headers: { "content-type": "application/json", ...DEVICE_HEADERS },
+      body: JSON.stringify({ deviceSessionId: DEVICE_SESSION, clientSessionId: CLIENT_SESSION, routes: ["direct"] }),
+    });
+    const body = await json(response);
+    expect(validator("ConnectResponse")(body)).toBe(true);
+    expect(body).not.toHaveProperty("runtimeBinding");
   });
 
   it("renews capabilities over REST and serves the JWKS", async () => {
@@ -193,6 +206,26 @@ describe("contract mock device stream", () => {
     stream.send({ t: "hello", d: { contract, ticket, ...(resume ? { resume } : {}) } });
     return stream;
   }
+
+  it("advertises only authorized organizations and their independent presence flag", async () => {
+    const secondOrg = "99999999-9999-4999-8999-999999999999";
+    mock = await createContractMock({
+      workspaces: [WORKSPACE_DOCUMENT, { ...WORKSPACE_DOCUMENT, id: DEVICE, organizationId: secondOrg }],
+      presenceOrganizations: [ORGANIZATION],
+    });
+    const stream = await hello(mock.ticket);
+    const ready = await stream.nextFrame("ready");
+    expect((ready.d as Record<string, unknown>).organizationFeatures).toEqual([
+      { organizationId: ORGANIZATION, deviceStream: true, presence: true },
+      { organizationId: secondOrg, deviceStream: true, presence: false },
+    ]);
+  });
+
+  it("can emulate older ready frames with unknown coverage", async () => {
+    mock = await createContractMock({ legacyMetadata: true });
+    const stream = await hello(mock.ticket);
+    expect((await stream.nextFrame("ready")).d).not.toHaveProperty("organizationFeatures");
+  });
 
   it("closes with 4426 when no common contract major exists", async () => {
     const m = await start();

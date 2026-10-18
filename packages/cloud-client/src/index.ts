@@ -27,6 +27,7 @@ export type {
   DeviceStreamClientOptions,
   DeviceStreamEvent,
   DeviceStreamPayloadFrame,
+  DeviceStreamPollCoverage,
   DeviceStreamPresenceState,
   DeviceStreamResumeBase,
   DeviceStreamSocket,
@@ -58,6 +59,7 @@ export {
   RuntimeConnectError,
   RuntimeConnection,
 } from "./runtime-session";
+export { readRuntimeBinding, type RuntimeBindingTarget } from "./runtime-binding";
 export type {
   CapabilityProofFields,
   RuntimeAttemptFailure,

@@ -6,6 +6,7 @@
 import type { Capabilities, ConnectResponse, Route } from "./generated/rest";
 import type { ClientAuth, ClientAuthRenew, Proof } from "./generated/runtime-auth";
 import { isRuntimeHandshakeFrame, parseRuntimeAuthFrame } from "./runtime-auth";
+import { readRuntimeBinding, type RuntimeBindingTarget } from "./runtime-binding";
 
 export const RUNTIME_SUBPROTOCOL = "zeros-cap.v1";
 export const RUNTIME_LEGACY_SUBPROTOCOL = "zeros-v1";
@@ -56,6 +57,8 @@ export type CapabilityProofFields = Readonly<{
 export interface RuntimeSessionOptions {
   /** Lowercase UUID naming this client's runtime session (S3). */
   clientSessionId: string;
+  /** The request's exact target, supplied by the host's admission boundary. */
+  target?: RuntimeBindingTarget;
   createSocket: RuntimeSocketFactory;
   /** Ed25519 signature with the device key over the UTF-8 bytes of `message`,
    * base64url without padding (86 characters). */
@@ -171,6 +174,8 @@ export function connectRuntime(
   if (!UUID_PATTERN.test(options.clientSessionId)) {
     throw new TypeError("clientSessionId must be a lowercase UUID");
   }
+  try { readRuntimeBinding(connect, options.target); }
+  catch { return Promise.reject(new RuntimeConnectError("runtime_binding_invalid", [])); }
   const routes = routesToTry(connect.routes);
   if (routes.length === 0) {
     return Promise.reject(new RuntimeConnectError("runtime_unreachable", []));

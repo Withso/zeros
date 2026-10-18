@@ -7,7 +7,7 @@ import {
   type DeviceStreamEvent,
 } from "../device-stream-client";
 import { CloudRestClient } from "../rest-client";
-import { DEVICE, TOKEN, WORKSPACE, WORKSPACE_DOCUMENT } from "./fixtures";
+import { DEVICE, ORGANIZATION, TOKEN, WORKSPACE, WORKSPACE_DOCUMENT } from "./fixtures";
 
 let mock: ContractMock | undefined;
 let client: DeviceStreamClient | undefined;
@@ -28,8 +28,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void
 }
 
 describe("DeviceStreamClient against the contract mock", () => {
-  it("connects, receives a pushed event and resumes after a restart", async () => {
-    const m = await createContractMock();
+  it.each([false, true])("connects, receives a pushed event and resumes after a restart (legacy metadata %s)", async legacyMetadata => {
+    const m = await createContractMock({ legacyMetadata });
     mock = m;
     const rest = new CloudRestClient({
       baseUrl: m.restUrl,
@@ -82,6 +82,9 @@ describe("DeviceStreamClient against the contract mock", () => {
     c.start();
     await waitFor(() => ofType("ready").length === 1 && ofType("snapshot_required").length === 1);
     expect(ofType("ready")[0]!.ready.resumed).toBe(false);
+    const revision = c.coverageRevision;
+    expect(c.markCatalogCurrent(revision)).toBe(!legacyMetadata);
+    expect(c.pollCoverage(ORGANIZATION).deviceStream).toBe(!legacyMetadata);
 
     m.pushStreamFrame({
       t: "catalog.changed",
@@ -99,6 +102,10 @@ describe("DeviceStreamClient against the contract mock", () => {
     m.closeStreams(1012, "restart");
     await waitFor(() => ofType("ready").length === 2);
     expect(ofType("ready")[1]!.ready.resumed).toBe(true);
-    expect(ofType("snapshot_required")).toHaveLength(1);
+    expect(ofType("snapshot_required")).toHaveLength(legacyMetadata ? 1 : 2);
+    expect(c.pollCoverage(ORGANIZATION).deviceStream).toBe(false);
+    expect(c.markCatalogCurrent(revision)).toBe(false);
+    expect(c.markCatalogCurrent(c.coverageRevision)).toBe(!legacyMetadata);
+    expect(c.pollCoverage(ORGANIZATION).deviceStream).toBe(!legacyMetadata);
   });
 });

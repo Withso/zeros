@@ -31,7 +31,7 @@ class FakeSocket implements DeviceStreamSocket {
   serve(frame: object) { this.handlers.message(JSON.stringify(frame)); }
 }
 
-function harness(options: { grants?: Array<string>; url?: string; base?: DeviceStreamResumeBase | null; fail?: unknown[] } = {}) {
+function harness(options: { grants?: Array<string>; url?: string; base?: DeviceStreamResumeBase | null; fail?: unknown[]; onEvent?: (event: DeviceStreamEvent) => void } = {}) {
   const sockets: FakeSocket[] = [];
   const events: DeviceStreamEvent[] = [];
   const grants = [...(options.grants ?? [])];
@@ -46,7 +46,9 @@ function harness(options: { grants?: Array<string>; url?: string; base?: DeviceS
     return socket;
   });
   const base = options.base === undefined ? { catalogVersion: 9, workspaces: { [WS]: 41 } } : options.base;
-  const client = new DeviceStreamClient({ openSession, createSocket, resumeBase: () => base, onEvent: event => events.push(event), random: () => 0.5 });
+  const client = new DeviceStreamClient({ openSession, createSocket, resumeBase: () => base, onEvent: event => {
+    events.push(event); options.onEvent?.(event);
+  }, random: () => 0.5 });
   const last = () => sockets[sockets.length - 1]!;
   /** After start() or a fired retry: let openSession resolve, then open the newest socket. */
   async function open() {
@@ -72,6 +74,110 @@ const changed = (seq: number, extra: Record<string, unknown> = {}) => ({
 describe("DeviceStreamClient", () => {
   beforeEach(() => vi.useFakeTimers({ now: 1_800_000_000_000 }));
   afterEach(() => vi.useRealTimers());
+
+  it("mixed_org_ready_suppresses_only_explicitly_covered_polls", async () => {
+    const h = harness(), a = uuid(1), b = uuid(2), c = uuid(3);
+    h.client.start();
+    await h.connectReady({ organizationFeatures: [
+      { organizationId: a, deviceStream: true, presence: true },
+      { organizationId: b, deviceStream: true, presence: false },
+      { organizationId: c, deviceStream: false, presence: false },
+    ] });
+    expect(h.client.pollCoverage(a)).toEqual({ deviceStream: false, presence: false });
+    expect(h.client.markCatalogCurrent(h.client.coverageRevision)).toBe(true);
+    expect(h.client.pollCoverage(a)).toEqual({ deviceStream: true, presence: true });
+    expect(h.client.pollCoverage(b)).toEqual({ deviceStream: true, presence: false });
+    expect(h.client.pollCoverage(c)).toEqual({ deviceStream: false, presence: false });
+    expect(h.client.pollCoverage(uuid(4))).toEqual({ deviceStream: false, presence: false });
+    h.client.stop();
+  });
+
+  it.each(["disconnect", "drain", "reset", "stop"] as const)(
+    "stream_reset_or_disconnect_restores_polling_until_coverage_is_current: %s", async reason => {
+      const h = harness(), organizationId = uuid(1);
+      const organizationFeatures = [{ organizationId, deviceStream: true, presence: true }];
+      h.client.start();
+      await h.connectReady({ organizationFeatures });
+      const oldRevision = h.client.coverageRevision, oldSocket = h.last();
+      expect(h.client.markCatalogCurrent(oldRevision)).toBe(true);
+      if (reason === "drain") {
+        oldSocket.serve({ t: "drain", d: { reconnectAfterMs: 100 } });
+        expect(h.client.pollCoverage(organizationId).deviceStream).toBe(false);
+        oldSocket.handlers.close(4503, "draining");
+      } else if (reason === "reset") oldSocket.serve({ t: "catalog.reset", d: { reason: "server_reset" } });
+      else if (reason === "stop") h.client.stop();
+      else oldSocket.handlers.close(1006, "");
+      expect(h.client.pollCoverage(organizationId)).toEqual({ deviceStream: false, presence: false });
+      expect(h.client.markCatalogCurrent(oldRevision)).toBe(false);
+      if (reason === "stop") h.client.start();
+      else h.client.reconnectNow();
+      await h.connectReady({ resumed: true, organizationFeatures });
+      expect(h.client.pollCoverage(organizationId).deviceStream).toBe(false);
+      expect(h.client.markCatalogCurrent(oldRevision)).toBe(false);
+      expect(h.client.markCatalogCurrent(h.client.coverageRevision)).toBe(true);
+      expect(h.client.pollCoverage(organizationId).deviceStream).toBe(true);
+      // Late frames from the retired connection cannot revive its proof.
+      oldSocket.serve({ t: "ready", d: { organizationFeatures: [] } });
+      expect(h.client.pollCoverage(organizationId).deviceStream).toBe(true);
+      expect(h.ofType("snapshot_required").at(-1)?.reason).toBe("coverage");
+      h.client.stop();
+    },
+  );
+
+  it("an older ready without coverage keeps all polling even after catalog catch-up", async () => {
+    const h = harness();
+    h.client.start();
+    await h.connectReady({ resumed: true });
+    expect(h.client.markCatalogCurrent(h.client.coverageRevision)).toBe(false);
+    expect(h.client.pollCoverage(uuid(1))).toEqual({ deviceStream: false, presence: false });
+    h.last().serve(changed(1));
+    expect(h.client.pollCoverage(uuid(1))).toEqual({ deviceStream: false, presence: false });
+    h.client.stop();
+  });
+
+  it.each([
+    null,
+    [{ organizationId: uuid(1), deviceStream: true }],
+    [{ organizationId: uuid(1), deviceStream: false, presence: true }],
+    [{ organizationId: "unknown", deviceStream: true, presence: true }],
+    Array.from({ length: 2 }, () => ({ organizationId: uuid(1), deviceStream: true, presence: true })),
+    Array.from({ length: 1_001 }, (_, n) => ({ organizationId: uuid(n), deviceStream: true, presence: true })),
+  ].map(value => [value]))("refuses malformed organization coverage before publishing ready (%#)", async organizationFeatures => {
+    const h = harness();
+    h.client.start();
+    await h.connectReady({ organizationFeatures });
+    expect(h.ofType("ready")).toEqual([]);
+    expect(h.last().closedWith?.reason).toBe("ready_invalid");
+    expect(h.client.pollCoverage(uuid(1))).toEqual({ deviceStream: false, presence: false });
+    h.client.stop();
+  });
+
+  it("folds the handshake reset while the fresh coverage snapshot is still pending", async () => {
+    const h = harness(), organizationId = uuid(1);
+    h.client.start();
+    await h.connectReady({ organizationFeatures: [{ organizationId, deviceStream: true, presence: true }] });
+    const revision = h.client.coverageRevision;
+    h.last().serve({ t: "catalog.reset", d: { reason: "resume_expired" } });
+    expect(h.client.coverageRevision).toBe(revision);
+    expect(h.client.markCatalogCurrent(revision)).toBe(true);
+    expect(h.client.pollCoverage(organizationId).deviceStream).toBe(true);
+    expect(h.last().closedWith).toBeNull();
+    h.client.stop();
+  });
+
+  it.each(["disconnect", "reset"])("honors a stop requested by the coverage consumer during %s", async reason => {
+    let stopOnCoverage = false;
+    const h = harness({ onEvent: event => { if (stopOnCoverage && event.type === "coverage") h.client.stop(); } });
+    h.client.start();
+    await h.connectReady({ organizationFeatures: [{ organizationId: uuid(1), deviceStream: true, presence: true }] });
+    h.client.markCatalogCurrent(h.client.coverageRevision);
+    stopOnCoverage = true;
+    if (reason === "reset") h.last().serve({ t: "catalog.reset", d: { reason: "server_reset" } });
+    else h.last().handlers.close(1006, "");
+    await tick(1_000);
+    expect(h.client.state).toEqual({ kind: "stopped", reason: "stopped" });
+    expect(h.openSession).toHaveBeenCalledOnce();
+  });
 
   it("sends hello with the contract range and ticket and asks for a snapshot when not resumed", async () => {
     const h = harness();

@@ -14,6 +14,7 @@ import type {
 } from "../generated/runtime-auth";
 import type {
   Capabilities,
+  CloudAgentBootScope,
   CatalogPage,
   ConnectRequest,
   ConnectResponse,
@@ -50,6 +51,14 @@ export const CAPABILITIES = {
   realtime: { token: TOKEN, expiresAt: NOW_ISO },
 } satisfies Capabilities;
 
+export const BOOT_SCOPE = {
+  organizationId: ORGANIZATION, workspaceId: WORKSPACE, generation: 7,
+  engineInstanceId: "44444444-4444-4444-8444-444444444444",
+  bootId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", writerEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  fundingOwnerUserId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", fundingOwnerEpoch: 1,
+} satisfies CloudAgentBootScope;
+export const RUNTIME_BINDING = { authorityEpoch: 3, bootScope: BOOT_SCOPE };
+
 export const DEVICE_STREAM_FIXTURES = {
   hello: {
     t: "hello",
@@ -71,6 +80,7 @@ export const DEVICE_STREAM_FIXTURES = {
       resumed: false,
       heartbeatIntervalMs: 20000,
       contract: 1,
+      organizationFeatures: [{ organizationId: ORGANIZATION, deviceStream: true, presence: true }],
     },
   },
   "catalog.changed": {
@@ -173,10 +183,14 @@ export const REST_FIXTURES = {
   } satisfies ConnectRequest,
   CapabilityGrant: { token: TOKEN, expiresAt: NOW_ISO },
   Capabilities: CAPABILITIES,
+  CloudAgentBootScope: BOOT_SCOPE,
+  RuntimeBinding: RUNTIME_BINDING,
   Route: { kind: "direct", url: "wss://vm.example.invalid/runtime", priority: 0 },
   ConnectResponse: {
     workspaceId: WORKSPACE,
     generation: 7,
+    engineInstanceId: BOOT_SCOPE.engineInstanceId,
+    runtimeBinding: RUNTIME_BINDING,
     capabilities: CAPABILITIES,
     routes: [
       { kind: "direct", url: "wss://vm.example.invalid/runtime", priority: 0 },

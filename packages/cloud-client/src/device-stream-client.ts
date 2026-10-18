@@ -38,6 +38,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PRESENCE_STATES: ReadonlySet<string> = new Set(["active", "idle", "away"]);
 
 export type DeviceStreamPresenceState = "active" | "idle" | "away";
+export type DeviceStreamPollCoverage = Readonly<{ deviceStream: boolean; presence: boolean }>;
+const NO_COVERAGE: DeviceStreamPollCoverage = Object.freeze({ deviceStream: false, presence: false });
 
 export interface DeviceStreamSocket {
   send(text: string): void;
@@ -87,6 +89,8 @@ export type DeviceStreamPayloadFrame = Extract<
 export type DeviceStreamEvent =
   | { type: "state"; state: DeviceStreamState }
   | { type: "ready"; ready: ServerReady["d"] }
+  /** Poll owners must reread their organization's coverage on this event. */
+  | { type: "coverage"; revision: number }
   /** Read the REST snapshot: "not_resumed" after a fresh stream, else the catalog.reset reason. */
   | { type: "snapshot_required"; reason: string }
   | { type: "frame"; frame: DeviceStreamPayloadFrame }
@@ -136,6 +140,9 @@ export class DeviceStreamClient {
   private attempt = 0;
   private sessionId: string | null = null;
   private cursor: string | null = null;
+  private organizationFeatures: ReadonlyMap<string, DeviceStreamPollCoverage> | null = null;
+  private catalogCurrent = false;
+  private coverageVersion = 0;
   private deadAfterMs = DEVICE_STREAM_DEAD_AFTER_MS;
   private readonly attachments = new Set<string>();
   private readonly presence = new Map<string, DeviceStreamPresenceState>();
@@ -151,6 +158,23 @@ export class DeviceStreamClient {
 
   get state(): DeviceStreamState { return this.stateValue; }
   get deviceSessionId(): string | null { return this.sessionId; }
+  /** Capture before reading the REST snapshot; a stale completion cannot restore coverage. */
+  get coverageRevision(): number { return this.coverageVersion; }
+
+  pollCoverage(organizationId: string): DeviceStreamPollCoverage {
+    return this.current?.ready && this.catalogCurrent
+      ? this.organizationFeatures?.get(organizationId) ?? NO_COVERAGE : NO_COVERAGE;
+  }
+
+  /** The host calls this only after applying its complete, race-fenced catalog snapshot. */
+  markCatalogCurrent(revision: number): boolean {
+    if (revision !== this.coverageVersion || !this.current?.ready || !this.organizationFeatures) return false;
+    if (!this.catalogCurrent) {
+      this.catalogCurrent = true;
+      this.emit({ type: "coverage", revision });
+    }
+    return true;
+  }
 
   start(): void {
     const kind = this.stateValue.kind;
@@ -230,7 +254,7 @@ export class DeviceStreamClient {
       });
     } catch {
       this.release(connection);
-      this.scheduleRetry({});
+      if (generation === this.generation) this.scheduleRetry({});
     }
   }
 
@@ -259,10 +283,18 @@ export class DeviceStreamClient {
     }
     switch (frame.t) {
       case "catalog.reset":
+        // A reset explaining an unresumed hello shares that hello's pending
+        // snapshot. Later resets need fresh ready metadata as well as data.
+        if (this.organizationFeatures && (!fold || this.catalogCurrent)) {
+          this.cursor = null;
+          this.abandon(connection, 1000, "catalog_reset");
+          return;
+        }
         if (!fold) this.emit({ type: "snapshot_required", reason: typeof frame.d.reason === "string" ? frame.d.reason : "server_reset" });
         return;
       case "drain":
         connection.drainAfterMs = drainDelay(frame.d.reconnectAfterMs);
+        this.clearCoverage();
         return;
       case "error":
         this.emit(errorEvent(frame.d));
@@ -290,13 +322,17 @@ export class DeviceStreamClient {
   }
 
   private ready(connection: Connection, d: ServerReady["d"]): void {
+    const coverage = parseOrganizationFeatures(d.organizationFeatures);
     if (typeof d.deviceSessionId !== "string" || typeof d.cursor !== "string" || d.cursor.length === 0 ||
-        typeof d.resumed !== "boolean") {
+        typeof d.resumed !== "boolean" || coverage === false) {
       this.abandon(connection, 1002, "ready_invalid");
       return;
     }
     connection.ready = true;
     connection.readyAtMs = Date.now();
+    this.organizationFeatures = coverage;
+    this.catalogCurrent = false;
+    this.coverageVersion += 1;
     this.sessionId = d.deviceSessionId;
     this.cursor = d.cursor;
     if (typeof d.heartbeatIntervalMs === "number" && Number.isFinite(d.heartbeatIntervalMs) && d.heartbeatIntervalMs > 0)
@@ -306,17 +342,20 @@ export class DeviceStreamClient {
     if (this.current !== connection) return;
     this.emit({ type: "ready", ready: d });
     if (this.current !== connection) return;
-    if (!d.resumed) {
-      connection.foldReset = true;
-      this.emit({ type: "snapshot_required", reason: "not_resumed" });
+    if (!d.resumed || coverage !== null) {
+      connection.foldReset = !d.resumed;
+      // A resume cursor describes the replay's start, not proof of catch-up.
+      this.emit({ type: "snapshot_required", reason: d.resumed ? "coverage" : "not_resumed" });
       if (this.current !== connection) return;
     }
     this.flush(connection);
   }
 
   private closed(connection: Connection, code: number): void {
+    const generation = this.generation;
     const stable = connection.readyAtMs !== null && Date.now() - connection.readyAtMs >= DEVICE_STREAM_STABLE_MS;
     this.release(connection);
+    if (generation !== this.generation) return;
     switch (code) {
       case CLOSE_DISABLED:
         this.forgetSession();
@@ -405,9 +444,10 @@ export class DeviceStreamClient {
   /** Closes a connection the client gave up on and retries; its late
    * events are ignored. */
   private abandon(connection: Connection, code: number, reason: string): void {
+    const generation = this.generation;
     this.release(connection);
     try { connection.socket?.close(code, reason); } catch { /* already closed */ }
-    this.scheduleRetry({});
+    if (generation === this.generation) this.scheduleRetry({});
   }
 
   private release(connection: Connection): void {
@@ -415,6 +455,14 @@ export class DeviceStreamClient {
     this.current = null;
     this.clearTimer("deadTimer");
     this.clearTimer("flushTimer");
+    this.clearCoverage();
+  }
+
+  private clearCoverage(): void {
+    this.organizationFeatures = null;
+    this.catalogCurrent = false;
+    this.coverageVersion += 1;
+    this.emit({ type: "coverage", revision: this.coverageVersion });
   }
 
   private forgetSession(): void {
@@ -554,4 +602,19 @@ function drainDelay(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.min(MAX_DRAIN_DELAY_MS, Math.max(0, Math.floor(value)))
     : null;
+}
+
+/** Optional absent coverage is an old server; malformed present coverage is not. */
+function parseOrganizationFeatures(value: unknown): ReadonlyMap<string, DeviceStreamPollCoverage> | null | false {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 1_000) return false;
+  const result = new Map<string, DeviceStreamPollCoverage>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+        typeof entry.organizationId !== "string" || !UUID.test(entry.organizationId) ||
+        typeof entry.deviceStream !== "boolean" || typeof entry.presence !== "boolean" ||
+        (entry.presence && !entry.deviceStream) || result.has(entry.organizationId)) return false;
+    result.set(entry.organizationId, Object.freeze({ deviceStream: entry.deviceStream, presence: entry.presence }));
+  }
+  return result;
 }

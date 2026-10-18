@@ -16,6 +16,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import {
   loadContractSchemas,
+  openApiComponentSchema,
   type JsonObject,
 } from "../src/contract-source";
 import type { WorkspaceDocument } from "../src/generated/rest";
@@ -38,18 +39,7 @@ function mockCapabilityToken(claims: JsonObject): string {
   const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
   return `${header}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.${"A".repeat(86)}`;
 }
-const MOCK_ENGINE_TOKEN = mockCapabilityToken({
-  aud: "zeros:engine",
-  wsp: DEFAULT_WORKSPACE.id,
-  jti: "MOCKjtiENGINE000000000",
-  exp: 1760000300,
-});
-const MOCK_REALTIME_TOKEN = mockCapabilityToken({
-  aud: "zeros:realtime",
-  wsp: DEFAULT_WORKSPACE.id,
-  jti: "MOCKjtiREALTIME0000000",
-  exp: 1760000300,
-});
+const ENGINE_INSTANCE_ID = "44444444-4444-4444-8444-444444444444";
 
 export interface ContractMockOptions {
   workspaces?: WorkspaceDocument[];
@@ -63,6 +53,10 @@ export interface ContractMockOptions {
   flaggedOrganizations?: string[];
   /** Workspaces a flagged organization answers 404 cloud_workspace_not_found for. */
   deletedWorkspaces?: string[];
+  /** Mixed-version fixture: omit the optional S3 1.3 metadata. */
+  legacyMetadata?: boolean;
+  deviceStreamOrganizations?: string[];
+  presenceOrganizations?: string[];
 }
 
 export interface ContractMock {
@@ -149,6 +143,9 @@ export async function createContractMock(
 
   const helloValid = frameValidator(schemas.deviceStream, "client.hello");
   const readyValid = frameValidator(schemas.deviceStream, "server.ready");
+  const connectAjv = new Ajv2020({ strict: true, strictTypes: false, strictRequired: false });
+  addFormats(connectAjv);
+  const connectValid = connectAjv.compile(openApiComponentSchema(schemas.openApi, "ConnectResponse"));
   const resetValid = frameValidator(schemas.deviceStream, "server.catalog.reset");
   const pongValid = frameValidator(schemas.deviceStream, "server.pong");
   const authValid = frameValidator(schemas.runtimeAuth, "client.auth");
@@ -171,9 +168,9 @@ export async function createContractMock(
     response.end(JSON.stringify(body));
   };
 
-  const capabilities = () => ({
-    engine: { token: MOCK_ENGINE_TOKEN, expiresAt: NOW_ISO },
-    realtime: { token: MOCK_REALTIME_TOKEN, expiresAt: NOW_ISO },
+  const capabilities = (workspaceId: string) => ({
+    engine: { token: mockCapabilityToken({ aud: "zeros:engine", wsp: workspaceId, jti: "MOCKjtiENGINE000000000", exp: 1760000300 }), expiresAt: NOW_ISO },
+    realtime: { token: mockCapabilityToken({ aud: "zeros:realtime", wsp: workspaceId, jti: "MOCKjtiREALTIME0000000", exp: 1760000300 }), expiresAt: NOW_ISO },
   });
 
   function handleRest(
@@ -244,21 +241,32 @@ export async function createContractMock(
         json(response, 404, errorBody("cloud_workspace_not_found", "Cloud workspace not found."));
         return;
       }
-      json(response, 201, {
-        workspaceId: workspaces[0]!.id,
+      const workspaceId = match?.[2] ?? workspaces[0]!.id;
+      const answer = {
+        workspaceId,
         generation: 7,
-        capabilities: capabilities(),
+        engineInstanceId: ENGINE_INSTANCE_ID,
+        ...(options.legacyMetadata ? {} : { runtimeBinding: {
+          authorityEpoch: 3,
+          bootScope: { organizationId: organization ?? workspaces[0]!.organizationId, workspaceId, generation: 7,
+            engineInstanceId: ENGINE_INSTANCE_ID, bootId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            writerEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", fundingOwnerUserId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", fundingOwnerEpoch: 1 },
+        } }),
+        capabilities: capabilities(workspaceId),
         routes: [
           { kind: "direct", url: `${wsBase}/runtime/direct`, priority: 0 },
           { kind: "relay", url: `${wsBase}/runtime/relay`, priority: 1 },
         ],
         renewAt: NOW_ISO,
         relayHedgeMs: 400,
-      }, { "cache-control": "no-store" });
+      };
+      if (!connectValid(answer)) throw new Error("contract mock would send an invalid ConnectResponse");
+      json(response, 201, answer, { "cache-control": "no-store" });
       return;
     }
     if (request.method === "POST" && path.endsWith("/runtime/capabilities")) {
-      json(response, 201, { capabilities: capabilities(), renewAt: NOW_ISO }, { "cache-control": "no-store" });
+      const workspaceId = /^\/v1\/organizations\/[^/]+\/cloud-workspaces\/([^/]+)\//.exec(path)?.[1] ?? workspaces[0]!.id;
+      json(response, 201, { capabilities: capabilities(workspaceId), renewAt: NOW_ISO }, { "cache-control": "no-store" });
       return;
     }
     if (lifecycleMatch && ["POST", "PATCH", "DELETE"].includes(request.method ?? "")) {
@@ -337,6 +345,11 @@ export async function createContractMock(
             resumed,
             heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
             contract: SUPPORTED_CONTRACT,
+            ...(options.legacyMetadata ? {} : { organizationFeatures: [...new Set(workspaces.map(workspace => workspace.organizationId))]
+              .sort().slice(0, 1_000).map(organizationId => {
+                const deviceStream = options.deviceStreamOrganizations?.includes(organizationId) ?? true;
+                return { organizationId, deviceStream, presence: deviceStream && (options.presenceOrganizations?.includes(organizationId) ?? true) };
+              }) }),
           },
         }, readyValid);
         if (d.resume && !resumed)

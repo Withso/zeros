@@ -77,10 +77,27 @@ export type Route = {
   priority: number;
 };
 
+export type CloudAgentBootScope = {
+  organizationId: string;
+  workspaceId: string;
+  generation: number;
+  engineInstanceId: string;
+  bootId: string;
+  writerEpoch: string;
+  fundingOwnerUserId: string;
+  fundingOwnerEpoch: number;
+};
+
+export type RuntimeBinding = {
+  authorityEpoch: number;
+  bootScope: CloudAgentBootScope;
+};
+
 export type ConnectResponse = {
   workspaceId: Uuid;
   generation: number;
   engineInstanceId?: Uuid;
+  runtimeBinding?: RuntimeBinding;
   capabilities: Capabilities;
   routes: Route[];
   renewAt: string;
@@ -131,5 +148,7 @@ export type RestSchemaName =
   | "CapabilityGrant"
   | "Capabilities"
   | "Route"
+  | "CloudAgentBootScope"
+  | "RuntimeBinding"
   | "ConnectResponse"
   | "Jwks";
