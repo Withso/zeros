@@ -13,4 +13,13 @@ describe("configured cloud actor relay CSP", () => {
     );
     expect(connect.split(/\s+/)).not.toContain("wss:");
   });
+
+  it("admits authenticated direct provider sockets without opening arbitrary WSS hosts", () => {
+    const sources = buildElectronRendererCsp("https://api.example.test")
+      .split(";").find(value => value.trim().startsWith("connect-src "))!.split(/\s+/);
+    expect(sources).toContain("wss://*.on.boat.dev");
+    expect(sources).toContain("wss://*.zeros.build");
+    expect(sources).not.toContain("wss:");
+    expect(sources).not.toContain("https://*.on.boat.dev");
+  });
 });

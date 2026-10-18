@@ -49,7 +49,7 @@ describe("qualified cloud runtime connection target", () => {
   it("uses an exact Electron loopback tunnel and a subprotocol bearer", () => {
     const now = 1_800_000_000_000;
     const target = parseRuntimeConnectionTarget(cloudTarget(now), now);
-    if (target.kind !== "cloud") throw new Error("expected cloud target");
+    if (target.kind !== "cloud" || target.channel !== "electron-ssh-tunnel") throw new Error("expected cloud tunnel target");
     expect(target).toEqual(cloudTarget(now));
     const protocols = cloudRuntimeWebSocketProtocols(target.cloudToken);
     expect(protocols[0]).toBe("zeros-v1");

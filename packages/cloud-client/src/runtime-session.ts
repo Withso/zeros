@@ -59,6 +59,9 @@ export interface RuntimeSessionOptions {
   clientSessionId: string;
   /** The request's exact target, supplied by the host's admission boundary. */
   target?: RuntimeBindingTarget;
+  /** Cancels pending route attempts. Once connected, the owner closes the
+   * returned RuntimeConnection; the race removes its signal listener. */
+  signal?: AbortSignal;
   createSocket: RuntimeSocketFactory;
   /** Ed25519 signature with the device key over the UTF-8 bytes of `message`,
    * base64url without padding (86 characters). */
@@ -234,11 +237,12 @@ export class RuntimeConnection {
   }
 
   onMessage(listener: (text: string) => void): () => void {
+    if (this.isClosed) return () => {};
     this.listeners.add(listener);
     const queued = this.queued;
     if (queued) {
       this.queued = undefined;
-      for (const text of queued) listener(text);
+      for (const text of queued) { if (this.isClosed) break; listener(text); }
     }
     return () => {
       this.listeners.delete(listener);
@@ -275,12 +279,15 @@ export class RuntimeConnection {
 
   close(code = 1000, reason = "client_closed"): void {
     if (this.isClosed) return;
-    this.isClosed = true;
+    // Owner retirement is synchronous even if an adapter never delivers a
+    // final close callback. It must settle renewal and release queued frames.
+    this.socketClosed(code, reason);
     this.socket.close(code, reason);
   }
 
   /** @internal Handles one text message from the socket; connectRuntime calls it. */
   receive(text: string): void {
+    if (this.isClosed) return;
     if (!isRuntimeHandshakeFrame(parseJson(text))) {
       this.deliver(text);
       return;
@@ -304,6 +311,8 @@ export class RuntimeConnection {
     if (this.closeRecord) return;
     this.closeRecord = { code, reason };
     this.isClosed = true;
+    this.queued = undefined;
+    this.listeners.clear();
     const renewal = this.renewal;
     if (renewal) this.failRenewal(renewal, "runtime connection closed");
     const listeners = [...this.closeListeners];
@@ -340,7 +349,8 @@ export class RuntimeConnection {
     }
     const frame: ClientAuthRenew = { t: "auth.renew", d: { capability: token, proof } };
     this.socket.send(JSON.stringify(frame));
-    renewal.timer = setTimeout(() => this.failRenewal(renewal, "renew_timeout"), RUNTIME_RENEW_TIMEOUT_MS);
+    if (this.renewal === renewal)
+      renewal.timer = setTimeout(() => this.failRenewal(renewal, "renew_timeout"), RUNTIME_RENEW_TIMEOUT_MS);
   }
 
   private failRenewal(renewal: PendingRenewal, message: string): void {
@@ -464,6 +474,17 @@ class RouteRace {
   private readonly proofs: ProofSource;
   private settled = false;
   private hedgeTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly cancel = () => {
+    if (this.settled) return;
+    this.settled = true;
+    this.detachSignal();
+    clearTimeout(this.hedgeTimer);
+    for (const attempt of this.attempts) {
+      attempt.phase = "ended"; clearTimeout(attempt.timer);
+      try { attempt.socket.close(1000, "cancelled"); } catch { /* retired regardless of adapter state */ }
+    }
+    this.reject(new RuntimeConnectError("runtime_cancelled", []));
+  };
 
   constructor(
     private readonly connect: ConnectResponse,
@@ -480,6 +501,8 @@ class RouteRace {
   }
 
   start(): void {
+    if (this.options.signal?.aborted) { this.cancel(); return; }
+    this.options.signal?.addEventListener("abort", this.cancel, { once: true });
     this.startAttempt(0);
     if (this.routes.length > 1 && !this.settled && this.attempts.length === 1) {
       this.hedgeTimer = setTimeout(() => this.startAttempt(1), relayHedgeDelayMs(this.connect.relayHedgeMs));
@@ -501,6 +524,7 @@ class RouteRace {
         message: (text) => this.onMessage(index, text),
         close: (code, reason) => this.onClose(index, code, reason),
       });
+      if (this.options.signal?.aborted) attempt.socket.close(1000, "cancelled");
     } catch {
       // For example a browser WebSocket refusing the URL.
       this.fail(attempt, { route: attempt.route, closeCode: null, reason: "socket_failed" });
@@ -631,6 +655,7 @@ class RouteRace {
   /** Ends the race with `winner`: every other open attempt closes as superseded. */
   private settle(winner: Attempt): void {
     this.settled = true;
+    this.detachSignal();
     clearTimeout(this.hedgeTimer);
     for (const other of this.attempts) {
       if (other === winner || other.phase === "won" || other.phase === "ended") continue;
@@ -656,8 +681,11 @@ class RouteRace {
     if (this.attempts.length < this.routes.length) return;
     if (!this.attempts.every((item) => item.phase === "ended")) return;
     this.settled = true;
+    this.detachSignal();
     clearTimeout(this.hedgeTimer);
     const failures = this.attempts.flatMap((item) => (item.failure ? [item.failure] : []));
     this.reject(new RuntimeConnectError(connectErrorCode(failures), failures));
   }
+
+  private detachSignal(): void { this.options.signal?.removeEventListener("abort", this.cancel); }
 }

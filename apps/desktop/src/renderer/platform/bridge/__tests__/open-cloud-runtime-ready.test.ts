@@ -15,6 +15,8 @@ vi.mock("../../../state/cloud-workspace-wake", () => ({ wakeCloudWorkspace: vi.f
 vi.mock("../../cloud-workspace-access", () => ({ openCloudWorkspaceRuntime: mocks.admission,
   refreshCloudWorkspaceRuntime: mocks.refresh, closeCloudWorkspaceRuntime: mocks.close,
   publishCloudWorkspacePortForwardingRuntime: mocks.publish }));
+vi.mock("../../cloud-sdk-runtime", () => ({ openCloudSdkWorkspaceRuntime: mocks.admission, refreshCloudSdkWorkspaceRuntime: vi.fn(),
+  fallbackCloudSdkWorkspaceRuntime: vi.fn(), signCloudSdkRuntimeProof: vi.fn(), renewCloudSdkRuntimeCapabilities: vi.fn() }));
 vi.mock("../../cloud-workspaces", () => ({ cloudAgentGrant: vi.fn() }));
 vi.mock("../workspace-runtime-client", () => ({ WorkspaceRuntimeClient: class {} }));
 vi.mock("../../observability/analytics/agent-events", () => ({ trackGitOp: vi.fn() }));

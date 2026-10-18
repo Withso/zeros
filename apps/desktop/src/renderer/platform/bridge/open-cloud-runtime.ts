@@ -1,9 +1,11 @@
 import {
   closeCloudWorkspaceRuntime,
-  openCloudWorkspaceRuntime,
   refreshCloudWorkspaceRuntime,
   publishCloudWorkspacePortForwardingRuntime,
 } from "../cloud-workspace-access";
+import { openCloudSdkWorkspaceRuntime, refreshCloudSdkWorkspaceRuntime, fallbackCloudSdkWorkspaceRuntime } from "../cloud-sdk-runtime";
+import { CloudSdkSocket } from "./cloud-sdk-socket";
+import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import {
   acceptCloudEngineWorkspace,
   cloudCatalogGeneration,
@@ -51,9 +53,9 @@ export async function openCloudRuntime(
       throw new Error("Cloud workspace generation or availability changed while connecting");
   };
   assertCurrent();
-  // The catalog is only a readiness hint. Every attachment mints a new
-  // one-use, server-authorized admission; none is held in a renderer cache.
-  const descriptor = await openCloudWorkspaceRuntime(target);
+  // Native probes the exact cloud key. Only an explicit disabled/absent route
+  // or old metadata selects the existing admission; denials never fall back.
+  const descriptor = await openCloudSdkWorkspaceRuntime(target);
   try {
     assertCurrent();
     if (descriptor.organizationId !== target.organizationId || descriptor.workspaceId !== target.workspaceId ||
@@ -64,18 +66,42 @@ export async function openCloudRuntime(
     throw error;
   }
   let latestDescriptor = descriptor;
+  let released = false;
+  let wasReady = false;
+  let legacyFlight: Promise<void> | undefined;
   const client = new RuntimeClient(descriptor, {
     refreshCloudConnectionTarget: async (previous) => {
-      const next = await refreshCloudWorkspaceRuntime(previous);
+      const next = previous.channel === "sdk-websocket" ? await refreshCloudSdkWorkspaceRuntime(previous) : await refreshCloudWorkspaceRuntime(previous);
       if (next.kind !== "cloud") throw new Error("Cloud runtime identity changed.");
+      try { assertCurrent(); if (released) throw new Error("Cloud connection cancelled"); }
+      catch (error) { void closeCloudWorkspaceRuntime(next.runtimeId).catch(() => {}); throw error; }
       latestDescriptor = next;
       return next;
     },
+    createCloudSdkSocket: (previous, createSocket) => new CloudSdkSocket(previous, createSocket, () => {
+      if (wasReady || released || previous.runtimeId !== latestDescriptor.runtimeId || previous.connectionSequence !== latestDescriptor.connectionSequence)
+        return Promise.reject(new CloudRuntimeAccessError({ code: "cloud_workspace_sdk_legacy_required", status: 409 }));
+      if (legacyFlight) return legacyFlight;
+      legacyFlight = (async () => {
+        const legacy = await fallbackCloudSdkWorkspaceRuntime(previous);
+        try {
+          assertCurrent(); if (released) throw new Error("Cloud connection cancelled");
+          const boot = "bootScope" in legacy ? legacy.bootScope : undefined;
+          if (legacy.organizationId !== previous.organizationId || legacy.workspaceId !== previous.workspaceId ||
+              legacy.generation !== previous.generation || legacy.authorityEpoch !== previous.authorityEpoch ||
+              legacy.engineInstanceId !== previous.engineInstanceId || !boot ||
+              Object.entries(previous.bootScope).some(([key, value]) => boot[key as keyof typeof boot] !== value))
+            throw new CloudRuntimeAccessError({ code: "cloud_workspace_access_superseded", status: 409 });
+          latestDescriptor = legacy;
+          await client.setConnectionTarget(legacy);
+        } catch (error) { void closeCloudWorkspaceRuntime(legacy.runtimeId).catch(() => {}); throw error; }
+      })();
+      return legacyFlight;
+    }),
   });
   let agents: CloudAgentConnection | undefined;
   let events: CloudEventReader | undefined;
   const listeners: Array<() => void> = [];
-  let released = false;
   const release = () => {
     if (released) return;
     released = true;
@@ -84,7 +110,7 @@ export async function openCloudRuntime(
     agents?.dispose();
     void publishCloudWorkspacePortForwardingRuntime(latestDescriptor, false).catch(() => {});
     client.dispose();
-    void closeCloudWorkspaceRuntime(descriptor.runtimeId).catch(() => {});
+    void closeCloudWorkspaceRuntime(latestDescriptor.runtimeId).catch(() => {});
   };
   const checkConnection = () => {
     assertCurrent();
@@ -100,6 +126,7 @@ export async function openCloudRuntime(
     checkConnection();
     await client.waitUntilReady({ signal: options?.signal });
     checkConnection();
+    wasReady = true;
     listeners.push(installCloudGithubNative(client, { ...target, generation: descriptor.generation }));
     const workspaces = await bridgeWorkspaceList(client, {});
     checkConnection();
@@ -169,7 +196,7 @@ export async function openCloudRuntime(
           };
         },
       },
-      runtimeId: descriptor.runtimeId,
+      runtimeId: latestDescriptor.runtimeId,
       generation: descriptor.generation,
       async prepareForRun(signal, reason, wakeIntent) {
         const current = await refreshCloudWorkspace(target);

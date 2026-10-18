@@ -9,7 +9,9 @@ import { CloudWorkspaceAccessClient } from "./cloud-workspace-access-client";
 import { CloudWorkspaceNativeSshRuntime, CloudWorkspaceSshRuntime } from "./cloud-workspace-ssh-runtime";
 import { CloudRuntimeServiceClient } from "./cloud-runtime-service-client";
 import { CloudRuntimeServiceTransport } from "./cloud-runtime-service-transport";
-import { ensureCloudAccessDeviceForMain, readCloudAccessDeviceForMain, signCloudEngineAdmissionForMain, signCloudRuntimeServiceForMain, signCloudPreviewForMain } from "./cloud-replica-host-runtime";
+import { CloudSdkRuntimeBroker } from "./cloud-sdk-runtime-broker";
+import { ensureCloudAccessDeviceForMain, readCloudAccessDeviceForMain, signCloudEngineAdmissionForMain, signCloudRuntimeServiceForMain, signCloudPreviewForMain,
+  signCloudSdkDeviceRequestForMain, signCloudSdkCapabilityProofForMain } from "./cloud-replica-host-runtime";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
 import {
   getValidAccessTokenForMain,
@@ -153,6 +155,20 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
     return ssh;
   };
   const current = new CloudWorkspaceAccessBroker({
+    createSdkRuntime: () => new CloudSdkRuntimeBroker({
+      baseUrl: controlPlaneBaseUrl(), appVersion: app.getVersion(),
+      platform: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux",
+      enabled: cloudWorkspaceDesktopCapabilityEnabled,
+      getAccountSessionKey: () => readForwardingSession()?.sessionKey ?? null,
+      getAccessToken: getValidAccessTokenForMain,
+      ensureDevice: ensureCloudAccessDeviceForMain, readDevice: readCloudAccessDeviceForMain,
+      signRequest: signCloudSdkDeviceRequestForMain, signProof: signCloudSdkCapabilityProofForMain,
+      fetch: controlPlaneFetch, allowInsecureLoopback: IS_DEV,
+      onRetired: runtimeIds => {
+        if (forwarding?.broker === current) for (const id of runtimeIds) forwarding.coordinator.retireRuntime(id);
+        emitEvent("cloud-workspace-access-retired", { runtimeIds });
+      },
+    }),
     nativeServices: {
       api: new CloudRuntimeServiceClient({ baseUrl: controlPlaneBaseUrl(), fetch: controlPlaneFetch,
         sign: signCloudRuntimeServiceForMain, allowInsecureLoopback: IS_DEV }),

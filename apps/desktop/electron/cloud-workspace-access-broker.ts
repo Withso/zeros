@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import type { CloudRuntimeServiceAccess, CloudRuntimeServiceApi } from "./cloud-runtime-service-client";
 import type { CloudServiceHandle, CloudServiceTunnel } from "./cloud-runtime-service-transport";
 import type { CloudNativeSshHandle } from "./cloud-workspace-ssh-runtime";
+import type { CloudSdkRuntimeBroker } from "./cloud-sdk-runtime-broker";
+import type { CloudSdkRuntimeTarget } from "../shared/cloud-sdk-contract";
 
 import {
   CloudWorkspaceAccessClientError,
@@ -200,6 +202,8 @@ function safeFrameName(value: string): string {
 }
 
 export class CloudWorkspaceAccessBroker {
+  private readonly createSdkRuntime?: () => CloudSdkRuntimeBroker;
+  private sdkRuntime: CloudSdkRuntimeBroker | null = null;
   private readonly nativeServices?: NativeServices;
   private readonly nativeLeases = new Map<string, NativeLease>();
   private readonly nativeAuthorityId = randomUUID();
@@ -244,6 +248,7 @@ export class CloudWorkspaceAccessBroker {
   private disposed = false;
 
   constructor(input: {
+    createSdkRuntime?: () => CloudSdkRuntimeBroker;
     nativeServices?: NativeServices;
     api: CloudWorkspaceAccessBrokerApi;
     getAccessToken: () => Promise<string | null>;
@@ -263,6 +268,7 @@ export class CloudWorkspaceAccessBroker {
     ) => Promise<CloudWorkspaceTunnelHandle>;
     disposeLocalAccess?: () => Promise<void>;
   }) {
+    this.createSdkRuntime = input.createSdkRuntime;
     this.nativeServices = input.nativeServices;
     this.api = input.api;
     this.getAccessToken = input.getAccessToken;
@@ -357,7 +363,7 @@ export class CloudWorkspaceAccessBroker {
       );
     }
     this.pruneExpired();
-    if (this.leases.size + this.nativeLeases.size + this.actorRuntimes.size + this.pendingAccess >= MAX_ACTIVE_ACCESS) {
+    if (this.leases.size + this.nativeLeases.size + this.actorRuntimes.size + (this.sdkRuntime?.size ?? 0) + this.pendingAccess >= MAX_ACTIVE_ACCESS) {
       throw new CloudWorkspaceAccessClientError(
         429,
         "cloud_access_local_limit",
@@ -1027,6 +1033,10 @@ export class CloudWorkspaceAccessBroker {
   /** Admission describes authority, not connectivity. The main coordinator
    * separately requires the renderer's exact connected-handle publication. */
   assertRuntime(input: CloudWorkspaceRuntimeIdentity): void {
+    if (this.sdkRuntime?.owns(input.runtimeId)) {
+      if (!this.hasCurrentSession()) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+      this.sdkRuntime.assertRuntime(input); return;
+    }
     const actor = this.actorRuntimes.get(input.runtimeId);
     const accessId = this.runtimeById.get(input.runtimeId), legacy = accessId ? this.leases.get(accessId) : undefined;
     const current = actor && !actor.closing ? actor.target : legacy?.runtime ? {
@@ -1285,6 +1295,46 @@ export class CloudWorkspaceAccessBroker {
     }
   }
 
+  /** Explicit SDK-capable callers only. The existing runtime open remains the
+   * default until the renderer installs its S3 transport adapter. */
+  async openSdkRuntime(input: AccessTarget): Promise<CloudWorkspaceRuntimeConnectionTarget | CloudSdkRuntimeTarget> {
+    if (!this.createSdkRuntime) return this.openRuntime(input);
+    const release = this.reserveCapacity();
+    try {
+      const sdk = this.sdkRuntime ??= this.createSdkRuntime();
+      const target = await sdk.open(input);
+      if (!this.hasCurrentSession()) throw new CloudWorkspaceAccessClientError(401, "signed_out", "Cloud workspace access authority has ended");
+      if (target) return target;
+    } finally { release(); }
+    // A legacy/disabled response created no SDK handle. Mint exactly one
+    // existing admission, with all of its boot checks and retirement fences.
+    return this.openRuntime(input);
+  }
+
+  refreshSdkRuntime(input: CloudWorkspaceRuntimeIdentity): Promise<CloudSdkRuntimeTarget> {
+    this.assertRuntime(input);
+    if (!this.sdkRuntime?.owns(input.runtimeId)) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    return this.sdkRuntime.refresh(input);
+  }
+
+  async fallbackSdkRuntime(input: CloudWorkspaceRuntimeIdentity): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+    this.assertRuntime(input);
+    if (!this.sdkRuntime?.owns(input.runtimeId)) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    this.sdkRuntime.markLegacy(input);
+    return this.openRuntime({ organizationId: input.organizationId, workspaceId: input.workspaceId });
+  }
+
+  signSdkRuntimeProof(input: Parameters<CloudSdkRuntimeBroker["signCapabilityProof"]>[0]): Promise<string> {
+    if (!this.hasCurrentSession() || !this.sdkRuntime) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    return this.sdkRuntime.signCapabilityProof(input);
+  }
+
+  renewSdkRuntimeCapabilities(input: CloudWorkspaceRuntimeIdentity) {
+    this.assertRuntime(input);
+    if (!this.sdkRuntime?.owns(input.runtimeId)) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    return this.sdkRuntime.renewCapabilities(input);
+  }
+
   /** Reconcile the exact reconnect boundary before minting. Concurrent and
    * retried requests share one published descriptor, even if IPC lost it. */
   async refreshRuntime(input: CloudWorkspaceRuntimeIdentity,
@@ -1459,6 +1509,7 @@ export class CloudWorkspaceAccessBroker {
   }
 
   async closeRuntime(runtimeId: string): Promise<boolean> {
+    if (this.sdkRuntime?.owns(runtimeId)) return this.sdkRuntime.close(runtimeId);
     this.pruneExpired();
     this.runtimeRefreshReceipts.delete(runtimeId);
     const actor=this.actorRuntimes.get(runtimeId);
@@ -1542,6 +1593,7 @@ export class CloudWorkspaceAccessBroker {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.sdkRuntime?.dispose();
     this.runtimeRefreshReceipts.clear();
     this.controlPlanePreferences.clear();
     const nativeCleanup = Promise.allSettled([...this.nativeLeases.values()].map(lease => this.retireNativeLease(lease)));

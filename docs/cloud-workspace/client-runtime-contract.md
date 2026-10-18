@@ -858,6 +858,39 @@ is no caller URL, query bearer or reused grant. Electron freezes the descriptor;
 the renderer requires both authenticated actor confirmation and matching
 `ENGINE_READY.cloudLocalCommands` before sending queued work.
 
+S3-capable desktop callers use the separate native `cloud_workspace_sdk_runtime_*`
+IPC surface. Electron owns the device session, exact-workspace rollout decision,
+runtime ID and connection sequence. Its broker validates S3 1.3 boot metadata,
+capability scope and route placement before returning a connection descriptor.
+Missing metadata or an explicitly disabled/absent S3 route selects the existing
+admission once; malformed metadata, denied access and transient failures never
+select a weaker path. The existing runtime-open IPC keeps its legacy behavior.
+
+Device private keys remain in native storage. Proof signing accepts only closed
+fields for a currently admitted native handle and a capability issued by that
+broker. Renewal and signing recheck account incarnation, device/key and exact
+connection identity after asynchronous work; retirement aborts pending network
+requests. Renderer account changes also fence late IPC delivery. Runtime grants
+and the bounded rollout cache remain in memory, and account retirement clears
+them. Local Personal and organization-local routing constructs neither an SDK
+client nor a device stream. S3 adoption still requires the renderer's matching
+`ENGINE_READY.cloudLocalCommands` gate before commands or forwarding become ready.
+
+The cloud peer selects that SDK IPC and adapts the authenticated SDK connection
+to the existing renderer RPC client. A direct/relay race reaching `auth.ok` does
+not establish command or forwarding readiness: the actor handshake, exact boot
+binding and physical workspace root are still required. Renewal runs in band
+without changing the native runtime identity or publishing a disconnect. A
+reconnect obtains the next native connection sequence and repeats those checks.
+Cancellation closes both pending routes and fences late signing and admission.
+
+An initial `zeros-v1` negotiation selects one native legacy admission with the
+same boot binding, before the peer is published. A published peer never silently
+changes its native runtime ID; a later legacy-required result retires it so a
+fresh open can select the legacy path. Server flag discovery remains native and
+per workspace. Catalog and presence polling are unchanged by transport adoption;
+per-organization device-stream coverage and rollout evidence gate their removal.
+
 Admission failures carry a closed `error.phase`: `grant`, `provider_endpoint`,
 `provider_host_key`, or `engine_reach`. The current public admission route only
 performs the first two; it does not claim to have reached the engine or checked

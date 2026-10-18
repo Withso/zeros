@@ -3,9 +3,12 @@ import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { cloudBridgeCloseDiagnostic } from "@zeros/protocol/cloud-bridge-diagnostics";
-import { RuntimeConnectionTargetSchema, type CloudRuntimeConnectionTarget, type RuntimeConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
+import { RuntimeConnectionTargetSchema, type CloudRuntimeConnectionTarget as LegacyCloudRuntimeConnectionTarget,
+  type RuntimeConnectionTarget as ProtocolRuntimeConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
+import { CloudSdkRuntimeTargetSchema, type CloudSdkRuntimeTarget } from "../../../../shared/cloud-sdk-contract";
 import { CloudAgentBootConversationSchema, type CloudAgentBootConversation, type CloudAgentBootScope } from "@zeros/protocol/cloud-agent-bootstrap";
-export type { CloudRuntimeConnectionTarget, RuntimeConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
+export type CloudRuntimeConnectionTarget = LegacyCloudRuntimeConnectionTarget | CloudSdkRuntimeTarget;
+export type RuntimeConnectionTarget = ProtocolRuntimeConnectionTarget | CloudSdkRuntimeTarget;
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import {
   MAX_BRIDGE_FRAME_BYTES,
@@ -96,6 +99,21 @@ export interface RuntimeClientEnvironment {
   logger: Pick<Console, "warn" | "error">;
 }
 
+/** Only the cloud SDK adapts this port. Native WebSockets still satisfy it,
+ * leaving the Local construction and transport path unchanged. */
+export interface RuntimeTransportSocket {
+  readonly readyState: number;
+  onopen: ((event: Event) => unknown) | null;
+  onmessage: ((event: MessageEvent) => unknown) | null;
+  onclose: ((event: CloseEvent) => unknown) | null;
+  onerror: ((event: Event) => unknown) | null;
+  send(text: string): void;
+  close(code?: number, reason?: string): void;
+  readonly cloudFailure?: CloudRuntimeAccessError;
+}
+export type CloudSdkSocketFactory = (target: CloudSdkRuntimeTarget,
+  createWebSocket: (url: string, protocols: string[]) => WebSocket) => RuntimeTransportSocket;
+
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
 const CLOUD_RUNTIME_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -132,7 +150,7 @@ export type RuntimeExecutionIdentity =
     };
 
 function cloudRuntimeBootScope(target: RuntimeConnectionTarget): CloudAgentBootScope | undefined {
-  return target.kind === "cloud" && (target.channel === "direct-provider-websocket" || target.channel === "control-plane-websocket")
+  return target.kind === "cloud" && (target.channel === "direct-provider-websocket" || target.channel === "control-plane-websocket" || target.channel === "sdk-websocket")
     ? target.bootScope : undefined;
 }
 
@@ -182,7 +200,8 @@ export function parseRuntimeConnectionTarget(
   now: number,
   environment: Pick<RuntimeClientEnvironment, "controlPlaneOrigin" | "allowHttpLoopback">,
 ): RuntimeConnectionTarget {
-  const parsed = RuntimeConnectionTargetSchema.safeParse(raw);
+  const parsed = raw && typeof raw === "object" && (raw as { channel?: unknown }).channel === "sdk-websocket"
+    ? CloudSdkRuntimeTargetSchema.safeParse(raw) : RuntimeConnectionTargetSchema.safeParse(raw);
   if (!parsed.success) throw new Error("cloud runtime connection target is invalid");
   const target = parsed.data;
   if (target.kind === "local") return Object.freeze(target);
@@ -378,7 +397,7 @@ function assertCloudRuntimeNotRetired(target: RuntimeConnectionTarget): void {
 
 export class RuntimeClient {
   private readonly environment: RuntimeClientEnvironment;
-  private ws: WebSocket | null = null;
+  private ws: RuntimeTransportSocket | null = null;
   /** A WebSocket that's been created but hasn't fired onopen yet.
    *  Tracking this prevents `connect()` from racing with itself: HMR
    *  reloads or rapid status churn used to stack orphan sockets, each
@@ -386,7 +405,7 @@ export class RuntimeClient {
    *  every client, so 3 orphans = every chunk arriving at the renderer
    *  3 times = one bubble with the response text concatenated 3x.
    *  See coalesce logic in use-agent-session.tsx:appendText. */
-  private pendingWs: WebSocket | null = null;
+  private pendingWs: RuntimeTransportSocket | null = null;
   private handlers = new Map<string, Set<(msg: BridgeMessage) => void>>();
   private pendingRequests = new Map<string, PendingRequest>();
   private queuedRequests: QueuedRequest[] = [];
@@ -414,6 +433,8 @@ export class RuntimeClient {
     (identity: RuntimeExecutionIdentity) => void
   >();
   private readonly refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
+  private readonly createCloudSdkSocket?: CloudSdkSocketFactory;
+  private sdkRevocationRetried = false;
   private cloudTargetNeedsRefresh = false;
   private cloudTargetRefreshPromise: Promise<boolean> | null = null;
   private cloudRefreshFailures = 0;
@@ -426,6 +447,7 @@ export class RuntimeClient {
     options: {
       environment: RuntimeClientEnvironment;
       refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
+      createCloudSdkSocket?: CloudSdkSocketFactory;
     },
   ) {
     this.environment = options.environment;
@@ -433,6 +455,7 @@ export class RuntimeClient {
     assertCloudRuntimeNotRetired(parsedTarget);
     this.connectionTarget = parsedTarget;
     this.refreshCloudConnectionTarget = options.refreshCloudConnectionTarget;
+    this.createCloudSdkSocket = options.createCloudSdkSocket;
     this.armConnectionTargetExpiry();
   }
 
@@ -541,16 +564,20 @@ export class RuntimeClient {
     }
 
     const targetEpoch = this.connectionTargetEpoch;
-    let wsUrl: string;
+    let wsUrl = "";
     let protocols: string[] | undefined;
+    let sdkTarget: CloudSdkRuntimeTarget | undefined;
     if (this.connectionTarget.kind === "cloud") {
       const target = this.connectionTarget;
       if (target.expiresAt <= Date.now()) {
         this.expireConnectionTarget(this.connectionTargetEpoch);
         return;
       }
-      wsUrl = target.url;
-      protocols = cloudRuntimeWebSocketProtocols(target.cloudToken);
+      if (target.channel === "sdk-websocket") sdkTarget = target;
+      else {
+        wsUrl = target.url;
+        protocols = cloudRuntimeWebSocketProtocols(target.cloudToken);
+      }
     } else {
       let port: number;
       let token: string;
@@ -580,9 +607,12 @@ export class RuntimeClient {
     this.setStatus("connecting");
     this.cloudDiagnostic("connect", { attempt: this.reconnectAttempts });
 
-    let ws: WebSocket;
+    let ws: RuntimeTransportSocket;
     try {
-      ws = this.environment.createWebSocket(wsUrl, protocols);
+      if (sdkTarget) {
+        if (!this.createCloudSdkSocket) throw new Error("Cloud SDK transport is not installed");
+        ws = this.createCloudSdkSocket(sdkTarget, (url, offered) => this.environment.createWebSocket(url, offered));
+      } else ws = this.environment.createWebSocket(wsUrl, protocols);
     } catch {
       this.setStatus("disconnected");
       this.scheduleReconnect();
@@ -646,7 +676,11 @@ export class RuntimeClient {
       if (this.ws === ws) this.ws = null;
       if (this.connectionTarget.kind === "cloud") {
         const category = cloudBridgeCloseDiagnostic(event?.code, event?.reason).class;
-        if (["authority_revoked", "account_binding_required", "actor_forbidden"].includes(category))
+        if (this.connectionTarget.channel === "sdk-websocket" && ws.cloudFailure) {
+          const failure = ws.cloudFailure;
+          if (failure.code === "capability_revoked" && !this.sdkRevocationRetried) this.sdkRevocationRetried = true;
+          else if (failure.category !== "transient" || ++this.cloudConnectFailures >= 5) this.rejectCloudConnection(failure);
+        } else if (["authority_revoked", "account_binding_required", "actor_forbidden"].includes(category))
           this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_access_revoked", status: 403 }));
         else if (category === "protocol_mismatch")
           this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_client_update_required", status: 409 }));
@@ -694,6 +728,7 @@ export class RuntimeClient {
     this.cloudTargetNeedsRefresh = false;
     this.cloudRefreshFailures = 0;
     this.cloudConnectFailures = 0;
+    this.sdkRevocationRetried = false;
     this.armConnectionTargetExpiry();
     this._rejected = false;
     this.lastRejection = null;
@@ -1093,6 +1128,7 @@ export class RuntimeClient {
       this.handshakeReady = true;
       this.clearDirectReadyTimer();
       this.cloudConnectFailures = 0;
+      this.sdkRevocationRetried = false;
       this._engineConnected = true;
       this.reconnectAttempts = 0;
       this.cloudDiagnostic("ready", {});
@@ -1489,7 +1525,9 @@ export class RuntimeClient {
           candidate.connectionSequence !== current.connectionSequence + 1 ||
           previousBoot && (candidate.authorityEpoch !== current.authorityEpoch || !nextBoot ||
             Object.entries(previousBoot).some(([key, value]) => nextBoot[key as keyof CloudAgentBootScope] !== value) ||
-            candidate.cloudToken === current.cloudToken)
+            (candidate.channel === "sdk-websocket" || current.channel === "sdk-websocket"
+              ? candidate.channel !== current.channel
+              : candidate.cloudToken === current.cloudToken))
         ) {
           throw new CloudRuntimeAccessError({ code: "cloud_workspace_access_superseded", status: 409 });
         }

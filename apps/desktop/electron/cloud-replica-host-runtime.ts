@@ -1,3 +1,7 @@
+import { createPrivateKey, sign } from "node:crypto";
+import { capabilityProofMessage, type CapabilityProofFields, type DeviceProofRequest } from "@zeros/cloud-client";
+import { CloudSdkCapabilityProofFieldsSchema, CloudSdkDeviceRequestSchema } from "../shared/cloud-sdk-contract";
+import { CAPABILITY_POP_TIMESTAMP_LEEWAY_MS } from "@zeros/protocol/cloud-capabilities";
 import {
   cloudDesktopDeviceLabel,
   cloudDesktopPlatform,
@@ -185,6 +189,33 @@ export class CloudAccessDeviceAuthority {
     return this.signAccess(accessToken, "preview.issue", payload);
   }
 
+  /** Main-owned S3 requests only. Never expose a generic signing action over IPC. */
+  async signSdkDeviceRequest(accessToken: string, request: DeviceProofRequest) {
+    const parsed = CloudSdkDeviceRequestSchema.safeParse(request);
+    if (!parsed.success) throw new Error("Cloud SDK device request is invalid");
+    return this.signAccess(accessToken, parsed.data.action, parsed.data.payload);
+  }
+
+  /** The SDK broker first binds these fields to a capability it issued. This
+   * method additionally binds signing to the current registered device key. */
+  async signSdkCapabilityProof(accessToken: string, expectedDevice: { deviceId: string; keyVersion: number }, fields: CapabilityProofFields) {
+    const parsed = CloudSdkCapabilityProofFieldsSchema.safeParse(fields);
+    if (!parsed.success || Math.abs(parsed.data.timestampMs - Date.now()) > CAPABILITY_POP_TIMESTAMP_LEEWAY_MS)
+      throw new Error("Cloud SDK capability proof is invalid");
+    const device = await this.ensure();
+    const session = workosAccountSession(await this.dependencies.getSession());
+    if (!this.dependencies.capabilityEnabled() || !session || session.accountId !== device.accountUserId || session.accessToken !== accessToken)
+      throw new Error("Cloud device admission session changed");
+    const envelope = this.dependencies.store.load(session.accountId);
+    if (!envelope || envelope.active.deviceId !== device.deviceId || envelope.active.deviceId !== expectedDevice.deviceId ||
+        envelope.active.keyVersion !== expectedDevice.keyVersion)
+      throw new Error("Cloud device admission identity changed");
+    if (Math.abs(parsed.data.timestampMs - Date.now()) > CAPABILITY_POP_TIMESTAMP_LEEWAY_MS) throw new Error("Cloud SDK capability proof is invalid");
+    const { publicKey, privateKey } = envelope.active;
+    const key = createPrivateKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: publicKey, d: privateKey } });
+    return sign(null, Buffer.from(capabilityProofMessage(parsed.data), "utf8"), key).toString("base64url");
+  }
+
   private async signAccess(accessToken: string, action: string, payload: unknown) {
     const device=await this.ensure();
     const session=workosAccountSession(await this.dependencies.getSession());
@@ -323,6 +354,16 @@ export async function signCloudRuntimeServiceForMain(accessToken: string, payloa
 export async function signCloudPreviewForMain(accessToken: string, payload: import("./cloud-workspace-access-client").CloudPreviewProofPayload) {
   await ensureCloudAccessDeviceForMain();
   return accessDeviceAuthority!.signPreview(accessToken, payload);
+}
+
+export async function signCloudSdkDeviceRequestForMain(accessToken: string, request: DeviceProofRequest) {
+  await ensureCloudAccessDeviceForMain();
+  return accessDeviceAuthority!.signSdkDeviceRequest(accessToken, request);
+}
+
+export async function signCloudSdkCapabilityProofForMain(accessToken: string, device: { deviceId: string; keyVersion: number }, fields: CapabilityProofFields) {
+  await ensureCloudAccessDeviceForMain();
+  return accessDeviceAuthority!.signSdkCapabilityProof(accessToken, device, fields);
 }
 
 /** Build the private stdin seed. Auth0 compatibility sessions deliberately

@@ -11,6 +11,8 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
   subscribeCloudWorkspaces: (fn: () => void) => { mocks.listeners.add(fn); return () => mocks.listeners.delete(fn); },
 }));
 vi.mock("../../cloud-workspace-access", () => ({ openCloudWorkspaceRuntime: mocks.admission, closeCloudWorkspaceRuntime: mocks.close, refreshCloudWorkspaceRuntime: mocks.refreshAdmission, publishCloudWorkspacePortForwardingRuntime: mocks.publish }));
+vi.mock("../../cloud-sdk-runtime", () => ({ openCloudSdkWorkspaceRuntime: mocks.admission, refreshCloudSdkWorkspaceRuntime: vi.fn(),
+  fallbackCloudSdkWorkspaceRuntime: vi.fn(), signCloudSdkRuntimeProof: vi.fn(), renewCloudSdkRuntimeCapabilities: vi.fn() }));
 vi.mock("../workspace-bridge", () => ({ bridgeWorkspaceList: mocks.list }));
 vi.mock("../ws-client", () => ({ RuntimeClient: class { constructor(_descriptor: unknown, options: typeof mocks.clientOptions) { mocks.clientOptions = options; } get status() { return mocks.status; } connect = mocks.connect; waitUntilReady = mocks.ready; dispose = mocks.dispose; on = () => () => {}; onStatusChange(fn: (status: string) => void) { mocks.statuses.add(fn); return () => mocks.statuses.delete(fn); } } }));
 vi.mock("../cloud-agent-connection", () => ({ CloudAgentConnection: class { dispose() {} async refreshAttachments() {} } }));
