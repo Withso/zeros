@@ -28,7 +28,7 @@ export function attestationFixture(version = 4, observations: { availableCPUs?: 
     "runtime-layout.json", "cloud-runtime-root.mjs", "cloud-runtime-profile.mjs", "cloud-engine-launcher.mjs",
     "cloud-engine-view.mjs", "cloud-engine-cgroup.mjs", "ensure-cloud-worker-supervisor.mjs",
     "cgroup-resources.mjs", "cloud-resource-admission.mjs", "image-build-contract.mjs",
-    "cloud-setup-process.mjs", "cloud-setup-timings.mjs", "consume-cloud-admission.mjs", "install-cloud-preview-links.mjs",
+    "cloud-setup-process.mjs", "cloud-setup-timings.mjs", "cloud-setup-performance.mjs", "consume-cloud-admission.mjs", "install-cloud-preview-links.mjs",
     "install-cloud-github-credential.mjs", "cloud-github-refresh-request.mjs", "cloud-git-askpass.mjs",
     "cloud-worker-supervisor.mjs", "setup-cloud-workspace.mjs", "attest-cloud-worker.mjs",
     "zeros-cloud-engine.apparmor",

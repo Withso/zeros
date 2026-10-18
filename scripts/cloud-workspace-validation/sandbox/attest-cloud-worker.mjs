@@ -2,6 +2,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { parseSetupTimings, setupTimingClock } from "./cloud-setup-timings.mjs";
+import { selectSetupPerformance, unwrapSetupPerformanceDiagnostic, wrapSetupPerformanceDiagnostic } from "./cloud-setup-performance.mjs";
 import * as filesystem from "node:fs";
 import { cloudComputerHostRepository } from "./cloud-computer-checkout.mjs";
 import {
@@ -343,8 +344,8 @@ function verifyV4Helpers(runtime) {
   return { trusted, deploymentTrusted };
 }
 
-function runV4Probe(runtime, helper, timeout, check, entry = "--qualify") {
-  const result = spawnSync(runtime.node, [helper, entry], { encoding: "utf8", timeout, maxBuffer: MAX_OUTPUT,
+function runV4Probe(runtime, helper, timeout, check, entry = "--qualify", collectPerformance = false) {
+  const result = spawnSync(runtime.node, [helper, entry, ...(collectPerformance ? ["--performance"] : [])], { encoding: "utf8", timeout, maxBuffer: MAX_OUTPUT,
     env: { PATH: `${runtime.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: "/root" } });
   requireCloudV4Check(result.error?.code !== "ETIMEDOUT", "timeout");
   requireCloudV4Check(!result.signal, "process_signal");
@@ -433,6 +434,11 @@ export function validV4Diagnostic(value) {
 }
 
 function attestV4CloudWorker() {
+  const args = process.argv.slice(2);
+  const collectPerformance = args.at(-1) === "--performance";
+  if (collectPerformance) args.pop();
+  let performance;
+  const withPerformance = diagnostic => collectPerformance ? wrapSetupPerformanceDiagnostic(diagnostic, performance) : diagnostic;
   let stage = "validate_input";
   const timings = setupTimingClock("attester_preflight");
   let finished;
@@ -442,14 +448,14 @@ function attestV4CloudWorker() {
     stage = "lock";
     next(stage);
     requireCloudV4AdmissionDirectory();
-    if (process.argv[2] !== LOCKED_ARGUMENT) {
-      requireCloudV4Check(process.argv.length === 2, "input_schema");
+    if (args[0] !== LOCKED_ARGUMENT) {
+      requireCloudV4Check(args.length === 0, "input_schema");
       const token = path.join(ADMISSION_DIRECTORY, `.attest-lock-${process.pid}-${randomBytes(8).toString("hex")}`);
       let child;
       try {
         writeFileSync(token, `${randomBytes(32).toString("hex")}\n`, { mode: 0o600, flag: "wx" });
         child = spawnSync("/usr/bin/flock", ["--no-fork", "--nonblock", "--conflict-exit-code", "75", ENGINE_LOCK,
-          process.execPath, realpathSync(fileURLToPath(import.meta.url)), LOCKED_ARGUMENT, token],
+          process.execPath, realpathSync(fileURLToPath(import.meta.url)), LOCKED_ARGUMENT, token, ...(collectPerformance ? ["--performance"] : [])],
         { encoding: "utf8", timeout: 300_000, maxBuffer: MAX_OUTPUT, env: { PATH: "/usr/bin:/bin", HOME: "/root" } });
       } finally { rmSync(token, { force: true }); }
       requireCloudV4Check(child.error?.code !== "ETIMEDOUT", "timeout");
@@ -457,7 +463,9 @@ function attestV4CloudWorker() {
       requireCloudV4Check(child.status !== 75, "lock_busy");
       requireCloudV4Check(!child.error, "diagnostic_missing");
       const lines = (child.stdout ?? "").trim().split("\n");
-      const diagnostic = attemptV4("diagnostic_missing", () => JSON.parse(lines.at(-1)));
+      const envelope = unwrapSetupPerformanceDiagnostic(attemptV4("diagnostic_missing", () => JSON.parse(lines.at(-1))));
+      const diagnostic = envelope.diagnostic;
+      performance = selectSetupPerformance(envelope.performance, ["attester_preflight"]);
       requireCloudV4Check(validV4Diagnostic(diagnostic) && child.status === diagnostic.exitCode, "diagnostic_missing");
       if (diagnostic.ok) {
         requireCloudV4Check(lines.length === 2, "diagnostic_missing");
@@ -465,15 +473,15 @@ function attestV4CloudWorker() {
         requireCloudV4Check(report?.version === 2 && report.boundary === "workspace-vm" && report.profile === "zeros-cloud-worker-v4" && report.qualified === true, "diagnostic_missing");
         process.stdout.write(`${JSON.stringify(report)}\n`);
       }
-      process.stdout.write(`${JSON.stringify(diagnostic)}\n`);
+      process.stdout.write(`${JSON.stringify(withPerformance(diagnostic))}\n`);
       process.exitCode = diagnostic.exitCode;
       return;
     }
-    requireCloudV4Check(process.argv.length === 4 && typeof process.argv[3] === "string" &&
-      path.dirname(process.argv[3]) === ADMISSION_DIRECTORY, "input_schema");
-    const token = readCloudV4File(process.argv[3], 65, "input_schema", 0o600);
+    requireCloudV4Check(args.length === 2 && typeof args[1] === "string" &&
+      path.dirname(args[1]) === ADMISSION_DIRECTORY, "input_schema");
+    const token = readCloudV4File(args[1], 65, "input_schema", 0o600);
     requireCloudV4Check(hexDigest(token.toString("utf8").trim()), "input_schema");
-    unlinkSync(process.argv[3]);
+    unlinkSync(args[1]);
     // Hold the engine lock before invalidating any prior unconsumed authority.
     rmSync(ADMISSION_PROOF, { force: true });
     stage = "verify_tree";
@@ -484,7 +492,8 @@ function attestV4CloudWorker() {
     next(stage);
     // The launcher admits a root monitor only inside the original host; setup
     // and this attester run outside it, like the runtime self-test.
-    const qualification = runV4Probe(runtime, runtime.helpers.launcher, 180_000, "engine_lifecycle", "--host-qualify");
+    const qualification = runV4Probe(runtime, runtime.helpers.launcher, 180_000, "engine_lifecycle", "--host-qualify", collectPerformance);
+    if (collectPerformance) performance = selectSetupPerformance(qualification?.performance, ["attester_preflight"]);
     requireCloudV4Check(qualification?.identity?.hostUid === 10003 && qualification?.identity?.namespaceUid === 10003, "uid_map");
     requireCloudV4Check(qualification?.identity?.qualified === true && qualification.identity.noNewPrivs === 1 &&
       qualification.identity.seccompMode === 2 && exactKeys(qualification.identity.capabilities, ["effective", "permitted", "inheritable", "bounding", "ambient"]) &&
@@ -528,10 +537,10 @@ function attestV4CloudWorker() {
     });
     process.stdout.write(serialized);
     finished?.();
-    process.stdout.write(`${JSON.stringify({ ...cloudV4Diagnostic(null, "done"), timings: timings.snapshot() })}\n`);
+    process.stdout.write(`${JSON.stringify(withPerformance({ ...cloudV4Diagnostic(null, "done"), timings: timings.snapshot() }))}\n`);
   } catch (error) {
     finished?.("failed");
-    process.stdout.write(`${JSON.stringify({ ...cloudV4Diagnostic(error ?? {}, stage), timings: timings.snapshot() })}\n`);
+    process.stdout.write(`${JSON.stringify(withPerformance({ ...cloudV4Diagnostic(error ?? {}, stage), timings: timings.snapshot() }))}\n`);
     process.exitCode = 1;
   }
 }

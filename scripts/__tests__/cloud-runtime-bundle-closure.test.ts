@@ -488,7 +488,7 @@ describe("pnpm runtime closure", () => {
         .sort(),
     ).toEqual([...names, "runtime-update-adapter.py", "cloud-resident-workload.mjs",
       "prepare-cloud-image-files.mjs", "prepare-cloud-git.mjs", "publish-cloud-workload-custody.mjs", "cloud-resource-budget.mjs",
-      "cloud-resident-control.mjs"].sort());
+      "cloud-resident-control.mjs", "cloud-setup-performance.mjs"].sort());
     expect(RUNTIME_HELPERS).toContainEqual({
       source: "scripts/cloud-workspace-validation/sandbox/cloud-resource-budget.mjs",
       target: "lib/zeros/cloud-resource-budget.mjs", optional: false,

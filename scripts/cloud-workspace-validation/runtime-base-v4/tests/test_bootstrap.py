@@ -1021,6 +1021,98 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("stop"), 2)
         self.assertEqual(self.host.calls.count("start"), 2)
 
+    def test_real_setup_stream_negotiates_installer_metrics_without_changing_helper_bytes_or_status(self):
+        self.value.update(purpose="workspace-setup", setup="e30")
+        original_run = b.run_setup
+        host = b.SystemHost()
+        for code in (0, 37):
+            with self.subTest(code=code):
+                result = {"version": 6, "audience": "zeros-cloud-workspace-setup-result-v1", "outcome": "ready" if code == 0 else "error",
+                          "timings": {"version": 1, "clocks": []}, "observations": {"version": 1},
+                          "performance": {"version": 1, "truncated": False, "groups": []}}
+                result.update({"readiness": {"fixture": "private-canary"}} if code == 0 else
+                              {"code": "image_contract_invalid", "diagnostic": {"version": 1, "phase": "image_launch"}})
+                raw = json.dumps(result).encode()
+                program = "import sys; assert sys.stdin.read()=='e30'; sys.stderr.write('private-stderr'); sys.stdout.buffer.write(" + repr(raw) + "); sys.exit(" + str(code) + ")"
+                def run(_command, payload, **kwargs):
+                    return original_run([sys.executable, "-I", "-c", program], payload, timeout=5, **kwargs)
+                def setup(root, payload):
+                    status = host.setup(root, payload)
+                    self.host.setup_performance = host.setup_performance
+                    return status
+                with mock.patch.object(b, "run_setup", side_effect=run), mock.patch.object(self.host, "setup", side_effect=setup):
+                    actual, output = self.cli()
+                self.assertEqual(actual, code)
+                self.assertTrue(output.startswith(raw + b"\n"))
+                envelope = json.loads(output.splitlines()[-1])
+                self.assertEqual(envelope["schema"], "zeros.diagnostic/v2")
+                self.assertEqual(envelope["diagnostic"]["exitCode"], code)
+                self.assertEqual(envelope["diagnostic"]["failedChecks"], [] if code == 0 else ["setup_exit"])
+                self.assertNotIn("private-canary", json.dumps(envelope))
+                self.assertNotIn(b"private-stderr", output)
+                stages = {entry["stage"]: entry for entry in envelope["performance"]["groups"][0]["stages"]}
+                self.assertEqual(stages["helper"]["lastOutcome"], "passed" if code == 0 else "failed")
+                self.assertEqual(stages["total"]["lastOutcome"], "passed" if code == 0 else "failed")
+
+    def test_optional_setup_observation_does_not_accept_partial_foreign_or_ambiguous_envelopes(self):
+        ready = {"version": 6, "audience": "zeros-cloud-workspace-setup-result-v1", "outcome": "ready", "readiness": {},
+                 "timings": {}, "observations": {}, "performance": {}}
+        complete = json.dumps(ready).encode()
+        variants = [b"", complete[:-1], complete + b"\n{}", complete.replace(b'"version": 6', b'"version": 5'),
+                    json.dumps({**ready, "audience": "foreign"}).encode(),
+                    json.dumps({key: value for key, value in ready.items() if key != "performance"}).encode(),
+                    json.dumps({**ready, "extra": "private-canary"}).encode(),
+                    b'{"version":6,' + complete[1:]]
+        for raw in variants:
+            with self.subTest(raw=raw):
+                observer = mock.Mock()
+                program = "import sys; sys.stdin.read(); sys.stdout.buffer.write(" + repr(raw) + ")"
+                with binary_stdout() as output:
+                    code, checks = b.run_setup([sys.executable, "-I", "-c", program], "e30", timeout=5, on_performance=observer)
+                self.assertEqual((code, checks), (0, []))
+                self.assertEqual(output.getvalue(), raw + (b"\n" if raw and not raw.endswith(b"\n") else b""))
+                observer.assert_not_called()
+        program = "import sys; sys.stdin.read(); sys.stdout.buffer.write(" + repr(complete) + ")"
+        observer = mock.Mock(side_effect=RuntimeError("private-canary"))
+        with binary_stdout():
+            self.assertEqual(b.run_setup([sys.executable, "-I", "-c", program], "e30", timeout=5, on_performance=observer), (0, []))
+        observer.assert_called_once_with(True)
+
+    def test_setup_negotiation_never_carries_over_to_the_next_host_call(self):
+        host = b.SystemHost()
+        def run(_command, _payload, *, on_performance):
+            on_performance(True)
+            return 0, []
+        with mock.patch.object(b, "run_setup", side_effect=run):
+            self.assertEqual(host.setup("/fixture", "e30"), (0, []))
+        self.assertTrue(host.setup_performance)
+        with mock.patch.object(b, "run_setup", return_value=(0, [])):
+            self.assertEqual(host.setup("/fixture", "e30"), (0, []))
+        self.assertFalse(host.setup_performance)
+
+    def test_installer_metrics_stay_bounded_and_preserve_clock_errors_and_signals(self):
+        metrics = b.InstallerPerformance()
+        clock = [0.0]
+        with mock.patch.object(b.time, "monotonic", side_effect=lambda: clock[0]):
+            for _ in range(5000):
+                finish = metrics.start("cache_verify")
+                clock[0] += 3601
+                finish()
+                finish("failed")
+        snapshot = metrics.snapshot()
+        self.assertTrue(snapshot["truncated"])
+        self.assertEqual(snapshot["groups"][0]["stages"], [{"stage": "cache_verify", "count": 4096,
+                         "totalMs": 3600000, "maxMs": 3600000, "lastOutcome": "passed"}])
+        self.assertLessEqual(len(b.packed(snapshot)), 8192)
+        with mock.patch.object(b.time, "monotonic", side_effect=RuntimeError("private-canary")):
+            with metrics.measure("total"):
+                pass
+        interrupted = b.Failure("process_signal", code=143)
+        with mock.patch.object(b.time, "monotonic", side_effect=interrupted), self.assertRaises(b.Failure) as caught:
+            with metrics.measure("total"):
+                self.fail("A signal must still interrupt installation")
+        self.assertIs(caught.exception, interrupted)
+
     def test_input_is_strict_bounded_and_has_no_extra_authority(self):
         for change, check in [
             (lambda v: v.update(command="private-canary"), "input_schema"),

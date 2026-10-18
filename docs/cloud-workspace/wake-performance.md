@@ -276,7 +276,7 @@ Never subtract timestamps from independent machine clock epochs.
 V4 Boat setup also retains a separate optional `performance` version 1 object
 in the existing `setup_succeeded`, `setup_claim_failed` and
 `setup_publish_rejected` audit subjects. It is internal evidence, outside the
-helper wire, attestation proof, public setup-evidence response and immutable
+attestation proof, public setup-evidence response and immutable
 `stage_timings` contract. Collection adds no database query, provider request,
 retry, timer or background loop. The existing run/generation/execution-fence
 checks protect persistence; late callbacks cannot update a closed execution.
@@ -303,8 +303,58 @@ provider response, output, command, path, endpoint or credential is retained.
 Keep enclosing totals and nested stages separate. The second status probe does
 not explain the earlier pre-admission wait, even though both call the same
 helper. These terminal observations can be missing after an abrupt worker exit;
-absence is not a zero-duration measurement. They do not yet isolate runtime
-cache verification, host restart or qualification subprobes inside the VM.
+absence is not a zero-duration measurement. Older runtimes and bases leave
+cache verification, host restart and qualification subprobes unseparated.
+
+### Negotiated guest performance
+
+Deploy the CP performance readers to every executing replica before qualifying
+and activating guest producers. The materials endpoint and setup executor can
+run on different replicas; a new materials response alone does not establish
+that an older executor can read a new result.
+
+The helper requests `X-Zeros-Setup-Performance: 1` on its existing materials
+request. It selects the new v6 result only when the response acknowledges that
+header and the existing timing and observation headers. Otherwise it retains
+v1/v4/v5 output. The material document and immutable stage-clock schema stay
+unchanged. No additional request is made. The CP accepts only helper and
+attester groups from that result; the guest cannot overwrite CP groups.
+
+The `helper` group records Node/module startup (`process_prelude`), request
+parsing, materials redemption, and total request execution through cleanup.
+Request parsing begins after stdin framing; installer `helper` time encloses
+the entire subprocess. `attester_preflight` and `attester_launch` record module
+loading, context creation, identity, actor tools, capture, human services, final
+census and context closure. The root launcher separately records view creation,
+spawn/placement barrier, whole-tree retirement and stdout drain. Inner metrics
+cannot replace root observations. Probes remain serial with the same assertions,
+engine lock, retirement and final runtime/binding verification.
+
+The fixed attester `--performance` option wraps its unchanged v1 completion
+diagnostic in `zeros.diagnostic/v2`. The proof report bytes and their hash are
+unchanged. Callers that do not select measurement keep v1 diagnostics. Invalid
+optional measurements are omitted independently of the existing proof checks.
+
+A newly qualified protected base can add the `installer` group: base validation,
+install-lock acquisition, persistence, full cached-tree verification, download,
+archive verification, extraction, switch, host stop/start, helper and total.
+Switch includes host retirement; host start includes its existing verification.
+Archive verification coalesces byte-digest and archive/manifest scan passes.
+These enclosing and nested durations must not be added as separate elapsed time.
+Cache hashing, lock order, host restart, failure codes and cleanup stay intact.
+
+The base keeps the same strict install input and streams helper stdout unchanged.
+It captures at most the existing 256 KiB output bound in memory and enables its
+v2 diagnostic only after a complete expected-audience helper v6 result. This is
+negotiation evidence, never readiness proof; the CP still checks the original
+result. Old helpers and failures before negotiation retain v1 installer output.
+An old base can forward a new helper's v6 result with its own v1 diagnostic.
+No body, path, command, credential or exception text enters the timer object.
+
+Runtime helpers require exact runtime qualification. Installer changes require
+a new protected base identity and its matching qualification before rollout;
+editing the repository does not update an installed base. These observations
+establish no live latency improvement until matched create/wake evidence exists.
 
 ## Closed attester refusals
 
