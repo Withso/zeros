@@ -9,6 +9,7 @@ import {
 } from "./cloud-workspace-key";
 import { runSessionId } from "@zeros/protocol/run-actions";
 import { turnIdentitySchema } from "@zeros/protocol/changes-history";
+import { DESIGN_CATALOG_READ_OPERATION, designCatalogReadSchema, designCatalogReplySchema } from "@zeros/protocol/design-catalog";
 
 export type WireRecord = Record<string, unknown>;
 export interface CloudRuntimeScope extends CloudWorkspaceTarget {
@@ -200,6 +201,9 @@ export function cloudOutgoing(
   const out = mapFields(scope, message, "out");
   if (message.params) {
     const original = record(message.params);
+    if (message.op === DESIGN_CATALOG_READ_OPERATION &&
+        designCatalogReadSchema.parse(original).workspaceId !== cloudWorkspaceKey(scope))
+      throw new Error("Design catalog belongs to another cloud workspace.");
     const params = mapFields(scope, original, "out");
     if (["design.context.inspect", "design.context.capture"].includes(String(message.op)) && original.reference)
       params.reference = cloudDesignReference(scope, original.reference, "out");
@@ -282,6 +286,14 @@ export function cloudIncoming(
     return { ...out, result: sample };
   }
   if (message.result && typeof message.result === "object") {
+    if (message.op === DESIGN_CATALOG_READ_OPERATION) {
+      const catalog = designCatalogReplySchema.parse(message.result);
+      if (catalog.status === "unavailable") return { ...out, result: catalog };
+      if (catalog.owner.workspaceId !== scope.engineWorkspaceId || catalog.owner.placement !== "cloud" ||
+          catalog.owner.organizationId !== scope.organizationId)
+        throw new Error("Design catalog belongs to another cloud workspace.");
+      return { ...out, result: { ...catalog, owner: { ...catalog.owner, workspaceId: cloudWorkspaceKey(scope) } } };
+    }
     const result = mapFields(scope, record(message.result), "in");
     if (typeof message.op === "string" &&
         (message.op.startsWith("design.") || message.op === "workspace.setMode")) {

@@ -9,6 +9,9 @@ import type { CodeReviewAgentScope } from "../agents/code-review-tools";
 import { isGitReviewOperation } from "@zeros/protocol/git-review-actions";
 import { handleGitReviewOperation } from "../git/review-actions";
 import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
+import { DesignCatalogReader, DesignCatalogError, type DesignCatalogAdmission } from "../design/catalog";
+import { inspectDesignCatalog, readDesignCatalogMetadata } from "../design/catalog-storage";
+import type { DesignCatalogRead, DesignCatalogOwner } from "@zeros/protocol/design-catalog";
 import {
   reqStr,
   reqNum,
@@ -1348,7 +1351,9 @@ interface DesignTerritoryTransitionTarget {
 
 export class WorkspaceService {
   private readonly resourceUsageSampler = new WorkspaceResourceUsageSampler();
+  private readonly catalogReader = new DesignCatalogReader();
   private readonly designRouteHost: DesignWorkspaceRouteHost = {
+    readDesignCatalog: (input, remote, admission, cloud) => this.readDesignCatalog(input, remote, admission, cloud),
     resolveDesignWorkspace: (workspaceId, remote) =>
       this.resolveDesignWorkspace(workspaceId, remote),
     resolveReadCwd: (workspaceId, remote) =>
@@ -2293,6 +2298,30 @@ export class WorkspaceService {
     }
   }
 
+  retireDesignCatalog(connectionId: string): void {
+    this.catalogReader.retire(connectionId);
+  }
+
+  private readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission, cloud: boolean) {
+    const owner = (workspace: Workspace): DesignCatalogOwner => {
+      if (cloud && !admission.cloudOrganizationId) throw new DesignCatalogError("authority-lost");
+      return { workspaceId: workspace.id, directoryId: input.directoryId,
+        placement: cloud ? "cloud" : "local", organizationId: cloud ? admission.cloudOrganizationId! : workspace.organizationId ?? null };
+    };
+    return this.catalogReader.read(input, admission, {
+      open: () => this.withDesignReadWorkspace(input.workspaceId, remote, async ({ workspace, root, designDirectory }) => {
+        const metadata = await readDesignCatalogMetadata(root, designDirectory);
+        if (metadata.directoryId !== input.directoryId) throw new DesignCatalogError("stale");
+        return { ...metadata, owner: owner(workspace) };
+      }),
+      validate: snapshot => this.withDesignReadWorkspace(input.workspaceId, remote, async ({ workspace, root, designDirectory }) => {
+        const current = inspectDesignCatalog(root, designDirectory);
+        return current.layout.manifest.id === input.directoryId && current.binding === snapshot.binding &&
+          current.revision === snapshot.revision && JSON.stringify(owner(workspace)) === JSON.stringify(snapshot.owner);
+      }),
+    });
+  }
+
   /** Canonicalize a pty/agent cwd token to its managed workspace id. The token
    *  may be a workspace ID (the web's opaque form) OR a real host PATH — the
    *  relaxed redaction sends real paths to trusted devices, and the desktop
@@ -2497,6 +2526,7 @@ export class WorkspaceService {
       hostLocalResources?: boolean;
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
+      catalogAdmission?: DesignCatalogAdmission;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
@@ -2691,6 +2721,7 @@ export class WorkspaceService {
         hostLocalResources,
         ...(humanActor ? { actor: humanActor, primaryRepositoryRoot: this.root } : {}),
         ...(cloudFiles ? { cloudFiles } : {}),
+        ...(opts.catalogAdmission ? { catalogAdmission: opts.catalogAdmission, cloudCatalog: cloudDesign } : {}),
       });
       if (op === "design.asset.upload") {
         if (!cloudDesign || !cloudFiles) throw new Error("Image upload requires the admitted cloud workspace.");

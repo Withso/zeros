@@ -2187,6 +2187,77 @@ a process-wide disk quota across all workspaces, or a guarantee that a deleted
 cloud workspace can be recovered. Source parsing remains engine work; the
 admission limits are not OS CPU/RSS/GPU quotas.
 
+### Negotiated metadata-only catalog reads
+
+`design.catalog.read.v1` is an additive engine capability for the distinct
+`design.catalog.read` operation. It is **not** a large-directory admission
+capability: production canvas admission and stacking bounds remain 256.
+Authored canvas v1/v2, registration, source paths and internal canvas v3 do not
+change. Increasing frame count does not by itself require a public canvas v3.
+
+Requests specify `version: 1`, the exact `workspaceId` and `directoryId`, a
+nonnegative monotonic `intent`, and optionally `cursor` and `limit` (1–256).
+The caller owns the intent: advance it when activating a new semantic owner,
+including an away-and-back transition. It is ephemeral within the connection,
+not authored state or a new selection store. The bridge helper requires the
+advertised capability, verifies the expected owner/intent, and uses only a
+connected passive request; it never wakes or reconnects a cloud workspace.
+Through the workspace facade, both capability lookup and dispatch use the exact
+already-connected owning peer, independent of the Local socket. Replies are
+fenced against peer, account, generation and execution-identity replacement;
+an absent, retired or incompatible cloud peer never falls back to Local.
+
+Replies use a distinct `kind: "design-catalog"` envelope. Ready replies contain
+the exact owner, an opaque root binding, metadata revision, page counts and a
+bounded ordered descriptor range. Descriptors contain saved IDs, sources,
+titles and geometry; `preparation: "unprepared"` explicitly means they provide
+no composed source version, node tree, asset bytes or lint result. Missing HTML
+does not erase registered membership. Catalog reads use public registered
+canvas v1/v2 metadata only; inline/source-discovered legacy layouts report
+`unsupported-layout` rather than silently guessing complete membership.
+
+Each response contains at most 256 descriptors and 256 KiB of encoded JSON,
+with headroom for typed cloud identity mapping. `coverage: "complete"` means
+this response contains the entire directory. The final fragment of a multi-batch
+read still says `partial`, with `nextCursor: null`. Assemble and validate one
+revision before pruning selections or authorizing whole-page operations. Never
+feed these batches into the complete-snapshot cache, boot mirror or existing
+mutation APIs. Existing small-directory full snapshots remain unchanged; their
+wire validator refuses pagination/coverage fields.
+
+Authenticated cursors bind the retained revision, connection/account authority,
+workspace/root, directory, intent and position. Continuations revalidate current
+metadata and root identity. Changed revisions return `stale`; retired, evicted
+or expired cursors cannot continue. Reads retain at most 16 sessions, an 8-MiB
+encoded-string estimate per snapshot and 32 MiB in total, with at most four
+concurrent reads and no wait queue. The 60-second deadline starts at admission
+and never extends while paging. These are retained-payload budgets, not RSS
+guarantees. Disconnect retires the connection's sessions and held publications.
+Retired snapshots remain charged until their last executing read releases them,
+including eviction, supersession and expiry. If executing leases prevent freeing
+enough bytes, a new read returns `busy` without queuing or freeing producer slots.
+Local sign-out and actual owner changes advance a separate account-binding
+lifetime, so account A→B→A cannot revive an old cursor or held publication.
+Unchanged-account reverification and unavailable claims preserve that lifetime;
+unsigned/offline Local reads remain supported.
+
+The read path neither enters the mutation lane nor composes/lints frame source.
+Pending metadata, page-layout or semantic journals return `unsettled`; this
+read-only API does not recover, migrate or rewrite them. Existing lifecycle
+recovery owns settlement. Cloud replies map only their typed owner to the
+admitted `cloud://` identity, retain server role checks, expose no native root
+or resource capability, and never authorize writes through a local replica.
+
+Renderer catalog consumption, coherent group geometry/history, negotiated
+mutation receipts and larger admission are separate integration layers. Before
+raising admission, update every lifecycle/order/undo/checkpoint guard and reject
+unnegotiated prospective-large writes **before** committing. Keep resource
+budgets independent: Foundation's 1,024 files/16 MiB bound one entry/dependency
+snapshot, semantic journals have a 32-MiB ceiling, metadata lifecycle journals
+have a 64-MiB/2,052-path ceiling, and page-layout migration uses an 8-MiB journal
+with separate payloads. A 10k metadata-helper fixture does not prove a registered
+10k directory, lifecycle recovery, rendered fidelity or pan/zoom performance.
+
 ### Performance and safety ceilings
 
 The following Foundation limits are compatibility and denial-of-service

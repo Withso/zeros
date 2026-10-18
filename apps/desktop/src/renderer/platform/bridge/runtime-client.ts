@@ -478,7 +478,7 @@ export class RuntimeClient {
   }
 
   private engineCapabilities = new Set<string>();
-  supportsEngineCapability(capability: string): boolean {
+  supportsEngineCapability(capability: string, _workspaceId?: string): boolean {
     return this._status === "connected" && this.isOpen() && this.engineCapabilities.has(capability);
   }
 

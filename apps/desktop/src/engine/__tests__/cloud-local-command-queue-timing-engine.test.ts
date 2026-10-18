@@ -9,6 +9,7 @@ import ts from "typescript";
 import type { CloudCommandClaim } from "@zeros/protocol/cloud-commands";
 import type { AgentPromptMessage } from "@zeros/protocol/messages";
 import { ZerosEngine } from "../zeros-engine";
+import { DESIGN_CATALOG_READ_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { CloudAgentTurnTimings } from "../cloud-local-command-queue-timings";
 import { closeZerosDb, setZerosDbPathForTesting } from "../db";
 import { upsertChat } from "../db/chats";
@@ -75,7 +76,7 @@ describe("authenticated exact-conversation timing inspection", () => {
       await methods.handleConnect.call({ ...f.engine, cloudWorker: null, cloudRuntimeConfig: null,
         cloudCommands: null, cloudAgentTurnTimings: null, framework: null, actualPort: 1234, owner },
       { ...f.client, kind: "local" });
-      expect(vi.mocked(f.client.send).mock.calls.at(-1)![0]).not.toHaveProperty("capabilities");
+      expect(vi.mocked(f.client.send).mock.calls.at(-1)![0]).toHaveProperty("capabilities", [DESIGN_CATALOG_READ_CAPABILITY]);
     }
   });
   it("clears timing ownership before even an already-stopped engine closes optional services", async () => {

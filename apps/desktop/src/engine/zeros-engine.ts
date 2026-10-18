@@ -48,6 +48,7 @@ import { ResidentTerminalReplay } from "./pty/resident-replay";
 import type { ResidentPtyFrame, ResidentPtySession } from "./pty/resident-protocol";
 
 type CloudResidentFence = { readonly owner: ResidentTerminalService; readonly ticket: ResidentWorkloadFence; released?: boolean };
+import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION } from "@zeros/protocol/design-catalog";
 import {
   personalRepoRoot,
   personalWorkspaceRoot,
@@ -1231,6 +1232,7 @@ export class ZerosEngine {
    *  connects (then relay clients are fail-closed as owner-unknown). */
   private ownerAccountSub: string | null = null;
   private ownerAccountName: string | null = null;
+  private localCatalogBindingEpoch?: number;
   private readonly cloudRuntimeConfig: CloudRuntimeConfig | null;
   private readonly cloudRuntimeRegistration: CloudRuntimeRegistration | null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
@@ -10901,7 +10903,16 @@ export class ZerosEngine {
         const reviewUserName = reviewUserId && this.clientAccount.get(client.id) === reviewUserId
           ? this.clientAccountNames.get(client.id)
           : client.kind === "local" && reviewUserId === this.ownerAccountSub ? this.ownerAccountName ?? undefined : undefined;
+        const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
+          ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         const handleWorkspaceRequest=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
+          ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
+            connectionId: client.id,
+            authority: catalogAuthority,
+            authorized: () => this.router.getClient(client.id) === client && (client.kind === "local" || client.authorized?.() === true) && !this.cloudRuntimeAuthorityStopping &&
+              catalogAuthority === JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]),
+            ...(this.cloudRuntimeConfig ? { cloudOrganizationId: this.cloudRuntimeConfig.execution.organizationId } : {}),
+          } } : {}),
           ...(op.startsWith("codeReview.") ? { reviewUserId, reviewUserName } : {}),
           ...(client.cloudActor && client.accountUserId ? { cloudActorIdentity: { userId: client.accountUserId, deviceId: client.cloudActor.deviceId, sessionId: client.cloudActor.sessionId },
             cloudFileActor: { role: client.cloudActor.role, authorized: () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping } } : {})});
@@ -12035,6 +12046,8 @@ export class ZerosEngine {
           `[Zeros] engine owner account changed ${this.ownerAccountSub.slice(0, 8)}… → ${next?.slice(0, 8) ?? "∅"}…`,
         );
       }
+      if (next !== this.ownerAccountSub)
+        this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
       this.ownerAccountSub = next;
       if (sub) this.ownerAccountName = verifiedName ?? null;
       return;
@@ -12137,6 +12150,7 @@ export class ZerosEngine {
    *  drop would be pointless reconnect churn. We still forget the owner in either
    *  mode so a later flip to required-mode starts from a clean slate. */
   private clearOwnerBinding(): void {
+    this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
     this.ownerAccountSub = nextOwnerAccount(this.ownerAccountSub, {
       kind: "signed-out",
     });
@@ -12925,6 +12939,7 @@ export class ZerosEngine {
    *  terminals are NOT torn down here — they're engine-owned and persist for the
    *  other devices (see the note at the end of this method). */
   private handleDisconnect(client: TransportClient): void {
+    this.workspace.retireDesignCatalog(client.id);
     if (this.cloudWorker && client.kind === "cloud" && client.cloudActor)
       this.cloudAgentBoot?.releaseActor(client.cloudActor.sessionId, client.id);
     this.residentReplay.release(client);
@@ -13025,7 +13040,7 @@ export class ZerosEngine {
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
         ...(cloudLocalCommands ? { cloudLocalCommands } : {}),
-        ...(this.cloudCommands ? { capabilities: ["cloud.commands.v1", ...(cloudLocalCommands ? ["cloud.localCommands.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig ? ["workspace.resourceUsage.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig && !this.cloudRuntimeAuthorityStopping && this.cloudAgentTurnTimings?.active ? ["cloud.turnTimings.v1"] : []), ...(this.cloudEvents ? ["cloud.events.v1"] : []), ...(this.cloudActions ? ["cloud.actions.v1"] : []), ...(this.cloud?.supportsNativeServices ? ["cloud.services.v1"] : [])] } : {}),
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, ...(this.cloudCommands ? ["cloud.commands.v1", ...(cloudLocalCommands ? ["cloud.localCommands.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig ? ["workspace.resourceUsage.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig && !this.cloudRuntimeAuthorityStopping && this.cloudAgentTurnTimings?.active ? ["cloud.turnTimings.v1"] : []), ...(this.cloudEvents ? ["cloud.events.v1"] : []), ...(this.cloudActions ? ["cloud.actions.v1"] : []), ...(this.cloud?.supportsNativeServices ? ["cloud.services.v1"] : [])] : [])],
       }),
     );
   }

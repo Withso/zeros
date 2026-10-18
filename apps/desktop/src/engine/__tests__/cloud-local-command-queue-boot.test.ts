@@ -20,6 +20,7 @@ import { ZerosEngine } from "../zeros-engine";
 import { CloudTransport } from "../transport/cloud";
 import type { TransportClient } from "../transport/types";
 import { CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
+import { DesignCatalogReader, type DesignCatalogSnapshot } from "../design/catalog";
 
 type Readiness = ReturnType<CloudRuntimeRegistration["readiness"]>;
 const engineMethods = ZerosEngine.prototype as unknown as {
@@ -87,14 +88,15 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
     unnegotiate: () => { negotiated = false; }, retire: () => { live = false; } };
 }
 
-function actorSockets(f: Awaited<ReturnType<typeof fixture>>) {
+function actorSockets(f: Awaited<ReturnType<typeof fixture>>, catalog = new DesignCatalogReader()) {
   const engine = { root: f.f.input.cwd, cloudWorker: { version: 4 }, cloudAgentBoot: f.boot, cloudRuntimeAuthorityStopping: false,
+    workspace: { retireDesignCatalog: vi.fn((id: string) => catalog.retire(id)) },
     framework: "unknown", actualPort: 1234, residentReplay: { release: vi.fn() }, cloudUserPresence: { release: vi.fn() },
     router: { sessionsOwnedBy: () => [], unregister: vi.fn() }, isHostRelayClient: () => false,
     recentlyLocalOwned: new Map(), sessionAgent: new Map(), permissionOwner: new Map(), questionOwner: new Map(),
     clientAccount: new Map(), clientAccountNames: new Map(), clientTokenExp: new Map() };
   return {
-    engine,
+    engine, catalog,
     async connect(admission = f.admission) {
       const client: TransportClient = { id: randomUUID(), kind: "cloud", accountUserId: admission.accountUserId,
         authorityEpoch: admission.authorityEpoch, cloudActor: admission.actor, authorized: () => true, send: vi.fn(), close: vi.fn() };
@@ -103,6 +105,30 @@ function actorSockets(f: Awaited<ReturnType<typeof fixture>>) {
     },
     disconnect(client: TransportClient) { engineMethods.handleDisconnect.call(engine, client); },
   };
+}
+
+function socketCatalog(f: Awaited<ReturnType<typeof fixture>>, client: TransportClient, actor: { signal: AbortSignal }, workspaceId = "local-main") {
+  const snapshot: DesignCatalogSnapshot = {
+    owner: { workspaceId, directoryId: "design_test", placement: "cloud", organizationId: f.f.scope.organizationId },
+    binding: path.join(f.f.input.cwd, workspaceId), revision: "a".repeat(64),
+    pages: [{ id: "p", title: "Page", folder: "page-1", count: 2 }],
+    frames: [0, 1].map(index => ({ id: `f${index}`, pageId: "p", source: `page-1/f${index}.html`, title: `Frame ${index}`,
+      kind: "html", x: index, y: 0, width: 100, height: 100, z: 0, order: index, preparation: "unprepared" })),
+  };
+  return {
+    snapshot,
+    input: { version: 1 as const, workspaceId, directoryId: "design_test", intent: 1, limit: 1 },
+    admission: { connectionId: client.id, authority: JSON.stringify([client.accountUserId, client.authorityEpoch, client.cloudActor]),
+      authorized: () => !actor.signal.aborted },
+    source: { open: async () => snapshot, validate: async () => true },
+  };
+}
+
+function catalogGate() {
+  let release!: (value: boolean) => void, enter!: () => void;
+  const pending = new Promise<boolean>(resolve => { release = resolve; });
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  return { release, entered, validate: () => { enter(); return pending; } };
 }
 
 function enqueueActorWork(f: Awaited<ReturnType<typeof fixture>>) {
@@ -369,6 +395,113 @@ describe("cloud actor socket lifetime", () => {
     await engineMethods.handleConnect.call(engine, client); engineMethods.handleDisconnect.call(engine, client);
     expect(attach).not.toHaveBeenCalled(); expect(release).not.toHaveBeenCalled();
     expect(f.request).not.toHaveBeenCalled();
+  });
+});
+
+describe("cloud actor and catalog disconnect integration", () => {
+  it.each(["shared", "separate"] as const)("retires only the disconnected catalog before releasing a %s actor", async relationship => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const first = await sockets.connect();
+    const firstActor = f.boot.authorizeActor(f.admission.actor.sessionId, "read");
+    const peerAdmission = relationship === "shared" ? f.admission : {
+      ...f.admission, actor: { ...f.admission.actor, sessionId: randomUUID() },
+    };
+    if (relationship === "separate") {
+      const original = f.request.getMockImplementation()!;
+      f.request.mockImplementation(async (operation, input) => operation === "actor-confirm"
+        ? { version: 1, mode: "boot-owner-v1", provenance: { ...f.f.provenance,
+          actorSessionId: (input as { actorSessionId: string }).actorSessionId, confirmedUntilMs: Date.now() + 8_000 } }
+        : original(operation, input));
+      await f.boot.confirmAdmission(peerAdmission);
+    }
+    const second = await sockets.connect(peerAdmission);
+    const peerActor = f.boot.authorizeActor(peerAdmission.actor.sessionId, "read");
+    const own = socketCatalog(f, first, firstActor), peer = socketCatalog(f, second, peerActor, "peer-workspace");
+    const firstBatch = await sockets.catalog.read(own.input, own.admission, own.source);
+    const peerBatch = await sockets.catalog.read(peer.input, peer.admission, peer.source);
+    if (firstBatch.status !== "ready" || peerBatch.status !== "ready") throw new Error("Expected catalog cursors");
+    const release = vi.spyOn(f.boot, "releaseActor");
+    sockets.disconnect(first);
+    expect(sockets.engine.workspace.retireDesignCatalog).toHaveBeenCalledExactlyOnceWith(first.id);
+    expect(release).toHaveBeenCalledExactlyOnceWith(f.admission.actor.sessionId, first.id);
+    expect(sockets.engine.workspace.retireDesignCatalog.mock.invocationCallOrder[0]).toBeLessThan(release.mock.invocationCallOrder[0]);
+    expect(peerActor.signal.aborted).toBe(false);
+    expect(firstActor.signal.aborted).toBe(relationship === "separate");
+    expect(await sockets.catalog.read({ ...own.input, cursor: firstBatch.nextCursor! }, own.admission, own.source)).toMatchObject({ status: "unavailable" });
+    expect(await sockets.catalog.read({ ...peer.input, cursor: peerBatch.nextCursor! }, peer.admission, peer.source)).toMatchObject({
+      status: "ready", owner: peer.snapshot.owner, revision: peer.snapshot.revision, offset: 1, coverage: "partial", nextCursor: null,
+    });
+    sockets.disconnect(second);
+    expect(peerActor.signal.aborted).toBe(true);
+  });
+
+  it("holds retired catalog bytes and read slots through actor release until every reader settles", async () => {
+    const f = await fixture(); await f.boot.initialize();
+    await f.boot.confirmAdmission(f.admission);
+    const sockets = actorSockets(f), client = await sockets.connect();
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "read"), data = socketCatalog(f, client, actor);
+    const bytes = Buffer.byteLength(JSON.stringify(data.snapshot)) * 2;
+    const reader = new DesignCatalogReader({ maxReads: 2, maxBytes: bytes });
+    sockets.engine.workspace.retireDesignCatalog.mockImplementation(id => reader.retire(id));
+    const state = reader as unknown as { retainedBytes: number; running: number; sessions: Map<string, unknown> };
+    const first = await reader.read(data.input, data.admission, data.source);
+    if (first.status !== "ready") throw new Error("Expected catalog cursor");
+    const gates = [catalogGate(), catalogGate()];
+    const reads = gates.map(gate => reader.read({ ...data.input, cursor: first.nextCursor! }, data.admission, { ...data.source, validate: gate.validate }));
+    try {
+      await Promise.all(gates.map(gate => gate.entered));
+      sockets.disconnect(client); sockets.disconnect(client);
+      expect(actor.signal.aborted).toBe(true);
+      expect(state.sessions.size).toBe(0);
+      expect(state.running).toBe(2); expect(state.retainedBytes).toBe(bytes);
+      await f.boot.confirmAdmission(f.admission); const replacement = await sockets.connect();
+      const freshActor = f.boot.authorizeActor(f.admission.actor.sessionId, "read");
+      const fresh = socketCatalog(f, replacement, freshActor), open = vi.fn(fresh.source.open);
+      expect(freshActor).not.toBe(actor);
+      expect(await reader.read(fresh.input, fresh.admission, { ...fresh.source, open })).toMatchObject({ status: "unavailable", reason: "busy" });
+      expect(open).not.toHaveBeenCalled();
+      gates[0].release(true); expect(await reads[0]).toMatchObject({ status: "unavailable" });
+      expect(state.running).toBe(1); expect(state.retainedBytes).toBe(bytes);
+      expect(await reader.read(fresh.input, fresh.admission, { ...fresh.source, open })).toMatchObject({ status: "unavailable", reason: "busy" });
+      expect(open).toHaveBeenCalledOnce();
+      expect(state.running).toBe(1); expect(state.retainedBytes).toBe(bytes);
+      gates[1].release(true); expect(await reads[1]).toMatchObject({ status: "unavailable" });
+      expect(state.running).toBe(0); expect(state.retainedBytes).toBe(0);
+      expect(await reader.read(fresh.input, fresh.admission, fresh.source)).toMatchObject({ status: "ready", owner: fresh.snapshot.owner });
+      expect(await reader.read({ ...fresh.input, cursor: first.nextCursor! }, fresh.admission, fresh.source)).toMatchObject({ status: "unavailable" });
+    } finally { gates.forEach(gate => gate.release(true)); await Promise.allSettled(reads); }
+  });
+
+  it("does not treat disconnect or a terminal receipt as native or catalog producer settlement", async () => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    await f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId);
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run"), work = enqueueActorWork(f);
+    const claim = CloudBootCommandClaimSchema.parse(f.boot.queue.handle({ kind: "claim", conversationId: work.conversationId,
+      claimId: randomUUID(), executionId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch }));
+    const selection = f.boot.selectClaim(claim), authority = cloudBootNativeAuthority(selection);
+    const data = socketCatalog(f, client, actor), first = await sockets.catalog.read(data.input, data.admission, data.source);
+    if (first.status !== "ready") throw new Error("Expected catalog cursor");
+    const gate = catalogGate(), held = sockets.catalog.read({ ...data.input, cursor: first.nextCursor! }, data.admission, { ...data.source, validate: gate.validate });
+    const state = sockets.catalog as unknown as { running: number; retainedBytes: number; sessions: Map<string, unknown> };
+    const bytes = Buffer.byteLength(JSON.stringify(data.snapshot)) * 2;
+    try {
+      await gate.entered; sockets.disconnect(client);
+      expect(state.sessions.size).toBe(0);
+      expect(actor.signal.aborted).toBe(false);
+      expect(() => authority.lifetime.assertLive()).not.toThrow();
+      expect(state.running).toBe(1); expect(state.retainedBytes).toBe(bytes);
+      f.boot.queue.handle({ kind: "settle", result: { commandId: work.commandId, claimId: claim.claimId,
+        state: "succeeded", resultCode: null } }, { writerEpoch: f.f.scope.writerEpoch });
+      await f.boot.releaseClaim(claim);
+      expect(actor.signal.aborted).toBe(false);
+      expect(() => authority.lifetime.assertLive()).not.toThrow();
+      await authority.lifetime.close();
+      expect(actor.signal.aborted).toBe(true);
+      expect(state.running).toBe(1); expect(state.retainedBytes).toBe(bytes);
+      gate.release(true); expect(await held).toMatchObject({ status: "unavailable" });
+      expect(state.running).toBe(0); expect(state.retainedBytes).toBe(0);
+    } finally { gate.release(true); await held; await authority.lifetime.close(); }
   });
 });
 
