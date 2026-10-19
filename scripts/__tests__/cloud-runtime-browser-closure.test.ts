@@ -72,7 +72,7 @@ describe.skipIf(process.platform !== "linux")("cloud runtime browser closure", (
           { ...options, timeout: 10_000 }, "browser_plan");
         return "";
       }
-      if (["dependency_install", "native_rebuild", "native_load", "supervisor_build", "engine_build"].includes(check)) return "";
+      if (["dependency_install", "native_rebuild", "native_load", "supervisor_build", "engine_build", "qualification_build"].includes(check)) return "";
       throw new Error(`Unexpected fixture stage: ${check}`);
     });
     await expect(buildRuntimeBundle({ sourceDir, outDir: path.join(root, "out"), workDir: work,

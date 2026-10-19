@@ -16,3 +16,9 @@ Compilation never precomputes an authority or retirement proof.
 
 Encoded in `cloud-qualification-loader.test.ts`,
 `cloud-qualification-bundle.test.ts` and the runtime publication closure probe.
+
+Builder-stage changes also reach focused fixtures that stop before payload
+staging. Run `cloud-runtime-browser-closure.test.ts` when adding a compilation
+stage: its synthetic stage allowlist must cover the new compilation while its
+real pinned browser CLI and headless-only assertions remain intact. Unknown
+stages still fail instead of being silently mocked.
