@@ -214,6 +214,13 @@ self-test uses the same non-root engine identity. No provider isolation is infer
 that its ELF payload survived packaging. These loader/ABI probes use no provider
 credentials and do not establish a successful model turn or runtime qualification.
 
+The cloud dependency closure targets Linux x64/glibc. It omits optional packages
+whose declared `libc` excludes glibc, including their links, executable shims and
+dependencies reached only through that package. Incompatible required edges
+fail the build. Packages without a libc declaration remain included; Local
+dependency installation is unchanged. Artifact verification and qualification
+still run on the resulting exact manifest.
+
 `ClosedDiagnostic` (`zeros.diagnostic/v1`) contains only `component`, `stage`,
 `ok`, nullable `exitCode`, `timedOut`, and deduplicated `failedChecks` (at most 32).
 Components are `bundle`, `publication`, `base`, `bootstrap`, `installer`,

@@ -198,6 +198,7 @@ type Package = {
   peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   os?: string[];
   cpu?: string[];
+  libc?: string[];
 };
 export type DependencyInventoryEntry = {
   name: string;
@@ -262,7 +263,7 @@ export async function stageDependencyClosure(
     name: string,
     owner: string,
     optional: boolean,
-  ): Promise<string | undefined> {
+  ): Promise<{ candidate: string; physical: string } | undefined> {
     check(/^(?:@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/i.test(name), "dependency_name");
     const require = createRequire(path.join(owner, "package.json"));
     // Asking for "buffer"/"events" alone returns null (Node built-ins), even
@@ -276,8 +277,7 @@ export async function stageDependencyClosure(
         within(source, candidate) && within(source, physical),
         "dependency_external",
       );
-      if (candidate !== physical) links.set(candidate, physical);
-      return physical;
+      return { candidate, physical };
     }
     check(optional, "dependency_missing");
     return undefined;
@@ -318,13 +318,21 @@ export async function stageDependencyClosure(
     owner: string,
     optional: boolean,
   ): Promise<void> {
-    const physical = await resolvePackage(name, owner, optional);
-    if (!physical) return;
+    const resolved = await resolvePackage(name, owner, optional);
+    if (!resolved) return;
+    const { candidate, physical } = resolved;
     const pkg = visited.get(physical) ?? (await packageJson(physical));
     check(
       platformAllows(pkg.os, "linux") && platformAllows(pkg.cpu, "x64"),
       "native_platform",
     );
+    // The cloud artifact targets glibc regardless of the build host. Omit an
+    // incompatible optional edge before recording any payload, link or shim.
+    if (!platformAllows(pkg.libc, "glibc")) {
+      check(optional, "native_platform");
+      return;
+    }
+    if (candidate !== physical) links.set(candidate, physical);
     await addBins(owner, physical, pkg);
     if (visited.has(physical)) return;
     visited.set(physical, pkg);
