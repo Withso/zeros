@@ -191,7 +191,7 @@ describe("pnpm runtime closure", () => {
     }
     const packages = await stageDependencyClosure(source, runtime, {
       harnessRoots: [], productionRoots: ["engine"],
-    } as Parameters<typeof stageDependencyClosure>[2]);
+    });
     expect(packages.map(entry => entry.name).sort()).toEqual(["engine", "late-data"]);
     await rm(source, { recursive: true });
     expect(execFileSync(process.execPath,
@@ -213,7 +213,7 @@ describe("pnpm runtime closure", () => {
       await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
       await writeFile(path.join(source, relative), "fixture");
     }
-    await stageSources(source, runtime, { sourceFiles: [engine, ...hostSources] } as never);
+    await stageSources(source, runtime, { sourceFiles: [engine, ...hostSources] });
     expect(await readFile(path.join(runtime, "worker", engine), "utf8")).toBe("fixture");
     await expect(lstat(path.join(runtime, "worker", renderer))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(lstat(path.join(runtime, "worker", test))).rejects.toMatchObject({ code: "ENOENT" });
