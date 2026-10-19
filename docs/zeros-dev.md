@@ -723,6 +723,55 @@ task. Intent, exact session, run/fixture, boot/writer/funding scope, nonce and
 program hash are signed before installation/allocation; uncertain starts are
 never repeated. The helper detaches its observers before the client disconnects.
 
+At each of the five connection points (create, three wakes, and detached
+reconnect), a separate, bounded native SDK probe runs before the legacy workload
+connection. It uses `CloudSdkRuntimeBroker`, `CloudSdkDeviceStream`,
+`CloudSdkSocket` and the shared `RuntimeClient` with the fixture's enrolled
+device. The SDK socket receives native authority directly in this headless
+process; the app supplies the same existing IPC functions at its renderer
+composition boundary. The probe advertises `platform: linux` and
+`appVersion: zeros-dev`. It is source-level native conformance, not evidence
+that a particular Mac installation or packaged renderer ran the path.
+
+A completed or flag-disabled probe writes four closed `zeros.dev-evidence/v1`
+phases, correlated by `sdk.probeId`, with finite monotonic `durationMs`. A failed
+probe retains its attempted phases and first closed failure:
+
+| Phase | Positive evidence |
+| --- | --- |
+| `sdk_device_session` | Fixture/workspace/device checks and a validated native-issued session/ticket |
+| `sdk_device_stream_ready` | Exact-session native `ready` with `sdk.organizationCoverage: enabled` for the fixture org |
+| `sdk_runtime_connect` | Native S3 admission with current workspace/generation/boot/capability binding |
+| `sdk_runtime_ready` | Direct SDK authentication, exact-boot `ENGINE_READY`, shared handshake read, and final scope recheck; `sdk.route: direct` |
+
+Session timing includes fixture/workspace/device validation. Stream timing starts
+after session issuance; runtime-ready timing includes the final workspace/device
+recheck. These measurements do not represent UI paint or first prompt latency.
+The stream URL comes only from the CP advertisement, currently the Alpha API
+origin. No ticket, capability, proof, cursor, URL or raw server error enters
+evidence. The probe never marks a catalog snapshot current or publishes presence.
+
+Generic route-absent 404s and the SDK's explicit disabled 403s produce
+`outcome: skipped`, `sdk.skip: legacy_discovery`. An unavailable session skips
+its dependent phases with `session_unavailable`; native legacy admission
+(including old boot metadata) skips runtime readiness with `runtime_legacy`.
+An explicit own-org stream disable or stream close 4404 uses
+`organization_disabled` or `stream_disabled`. Missing own-org proof, auth
+denials, specific workspace 404s, transient errors, malformed responses and
+wrong scope fail. A relay winner cannot satisfy direct readiness. When only
+`device_stream` is enabled, session and stream can pass while runtime phases
+skip. Each probe starts fresh discovery, so later flag changes cannot reuse an
+earlier negative decision.
+
+The ordinary infrastructure result may pass with SDK skips while flags are off.
+Full Step 3 source conformance requires all four phases to be `ok` for all five
+probe IDs; legacy `runtime_connect`/`runtime_transport` rows cannot supply it.
+This short probe does not prove renewals, long-lived stream continuity, polling
+replacement, presence parity, relay, accepted-work Send or Mac UI behavior.
+All probe sockets, renewal timers and native handles close before returning.
+The existing native workload and detached proof remain separate. New evidence
+fields are optional for old signed receipts and introduce no parsing defaults.
+
 `detached_wait` measures 31 monotonic minutes with all client transports closed,
 without CP polling, token refresh or actor retirement. Auth headroom is verified
 before detach. Reconnect must reach the same boot, authority, writer, funding,

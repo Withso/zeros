@@ -299,6 +299,7 @@ it("keeps the admitted runtime alive when its completed connect-phase deadline e
   try {
     const result = await runInfrastructure({ handle: f.handle, api,
       evidence: new Evidence(f.handle.run.runId, () => {}),
+      probeSdk: async () => {},
       connect: async (_run: unknown, signal: AbortSignal) => {
         const connectPhase = timeouts.filter(row => row.ms === 30_000).at(-1)!;
         const runtime = await f.connect(signal);

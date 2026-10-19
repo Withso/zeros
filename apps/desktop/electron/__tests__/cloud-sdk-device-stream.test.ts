@@ -27,8 +27,8 @@ function fixture() {
     close: vi.fn((runtimeId: string) => { targets = targets.filter(row => row.runtimeId !== runtimeId); for (const changed of changes) changed(); return true; }),
   };
   const sockets: Array<{ handlers: DeviceStreamSocketHandlers; sent: Array<Record<string, unknown>>; close: ReturnType<typeof vi.fn> }> = [];
-  const emit = vi.fn(); let nextId = 20;
-  const stream = new CloudSdkDeviceStream({ broker, emit, random: () => 0.5, newId: () => id(nextId++),
+  const emit = vi.fn(), onReady = vi.fn(); let nextId = 20;
+  const stream = new CloudSdkDeviceStream({ broker, emit, onReady, random: () => 0.5, newId: () => id(nextId++),
     createSocket: (_url, handlers) => { const sent: Array<Record<string, unknown>> = [], close = vi.fn(); sockets.push({ handlers, sent, close });
       return { send: text => sent.push(JSON.parse(text)), close }; } });
   cleanups.push(() => stream.dispose());
@@ -39,7 +39,7 @@ function fixture() {
       contract: 1, heartbeatIntervalMs: 20_000, ...(features === null ? {} : { organizationFeatures: features }) } }));
     return stream.snapshot();
   };
-  return { stream, sockets, broker, emit, ready, retire: () => { current = false; } };
+  return { stream, sockets, broker, emit, onReady, ready, retire: () => { current = false; } };
 }
 const acknowledge = (f: ReturnType<typeof fixture>) => {
   const view = f.stream.snapshot();
@@ -48,6 +48,21 @@ const acknowledge = (f: ReturnType<typeof fixture>) => {
 };
 
 describe("native device stream ownership", () => {
+  it("observes only validated ready metadata without asserting catalog coverage", async () => {
+    const f = fixture(); f.stream.control({ action: "start", target });
+    await f.ready();
+    expect(f.onReady).toHaveBeenCalledExactlyOnceWith([
+      { organizationId: target.organizationId, deviceStream: true, presence: true },
+      { organizationId: otherOrg, deviceStream: false, presence: false },
+    ]);
+    expect(f.stream.snapshot().organizations.every(row => !row.deviceStream)).toBe(true);
+    f.onReady.mockClear();
+    f.sockets[0]!.handlers.message(JSON.stringify({ t: "ready", d: { deviceSessionId: id(99), cursor: "c0", resumed: false,
+      contract: 1, heartbeatIntervalMs: 20_000, organizationFeatures: [] } }));
+    expect(f.onReady).not.toHaveBeenCalled();
+    expect(f.stream.snapshot().state).toBe("stopped");
+  });
+
   it("CM review: ignores a retired socket's late ready after a replacement session opens", async () => {
     const f = fixture(), first = f.stream.control({ action: "start", target });
     await tick();
@@ -68,10 +83,12 @@ describe("native device stream ownership", () => {
     current.handlers.message(readyFrame(replacementSessionId));
     expect(f.stream.snapshot().state).toBe("open");
     f.emit.mockClear();
+    f.onReady.mockClear();
     retired.handlers.message(readyFrame(sessionId));
     expect(f.stream.snapshot().state).toBe("open");
     expect(current.close).not.toHaveBeenCalled();
     expect(f.emit).not.toHaveBeenCalled();
+    expect(f.onReady).not.toHaveBeenCalled();
   });
 
   it.each(["local close", "remote close"])("ignores invalid frames after %s without stopping a replacement", async close => {

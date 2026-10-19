@@ -151,6 +151,7 @@ async function actionsFixture(deviceId?: string) {
     }),
   };
   const services = { session, api, credentials,
+    probeSdk: vi.fn(async () => {}),
     health: vi.fn(async () => ({ ready: true, cloud: { enabled: true }, sourceSha: "a".repeat(40) })),
     connect: vi.fn(async () => { throw new ZerosDevError("runtime_unavailable"); }),
   };
@@ -230,6 +231,7 @@ describe("Actions orchestration through signed files", () => {
       expect(options.handle.run.hourly.infrastructure).toMatchObject({ complete: false,
         coverage: { agents: "not_covered_owner_section7" }, cycles: [], terminalChecks: 0 });
       expect(options.handle.run.hourly.complete).toBe(false);
+      expect(options.probeSdk).toBe(f.services.probeSdk);
       expect(await options.prepareLaunchAuth(120_000)).toEqual(launchAuth);
       await options.evidence.step("detached_start", async () => { throw new ZerosDevError("detached_task_not_active"); });
     });
