@@ -1,9 +1,14 @@
 import { portableCloudWorkloads } from "./helpers/portable-cloud-custody";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudExecutionBoundary, isCloudPreparedBoundary } from "../cloud-execution-boundary";
 import { CloudOwnedWorkloadRegistry } from "../cloud-owned-workloads";
 import { HostExecutionBoundary } from "../host-boundary";
+import { sessionDir, sweepDeadSessions, writeSessionMeta } from "../../session-paths";
 
 const configuration = vi.hoisted(() => ({ uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0,
   version: 4 as const, backend: "cloud-worker" as const, profile: "zeros-cloud-worker-v4" as const,
@@ -16,9 +21,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
   for (const registry of registries.splice(0)) await registry.drain(registry.fence());
 });
-function setup(options?: { maxScopes?: number }) {
+function setup(options?: { maxScopes?: number; retainSessionDirectories?: boolean }) {
   const workloads = portableCloudWorkloads(configuration, options); registries.push(workloads);
-  const boundary = new CloudExecutionBoundary({ configuration, workloads });
+  const boundaryOptions = { configuration, workloads, retainSessionDirectories: options?.retainSessionDirectories };
+  const boundary = new CloudExecutionBoundary(boundaryOptions);
   return { workloads, boundary };
 }
 async function completeInspection(workloads: CloudOwnedWorkloadRegistry) {
@@ -33,6 +39,83 @@ const request = () => ({ executionId: randomUUID(), actor: "agent-code" as const
 const launch = () => ({ command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], cwd: process.cwd(), env: { PATH: "/usr/bin:/bin" } });
 
 describe("same-user cloud Host lifecycle", () => {
+  it.skipIf(process.platform !== "linux")("keeps retired qualification metadata visible to sanitation instead of inherited snapshot bytes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-probe-sanitation-"));
+    const previous = process.env.ZEROS_DATA_DIR;
+    process.env.ZEROS_DATA_DIR = path.join(root, "srv/zeros/state");
+    try {
+      const { boundary, workloads } = setup({ retainSessionDirectories: true });
+      const input = request(), prepared = await boundary.prepare(input);
+      const directory = sessionDir(input.executionId), metadata = path.join(directory, "meta.json");
+      const inherited = await readFile(metadata), before = await lstat(metadata);
+      const child = await prepared.spawn({ ...launch(), args: ["-e", "process.stdout.write('probe')"] });
+      child.stdout?.resume(); child.stderr?.resume();
+      expect(await child.wait()).toMatchObject({ code: 0 });
+      await prepared.stopAndProve();
+      expect(await completeInspection(workloads)).toMatchObject({ complete: true, workloadPids: [], pendingLaunches: 0 });
+
+      // Exercise the real base sanitizer after the actual Host scope retires.
+      // An incremental saved tree can keep deleted children, so an absent
+      // path falls back to its captured bytes rather than proving erasure.
+      const sanitized = spawnSync("python3", ["-I", "-B", "-c", `
+import importlib.util, os, pathlib, sys
+spec = importlib.util.spec_from_file_location("computer_build", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.ComputerBuild(root=pathlib.Path(sys.argv[2]), uid=os.getuid(), gid=os.getgid()).clear_directory("/srv/zeros/state")
+`, path.resolve("scripts/cloud-workspace-validation/runtime-base-v4/computer-build.py"), root], { encoding: "utf8", timeout: 5000 });
+      expect(sanitized.status, sanitized.stderr).toBe(0);
+      const saved = await readFile(metadata).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return inherited;
+      });
+      expect(saved.length, "deleted qualification metadata survived the incremental capture").toBe(0);
+      expect(await lstat(metadata)).toMatchObject({ ino: before.ino, dev: before.dev, mode: before.mode });
+      expect((await readdir(directory)).sort()).toEqual(["boundary", "env", "log", "meta.json", "telemetry"]);
+      for (const name of ["boundary", "env", "log", "telemetry"]) expect(await readdir(path.join(directory, name))).toEqual([]);
+      // Idempotent retirement cannot recreate a journal or multiply stubs.
+      await prepared.stopAndProve();
+      expect(await sweepDeadSessions()).toBe(0);
+      expect(await readdir(path.dirname(directory))).toEqual([input.executionId]);
+      expect((await readdir(directory)).length).toBe(5);
+    } finally {
+      if (previous === undefined) delete process.env.ZEROS_DATA_DIR;
+      else process.env.ZEROS_DATA_DIR = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["local", "cloud"])("still deletes ordinary %s sessions even with a qualification-like name", async placement => {
+    const input = { ...request(), executionId: `human-language-${randomUUID()}` };
+    const boundary = placement === "local" ? new HostExecutionBoundary() : setup().boundary;
+    const prepared = await boundary.prepare(input);
+    const directory = sessionDir(input.executionId);
+    expect((await lstat(path.join(directory, "meta.json"))).size).toBeGreaterThan(0);
+    await prepared.stopAndProve();
+    await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("collects valid retained probe metadata only after its owner is dead", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-probe-gc-"));
+    const previous = process.env.ZEROS_DATA_DIR;
+    process.env.ZEROS_DATA_DIR = root;
+    try {
+      const { boundary } = setup({ retainSessionDirectories: true });
+      const input = request(), prepared = await boundary.prepare(input);
+      const metadata = JSON.parse(await readFile(path.join(sessionDir(input.executionId), "meta.json"), "utf8"));
+      await prepared.stopAndProve();
+      expect(await sweepDeadSessions()).toBe(0);
+      // Model the fixed qualification process exiting after native retirement.
+      await writeSessionMeta(input.executionId, { ...metadata, pid: 2_147_483_647 });
+      expect(await sweepDeadSessions()).toBe(1);
+      await expect(lstat(sessionDir(input.executionId))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previous === undefined) delete process.env.ZEROS_DATA_DIR;
+      else process.env.ZEROS_DATA_DIR = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses cloud placement without ORIGINAL delegated kernel custody", () => {
     const workloads = new CloudOwnedWorkloadRegistry();
     expect(() => new CloudExecutionBoundary({ configuration, workloads })).toThrow();
@@ -150,8 +233,8 @@ describe("same-user cloud Host lifecycle", () => {
     expect(() => workloads.assertAccepting()).not.toThrow();
     expect(() => workloads.resume({ ...seal })).toThrow();
   });
-  it("rejects caller cancellation after Host prepared but before cloud admission returns", async () => {
-    const { boundary, workloads } = setup(), abort = new AbortController();
+  it.each([false, true])("rejects caller cancellation after Host prepared but before cloud admission returns (retain %s)", async retainSessionDirectories => {
+    const { boundary, workloads } = setup({ retainSessionDirectories }), abort = new AbortController();
     const original = HostExecutionBoundary.prototype.prepare;
     let prepared!: () => void, unblock!: () => void;
     const reached = new Promise<void>((resolve) => { prepared = resolve; });
@@ -197,8 +280,8 @@ describe("same-user cloud Host lifecycle", () => {
     expect(workloads.snapshot().scopes).toEqual([]);
     await expect(boundary.proveFailedPreparationStopped(input.executionId)).rejects.toThrow();
   });
-  it("retains a failed exact retirement and refuses a falsely empty release", async () => {
-    const { boundary, workloads } = setup();
+  it.each([false, true])("retains a failed exact retirement and refuses a falsely empty release (retain %s)", async retainSessionDirectories => {
+    const { boundary, workloads } = setup({ retainSessionDirectories });
     const prepared = await boundary.prepare(request());
     const lifecycle = Object.getPrototypeOf(boundary);
     expect(lifecycle).toBeDefined();

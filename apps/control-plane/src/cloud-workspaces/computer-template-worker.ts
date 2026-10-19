@@ -19,6 +19,7 @@ import {
 import { ComputerTemplateLogRedactor } from "./computer-template-logs.js";
 import { BuilderVmError, computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import { quarantineRuntimeImage, type RuntimeImageChannel } from "./runtime-images.js";
+import { parseBuilderDiagnostic, type ClosedDiagnostic } from "./cloud-builder-commands.js";
 import type { ComputerTemplateSnapshotLifecycle } from "./computer-template-snapshots.js";
 import type {
   BuilderFixedCommand,
@@ -84,7 +85,7 @@ const SanitationResult = z
   .strict();
 
 class BuildFailure extends Error {
-  constructor(readonly code: CloudComputerV2BuildError) {
+  constructor(readonly code: CloudComputerV2BuildError, readonly diagnostic: ClosedDiagnostic | null = null) {
     super(code);
   }
 }
@@ -314,7 +315,9 @@ export class ComputerTemplateWorker {
       const output = await this.deps.vms.runFixed(vm, command, input, {
         timeoutMs,
       });
-      const diagnostic = output.diagnostic;
+      const diagnostic = output.diagnostic
+        ? parseBuilderDiagnostic(JSON.stringify(output.diagnostic), command, output.exitCode)
+        : null;
       if (
         output.exitCode !== 0 ||
         !diagnostic ||
@@ -326,9 +329,10 @@ export class ComputerTemplateWorker {
         diagnostic.timedOut ||
         diagnostic.failedChecks.length
       )
-        throw new BuildFailure(error);
+        throw new BuildFailure(error, diagnostic);
       return output.stdout;
-    } catch {
+    } catch (failure) {
+      if (failure instanceof BuildFailure) throw failure;
       throw new BuildFailure(error);
     } finally {
       input?.fill(0);
@@ -520,6 +524,13 @@ export class ComputerTemplateWorker {
       );
     } catch (error) {
       if (error instanceof BuildHandoff) return;
+      if (error instanceof BuildFailure && error.diagnostic) {
+        // Persist only the closed command-specific vocabulary, never helper
+        // output or exception text. Reporting cannot prevent failure/cleanup.
+        await this.deps.service.appendBuildLog(id, fence, {
+          stage: claim.build.stage, stream: "system", text: JSON.stringify(error.diagnostic),
+        }).catch(() => undefined);
+      }
       // failBuild is fenced and cannot turn an already-committed success into a
       // failure when the completion reply was lost. Cleanup reads that DB fact.
       await this.deps.service.failBuild(

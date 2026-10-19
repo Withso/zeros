@@ -14,7 +14,8 @@ it("shares one original controller custody, registry and boundary across inline 
   expect(context.configuration).toBe(configuration); expect(context.custody).toBe(custody);
   expect(ports.custody).toHaveBeenCalledExactlyOnceWith(configuration);
   expect(ports.registry).toHaveBeenCalledExactlyOnceWith({ custody });
-  expect(ports.boundary).toHaveBeenCalledExactlyOnceWith({ projectRoot: "/srv/zeros/workspace", configuration, workloads: context.workloads });
+  expect(ports.boundary).toHaveBeenCalledExactlyOnceWith({ projectRoot: "/srv/zeros/workspace", configuration,
+    workloads: context.workloads, retainSessionDirectories: true });
   expect(ports.live).toHaveBeenCalledOnce();
   expect(ports.dispose).not.toHaveBeenCalled();
 });

@@ -756,6 +756,70 @@ database("Cloud Computer template worker", () => {
     expect(remove).toHaveBeenCalledOnce();
   });
 
+  it("retains the closed self-test failure before builder cleanup without raw output", async () => {
+    const proof = { schema: "zeros.diagnostic/v1", component: "qualification", stage: "self_test", ok: false,
+      exitCode: 1, timedOut: false, failedChecks: ["engine_lifecycle"] };
+    const original = runFixed.getMockImplementation()!;
+    runFixed.mockImplementation((...args) => args[1] === "runtime-self-test"
+      ? { exitCode: 1, stdout: "private self-test output", diagnostic: proof }
+      : original(...args));
+    const build = await request();
+    const diagnostics = async () => (await pool.query(
+      "SELECT stage,stream,text FROM cloud_computer_build_logs WHERE build_id=$1 AND stream='system' ORDER BY seq",
+      [build.build.id],
+    )).rows;
+    remove.mockImplementation(async () => {
+      expect(await diagnostics()).toEqual([{ stage: "integrity", stream: "system", text: JSON.stringify(proof) }]);
+    });
+    await worker.tick();
+    expect(await read()).toMatchObject({ latestBuild: { state: "failed", errorCode: "integrity_failed" } });
+    expect(await diagnostics()).toEqual([{ stage: "integrity", stream: "system", text: JSON.stringify(proof) }]);
+    expect(JSON.stringify((await pool.query("SELECT text FROM cloud_computer_build_logs WHERE build_id=$1", [build.build.id])).rows))
+      .not.toContain("private self-test output");
+    expect(remove).toHaveBeenCalledOnce();
+  });
+
+  it.each(["unknown check", "extra field", "wrong stage", "exit mismatch"])(
+    "does not retain an untrusted self-test diagnostic: %s", async invalid => {
+      const proof: Record<string, unknown> = { schema: "zeros.diagnostic/v1", component: "qualification", stage: "self_test", ok: false,
+        exitCode: 1, timedOut: false, failedChecks: ["engine_lifecycle"] };
+      if (invalid === "unknown check") proof.failedChecks = ["private_output"];
+      if (invalid === "extra field") proof.privateOutput = "private output";
+      if (invalid === "wrong stage") proof.stage = "sanitation";
+      if (invalid === "exit mismatch") proof.exitCode = 2;
+      const original = runFixed.getMockImplementation()!;
+      runFixed.mockImplementation((...args) => args[1] === "runtime-self-test"
+        ? { exitCode: 1, stdout: "private output", diagnostic: proof }
+        : original(...args));
+      const build = await request();
+      await worker.tick();
+      expect(await read()).toMatchObject({ latestBuild: { state: "failed", errorCode: "integrity_failed" } });
+      expect((await pool.query("SELECT text FROM cloud_computer_build_logs WHERE build_id=$1 AND stream='system'", [build.build.id])).rows)
+        .toEqual([]);
+      expect(remove).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("keeps the original failure and cleanup when diagnostic storage is unavailable", async () => {
+    const proof = { schema: "zeros.diagnostic/v1", component: "qualification", stage: "self_test", ok: false,
+      exitCode: 1, timedOut: false, failedChecks: ["engine_lifecycle"] };
+    const original = runFixed.getMockImplementation()!;
+    runFixed.mockImplementation((...args) => args[1] === "runtime-self-test"
+      ? { exitCode: 1, stdout: "", diagnostic: proof }
+      : original(...args));
+    const append = service.appendBuildLog.bind(service);
+    const reporting = vi.spyOn(service, "appendBuildLog").mockImplementation((...args) => {
+      if (args[2].stream === "system") return Promise.reject(new Error("private database failure"));
+      return append(...args);
+    });
+    await request();
+    await worker.tick();
+    expect(reporting).toHaveBeenCalledWith(expect.any(String), expect.any(Number),
+      { stage: "integrity", stream: "system", text: JSON.stringify(proof) });
+    expect(await read()).toMatchObject({ latestBuild: { state: "failed", errorCode: "integrity_failed" } });
+    expect(remove).toHaveBeenCalledOnce();
+  });
+
   it.each(["timeout", "transport", "malformed result", "missing diagnostic", "exit mismatch", "unrelated diagnostic"])(
     "does not withdraw an image after an unconfirmed baseline %s", async failure => {
       const image = await enableImage();

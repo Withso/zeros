@@ -1,0 +1,9 @@
+{
+  "id": "qualification-session-sanitation",
+  "kind": "replay",
+  "area": "vm-image-bootstrap",
+  "fixedBy": "pr:621",
+  "symptom": "A fixed qualifier deleted its retired session metadata before sanitation, leaving captured child bytes that could reappear in an incremental template snapshot.",
+  "rule": "Exercise producer cleanup before sanitation with deleted-child persistence. Retain explicitly owned qualification bookkeeping without weakening native retirement or saved-tree refusal. See agents/zstack/changes/qualification-session-sanitation.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/agents/containment/__tests__/cloud-execution-boundary.test.ts scripts/__tests__/cloud-qualification-runtime.test.ts"
+}

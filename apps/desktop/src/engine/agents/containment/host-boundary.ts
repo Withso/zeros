@@ -134,6 +134,9 @@ export interface HostExecutionBoundaryOptions {
   readonly ownerProcessId?: number;
   /** Only cloud controllers supply an ORIGINAL root-verified kernel client. */
   readonly cloudWorkloadCustody?: CloudWorkloadCustody;
+  /** Fixed qualification keeps ordinary bookkeeping visible to the template
+   * sanitizer. Native launch/recovery records still require exact retirement. */
+  readonly retainSessionDirectories?: boolean;
 }
 
 function abortIfRequested(control?: AdmissionControl): void {
@@ -761,6 +764,7 @@ export class HostExecutionBoundary implements ExecutionBoundary {
   private readonly supervisorScript: string;
   private readonly supervisorRuntime: string;
   private readonly ownerProcessId: number;
+  private readonly retainSessionDirectories: boolean;
   private readonly preparationOwnership = new Map<
     TerritoryGeneration,
     { executionId: string; state: "preparing" | "active" | "failed" }
@@ -787,6 +791,7 @@ export class HostExecutionBoundary implements ExecutionBoundary {
       process.env.ZEROS_PTY_HOST_RUNTIME ??
       process.execPath;
     this.ownerProcessId = options.ownerProcessId ?? process.pid;
+    this.retainSessionDirectories = options.retainSessionDirectories === true;
     if (
       !Number.isSafeInteger(this.ownerProcessId) ||
       this.ownerProcessId <= 0
@@ -882,7 +887,7 @@ export class HostExecutionBoundary implements ExecutionBoundary {
       throw new Error("Only an exact rejected no-process preparation can be proven here.");
     }
     const proof = Promise.resolve().then(async () => {
-      await removeSessionDir(executionId);
+      await this.cleanupSessionDirectory(executionId);
       for (const [generation] of attempts) this.preparationOwnership.delete(generation);
     });
     this.failedPreparationProofs.set(executionId, proof);
@@ -891,6 +896,13 @@ export class HostExecutionBoundary implements ExecutionBoundary {
     } finally {
       if (this.failedPreparationProofs.get(executionId) === proof) this.failedPreparationProofs.delete(executionId);
     }
+  }
+
+  private async cleanupSessionDirectory(executionId: string): Promise<void> {
+    // A live sanitizer cannot discover filenames unlinked by an earlier
+    // probe. Keep its ordinary session tree until sanitation overwrites it;
+    // this policy never substitutes for native process/generation cleanup.
+    if (!this.retainSessionDirectories) await removeSessionDir(executionId);
   }
 
   private async prepareHost(
@@ -943,7 +955,7 @@ export class HostExecutionBoundary implements ExecutionBoundary {
       await rm(generationRoot, { recursive: true, force: true }).catch(
         () => undefined,
       );
-      await removeSessionDir(request.executionId).catch(() => undefined);
+      await this.cleanupSessionDirectory(request.executionId).catch(() => undefined);
       throw error;
     }
     const processes = new Map<number, BoundaryProcess>();
@@ -1277,7 +1289,7 @@ export class HostExecutionBoundary implements ExecutionBoundary {
           processes.clear();
           startTicks.clear();
           targetExecutables.clear();
-          await removeSessionDir(request.executionId);
+          await this.cleanupSessionDirectory(request.executionId);
           this.preparationOwnership.delete(generation);
         })();
         const wrapped = attempt.catch((error) => {
