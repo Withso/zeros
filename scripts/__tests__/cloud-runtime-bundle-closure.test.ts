@@ -310,6 +310,100 @@ describe("pnpm runtime closure", () => {
     await expect(inventoryTree(relocated)).resolves.toBeTruthy();
   });
 
+  it("omits musl optional payload, links and shims while the relocated glibc agent still runs", async () => {
+    const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
+    const agent = path.join(source, "node_modules/.pnpm/agent@1/node_modules/agent");
+    const glibc = path.join(source, "node_modules/.pnpm/native-glibc@1/node_modules/native-glibc");
+    const musl = path.join(source, "node_modules/.pnpm/native-musl@1/node_modules/native-musl");
+    const muslOnly = path.join(source, "node_modules/.pnpm/musl-only@1/node_modules/musl-only");
+    await json(path.join(source, "package.json"), { dependencies: { agent: "1" } });
+    await json(path.join(agent, "package.json"), { name: "agent", version: "1", main: "index.cjs",
+      optionalDependencies: { "native-glibc": "1", "native-musl": "1" } });
+    await writeFile(path.join(agent, "index.cjs"), 'module.exports = require("native-glibc");\n');
+    for (const [name, physical, libc] of [["native-glibc", glibc, "glibc"], ["native-musl", musl, "musl"]]) {
+      await json(path.join(physical, "package.json"), { name, version: "1", main: "index.cjs",
+        os: ["linux"], cpu: ["x64"], libc: [libc], bin: { [name]: "cli" },
+        ...(libc === "musl" ? { dependencies: { "musl-only": "1" } } : {}) });
+      await writeFile(path.join(physical, "cli"), `#!/bin/sh\nprintf '%s' '${libc}-fixture'\n`, { mode: 0o555 });
+      await writeFile(path.join(physical, "index.cjs"),
+        'module.exports = () => require("node:child_process").execFileSync(require("node:path").join(__dirname, "cli"), {encoding:"utf8"});\n');
+      await writeFile(path.join(physical, "LICENSE"), "fixture notice\n");
+      await link(physical, path.join(path.dirname(agent), name));
+    }
+    await json(path.join(muslOnly, "package.json"), { name: "musl-only", version: "1" });
+    await link(muslOnly, path.join(path.dirname(musl), "musl-only"));
+    await link(agent, path.join(source, "node_modules/agent"));
+    const before = await readFile(path.join(musl, "package.json"));
+
+    const packages = await stageDependencyClosure(source, runtime, { harnessRoots: [] });
+    expect(packages.map(pkg => pkg.name).sort()).toEqual(["agent", "native-glibc"]);
+    const entries = await inventoryTree(runtime);
+    expect(entries.some(entry => entry.path.includes("musl"))).toBe(false);
+    expect(await readFile(path.join(musl, "package.json"))).toEqual(before);
+    expect(await readFile(path.join(musl, "cli"), "utf8")).toContain("musl-fixture");
+    await rm(source, { recursive: true });
+    const relocated = path.join(temp, "relocated");
+    await rename(runtime, relocated);
+    const worker = path.join(relocated, "worker");
+    expect(execFileSync(process.execPath,
+      ["-e", "process.stdout.write(require(process.argv[1])())", path.join(worker, "node_modules/agent")],
+      { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } })).toBe("glibc-fixture");
+    const stagedAgent = packages.find(pkg => pkg.name === "agent")!;
+    expect(execFileSync(path.join(relocated, stagedAgent.path, "node_modules/.bin/native-glibc"),
+      { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } })).toBe("glibc-fixture");
+    await expect(lstat(path.join(relocated, stagedAgent.path, "node_modules/.bin/native-musl")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    const stagedGlibc = packages.find(pkg => pkg.name === "native-glibc")!;
+    expect(await readFile(path.join(relocated, stagedGlibc.path, "LICENSE"), "utf8")).toBe("fixture notice\n");
+  });
+
+  it.each([
+    { libc: undefined, retained: true },
+    { libc: ["glibc"], retained: true },
+    { libc: ["glibc", "musl"], retained: true },
+    { libc: ["!musl"], retained: true },
+    { libc: ["glibc", "!musl"], retained: true },
+    { libc: ["musl"], retained: false },
+    { libc: ["!glibc"], retained: false },
+    { libc: ["glibc", "!glibc"], retained: false },
+  ])("uses declared libc metadata for optional packages: $libc => $retained", async ({ libc, retained }) => {
+    const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
+    await json(path.join(source, "package.json"), { optionalDependencies: { optional: "1" } });
+    await json(path.join(source, "node_modules/optional/package.json"),
+      { name: "optional", version: "1", os: ["linux"], cpu: ["x64"], ...(libc ? { libc } : {}) });
+    const packages = await stageDependencyClosure(source, runtime, { harnessRoots: [] });
+    expect(packages.map(pkg => pkg.name)).toEqual(retained ? ["optional"] : []);
+    expect((await inventoryTree(runtime)).some(entry => entry.path.includes("node_modules/optional"))).toBe(retained);
+  });
+
+  it.each(["dependencies", "peerDependencies"])("refuses incompatible required libc edges in %s", async edge => {
+    const temp = await directory(), source = path.join(temp, "source");
+    await json(path.join(source, "package.json"), { dependencies: { agent: "1" } });
+    await json(path.join(source, "node_modules/agent/package.json"),
+      { name: "agent", version: "1", [edge]: { incompatible: "1" } });
+    await json(path.join(source, "node_modules/incompatible/package.json"),
+      { name: "incompatible", version: "1", os: ["linux"], cpu: ["x64"], libc: ["musl"] });
+    await expect(stageDependencyClosure(source, path.join(temp, "runtime"), { harnessRoots: [] }))
+      .rejects.toThrow(/native_platform/);
+  });
+
+  it("omits incompatible optional peers but still refuses a later required edge to that package", async () => {
+    const temp = await directory(), source = path.join(temp, "source");
+    const optionalAgent = path.join(source, "node_modules/optional-agent");
+    await json(path.join(source, "package.json"), { dependencies: { "optional-agent": "1" } });
+    await json(path.join(optionalAgent, "package.json"), { name: "optional-agent", version: "1",
+      peerDependencies: { incompatible: "1" }, peerDependenciesMeta: { incompatible: { optional: true } } });
+    await json(path.join(source, "node_modules/incompatible/package.json"),
+      { name: "incompatible", version: "1", libc: ["!glibc"] });
+    expect((await stageDependencyClosure(source, path.join(temp, "optional"), { harnessRoots: [] }))
+      .map(pkg => pkg.name)).toEqual(["optional-agent"]);
+    await json(path.join(source, "package.json"), { dependencies: { "optional-agent": "1", "required-agent": "1" } });
+    await json(path.join(source, "node_modules/required-agent/package.json"),
+      { name: "required-agent", version: "1", dependencies: { incompatible: "1" } });
+    await expect(stageDependencyClosure(source, path.join(temp, "required"), { harnessRoots: [] }))
+      .rejects.toThrow(/native_platform/);
+  });
+
   it("fails on missing required dependencies and external package targets", async () => {
     const temp = await directory(),
       source = path.join(temp, "source");
