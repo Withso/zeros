@@ -3707,14 +3707,17 @@ export class ZerosEngine {
     try { flushStreamingChatMessages(); } catch { /* best effort, like persist-on-emit */ }
     this.cloudCheckpointProgress?.reporter.dispose();
     const failures: unknown[] = [];
-    // Withdraw ingress before any slow seal/retirement. The original owner
-    // still performs its existing teardown; a frontend restart never does.
-    try { await this.cloudCoordinator?.stop(); } catch (error) { failures.push(error); }
     if (this.cloudLegacyResidentRetryTimer) clearTimeout(this.cloudLegacyResidentRetryTimer);
     this.cloudLegacyResidentRetryTimer = null;
+    // Close launch admission synchronously, before any frontend retirement.
     if (this.cloudWorkloads && !this.cloudWorkloadStopFence) {
       this.cloudWorkloadStopPreserved = this.cloudRuntimeHandoffFenced === true;
       this.cloudWorkloadStopFence = this.cloudWorkloads.fence({ preserveActive: this.cloudWorkloadStopPreserved });
+    }
+    // Withdraw ingress before any slow seal/retirement. Do not add an await
+    // to legacy/Local teardown when there is no coordinator to retire.
+    if (this.cloudCoordinator) {
+      try { await this.cloudCoordinator.stop(); } catch (error) { failures.push(error); }
     }
     // A submitted original root effect keeps registration/custody alive until
     // its exact receipt is joined. Unknown ACK retries the saved request only.
