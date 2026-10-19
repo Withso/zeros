@@ -173,6 +173,54 @@ it("binds both offline phases to engine10003 and the exact pinned Host marker wi
 });
 
 describe("pnpm runtime closure", () => {
+  it("stages only the selected cloud package roots while retaining late transitive data", async () => {
+    const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
+    await json(path.join(source, "package.json"), {
+      dependencies: { engine: "1", "desktop-renderer": "1" },
+      optionalDependencies: { "desktop-native": "1" },
+    });
+    for (const name of ["engine", "late-data", "desktop-renderer", "desktop-native"]) {
+      const pkg = path.join(source, "node_modules", name);
+      await json(path.join(pkg, "package.json"), { name, version: "1", main: "index.cjs",
+        ...(name === "engine" ? { dependencies: { "late-data": "1" } } : {}) });
+      await writeFile(path.join(pkg, "LICENSE"), `${name} notice\n`);
+      await writeFile(path.join(pkg, "index.cjs"), name === "engine"
+        ? 'module.exports = () => require("late-data");\n'
+        : 'module.exports = require("node:fs").readFileSync(require("node:path").join(__dirname, "data.txt"), "utf8");\n');
+      await writeFile(path.join(pkg, "data.txt"), `${name} payload`);
+    }
+    const packages = await stageDependencyClosure(source, runtime, {
+      harnessRoots: [], productionRoots: ["engine"],
+    } as Parameters<typeof stageDependencyClosure>[2]);
+    expect(packages.map(entry => entry.name).sort()).toEqual(["engine", "late-data"]);
+    await rm(source, { recursive: true });
+    expect(execFileSync(process.execPath,
+      ["-e", "process.stdout.write(require(process.argv[1])())", path.join(runtime, "worker/node_modules/engine")],
+      { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } })).toBe("late-data payload");
+    expect(await readFile(path.join(runtime, "worker/node_modules/late-data/LICENSE"), "utf8"))
+      .toBe("late-data notice\n");
+  });
+
+  it("retains selected source and helper files without the desktop renderer or source tests", async () => {
+    const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
+    const engine = "apps/desktop/src/engine/zeros-engine.ts";
+    const renderer = "apps/desktop/src/renderer/renderer.tsx";
+    const test = "apps/desktop/src/engine/__tests__/unused.test.ts";
+    for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
+    for (const relative of new Set([...ROOT_METADATA, ...SOURCE_FILES,
+      ...RUNTIME_HELPERS.filter(helper => !helper.optional).map(helper => helper.source),
+      ...hostSources, engine, renderer, test, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"])) {
+      await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+      await writeFile(path.join(source, relative), "fixture");
+    }
+    await stageSources(source, runtime, { sourceFiles: [engine, ...hostSources] } as never);
+    expect(await readFile(path.join(runtime, "worker", engine), "utf8")).toBe("fixture");
+    await expect(lstat(path.join(runtime, "worker", renderer))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(path.join(runtime, "worker", test))).rejects.toMatchObject({ code: "ENOENT" });
+    for (const helper of RUNTIME_HELPERS.filter(helper => !helper.optional))
+      expect((await lstat(path.join(runtime, helper.target))).isFile()).toBe(true);
+  });
+
   it("stages every transitive engine source import outside apps/desktop/src", async () => {
     // Bundling discovers eager and lazy source edges without executing native
     // modules. Bare packages belong to stageDependencyClosure instead.
