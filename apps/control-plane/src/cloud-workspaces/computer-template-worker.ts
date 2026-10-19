@@ -104,7 +104,7 @@ export type ComputerTemplateWorkerDependencies = {
     revoke(token: string): Promise<void>;
   };
   runtime: {
-    select(tx: Tx): Promise<ComputerTemplateRuntime | null>;
+    select(tx: Tx, organizationId: string): Promise<ComputerTemplateRuntime | null>;
     load(tx: Tx, pin: { baseImageId: string; runtimeId: string }): Promise<ComputerTemplateRuntime | null>;
     validate(tx: Tx, runtime: ComputerTemplateRuntime): Promise<boolean>;
   };
@@ -225,8 +225,8 @@ export class ComputerTemplateWorker {
         billingOrg: this.deps.billingOrg,
         ...(this.deps.runtimeImageChannel ? { runtimeImageChannel: this.deps.runtimeImageChannel } : {}),
         ...(this.deps.namePrefix ? { namePrefix: this.deps.namePrefix } : {}),
-        selectRuntime: async (tx) => {
-          runtime = await this.deps.runtime.select(tx);
+        selectRuntime: async (tx, organizationId) => {
+          runtime = await this.deps.runtime.select(tx, organizationId);
           return runtime
             ? {
                 baseImageId: runtime.baseImageId,

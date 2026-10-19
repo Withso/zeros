@@ -62,8 +62,8 @@ describe("computer template worker factory", () => {
     const select = vi.spyOn(runtimeSelection, "selectCloudRuntime").mockResolvedValue(null);
     const validate = vi.spyOn(runtimeSelection, "loadPinnedCloudRuntime").mockResolvedValue(null);
     const tx = {} as Tx;
-    expect(await deps.runtime.select(tx)).toBeNull();
-    expect(select).toHaveBeenCalledWith(tx, mode);
+    expect(await deps.runtime.select(tx, "11111111-1111-4111-8111-111111111111")).toBeNull();
+    expect(select).toHaveBeenCalledWith(tx, mode, undefined);
     expect(await deps.runtime.validate(tx, templateRuntime)).toBe(false);
     expect(validate).toHaveBeenCalledWith(tx, expect.objectContaining({
       baseImageId: templateRuntime.baseImageId, runtimeId: templateRuntime.descriptor.runtimeId,

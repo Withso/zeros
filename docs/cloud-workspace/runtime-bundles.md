@@ -732,8 +732,10 @@ directly. The control-plane worker owns VM cleanup.
 | `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `v4` | Only `v4` is accepted; new cloud workspaces require a saved v2 Computer source and qualified pin. |
 | `CLOUD_RUNTIME_QUALIFICATION_MODE` | `full` | `full` requires full evidence; `smoke` accepts smoke or full evidence for selection and credential admission. |
 | `CLOUD_RUNTIME_IMAGES_ENABLED` | `false` | Permits new derived runtime images and Computer image choices. Saved creates and cleanup keep their original source when disabled. |
+| `CLOUD_RUNTIME_BASE_ROLLOUT_JSON` | Absent | Optional exact default and organization-scoped candidate for new Computer builds and their runtime observation. |
 
-The configured base is the newest approved, non-revoked base image. A revoked
+Without a base rollout policy, new Computer builds select the newest approved,
+non-revoked base image. A revoked
 compatibility contract on that base closes admission rather than selecting an
 older base. Its Alpha head is the highest confirmed, non-revoked `release_order`
 whose bundle is not revoked, uses the deployed engine protocol, and has enabled,
@@ -744,6 +746,44 @@ V4 admission supports only the current tested engine protocol. An incompatible
 `CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION` override closes new creates before
 allocation. The removed staff rollout selector grants no execution fallback;
 current organization/member/admin roles, funding and qualification still apply.
+
+To isolate a base rollout, configure all Computer and runtime-image workers
+with the same server-only policy:
+
+```json
+{
+  "version": 1,
+  "defaultBaseImageId": "zeros-v2-default",
+  "candidate": {
+    "baseImageId": "zeros-v2-candidate",
+    "organizationIds": ["11111111-1111-4111-8111-111111111111"]
+  }
+}
+```
+
+The value is limited to 4096 UTF-8 bytes, distinct valid base IDs, at most 16
+unique organization UUIDs, and these exact fields. `candidate` is required but
+may be `null`; an empty organization list prepares a candidate without admitting
+any organization. Invalid configuration refuses startup on a cloud-enabled
+release channel. The claim uses the
+organization from its locked build row. Its exact target must pass existing
+qualification and revocation checks; missing or unqualified targets never fall
+back to another base. Registration, qualification and observation cannot promote
+the candidate. Global `newestApprovedBase` release metadata still describes the
+registry, not an organization's effective selection.
+
+Qualification continues to discover the newest approved base independently.
+The image producer considers both exact targets fairly within its existing
+single production slot, keeping one ready image per base while both are
+configured. A candidate failure does not prevent eligible default production.
+Before registering a candidate, drain old worker versions and confirm this
+policy on every worker that can claim Computer or image work; disabling workspace
+setup alone does not stop Computer builds. Promote by changing the explicit
+default. Roll back by naming the retained previous default and removing the
+candidate, rather than unsetting the policy or revoking saved pins. Claimed
+builds, saved Computer sources, workspace wakes and same-base runtime upgrades
+keep their original pins and deadlines. Rebuilding a Computer still activates
+the successful version for that organization through the existing build flow.
 
 Create reselects under the organization lock and saves base provenance and all
 six runtime fields in the generation transaction, without provider or artifact

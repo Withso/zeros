@@ -203,6 +203,24 @@ describe("v4 runtime admission configuration", () => {
       expect(() => loadConfig({ ...cloudSetupEnv(), [name]: "invalid" })).toThrow(name);
     }
   });
+
+  it("loads the base policy for observers and builders even with setup disabled", () => {
+    const baseRollout = { version: 1, defaultBaseImageId: "zeros-v2-test-default", candidate: null };
+    expect(loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
+      CLOUD_RUNTIME_BASE_ROLLOUT_JSON: JSON.stringify(baseRollout) }).cloudWorkspaces?.runtime)
+      .toMatchObject({ baseRollout, qualificationEnabled: false, imagesEnabled: false });
+  });
+
+  it.each(["true", "false"])("rejects a malformed base policy at startup with cloud enabled=%s", enabled => {
+    expect(() => loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACES_ENABLED: enabled,
+      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false", CLOUD_RUNTIME_BASE_ROLLOUT_JSON: "{}" }))
+      .toThrow("CLOUD_RUNTIME_BASE_ROLLOUT_JSON");
+  });
+
+  it.each(["beta", "production"])("keeps %s Local-only despite a stale base policy", channel => {
+    expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+      CLOUD_RUNTIME_BASE_ROLLOUT_JSON: "{}" }).cloudWorkspaces).toBeNull();
+  });
 });
 
 describe("cloud-off release bootstrap configuration", () => {
