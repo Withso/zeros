@@ -2,7 +2,7 @@
   "id": "cloud-running-observation-runtime-revocation",
   "kind": "replay",
   "area": "cloud-workspaces",
-  "fixedBy": "pending",
+  "fixedBy": "pr:641",
   "symptom": "A runtime revoked during provider inspection could still complete a create or wake when inspection found an already-running resource and runtime upgrade handling was absent.",
   "rule": "Keep a fresh full generation/runtime-pin check after provider inspection and the stopped-runtime upgrade decision, including no-dispatch results. Database-only batching must retry the entire admission snapshot after a confirmed transaction abort.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/reconciler.integration.test.ts -t 'rechecks a revoked runtime after inspect returns running'"
