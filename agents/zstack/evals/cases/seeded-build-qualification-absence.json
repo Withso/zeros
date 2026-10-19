@@ -2,7 +2,7 @@
   "id": "seeded-build-qualification-absence",
   "kind": "seeded",
   "area": "cloud workspace authority",
-  "fixedBy": "pending",
+  "fixedBy": "pr:626",
   "symptom": "Filtering revoked build evidence out of a lookup selects legacy qualification as if no evidence had ever existed.",
   "rule": "zstack-review requires lookup before eligibility filtering and forbids downgrade of a selected attempt.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-build-qualification.integration.test.ts -t 'never turns revoked evidence into absence'"
