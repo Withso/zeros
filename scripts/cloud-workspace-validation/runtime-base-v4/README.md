@@ -91,6 +91,29 @@ Qualify the new base/runtime/template tuple before promotion. Existing bases,
 runtime pins, Local Personal and organization-local workspaces keep their
 current implementation. The full hydration and runtime-hash gates remain.
 
+A timestamp-only race at exactly the qualified provider-owned `/usr/local` or
+`/usr/local/lib` may discard a complete strict observation and retry it. All
+structural, ACL, capability, mount, protected-name and absence checks still run;
+every completed observation must equal the original sealed policy before a
+retry. Fresh original/reopened ACL checks and post-ACL identity comparisons
+prevent a timestamp change from hiding a newly installed ACL. Root-owned
+ancestors and every other path remain strict. At most three passes use 25/50 ms
+backoffs within one original-start 500 ms retry deadline. Slow uncontended
+first passes keep the outer command deadline; retried results are checked again
+after diagnostic I/O. Outer cancellation and command timeouts remain terminal.
+
+Each observation attempts a bounded root-only record in
+`/run/zeros/optional-systemd-observations.jsonl` (0600, 65,536 bytes, complete-line
+rotation, nonblocking `diagnostic.lock`). The closed record contains only fixed
+ancestor indexes, comparison field names, phases, outcomes and retry counts;
+it contains no scalar metadata or arbitrary paths. The public diagnostic and
+sealed policy schemas are unchanged. Logging failure never grants admission.
+Repeated independent records are valid history. A valid history can predate the
+current verifier when its write was dropped, so it cannot establish the current
+call's outcome or retry count. Diagnostic collectors must report current-call
+coverage as unknown. The retry repairs a reproduced sibling-write race; it does
+not identify the cause of an earlier live refusal.
+
 The fixed transport is:
 
 ```sh

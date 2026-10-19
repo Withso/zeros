@@ -1,5 +1,6 @@
 """Read-only stock qualification, using synthetic files and command replies."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import struct
@@ -78,7 +79,19 @@ class StockPrerequisiteTests(unittest.TestCase):
         self.assertEqual(result["optionalSystemd"]["snapshot"]["absent"], "/usr/local/lib/systemd")
         after = {str(path.relative_to(self.root)): (path.stat().st_mode, path.stat().st_mtime_ns,
                  path.read_bytes() if path.is_file() else None) for path in self.root.rglob("*")}
+        # Qualification can append only the fixed private observation. Every
+        # original stock entry, including its timestamps, remains untouched.
+        self.assertEqual(set(after) - set(before), {"run", "run/zeros", "run/zeros/diagnostic.lock",
+                                                   "run/zeros/optional-systemd-observations.jsonl"})
+        for name in set(after) - set(before):
+            del after[name]
         self.assertEqual(before, after)
+        log = self.root / "run/zeros/optional-systemd-observations.jsonl"
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(log.parent.stat().st_mode & 0o777, 0o700)
+        rows = [json.loads(line) for line in log.read_bytes().splitlines()]
+        self.assertEqual(rows, [{"schema": "zeros.optional-systemd-observation/v1", "callKind": "qualification",
+                                 "outcome": "stable", "retryCount": 0, "terminalCheck": "none", "comparisons": []}])
         self.assertFalse(any("apt" in argv[0] or "ldconfig" in argv[0] or "fc-cache" in argv[0] for argv in self.calls))
 
     def test_stock_requirement_list_covers_remaining_capabilities_and_drops_unused_packages(self):
