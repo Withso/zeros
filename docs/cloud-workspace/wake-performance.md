@@ -255,6 +255,26 @@ handling, and prevents a late claim from starting a provider command. Fresh
 admission, runtime qualification and readiness publication remain mandatory for
 every execution. Local workspace setup uses its existing path.
 
+## V4 setup access reads
+
+After successful preparation, v4 workspace setup reads the public SSH host key
+and the exact sandbox endpoint concurrently. Both reads must finish and pass
+validation before it installs the restricted, expiring key or sends setup
+secrets through pinned SSH. The overlap is selected only by the v4 setup caller;
+legacy setup, Computer builds and runtime updates keep serial access reads.
+
+Each execution owns its read cancellation. On a failed read, cancel its sibling
+and join both before disposing the channel, preserving the first failure. A
+cancelled execution cannot install access from late successful replies. Existing
+host-key pinning, public-address validation, ownership checks and key revocation
+after any possibly applied install remain mandatory. Local workspace setup and
+owner selection do not use this control-plane path.
+
+Successful overlap can remove the shorter read's latency if the requests do not
+contend; that is a bound, not a measured wake improvement. Compare the two read
+durations and total setup time from the same diagnostic sample before attributing
+an observed gain.
+
 ## Closed setup clocks
 
 Migration 0135 adds nullable `stage_timings` on setup runs. The negotiated version 1
@@ -331,6 +351,25 @@ This is additive diagnostic evidence, not an admission grant. Older helpers keep
 their existing behavior; older readers may omit unsupported evidence and still
 fail setup closed. Deploy the control-plane reader before publishing a runtime
 with the new helper. Local setup does not use this cloud attestation path.
+
+## Pre-admission readiness cadence
+
+Before v4 setup authority exists, an exact-base status with `hostState=stopped`
+permits a 500 ms pause before the next read-only status request. At most four
+such pauses are allowed per wait; later stopped observations use the ordinary
+2 s pause. The status must be successful, complete and valid for the pinned
+base. Malformed, failed or foreign-base observations do not earn a short pause.
+
+Provider errors, Retry-After handling and restore timeouts keep their existing
+pacing. They neither spend nor reset the four-pause budget. Cancellation and
+the absolute execution, boot and restore ceilings still bound the wait. The
+post-admission preparation check keeps its 2 s cadence. This change does not
+restart the host or relax readiness or attestation; Local setup is unaffected.
+
+The burst can reduce detection delay when the host becomes ready during one of
+the accelerated intervals, at the cost of additional status requests. Measure
+request count, request duration and wait time together. The burst does not
+establish a live wake-latency gain or shorten provider restoration itself.
 
 ## Unmatched VM probes
 
