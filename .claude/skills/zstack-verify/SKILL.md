@@ -90,8 +90,8 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
 - Report counts, for example "adjacent 130/130 across 11 suites". Name what you
   did not run and why.
 - A retry never relabels the original failure. Record both results.
-- Every time in a record, plan or report comes from a clock read (`date -u`),
-  never an estimate.
+- Every time in a record, plan or report comes from a clock read, never an
+  estimate: write it with `$(date -u +%H:%M)` inside the command that appends it.
 - Don't claim macOS-only checks from Linux.
 
 ## Gotchas already paid for
