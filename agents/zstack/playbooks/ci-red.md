@@ -27,6 +27,11 @@
   Do not widen the CI input list merely to hide an unintended dependency.
 - **PR CI:** rerunning only the failed jobs is fine for a flake or infra
   failure. Record that it was a rerun.
+- **Read-only corruption fixtures:** temporarily permit fixture writes, restore
+  the original mode in `finally`, and keep the byte length unchanged when testing
+  a digest mismatch. Assert the closed failure code. On Linux, a nonzero UID can
+  still hold filesystem-bypass capabilities; reproduce permission failures with
+  inherited, ambient and bounding capabilities dropped, not just another UID.
 - **Pinned documentation inventories:** adding a guide under a directory with
   an exact file allowlist also changes its layout contract. Run
   `scripts/__tests__/repository-layout.test.ts` explicitly, update the owning

@@ -240,10 +240,17 @@ class RollbackCacheTests(unittest.TestCase):
 
     def test_evicted_metadata_does_not_skip_current_payload_integrity(self):
         source, _, _ = self.evicted()
-        (self.runtime() / 'worker/data.txt').write_bytes(b'changed')
+        target = self.runtime() / 'worker/data.txt'
+        original = target.read_bytes()
+        target.chmod(0o755)
+        try:
+            target.write_bytes(b'x' * len(original))
+        finally:
+            target.chmod(0o555)
         self.app.boot()
-        with self.assertRaises(b.Failure):
+        with self.assertRaises(b.Failure) as caught:
             self.app.install(encoded(self.value))
+        self.assertEqual(caught.exception.checks, ['file_digest'])
         self.assertFalse(self.runtime(source).exists())
 
     def test_old_base_cannot_enable_eviction_or_restore(self):
