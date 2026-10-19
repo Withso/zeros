@@ -1,3 +1,5 @@
+import type { CloudCheckpointCaptureFailure } from "@zeros/protocol/cloud-checkpoint-progress";
+
 export type NativeCheckpointBlob = { blobId: string; contentSha256: string; sizeBytes: number };
 export const CLOUD_LOCAL_COMMAND_CHECKPOINT_SCOPE: "local-command-checkpoint";
 export type NativeCheckpointRoots = {
@@ -40,3 +42,11 @@ export function restoreCloudNativeCheckpoint(options: Options & {
   privateIdentity?:{uid:number;gid:number};
   archive: NativeCheckpointArchive; getChunk(blobId: string): Promise<Uint8Array>;
 }): Promise<void>;
+
+export class CloudCheckpointCaptureError extends Error {
+  constructor(message: string, reason: CloudCheckpointCaptureFailure["reason"], options?: ErrorOptions);
+}
+export function markCloudCheckpointCaptureCause<T>(error: T, reason: CloudCheckpointCaptureFailure["reason"]): T;
+export function atCloudCheckpointCaptureSite<T>(error: T, site: CloudCheckpointCaptureFailure["site"],
+  fallback?: CloudCheckpointCaptureFailure["reason"], httpClass?: CloudCheckpointCaptureFailure["httpClass"]): T;
+export function cloudCheckpointCaptureFailure(error: unknown): Readonly<CloudCheckpointCaptureFailure> | undefined;

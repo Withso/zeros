@@ -8,6 +8,35 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 
+// Sidecar metadata never changes the original rejection, instanceof checks or
+// retry behavior. Only these real capture boundaries can attach it; arbitrary
+// Error properties/messages are not diagnostic input. Restore has no observer.
+const captureCauses = new WeakMap();
+const captureFailures = new WeakMap();
+const errorObject = error => error !== null && (typeof error === "object" || typeof error === "function");
+export class CloudCheckpointCaptureError extends Error {
+  constructor(message, reason, options) {
+    super(message, options);
+    captureCauses.set(this, reason);
+  }
+}
+export function markCloudCheckpointCaptureCause(error, reason) {
+  if (errorObject(error) && !captureCauses.has(error)) captureCauses.set(error, reason);
+  return error;
+}
+export function atCloudCheckpointCaptureSite(error, site, fallback = "unknown", httpClass = "none") {
+  if (!errorObject(error) || captureFailures.has(error)) return error;
+  let reason = captureCauses.get(error);
+  try {
+    if (!reason && ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ELOOP", "ENOSPC", "EIO", "EROFS", "EMFILE", "ENFILE"].includes(error.code)) reason = "filesystem";
+  } catch { /* Hostile exception properties cannot change capture outcomes. */ }
+  captureFailures.set(error, Object.freeze({ version: 1, site, reason: reason ?? fallback, httpClass }));
+  return error;
+}
+export function cloudCheckpointCaptureFailure(error) {
+  return errorObject(error) ? captureFailures.get(error) : undefined;
+}
+
 const CHUNK_BYTES = 16 * 1024 * 1024;
 const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_FILES = 25_000;
@@ -25,8 +54,10 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-
 const gitFiles = new Set(["HEAD", "index", "shallow", "packed-refs", "ORIG_HEAD", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "AUTO_MERGE", "info/sparse-checkout", "info/exclude"]);
 const cursorFiles = new Set(["agents.ndjson", "runs.ndjson", "run_events.ndjson", "checkpoints.ndjson"]);
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
-const fail = () => new Error("cloud native checkpoint is invalid or unsafe");
-function deadline(at) { if (!Number.isSafeInteger(at) || Date.now() >= at) throw new Error("cloud native checkpoint deadline expired"); }
+const fail = () => new CloudCheckpointCaptureError("cloud native checkpoint is invalid or unsafe", "native_invalid");
+const changed = () => new CloudCheckpointCaptureError("cloud native checkpoint changed during capture", "native_changed");
+const gitFailed = () => new CloudCheckpointCaptureError("cloud native checkpoint is invalid or unsafe", "git_failed");
+function deadline(at) { if (!Number.isSafeInteger(at) || Date.now() >= at) throw new CloudCheckpointCaptureError("cloud native checkpoint deadline expired", "deadline"); }
 function relative(value) {
   if (typeof value !== "string" || !value || Buffer.byteLength(value) > 4_096 || value !== value.normalize("NFC") ||
     // eslint-disable-next-line no-control-regex -- recovery names reject C0 and DEL
@@ -134,14 +165,15 @@ async function inventory(roots, at) {
         if (files.length > MAX_FILES) throw fail();
       }
     }
-    if (!stable(before, await handle.stat({ bigint: true }))) throw new Error("cloud native checkpoint changed during capture");
+    if (!stable(before, await handle.stat({ bigint: true }))) throw changed();
   }
   for (const [scope, root] of Object.entries(scopeRoots(roots))) {
     let handle;
     try { handle = await directory(root); }
     catch (error) {
       if (error.code === "ENOENT" && scope !== "git") continue;
-      throw fail();
+      throw new CloudCheckpointCaptureError("cloud native checkpoint is invalid or unsafe",
+        ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ELOOP", "ENOSPC", "EIO", "EROFS", "EMFILE", "ENFILE"].includes(error.code) ? "filesystem" : "native_invalid");
     }
     try { await walk(scope, root, handle, ""); } finally { await handle.close(); }
   }
@@ -167,7 +199,7 @@ async function readFileChunks(file, at, consume) {
       }
     } finally { buffer.fill(0); }
     if (size !== file.sizeBytes || !stable(before, await handle.stat({ bigint: true })) ||
-      !stable(before, await fs.lstat(target, { bigint: true }))) throw new Error("cloud native checkpoint changed during capture");
+      !stable(before, await fs.lstat(target, { bigint: true }))) throw changed();
   } finally { await handle?.close(); await parent.close(); }
 }
 function spawnGit(roots, identity, at, args) {
@@ -184,17 +216,17 @@ function spawnGit(roots, identity, at, args) {
 async function gitOutput(roots, identity, at, args, consume, input) {
   const child = spawnGit(roots, identity, at, args);
   const ended = new Promise((resolve, reject) => {
-    child.once("error", () => reject(fail()));
-    child.once("close", code => code === 0 ? resolve() : reject(fail()));
+    child.once("error", () => reject(gitFailed()));
+    child.once("close", code => code === 0 ? resolve() : reject(gitFailed()));
   });
   // Install a rejection handler before streaming, including spawn/early exit.
   void ended.catch(() => undefined);
   child.stdin.on("error", () => undefined);
   const sent = (async () => {
     if (input) for await (const bytes of input) {
-      if (child.stdin.destroyed) throw fail();
+      if (child.stdin.destroyed) throw gitFailed();
       if (!child.stdin.write(bytes)) await new Promise((resolve, reject) => {
-        const drain = () => { cleanup(); resolve(); }; const closed = () => { cleanup(); reject(fail()); };
+        const drain = () => { cleanup(); resolve(); }; const closed = () => { cleanup(); reject(gitFailed()); };
         const cleanup = () => { child.stdin.off("drain", drain); child.stdin.off("close", closed); };
         child.stdin.once("drain", drain); child.stdin.once("close", closed);
       });
@@ -205,6 +237,11 @@ async function gitOutput(roots, identity, at, args, consume, input) {
   try {
     for await (const bytes of child.stdout) { deadline(at); await consume(bytes); }
     await sent; await ended;
+  } catch (error) {
+    // Git's timeout is still joined below; an expired capture keeps its
+    // original deadline class instead of becoming a generic exit failure.
+    if (!cloudCheckpointCaptureFailure(error)) deadline(at);
+    throw error;
   } finally { if (child.exitCode === null) child.kill("SIGKILL"); await ended.catch(() => undefined); }
 }
 
@@ -344,11 +381,11 @@ export async function saveCloudNativeCheckpointCache({ roots, scope, archive, sn
 async function confirmNativeFiles(roots, identity, at, sources, files) {
   await verifyGitConnectivity(roots, identity, at, sources);
   const confirmed = await inventory(roots, at);
-  if (JSON.stringify(confirmed) !== JSON.stringify(sources)) throw new Error("cloud native checkpoint changed during capture");
+  if (JSON.stringify(confirmed) !== JSON.stringify(sources)) throw changed();
   for (let index = 0; index < confirmed.length; index++) {
     const digest = createHash("sha256");
     await readFileChunks(confirmed[index], at, async bytes => { digest.update(bytes); });
-    if (digest.digest("hex") !== files[index].contentSha256) throw new Error("cloud native checkpoint changed during capture");
+    if (digest.digest("hex") !== files[index].contentSha256) throw changed();
   }
   return confirmed;
 }
@@ -364,7 +401,7 @@ export async function fingerprintCloudNativeCheckpoint({ roots, identity, deadli
   const base = await remoteGitBase(roots, identity, deadlineAtMs, gitBase, sources);
   const confirmed = await confirmNativeFiles(roots, identity, deadlineAtMs, sources, files);
   if (JSON.stringify(await remoteGitBase(roots, identity, deadlineAtMs, gitBase, confirmed)) !== JSON.stringify(base))
-    throw new Error("cloud native checkpoint changed during capture");
+    throw changed();
   return nativeCheckpointFingerprint(base ? { version: 2, gitRemoteBase: base, files } : { version: 1, files });
 }
 
@@ -439,82 +476,92 @@ async function splitArchiveFits(roots, identity, at, sources, metadataBytes, reu
 }
 
 export async function captureCloudNativeCheckpoint({ roots, identity, deadlineAtMs, putChunk, chunkBytes = CHUNK_BYTES, gitBase = "none", previous }) {
-  deadline(deadlineAtMs);
-  if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 64 || chunkBytes > CHUNK_BYTES) throw fail();
-  const sources = await inventory(roots, deadlineAtMs);
-  let base = await remoteGitBase(roots, identity, deadlineAtMs, gitBase, sources);
-  const trees = base ? await gitLines(roots, identity, deadlineAtMs, ["rev-parse", ...base.commits.map(oid => `${oid}^{tree}`)]) : null;
-  if (base && (trees?.length !== base.commits.length || trees.some(oid => !COMMIT_ID.test(oid)))) base = null;
-  const chunks = []; const files = []; const buffer = Buffer.alloc(chunkBytes);
-  let filled = 0; let totalBytes = 0;
-  async function flush() {
-    if (!filled) return;
-    deadline(deadlineAtMs);
-    const bytes = buffer.subarray(0, filled); const expected = hash(bytes);
-    const uploaded = await putChunk(bytes);
-    if (!uploaded || !UUID.test(uploaded.blobId ?? "") || uploaded.contentSha256 !== expected || uploaded.sizeBytes !== filled) throw fail();
-    chunks.push(uploaded); if (chunks.length > 1_024) throw fail();
-    buffer.fill(0); filled = 0;
-  }
-  async function capture(scope, file, produce) {
-    const digest = createHash("sha256"); const segments = []; let sizeBytes = 0;
-    await produce(async bytes => {
-      totalBytes += bytes.length; sizeBytes += bytes.length;
-      if (totalBytes > MAX_BYTES || sizeBytes > fileByteLimit(scope, file)) throw fail();
-      digest.update(bytes);
-      let offset = 0;
-      while (offset < bytes.length) {
-        const amount = Math.min(buffer.length - filled, bytes.length - offset);
-        const prior = segments.at(-1);
-        if (prior && prior.chunk === chunks.length && prior.offset + prior.sizeBytes === filled) prior.sizeBytes += amount;
-        else segments.push({ chunk: chunks.length, offset: filled, sizeBytes: amount });
-        bytes.copy(buffer, filled, offset, offset + amount); filled += amount; offset += amount;
-        if (filled === buffer.length) await flush();
-      }
-    });
-    files.push({ scope, path: file, sizeBytes, contentSha256: digest.digest("hex"), segments });
-  }
+  let site = "native_inventory";
   try {
-    for (const file of sources) await capture(file.scope, file.path, consume => readFileChunks(file, deadlineAtMs, consume));
-    await flush();
-    let reuse = base ? await reusableRemotePacks(previous, base, files, roots, identity, deadlineAtMs) : null;
-    let sameBase = reuse && JSON.stringify(base) === JSON.stringify(previous.gitRemoteBase);
-    if (reuse && !sameBase && reuse.length >= MAX_REMOTE_PACKS) { base = null; reuse = null; }
-    if (base && !await splitArchiveFits(roots, identity, deadlineAtMs, sources, totalBytes, reuse, previous, chunkBytes)) {
-      base = null; reuse = null; sameBase = false;
+    deadline(deadlineAtMs);
+    if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 64 || chunkBytes > CHUNK_BYTES) throw fail();
+    const sources = await inventory(roots, deadlineAtMs);
+    let base = await remoteGitBase(roots, identity, deadlineAtMs, gitBase, sources);
+    const trees = base ? await gitLines(roots, identity, deadlineAtMs, ["rev-parse", ...base.commits.map(oid => `${oid}^{tree}`)]) : null;
+    if (base && (trees?.length !== base.commits.length || trees.some(oid => !COMMIT_ID.test(oid)))) base = null;
+    const chunks = []; const files = []; const buffer = Buffer.alloc(chunkBytes);
+    let filled = 0; let totalBytes = 0;
+    async function flush() {
+      if (!filled) return;
+      deadline(deadlineAtMs);
+      const bytes = buffer.subarray(0, filled); const expected = hash(bytes);
+      let uploaded;
+      try {
+        uploaded = await putChunk(bytes);
+        if (!uploaded || !UUID.test(uploaded.blobId ?? "")) throw fail();
+        if (uploaded.contentSha256 !== expected || uploaded.sizeBytes !== filled)
+          throw new CloudCheckpointCaptureError("cloud native checkpoint is invalid or unsafe", "integrity");
+      } catch (error) { throw atCloudCheckpointCaptureSite(error, "native_upload"); }
+      chunks.push(uploaded); if (chunks.length > 1_024) throw fail();
+      buffer.fill(0); filled = 0;
     }
-    if (reuse) {
-      for (const file of reuse) {
-        const first = file.segments[0].chunk;
-        const last = file.segments.at(-1).chunk;
-        const adjustment = chunks.length - first;
-        chunks.push(...previous.chunks.slice(first, last + 1));
-        files.push({ ...file, segments: file.segments.map(segment => ({ ...segment, chunk: segment.chunk + adjustment })) });
-        totalBytes += file.sizeBytes;
-      }
-      if (totalBytes > MAX_BYTES || chunks.length > 1_024) throw fail();
+    async function capture(scope, file, produce) {
+      const digest = createHash("sha256"); const segments = []; let sizeBytes = 0;
+      await produce(async bytes => {
+        totalBytes += bytes.length; sizeBytes += bytes.length;
+        if (totalBytes > MAX_BYTES || sizeBytes > fileByteLimit(scope, file)) throw fail();
+        digest.update(bytes);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const amount = Math.min(buffer.length - filled, bytes.length - offset);
+          const prior = segments.at(-1);
+          if (prior && prior.chunk === chunks.length && prior.offset + prior.sizeBytes === filled) prior.sizeBytes += amount;
+          else segments.push({ chunk: chunks.length, offset: filled, sizeBytes: amount });
+          bytes.copy(buffer, filled, offset, offset + amount); filled += amount; offset += amount;
+          if (filled === buffer.length) await flush();
+        }
+      });
+      files.push({ scope, path: file, sizeBytes, contentSha256: digest.digest("hex"), segments });
     }
-    if (base && !sameBase) {
-      const oldTrees = reuse ? await gitLines(roots, identity, deadlineAtMs,
-        ["rev-parse", ...previous.gitRemoteBase.commits.map(oid => `${oid}^{tree}`)]) : [];
-      if (!oldTrees || oldTrees.some(oid => !COMMIT_ID.test(oid))) throw fail();
-      const rootsToPack = [...base.commits, ...trees,
-        ...(reuse ? [...previous.gitRemoteBase.commits, ...oldTrees].map(oid => `^${oid}`) : [])];
-      const name = `remote-${hash(Buffer.from(JSON.stringify(rootsToPack)))}.pack`;
-      await capture("git-pack", name, consume => gitOutput(roots, identity, deadlineAtMs,
-        ["pack-objects", "--stdout", "--revs"], consume, [Buffer.from(`${rootsToPack.join("\n")}\n`)]));
+    try {
+      for (const file of sources) await capture(file.scope, file.path, consume => readFileChunks(file, deadlineAtMs, consume));
       await flush();
-    }
-    const selection = [...await metadataObjectRoots(sources, deadlineAtMs), ...(base ? [...base.commits, ...trees].map(oid => `^${oid}`) : [])];
-    await capture("git-pack", "objects.pack", consume => gitOutput(roots, identity, deadlineAtMs,
-      ["pack-objects", "--stdout", "--revs", "--all", "--reflog", "--indexed-objects"], consume,
-      selection.length ? [Buffer.from(`${selection.join("\n")}\n`)] : undefined));
-    await flush();
-    const confirmed = await confirmNativeFiles(roots, identity, deadlineAtMs, sources, files);
-    if (JSON.stringify(await remoteGitBase(roots, identity, deadlineAtMs, gitBase, confirmed)) !== JSON.stringify(base))
-      if (base) throw new Error("cloud native checkpoint changed during capture");
-    return base ? { version: 2, chunks, files, totalBytes, gitRemoteBase: base } : { version: 1, chunks, files, totalBytes };
-  } finally { buffer.fill(0); }
+      site = "native_pack";
+      let reuse = base ? await reusableRemotePacks(previous, base, files, roots, identity, deadlineAtMs) : null;
+      let sameBase = reuse && JSON.stringify(base) === JSON.stringify(previous.gitRemoteBase);
+      if (reuse && !sameBase && reuse.length >= MAX_REMOTE_PACKS) { base = null; reuse = null; }
+      if (base && !await splitArchiveFits(roots, identity, deadlineAtMs, sources, totalBytes, reuse, previous, chunkBytes)) {
+        base = null; reuse = null; sameBase = false;
+      }
+      if (reuse) {
+        for (const file of reuse) {
+          const first = file.segments[0].chunk;
+          const last = file.segments.at(-1).chunk;
+          const adjustment = chunks.length - first;
+          chunks.push(...previous.chunks.slice(first, last + 1));
+          files.push({ ...file, segments: file.segments.map(segment => ({ ...segment, chunk: segment.chunk + adjustment })) });
+          totalBytes += file.sizeBytes;
+        }
+        if (totalBytes > MAX_BYTES || chunks.length > 1_024) throw fail();
+      }
+      if (base && !sameBase) {
+        const oldTrees = reuse ? await gitLines(roots, identity, deadlineAtMs,
+          ["rev-parse", ...previous.gitRemoteBase.commits.map(oid => `${oid}^{tree}`)]) : [];
+        if (!oldTrees || oldTrees.some(oid => !COMMIT_ID.test(oid))) throw fail();
+        const rootsToPack = [...base.commits, ...trees,
+          ...(reuse ? [...previous.gitRemoteBase.commits, ...oldTrees].map(oid => `^${oid}`) : [])];
+        const name = `remote-${hash(Buffer.from(JSON.stringify(rootsToPack)))}.pack`;
+        await capture("git-pack", name, consume => gitOutput(roots, identity, deadlineAtMs,
+          ["pack-objects", "--stdout", "--revs"], consume, [Buffer.from(`${rootsToPack.join("\n")}\n`)]));
+        await flush();
+      }
+      const selection = [...await metadataObjectRoots(sources, deadlineAtMs), ...(base ? [...base.commits, ...trees].map(oid => `^${oid}`) : [])];
+      await capture("git-pack", "objects.pack", consume => gitOutput(roots, identity, deadlineAtMs,
+        ["pack-objects", "--stdout", "--revs", "--all", "--reflog", "--indexed-objects"], consume,
+        selection.length ? [Buffer.from(`${selection.join("\n")}\n`)] : undefined));
+      await flush();
+      site = "native_verify";
+      const confirmed = await confirmNativeFiles(roots, identity, deadlineAtMs, sources, files);
+      if (JSON.stringify(await remoteGitBase(roots, identity, deadlineAtMs, gitBase, confirmed)) !== JSON.stringify(base))
+        if (base) throw changed();
+      return base ? { version: 2, chunks, files, totalBytes, gitRemoteBase: base } : { version: 1, chunks, files, totalBytes };
+    } finally { buffer.fill(0); }
+  } catch (error) { throw atCloudCheckpointCaptureSite(error, site); }
 }
 
 export function validateCloudNativeCheckpoint(raw) {

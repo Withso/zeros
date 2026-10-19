@@ -56,3 +56,29 @@ export function parseCloudCheckpointSealRefusal(header: string | undefined): Clo
     return parsed.success ? parsed.data : undefined;
   } catch { return; }
 }
+
+/** Optional capture evidence uses its own header/audit, never the strict v1
+ * body or heartbeat. It cannot prove durability or resolve an ambiguous ACK. */
+export const CLOUD_CHECKPOINT_CAPTURE_FAILURE_HEADER = "x-zeros-checkpoint-capture-failure";
+export const CloudCheckpointCaptureFailureSchema = z.object({
+  version: z.literal(1),
+  site: z.enum([
+    "projection", "file_scan", "file_upload", "content_append", "native_inventory",
+    "native_pack", "native_upload", "native_verify", "final_verify", "manifest_upload", "commit", "commit_ack",
+  ]),
+  reason: z.enum([
+    "deadline", "request_timeout", "transport", "authority", "http_refusal", "response_invalid", "integrity",
+    "working_tree_changed", "native_changed", "design_changed", "native_invalid", "filesystem", "git_failed",
+    "revision_conflict", "idempotency_conflict", "request_not_current", "unknown",
+  ]),
+  httpClass: z.enum(["none", "2xx", "4xx", "5xx", "other"]),
+}).strict();
+export type CloudCheckpointCaptureFailure = z.infer<typeof CloudCheckpointCaptureFailureSchema>;
+
+export function parseCloudCheckpointCaptureFailure(header: string | undefined): CloudCheckpointCaptureFailure | undefined {
+  if (!header || header.length > 512) return;
+  try {
+    const parsed = CloudCheckpointCaptureFailureSchema.safeParse(JSON.parse(header));
+    return parsed.success ? parsed.data : undefined;
+  } catch { return; }
+}

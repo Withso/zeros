@@ -65,6 +65,42 @@ first refusal. This evidence shares the audit retention policy above and uses
 the same bounded best-effort request; it never changes seal acceptance, local
 writer fencing or checkpoint completion.
 
+A failed `durability_capture` can similarly carry
+`x-zeros-checkpoint-capture-failure` (at most 512 characters). Its strict version
+1 object contains only `site`, `reason` and `httpClass`. Sites distinguish the
+projection, file scan/upload, content append, native inventory/pack/upload/proof,
+final working-tree/Design proof, manifest upload, commit request and commit ACK.
+The canonical closed vocabularies are in
+`packages/protocol/src/cloud-checkpoint-progress.ts`, mirrored by the standalone
+control plane. Reasons distinguish the original capture deadline, a request
+timeout, transport or HTTP refusal, authority, response shape/integrity,
+filesystem/Git failure, mutation and exact revision/request conflicts. No error
+message, body, path, Git output or stack enters this descriptor. Unknown causes
+remain `unknown`; a site is an observed boundary, not a proven underlying cause.
+
+The capture annotates its original rejection without changing retry checks. It
+keeps the first observed failure and joins admitted uploads before releasing
+capture or erasing its buffers. Known CP refusal envelopes are parsed strictly
+under the existing request deadline: at most 512 bytes, except the existing
+append-409 parser retains its 2 MiB bound for compatibility. The progress v1
+reason stays in its original enum: deadline/timeouts map to `deadline`, authority
+and request refusal to `authority_rejected`, other known capture failures to
+`storage`, and unknown to `unknown`. A lost commit response is observed at
+`commit`; an invalid success response at `commit_ack`. Neither resolves whether
+the CP committed, permits recapture/replay, or supplies a final receipt.
+
+The first accepted failed capture receipt can atomically add one
+`cloud_workspace.checkpoint_capture_failure` companion with the same exact
+scope, request and sequence. It uses the existing transaction, authority check
+and audit erasure policy, adding no provider call or authority read. Strict v1
+progress JSON remains unchanged. Older CP ignores the header; new CP ignores
+invalid headers, rejects retired requests and stale engines, and cannot append
+detail to an earlier headerless failure. Reporting retains the original clock,
+first failure and late-response fence. Optional clock/observer errors, including
+an accidentally rejected observer Promise, do not affect capture outcomes.
+Deploy this reader before its separately packaged runtime producer. It does not
+change the explicit-stop recovery policy or add publication overlap.
+
 ## Engine boot-owner startup
 
 Negotiated cloud boot-owner startup retries only the exact bootstrap, initial

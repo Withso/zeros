@@ -10,9 +10,13 @@ import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse as parseToml } from "smol-toml";
+import type { CloudCheckpointCaptureFailure } from "@zeros/protocol/cloud-checkpoint-progress";
 import { gitExecutionIdentity } from "./git/git-execution-identity";
 import {
   captureCloudNativeCheckpoint,
+  CloudCheckpointCaptureError,
+  atCloudCheckpointCaptureSite,
+  markCloudCheckpointCaptureCause,
   cloudCheckpointProjectionFingerprint,
   fingerprintCloudNativeCheckpoint,
   loadCloudNativeCheckpointCache,
@@ -39,6 +43,14 @@ const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_FILES = 100_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+type CaptureSite = CloudCheckpointCaptureFailure["site"];
+function httpClass(status: number): CloudCheckpointCaptureFailure["httpClass"] {
+  return status >= 200 && status < 300 ? "2xx" : status >= 400 && status < 500 ? "4xx"
+    : status >= 500 && status < 600 ? "5xx" : "other";
+}
+function invalidResponse(site: CaptureSite, message: string, reason: "response_invalid" | "integrity" = "response_invalid") {
+  return atCloudCheckpointCaptureSite(new CloudCheckpointCaptureError(message, reason), site, reason, "2xx");
+}
 // O_PATH is Linux-specific and intentionally used only behind a platform gate.
 // Node does not expose it, but Linux keeps this UAPI value stable across arches.
 const LINUX_O_PATH = 0o10000000;
@@ -146,7 +158,7 @@ function normalizedPath(value: string): string {
           component.toLocaleLowerCase("en-US") === ".git",
       )
   ) {
-    throw new Error("cloud checkpoint contains an unsafe path");
+    throw new CloudCheckpointCaptureError("cloud checkpoint contains an unsafe path", "native_invalid");
   }
   return value;
 }
@@ -191,7 +203,7 @@ function secretLike(relativePath: string): boolean {
 
 function splitNull(source: Buffer): string[] {
   if (source.length === 0) return [];
-  if (source.at(-1) !== 0) throw new Error("git path output is invalid");
+  if (source.at(-1) !== 0) throw new CloudCheckpointCaptureError("git path output is invalid", "native_invalid");
   const values: string[] = [];
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let start = 0;
@@ -201,7 +213,7 @@ function splitNull(source: Buffer): string[] {
     try {
       value = decoder.decode(source.subarray(start, end));
     } catch {
-      throw new Error("git path output is not valid UTF-8");
+      throw new CloudCheckpointCaptureError("git path output is not valid UTF-8", "native_invalid");
     }
     values.push(normalizedPath(value));
     start = end + 1;
@@ -214,7 +226,7 @@ function validateSymlinkTarget(relativePath: string, bytes: Buffer): void {
   try {
     value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw new Error("cloud checkpoint symlink target is not valid UTF-8");
+    throw new CloudCheckpointCaptureError("cloud checkpoint symlink target is not valid UTF-8", "native_invalid");
   }
   if (
     bytes.length < 1 ||
@@ -227,7 +239,7 @@ function validateSymlinkTarget(relativePath: string, bytes: Buffer): void {
     // eslint-disable-next-line no-control-regex -- link targets reject C0 and DEL
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
-    throw new Error("cloud checkpoint symlink target is unsafe");
+    throw new CloudCheckpointCaptureError("cloud checkpoint symlink target is unsafe", "native_invalid");
   }
   const resolved = path.posix.normalize(
     path.posix.join(path.posix.dirname(relativePath), value),
@@ -238,14 +250,14 @@ function validateSymlinkTarget(relativePath: string, bytes: Buffer): void {
     resolved.startsWith("../") ||
     path.posix.isAbsolute(resolved)
   ) {
-    throw new Error("cloud checkpoint symlink target escaped the repository");
+    throw new CloudCheckpointCaptureError("cloud checkpoint symlink target escaped the repository", "native_invalid");
   }
   normalizedPath(resolved);
   if (
     resolved.toLocaleLowerCase("en-US") === ".zeros" ||
     secretLike(resolved)
   ) {
-    throw new Error("cloud checkpoint symlink target is excluded");
+    throw new CloudCheckpointCaptureError("cloud checkpoint symlink target is excluded", "native_invalid");
   }
 }
 
@@ -300,7 +312,7 @@ async function gitBuffer(
     if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
       throw new CloudCheckpointDeadlineError();
     }
-    throw error;
+    throw markCloudCheckpointCaptureCause(error, "git_failed");
   }
 }
 
@@ -384,7 +396,7 @@ function linuxDescriptorChild(handle: FileHandle, component: string): string {
     component === ".." ||
     component.includes("/")
   ) {
-    throw new Error("cloud checkpoint descriptor component is invalid");
+    throw new CloudCheckpointCaptureError("cloud checkpoint descriptor component is invalid", "native_invalid");
   }
   // `/proc/self/fd/<fd>` is the one intentionally followed magic link: the
   // kernel creates it from a directory descriptor this process already owns.
@@ -405,7 +417,7 @@ async function openLinuxDirectory(
   try {
     const stat = await handle.stat();
     if (!stat.isDirectory()) {
-      throw new Error("cloud checkpoint parent is not a directory");
+      throw new CloudCheckpointCaptureError("cloud checkpoint parent is not a directory", "native_invalid");
     }
     return { absolutePath, handle, stat };
   } catch (error) {
@@ -442,7 +454,7 @@ async function openLinuxCaptureRoot(
       !sameIdentity(stat, named) ||
       !sameIdentity(stat, anchored)
     ) {
-      throw new Error("cloud checkpoint repository root is unsafe");
+      throw new CloudCheckpointCaptureError("cloud checkpoint repository root is unsafe", "native_invalid");
     }
     return { absolutePath: root, handle, stat };
   } catch (error) {
@@ -461,7 +473,7 @@ async function openCaptureRoot(
     !path.isAbsolute(root) ||
     root === path.parse(root).root
   ) {
-    throw new Error("cloud checkpoint repository root is invalid");
+    throw new CloudCheckpointCaptureError("cloud checkpoint repository root is invalid", "native_invalid");
   }
   if (process.platform === "linux") {
     const linux = await openLinuxCaptureRoot(root);
@@ -474,7 +486,7 @@ async function openCaptureRoot(
   }
   const stat = await fs.lstat(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error("cloud checkpoint repository root is unsafe");
+    throw new CloudCheckpointCaptureError("cloud checkpoint repository root is unsafe", "native_invalid");
   }
   return {
     root,
@@ -507,7 +519,7 @@ async function verifyDirectoryBindings(
     try {
       current = await fs.lstat(binding.absolutePath);
     } catch (error) {
-      throw new Error("cloud checkpoint parent changed during scan", {
+      throw new CloudCheckpointCaptureError("cloud checkpoint parent changed during scan", "working_tree_changed", {
         cause: error,
       });
     }
@@ -516,7 +528,7 @@ async function verifyDirectoryBindings(
       current.isSymbolicLink() ||
       !sameIdentity(current, binding.stat)
     ) {
-      throw new Error("cloud checkpoint parent changed during scan");
+      throw new CloudCheckpointCaptureError("cloud checkpoint parent changed during scan", "working_tree_changed");
     }
   }
 }
@@ -573,16 +585,16 @@ async function readLinuxBoundLeaf(
         !sameStableEntry(pinnedAfter, initial) ||
         !sameStableDirectory(parentAfter, parentBefore)
       ) {
-        throw new Error("cloud checkpoint symlink changed during scan");
+        throw new CloudCheckpointCaptureError("cloud checkpoint symlink changed during scan", "working_tree_changed");
       }
       return scannedEntry(relativePath, "symlink", 40960, bytes);
     }
 
     if (!initial.isFile()) {
-      throw new Error("cloud checkpoint path type is unsupported");
+      throw new CloudCheckpointCaptureError("cloud checkpoint path type is unsupported", "native_invalid");
     }
     if (initial.size > MAX_FILE_BYTES || initial.nlink !== 1) {
-      throw new Error("cloud checkpoint file is unsupported or too large");
+      throw new CloudCheckpointCaptureError("cloud checkpoint file is unsupported or too large", "native_invalid");
     }
 
     // This intentionally follows only the process-owned procfs magic link for
@@ -593,7 +605,7 @@ async function readLinuxBoundLeaf(
     );
     const opened = await dataHandle.stat();
     if (!opened.isFile() || !sameStableEntry(opened, initial)) {
-      throw new Error("cloud checkpoint file changed during scan");
+      throw new CloudCheckpointCaptureError("cloud checkpoint file changed during scan", "working_tree_changed");
     }
     bytes = await dataHandle.readFile();
     await verifyParents();
@@ -613,7 +625,7 @@ async function readLinuxBoundLeaf(
       !sameStableEntry(pinnedAfter, opened) ||
       !sameStableEntry(namedAfter, opened)
     ) {
-      throw new Error("cloud checkpoint file changed during scan");
+      throw new CloudCheckpointCaptureError("cloud checkpoint file changed during scan", "working_tree_changed");
     }
     const mode = (opened.mode & 0o111) === 0 ? 33188 : 33261;
     return scannedEntry(relativePath, "file", mode, bytes);
@@ -646,7 +658,7 @@ async function readPortableBoundLeaf(
       if ((error as NodeJS.ErrnoException).code !== "ELOOP") throw error;
       const before = await fs.lstat(leafPath);
       if (!before.isSymbolicLink()) {
-        throw new Error("cloud checkpoint symlink changed during scan");
+        throw new CloudCheckpointCaptureError("cloud checkpoint symlink changed during scan", "working_tree_changed");
       }
       bytes = await fs.readlink(leafPath, { encoding: "buffer" });
       validateSymlinkTarget(relativePath, bytes);
@@ -655,26 +667,26 @@ async function readPortableBoundLeaf(
       try {
         after = await fs.lstat(leafPath);
       } catch (error) {
-        throw new Error("cloud checkpoint symlink changed during scan", {
+        throw new CloudCheckpointCaptureError("cloud checkpoint symlink changed during scan", "working_tree_changed", {
           cause: error,
         });
       }
       if (!after.isSymbolicLink() || !sameStableEntry(after, before)) {
-        throw new Error("cloud checkpoint symlink changed during scan");
+        throw new CloudCheckpointCaptureError("cloud checkpoint symlink changed during scan", "working_tree_changed");
       }
       return scannedEntry(relativePath, "symlink", 40960, bytes);
     }
 
     const opened = await handle.stat();
     if (!opened.isFile()) {
-      throw new Error("cloud checkpoint path type is unsupported");
+      throw new CloudCheckpointCaptureError("cloud checkpoint path type is unsupported", "native_invalid");
     }
     if (opened.size > MAX_FILE_BYTES || opened.nlink !== 1) {
-      throw new Error("cloud checkpoint file is unsupported or too large");
+      throw new CloudCheckpointCaptureError("cloud checkpoint file is unsupported or too large", "native_invalid");
     }
     const namedBefore = await fs.lstat(leafPath);
     if (!namedBefore.isFile() || !sameStableEntry(namedBefore, opened)) {
-      throw new Error("cloud checkpoint file changed during scan");
+      throw new CloudCheckpointCaptureError("cloud checkpoint file changed during scan", "working_tree_changed");
     }
     bytes = await handle.readFile();
     await verifyParents();
@@ -691,7 +703,7 @@ async function readPortableBoundLeaf(
       !sameStableEntry(after, opened) ||
       !sameStableEntry(namedAfter, opened)
     ) {
-      throw new Error("cloud checkpoint file changed during scan");
+      throw new CloudCheckpointCaptureError("cloud checkpoint file changed during scan", "working_tree_changed");
     }
     const mode = (opened.mode & 0o111) === 0 ? 33188 : 33261;
     return scannedEntry(relativePath, "file", mode, bytes);
@@ -747,7 +759,7 @@ async function readPortableEntry(
     current = path.join(current, component);
     const stat = await fs.lstat(current);
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new Error("cloud checkpoint parent is unsafe");
+      throw new CloudCheckpointCaptureError("cloud checkpoint parent is unsafe", "native_invalid");
     }
     bindings.push({ absolutePath: current, stat });
   }
@@ -786,7 +798,7 @@ async function scanCloudWorkspaceChangesOnce(
         deadlineAtMs,
       );
       if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) {
-        throw new Error("cloud checkpoint Git base is invalid");
+        throw new CloudCheckpointCaptureError("cloud checkpoint Git base is invalid", "native_invalid");
       }
       const [tracked, basePaths, untracked] = await Promise.all([
         gitBuffer(
@@ -843,7 +855,7 @@ async function scanCloudWorkspaceChangesOnce(
           Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")),
         );
       if (paths.length > MAX_FILES) {
-        throw new Error("cloud checkpoint contains too many files");
+        throw new CloudCheckpointCaptureError("cloud checkpoint contains too many files", "native_invalid");
       }
       const collisionKeys = new Set<string>();
       const entries = new Map<string, ScannedEntry>();
@@ -855,7 +867,7 @@ async function scanCloudWorkspaceChangesOnce(
             .normalize("NFKC")
             .toLocaleLowerCase("en-US");
           if (collisionKeys.has(collision)) {
-            throw new Error("cloud checkpoint contains a path collision");
+            throw new CloudCheckpointCaptureError("cloud checkpoint contains a path collision", "native_invalid");
           }
           collisionKeys.add(collision);
           try {
@@ -863,7 +875,7 @@ async function scanCloudWorkspaceChangesOnce(
             totalBytes += entry.sizeBytes;
             if (totalBytes > MAX_TOTAL_BYTES) {
               entry.bytes.fill(0);
-              throw new Error("cloud checkpoint is too large");
+              throw new CloudCheckpointCaptureError("cloud checkpoint is too large", "native_invalid");
             }
             entries.set(relativePath, entry);
           } catch (error) {
@@ -913,7 +925,7 @@ export async function scanCloudWorkspaceChanges(
     baseCommit !== null &&
     !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(baseCommit)
   ) {
-    throw new Error("cloud checkpoint Git base is invalid");
+    throw new CloudCheckpointCaptureError("cloud checkpoint Git base is invalid", "native_invalid");
   }
   const includeRepositorySettings = options.includeRepositorySettings !== false;
   const first = await scanCloudWorkspaceChangesOnce(
@@ -934,7 +946,7 @@ export async function scanCloudWorkspaceChanges(
       options.deadlineAtMs,
     );
     if (confirmation.fingerprint !== first.fingerprint) {
-      throw new Error("cloud checkpoint changed while it was being captured");
+      throw new CloudCheckpointCaptureError("cloud checkpoint changed while it was being captured", "working_tree_changed");
     }
     return first;
   } catch (error) {
@@ -947,9 +959,9 @@ export async function scanCloudWorkspaceChanges(
   }
 }
 
-class CloudCheckpointDeadlineError extends Error {
+class CloudCheckpointDeadlineError extends CloudCheckpointCaptureError {
   constructor() {
-    super("cloud checkpoint deadline expired");
+    super("cloud checkpoint deadline expired", "deadline");
     this.name = "CloudCheckpointDeadlineError";
   }
 }
@@ -963,6 +975,8 @@ function assertCheckpointBeforeDeadline(deadlineAtMs: number): void {
 async function boundedJson(
   response: Response,
   deadlineAtMs: number,
+  signal?: AbortSignal,
+  limit = MAX_JSON_BYTES,
 ): Promise<unknown> {
   if (Date.now() >= deadlineAtMs) {
     await response.body?.cancel().catch(() => undefined);
@@ -974,19 +988,19 @@ async function boundedJson(
   ) {
     await response.body?.cancel().catch(() => undefined);
     assertCheckpointBeforeDeadline(deadlineAtMs);
-    throw new Error("cloud durability response is invalid");
+    throw new CloudCheckpointCaptureError("cloud durability response is invalid", "response_invalid");
   }
   const declared = Number(response.headers.get("content-length"));
   if (
     Number.isFinite(declared) &&
-    (declared < 0 || declared > MAX_JSON_BYTES)
+    (declared < 0 || declared > limit)
   ) {
     await response.body?.cancel().catch(() => undefined);
     assertCheckpointBeforeDeadline(deadlineAtMs);
-    throw new Error("cloud durability response is too large");
+    throw new CloudCheckpointCaptureError("cloud durability response is too large", "response_invalid");
   }
   if (!response.body) {
-    throw new Error("cloud durability response is invalid");
+    throw new CloudCheckpointCaptureError("cloud durability response is invalid", "response_invalid");
   }
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
@@ -1001,11 +1015,11 @@ async function boundedJson(
       }
       if (chunk.done) break;
       total += chunk.value.byteLength;
-      if (total > MAX_JSON_BYTES) {
+      if (total > limit) {
         chunk.value.fill(0);
         await reader.cancel().catch(() => undefined);
         assertCheckpointBeforeDeadline(deadlineAtMs);
-        throw new Error("cloud durability response is too large");
+        throw new CloudCheckpointCaptureError("cloud durability response is too large", "response_invalid");
       }
       chunks.push(
         Buffer.from(
@@ -1018,9 +1032,9 @@ async function boundedJson(
     const bytes = Buffer.concat(chunks, total);
     try {
       assertCheckpointBeforeDeadline(deadlineAtMs);
-      const raw: unknown = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-      );
+      let raw: unknown;
+      try { raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
+      catch (error) { throw markCloudCheckpointCaptureCause(error, "response_invalid"); }
       assertCheckpointBeforeDeadline(deadlineAtMs);
       return raw;
     } finally {
@@ -1035,38 +1049,40 @@ async function boundedJson(
       if (error instanceof CloudCheckpointDeadlineError) throw error;
       throw new CloudCheckpointDeadlineError();
     }
-    throw error;
+    throw markCloudCheckpointCaptureCause(error, signal?.aborted ? "request_timeout" : "transport");
   } finally {
     for (const chunk of chunks) chunk.fill(0);
     reader.releaseLock();
   }
 }
 
-class CloudDurabilityAppendRevisionConflictError extends Error {
+class CloudDurabilityAppendRevisionConflictError extends CloudCheckpointCaptureError {
   constructor() {
-    super("cloud durability content revision changed");
+    super("cloud durability content revision changed", "revision_conflict");
     this.name = "CloudDurabilityAppendRevisionConflictError";
   }
 }
 
-async function isAppendRevisionConflict(
+async function refusalCode(
   response: Response,
   deadlineAtMs: number,
-): Promise<boolean> {
+  signal: AbortSignal,
+  limit: number,
+): Promise<string | undefined> {
   let raw: unknown;
   try {
-    raw = await boundedJson(response, deadlineAtMs);
+    raw = await boundedJson(response, deadlineAtMs, signal, limit);
   } catch (error) {
     if (error instanceof CloudCheckpointDeadlineError) throw error;
-    return false;
+    return;
   }
-  return (
+  if (
     isRecord(raw) &&
     exactKeys(raw, ["error"]) &&
     isRecord(raw.error) &&
     exactKeys(raw.error, ["code"]) &&
-    raw.error.code === "revision_conflict"
-  );
+    typeof raw.error.code === "string"
+  ) return raw.error.code;
 }
 
 export class CloudWorkspaceDurabilityRuntime {
@@ -1079,6 +1095,7 @@ export class CloudWorkspaceDurabilityRuntime {
   private readonly uploadCache = new Map<string, { blobId: string; expiresAtMs: number }>();
   private lastDurable: DurableCheckpointState | null = null;
   private finalCheckpoint: { scopeKey: string; receipt: CloudFinalCheckpointReceipt } | null = null;
+  private readonly responseSignals = new WeakMap<Response, AbortSignal>();
 
   constructor(
     private readonly repositoryRoot: string,
@@ -1097,17 +1114,17 @@ export class CloudWorkspaceDurabilityRuntime {
       try { entry = await readEntry(root, file); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
       try {
-        if (entry.entryType !== "file" || entry.sizeBytes > 512 * 1024) throw new Error("cloud private Design settings are invalid");
+        if (entry.entryType !== "file" || entry.sizeBytes > 512 * 1024) throw new CloudCheckpointCaptureError("cloud private Design settings are invalid", "native_invalid");
         const design = parseToml(entry.bytes.toString("utf8")).design;
         if (!isRecord(design)) return null;
         const selection: { directory_id?: string; directory?: string } = {};
         if (design.directory_id !== undefined) {
-          if (typeof design.directory_id !== "string" || !DESIGN_DIRECTORY_ID_PATTERN.test(design.directory_id)) throw new Error("cloud private Design selection is invalid");
+          if (typeof design.directory_id !== "string" || !DESIGN_DIRECTORY_ID_PATTERN.test(design.directory_id)) throw new CloudCheckpointCaptureError("cloud private Design selection is invalid", "native_invalid");
           selection.directory_id = design.directory_id;
         }
         if (design.directory !== undefined) {
           const directory = sanitizeDesignDirectoryName(design.directory);
-          if (!directory) throw new Error("cloud private Design selection is invalid");
+          if (!directory) throw new CloudCheckpointCaptureError("cloud private Design selection is invalid", "native_invalid");
           selection.directory = directory;
         }
         return Object.keys(selection).length ? selection : null;
@@ -1204,17 +1221,19 @@ export class CloudWorkspaceDurabilityRuntime {
     url: string,
     init: RequestInit,
     deadlineAtMs: number,
+    site: CaptureSite,
   ): Promise<Response> {
     const remainingMs = deadlineAtMs - Date.now();
-    if (remainingMs <= 0) throw new CloudCheckpointDeadlineError();
+    if (remainingMs <= 0) throw atCloudCheckpointCaptureSite(new CloudCheckpointDeadlineError(), site);
     const timeoutMs = Math.min(REQUEST_TIMEOUT_MS, remainingMs);
+    const signal = AbortSignal.timeout(timeoutMs);
     let response: Response;
     try {
       response = await this.fetch(url, {
         ...init,
         redirect: "error",
         cache: "no-store",
-        signal: AbortSignal.timeout(timeoutMs),
+        signal,
         headers: {
           accept: "application/json",
           authorization: `Bearer ${authority.heartbeatToken}`,
@@ -1223,22 +1242,36 @@ export class CloudWorkspaceDurabilityRuntime {
         },
       });
     } catch (error) {
-      assertCheckpointBeforeDeadline(deadlineAtMs);
-      throw error;
+      if (Date.now() >= deadlineAtMs) throw atCloudCheckpointCaptureSite(new CloudCheckpointDeadlineError(), site);
+      throw atCloudCheckpointCaptureSite(markCloudCheckpointCaptureCause(error, signal.aborted ? "request_timeout" : "transport"), site);
     }
+    this.responseSignals.set(response, signal);
     if (!response.ok) {
-      if (
-        response.status === 409 &&
-        new URL(url).pathname === CONTENT_APPEND_PATH &&
-        (await isAppendRevisionConflict(response, deadlineAtMs))
-      ) {
-        throw new CloudDurabilityAppendRevisionConflictError();
+      try {
+        // Preserve the existing append-conflict parser's acceptance bound;
+        // other optional refusal bodies need at most 512 bytes. Neither body
+        // nor its arbitrary code can enter the diagnostic descriptor.
+        const code = await refusalCode(response, deadlineAtMs, signal,
+          response.status === 409 && site === "content_append" ? MAX_JSON_BYTES : 512);
+        if (response.status === 409 && site === "content_append" && code === "revision_conflict") {
+          throw new CloudDurabilityAppendRevisionConflictError();
+        }
+        await response.body?.cancel().catch(() => undefined);
+        assertCheckpointBeforeDeadline(deadlineAtMs);
+        const reason = code === "engine_authority_rejected" || code === "invalid_capability" ? "authority"
+          : code === "revision_conflict" ? "revision_conflict" : code === "idempotency_conflict" ? "idempotency_conflict"
+            : code === "checkpoint_request_rejected" ? "request_not_current" : "http_refusal";
+        throw new CloudCheckpointCaptureError("cloud durability request was rejected", reason);
+      } catch (error) {
+        throw atCloudCheckpointCaptureSite(error, site, "http_refusal", httpClass(response.status));
       }
-      await response.body?.cancel().catch(() => undefined);
-      assertCheckpointBeforeDeadline(deadlineAtMs);
-      throw new Error("cloud durability request was rejected");
     }
     return response;
+  }
+
+  private async readJson(response: Response, deadlineAtMs: number, site: CaptureSite): Promise<unknown> {
+    try { return await boundedJson(response, deadlineAtMs, this.responseSignals.get(response)); }
+    catch (error) { throw atCloudCheckpointCaptureSite(error, site, "response_invalid", httpClass(response.status)); }
   }
 
   private async loadProjection(
@@ -1267,14 +1300,16 @@ export class CloudWorkspaceDurabilityRuntime {
           Buffer.from(afterPath, "utf8").toString("base64url"),
         );
       }
-      const raw = await boundedJson(
+      const raw = await this.readJson(
         await this.request(
           authority,
           url.toString(),
           { method: "GET" },
           deadlineAtMs,
+          "projection",
         ),
         deadlineAtMs,
+        "projection",
       );
       if (
         !isRecord(raw) ||
@@ -1291,13 +1326,11 @@ export class CloudWorkspaceDurabilityRuntime {
         raw.entries.length > 200 ||
         !(raw.nextAfterPath === null || typeof raw.nextAfterPath === "string")
       ) {
-        throw new Error("cloud durability projection is invalid");
+        throw invalidResponse("projection", "cloud durability projection is invalid");
       }
       if (revision === null) revision = Number(raw.currentRevision);
       else if (revision !== raw.currentRevision) {
-        throw new Error(
-          "cloud durability projection changed during pagination",
-        );
+        throw new CloudCheckpointCaptureError("cloud durability projection changed during pagination", "revision_conflict");
       }
       const pageDurable = {
         durableRevision: Number.isSafeInteger(raw.durableRevision) ? Number(raw.durableRevision) : null,
@@ -1321,14 +1354,14 @@ export class CloudWorkspaceDurabilityRuntime {
             "sizeBytes",
           ])
         ) {
-          throw new Error("cloud durability projection is invalid");
+          throw invalidResponse("projection", "cloud durability projection is invalid");
         }
         if (typeof candidate.path !== "string") {
-          throw new Error("cloud durability projection is invalid");
+          throw invalidResponse("projection", "cloud durability projection is invalid");
         }
         const entryPath = normalizedPath(candidate.path);
         if (entries.has(entryPath))
-          throw new Error("cloud durability projection is invalid");
+          throw invalidResponse("projection", "cloud durability projection is invalid");
         const blobId = candidate.blobId;
         const contentSha256 = candidate.contentSha256;
         if (candidate.operation === "delete") {
@@ -1339,7 +1372,7 @@ export class CloudWorkspaceDurabilityRuntime {
             candidate.contentSha256 !== null ||
             candidate.sizeBytes !== null
           ) {
-            throw new Error("cloud durability projection is invalid");
+            throw invalidResponse("projection", "cloud durability projection is invalid");
           }
           entries.set(entryPath, {
             operation: "delete",
@@ -1376,7 +1409,7 @@ export class CloudWorkspaceDurabilityRuntime {
             sizeBytes: Number(candidate.sizeBytes),
           });
         } else {
-          throw new Error("cloud durability projection is invalid");
+          throw invalidResponse("projection", "cloud durability projection is invalid");
         }
       }
       if (raw.nextAfterPath === null) {
@@ -1389,25 +1422,26 @@ export class CloudWorkspaceDurabilityRuntime {
       }
       const next = normalizedPath(raw.nextAfterPath);
       if (seenCursors.has(next) || !entries.has(next)) {
-        throw new Error("cloud durability projection cursor is invalid");
+        throw invalidResponse("projection", "cloud durability projection cursor is invalid");
       }
       seenCursors.add(next);
       afterPath = next;
     }
-    throw new Error("cloud durability projection exceeded its page bound");
+    throw invalidResponse("projection", "cloud durability projection exceeded its page bound");
   }
 
   private async upload(
     authority: CloudDurabilityAuthority,
     entry: ScannedEntry,
     deadlineAtMs: number,
+    site: CaptureSite = "file_upload",
   ): Promise<ProjectionEntry> {
     assertCheckpointBeforeDeadline(deadlineAtMs);
     const url = new URL(this.endpoint(authority, BLOB_PATH));
     for (const [key, value] of Object.entries(this.scope(authority))) {
       url.searchParams.set(key, String(value));
     }
-    const raw = await boundedJson(
+    const raw = await this.readJson(
       await this.request(
         authority,
         url.toString(),
@@ -1417,18 +1451,21 @@ export class CloudWorkspaceDurabilityRuntime {
           body: new Uint8Array(entry.bytes),
         },
         deadlineAtMs,
+        site,
       ),
       deadlineAtMs,
+      site,
     );
     const blobId = isRecord(raw) ? raw.id : null;
     if (
       !isRecord(raw) ||
       typeof blobId !== "string" ||
-      !UUID_PATTERN.test(blobId) ||
-      raw.plaintextSha256 !== entry.contentSha256 ||
-      raw.sizeBytes !== entry.sizeBytes
+      !UUID_PATTERN.test(blobId)
     ) {
-      throw new Error("cloud durability blob response is invalid");
+      throw invalidResponse(site, "cloud durability blob response is invalid");
+    }
+    if (raw.plaintextSha256 !== entry.contentSha256 || raw.sizeBytes !== entry.sizeBytes) {
+      throw invalidResponse(site, "cloud durability blob response is invalid", "integrity");
     }
     return {
       operation: "upsert",
@@ -1451,17 +1488,19 @@ export class CloudWorkspaceDurabilityRuntime {
       entries: entries.map(entry => ({ bytesBase64: entry.bytes.toString("base64") })),
     }, deadlineAtMs);
     if (!isRecord(raw) || !Array.isArray(raw.blobs) || raw.blobs.length !== entries.length) {
-      throw new Error("cloud durability batch response is invalid");
+      throw invalidResponse("file_upload", "cloud durability batch response is invalid");
     }
     const results = new Map<number, ProjectionEntry>();
     for (const blob of raw.blobs) {
       if (!isRecord(blob) || !Number.isInteger(blob.index) || results.has(Number(blob.index))) {
-        throw new Error("cloud durability batch response is invalid");
+        throw invalidResponse("file_upload", "cloud durability batch response is invalid");
       }
       const entry = entries[Number(blob.index)];
-      if (!entry || typeof blob.id !== "string" || !UUID_PATTERN.test(blob.id) ||
-          blob.plaintextSha256 !== entry.contentSha256 || blob.sizeBytes !== entry.sizeBytes) {
-        throw new Error("cloud durability batch response is invalid");
+      if (!entry || typeof blob.id !== "string" || !UUID_PATTERN.test(blob.id)) {
+        throw invalidResponse("file_upload", "cloud durability batch response is invalid");
+      }
+      if (blob.plaintextSha256 !== entry.contentSha256 || blob.sizeBytes !== entry.sizeBytes) {
+        throw invalidResponse("file_upload", "cloud durability batch response is invalid", "integrity");
       }
       results.set(Number(blob.index), { operation: "upsert", path: entry.path,
         entryType: entry.entryType, mode: entry.mode, blobId: blob.id,
@@ -1499,9 +1538,10 @@ export class CloudWorkspaceDurabilityRuntime {
     if (batch.length) batches.push(batch);
     const uploaded: ProjectionEntry[][] = new Array(batches.length);
     let next = 0, failed = false;
+    let firstFailure: unknown;
     // Bound both network concurrency and retained encoded request bodies. Drain
     // admitted requests before the caller erases the scan's plaintext buffers.
-    const outcomes = await Promise.allSettled(Array.from({ length: Math.min(2, batches.length) }, async () => {
+    await Promise.allSettled(Array.from({ length: Math.min(2, batches.length) }, async () => {
       while (!failed && next < batches.length) {
         const index = next++, current = batches[index]!;
         try {
@@ -1514,10 +1554,16 @@ export class CloudWorkspaceDurabilityRuntime {
             this.uploadCache.set(keyFor(entry), { blobId: entry.blobId!, expiresAtMs: Date.now() + 15 * 60_000 });
             while (this.uploadCache.size > 10_000) this.uploadCache.delete(this.uploadCache.keys().next().value!);
           }
-        } catch (error) { failed = true; throw error; }
+        } catch (error) {
+          if (!failed) firstFailure = error;
+          failed = true;
+          throw error;
+        }
       }
     }));
-    for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
+    // allSettled orders results by lane, not by failure time. Preserve the
+    // first observed rejection, but release capture only after both settle.
+    if (failed) throw firstFailure;
     return entries.map(entry => ready.get(entry.path)!);
   }
 
@@ -1527,7 +1573,8 @@ export class CloudWorkspaceDurabilityRuntime {
     body: Record<string, unknown>,
     deadlineAtMs: number,
   ): Promise<unknown> {
-    return boundedJson(
+    const site = pathname === CHECKPOINT_PATH ? "commit" : pathname === CONTENT_APPEND_PATH ? "content_append" : "file_upload";
+    return this.readJson(
       await this.request(
         authority,
         this.endpoint(authority, pathname),
@@ -1537,8 +1584,10 @@ export class CloudWorkspaceDurabilityRuntime {
           body: JSON.stringify(body),
         },
         deadlineAtMs,
+        site,
       ),
       deadlineAtMs,
+      site === "commit" ? "commit_ack" : site,
     );
   }
 
@@ -1547,50 +1596,53 @@ export class CloudWorkspaceDurabilityRuntime {
     authority: CloudDurabilityAuthority,
     stillIdle?: () => boolean,
   ): Promise<void> {
-    if (
-      !UUID_PATTERN.test(directive.id) ||
-      !Number.isSafeInteger(directive.deadlineAtMs) ||
-      directive.deadlineAtMs <= Date.now()
-    ) {
-      throw new Error("cloud checkpoint directive is invalid");
-    }
-    // This runtime is constructed only for the privileged cloud engine. Local
-    // desktop forks call the scanner directly and may use the portable path
-    // verifier; an authority-bearing checkpoint may never fall back to it.
-    if (process.platform !== "linux") {
-      throw new Error(
-        "privileged cloud checkpoint capture requires Linux descriptor safety",
-      );
-    }
-    let projection = await this.loadProjection(
-      authority,
-      directive.deadlineAtMs,
-    );
-    const scope = this.scopeKey(authority);
-    let previous: NativeCheckpointArchive | undefined;
-    if (this.lastDurable?.scope === scope && this.lastDurable.checkpointId === projection.checkpointId) {
-      previous = this.lastDurable.nativeArchive;
-    } else {
-      this.lastDurable = null;
-      if (projection.checkpointId) {
-        const cached = await loadCloudNativeCheckpointCache({ roots: this.nativeRoots, deadlineAtMs: directive.deadlineAtMs,
-          scope: { workspaceId: authority.workspaceId, organizationId: authority.organizationId, checkpointId: projection.checkpointId } });
-        previous = cached?.archive;
-        if (cached?.snapshot) this.lastDurable = { ...cached.snapshot, scope, checkpointId: projection.checkpointId, nativeArchive: cached.archive };
-      }
-    }
-    if (
-      directive.reason === "periodic" &&
-      (await this.unchangedSinceDurable(authority, projection, directive.deadlineAtMs))
-    ) {
-      return;
-    }
+    let site: CaptureSite = "projection";
     let finalScan: CloudWorkspaceChangeScan | null = null;
     try {
+      if (
+        !UUID_PATTERN.test(directive.id) ||
+        !Number.isSafeInteger(directive.deadlineAtMs) ||
+        directive.deadlineAtMs <= Date.now()
+      ) {
+        throw new Error("cloud checkpoint directive is invalid");
+      }
+      // This runtime is constructed only for the privileged cloud engine. Local
+      // desktop forks call the scanner directly and may use the portable path
+      // verifier; an authority-bearing checkpoint may never fall back to it.
+      if (process.platform !== "linux") {
+        throw new Error(
+          "privileged cloud checkpoint capture requires Linux descriptor safety",
+        );
+      }
+      let projection = await this.loadProjection(
+        authority,
+        directive.deadlineAtMs,
+      );
+      const scope = this.scopeKey(authority);
+      let previous: NativeCheckpointArchive | undefined;
+      if (this.lastDurable?.scope === scope && this.lastDurable.checkpointId === projection.checkpointId) {
+        previous = this.lastDurable.nativeArchive;
+      } else {
+        this.lastDurable = null;
+        if (projection.checkpointId) {
+          const cached = await loadCloudNativeCheckpointCache({ roots: this.nativeRoots, deadlineAtMs: directive.deadlineAtMs,
+            scope: { workspaceId: authority.workspaceId, organizationId: authority.organizationId, checkpointId: projection.checkpointId } });
+          previous = cached?.archive;
+          if (cached?.snapshot) this.lastDurable = { ...cached.snapshot, scope, checkpointId: projection.checkpointId, nativeArchive: cached.archive };
+        }
+      }
+      if (
+        directive.reason === "periodic" &&
+        (await this.unchangedSinceDurable(authority, projection, directive.deadlineAtMs))
+      ) {
+        return;
+      }
+      site = "file_scan";
       for (let attempt = 0; attempt < 3; attempt += 1) {
         if (Date.now() >= directive.deadlineAtMs) {
-          throw new Error("cloud checkpoint deadline expired");
+          throw new CloudCheckpointDeadlineError();
         }
+        site = "file_scan";
         const scan = await scanCloudWorkspaceChanges(this.repositoryRoot, {
           requireDescriptorSafety: true,
           deadlineAtMs: directive.deadlineAtMs,
@@ -1628,10 +1680,12 @@ export class CloudWorkspaceDurabilityRuntime {
             return !prior || prior.operation !== "upsert" || prior.entryType !== entry.entryType ||
               prior.mode !== entry.mode || prior.contentSha256 !== entry.contentSha256 || prior.sizeBytes !== entry.sizeBytes;
           });
+          site = "file_upload";
           mutations.push(...await this.uploadChangedEntries(authority, changed, directive.deadlineAtMs));
         } finally {
           for (const entry of scan.entries.values()) entry.bytes.fill(0);
         }
+        site = "file_scan";
         assertCheckpointBeforeDeadline(directive.deadlineAtMs);
         const confirmation = await scanCloudWorkspaceChanges(
           this.repositoryRoot,
@@ -1657,6 +1711,7 @@ export class CloudWorkspaceDurabilityRuntime {
           });
         }
         try {
+          site = "content_append";
           // A directive may be redelivered after an ambiguous response. Binding
           // the key to its exact revision keeps only the same request replayable.
           const chunks: Array<Array<Record<string, unknown>>> = [];
@@ -1688,7 +1743,7 @@ export class CloudWorkspaceDurabilityRuntime {
               directive.deadlineAtMs,
             );
             if (!isRecord(raw) || !Number.isSafeInteger(raw.revision)) {
-              throw new Error("cloud durability append response is invalid");
+              throw invalidResponse("content_append", "cloud durability append response is invalid");
             }
             projection.currentRevision = Number(raw.revision);
           }
@@ -1709,7 +1764,7 @@ export class CloudWorkspaceDurabilityRuntime {
               directive.deadlineAtMs,
             );
             if (!isRecord(raw) || !Number.isSafeInteger(raw.revision)) {
-              throw new Error("cloud durability append response is invalid");
+              throw invalidResponse("content_append", "cloud durability append response is invalid");
             }
             projection.currentRevision = Number(raw.revision);
           }
@@ -1720,32 +1775,25 @@ export class CloudWorkspaceDurabilityRuntime {
             entry.bytes.fill(0);
           if (error instanceof CloudDurabilityAppendRevisionConflictError) {
             if (Date.now() >= directive.deadlineAtMs) {
-              throw new Error(
-                "cloud checkpoint deadline expired after revision conflict",
-              );
+              throw atCloudCheckpointCaptureSite(new CloudCheckpointDeadlineError(), "content_append", "deadline", "4xx");
             }
             if (attempt === 2) {
-              throw new Error(
-                "cloud checkpoint append revision conflicts exhausted",
-              );
+              throw atCloudCheckpointCaptureSite(new CloudCheckpointCaptureError("cloud checkpoint append revision conflicts exhausted", "revision_conflict"), "content_append", "revision_conflict", "4xx");
             }
             try {
+              site = "projection";
               projection = await this.loadProjection(
                 authority,
                 directive.deadlineAtMs,
               );
             } catch (loadError) {
               if (Date.now() >= directive.deadlineAtMs) {
-                throw new Error(
-                  "cloud checkpoint deadline expired after revision conflict",
-                );
+                throw atCloudCheckpointCaptureSite(new CloudCheckpointDeadlineError(), "content_append", "deadline", "4xx");
               }
               throw loadError;
             }
             if (Date.now() >= directive.deadlineAtMs) {
-              throw new Error(
-                "cloud checkpoint deadline expired after revision conflict",
-              );
+              throw atCloudCheckpointCaptureSite(new CloudCheckpointDeadlineError(), "content_append", "deadline", "4xx");
             }
             continue;
           }
@@ -1753,6 +1801,7 @@ export class CloudWorkspaceDurabilityRuntime {
         }
         let settled: CloudWorkspaceChangeScan;
         try {
+          site = "file_scan";
           assertCheckpointBeforeDeadline(directive.deadlineAtMs);
           settled = await scanCloudWorkspaceChanges(this.repositoryRoot, {
             requireDescriptorSafety: true,
@@ -1774,8 +1823,9 @@ export class CloudWorkspaceDurabilityRuntime {
             entry.bytes.fill(0);
           for (const entry of settled.entries.values()) entry.bytes.fill(0);
           if (Date.now() >= directive.deadlineAtMs) {
-            throw new Error("cloud checkpoint deadline expired");
+            throw new CloudCheckpointDeadlineError();
           }
+          site = "projection";
           projection = await this.loadProjection(
             authority,
             directive.deadlineAtMs,
@@ -1787,9 +1837,11 @@ export class CloudWorkspaceDurabilityRuntime {
         break;
       }
       if (!finalScan)
-        throw new Error("cloud checkpoint could not quiesce the working tree");
+        throw new CloudCheckpointCaptureError("cloud checkpoint could not quiesce the working tree", "working_tree_changed");
       assertCheckpointBeforeDeadline(directive.deadlineAtMs);
+      site = "final_verify";
       const designSelection = await this.readPrivateDesignSelection(directive.deadlineAtMs);
+      site = "native_inventory";
       const native = await captureCloudNativeCheckpoint({
         roots: this.nativeRoots,
         identity: gitExecutionIdentity(),
@@ -1802,19 +1854,22 @@ export class CloudWorkspaceDurabilityRuntime {
             const uploaded = await this.upload(authority, {
               path: "native-checkpoint-chunk", entryType: "file", mode: 33188,
               sizeBytes: bytes.length, contentSha256: createHash("sha256").update(bytes).digest("hex"), bytes,
-            }, directive.deadlineAtMs);
+            }, directive.deadlineAtMs, "native_upload");
             if (uploaded.operation !== "upsert") throw new Error("invalid native checkpoint upload");
             return { blobId: uploaded.blobId, contentSha256: uploaded.contentSha256, sizeBytes: uploaded.sizeBytes };
           } finally { bytes.fill(0); }
         },
       });
+      site = "final_verify";
       const afterNative = await scanCloudWorkspaceChanges(this.repositoryRoot, {
         requireDescriptorSafety: true, deadlineAtMs: directive.deadlineAtMs,
       });
       try {
-        if (afterNative.fingerprint !== finalScan.fingerprint ||
-          JSON.stringify(await this.readPrivateDesignSelection(directive.deadlineAtMs)) !== JSON.stringify(designSelection)) {
-          throw new Error("cloud checkpoint changed during native recovery capture");
+        if (afterNative.fingerprint !== finalScan.fingerprint) {
+          throw new CloudCheckpointCaptureError("cloud checkpoint changed during native recovery capture", "working_tree_changed");
+        }
+        if (JSON.stringify(await this.readPrivateDesignSelection(directive.deadlineAtMs)) !== JSON.stringify(designSelection)) {
+          throw new CloudCheckpointCaptureError("cloud checkpoint changed during native recovery capture", "design_changed");
         }
       } finally { for (const entry of afterNative.entries.values()) entry.bytes.fill(0); }
       const manifestBytes = Buffer.from(
@@ -1834,8 +1889,9 @@ export class CloudWorkspaceDurabilityRuntime {
       );
       let manifest: ProjectionEntry;
       try {
+        site = "manifest_upload";
         if (manifestBytes.length > MAX_FILE_BYTES) {
-          throw new Error("cloud checkpoint manifest is too large");
+          throw new CloudCheckpointCaptureError("cloud checkpoint manifest is too large", "native_invalid");
         }
         const manifestEntry: ScannedEntry = {
           path: "checkpoint-manifest.json",
@@ -1852,6 +1908,7 @@ export class CloudWorkspaceDurabilityRuntime {
           authority,
           manifestEntry,
           directive.deadlineAtMs,
+          "manifest_upload",
         );
       } finally {
         manifestBytes.fill(0);
@@ -1859,6 +1916,7 @@ export class CloudWorkspaceDurabilityRuntime {
       // Uploading a checkpoint can take minutes. Presence or explicit work
       // received during capture must cancel before the final stop commits.
       if (stillIdle && !stillIdle()) throw new Error("Cloud workspace is no longer idle; final checkpoint cancelled");
+      site = "commit";
       const committed = await this.postJson(
         authority,
         CHECKPOINT_PATH,
@@ -1893,8 +1951,9 @@ export class CloudWorkspaceDurabilityRuntime {
         typeof committed.checkpointId !== "string" ||
         !UUID_PATTERN.test(committed.checkpointId)
       ) {
-        throw new Error("cloud checkpoint commit response is invalid");
+        throw invalidResponse("commit_ack", "cloud checkpoint commit response is invalid");
       }
+      site = "commit_ack";
       this.lastDurable = {
         scope: this.scopeKey(authority),
         checkpointId: committed.checkpointId.toLowerCase(),
@@ -1917,6 +1976,8 @@ export class CloudWorkspaceDurabilityRuntime {
         snapshot: { contentRevision: this.lastDurable.contentRevision, scanFingerprint: this.lastDurable.scanFingerprint,
           nativeFingerprint: this.lastDurable.nativeFingerprint, designSelection: this.lastDurable.designSelection },
       }).catch(() => undefined);
+    } catch (error) {
+      throw atCloudCheckpointCaptureSite(error, site);
     } finally {
       if (finalScan) {
         for (const entry of finalScan.entries.values()) entry.bytes.fill(0);

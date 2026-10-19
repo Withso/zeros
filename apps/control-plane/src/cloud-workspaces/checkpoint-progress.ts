@@ -1,10 +1,12 @@
 import type pg from "pg";
 import { DatabaseAcquireTimeoutError, withSystemTx } from "../db.js";
-import { CloudCheckpointProgressSchema, CloudCheckpointSealRefusalSchema,
-  type CloudCheckpointProgress, type CloudCheckpointSealRefusal } from "./checkpoint-progress-contract.js";
+import { CloudCheckpointProgressSchema, CloudCheckpointSealRefusalSchema, CloudCheckpointCaptureFailureSchema,
+  type CloudCheckpointProgress, type CloudCheckpointSealRefusal, type CloudCheckpointCaptureFailure } from "./checkpoint-progress-contract.js";
 import { assertCurrentCloudEngineAuthority, CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 
-export type CloudEngineCheckpointProgressInput = CloudCheckpointProgress & { token: string; sealRefusal?: CloudCheckpointSealRefusal };
+export type CloudEngineCheckpointProgressInput = CloudCheckpointProgress & {
+  token: string; sealRefusal?: CloudCheckpointSealRefusal; captureFailure?: CloudCheckpointCaptureFailure;
+};
 
 export class CloudEngineCheckpointProgressRejected extends Error {
   readonly code = "engine_checkpoint_progress_rejected";
@@ -22,7 +24,7 @@ export class CloudEngineCheckpointProgress {
   constructor(private readonly pool: pg.Pool, private readonly options: { workosEnabled: boolean }) {}
 
   async report(input: CloudEngineCheckpointProgressInput): Promise<void> {
-    const { token, sealRefusal, ...body } = input;
+    const { token, sealRefusal, captureFailure, ...body } = input;
     const parsed = CloudCheckpointProgressSchema.safeParse(body);
     if (!parsed.success || !/^zwh_[A-Za-z0-9_-]{43}$/.test(token)) throw new CloudEngineCheckpointProgressRejected();
     // PostgreSQL UUIDs are case-insensitive; JSON audit keys are not. One
@@ -32,6 +34,7 @@ export class CloudEngineCheckpointProgress {
       engineInstanceId: parsed.data.engineInstanceId.toLowerCase(), requestId: parsed.data.requestId.toLowerCase(),
     };
     const refusal = CloudCheckpointSealRefusalSchema.safeParse(progress.state === "failed" && progress.stage === "seal_ack" ? sealRefusal : undefined);
+    const capture = CloudCheckpointCaptureFailureSchema.safeParse(progress.state === "failed" && progress.stage === "durability_capture" ? captureFailure : undefined);
     try {
       await withSystemTx(this.pool, async tx => {
         // Optional diagnostics must release contended authority promptly. These
@@ -100,6 +103,11 @@ export class CloudEngineCheckpointProgress {
           `INSERT INTO audit_log(org_id,actor_id,action,subject,created_at)
            VALUES($1,NULL,'cloud_workspace.checkpoint_seal_refusal',$2::jsonb,clock_timestamp())`,
           [progress.organizationId, JSON.stringify({ ...progress, sealRefusal: refusal.data })],
+        );
+        if (capture.success) await tx.query(
+          `INSERT INTO audit_log(org_id,actor_id,action,subject,created_at)
+           VALUES($1,NULL,'cloud_workspace.checkpoint_capture_failure',$2::jsonb,clock_timestamp())`,
+          [progress.organizationId, JSON.stringify({ ...progress, captureFailure: capture.data })],
         );
       });
     } catch (error) {
