@@ -857,3 +857,66 @@ runtime's current qualifications and revocation state. Credential discovery,
 execution and renewal share the exact per-kind v4 qualification join, including
 evidence mode and independent MCP/native-capability requirements. No v3 worker credential-qualification fallback remains. Revocation closes new admissions without choosing a
 different runtime; existing in-flight credentials retain their lease deadlines.
+
+## Dormant per-execution runner contract
+
+The engine's `cloud-runner-contract.ts` and `cloud-runner-lifecycle.ts` define a
+dormant ownership boundary for a future qualified systemd backend. They do not
+install units, provide a runner executable or native transport, or select a
+production spawn path. Local Personal, organization-local and existing cloud
+Host execution retain their current implementations. Flags remain off.
+
+The fixed policy names `zeros-agent-runner@<executionId>.service`, with a UUID
+execution ID, UID/GID 10003, `Restart=no`, `KillMode=control-group`, ten-second
+start/stop limits, a private umask and null standard streams. Only the qualified
+backend may resolve its fixed entrypoint. Callers cannot supply arbitrary unit
+properties, shell commands or unit environment. The policy alone does not
+establish the qualified base's resource or process security posture.
+
+Before native submission, the lifecycle exclusively reserves and fsyncs a
+private receipt containing only immutable identity and phase. Its scope includes
+organization, workspace, generation, engine instance, boot, writer, execution,
+runtime, owner PID/start token and the original workload directory/device/inode.
+The receipt directory is canonical, owned by the current engine UID and 0700;
+receipt files are 0600, single-link regular files opened without following links.
+An existing receipt refuses relaunch, including after a coordinator restart.
+A lost start reply triggers one inspection of the original attempt, never a
+second start. A dead unit interrupts its execution; it does not restart the
+provider turn.
+
+Native proof must come from independent systemd and kernel observations of the
+original attempt, unit invocation, boot, PID/start token and cgroup inode. A
+runner hello or caller-supplied PID cannot provide that proof. The unit cgroup
+must descend from the original shared Host workload root. Private channel
+establishment must also verify the canonical owner-only socket or descriptor,
+peer UID, PID/start token and original cgroup before material is captured.
+Backend I/O must be bounded and joined, including uncertain starts and late
+connections; the lifecycle does not turn a timed-out promise into exit proof.
+
+Selected provider material, cwd and arguments travel once in a bounded 64 KiB
+private request, never in unit metadata, argv, unit environment, general logs
+or the durable receipt. Authority and source revisions are rechecked after
+asynchronous work and immediately before delivery. An unknown handoff ACK
+causes retirement; it cannot resend material or dispatch again. A live unit
+remains `starting` until that private handoff is acknowledged. Stop cancels
+preparation and retires the original custody even if the receipt has become
+unwritable. Material is released only after positive original-process and
+complete empty-cgroup evidence. Failed cleanup or final persistence remains
+busy; a late reply cannot restore authority.
+
+Runner census is an additional veto on idle/checkpoint sealing, not a
+replacement for the existing complete Host census. Even zero counts require
+the current owner scope, a fresh challenge and the current registry revision.
+Pending starts, failed retirements, escaped processes and unknown or partial
+observations remain busy. The next implementation must wire all turn units
+into **zeros-host's shared resource budget, census and final drain**, including
+workspace-user descendants outside individual unit cgroups. An ordinary
+systemd sibling service outside that tree is not a valid implementation.
+
+Activation requires the native backend, fixed runner, bounded registry, full
+execution/event/census integration and a newly qualified base/runtime together.
+Qualification must include real systemd start/ACK loss, escaped-child drain,
+frontend replacement, coordinator-loss withdrawal and checkpoint fallback.
+The injected-driver tests establish only the dormant contract. They do not
+qualify systemd, a provider turn or a base; no in-place change of an old runtime
+pin or downgrade of an active execution is permitted.
