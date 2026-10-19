@@ -14,11 +14,10 @@ import { adoptCloudComputerBuildRepositories } from "./cloud-computer-checkout.m
 import { CloudDelegatedCgroups, enterCloudRootHost } from "./cloud-engine-cgroup.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import { cloudRunnerBaseSupported, cloudRunnerQualificationPassed } from "./cloud-runner-base.mjs";
+import { COMPUTER_ADDITIONAL_CHECKS, COMPUTER_RUNTIME_CHECKS, canonicalComputerSelfTest, computerEngineEvidence,
+  computerSelfTestReport, computerSelfTestRuntime, computerSetupEvidence, parseComputerSelfTestReport } from "./cloud-computer-self-test.mjs";
 
-export const RUNTIME_SELF_TEST_CHECKS = Object.freeze([
-  "node_abi", "sqlite_query", "pty_load", "claude_version", "codex_version",
-  "cursor_load", "engine_load", "supervisor_idle", "engine_lifecycle",
-]);
+export const RUNTIME_SELF_TEST_CHECKS = COMPUTER_RUNTIME_CHECKS;
 const MAX_OUTPUT = 64 * 1024;
 const SCRIPT = fileURLToPath(import.meta.url);
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -117,6 +116,65 @@ export async function runSelfTestChecks(checks) {
     catch { results[name] = false; }
   }
   return selfTestDiagnostic(results);
+}
+
+export function computerSelfTestDiagnostic(results, timedOut = false) {
+  const failedChecks = [...RUNTIME_SELF_TEST_CHECKS, ...COMPUTER_ADDITIONAL_CHECKS].filter(name => results[name] !== true);
+  return { schema: "zeros.diagnostic/v1", component: "qualification", stage: "self_test",
+    ok: failedChecks.length === 0 && !timedOut, exitCode: failedChecks.length || timedOut ? 1 : 0, timedOut,
+    failedChecks: timedOut && failedChecks.length === 0 ? [...RUNTIME_SELF_TEST_CHECKS, ...COMPUTER_ADDITIONAL_CHECKS] : failedChecks };
+}
+
+export function parseComputerSelfTestOutput(output, exitCode) {
+  try {
+    if (typeof output !== "string" || Buffer.byteLength(output) > MAX_OUTPUT || ![0, 1].includes(exitCode)) return null;
+    const lines = output.replace(/\r?\n$/, "").split("\n"), diagnostic = JSON.parse(lines.at(-1));
+    const checks = [...RUNTIME_SELF_TEST_CHECKS, ...COMPUTER_ADDITIONAL_CHECKS];
+    if (!exactKeys(diagnostic, ["schema", "component", "stage", "ok", "exitCode", "timedOut", "failedChecks"]) ||
+      diagnostic.schema !== "zeros.diagnostic/v1" || diagnostic.component !== "qualification" || diagnostic.stage !== "self_test" ||
+      typeof diagnostic.ok !== "boolean" || typeof diagnostic.timedOut !== "boolean" || diagnostic.exitCode !== exitCode ||
+      !Array.isArray(diagnostic.failedChecks) || new Set(diagnostic.failedChecks).size !== diagnostic.failedChecks.length ||
+      diagnostic.failedChecks.some(name => !checks.includes(name)) || canonicalComputerSelfTest(diagnostic) !== lines.at(-1)) return null;
+    if (!diagnostic.ok) return lines.length === 1 && exitCode === 1 && diagnostic.failedChecks.length > 0 ? { diagnostic, report: null } : null;
+    if (lines.length !== 2 || exitCode !== 0 || diagnostic.timedOut || diagnostic.failedChecks.length) return null;
+    const report = parseComputerSelfTestReport(JSON.parse(lines[0]));
+    return report && canonicalComputerSelfTest(report) === lines[0] ? { diagnostic, report } : null;
+  } catch { return null; }
+}
+
+/** Build-only producer. Reuse the existing smoke sequence, including exactly
+ * one full engine exercise, and publish only after setup and final retirement.
+ * The ordinary self-test and workspace attester do not call this path. */
+export async function runComputerSelfTestChecks(checks, options) {
+  const results = {};
+  let original, roles, report = null;
+  const { requireRunners, resourcePolicySha256, signal } = options;
+  try {
+    original = computerSelfTestRuntime(options.runtime);
+    assert.equal(typeof requireRunners, "boolean");
+    assert(!signal?.aborted);
+    const diagnostic = await runSelfTestChecks({ ...checks, engine_lifecycle: async () => {
+      roles = computerEngineEvidence(await checks.engine_lifecycle(), requireRunners);
+      return true;
+    } });
+    for (const name of RUNTIME_SELF_TEST_CHECKS) results[name] = !diagnostic.failedChecks.includes(name);
+    if (diagnostic.ok && !signal?.aborted) results.setup_process = computerSetupEvidence(await options.setup());
+  } catch { /* No raw child output, errors or environment enters evidence. */ }
+  // Even a failed probe must reach the independent actual-tree census. A
+  // positive engine report alone does not account for the later setup probe.
+  try { await options.retired(); results.final_census = true; } catch { /* Unknown custody stays closed. */ }
+  if (original && results.setup_process && results.final_census && !signal?.aborted) {
+    try {
+      const current = await options.current();
+      assert(!signal?.aborted && current.requireRunners === requireRunners);
+      assert.equal(canonicalComputerSelfTest(computerSelfTestRuntime(current.runtime)), canonicalComputerSelfTest(original));
+      report = computerSelfTestReport({ runtime: original, requireRunners, resourcePolicySha256,
+        checks: roles, now: (options.now ?? Date.now)() });
+      results.final_identity = true;
+    } catch { /* Post-I/O identity changes cannot certify the old execution. */ }
+  }
+  const diagnostic = computerSelfTestDiagnostic(results);
+  return { diagnostic, report: diagnostic.ok ? report : null };
 }
 
 function command(executable, args, environment, timeout = 20_000, maxBuffer = MAX_OUTPUT, lock) {
@@ -273,7 +331,7 @@ function prepareSelfTestLayout(runtime) {
   prepareDirectory(runtimeLayout.repository, 10003);
 }
 
-export function runtimeEngineLifecycleSmoke(runtime, environment) {
+function runtimeEngineLifecycleOutput(runtime, environment, maxBuffer = 8 * 1024 * 1024) {
   prepareSelfTestLayout(runtime);
   // Keep only loopback usable in this otherwise disconnected namespace so
   // the existing local gateway/service probes can exercise their sockets.
@@ -283,15 +341,20 @@ export function runtimeEngineLifecycleSmoke(runtime, environment) {
   // the v4 engine view, including direct non-root owned-process/service probes.
   // Manifest/receipt identity is checked separately; this neither consumes
   // workspace admission nor starts a model session.
-  const stdout = selfTestLauncher(runtime, "qualify", environment, 330_000, 8 * 1024 * 1024);
-  return engineLifecyclePassed(stdout, cloudRunnerBaseSupported());
+  return selfTestLauncher(runtime, "qualify", environment, 330_000, maxBuffer);
 }
 
-async function installedRuntime() {
+export function runtimeEngineLifecycleSmoke(runtime, environment) {
+  return engineLifecyclePassed(runtimeEngineLifecycleOutput(runtime, environment), cloudRunnerBaseSupported());
+}
+
+async function installedRuntime(fresh = false) {
   // B2's single selector reads only the base-owned active descriptor. No argv,
   // cwd, facade, environment or source-checkout fallback can select a runtime.
   const resolver = await import("./cloud-runtime-root.mjs");
-  const runtime = resolver.resolveCloudRuntime();
+  // The ordinary selector is process-cached. Build evidence's post-I/O fence
+  // must reopen the base-owned descriptor rather than compare that cache.
+  const runtime = fresh ? resolver.createCloudRuntimeResolver().resolve() : resolver.resolveCloudRuntime();
   const manifestFile = `${runtime.root}/manifest.json`;
   const receiptFile = `/srv/zeros/runtime-installs/${runtime.runtimeId}.json`;
   resolver.assertCloudRuntimePath(manifestFile);
@@ -301,13 +364,13 @@ async function installedRuntime() {
   return { runtime, manifest, resolver };
 }
 
-async function offlineChecks(environment) {
+async function offlineChecks(environment, buildQualification = false) {
   const { runtime, manifest, resolver } = await installedRuntime();
   const worker = `${runtime.root}/worker`;
   const fromWorker = createRequire(`${worker}/package.json`);
   const internal = file => resolver.resolveCloudRuntimePackagePath(file);
   const version = (file, args) => command(file, args, environment);
-  return runSelfTestChecks({
+  const checks = {
     node_abi() {
       assert.equal(process.platform, "linux"); assert.equal(process.arch, "x64");
       assert.equal(process.versions.node, manifest.platform.node);
@@ -360,7 +423,29 @@ async function offlineChecks(environment) {
       const stdout = command("/usr/bin/python3", ["-I", "-B", "/opt/zeros-bootstrap/bootstrap.py", "status"], environment, 30_000);
       return supervisorIsIdle(JSON.parse(stdout), runtime);
     },
-    engine_lifecycle: () => runtimeEngineLifecycleSmoke(runtime, environment),
+    engine_lifecycle: () => buildQualification ? JSON.parse(runtimeEngineLifecycleOutput(runtime, environment, MAX_OUTPUT)) :
+      runtimeEngineLifecycleSmoke(runtime, environment),
+  };
+  if (!buildQualification) return runSelfTestChecks(checks);
+  const policy = manifest.files?.filter(entry => entry.path === "lib/zeros/cloud-resource-admission.mjs");
+  assert.equal(policy?.length, 1);
+  assert.equal(policy[0].type, "file"); assert.match(policy[0].sha256, /^[a-f0-9]{64}$/);
+  return runComputerSelfTestChecks(checks, { runtime, resourcePolicySha256: policy[0].sha256,
+    requireRunners: cloudRunnerBaseSupported(),
+    setup: () => JSON.parse(command(runtime.node, [runtime.helpers.setupProcess, "--qualify"], environment, 30_000, MAX_OUTPUT, 3)),
+    retired: () => {
+      assertSelfTestSetupLock(3);
+      new CloudDelegatedCgroups({ runtime }).assertRetired();
+      assertSelfTestSetupLock(3);
+    },
+    current: async () => {
+      const { runtime: current } = await installedRuntime(true);
+      assertSelfTestSetupLock(3);
+      assert(supervisorIsIdle(JSON.parse(command("/usr/bin/python3", ["-I", "-B", "/opt/zeros-bootstrap/bootstrap.py", "status"],
+        environment, 30_000)), current));
+      assertSelfTestSetupLock(3);
+      return { runtime: current, requireRunners: cloudRunnerBaseSupported() };
+    },
   });
 }
 
@@ -388,39 +473,58 @@ async function main() {
     }
     return;
   }
-  let result = selfTestDiagnostic({});
+  const buildQualification = ["--build-qualification", "--offline-build-qualification"].includes(process.argv[2]);
+  const refused = timedOut => buildQualification ? computerSelfTestDiagnostic({}, timedOut) : selfTestDiagnostic({}, timedOut);
+  let result = refused(false), report = null;
   let directory;
   let lock;
   try {
     assert.equal(process.platform, "linux"); assert.equal(process.getuid?.(), 0);
     assert.equal(process.geteuid?.(), 0);
-    if (process.argv.length === 3 && process.argv[2] === "--offline-probes") {
+    if (process.argv.length === 3 && ["--offline-probes", "--offline-build-qualification"].includes(process.argv[2])) {
       // The parent supplies an empty private HOME, never the VM root's HOME.
       // Its network namespace has no external interfaces/routes.
       assertSelfTestSetupLock(3);
-      result = await offlineChecks({ PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: process.env.HOME, TMPDIR: process.env.HOME });
+      const observed = await offlineChecks({ PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: process.env.HOME, TMPDIR: process.env.HOME }, buildQualification);
+      if (buildQualification) { result = observed.diagnostic; report = observed.report; }
+      else result = observed;
     } else {
-      assert.equal(process.argv.length, 2);
+      assert(process.argv.length === 2 || process.argv.length === 3 && process.argv[2] === "--build-qualification");
       const { runtime } = await installedRuntime();
       lock = acquireSelfTestSetupLock();
       assert(supervisorIsIdle(JSON.parse(command("/usr/bin/python3", ["-I", "-B", "/opt/zeros-bootstrap/bootstrap.py", "status"],
         { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, 30_000)), runtime));
       new CloudDelegatedCgroups({ runtime }).assertRetired();
       directory = mkdtempSync("/run/zeros/runtime-smoke-");
-      const child = spawnSync("/usr/bin/unshare", ["--net", "--", runtime.node, SCRIPT, "--offline-probes"], {
+      const child = spawnSync("/usr/bin/unshare", ["--net", "--", runtime.node, SCRIPT,
+        buildQualification ? "--offline-build-qualification" : "--offline-probes"], {
         cwd: "/", env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: directory, TMPDIR: directory },
         stdio: ["ignore", "pipe", "pipe", lock], encoding: "utf8", timeout: 540_000, maxBuffer: MAX_OUTPUT, killSignal: "SIGKILL",
       });
       assertSelfTestSetupLock(lock);
-      if (!child.error && child.signal === null) result = parseSelfTestDiagnostic(child.stdout, child.status) ?? result;
-      else result = selfTestDiagnostic({}, child.error?.code === "ETIMEDOUT");
+      if (!child.error && child.signal === null) {
+        if (buildQualification) {
+          const observed = parseComputerSelfTestOutput(child.stdout, child.status);
+          if (observed) { result = observed.diagnostic; report = observed.report; }
+          if (result.ok) {
+            const { runtime: current } = await installedRuntime(true);
+            const original = canonicalComputerSelfTest(computerSelfTestRuntime(runtime));
+            assert.equal(canonicalComputerSelfTest(computerSelfTestRuntime(current)), original);
+            assert.equal(canonicalComputerSelfTest(report.runtime), original);
+            assert.equal(report.policy.runnerVersion === 1, cloudRunnerBaseSupported());
+            new CloudDelegatedCgroups({ runtime }).assertRetired();
+            assertSelfTestSetupLock(lock);
+          }
+        } else result = parseSelfTestDiagnostic(child.stdout, child.status) ?? result;
+      } else result = refused(child.error?.code === "ETIMEDOUT");
     }
-  } catch { /* No exception text, output, paths or environment reaches stdout. */ }
+  } catch { result = refused(false); report = null; /* No exception text, output, paths or environment reaches stdout. */ }
   finally {
-    if (directory) try { rmSync(directory, { recursive: true, force: true }); } catch { result = selfTestDiagnostic({}); }
+    if (directory) try { rmSync(directory, { recursive: true, force: true }); } catch { result = refused(false); report = null; }
     if (lock !== undefined) closeSync(lock);
   }
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (buildQualification && result.ok && report) process.stdout.write(`${canonicalComputerSelfTest(report)}\n`);
+  process.stdout.write(`${buildQualification ? canonicalComputerSelfTest(result) : JSON.stringify(result)}\n`);
   // Dependency imports may leave timers behind. This is a one-shot probe.
   process.exit(result.exitCode);
 }

@@ -1,0 +1,5 @@
+{
+  "file": "scripts/cloud-workspace-validation/sandbox/runtime-self-test.mjs",
+  "before": "fresh ? resolver.createCloudRuntimeResolver().resolve() : resolver.resolveCloudRuntime()",
+  "after": "resolver.resolveCloudRuntime()"
+}
