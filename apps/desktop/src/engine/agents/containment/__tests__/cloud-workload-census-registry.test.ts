@@ -54,7 +54,7 @@ function owner(f: ReturnType<typeof setup>, change?: (reply: ResidentWorkloadCla
   f.registry.registerOwner(channel);
   return { ...t, channel };
 }
-async function infrastructureScope(f: ReturnType<typeof setup>, kind: "language-service" | "service" = "language-service") {
+async function infrastructureScope(f: ReturnType<typeof setup>, kind: "language-service" | "service" = "language-service", coordinatorService?: () => readonly { pid: number; startToken: string }[]) {
   const supervisor = { ...kernelProcess(301, workload), parent: 101 };
   const target = { ...kernelProcess(302, workload), parent: 301, group: 301, session: 301 };
   const worker = { ...kernelProcess(303, workload), parent: 302, group: 303, session: 301 };
@@ -73,7 +73,7 @@ async function infrastructureScope(f: ReturnType<typeof setup>, kind: "language-
   });
   const prepared = await f.registry.prepare(host,
     { executionId: randomUUID(), actor: "repo-code-task", cwd: process.cwd(), workspaceRoot: process.cwd() },
-    undefined, { kind, role: "infrastructure" });
+    undefined, { kind, role: "infrastructure", ...(coordinatorService ? { coordinatorService } : {}) });
   cleanups.push(async () => {
     for (const member of [supervisor, target, worker]) f.processes.delete(member.pid);
     f.groups.get(workload)!.pids = f.groups.get(workload)!.pids.filter(pid => ![301, 302, 303].includes(pid));
@@ -126,6 +126,28 @@ describe("ORIGINAL registry joined to complete shared kernel census (fake kernel
     const f = setup(); await infrastructureScope(f, kind);
     expect(await f.registry.inspect()).toMatchObject({ complete: true, pendingLaunches: 0,
       workloadPids: [], infrastructurePids: [101, 102, 301, 302, 303] });
+  });
+  it("exempts only exact coordinator service births, never its runner descendants", async () => {
+    const f = setup();
+    await infrastructureScope(f, "service", () => [{ pid: 301, startToken: "3010" }, { pid: 302, startToken: "3020" }]);
+    expect(await f.registry.inspect()).toMatchObject({ complete: true, workloadPids: [303], infrastructurePids: [101, 102, 301, 302] });
+  });
+  it("keeps an uncertain coordinator service census incomplete and all children busy", async () => {
+    const f = setup();
+    await infrastructureScope(f, "service", () => { throw new Error("original manager birth lost"); });
+    expect(await f.registry.inspect()).toMatchObject({ complete: false, workloadPids: [301, 302, 303], infrastructurePids: [101, 102] });
+  });
+  it("preserves an empty coordinator service across quiescence while retaining its explicit stop owner", async () => {
+    const f = setup();
+    const scope = await infrastructureScope(f, "service", () => [{ pid: 301, startToken: "3010" }, { pid: 302, startToken: "3020" }]);
+    f.processes.delete(303); f.groups.get(workload)!.pids = [301, 302];
+    const stop = vi.spyOn(scope.original, "stopAndProve"), ticket = f.registry.fence();
+    await f.registry.drain(ticket);
+    expect(stop).not.toHaveBeenCalled();
+    f.registry.resume(ticket);
+    expect(await f.registry.inspect()).toMatchObject({ complete: true, workloadPids: [], infrastructurePids: [101, 102, 301, 302] });
+    await scope.prepared.stopAndProve();
+    expect(stop).toHaveBeenCalledOnce();
   });
   it("keeps unrelated engine-leaf and detached jobs busy beside language infrastructure", async () => {
     const f = setup(); await infrastructureScope(f);

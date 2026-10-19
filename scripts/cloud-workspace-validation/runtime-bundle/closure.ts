@@ -72,6 +72,11 @@ export const RUNTIME_HELPERS = [
     optional: false,
   },
   {
+    source: "apps/desktop/src/engine/agents/containment/cloud-runner-base.mjs",
+    target: "lib/zeros/cloud-runner-base.mjs",
+    optional: false,
+  },
+  {
     source: "apps/control-plane/src/cloud-workspaces/runtime-update-adapter.py",
     target: "lib/zeros/runtime-update-adapter.py",
     optional: false,
@@ -105,6 +110,10 @@ const CLOUD_HOST_MODULES = [
   "host-process-supervisor.mjs",
   "cloud-host-workload-entry.mjs",
   "cloud-workload-cgroup.mjs",
+  "cloud-runner-base.mjs",
+  "cloud-runner-manager.mjs",
+  "cloud-agent-runner.mjs",
+  "cloud-runner-transport.mjs",
 ].map(name => `apps/desktop/src/engine/agents/containment/${name}`);
 export const ROOT_METADATA = [
   "package.json",

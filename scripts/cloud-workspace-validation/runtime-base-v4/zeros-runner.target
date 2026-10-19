@@ -1,0 +1,4 @@
+[Unit]
+Description=Zeros private runner manager
+DefaultDependencies=no
+AllowIsolate=no

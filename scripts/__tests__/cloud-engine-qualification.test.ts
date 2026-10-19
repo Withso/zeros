@@ -1,17 +1,34 @@
 import { beforeEach, expect, it, vi } from "vitest";
-const ports=vi.hoisted(()=>({actor:vi.fn(),capture:vi.fn(),human:vi.fn(),create:vi.fn(),load:vi.fn(),unregister:vi.fn(),live:vi.fn(),inspect:vi.fn(),close:vi.fn()}));
+const ports=vi.hoisted(()=>({actor:vi.fn(),capture:vi.fn(),human:vi.fn(),runners:vi.fn(),create:vi.fn(),load:vi.fn(),unregister:vi.fn(),live:vi.fn(),inspect:vi.fn(),close:vi.fn()}));
 import { qualifyCloudEngineRuntime as qualify } from "../cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs";
-const qualifyCloudEngineRuntime=(value?:Parameters<typeof qualify>[0])=>qualify(value,ports.load);
+const qualifyCloudEngineRuntime=(value?:Parameters<typeof qualify>[0])=>qualify(value,ports.load,{runnerSupport:()=>false});
+const runners={version:1,managerIdentity:true,privateMaterial:true,stdio:true,originalRetirement:true,descendantsRetired:true,census:true,revocation:true,managerRetired:true};
 const execution={sameEngineIdentity:true,noSandbox:true,ownedProcessGroups:true,originalProcessGroupsRetired:true,timeoutRetired:true,workloadCgroup:true,vmWorkloadDrain:false};
 const identity={qualified:true,hostUid:10003,namespaceUid:10003,noNewPrivs:1,seccompMode:2,capabilities:{effective:0,permitted:0,inheritable:0,bounding:0,ambient:0},checks:[],resources:{finite:true,cpuMax:"400000 100000",memoryMax:String(7*1024**3),pidsMax:"4096",memoryBudget:{nominalMemoryBytes:String(8*1024**3),measuredMemoryBytes:String(8*1024**3),hostMemoryMax:String(256*1024**2),source:"nominal",capped:false},hierarchy:[{path:"/fixture/engine-runtime",memoryMax:String(7*1024**3),cpuMax:"400000 100000",pidsMax:"4096"}],cpuSplit:{engine:{cpuMax:"max 100000",cpuWeight:100},workload:{controllers:["cpu"],cpuWeight:100,cap:{kind:"applied",effectiveCpus:4,cpuMax:"300000 100000"}}}}};
 const context={custody:{assertLive:ports.live},workloads:{inspect:ports.inspect},close:ports.close};
+it("requires an actual runner probe on a supporting base before claiming engine checks passed", async () => {
+ ports.runners.mockResolvedValue(undefined);
+ const report = await qualify(identity, ports.load, { runnerSupport: () => true });
+ expect(report.engineChecksPassed).toBe(false);
+});
+it("executes the runner role only on a supporting base and requires every positive witness", async () => {
+ expect((await qualify(identity, ports.load, { runnerSupport: () => false })).engineChecksPassed).toBe(true);
+ expect(ports.runners).not.toHaveBeenCalled();
+ expect((await qualify(identity, ports.load, { runnerSupport: () => true })).engineChecksPassed).toBe(true);
+ expect(ports.runners).toHaveBeenCalledExactlyOnceWith(context);
+ for(const field of Object.keys(runners)) {
+  ports.runners.mockResolvedValue({...runners,[field]:false});
+  expect((await qualify(identity, ports.load, { runnerSupport: () => true })).engineChecksPassed).toBe(false);
+ }
+});
 beforeEach(()=>{
  for(const fn of Object.values(ports))fn.mockReset();
- ports.load.mockResolvedValue({roles:{createCloudQualificationRuntime:ports.create,qualifyCloudActorTools:ports.actor,qualifyCloudCapture:ports.capture,qualifyCloudHumanServices:ports.human},unregister:ports.unregister});
+ ports.load.mockResolvedValue({roles:{createCloudQualificationRuntime:ports.create,qualifyCloudActorTools:ports.actor,qualifyCloudCapture:ports.capture,qualifyCloudHumanServices:ports.human,qualifyCloudRunners:ports.runners},unregister:ports.unregister});
  ports.create.mockReturnValue(context);
  ports.actor.mockResolvedValue({execution,actorTools:{sameEngineIdentity:true,noSandbox:true}});
  ports.capture.mockResolvedValue({sameEngineIdentity:true,chromiumSandbox:true});
  ports.human.mockResolvedValue({sameEngineIdentity:true,noSandbox:true});
+ ports.runners.mockResolvedValue(runners);
  ports.inspect.mockResolvedValue({complete:true,pendingLaunches:0,failedRetirements:0,workloadPids:[],infrastructurePids:[22]});
 });
 it("runs fixed inline probes in one original controller and leaves final drain to root",async()=>{
@@ -72,13 +89,13 @@ it("refuses the legacy secure result instead of borrowing its retired-sandbox cl
  expect((await qualifyCloudEngineRuntime(identity)).engineChecksPassed).toBe(false); expect(ports.capture).not.toHaveBeenCalled();
 });
 
-it("times serial qualification roles and retirement without making an inner proof", async () => {
+it.each([false, true])("times serial qualification roles without charging runner work to adjacent stages (runner support: %s)", async runnerSupport => {
  const observed = vi.fn(); let ms = 0;
- for (const [name, duration] of [["load", 11], ["create", 12], ["actor", 13], ["capture", 14], ["human", 15], ["inspect", 16], ["close", 17], ["unregister", 18]] as const) {
+ for (const [name, duration] of [["load", 11], ["create", 12], ["actor", 13], ["capture", 14], ["human", 15], ["runners", 19], ["inspect", 16], ["close", 17], ["unregister", 18]] as const) {
   const original = ports[name].getMockImplementation();
   ports[name].mockImplementation((...args: any[]) => { ms += duration; return original?.(...args); });
  }
- const report = await (qualify as any)(identity, ports.load, { onPerformance: observed, now: () => ms });
+ const report = await qualify(identity, ports.load, { onPerformance: observed, now: () => ms, runnerSupport: () => runnerSupport });
  expect(report.engineChecksPassed).toBe(true); expect(report.qualified).toBe(false);
  expect(report).not.toHaveProperty("performance");
  expect(observed).toHaveBeenCalledOnce();
@@ -89,17 +106,41 @@ it("times serial qualification roles and retirement without making an inner proo
  expect(ports.capture.mock.invocationCallOrder[0]).toBeGreaterThan(ports.actor.mock.invocationCallOrder[0]!);
  expect(ports.human.mock.invocationCallOrder[0]).toBeGreaterThan(ports.capture.mock.invocationCallOrder[0]!);
  expect(ports.close.mock.invocationCallOrder[0]).toBeGreaterThan(ports.inspect.mock.invocationCallOrder[0]!);
+ if (runnerSupport) {
+  expect(ports.runners).toHaveBeenCalledExactlyOnceWith(context);
+  expect(ports.runners.mock.invocationCallOrder[0]).toBeGreaterThan(ports.human.mock.invocationCallOrder[0]!);
+  expect(ports.inspect.mock.invocationCallOrder[0]).toBeGreaterThan(ports.runners.mock.invocationCallOrder[0]!);
+  expect(report).toHaveProperty("runners", runners);
+ } else {
+  expect(ports.runners).not.toHaveBeenCalled();
+  expect(report).not.toHaveProperty("runners");
+ }
+});
+it.each(["refused", "thrown"])("keeps runner admission %s without rewriting a successful human-service timer", async failure => {
+ const observed = vi.fn();
+ if (failure === "refused") ports.runners.mockResolvedValue({...runners,revocation:false});
+ else ports.runners.mockRejectedValue(new Error("private runner output"));
+ const report = await qualify(identity, ports.load, { onPerformance: observed, runnerSupport: () => true });
+ expect(report.engineChecksPassed).toBe(false); expect(report.qualified).toBe(false);
+ expect(ports.inspect).not.toHaveBeenCalled();
+ expect(ports.close).toHaveBeenCalledOnce(); expect(ports.unregister).toHaveBeenCalledOnce();
+ expect(observed).toHaveBeenCalledOnce();
+ expect(observed.mock.calls[0][0].groups[0].stages).toEqual(expect.arrayContaining([
+  expect.objectContaining({stage:"human_services",lastOutcome:"passed"}),
+  expect.objectContaining({stage:"context_close",lastOutcome:"passed"}),
+ ]));
+ expect(JSON.stringify([report, observed.mock.calls])).not.toContain("private runner output");
 });
 it("retains a closed failed role and cleanup while discarding raw errors", async () => {
  const observed=vi.fn(); ports.capture.mockRejectedValue(new Error("private probe"));
- const report=await (qualify as any)(identity,ports.load,{onPerformance:observed});
+ const report=await (qualify as any)(identity,ports.load,{onPerformance:observed,runnerSupport:()=>false});
  expect(report.engineChecksPassed).toBe(false); expect(ports.human).not.toHaveBeenCalled();
  expect(observed.mock.calls[0]?.[0].groups[0].stages).toEqual(expect.arrayContaining([
   expect.objectContaining({stage:"capture",lastOutcome:"failed"}),expect.objectContaining({stage:"context_close",lastOutcome:"passed"}),
  ]));
  expect(JSON.stringify(observed.mock.calls)).not.toContain("private probe");
 });
-it("cannot let a diagnostic observer alter qualification or cleanup", async () => {
- const report=await (qualify as any)(identity,ports.load,{onPerformance:()=>{throw new Error("observer");}});
+it.each([false, true])("cannot let a diagnostic observer alter qualification or cleanup (runner support: %s)", async runnerSupport => {
+ const report=await qualify(identity,ports.load,{onPerformance:()=>{throw new Error("observer");},runnerSupport:()=>runnerSupport});
  expect(report.engineChecksPassed).toBe(true);expect(ports.close).toHaveBeenCalledOnce();expect(ports.unregister).toHaveBeenCalledOnce();
 });

@@ -13,6 +13,7 @@ import { adoptCloudEngineState } from "./prepare-cloud-image-files.mjs";
 import { adoptCloudComputerBuildRepositories } from "./cloud-computer-checkout.mjs";
 import { CloudDelegatedCgroups, enterCloudRootHost } from "./cloud-engine-cgroup.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
+import { cloudRunnerBaseSupported, cloudRunnerQualificationPassed } from "./cloud-runner-base.mjs";
 
 export const RUNTIME_SELF_TEST_CHECKS = Object.freeze([
   "node_abi", "sqlite_query", "pty_load", "claude_version", "codex_version",
@@ -91,7 +92,7 @@ export function containmentSmokePassed(output) {
   } catch { return false; }
 }
 
-export function engineLifecyclePassed(output) {
+export function engineLifecyclePassed(output, requireRunners = false) {
   try {
     if (typeof output !== "string" || Buffer.byteLength(output) > 8 * 1024 * 1024) return false;
     const report = JSON.parse(output);
@@ -104,6 +105,7 @@ export function engineLifecyclePassed(output) {
       ["sameEngineIdentity", "noSandbox", "ownedProcessGroups", "originalProcessGroupsRetired", "timeoutRetired", "workloadCgroup", "vmWorkloadDrain"].every(name => report.execution?.[name] === true) &&
       !Object.hasOwn(report.execution, "detachedDescendantsRetired") &&
       report.capture?.sameEngineIdentity === true && report.capture?.chromiumSandbox === true &&
+      (!requireRunners || cloudRunnerQualificationPassed(report.runners)) &&
       ["humanServices", "actorTools"].every(name => report[name]?.sameEngineIdentity === true && report[name]?.noSandbox === true);
   } catch { return false; }
 }
@@ -282,7 +284,7 @@ export function runtimeEngineLifecycleSmoke(runtime, environment) {
   // Manifest/receipt identity is checked separately; this neither consumes
   // workspace admission nor starts a model session.
   const stdout = selfTestLauncher(runtime, "qualify", environment, 330_000, 8 * 1024 * 1024);
-  return engineLifecyclePassed(stdout);
+  return engineLifecyclePassed(stdout, cloudRunnerBaseSupported());
 }
 
 async function installedRuntime() {

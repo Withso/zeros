@@ -1,5 +1,5 @@
 import { CloudOwnedWorkloadRegistry, assertCloudOwnedScopeLive, isCloudOwnedWorkloadRegistry,
-  type CloudWorkloadKind, type CloudWorkloadRole } from "./cloud-owned-workloads";
+  type CloudWorkloadMetadata } from "./cloud-owned-workloads";
 import { isCloudWorkerConfiguration, type CloudWorkerConfiguration } from "./cloud-worker-config";
 import { cloudWorkloadCustodyConfiguration } from "./cloud-workload-custody";
 import { HostExecutionBoundary } from "./host-boundary";
@@ -42,7 +42,7 @@ export class CloudExecutionBoundary implements ExecutionBoundary {
   prepare(request: BoundaryRequest, control?: AdmissionControl): Promise<PreparedBoundary> {
     return this.prepareOwned(request, { ...control, kind: request.actor === "repo-code-task" ? "repo-task" : "agent", role: "workload" });
   }
-  async prepareOwned(request: BoundaryRequest, control: AdmissionControl & { kind: CloudWorkloadKind; role: CloudWorkloadRole; terminalIdle?: () => unknown }): Promise<PreparedBoundary> {
+  async prepareOwned(request: BoundaryRequest, control: AdmissionControl & CloudWorkloadMetadata): Promise<PreparedBoundary> {
     if (control.role === "infrastructure" && control.kind !== "language-service" && control.kind !== "service")
       throw new Error("interactive cloud processes cannot be infrastructure");
     const prepared = await this.workloads.prepare(this.host, request, control, control);

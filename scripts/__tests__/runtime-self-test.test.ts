@@ -38,13 +38,19 @@ describe("credential-free installed runtime self-test", () => {
       failedChecks: ["containment_smoke"] }), 1)).toMatchObject({ failedChecks: ["containment_smoke"] });
   });
   it("requires the shared non-root engine and sandboxed Chromium identities with positive retirement", () => {
-    const lifecycle = (selfTest as unknown as { engineLifecyclePassed: (value: string) => boolean }).engineLifecyclePassed;
+    const lifecycle = (selfTest as unknown as { engineLifecyclePassed: (value: string, requireRunners?: boolean) => boolean }).engineLifecyclePassed;
     const value = { version: 2, boundary: "workspace-vm", qualified: true, identity: { qualified:true, hostUid: 10003, namespaceUid: 10003, noNewPrivs:1,seccompMode:2,capabilities:{effective:0,permitted:0,inheritable:0,bounding:0,ambient:0} },
       execution: { sameEngineIdentity: true, noSandbox: true, ownedProcessGroups: true, originalProcessGroupsRetired: true, timeoutRetired: true, workloadCgroup: true, vmWorkloadDrain: true },
       capture: { sameEngineIdentity: true, chromiumSandbox: true },
       humanServices: { sameEngineIdentity: true, noSandbox: true },
       actorTools: { sameEngineIdentity: true, noSandbox: true } };
     expect(lifecycle(JSON.stringify(value))).toBe(true);
+    expect(lifecycle(JSON.stringify(value), true)).toBe(false);
+    const runners = { version: 1, managerIdentity: true, privateMaterial: true, stdio: true,
+      originalRetirement: true, descendantsRetired: true, census: true, revocation: true, managerRetired: true };
+    expect(lifecycle(JSON.stringify({ ...value, runners }), true)).toBe(true);
+    for (const field of Object.keys(runners).filter(key => key !== "version"))
+      expect(lifecycle(JSON.stringify({ ...value, runners: { ...runners, [field]: false } }), true)).toBe(false);
     expect(lifecycle(JSON.stringify({...value,qualified:false}))).toBe(false);
     expect(lifecycle(JSON.stringify({...value,engineChecksPassed:true}))).toBe(false);
     const { originalProcessGroupsRetired: _group, workloadCgroup: _custody, vmWorkloadDrain: _drain, ...oldExecution } = value.execution;

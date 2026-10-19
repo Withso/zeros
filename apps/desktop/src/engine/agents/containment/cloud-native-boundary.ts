@@ -15,6 +15,8 @@ import { cloudRuntimeAssetEnvironment } from "./cloud-runtime-assets.mjs";
 import { acquireCloudNativeHistory, CLOUD_NATIVE_HISTORY_ROOT } from "./cloud-native-history";
 import { loadCloudWorkerConfiguration } from "./cloud-worker-config";
 import type { BoundaryLaunchSpec, BoundaryProcess, BoundarySpawnRequest, PortRequest, PreparedBoundary } from "./types";
+import { cloudRunnerForBoundary } from "./cloud-runner-runtime";
+import type { CloudRunnerBoundary } from "./cloud-runner-boundary";
 import {hasCloudBackgroundServers} from "./cloud-background-processes";
 import { cloudComputerExecutionHistory, cloudComputerProcessEnvironment } from "../cloud-computer-environment";
 
@@ -105,6 +107,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
   readonly attestation;
   get providerHomePath() { return this.nativeHome.paths.home; }
   private readonly owner:NativeOwner;
+  private readonly runner: CloudRunnerBoundary | null;
   private retired = false;
   private closing: Promise<void> | null = null;
   private readonly launches = new Map<string, BoundaryLaunchSpec>();
@@ -134,6 +137,10 @@ export class CloudNativeBoundary implements PreparedBoundary {
     this.generation = workload.generation;
     this.status = workload.status;
     this.attestation = workload.attestation;
+    this.runner = cloudRunnerForBoundary(workload, () => {
+      this.assertLive();
+      if (isCloudBootNativeAuthority(this.authority)) assertCloudBootNativeLaunch(this.authority);
+    });
   }
 
   static async prepare(lease: CloudAgentLease, workload: PreparedBoundary, conversationId: string,
@@ -228,7 +235,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
     this.assertLive();
     if(isCloudBootNativeAuthority(this.authority))assertCloudBootNativeLaunch(this.authority);
     if (this.launches.size >= 16) throw new Error("Native cloud launch capacity exceeded");
-    const launch = this.workload.wrapSpawn(this.request(request));
+    const launch = this.runner ? this.runner.wrapSpawn(() => this.request(request)) : this.workload.wrapSpawn(this.request(request));
     const key = JSON.stringify([launch.command, ...launch.args]);
     if (this.launches.has(key)) throw new Error("Native cloud launch identity was reused");
     this.launches.set(key, launch); return launch;
@@ -236,7 +243,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
   cancelUnstartedLaunch(launch: BoundaryLaunchSpec): void {
     const key = JSON.stringify([launch.command, ...launch.args]);
     if (this.launches.get(key) !== launch) throw new Error("Native cloud launch identity is invalid");
-    this.workload.cancelUnstartedLaunch?.(launch);
+    if (this.runner) this.runner.cancelUnstartedLaunch(launch); else this.workload.cancelUnstartedLaunch?.(launch);
     this.launches.delete(key);
   }
   trackProcess(child: ChildProcess): BoundaryProcess {
@@ -245,7 +252,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
     if (!launch || launch.command !== child.spawnfile) {
       void this.owner.lifetime.close().catch(() => {}); throw new Error("Native cloud launch identity is invalid");
     }
-    const tracked = this.workload.trackProcess(child);
+    const tracked = this.runner ? this.runner.trackProcess(child) : this.workload.trackProcess(child);
     this.observeProcess(tracked);
     this.launches.delete(key);
     this.owner.lifetime.attach(tracked); this.assertLive(); return tracked;
@@ -257,14 +264,19 @@ export class CloudNativeBoundary implements PreparedBoundary {
   }
   async hasBackgroundServers():Promise<boolean>{
     this.assertLive();
-    const active=await hasCloudBackgroundServers([...this.nativeProcesses].map(process=>process.pid));
-    this.assertLive();return active;
+    const runners=this.runner?.backgroundRoots();
+    const roots=[...new Set([...this.nativeProcesses].map(process=>process.pid).concat(runners?.map(member=>member.pid)??[]))];
+    const active=await hasCloudBackgroundServers(roots);
+    this.assertLive();
+    if(runners && JSON.stringify(runners)!==JSON.stringify(this.runner!.backgroundRoots()))
+      throw new Error("cloud_runner_census_changed");
+    return active;
   }
   async spawn(request: BoundarySpawnRequest): Promise<BoundaryProcess> {
     if(isCloudBootNativeAuthority(this.authority))assertCloudBootNativeLaunch(this.authority);
     const process=await this.owner.lifetime.launch(() => {
       if(isCloudBootNativeAuthority(this.authority))assertCloudBootNativeLaunch(this.authority);
-      return this.workload.spawn(this.request(request));
+      return this.runner ? this.runner.spawn(() => this.request(request)) : this.workload.spawn(this.request(request));
     });
     this.observeProcess(process);return process;
   }
