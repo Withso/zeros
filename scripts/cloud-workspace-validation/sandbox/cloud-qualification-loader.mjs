@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { lstatSync } from "node:fs";
 
 const ROLES = [
   ["./cloud-qualification-runtime.ts", "createCloudQualificationRuntime"],
@@ -7,6 +8,13 @@ const ROLES = [
   ["./qualify-cloud-human-services.ts", "qualifyCloudHumanServices"],
 ];
 
+function compiledRoles(module) {
+  return Object.fromEntries(ROLES.map(([, name]) => {
+    if (typeof module[name] !== "function") throw new Error("Cloud qualification role is unavailable");
+    return [name, module[name]];
+  }));
+}
+
 /** Loads the fixed TypeScript role probes through the shipped tsx CommonJS
  * hook. The worker package is CommonJS, where tsx's ESM hook cannot load their
  * extensionless graphs. esbuild's default worker-thread service would leave a
@@ -14,6 +22,16 @@ const ROLES = [
  * stopping it does not wait for its exit. One-shot mode reaps each transform's
  * child before require returns; esbuild reads this setting when it loads. */
 export async function loadCloudQualificationRoles() {
+  // One build-time graph preserves the original registry/class identities.
+  // Sources remain available for checkouts and historical image recipes. A
+  // present but broken bundle must fail, never silently select another graph.
+  const bundle = new URL("../../../dist-engine/cloud-qualification-roles.mjs", import.meta.url);
+  const entry = lstatSync(bundle, { throwIfNoEntry: false });
+  if (entry) {
+    if (!entry.isFile()) throw new Error("Cloud qualification role is unavailable");
+    const roles = compiledRoles(await import(bundle.href));
+    return { roles, unregister() {} };
+  }
   const prior = process.env.ESBUILD_WORKER_THREADS;
   process.env.ESBUILD_WORKER_THREADS = "0";
   try {

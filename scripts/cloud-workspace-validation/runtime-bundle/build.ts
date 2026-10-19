@@ -291,6 +291,7 @@ export async function buildRuntimeBundle(options: {
         "supervisor_build",
       );
       await runTool(tools.pnpm, ["build:engine"], command, "engine_build");
+      await runTool(tools.node, ["scripts/cloud-workspace-validation/runtime-bundle/qualification.mjs"], command, "qualification_build");
     });
     const browsers = path.join(work, "browser-downloads");
     await stage("download_browsers", async () => {

@@ -221,6 +221,17 @@ fail the build. Packages without a libc declaration remain included; Local
 dependency installation is unchanged. Artifact verification and qualification
 still run on the resulting exact manifest.
 
+Cloud builds precompile the fixed engine-qualification roles into
+`worker/dist-engine/cloud-qualification-roles.mjs`. One shared graph preserves
+the original controller, registry and boundary identities. Source-relative
+module URLs remain relative to the installed source layout for native helpers
+and standalone-entry guards. The offline `qualification_roles` check loads
+that manifested graph through the real role loader with TypeScript transforms
+disabled. Historical archives without the entry retain their existing source
+loader; a present but invalid compiled entry never falls back to source.
+Every dynamic identity, descendant, timeout, census and retirement check still
+runs at qualification time. Local engine builds do not generate this entry.
+
 `ClosedDiagnostic` (`zeros.diagnostic/v1`) contains only `component`, `stage`,
 `ok`, nullable `exitCode`, `timedOut`, and deduplicated `failedChecks` (at most 32).
 Components are `bundle`, `publication`, `base`, `bootstrap`, `installer`,
