@@ -50,8 +50,8 @@ class StabilityFixture(unittest.TestCase):
         return [json.loads(line) for line in path.read_bytes().splitlines()] if path.exists() else []
 
     def observe(self, on_open=lambda *_: None, on_sleep=lambda *_: None):
-        original_open, original_close, original_mount = b.os.open, b.os.close, self.app.mounts.mount_id
-        directories, roots, started, counts = set(), set(), set(), {}
+        original_open, original_close, original_dup, original_mount = b.os.open, b.os.close, b.os.dup, self.app.mounts.mount_id
+        directories, roots, started, anchors, counts = set(), set(), set(), set(), {}
 
         def opening(name, flags, *args, **kwargs):
             absolute = self.absolute(name, kwargs)
@@ -71,6 +71,14 @@ class StabilityFixture(unittest.TestCase):
             directories.discard(fd)
             roots.discard(fd)
             started.discard(fd)
+            anchors.discard(fd)
+
+        def duplicating(fd):
+            result = original_dup(fd)
+            if fd in directories:
+                directories.add(result)
+                anchors.add(result)
+            return result
 
         def mounted(fd):
             # Logging also opens the root, but never asks its mount identity.
@@ -81,13 +89,15 @@ class StabilityFixture(unittest.TestCase):
             return original_mount(fd)
 
         def sleep(seconds):
-            self.assertEqual(directories, set(), "a discarded pass must release every directory before backoff")
+            self.assertEqual(directories, anchors, "a discarded pass must release every per-pass directory before backoff")
+            self.assertEqual(len(anchors), 2, "only the original root/usr references survive backoff")
             self.sleeps.append(seconds)
             self.clock += seconds
             on_sleep(seconds)
 
         result, error = None, None
         with mock.patch.object(b.os, "open", side_effect=opening), mock.patch.object(b.os, "close", side_effect=closing), \
+                mock.patch.object(b.os, "dup", side_effect=duplicating), \
                 mock.patch.object(self.app.mounts, "mount_id", side_effect=mounted), \
                 mock.patch.object(b.time, "monotonic", side_effect=lambda: self.clock), \
                 mock.patch.object(b.time, "sleep", side_effect=sleep):

@@ -235,7 +235,9 @@ class ObservationSourceTests(stability.StabilityFixture):
         self.fixture.verify(self.policy)
         rows = self.history()
         self.assertGreaterEqual(len(rows), 3)
-        self.assertEqual(rows[-2:], [record(), record()])
+        expected = {**record(), "schema": "zeros.optional-systemd-observation/v2",
+                    "anchorChecks": [{"retryCount": 0, "root": "native_ext4", "usr": "root_ext4"}]}
+        self.assertEqual(rows[-2:], [expected, expected])
 
     def test_log_lock_failure_leaves_indistinguishable_old_history_without_affecting_admission(self):
         path = self.root / "run/zeros/optional-systemd-observations.jsonl"
@@ -290,7 +292,9 @@ class ObservationSourceTests(stability.StabilityFixture):
         raw = path.read_bytes()
         self.assertLessEqual(len(raw), 65536)
         self.assertTrue(raw.endswith(b"\n"))
-        self.assertTrue(all(json.loads(line)["schema"] == "zeros.optional-systemd-observation/v1" for line in raw.splitlines()))
+        self.assertTrue(all(json.loads(line)["schema"] in ("zeros.optional-systemd-observation/v1", "zeros.optional-systemd-observation/v2")
+                            for line in raw.splitlines()))
+        self.assertEqual(json.loads(raw.splitlines()[-1])["schema"], "zeros.optional-systemd-observation/v2")
         self.assertNotIn(str(self.root).encode(), raw)
 
 

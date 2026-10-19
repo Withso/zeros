@@ -24,6 +24,9 @@ RUNTIME = "r1-" + "a" * 64
 bootstrap_spec = importlib.util.spec_from_file_location("fixture_bootstrap", SOURCE.with_name("bootstrap.py"))
 bootstrap = importlib.util.module_from_spec(bootstrap_spec)
 bootstrap_spec.loader.exec_module(bootstrap)
+mount_spec = importlib.util.spec_from_file_location("computer_native_mounts", Path(__file__).with_name("mount_fixture.py"))
+mount_fixture = importlib.util.module_from_spec(mount_spec)
+mount_spec.loader.exec_module(mount_fixture)
 
 
 class Logs(unittest.TestCase):
@@ -79,9 +82,13 @@ class Fixture(unittest.TestCase):
 spec = importlib.util.spec_from_file_location('fixture_bootstrap', """ + repr(str(SOURCE.with_name("bootstrap.py"))) + """)
 source = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(source)
+mount_spec = importlib.util.spec_from_file_location('native_mounts', """ + repr(str(Path(__file__).with_name("mount_fixture.py"))) + """)
+mounts = importlib.util.module_from_spec(mount_spec)
+mount_spec.loader.exec_module(mounts)
 Failure = source.Failure
 class Bootstrap(source.Bootstrap):
     def base(self):
+        self.mounts = mounts.NativeMounts(self.root)
         stock = source.strict_json(self.read('/opt/zeros-bootstrap/stock-prerequisites.json', 131072, 0o444), 'base_compatibility')
         self.optional_systemd_policy = stock['optionalSystemd']
         self.optional_systemd = self.optional_systemd_absence(self.optional_systemd_policy)
@@ -104,7 +111,7 @@ class Bootstrap(source.Bootstrap):
         self.mkdir("/opt/zeros/sessions").chmod(0o700)
         (self.root / "opt/zeros/current").symlink_to("../zeros-infra/" + RUNTIME)
         self.mkdir("/usr/local/lib")
-        stock = {"optionalSystemd": bootstrap.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid()).qualify_optional_systemd({"uid": 4242, "gid": 4242})}
+        stock = {"optionalSystemd": self.optional_policy()}
         self.write("/opt/zeros-bootstrap/stock-prerequisites.json", build.packed(stock), 0o444)
         protected = []
         for path in ("/opt/zeros-bootstrap/bootstrap.py", "/opt/zeros-bootstrap/computer-build.py", "/opt/zeros-bootstrap/computer-git-askpass.py", "/opt/zeros-bootstrap/stock-prerequisites.json", "/etc/systemd/system/zeros-host.service"):
@@ -118,6 +125,11 @@ class Bootstrap(source.Bootstrap):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def optional_policy(self):
+        app = bootstrap.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid())
+        app.mounts = mount_fixture.NativeMounts(self.root)
+        return app.qualify_optional_systemd({"uid": 4242, "gid": 4242})
 
     def mkdir(self, path):
         value = self.root / path.lstrip("/")
@@ -147,11 +159,16 @@ class Bootstrap(source.Bootstrap):
         self.mkdir("/run/zeros")
         target = self.mkdir("/srv/zeros/repos")
         app = build.ComputerBuild()
+        readlink = os.readlink
+        def namespace(path, *args, **kwargs):
+            if path == "/proc/self/ns/mnt": return "private"
+            if path == "/proc/1/ns/mnt": return "host"
+            return readlink(path, *args, **kwargs)
         with patch.object(app, "path", side_effect=self.app.path), \
              patch.object(app, "repository_parent", return_value=target), \
              patch.object(app, "install_environment", wraps=self.app.install_environment), \
              patch.object(build.os, "geteuid", return_value=0), \
-             patch.object(build.os, "readlink", side_effect=["private", "host"]), \
+             patch.object(build.os, "readlink", side_effect=namespace), \
              patch.object(build, "bounded_command", return_value=(0, b"")), \
              patch.object(build.os, "chdir"), patch.object(build.os, "execve") as execute:
             app.install_shell()
@@ -330,7 +347,7 @@ ENDFONT
                 patch.object(os, "lstat", side_effect=link_stat), patch.object(Path, "lstat", autospec=True, side_effect=link_stat):
             with self.assertRaises(build.Failure):
                 self.app.protected_ancestors(self.root / "usr/local/lib/systemd/system/service.d")
-            policy = bootstrap.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid()).qualify_optional_systemd({"uid": 4242, "gid": 4242})
+            policy = self.optional_policy()
             stock_path = "/opt/zeros-bootstrap/stock-prerequisites.json"
             raw = build.packed({"optionalSystemd": policy})
             self.write(stock_path, raw, 0o444)

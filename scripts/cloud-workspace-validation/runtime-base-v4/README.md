@@ -68,7 +68,7 @@ Only `/opt` retains ancestor custody hardening. The build never changes
 seals a narrowly scoped absence policy for `/usr/local/lib/systemd/system` in
 the protected stock evidence. Existing ancestors must be root-owned or owned
 by the qualified stock administrative user, with no group/world writes,
-special mode bits, ACLs, capabilities, symlinks or intervening mounts. Zeros
+special mode bits, ACLs, capabilities, symlinks or unqualified intervening mounts. Zeros
 principal IDs cannot be the qualified provider owner. Directory descriptors
 pin every component; the final pass checks identity, metadata, absence and
 mount identity again. Traversal also rejects nested `zeros-*` entries,
@@ -80,6 +80,14 @@ Every base/boot check revalidates this policy. Computer pre/post recipe proofs
 include the observed owners, modes, empty ACL state, directory topology and
 protected-path absence in the externally held digest. Cold boots compare the
 policy without requiring old inode or mount numbers to survive restoration.
+Within one observation, `/` is pinned to its original native mount and the
+fixed root-owned `/usr` edge may establish a separate native anchor. Each
+anchor requires descriptor mount ID, exact unique mount-table target, device
+and `ext4` agreement, with identity and ACL rechecks after table I/O. Unknown,
+FUSE, detached, ambiguous or inconsistent mounts refuse. All descendants stay
+on that original `/usr` mount; no provider-owned child may establish an anchor.
+This verifies a fixed native boundary, not provider provenance from a source
+name. Home hydration alone does not prove the `/usr` boundary.
 The exception never applies to an actual protected file: those files keep
 strict root-owned ancestry and ordinary hash checks. Operational Zeros units
 remain under `/etc/systemd/system`, and the engine's `/usr` view stays read-only.
@@ -101,11 +109,23 @@ ancestors and every other path remain strict. At most three passes use 25/50 ms
 backoffs within one original-start 500 ms retry deadline. Slow uncontended
 first passes keep the outer command deadline; retried results are checked again
 after diagnostic I/O. Outer cancellation and command timeouts remain terminal.
+At most two non-inheritable root/usr reference descriptors survive backoff,
+diagnostics and the final acceptance check. Every per-pass descriptor closes
+before sleep; every attempt repeats named, table, metadata, ACL, absence and
+original-policy checks. Ordinary mount IDs can be recycled only after the
+mount object is released, so immutable numbers without these retained
+references cannot prove continuity. Partial acquisition and every exit release
+the references. A detached reference is not current named attachment; no ID is
+persisted across calls/boots and no unique-ID kernel feature is assumed.
 
 Each observation attempts a bounded root-only record in
 `/run/zeros/optional-systemd-observations.jsonl` (0600, 65,536 bytes, complete-line
 rotation, nonblocking `diagnostic.lock`). The closed record contains only fixed
-ancestor indexes, comparison field names, phases, outcomes and retry counts;
+ancestor indexes, comparison field names, phases, outcomes and retry counts.
+Observation v2 also names the fixed `root`/`usr` comparison reference and closed
+per-attempt native-anchor outcomes; exact v1 histories remain readable. Neither
+version identifies a current invocation. No root/mount IDs or source/device
+values are emitted;
 it contains no scalar metadata or arbitrary paths. The public diagnostic and
 sealed policy schemas are unchanged. Logging failure never grants admission.
 Repeated independent records are valid history. A valid history can predate the

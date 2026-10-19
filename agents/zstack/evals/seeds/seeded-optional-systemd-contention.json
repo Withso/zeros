@@ -1,5 +1,5 @@
 {
   "file": "scripts/cloud-workspace-validation/runtime-base-v4/bootstrap.py",
-  "before": "                result = self._optional_systemd_pass(provider, observation)\n",
-  "after": "                result = self._optional_systemd_pass(provider, observation)\n                observation.require(not observation.pending, \"policy\")\n"
+  "before": "                    result = self._optional_systemd_pass(provider, observation, anchors, anchor_stack)\n",
+  "after": "                    result = self._optional_systemd_pass(provider, observation, anchors, anchor_stack)\n                    observation.require(not observation.pending, \"policy\")\n"
 }

@@ -5,9 +5,11 @@ previous live refusal. Timestamp omission would also hide late ACL changes.
 
 Keep fresh descriptor ACL observations, every structural/mount/absence fence,
 and the immutable sealed-policy comparison before discarding a completed pass.
-Use one original deadline, release all descriptors before backoff, and recheck
+Use one original deadline, release all per-pass descriptors before backoff, and recheck
 acceptance after diagnostic I/O. Best-effort logging must preserve outer signal
-and timeout failures. The retained Python stability and diagnostic suites cover
+and timeout failures. Explicitly bounded anchor references may span backoff to
+prove mount-object lifetime; fresh traversal observations remain mandatory.
+The retained Python stability and diagnostic suites cover
 these boundaries with real sibling writes and ACLs, plus deterministic races.
 Permission-sensitive runs remove all capabilities; UID alone is insufficient.
 

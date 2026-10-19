@@ -39,6 +39,9 @@ GOLDEN = golden_directory()
 SPEC = importlib.util.spec_from_file_location("bootstrap", HERE.parent / "bootstrap.py")
 b = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(b)
+MOUNT_SPEC = importlib.util.spec_from_file_location("bootstrap_native_mounts", HERE / "mount_fixture.py")
+mount_fixture = importlib.util.module_from_spec(MOUNT_SPEC)
+MOUNT_SPEC.loader.exec_module(mount_fixture)
 SYNTHETIC_SPEC = importlib.util.spec_from_file_location("synthetic_runtime", HERE / "synthetic_runtime.py")
 synthetic_runtime = importlib.util.module_from_spec(SYNTHETIC_SPEC)
 SYNTHETIC_SPEC.loader.exec_module(synthetic_runtime)
@@ -162,9 +165,10 @@ def cgroup_fixture(root):
     return scope
 
 
-class FakeMounts:
+class FakeMounts(mount_fixture.NativeMounts):
     """Mount-namespace model for rootless bootstrap lifecycle tests."""
-    def __init__(self):
+    def __init__(self, root):
+        super().__init__(root)
         self.links = {}
         self.calls = []
         self.fail = None
@@ -174,9 +178,6 @@ class FakeMounts:
 
     def unmounted(self, target):
         b.require(not any(path == str(target) or path.startswith(str(target) + "/") for path in self.links), "base_compatibility")
-
-    mount_id = b.BindMounts.mount_id
-    table = b.BindMounts.table
 
     def bind(self, source_fd, target_fd):
         source = os.readlink(f"/proc/self/fd/{source_fd}")
@@ -236,7 +237,7 @@ class BootstrapTests(unittest.TestCase):
         self.downloads = 0
         self.app = b.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid(), host=self.host,
                                now=lambda: NOW, boot_id=lambda: BOOT, downloader=self.download)
-        self.mounts = FakeMounts()
+        self.mounts = FakeMounts(self.root)
         self.app.mounts = self.mounts
         self.app.accounts = {name: (os.getuid(), os.getgid()) for name in ("user", "agent", "capture", "engine")}
         bootstrap = self.root / "opt/zeros-bootstrap"

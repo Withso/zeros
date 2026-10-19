@@ -37,7 +37,8 @@ class PersistenceTests(unittest.TestCase):
         target = self.root / "home/user"
         if nested:
             target /= ".zeros-persist"
-        return b.parse_mountinfo(f"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 0:55 / {target} rw - {filesystem} ascii-lazyfs rw\n".encode())
+        return fixtures.mount_fixture.NativeMounts.table(self.mounts) + b.parse_mountinfo(
+            f"2 1 0:55 / {target} rw - {filesystem} ascii-lazyfs rw\n".encode())
 
     def test_every_entrypoint_waits_for_hydration_before_any_base_file_read(self):
         self.install()  # Dispatch has a selected runtime; no waiting loop or real exec.

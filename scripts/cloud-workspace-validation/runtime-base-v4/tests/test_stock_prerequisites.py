@@ -14,6 +14,9 @@ SOURCE = Path(__file__).resolve().parents[1] / "stock-prerequisites.py"
 spec = importlib.util.spec_from_file_location("stock", SOURCE)
 stock = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(stock)
+mount_spec = importlib.util.spec_from_file_location("stock_native_mounts", Path(__file__).with_name("mount_fixture.py"))
+mount_fixture = importlib.util.module_from_spec(mount_spec)
+mount_spec.loader.exec_module(mount_fixture)
 
 
 class StockPrerequisiteTests(unittest.TestCase):
@@ -65,8 +68,14 @@ class StockPrerequisiteTests(unittest.TestCase):
         return b"fixture version 1.2.3\n"
 
     def probe(self):
-        return stock.probe(self.root, uid=os.getuid(), gid=os.getgid(), provider={"uid": 4242, "gid": 4242},
-                           command=self.command, load_library=lambda _: None, load_certificates=lambda _: True)
+        constructor = stock.bootstrap.Bootstrap
+        def bootstrap(*args, **kwargs):
+            app = constructor(*args, **kwargs)
+            app.mounts = mount_fixture.NativeMounts(self.root)
+            return app
+        with mock.patch.object(stock.bootstrap, "Bootstrap", side_effect=bootstrap):
+            return stock.probe(self.root, uid=os.getuid(), gid=os.getgid(), provider={"uid": 4242, "gid": 4242},
+                               command=self.command, load_library=lambda _: None, load_certificates=lambda _: True)
 
     def test_records_versions_libraries_and_absence_without_mutation(self):
         before = {str(path.relative_to(self.root)): (path.stat().st_mode, path.stat().st_mtime_ns,
@@ -90,8 +99,9 @@ class StockPrerequisiteTests(unittest.TestCase):
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
         self.assertEqual(log.parent.stat().st_mode & 0o777, 0o700)
         rows = [json.loads(line) for line in log.read_bytes().splitlines()]
-        self.assertEqual(rows, [{"schema": "zeros.optional-systemd-observation/v1", "callKind": "qualification",
-                                 "outcome": "stable", "retryCount": 0, "terminalCheck": "none", "comparisons": []}])
+        self.assertEqual(rows, [{"schema": "zeros.optional-systemd-observation/v2", "callKind": "qualification",
+                                 "outcome": "stable", "retryCount": 0, "terminalCheck": "none", "comparisons": [],
+                                 "anchorChecks": [{"retryCount": 0, "root": "native_ext4", "usr": "root_ext4"}]}])
         self.assertFalse(any("apt" in argv[0] or "ldconfig" in argv[0] or "fc-cache" in argv[0] for argv in self.calls))
 
     def test_stock_requirement_list_covers_remaining_capabilities_and_drops_unused_packages(self):
