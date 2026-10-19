@@ -1,7 +1,8 @@
 import { portableCloudWorkloads } from "./helpers/portable-cloud-custody";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdtemp, open, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -35,6 +36,15 @@ async function completeInspection(workloads: CloudOwnedWorkloadRegistry) {
   }, { timeout: 3000 }).toBe(true);
   return inventory;
 }
+/** Bytes and identity from one no-follow handle, never a path check then a separate read. */
+async function observeFile(file: string) {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return { bytes: await handle.readFile(), stat: await handle.stat() };
+  } finally {
+    await handle.close();
+  }
+}
 const request = () => ({ executionId: randomUUID(), actor: "agent-code" as const, cwd: process.cwd(), workspaceRoot: process.cwd() });
 const launch = () => ({ command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], cwd: process.cwd(), env: { PATH: "/usr/bin:/bin" } });
 
@@ -47,7 +57,7 @@ describe("same-user cloud Host lifecycle", () => {
       const { boundary, workloads } = setup({ retainSessionDirectories: true });
       const input = request(), prepared = await boundary.prepare(input);
       const directory = sessionDir(input.executionId), metadata = path.join(directory, "meta.json");
-      const inherited = await readFile(metadata), before = await lstat(metadata);
+      const before = await observeFile(metadata);
       const child = await prepared.spawn({ ...launch(), args: ["-e", "process.stdout.write('probe')"] });
       child.stdout?.resume(); child.stderr?.resume();
       expect(await child.wait()).toMatchObject({ code: 0 });
@@ -65,12 +75,12 @@ spec.loader.exec_module(module)
 module.ComputerBuild(root=pathlib.Path(sys.argv[2]), uid=os.getuid(), gid=os.getgid()).clear_directory("/srv/zeros/state")
 `, path.resolve("scripts/cloud-workspace-validation/runtime-base-v4/computer-build.py"), root], { encoding: "utf8", timeout: 5000 });
       expect(sanitized.status, sanitized.stderr).toBe(0);
-      const saved = await readFile(metadata).catch((error: NodeJS.ErrnoException) => {
+      const after = await observeFile(metadata).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
-        return inherited;
+        return null;
       });
-      expect(saved.length, "deleted qualification metadata survived the incremental capture").toBe(0);
-      expect(await lstat(metadata)).toMatchObject({ ino: before.ino, dev: before.dev, mode: before.mode });
+      expect((after?.bytes ?? before.bytes).length, "deleted qualification metadata survived the incremental capture").toBe(0);
+      expect(after?.stat).toMatchObject({ ino: before.stat.ino, dev: before.stat.dev, mode: before.stat.mode });
       expect((await readdir(directory)).sort()).toEqual(["boundary", "env", "log", "meta.json", "telemetry"]);
       for (const name of ["boundary", "env", "log", "telemetry"]) expect(await readdir(path.join(directory, name))).toEqual([]);
       // Idempotent retirement cannot recreate a journal or multiply stubs.
