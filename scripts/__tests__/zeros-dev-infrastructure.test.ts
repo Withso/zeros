@@ -100,13 +100,49 @@ function fixture() {
     expect(calls).toEqual(before);
     expect(runtimes[3].dispose).not.toHaveBeenCalled();
   });
-  const options = { handle, api, connect, prepareDetachedAuth, prepareLaunchAuth, native, sleep,
+  const probeSdk = vi.fn(async (_run, _signal: AbortSignal, _evidence: Evidence) => {});
+  const options = { handle, api, connect, probeSdk, prepareDetachedAuth, prepareLaunchAuth, native, sleep,
     now: () => origin + elapsed, monotonic: () => elapsed, evidence: new Evidence(handle.run.runId, row => output.push(row), () => elapsed) };
-  return { options, handle, api, connect, prepareDetachedAuth, prepareLaunchAuth, sleep, native, helpers, runtimes, snapshots, calls, output, scripts,
+  return { options, handle, api, connect, probeSdk, prepareDetachedAuth, prepareLaunchAuth, sleep, native, helpers, runtimes, snapshots, calls, output, scripts,
     advance: (ms: number) => { elapsed += ms; } };
 }
 
 describe("infrastructure-only product lifecycle", () => {
+  it("probes the native SDK at all five connection points, outside the detached interval", async () => {
+    const f = fixture(), generations: number[] = [];
+    f.probeSdk.mockImplementation(async (run, signal, evidence) => {
+      expect(signal.aborted).toBe(false); expect(evidence).toBe(f.options.evidence);
+      generations.push(run.create.result.generation);
+      expect(f.connect).toHaveBeenCalledTimes(generations.length - 1);
+    });
+    f.sleep.mockImplementation(async ms => {
+      expect(f.probeSdk).toHaveBeenCalledTimes(4);
+      expect(f.calls.at(-1)).toBe("detach"); f.advance(ms);
+    });
+    await runInfrastructure(f.options as never);
+    expect(generations).toEqual([1, 2, 3, 4, 4]);
+    expect(f.handle.run.hourly!.infrastructure!.complete).toBe(true);
+  });
+
+  it("preserves a failed SDK probe and cleans up before any legacy workload can claim success", async () => {
+    const f = fixture(), failure = new ZerosDevError("bad_response");
+    f.probeSdk.mockRejectedValueOnce(failure);
+    await expect(runInfrastructure(f.options as never)).rejects.toBe(failure);
+    expect(f.connect).not.toHaveBeenCalled(); expect(f.api.cleanup).toHaveBeenCalledOnce();
+    expect(f.output.some(row => row.phase === "infrastructure_proof" && row.outcome === "ok")).toBe(false);
+  });
+
+  it("keeps flag-off SDK skips in the signed checkpoints while the legacy infrastructure workload passes", async () => {
+    const f = fixture();
+    f.probeSdk.mockImplementation(async (_run, _signal, evidence) => {
+      evidence.emit({ phase: "sdk_device_session", outcome: "skipped", durationMs: 2, sdk: { probeId: randomUUID(), skip: "legacy_discovery" } });
+    });
+    await runInfrastructure(f.options as never);
+    const sdk = f.snapshots.at(-1).evidence.filter((row: any) => row.sdk);
+    expect(sdk).toHaveLength(5); expect(sdk.every((row: any) => row.outcome === "skipped")).toBe(true);
+    expect(f.handle.run.hourly!.infrastructure!.complete).toBe(true);
+  });
+
   it("finishes 31 minutes of native detachment with a 300-second launch token and no detached auth work", async () => {
     const f = fixture();
     f.prepareDetachedAuth.mockImplementation(async requiredMs => {

@@ -16,6 +16,7 @@ type Runtime = Pick<ZerosDevRuntime, "client" | "scope" | "terminal" | "dispose"
 type Native = Pick<InfrastructureNative, "begin" | "finish" | "cleanup">;
 export type InfrastructureOptions = Omit<HourlyOptions, "credentials" | "connect" | "workMs" | "computerMs"> & {
   connect(run: Run, signal: AbortSignal, onAdmissionEvent?: (event: AdmissionObservation) => void): Promise<Runtime>;
+  probeSdk(run: Run, signal: AbortSignal, evidence: Evidence): Promise<void>;
   prepareLaunchAuth(requiredMs: number): Promise<LaunchAuthObservation>;
   native(runtime: Runtime, handle: RunHandle, options: { persistIntent(intent: InfrastructureNativeIntent): Promise<void> }): Native;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -70,6 +71,12 @@ export async function runInfrastructure(options: InfrastructureOptions): Promise
       throw new ZerosDevError("transport_interrupted", undefined, undefined, undefined, undefined, undefined, transport);
   };
   const connect = async (phase: "runtime_connect" | "detached_reconnect" = "runtime_connect") => {
+    const probeSignal = bound(30_000);
+    if (probeSignal.aborted) throw new ZerosDevError("deadline");
+    // The additive SDK proof is closed before the ordinary workload connects.
+    // It never leaves a device stream or renewal alive during detachment.
+    await beforeDeadline(options.probeSdk(handle.run, probeSignal, evidence), probeSignal);
+    await checkpoint();
     const started = clock();
     return evidence.step(phase, async () => {
       const signal = bound(30_000);

@@ -3,8 +3,11 @@ import {
   refreshCloudWorkspaceRuntime,
   publishCloudWorkspacePortForwardingRuntime,
 } from "../cloud-workspace-access";
-import { openCloudSdkWorkspaceRuntime, refreshCloudSdkWorkspaceRuntime, fallbackCloudSdkWorkspaceRuntime } from "../cloud-sdk-runtime";
-import { CloudSdkSocket } from "./cloud-sdk-socket";
+import { openCloudSdkWorkspaceRuntime, refreshCloudSdkWorkspaceRuntime, fallbackCloudSdkWorkspaceRuntime,
+  signCloudSdkRuntimeProof, renewCloudSdkRuntimeCapabilities, activateCloudSdkRuntimeConnection, retireCloudSdkRuntimeConnection,
+  prepareCloudSdkCommandEnvelope, cancelCloudSdkRuntimeCommand } from "../cloud-sdk-runtime";
+import { subscribeCloudSdkRuntimeRenewals } from "../cloud-sdk-stream";
+import { CloudSdkSocket, type CloudSdkSocketAuthority } from "./cloud-sdk-socket";
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import {
   acceptCloudEngineWorkspace,
@@ -23,6 +26,15 @@ import { CloudAgentConnection } from "./cloud-agent-connection";
 import { CloudEventReader } from "./cloud-event-reader";
 import { installCloudGithubNative } from "./cloud-github-native";
 import { wakeCloudWorkspace, type CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
+
+// Renderer IPC belongs at composition, so the same socket/handshake code can
+// also run under the headless fixture's native authority without UI globals.
+const sdkAuthority = (): CloudSdkSocketAuthority => ({
+  signProof: signCloudSdkRuntimeProof, renewCapabilities: renewCloudSdkRuntimeCapabilities,
+  activateConnection: activateCloudSdkRuntimeConnection, retireConnection: retireCloudSdkRuntimeConnection,
+  prepareCommand: prepareCloudSdkCommandEnvelope, cancelCommand: cancelCloudSdkRuntimeCommand,
+  subscribeRenewals: subscribeCloudSdkRuntimeRenewals,
+});
 
 export async function openCloudRuntime(
   target: CloudWorkspaceTarget,
@@ -97,7 +109,7 @@ export async function openCloudRuntime(
         } catch (error) { void closeCloudWorkspaceRuntime(legacy.runtimeId).catch(() => {}); throw error; }
       })();
       return legacyFlight;
-    }),
+    }, sdkAuthority()),
   });
   let agents: CloudAgentConnection | undefined;
   let events: CloudEventReader | undefined;

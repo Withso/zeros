@@ -26,7 +26,8 @@ import { GATE0_TOTAL_MS } from "./gate0-contract";
 import { importCleanupInput } from "./cleanup-recovery";
 import { MAX_PENDING_AGE_MS, MAX_PENDING_STORAGE_MIB, MAX_PENDING_WORKSPACES, type CleanupHandoffReference, type CleanupSummary } from "./cleanup-contract";
 import type { CleanupRecoveryReference } from "./cleanup-recovery-contract";
-import { runInfrastructure } from "./infrastructure";
+import { runInfrastructure, type InfrastructureOptions } from "./infrastructure";
+import { probeSdkRuntime } from "./sdk-canary";
 import { InfrastructureNative } from "./infrastructure-native";
 import { initialInfrastructure, INFRASTRUCTURE_TOTAL_MS, OWNER_SECTION7_COVERAGE } from "./infrastructure-contract";
 
@@ -108,6 +109,7 @@ async function ownedDirectory(directory: string): Promise<void> {
 
 type ActionsServices = Pick<Parameters<typeof runHourly>[0], "api" | "credentials"> & {
   connect: (...args: Parameters<Parameters<typeof runHourly>[0]["connect"]>) => Promise<ZerosDevRuntime>;
+  probeSdk: InfrastructureOptions["probeSdk"];
   session: Pick<ZerosDevSession, "login" | "whoami" | "logout"> & Partial<Pick<ZerosDevSession, "prepareDetachedAuth" | "prepareLaunchAuth">>;
   health(): ReturnType<typeof controlPlaneHealth>;
 };
@@ -124,6 +126,7 @@ function productServices(file: AgentFileStore): ActionsServices {
   // cleanup available; full agent installation awaits the release-check bridge.
   return { session, api, credentials: new HourlyCredentials(api),
     health: () => controlPlaneHealth(transport),
+    probeSdk: (run, signal, evidence) => probeSdkRuntime(session, api, run, { signal, evidence }),
     connect: (run, signal, onAdmissionEvent) => ZerosDevRuntime.connect(session, api, run, { signal, onAdmissionEvent }) };
 }
 
@@ -243,7 +246,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
         if (profile === "infrastructure") {
           if (!session!.prepareLaunchAuth) throw new ZerosDevError("invalid_request");
           await (options.infrastructure ?? runInfrastructure)({ ...inputs,
-            connect: services.connect,
+            connect: services.connect, probeSdk: services.probeSdk,
             prepareLaunchAuth: ms => session!.prepareLaunchAuth!(ms),
             native: (runtime, handle, settings) => new InfrastructureNative(runtime, handle, settings) });
         } else if (profile === "gate0") {

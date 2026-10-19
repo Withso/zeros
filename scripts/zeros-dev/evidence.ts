@@ -9,13 +9,27 @@ import { TransportObservationSchema } from "./gate0-contract";
 import { CleanupSummarySchema } from "./cleanup-contract";
 import { NativeProofObservationSchema } from "./native-proof-observation";
 
+export const SDK_PHASES = ["sdk_device_session", "sdk_runtime_connect", "sdk_runtime_ready", "sdk_device_stream_ready"] as const;
+export type SdkPhase = typeof SDK_PHASES[number];
+const sdkSkips = {
+  sdk_device_session: ["legacy_discovery"],
+  sdk_runtime_connect: ["legacy_discovery", "session_unavailable"],
+  sdk_runtime_ready: ["runtime_legacy", "session_unavailable"],
+  sdk_device_stream_ready: ["organization_disabled", "stream_disabled", "session_unavailable"],
+} as const;
+const SdkObservationSchema = z.object({ probeId: z.string().uuid(), route: z.literal("direct").optional(),
+  organizationCoverage: z.literal("enabled").optional(),
+  skip: z.enum(["legacy_discovery", "session_unavailable", "runtime_legacy", "organization_disabled", "stream_disabled"]).optional(),
+}).strict();
+export type SdkObservation = z.infer<typeof SdkObservationSchema>;
+
 export const EvidenceEventSchema=z.object({
   phase:z.enum(["login","identity","repository","computer_build","computer_wait","workspace_create","workspace_resume","workspace_stop","workspace_delete",
     "workspace_wait","workspace_create_wait","workspace_resume_wait","workspace_stop_wait","workspace_delete_wait",
     "runtime_connect","runtime_admission","agent_send","agent_settled","chat_tail","terminal_run","health_cp","health_db","health_vm","cleanup","scenario",
     "prior_cleanup","storage_pending","computer_selection","computer_pin","credentials_install","credentials_cleanup","agent_claude","agent_codex","agent_cursor","chat_continuity","runtime_disconnect",
     "model_eligibility","workload","workload_tick","file_edit","detached_auth","detached_start","detached_disconnect","detached_wait","detached_reconnect","detached_history","runtime_transport","rehearsal_proof","workspace_setup",
-    "detached_native_proof","native_cleanup","infrastructure_proof"]),
+    "detached_native_proof","native_cleanup","infrastructure_proof", ...SDK_PHASES]),
   outcome:z.enum(["ok","failed","pending","skipped"]),durationMs:z.number().nonnegative().finite(),
   code:z.enum(ERROR_CODES).optional(),count:z.number().int().nonnegative().safe().optional(),exitCode:z.number().int().min(-1).max(255).optional(),
   setup:SetupObservationSchema.optional(),runtime:RuntimeObservationSchema.optional(),
@@ -23,8 +37,19 @@ export const EvidenceEventSchema=z.object({
   transport:TransportObservationSchema.optional(),
   cleanup:CleanupSummarySchema.optional(),
   nativeProof:NativeProofObservationSchema.optional(),
+  sdk:SdkObservationSchema.optional(),
 }).strict().refine(event=>!event.nativeProof||event.outcome==="failed"&&event.code==="detached_proof_incomplete"&&
-  ["detached_start","detached_native_proof"].includes(event.phase),"Native diagnostic requires a failed native proof phase");
+  ["detached_start","detached_native_proof"].includes(event.phase),"Native diagnostic requires a failed native proof phase")
+  .refine(event => {
+    const isSdk = (SDK_PHASES as readonly string[]).includes(event.phase), sdk = event.sdk;
+    if (!isSdk) return sdk === undefined;
+    if (!sdk || event.outcome === "pending") return false;
+    if (event.outcome === "skipped") return !!sdk.skip && !sdk.route && !sdk.organizationCoverage && !event.code &&
+      (sdkSkips[event.phase as SdkPhase] as readonly string[]).includes(sdk.skip);
+    if (sdk.skip) return false;
+    return (sdk.route === "direct") === (event.outcome === "ok" && event.phase === "sdk_runtime_ready") &&
+      (sdk.organizationCoverage === "enabled") === (event.outcome === "ok" && event.phase === "sdk_device_stream_ready");
+  }, "SDK evidence requires exact phase coverage or an explicit skip");
 export type EvidenceEvent=z.infer<typeof EvidenceEventSchema>;
 export class Evidence {
   readonly events:EvidenceEvent[]=[];

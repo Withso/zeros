@@ -11,6 +11,7 @@ const MAX_FRAME_BYTES = 512 * 1024;
 type RuntimeAuthority = Pick<CloudSdkRuntimeBroker, "assertActive" | "openStreamSession" | "runtimeTargets" | "subscribeRuntimeTargets" |
   "assertRuntime" | "acceptPushedCapabilities" | "close">;
 type Options = { broker: RuntimeAuthority; emit(event: CloudSdkStreamEvent): void; createSocket?: DeviceStreamSocketFactory;
+  onReady?(organizations: Extract<DeviceStreamEvent, { type: "ready" }>["ready"]["organizationFeatures"]): void;
   newId?: () => string; random?: () => number };
 export type CloudStreamRendererLifetime = (onGone: () => void) => () => void;
 
@@ -152,6 +153,9 @@ export class CloudSdkDeviceStream {
     if (event.type === "state" && event.state.kind === "open") return;
     if (event.type === "ready") {
       this.organizations = event.ready.organizationFeatures ?? [];
+      // A headless native consumer may observe admission without pretending a
+      // catalog snapshot has caught up. Never expose a ticket or resume cursor.
+      this.options.onReady?.(event.ready.organizationFeatures?.map(row => ({ ...row })));
       if (!event.ready.resumed || event.ready.organizationFeatures !== undefined) return;
     }
     if (event.type === "snapshot_required") this.catalogRequired = true;
