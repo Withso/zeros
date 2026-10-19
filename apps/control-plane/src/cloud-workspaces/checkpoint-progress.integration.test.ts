@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { enqueueWorkspaceCheckpointRequest, deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
@@ -99,6 +99,47 @@ const url = process.env.TEST_DATABASE_URL;
     expect(closed).toEqual([{ subject: expected }]);
     expect(await receipts()).toEqual([report({ stage: "seal_ack", state: "failed", reason: "unknown" })].map(({ token: _token, ...body }) => body));
     expect(await authority()).toEqual(before);
+  });
+
+  it("retains one closed capture failure with no additional authority reads or provider operations", async () => {
+    const before = await authority();
+    const captureFailure = { version: 1 as const, site: "native_verify" as const, reason: "native_changed" as const, httpClass: "none" as const };
+    const query = vi.spyOn(pg.Client.prototype, "query");
+    let ordinary: unknown[], detailed: unknown[];
+    const failure = { ...report({ sequence: 2, stage: "durability_capture", state: "failed", reason: "storage" }), captureFailure };
+    try {
+      await service.report(report()); ordinary = query.mock.calls.map(call => call[0]); query.mockClear();
+      await service.report(failure); detailed = query.mock.calls.map(call => call[0]);
+    } finally { query.mockRestore(); }
+    expect(detailed!.filter(sql => !String(sql).includes("cloud_workspace.checkpoint_capture_failure"))).toEqual(ordinary!);
+    expect(detailed!.length).toBe(ordinary!.length + 1);
+    await service.report(failure);
+    await service.report({ ...failure, sequence: 3, captureFailure: { ...captureFailure, reason: "unknown" } });
+    const rows = (await pool.query(`SELECT subject FROM audit_log
+      WHERE org_id=$1 AND action='cloud_workspace.checkpoint_capture_failure' ORDER BY id`, [fixture.organizationId])).rows;
+    const { token: _token, ...expected } = failure;
+    expect(rows).toEqual([{ subject: expected }]);
+    expect((await receipts()).at(-1)).not.toHaveProperty("captureFailure");
+    expect(await authority()).toEqual(before);
+  });
+
+  it("cannot add capture detail after a headerless failure or cancelled request", async () => {
+    const failure = report({ stage: "durability_capture", state: "failed", reason: "unknown" });
+    const captureFailure = { version: 1 as const, site: "commit" as const, reason: "transport" as const, httpClass: "none" as const };
+    await service.report(failure); await service.report({ ...failure, captureFailure });
+    await pool.query("UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now() WHERE id=$1", [requestId]);
+    await expect(service.report({ ...failure, sequence: 2, captureFailure })).rejects.toBeInstanceOf(CloudEngineCheckpointProgressRejected);
+    expect((await pool.query("SELECT count(*)::int count FROM audit_log WHERE action='cloud_workspace.checkpoint_capture_failure'")).rows[0].count).toBe(0);
+  });
+
+  it("rejects superseded capture authority and ignores detail outside the failed capture stage", async () => {
+    const captureFailure = { version: 1 as const, site: "native_pack" as const, reason: "git_failed" as const, httpClass: "none" as const };
+    await expect(service.report({ ...report({ engineInstanceId: randomUUID(), stage: "durability_capture", state: "failed", reason: "storage" }), captureFailure }))
+      .rejects.toBeInstanceOf(CloudEngineCheckpointProgressRejected);
+    await service.report({ ...report(), captureFailure });
+    await service.report({ ...report({ sequence: 2, stage: "record_flush", state: "failed", reason: "unknown" }), captureFailure });
+    expect((await pool.query("SELECT count(*)::int count FROM audit_log WHERE action='cloud_workspace.checkpoint_capture_failure'")).rows[0].count).toBe(0);
+    expect(await receipts()).toHaveLength(2);
   });
 
   it("cannot append seal evidence after a headerless first failure or a cancelled request", async () => {

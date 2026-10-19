@@ -33,6 +33,27 @@ function harness() {
 }
 
 describe("closed checkpoint progress route", () => {
+  it("accepts closed capture metadata separately from the historical v1 JSON", async () => {
+    const { app, service } = harness();
+    const captureFailure = { version: 1, site: "native_pack", reason: "git_failed", httpClass: "none" };
+    const failure = { ...progress, stage: "durability_capture", state: "failed", reason: "storage" };
+    const response = await app.request(path, { method: "POST", headers: { authorization: `Bearer ${token}`,
+      "content-type": "application/json", "x-zeros-checkpoint-capture-failure": JSON.stringify(captureFailure) }, body: JSON.stringify(failure) });
+    expect(response.status).toBe(202);
+    expect(service.reportCheckpointProgress).toHaveBeenCalledExactlyOnceWith({ ...failure, token, captureFailure });
+  });
+
+  it.each(["{", "x".repeat(513), JSON.stringify({ version: 1, site: "native_pack", reason: "private-canary", httpClass: "none" }),
+    JSON.stringify({ version: 1, site: "native_pack", reason: "git_failed", httpClass: "none", text: "private-canary" })])(
+    "ignores malformed capture headers without rejecting otherwise valid progress", async header => {
+      const { app, service } = harness();
+      const failure = { ...progress, stage: "durability_capture", state: "failed", reason: "unknown" };
+      const response = await app.request(path, { method: "POST", headers: { authorization: `Bearer ${token}`,
+        "content-type": "application/json", "x-zeros-checkpoint-capture-failure": header }, body: JSON.stringify(failure) });
+      expect(response.status).toBe(202);
+      expect(service.reportCheckpointProgress).toHaveBeenCalledExactlyOnceWith({ ...failure, token });
+    });
+
   it("accepts optional closed seal evidence outside the unchanged strict v1 JSON", async () => {
     const { app, service } = harness();
     const sealRefusal = { version: 1, site: "request", code: "command_conflict", httpClass: "4xx" };

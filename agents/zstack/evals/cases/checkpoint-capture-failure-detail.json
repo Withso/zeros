@@ -1,0 +1,9 @@
+{
+  "id": "checkpoint-capture-failure-detail",
+  "kind": "replay",
+  "area": "cloud-engine-stop",
+  "fixedBy": "pending",
+  "symptom": "A failed final capture lost its upload, native, integrity or commit boundary and appeared only as unknown; a later cancellation label could be mistaken for its cause.",
+  "rule": "Retain closed failure metadata at actual I/O and proof boundaries, preserve the first observed failure while joining admitted work, and transport optional diagnostics outside strict historical wire documents. Optional clocks and rejecting observers cannot alter lifecycle outcomes.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-checkpoint-capture-diagnostics.test.ts apps/desktop/src/engine/__tests__/cloud-checkpoint-progress.test.ts scripts/__tests__/cloud-checkpoint-progress-contract.test.ts"
+}

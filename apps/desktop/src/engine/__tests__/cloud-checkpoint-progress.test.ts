@@ -26,6 +26,33 @@ function fixture(overrides: Partial<ConstructorParameters<typeof CloudCheckpoint
 }
 
 describe("finite checkpoint diagnostics", () => {
+  it.each(["construction", "publication", "flush"])("a throwing %s clock cannot change checkpoint execution", phase => {
+    const f = phase === "construction" ? undefined : fixture();
+    let calls = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => {
+      if (phase !== "flush" || ++calls >= 3) throw new Error("private-clock-canary");
+      return 0;
+    });
+    let reporter: CloudCheckpointProgressReporter | undefined;
+    expect(() => { reporter = f?.reporter ?? fixture().reporter; reporter.stage("durability_capture"); reporter.fail(new Error()); }).not.toThrow();
+    vi.restoreAllMocks(); reporter?.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("absorbs an accidentally rejecting current observer without admitting a report", async () => {
+    const f = fixture({ current: (() => Promise.reject(new Error("private-observer-canary"))) as unknown as () => boolean });
+    expect(() => f.reporter.stage("durability_capture")).not.toThrow();
+    await settle();
+    expect(f.requestFetch).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("absorbs an accidentally rejecting unsupported observer", async () => {
+    const f = fixture({ unsupported: () => Promise.reject(new Error("private-observer-canary")) });
+    f.requestFetch.mockResolvedValue(new Response(null, { status: 404 }));
+    f.reporter.stage("durability_capture"); await settle();
+    expect(f.requestFetch).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("keeps only the first closed seal refusal and leaves the strict progress body unchanged", async () => {
     const f = fixture();
     const refusal = { version: 1, site: "request", code: "command_conflict", httpClass: "4xx" };

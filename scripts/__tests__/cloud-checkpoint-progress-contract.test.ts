@@ -14,6 +14,17 @@ const input = {
 };
 
 describe("checkpoint diagnostic contract parity", () => {
+  it.each([shared, controlPlane])("bounds capture metadata while preserving every historical strict v1 document", contract => {
+    const captureFailure = { version: 1, site: "native_verify", reason: "native_changed", httpClass: "none" };
+    expect(contract.CLOUD_CHECKPOINT_CAPTURE_FAILURE_HEADER).toBe("x-zeros-checkpoint-capture-failure");
+    expect(contract.parseCloudCheckpointCaptureFailure?.(JSON.stringify(captureFailure))).toEqual(captureFailure);
+    expect(contract.CloudCheckpointProgressSchema.parse(input)).toEqual(input);
+    expect(contract.CloudCheckpointProgressSchema.safeParse({ ...input, captureFailure }).success).toBe(false);
+    for (const value of [undefined, "{", "x".repeat(513), JSON.stringify({ ...captureFailure, detail: "private-canary" }),
+      ...["version", "site", "reason", "httpClass"].map(key => JSON.stringify({ ...captureFailure, [key]: "private-canary" }))])
+      expect(contract.parseCloudCheckpointCaptureFailure?.(value)).toBeUndefined();
+  });
+
   it.each([shared, controlPlane])("bounds the optional closed header without extending v1 JSON", contract => {
     const refusal = { version: 1, site: "request", code: "command_conflict", httpClass: "4xx" };
     expect(contract.CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER).toBe("x-zeros-checkpoint-seal-refusal");

@@ -68,7 +68,8 @@ import {
 import { CloudEngineCheckpointHintRejected, type CloudEngineCheckpointHintInput } from "./engine-checkpoint-hints.js";
 import type { RolloutFlagReader } from "../rollout-flags.js";
 import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema,
-  CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER, parseCloudCheckpointSealRefusal } from "./checkpoint-progress-contract.js";
+  CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER, parseCloudCheckpointSealRefusal,
+  CLOUD_CHECKPOINT_CAPTURE_FAILURE_HEADER, parseCloudCheckpointCaptureFailure } from "./checkpoint-progress-contract.js";
 import { CloudEngineCheckpointProgressRejected, CloudEngineCheckpointProgressUnavailable, type CloudEngineCheckpointProgressInput } from "./checkpoint-progress.js";
 import { CLOUD_ENGINE_EXIT_PATH, CloudEngineExitReportSchema, CloudEngineExitRejected, type CloudEngineExitInput } from "./engine-exit.js";
 
@@ -860,8 +861,11 @@ export function createCloudWorkspaceInternalRoutes(
       if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
       const sealRefusal = input.stage === "seal_ack" && input.state === "failed"
         ? parseCloudCheckpointSealRefusal(c.req.header(CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER)) : undefined;
+      const captureFailure = input.stage === "durability_capture" && input.state === "failed"
+        ? parseCloudCheckpointCaptureFailure(c.req.header(CLOUD_CHECKPOINT_CAPTURE_FAILURE_HEADER)) : undefined;
       try {
-        await service.reportCheckpointProgress!({ ...input, token, ...(sealRefusal ? { sealRefusal } : {}) });
+        await service.reportCheckpointProgress!({ ...input, token, ...(sealRefusal ? { sealRefusal } : {}),
+          ...(captureFailure ? { captureFailure } : {}) });
         return c.json({ version: 1, accepted: true }, 202);
       } catch (error) {
         if (error instanceof CloudEngineCheckpointProgressUnavailable) return c.json({ error: { code: error.code } }, 503);
