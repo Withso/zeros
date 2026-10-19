@@ -25,6 +25,8 @@ import { requestManagedComputeStop } from "./compute-credit-stop.js";
 import { classifyCloudFailure, diagnosticCode, type CloudDiagnostic, type CloudDiagnosticPhase, type ComputeFailureSite } from "./cloud-diagnostics.js";
 import { retainCloudDiagnostic, diagnosticStorageFailed, recoverCloudDiagnostic } from "./cloud-diagnostic-store.js";
 import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
+import { computeLeaseDueAtSql } from "./compute-rechecks.js";
+import { measureLifecyclePhase } from "./lifecycle-timing.js";
 
 export type ManagedComputePolicy = {
   provider: string;
@@ -43,6 +45,8 @@ type Lease = {
   observed_at?: Date;
   /** next_check_at when this pass claimed the lease, exact to the microsecond. */
   claimed_next_check_at?: string;
+  /** Only this request snapshot may be acknowledged after a successful pass. */
+  claimed_recheck_sequence: string;
   id: string;
   workspace_id: string;
   org_id: string;
@@ -455,7 +459,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     provider: CloudWorkspaceProvider,
     current: CloudProviderResource | null,
   ): Promise<CloudProviderResource> {
-    const scope = await this.scope(input);
+    const scope = await measureLifecyclePhase("funding", () => this.scope(input));
     if (
       !scope.live ||
       scope.desired_state !== "running" ||
@@ -470,15 +474,15 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     // The lifecycle worker already serializes each intent. Claim this lease as
     // well so the metering worker cannot settle it during a provider request.
     const owner = `allocation:${randomUUID()}`;
-    const lease = await this.prepare(input, scope, metered, owner);
+    const lease = await measureLifecyclePhase("funding", () => this.prepare(input, scope, metered, owner));
     try {
-      await this.assertAllocationRetryDeadline(lease);
-      const plan = await this.plan(lease, lease.state !== "funding");
+      await measureLifecyclePhase("funding", () => this.assertAllocationRetryDeadline(lease));
+      const plan = await measureLifecyclePhase("funding", () => this.plan(lease, lease.state !== "funding"));
       if (!plan) throw failure("compute_credit_exhausted");
-      await this.fund(lease, plan, owner);
+      await measureLifecyclePhase("funding", () => this.fund(lease, plan, owner));
       // A lifecycle/ownership change during funding prevents dispatch, while
       // the reservation remains until independent absence/stop evidence.
-      const currentScope = await this.scope(input);
+      const currentScope = await measureLifecyclePhase("funding", () => this.scope(input));
       if (
         !currentScope.live ||
         currentScope.desired_state !== "running" ||
@@ -487,7 +491,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         money(currentScope.billing_epoch) !== money(lease.billing_epoch)
       )
         throw failure("compute_lease_superseded");
-      await this.assertAllocationRetryDeadline(lease);
+      await measureLifecyclePhase("funding", () => this.assertAllocationRetryDeadline(lease));
       const resource = current
         ? await metered.startWithComputeLease(
             current.resourceId,
@@ -495,7 +499,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           )
         : await metered.createWithComputeLease(input, plan.ttlSeconds);
       assertProviderResourceIdentity(resource, input);
-      await this.observeRunning(input, provider, resource);
+      await measureLifecyclePhase("postDispatchObservation", () => this.observeRunning(input, provider, resource));
       return resource;
     } catch (error) {
       if (
@@ -809,15 +813,16 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         (
           await tx.query<Lease>(
             `WITH candidate AS (
-      SELECT id FROM managed_compute_allocation_leases WHERE state<>'settled' AND next_check_at<=clock_timestamp()
-        AND ($2::uuid IS NULL OR workspace_id=$2)
+      SELECT lease.id FROM managed_compute_allocation_leases lease WHERE lease.state<>'settled' AND (${computeLeaseDueAtSql})<=clock_timestamp()
+        AND ($2::uuid IS NULL OR lease.workspace_id=$2)
         AND NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions runtime
-          WHERE runtime.workspace_id=managed_compute_allocation_leases.workspace_id
+          WHERE runtime.workspace_id=lease.workspace_id
             AND ((runtime.phase IN ('activated','enrolling','checking') AND runtime.activation_deadline_at>clock_timestamp())
               OR (runtime.phase IN ('rolling_back','rollback_enrolling','rollback_checking') AND runtime.rollback_deadline_at>clock_timestamp())))
-        AND (lease_owner IS NULL OR lease_expires_at<=clock_timestamp()) ORDER BY next_check_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
+        AND (lease.lease_owner IS NULL OR lease.lease_expires_at<=clock_timestamp()) ORDER BY ${computeLeaseDueAtSql},lease.id FOR UPDATE OF lease SKIP LOCKED LIMIT 1)
       UPDATE managed_compute_allocation_leases lease SET lease_owner=$1,lease_expires_at=clock_timestamp()+interval '5 minutes'
       FROM candidate WHERE lease.id=candidate.id RETURNING lease.*,lease.next_check_at::text AS claimed_next_check_at,clock_timestamp() AS observed_at,
+        coalesce((SELECT requested_sequence FROM cloud_workspace_compute_rechecks WHERE allocation_lease_id=lease.id),0)::text AS claimed_recheck_sequence,
         coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),lease.generation) AS current_generation`,
             [this.workerId, workspaceId],
           )
@@ -905,8 +910,20 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         `[cloud-workspace] compute reconciliation failed (${code}${diagnostic.site ? `, ${diagnostic.site}` : ""}${diagnostic.sqlState ? `, SQLSTATE ${diagnostic.sqlState}` : ""})`,
       );
     } finally {
-      await withRetryableSystemTx(this.options.pool, (tx) =>
-        tx.query(
+      await withRetryableSystemTx(this.options.pool, async (tx) => {
+        // Lock lease -> marker -> job in that order. The accepted-observation
+        // producer never locks a lease. Ack before the lease's job trigger, so
+        // a workspace writer holding the marker cannot form a job/marker cycle.
+        const owned = await tx.query(`SELECT id FROM managed_compute_allocation_leases lease
+          WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
+            AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$3
+          FOR UPDATE`, [lease.id, this.workerId, this.identity(lease).generation]);
+        if (!owned.rowCount) return;
+        if (!failed) await tx.query(`UPDATE cloud_workspace_compute_rechecks
+          SET handled_sequence=greatest(handled_sequence,$2::bigint)
+          WHERE allocation_lease_id=$1 AND workspace_id=$3 AND org_id=$4 AND handled_sequence<$2::bigint`,
+        [lease.id, lease.claimed_recheck_sequence, lease.workspace_id, lease.org_id]);
+        await tx.query(
           // A just-stopped allocation settles once its final meter can cover
           // the stop; recheck then instead of after a full poll. Backoff cannot
           // defer an unproved stop past its next safety deadline. After a due
@@ -916,7 +933,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           // Keep a check requested while this pass ran, and honor provider
           // Retry-After only within the same runway and stop-deadline bounds.
           `UPDATE managed_compute_allocation_leases lease SET lease_owner=NULL,lease_expires_at=NULL,
-        next_check_at=least(CASE WHEN $6::timestamptz IS NOT NULL AND next_check_at IS DISTINCT FROM $6::timestamptz THEN next_check_at END,CASE
+        next_check_at=least(CASE WHEN NOT $4 AND $6::timestamptz IS NOT NULL AND next_check_at IS DISTINCT FROM $6::timestamptz THEN next_check_at END,CASE
           WHEN $4 THEN least(coalesce($3::timestamptz,'infinity'::timestamptz),greatest(clock_timestamp()+least(interval '5 minutes',
             greatest(interval '15 seconds',clock_timestamp()-coalesce(first_error_at,clock_timestamp()))),
             clock_timestamp()+coalesce($7::bigint,0)*interval '1 millisecond'))
@@ -930,8 +947,8 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
           AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$5`,
           [lease.id, this.workerId, recheckAt, failed, this.identity(lease).generation, lease.claimed_next_check_at ?? null, retryAfterMs],
-        ),
-      );
+        );
+      });
     }
     return true;
   }

@@ -1535,6 +1535,30 @@ d("cloud workspace API contracts", () => {
     ]);
   });
 
+  it("records admission timing only in the existing create and stop audits, including replay", async () => {
+    const createKey = randomUUID();
+    const created = await createWorkspace(createKey);
+    expect(created.response.status).toBe(202);
+    expect((await createWorkspace(createKey)).response.status).toBe(200);
+    const workspaceId = created.body.workspace.id;
+    const stopKey = randomUUID();
+    const path = `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/stop`;
+    const stopped = await request(path, { method: "POST", key: stopKey });
+    expect(stopped.status).toBe(202);
+    expect((await request(path, { method: "POST", key: stopKey })).status).toBe(200);
+    const audits = (await pool.query(`SELECT action,subject FROM audit_log
+      WHERE subject->>'workspaceId'=$1 AND action IN ('cloud_workspace.create_requested','cloud_workspace.stop_requested')
+      ORDER BY action`, [workspaceId])).rows;
+    expect(audits).toHaveLength(2);
+    for (const audit of audits) {
+      expect(audit.subject.phaseTiming).toEqual({ version: 1, monotonicMs: { admission: expect.any(Number) }, databaseElapsedMs: {} });
+      expect(audit.subject.phaseTiming.monotonicMs.admission).toBeGreaterThanOrEqual(0);
+      expect(audit.subject.phaseTiming.monotonicMs.admission).toBeLessThanOrEqual(86_400_000);
+    }
+    expect(JSON.stringify(created.body)).not.toContain("phaseTiming");
+    expect(await stopped.text()).not.toContain("phaseTiming");
+  });
+
   it("reauthorizes an idempotent create replay instead of lending it to another admin", async () => {
     const key = randomUUID();
     expect((await createWorkspace(key)).response.status).toBe(202);

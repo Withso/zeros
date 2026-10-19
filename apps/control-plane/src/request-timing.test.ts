@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 
 import { withSystemTx } from "./db.js";
-import { recordPoolWait, recordTransactionTiming, requestTiming } from "./request-timing.js";
+import { recordPoolWait, recordTransactionTiming, requestTiming, observeTransactionTiming } from "./request-timing.js";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -122,4 +122,102 @@ describe("request timing", () => {
     const wait = Number(lines()[0]!.match(/ tx=0 txMs=0 waitMs=(\d+)$/)?.[1]);
     expect(wait).toBeGreaterThanOrEqual(20);
   });
+});
+
+describe("scoped background transaction timing", () => {
+  it("uses the completed helper hook without stealing a surrounding request's accounting", async () => {
+    const observed: unknown[] = [];
+    const { app, lines } = timedApp();
+    app.get("/v1/timing", async c => {
+      await observeTransactionTiming(async () => {
+        recordTransactionTiming(4, 15);
+        recordTransactionTiming(6, 25);
+      }, timing => { observed.push(timing); });
+      return c.text("ok");
+    });
+    expect((await app.request("/v1/timing")).status).toBe(200);
+    expect(observed).toEqual([{ transactions: 2, waitMs: 10, heldMs: 30 }]);
+    expect(lines()[0]).toMatch(/tx=2 txMs=30 waitMs=10$/);
+  });
+
+  it("keeps overlapping background scopes separate and refuses detached late samples", async () => {
+    let releaseA!: () => void, enteredA!: () => void, late!: () => void;
+    const reachedA = new Promise<void>(resolve => { enteredA = resolve; });
+    const a: unknown[] = [], b: unknown[] = [];
+    const flight = observeTransactionTiming(async () => {
+      recordTransactionTiming(1, 10);
+      enteredA();
+      await new Promise<void>(resolve => { releaseA = resolve; });
+      const detached = new Promise<void>(resolve => { late = resolve; });
+      void detached.then(() => recordTransactionTiming(99, 999));
+    }, value => { a.push(value); });
+    await reachedA;
+    await observeTransactionTiming(async () => { recordTransactionTiming(2, 20); }, value => { b.push(value); });
+    releaseA(); await flight; late(); await Promise.resolve();
+    expect(a).toEqual([{ transactions: 1, waitMs: 1, heldMs: 9 }]);
+    expect(b).toEqual([{ transactions: 1, waitMs: 2, heldMs: 18 }]);
+  });
+
+  it("does not replace either success or failure when its observer throws", async () => {
+    const observer = () => { throw new Error("Synthetic timing sink failure"); };
+    await expect(observeTransactionTiming(async () => "committed", observer)).resolves.toBe("committed");
+    const failure = new Error("Synthetic transaction failure");
+    await expect(observeTransactionTiming(async () => { throw failure; }, observer)).rejects.toBe(failure);
+  });
+
+  it("keeps nested scopes bounded and excludes a closed child's detached work from its parent", async () => {
+    const outer: unknown[] = [], inner: unknown[] = [];
+    let release!: () => void, detached!: Promise<void>;
+    await observeTransactionTiming(async () => {
+      recordTransactionTiming(2, 12);
+      await observeTransactionTiming(async () => {
+        recordTransactionTiming(3, 23);
+        detached = new Promise<void>(resolve => { release = resolve; })
+          .then(() => { recordTransactionTiming(99, 999); });
+      }, value => { inner.push(value); });
+      release(); await detached;
+    }, value => { outer.push(value); });
+    expect(inner).toEqual([{ transactions: 1, waitMs: 3, heldMs: 20 }]);
+    expect(outer).toEqual([{ transactions: 2, waitMs: 5, heldMs: 30 }]);
+
+    const bounded: unknown[] = [];
+    await observeTransactionTiming(async () => {
+      recordTransactionTiming(NaN, 2);
+      recordTransactionTiming(1, Infinity);
+      recordTransactionTiming(-10, -1);
+      recordPoolWait(100_000_000);
+      recordTransactionTiming(0, 100_000_000);
+    }, value => { bounded.push(value); });
+    expect(bounded).toEqual([{ transactions: 2, waitMs: 86_400_000, heldMs: 86_400_000 }]);
+    await expect(observeTransactionTiming(async () => "committed", async () => {
+      throw new Error("Synthetic rejected timing sink");
+    })).resolves.toBe("committed");
+  });
+
+  it("includes a delayed COMMIT only after the existing transaction hook completes, without extra queries", async () => {
+    let now = 0, reached!: () => void, release!: () => void;
+    const committing = new Promise<void>(resolve => { reached = resolve; });
+    const summaries: unknown[] = [];
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "COMMIT") { reached(); await new Promise<void>(resolve => { release = resolve; }); }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    });
+    const pool = { connect: vi.fn(async () => client) } as unknown as pg.Pool;
+    try {
+      const flight = observeTransactionTiming(() => withSystemTx(pool, async tx => {
+        now = 7; await tx.query("SELECT 1");
+      }), value => { summaries.push(value); });
+      await committing;
+      expect(summaries).toEqual([]);
+      now = 700; release(); await flight;
+      expect(summaries).toEqual([{ transactions: 1, waitMs: 0, heldMs: 700 }]);
+      expect(client.query).toHaveBeenCalledTimes(3);
+      expect(client.release).toHaveBeenCalledOnce();
+    } finally { clock.mockRestore(); }
+  });
+
 });

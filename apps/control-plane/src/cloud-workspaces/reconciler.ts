@@ -5,7 +5,10 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { CLOUD_WORKSPACE_V2_REQUIRED, requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
+import { createDatabaseTimingReporter } from "../database-timing.js";
+import { observeTransactionTiming } from "../request-timing.js";
+import { measureLifecyclePhase, readLifecycleTiming, recordLifecycleDatabaseElapsed, withLifecycleTiming } from "./lifecycle-timing.js";
 import { deferCloudRecoveryResourceBlock, enqueueCloudMissingSnapshotRecovery } from "./automatic-recovery.js";
 import { requireGenerationRuntime } from "./generation-pins.js";
 import { CloudRuntimeError } from "./runtime-selection.js";
@@ -53,6 +56,7 @@ import {
 } from "./runtime-access.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceComputeLeaseCoordinator, type ManagedComputePolicy } from "./compute-leases.js";
+import { computeObservationAllocationIdSql, requestComputeObservationRecheck } from "./compute-rechecks.js";
 import {retireCloudAgentBootSources} from "./agent-boot-credentials.js";
 import type { CloudRuntimeRollbackCache } from "./runtime-rollback.js";
 
@@ -67,6 +71,9 @@ type ClaimedIntent = {
   desiredState: DesiredState;
   generation: number;
   provider: string;
+  providerConnectionId: string;
+  providerConnectionVersion: string;
+  allocationLeaseId: string | null;
   imageRef: string;
   architecture: "linux/amd64" | "linux/arm64";
   cpuMillicores: number;
@@ -90,6 +97,9 @@ type DriftCandidate = {
   version: string | number;
   generation: number;
   provider: string;
+  providerConnectionId: string;
+  providerConnectionVersion: string;
+  allocationLeaseId: string | null;
   providerResourceId: string | null;
   driftLeaseUntil: Date;
   /** This candidate's observation cadence, by its settled state. */
@@ -328,6 +338,7 @@ export class CloudWorkspaceReconciler {
   private cleanupScopeOffset = 0;
   private readonly workerId: string;
   private readonly logger: ReconcileLogger;
+  private readonly resultTiming: ReturnType<typeof createDatabaseTimingReporter>;
   private readonly paidAuthority: DatabaseCloudWorkspacePaidAuthorityReconciler;
   private readonly computeLeases: CloudWorkspaceComputeLeaseCoordinator;
   private readonly runtimeUpgradeConfig: CloudWorkspaceBackendConfig | null;
@@ -393,6 +404,7 @@ export class CloudWorkspaceReconciler {
       throw new Error("Cloud workspace reconciler worker identity is invalid");
     }
     this.logger = options.logger ?? console;
+    this.resultTiming = createDatabaseTimingReporter({ log: line => this.logger.info(line) });
     this.jobAuditIntervalMs = options.jobAuditIntervalMs ?? 60 * 60_000;
     if (!Number.isSafeInteger(this.jobAuditIntervalMs) || this.jobAuditIntervalMs < 1_000 ||
       this.jobAuditIntervalMs > 24 * 60 * 60_000 ||
@@ -444,7 +456,8 @@ export class CloudWorkspaceReconciler {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    await Promise.all([this.scheduler.stop(), this.jobs.stop(), this.authExpiryRepair]);
+    try { await Promise.all([this.scheduler.stop(), this.jobs.stop(), this.authExpiryRepair]); }
+    finally { this.resultTiming.flush(); }
   }
 
   private async tick(): Promise<void> {
@@ -530,6 +543,9 @@ export class CloudWorkspaceReconciler {
         current_generation: number;
         generation: number;
         provider: string;
+        provider_connection_id: string;
+        provider_connection_version: string;
+        allocation_lease_id: string | null;
         image_ref: string;
         architecture: "linux/amd64" | "linux/arm64";
         cpu_millicores: number;
@@ -545,11 +561,19 @@ export class CloudWorkspaceReconciler {
         agent_boot_id: string | null;
         requested_by: string | null;
         created_at: Date;
+        first_claim_wait_ms: string | null;
+        previous_lease_wait_ms: string | null;
       }>(
         `SELECT i.id, i.workspace_id, i.org_id, i.operation,
                 cw.desired_state, cw.current_generation, cw.authority_epoch, cw.agent_boot_id, i.generation,
                 i.requested_by,i.created_at,
+                CASE WHEN i.attempt_count=0
+                  THEN extract(epoch FROM (clock_timestamp()-i.created_at))*1000 END AS first_claim_wait_ms,
+                CASE WHEN i.error_code='compute_previous_lease_pending'
+                  THEN extract(epoch FROM (clock_timestamp()-i.updated_at))*1000 END AS previous_lease_wait_ms,
                 i.affects_workspace, i.generation_transition_id, g.provider,
+                g.provider_connection_id, g.provider_connection_version::text,
+                ${computeObservationAllocationIdSql} AS allocation_lease_id,
                 g.image_ref, g.architecture, g.cpu_millicores,
                 g.memory_mib, g.storage_mib, pb.provider_resource_id,
                 i.attempt_count, checkpoint_request.id AS checkpoint_request_id,
@@ -602,6 +626,8 @@ export class CloudWorkspaceReconciler {
       );
       const row = result.rows[0];
       if (!row) return null;
+      recordLifecycleDatabaseElapsed("firstClaimWait", row.first_claim_wait_ms);
+      recordLifecycleDatabaseElapsed("previousLeaseWait", row.previous_lease_wait_ms);
 
       if (row.operation === "wake" && row.affects_workspace && row.current_generation === row.generation && row.desired_state === "running") {
         // Cover requests admitted by an older route, including those with no
@@ -693,6 +719,9 @@ export class CloudWorkspaceReconciler {
         desiredState,
         generation: row.generation,
         provider: row.provider,
+        providerConnectionId: row.provider_connection_id,
+        providerConnectionVersion: row.provider_connection_version,
+        allocationLeaseId: row.allocation_lease_id,
         imageRef: row.image_ref,
         architecture: row.architecture,
         cpuMillicores: row.cpu_millicores,
@@ -711,39 +740,45 @@ export class CloudWorkspaceReconciler {
   }
 
   async runOnce(workspaceId: string | null = null): Promise<boolean> {
-    const intent = await this.claimIntent(workspaceId);
+    return withLifecycleTiming(() => this.runTimedAttempt(workspaceId));
+  }
+
+  private async runTimedAttempt(workspaceId: string | null): Promise<boolean> {
+    const intent = await measureLifecyclePhase("claim", () => this.claimIntent(workspaceId));
     if (!intent) return false;
     if ("deferred" in intent) return true;
     const mayUpgradeOnWake = !!this.runtimeUpgradeConfig && intent.affectsWorkspace &&
       !intent.generationTransitionId && ["create", "wake"].includes(intent.operation);
     let provider: CloudWorkspaceProvider;
     try {
-      if (intent.operation === "create" || intent.operation === "wake") {
-        await withSystemTx(this.pool, async tx => {
-          await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
-          await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [intent.workspaceId, intent.orgId]);
-          await requireSupportedCloudWorkspaceGeneration(tx, {
-            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+      provider = await measureLifecyclePhase("providerResolution", async () => {
+        if (intent.operation === "create" || intent.operation === "wake") {
+          await withSystemTx(this.pool, async tx => {
+            await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
+            await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [intent.workspaceId, intent.orgId]);
+            await requireSupportedCloudWorkspaceGeneration(tx, {
+              workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+            });
           });
-        });
-      }
-      if (!mayUpgradeOnWake && (intent.operation === "create" || intent.operation === "wake")) {
-        await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
-          workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
-        }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
-      }
-      provider = this.providerResolver
-        ? (
-            await this.providerResolver.resolve({
-              workspaceId: intent.workspaceId,
-              organizationId: intent.orgId,
-              generation: intent.generation,
-              purpose: ["create", "wake"].includes(intent.operation)
-                ? "lifecycle"
-                : "cleanup",
-            })
-          ).provider
-        : this.provider;
+        }
+        if (!mayUpgradeOnWake && (intent.operation === "create" || intent.operation === "wake")) {
+          await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
+            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+          }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
+        }
+        return this.providerResolver
+          ? (
+              await this.providerResolver.resolve({
+                workspaceId: intent.workspaceId,
+                organizationId: intent.orgId,
+                generation: intent.generation,
+                purpose: ["create", "wake"].includes(intent.operation)
+                  ? "lifecycle"
+                  : "cleanup",
+              })
+            ).provider
+          : this.provider;
+      });
     } catch (error) {
       await this.recordFailure(intent, error);
       return true;
@@ -762,7 +797,7 @@ export class CloudWorkspaceReconciler {
 
     let current: CloudProviderResource | null = null;
     try {
-      current = await this.observe(provider, intent);
+      current = await measureLifecyclePhase("inspect", () => this.observe(provider, intent));
       let providerAccessRevocationProven =
         current === null || current.state === "deleted";
 
@@ -795,7 +830,8 @@ export class CloudWorkspaceReconciler {
         workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation,
       },this.runtimeUpgradeConfig?.runtime?.qualificationMode));
       if(current?.state==='running'&&['create','wake'].includes(intent.operation))
-        await this.computeLeases.observeRunning({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current);
+        await measureLifecyclePhase("funding", () => this.computeLeases.observeRunning(
+          {workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current!));
 
       // The provider adapter's destructive lifecycle contract includes
       // provider-wide access revocation. Even when provider state already
@@ -810,7 +846,7 @@ export class CloudWorkspaceReconciler {
           forceProviderAccessDrain) &&
         (!isTransitional(current) || current?.computeStopped === true)
       ) {
-        current = await this.dispatch(provider, intent, current);
+        current = await measureLifecyclePhase("dispatch", () => this.dispatch(provider, intent, current));
         if (["stop", "archive", "delete"].includes(intent.operation)) {
           providerAccessRevocationProven = true;
         }
@@ -970,13 +1006,34 @@ export class CloudWorkspaceReconciler {
     }
   }
 
+  /** Observe the existing result transaction after its COMMIT/rollback hook.
+   * Only a static worker category reaches the bounded histogram reporter. */
+  private async resultTransaction<T>(work: (tx: Tx) => Promise<T>): Promise<T> {
+    let status: number | "error" = "error";
+    return observeTransactionTiming(async () => {
+      const result = await withSystemTx(this.pool, work);
+      status = 200;
+      return result;
+    }, timing => this.resultTiming.observe({
+      version: 1, scope: "transaction-helpers-and-provider-locks",
+      method: "WORKER", route: "cloud-workspace/lifecycle-result", status, droppedSpans: 0,
+      spans: [
+        ...(timing.transactions || timing.waitMs ? [{ kind: "pool-wait" as const, offsetMs: 0,
+          durationMs: timing.waitMs, purpose: null, failed: timing.transactions === 0 }] : []),
+        ...(timing.transactions ? [{ kind: "transaction" as const, offsetMs: timing.waitMs,
+          durationMs: timing.heldMs, purpose: null, failed: null }] : []),
+      ],
+    }));
+  }
+
   private async recordResult(
     intent: ClaimedIntent,
     resource: CloudProviderResource | null,
     intentState: "succeeded" | "superseded" | "observing",
     providerAccessRevocationProven = false,
   ): Promise<void> {
-    await withSystemTx(this.pool, async (tx) => {
+    const resultStarted = performance.now();
+    await this.resultTransaction(async (tx) => {
       // Lifecycle routes lock workspace before touching intents. Keep the same
       // order here so a provider response racing stop/delete cannot deadlock.
       const workspace = await tx.query<{
@@ -994,9 +1051,10 @@ export class CloudWorkspaceReconciler {
         state: string;
         affects_workspace: boolean;
         lease_owner: string | null;
+        lease_current: boolean;
         dispatched_age_ms: string;
       }>(
-        `SELECT state, affects_workspace, lease_owner,
+        `SELECT state, affects_workspace, lease_owner, lease_expires_at>clock_timestamp() AS lease_current,
                 extract(epoch FROM (now() - dispatched_at)) * 1000 AS dispatched_age_ms
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
@@ -1022,6 +1080,8 @@ export class CloudWorkspaceReconciler {
       const observedState =
         resource?.state ??
         (intent.operation === "delete" ? "deleted" : "absent");
+      if (resultState !== "superseded" && row.state === "dispatching" && row.lease_current)
+        await requestComputeObservationRecheck(tx, { ...intent, organizationId: intent.orgId }, resource);
       // A later stop or archive that finds a deleted generation absent must
       // not clear its deletion verification; only a live resource can.
       await tx.query(
@@ -1181,6 +1241,7 @@ export class CloudWorkspaceReconciler {
           providerState: observedState,
           staleGeneration: !generationIsCurrent,
           desiredStateChanged: !intentIsCurrent && generationIsCurrent,
+          phaseTiming: readLifecycleTiming(resultStarted),
         },
       );
     });
@@ -1191,8 +1252,9 @@ export class CloudWorkspaceReconciler {
     error: unknown,
     observed: CloudProviderResource | null = null,
   ): Promise<void> {
+    const resultStarted = performance.now();
     const failure = safeFailure(error);
-    await withSystemTx(this.pool, async (tx) => {
+    await this.resultTransaction(async (tx) => {
       const current = await tx.query<{
         desired_state: DesiredState;
         current_generation: number;
@@ -1259,6 +1321,7 @@ export class CloudWorkspaceReconciler {
             code: failure.code,
             staleGeneration:
               workspace?.current_generation !== intent.generation,
+            phaseTiming: readLifecycleTiming(resultStarted),
           },
         );
         return;
@@ -1276,6 +1339,7 @@ export class CloudWorkspaceReconciler {
           observed && (["stopped", "archived"].includes(observed.state) || observed.computeStopped === true)) {
         assertProviderResourceIdentity(observed, intent);
         const observedState = ["stopped", "archived"].includes(observed.state) ? observed.state : "deleting";
+        await requestComputeObservationRecheck(tx, { ...intent, organizationId: intent.orgId }, observed);
         await tx.query(`UPDATE cloud_workspace_provider_bindings
           SET observed_state=$4, observed_metadata=$7::jsonb, last_observed_at=now(), updated_at=now()
           WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND provider=$5
@@ -1390,6 +1454,7 @@ export class CloudWorkspaceReconciler {
           generation: intent.generation,
           code: failure.code,
           attempt: intent.attemptCount,
+          phaseTiming: readLifecycleTiming(resultStarted),
         },
       );
     });
@@ -1405,10 +1470,15 @@ export class CloudWorkspaceReconciler {
         version: string | number;
         current_generation: number;
         provider: string;
+        provider_connection_id: string;
+        provider_connection_version: string;
+        allocation_lease_id: string | null;
         provider_resource_id: string | null;
       }>(
         `SELECT cw.id AS workspace_id, cw.org_id, cw.desired_state,
                 cw.status, cw.version, cw.current_generation, pb.provider,
+                pb.provider_connection_id, pb.provider_connection_version::text,
+                ${computeObservationAllocationIdSql} AS allocation_lease_id,
                 pb.provider_resource_id
          FROM cloud_workspaces cw
          JOIN cloud_workspace_provider_bindings pb
@@ -1452,6 +1522,9 @@ export class CloudWorkspaceReconciler {
             version: row.version,
             generation: row.current_generation,
             provider: row.provider,
+            providerConnectionId: row.provider_connection_id,
+            providerConnectionVersion: row.provider_connection_version,
+            allocationLeaseId: row.allocation_lease_id,
             providerResourceId: row.provider_resource_id,
             driftLeaseUntil: claim.rows[0]!.next_drift_check_at,
             intervalMs: driftCadenceMs(row.desired_state, row.status, this.intervalMs, this.stoppedDriftIntervalMs),
@@ -1551,6 +1624,7 @@ export class CloudWorkspaceReconciler {
       const observedState =
         resource?.state ??
         (workspace.desired_state === "deleted" ? "deleted" : "absent");
+      await requestComputeObservationRecheck(tx, { ...candidate, organizationId: candidate.orgId }, resource);
       await tx.query(
         `UPDATE cloud_workspace_provider_bindings
          SET provider_resource_id = coalesce($3, provider_resource_id),
