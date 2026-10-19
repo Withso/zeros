@@ -3,7 +3,8 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
 import { withSystemTx, type Tx } from "../db.js";
-import { recordCloudWorkspaceStopUnsealed } from "./stop-seal.js";
+import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
+import { scheduleFinalSaveRecovery } from "./final-save-recovery.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import { expireCloudCoordinatorReadiness } from "./coordinator-readiness.js";
 
@@ -100,7 +101,7 @@ export async function admitUnavailableCloudEngineStopTx(tx: Tx, input: {
   const incidentId = await tryRetainCloudDiagnosticTx(tx, {
     workspaceId: input.workspaceId, organizationId: input.organizationId, generation: input.generation,
     operationKind: "engine", operationId: input.engineInstanceId ?? intentId,
-  }, { phase: "authority_check", code: input.reason, errorClass: "unknown", retryable: false, decision: "direct_stop", claim: "current" });
+  }, { phase: "authority_check", code: input.reason, errorClass: "unknown", retryable: false, decision: "checkpoint", claim: "current" });
   await retireCloudWorkspaceRuntimeAccess(tx, { ...input, reason: input.reason });
   if (!input.adoptedIntent) await tx.query(
     `INSERT INTO cloud_workspace_lifecycle_intents
@@ -109,14 +110,13 @@ export async function admitUnavailableCloudEngineStopTx(tx: Tx, input: {
     [intentId, input.workspaceId, input.generation, input.organizationId,
       exited ? `system:engine-exit:${input.engineInstanceId}` : `system:engine-stop:${randomUUID()}`, randomBytes(32)],
   );
-  if (exited) await recordCloudWorkspaceStopUnsealed(tx, {
-    ...input, intentId, checkpointRequestId: input.checkpointRequestId ?? null, reason: "authority_closed",
-  });
+  await prepareCloudWorkspaceStopSeal(tx, { ...input, intentId, operation: input.adoptedIntent?.operation ?? "stop" });
+  await scheduleFinalSaveRecovery(tx, { intentId, failure: "source_unavailable", blocked: true });
   const archive = input.adoptedIntent?.operation === "archive";
   await tx.query(`UPDATE cloud_workspaces SET desired_state=$4::cloud_workspace_desired_state,status=$5::cloud_workspace_status,
     authority_epoch=authority_epoch+1,version=version+1,updated_at=now(),last_error_code=$6,last_error_message=$3
     WHERE id=$1 AND org_id=$2`, [input.workspaceId, input.organizationId,
-    `${exited ? "Workspace stopped because its engine exited" : "Workspace stopped because its engine lease expired"}${incidentId ? ` (incident ${incidentId})` : ""}`,
+    `${exited ? "Workspace engine exited; final save recovery is pending" : "Workspace engine lease expired; final save recovery is pending"}${incidentId ? ` (incident ${incidentId})` : ""}`,
     archive ? "archived" : "stopped", archive ? "archiving" : "stopping", input.reason]);
   await audit(tx, input.organizationId, null, `cloud_workspace.${input.reason}`, {
     workspaceId: input.workspaceId, generation: input.generation, intentId, incidentId,

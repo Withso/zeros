@@ -43,6 +43,9 @@ type HealthSignals = {
   deletion_provider_stalled: boolean;
   deletion_intent_stalled: boolean;
   idle_stop_blocked: boolean;
+  final_save_retrying: boolean;
+  final_save_blocked: boolean;
+  final_save_worker_stalled: boolean;
   object_rotation_failed: boolean;
   object_deletion_stalled: boolean;
   provider_orphans_stalled: boolean;
@@ -137,6 +140,12 @@ export class DatabaseCloudWorkspaceHealthService {
                  WHERE ${stalledProviderDeletionPredicate("$4")}) AS deletion_intent_stalled,
              EXISTS (SELECT 1 FROM workspace_checkpoint_requests WHERE idle_engine_instance_id IS NOT NULL
                AND state IN ('queued','delivered') AND created_at<now()-interval '5 minutes') AS idle_stop_blocked,
+             EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries
+               WHERE failure_started_at IS NOT NULL AND state IN ('capturing','retrying','reconciling')) AS final_save_retrying,
+             EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries
+               WHERE state='blocked') AS final_save_blocked,
+             EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries
+               WHERE state NOT IN ('proven','resolved') AND next_attempt_at<clock_timestamp()-interval '5 minutes') AS final_save_worker_stalled,
              CASE WHEN $2::boolean THEN EXISTS (
                SELECT 1 FROM workspace_blob_rotation_jobs
                WHERE state = 'failed'

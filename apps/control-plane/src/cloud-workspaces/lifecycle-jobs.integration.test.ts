@@ -96,7 +96,7 @@ d("lifecycle jobs", () => {
     const intentId = randomUUID();
     await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
       (id, workspace_id, org_id, generation, operation, idempotency_key, request_sha256, next_attempt_at)
-      VALUES ($1::uuid, $2, $3, 1, 'stop', $1::text, $4, now()+interval '1 hour')`, [intentId, f.workspaceId, f.organizationId, randomBytes(32)]));
+      VALUES ($1::uuid, $2, $3, 1, 'wake', $1::text, $4, now()+interval '1 hour')`, [intentId, f.workspaceId, f.organizationId, randomBytes(32)]));
     expect((await job("lifecycle", f.workspaceId))?.delay_ms).toBeGreaterThan(3_500_000);
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='superseded', completed_at=now() WHERE id=$1", [intentId]);
     expect((await job("lifecycle", f.workspaceId))?.delay_ms).toBeLessThanOrEqual(0);

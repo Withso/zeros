@@ -48,17 +48,32 @@ suite("recovery migration with populated FORCE RLS tables", () => {
     const appended = await content.append({ ...scope, expectedRevision: 0, idempotencyKey: randomUUID(), gitBaseCommit: "a".repeat(40), gitHeadRef: null,
       mutations: [{ path: "file.txt", operation: "upsert", entryType: "file", mode: 33188, blobId: file.id, contentSha256: file.plaintextSha256, sizeBytes: 7 }] });
     const directive = (await new DatabaseCloudIdleStop(pool, false).request(scope, randomUUID()))!;
-    const checkpoint = await content.commitCheckpoint({ ...scope, idempotencyKey: directive.id,
-      contentRevision: appended.revision, reason: "before_stop", manifestBlobId: manifest.id, artifactBlobId: null,
-      inclusionPolicy: {}, fileCount: 1, totalBytes: 7, integritySha256: manifest.plaintextSha256 });
-    // Seed the receipt written by a pre-0113 worker. Today's completion path
-    // requires the native-writer table from 0139, which must not exist in this
-    // migration fixture. Keep the durable content and its real blob references.
+    // Pin this writer to the pre-0113 schema under test. Today's commit reader
+    // includes 0171's exact-body receipt and cannot run against that cutoff.
+    // Keep actual uploaded blobs/content, and seed the historical snapshot and
+    // its references rather than adding future columns to the fixture.
+    const checkpointId = randomUUID();
+    await pool.query(`INSERT INTO workspace_checkpoints(id,workspace_id,org_id,idempotency_key,request_sha256,
+      content_revision,record_revision,authority_epoch,generation,reason,manifest_blob_id,artifact_blob_id,
+      inclusion_policy,file_count,total_bytes,state,integrity_sha256,created_by,durable_at)
+      VALUES($1,$2,$3,$4,digest($4,'sha256'),$5,0,1,1,'before_stop',$6,NULL,'{}',1,7,'durable',$7,$8,now())`,
+    [checkpointId,fixture.workspaceId,fixture.organizationId,directive.id,appended.revision,manifest.id,
+      Buffer.from(manifest.plaintextSha256,"hex"),fixture.userId]);
+    await pool.query(`INSERT INTO workspace_checkpoint_entries(checkpoint_id,workspace_id,org_id,normalized_path,
+      operation,entry_type,mode,blob_id,content_sha256,size_bytes)
+      SELECT $1,workspace_id,org_id,normalized_path,'upsert',entry_type,mode,blob_id,content_sha256,size_bytes
+      FROM workspace_file_entries WHERE workspace_id=$2 AND org_id=$3`, [checkpointId,fixture.workspaceId,fixture.organizationId]);
+    await pool.query(`INSERT INTO workspace_blob_references(blob_id,org_id,workspace_id,reference_kind,reference_id)
+      VALUES($1,$3,$4,'checkpoint_manifest',$5),($2,$3,$4,'checkpoint_file',$5)`,
+    [manifest.id,file.id,fixture.organizationId,fixture.workspaceId,checkpointId]);
+    await pool.query(`UPDATE workspace_blobs SET reference_count=reference_count+1 WHERE id=ANY($1::uuid[])`, [[manifest.id,file.id]]);
+    await pool.query(`UPDATE workspace_content_heads SET current_checkpoint_id=$2,durable_revision=$3
+      WHERE workspace_id=$1`, [fixture.workspaceId,checkpointId,appended.revision]);
     const completed = await pool.query<{ lifecycle_intent_id: string }>(`UPDATE workspace_checkpoint_requests
       SET state='succeeded', checkpoint_id=$2, completed_at=clock_timestamp(), error_code=NULL
       WHERE id=$1 AND workspace_id=$3 AND org_id=$4 AND generation=1 AND reason='before_stop'
         AND state IN ('queued','delivered') AND deadline_at>now()
-      RETURNING lifecycle_intent_id`, [directive.id, checkpoint.checkpointId, fixture.workspaceId, fixture.organizationId]);
+      RETURNING lifecycle_intent_id`, [directive.id, checkpointId, fixture.workspaceId, fixture.organizationId]);
     expect(completed.rowCount).toBe(1);
     return completed.rows[0]!.lifecycle_intent_id;
   }

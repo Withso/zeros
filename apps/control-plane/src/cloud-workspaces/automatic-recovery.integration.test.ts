@@ -255,13 +255,15 @@ suite("automatic Boat checkpoint recovery", () => {
       .toEqual({ state: "failed", error_code: "provider_snapshot_missing" });
   });
 
-  it("automatically uses the latest available periodic checkpoint only after confirmed provider capture loss", async () => {
+  it("retains an unsaved source despite an available periodic checkpoint and confirmed provider capture loss", async () => {
     await currentComputer();
     await pool.query("UPDATE workspace_checkpoint_requests SET reason='manual',idle_engine_instance_id=NULL WHERE workspace_id=$1", [fixture.workspaceId]);
     const f = await missingSnapshotWake();
     await f.reconciler.runOnce();
     await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
-    expect((await pool.query("SELECT recovery_checkpoint_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0]?.recovery_checkpoint_id).toBe(checkpointId);
+    expect(f.stop).not.toHaveBeenCalled(); expect(f.start).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT generation FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows).toEqual([]);
+    expect((await pool.query("SELECT state FROM cloud_workspace_final_save_recoveries WHERE workspace_id=$1 AND state NOT IN ('proven','resolved')", [fixture.workspaceId])).rows.length).toBeGreaterThan(0);
   });
 
   it("uses the Computer current at admission even when the original runtime was revoked after loss was confirmed", async () => {

@@ -26,6 +26,7 @@ import { cloudRuntimePinValues } from "./runtime-selection.js";
 import { runtimeBase, runtimeWitness, seedRuntimeBundle, seedRuntimeBase } from "./runtime-test-fixtures.js";
 import { CloudWorkspaceSetupError, CloudWorkspaceSetupWorker } from "./setup-worker.js";
 import { seedCanonicalCloudWorkspaceAuthority, seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
+import { commitFinalSaveFixture } from "./final-save-test-fixtures.js";
 
 const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image", sourceCommit: "b".repeat(40),
   architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480,
@@ -210,6 +211,77 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     const admitted = await actors.consume({ ...engineScope, token: grant.grantToken });
     return { ...engineScope, actorSessionId: admitted.actorSessionId, deviceId: admitted.deviceId };
   }
+
+  it.each(["replacement", "rollback"] as const)("keeps one accepted Restart through its automatic %s until fresh interactive readiness", async outcome => {
+    await advanceHead();
+    const response = await route("/restart", { version: 1, expectedGeneration: 1 });
+    expect(response.status).toBe(202);
+    const { operation } = await response.json();
+    expect(operation).toMatchObject({ kind: "restart", sourceGeneration: 1 });
+    const stop = (await pool.query("SELECT resume_after_intent_id AS id FROM cloud_workspace_lifecycle_intents WHERE id=$1", [operation.id])).rows[0];
+    const read = async () => (await (await route("", undefined, config, "GET")).json()).workspace;
+    const { provider, calls } = stoppedProvider();
+    const reconciler = new CloudWorkspaceReconciler({ pool, provider, runtimeUpgradeConfig: config, intervalMs: 1000, workosEnabled: false });
+    await reconciler.runOnce(fixture.workspaceId);
+    expect(calls).toEqual([]);
+    expect(await read()).toMatchObject({ acceptedOperation: { id: operation.id, phase: "saving", state: "pending" } });
+    await commitFinalSaveFixture(pool, { ...scope(), engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken },
+      { intentId: stop.id, userId: fixture.userId, reason: "before_stop" });
+    await reconciler.runOnce(fixture.workspaceId); // Saved source Stop.
+    await reconciler.runOnce(fixture.workspaceId); // Same Restart admits its automatic replacement.
+    const transition = (await pool.query(`SELECT transition.*,drain.idempotency_key FROM cloud_workspace_generation_transitions transition
+      JOIN cloud_workspace_lifecycle_intents drain ON drain.id=transition.drain_intent_id WHERE transition.workspace_id=$1`, [fixture.workspaceId])).rows[0];
+    expect(transition).toMatchObject({ source_generation: 1, candidate_generation: 2,
+      idempotency_key: `runtime-upgrade:automatic-wake:${operation.id}` });
+    await reconciler.runOnce(fixture.workspaceId); // Already-saved transition drain.
+    expect(await read()).toMatchObject({ generation: { number: 2 }, acceptedOperation: { id: operation.id, sourceGeneration: 1, phase: "starting", state: "pending" } });
+    await reconciler.runOnce(fixture.workspaceId); // Candidate create.
+    if (outcome === "rollback") {
+      await new CloudWorkspaceSetupWorker({ pool, intervalMs: 1000, sanitizeLog: value => value,
+        executor: { async execute() { throw new CloudWorkspaceSetupError("setup_command_failed", "Synthetic candidate failure", false); } },
+      }).runOnce();
+      expect(await read()).toMatchObject({ generation: { number: 1 }, acceptedOperation: { id: operation.id, phase: "starting", state: "pending" } });
+      await reconciler.runOnce(fixture.workspaceId); // Exact transition source rollback wake.
+    }
+    let readyEngine: CloudCommandEngineScope | undefined, registered!: () => void, releaseReady!: () => void;
+    const registration = new Promise<void>(resolve => { registered = resolve; });
+    const readiness = new Promise<void>(resolve => { releaseReady = resolve; });
+    const setup = readyWorker(async engine => {
+      readyEngine = engine;
+      await pool.query(`UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1,
+        accepted_work_version=1,coordinator_version=1 WHERE id=$1`, [engine.engineInstanceId]);
+      registered(); await readiness;
+    }).runOnce();
+    await registration;
+    try {
+      expect(readyEngine).toBeDefined();
+      expect(await read()).toMatchObject({ generation: { number: outcome === "replacement" ? 2 : 1 },
+        acceptedOperation: { id: operation.id, phase: "starting", state: "pending" } });
+      await pool.query(`UPDATE cloud_workspace_engine_instances SET interactive_frontend_id=$2,
+        interactive_ready_until=clock_timestamp()+interval '30 seconds' WHERE id=$1`, [readyEngine!.engineInstanceId, randomUUID()]);
+    } finally { releaseReady(); await setup; }
+    expect(await read()).toMatchObject({ acceptedOperation: { id: operation.id, sourceGeneration: 1, phase: "completed", state: "completed" } });
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE id=$1", [transition.id])).rows[0].state)
+      .toBe(outcome === "replacement" ? "succeeded" : "rolled_back");
+  });
+
+  it("truthfully retires a legacy rebuild capture while preserving its accepted replacement", async () => {
+    await advanceHead();
+    const response = await upgrade(); expect(response.status).toBe(202);
+    const request = (await pool.query(`SELECT request.id,request.lifecycle_intent_id,transition.id AS transition_id
+      FROM workspace_checkpoint_requests request JOIN cloud_workspace_generation_transitions transition
+        ON transition.drain_intent_id=request.lifecycle_intent_id
+      WHERE request.workspace_id=$1 AND request.reason='before_rebuild'`, [fixture.workspaceId])).rows[0];
+    const idle = new DatabaseCloudIdleStop(pool, false);
+    const source = { ...scope(), engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
+    await idle.cancel(source, request.id);
+    await idle.cancel(source, request.id);
+    expect((await pool.query("SELECT state,final_save_retirement_id FROM workspace_checkpoint_requests WHERE id=$1", [request.id])).rows[0])
+      .toEqual({ state: "cancelled", final_save_retirement_id: expect.any(String) });
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [request.lifecycle_intent_id])).rows[0].state).toBe("queued");
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE id=$1", [request.transition_id])).rows[0].state).toBe("draining");
+    expect((await pool.query("SELECT retired_at FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0].retired_at).toBeNull();
+  });
 
   it("discovers a compatible runtime update without changing pins or creating lifecycle work", async () => {
     const source = await pin();
@@ -492,7 +564,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect(await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000}).runOnce()).toBe(false);
     expect(calls).toEqual([]);expect(await pin()).toEqual(saved);
   });
-  it.each(["draining","setting_up","provider_retry","setup_retry"])("honors sleep during an automatic %s update and cleans its candidate",async phase=>{
+  it.each(["draining","setting_up","provider_retry","setup_retry"])("honors sleep during an automatic %s update and retains its unsaved candidate",async phase=>{
     await finalCheckpoint(); await advanceHead(); await route("/wake");
     const {provider,calls}=stoppedProvider();
     if(phase==="provider_retry") vi.spyOn(provider,"create").mockRejectedValueOnce(
@@ -512,7 +584,9 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
       .toEqual({current_generation:1,status:"stopped",desired_state:"stopped"});
     expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].state).toBe("cancelled");
     expect(calls).not.toContain("resume:1");
-    expect((await pool.query("SELECT deletion_verified_at FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=2",[fixture.workspaceId])).rows[0]?.deletion_verified_at).toBeTruthy();
+    expect((await pool.query("SELECT deletion_verified_at FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=2",[fixture.workspaceId])).rows[0]?.deletion_verified_at).toBeNull();
+    expect((await pool.query("SELECT state FROM cloud_workspace_final_save_recoveries WHERE workspace_id=$1 AND generation=2",[fixture.workspaceId])).rows)
+      .toEqual([{state:"capturing"}]);
   });
   it("does not advertise an unconfirmed, revoked, incompatible or partially qualified release", async () => {
     const source = await pin();

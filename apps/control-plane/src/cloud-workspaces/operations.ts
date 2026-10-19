@@ -527,6 +527,7 @@ export class CloudWorkspaceOperationsWorker {
                AND (job.lease_owner IS NULL OR job.lease_expires_at <= now())
                AND workspace.status = 'deleted'
                AND workspace.data_deleted_at IS NULL
+               AND cloud_final_save_deletion_claimable(workspace.id,workspace.org_id)
                AND coalesce(policy.legal_hold, false) = false
                AND NOT EXISTS (
                  SELECT 1 FROM workspace_blob_references reference

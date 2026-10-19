@@ -7,12 +7,12 @@ import { findInitiatingCloudStopTx, tryRetainCloudDiagnosticTx } from "./cloud-d
 import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { cancelCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
-import { recordCloudWorkspaceStopUnsealed } from "./stop-seal.js";
+import { ensureFinalSaveRecovery, finalSaveProven, scheduleFinalSaveRecovery } from "./final-save-recovery.js";
 
-/** Budget expiry preserves the VM's recoverable snapshot. Give the engine a
- * final-checkpoint window while it is still funded; if that fails, retain the
- * last durable checkpoint and stop compute without declaring a new checkpoint
- * durable or permanently deleting the allocation. A checking worker may pass
+/** Give the engine a finite final-save window while execution is funded.
+ * Expiry closes access, never authorizes destruction of an unsaved source.
+ * Durable recovery and the operator alert owner retain the blocked drain.
+ * A checking worker may pass
  * its schedule token to acknowledge only the re-check this stop itself causes;
  * an earlier concurrent request is retained, and later requests still differ
  * from the returned token. */
@@ -141,16 +141,42 @@ export async function requestManagedComputeStop(
       await tx.query("UPDATE workspace_checkpoint_requests SET state=state WHERE id=$1 AND state='cancelled'", [pending.checkpoint_id]);
       pending.state = "queued";
     }
-    if (
-      pending &&
-      ["queued", "observing", "dispatching"].includes(pending.state) &&
-      (pending.state === "dispatching" ||
-        pending.checkpoint_state === null ||
-        pending.checkpoint_state === "succeeded" ||
-        pending.checkpoint_error === "stop_unsealed" ||
-        (!input.force && pending.checkpoint_live === true))
-    )
-      return;
+    if (pending && ["queued", "observing", "dispatching"].includes(pending.state)) {
+      await ensureFinalSaveRecovery(tx, pending.id);
+      if (await finalSaveProven(tx, pending.id)) return;
+      if (!pending.checkpoint_id) await enqueueWorkspaceCheckpointRequest(tx, {
+        workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
+        requestedBy: pending.requested_by, lifecycleIntentId: pending.id,
+        reason: pending.operation === "stop" ? "before_stop" : "before_archive", idempotencyKey: `compute.${pending.id}`,
+      });
+      if (input.force) {
+        await tx.query(`UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=clock_timestamp(),
+          error_code='final_save_authority_lost' WHERE final_save_recovery_id=$1
+          AND state IN ('queued','delivered','recovery_queued','recovery_delivered')`, [pending.id]);
+        await scheduleFinalSaveRecovery(tx, { intentId: pending.id, failure: "authority", blocked: true });
+        await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId: scope.workspace_id, organizationId: scope.org_id,
+          generation: scope.generation, reason: "workspace_stop_requested" });
+        // Funding/authority closure is independent of capture failure. Keep
+        // the initiating diagnostic and close the interactive projection once,
+        // while the accepted action remains blocked on its missing final save.
+        // A dependent wake owns its own projection and is still not runnable.
+        if (affectsWorkspace && pending.affects_workspace &&
+            (workspace.desired_state !== "stopped" || workspace.status !== "stopping")) {
+          const initiating = await findInitiatingCloudStopTx(tx, {
+            workspaceId:scope.workspace_id,organizationId:scope.org_id,generation:scope.generation,leaseId:input.leaseId,
+            workspaceStopping:workspace.desired_state !== "running" || ["stopping","stopped","failed","archiving","archived"].includes(workspace.status),
+          });
+          const code = initiating ? diagnosticCode(initiating.code) : input.reason;
+          const ordinary = !initiating && pending.requested_by !== null;
+          const reason = cloudStopReason(code, initiating?.stopReason ?? input.stopReason);
+          const incidentId = initiating?.id ?? input.incidentId;
+          await tx.query(`UPDATE cloud_workspaces SET desired_state='stopped',status='stopping',authority_epoch=authority_epoch+1,
+            version=version+1,updated_at=now(),last_error_code=$2,last_error_message=$3 WHERE id=$1`,
+          [scope.workspace_id,ordinary ? null : code,ordinary ? null : `${reason.message}${incidentId ? ` (incident ${incidentId})` : ""}`]);
+        }
+      }
+      return handledNextCheckAt();
+    }
     // An existing stop covers normal drain observations. Only a new stop or a
     // required escalation reaches evidence retention; reuse its initiating
     // cause when replacing the checkpoint with a direct safety stop.
@@ -166,34 +192,12 @@ export async function requestManagedComputeStop(
       operationKind: "compute", operationId: input.leaseId, ...(input.expectedLeaseOwner ? { leaseOwner: input.expectedLeaseOwner } : {}),
     }, { phase: "authority_check", code: diagnosticCode(code), errorClass: "unknown", retryable: false,
       ...(stopReason ? { stopReason } : {}),
-      decision: input.force ? "direct_stop" : "checkpoint", claim: "current" }));
+      decision: "checkpoint", claim: "current" }));
     const reason = cloudStopReason(code, stopReason);
     if (!ordinaryStop) await tx.query("UPDATE managed_compute_allocation_leases SET last_error_code=$2 WHERE id=$1",[input.leaseId,code]);
     if (pending) {
-      // The finite funding/provider limit can shorten the seal window, but it
-      // cannot replace the operation or turn an incomplete capture into success.
-      await tx.query(`UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now(),error_code='stop_unsealed',
-        deadline_at=least(deadline_at,greatest(clock_timestamp(),created_at+interval '1 millisecond'))
-        WHERE id=$1 AND state IN ('queued','delivered','failed','expired','cancelled')`, [pending.checkpoint_id]);
-      await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='queued',completed_at=NULL,next_attempt_at=now(),
-        lease_owner=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1`, [pending.id]);
-      await recordCloudWorkspaceStopUnsealed(tx, {
-        workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
-        intentId: pending.id, reason: "seal_deadline", checkpointRequestId: pending.checkpoint_id,
-      });
-      if (affectsWorkspace) {
-        await retireCloudWorkspaceRuntimeAccess(tx, {
-          workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
-          reason: pending.operation === "stop" ? "workspace_stop_requested" : "workspace_archive_requested",
-        });
-        await tx.query(`UPDATE cloud_workspaces SET desired_state=$4::cloud_workspace_desired_state,status=$5::cloud_workspace_status,authority_epoch=authority_epoch+1,
-          version=version+1,updated_at=now(),last_error_code=$2,last_error_message=$3 WHERE id=$1`,
-        [scope.workspace_id, ordinaryStop ? null : code,
-          ordinaryStop ? null : `${reason.message}${incidentId ? ` (incident ${incidentId})` : ''}`,
-          pending.affects_workspace ? (pending.operation === "stop" ? "stopped" : "archived") : workspace.desired_state,
-          pending.affects_workspace ? (pending.operation === "stop" ? "stopping" : "archiving")
-            : workspace.desired_state === "running" ? "waking" : workspace.desired_state === "stopped" ? "stopping" : "archiving"]);
-      }
+      await ensureFinalSaveRecovery(tx, pending.id);
+      await scheduleFinalSaveRecovery(tx, { intentId: pending.id, failure: "authority", blocked: true });
       return handledNextCheckAt();
     }
     const key = `system:compute-stop:${randomUUID()}`;
@@ -225,34 +229,17 @@ export async function requestManagedComputeStop(
         affectsWorkspace,
       ],
     );
-    const checkpointPossible =
-      affectsWorkspace &&
-      !input.force &&
-      ["ready", "busy"].includes(workspace.status) &&
-      (
-        await tx.query(
-          `SELECT 1 FROM cloud_workspace_engine_instances engine WHERE workspace_id=$1 AND org_id=$2 AND generation=$3
-        AND state='ready' AND lease_expires_at>now() AND cloud_workspace_compute_authority_live(workspace_id,generation) LIMIT 1`,
-          [scope.workspace_id, scope.org_id, scope.generation],
-        )
-      ).rowCount !== 0;
-    const checkpoint = checkpointPossible
-      ? await enqueueWorkspaceCheckpointRequest(tx, {
-          workspaceId: scope.workspace_id,
-          organizationId: scope.org_id,
-          generation: scope.generation,
-          requestedBy: null,
-          lifecycleIntentId: intentId,
-          reason: "before_stop",
-          idempotencyKey: `compute.${intentId}`,
-          deadlineMs: input.checkpointDeadlineMs ?? 300000,
-        })
-      : null;
-    if (affectsWorkspace && !checkpoint) {
-      await recordCloudWorkspaceStopUnsealed(tx, {
-        workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
-        intentId, reason: input.force ? "seal_deadline" : "authority_closed", checkpointRequestId: null,
-      });
+    const checkpoint = await enqueueWorkspaceCheckpointRequest(tx, {
+      workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
+      requestedBy: null, lifecycleIntentId: intentId, reason: "before_stop", idempotencyKey: `compute.${intentId}`,
+      deadlineMs: input.checkpointDeadlineMs ?? 300000,
+    });
+    if (input.force) {
+      await tx.query(`UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=clock_timestamp(),
+        error_code='final_save_authority_lost' WHERE id=$1`, [checkpoint.id]);
+      await scheduleFinalSaveRecovery(tx, { intentId, failure: "authority", blocked: true });
+    }
+    if (affectsWorkspace && input.force) {
       await retireCloudWorkspaceRuntimeAccess(tx, {
         workspaceId: scope.workspace_id,
         organizationId: scope.org_id,

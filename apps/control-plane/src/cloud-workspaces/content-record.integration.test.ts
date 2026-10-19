@@ -30,6 +30,7 @@ import type {
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import { activateLocalCloudCommandWriter, reserveLocalCloudCommandWriter } from "./commands.js";
 import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
+import { createCloudWorkspaceInternalRoutes, CLOUD_WORKSPACE_CHECKPOINT_COMMIT_PATH } from "./internal-routes.js";
 import {
   DatabaseCloudWorkspaceSetupRecoveryService,
   issueWorkspaceSetupRecoveryGrant,
@@ -127,11 +128,50 @@ d("cloud workspace content durability", () => {
     };
   }
 
+  it.each(["manual", "periodic", "before_stop"] as const)("preserves canonical JSON replay for a legacy %s HTTP commit", async reason => {
+    const { heartbeatToken, ...scope } = engineAuthority();
+    const manifest = await blobs.put({ ...scope, heartbeatToken, bytes: Buffer.from("{}") });
+    const revision = await content.append({ ...scope, heartbeatToken, expectedRevision: 0,
+      idempotencyKey: randomUUID(), gitBaseCommit: null, gitHeadRef: null, mutations: [] });
+    const request = reason === "before_stop" ? await withSystemTx(pool, async tx => {
+      const intentId = randomUUID();
+      await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
+        (id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
+        VALUES($1::uuid,$2,$3,1,$4,'stop',$1::text,digest($1::text,'sha256'))`,
+      [intentId, fixture.workspaceId, fixture.organizationId, fixture.userId]);
+      return enqueueWorkspaceCheckpointRequest(tx, { ...scope, requestedBy: fixture.userId,
+        lifecycleIntentId: intentId, reason, idempotencyKey: randomUUID() });
+    }) : undefined;
+    expect((await pool.query("SELECT final_save_version FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows)
+      .toEqual([{ final_save_version: null }]);
+    const body = { ...scope, ...(request ? { requestId: request.id } : {}), idempotencyKey: randomUUID(),
+      contentRevision: revision.revision, reason, manifestBlobId: manifest.id, artifactBlobId: null,
+      inclusionPolicy: {}, fileCount: 0, totalBytes: 0, integritySha256: manifest.plaintextSha256 };
+    const app = createCloudWorkspaceInternalRoutes({ redeem: vi.fn(), registerEngine: vi.fn(), heartbeat: vi.fn(),
+      commitCheckpoint: input => content.commitCheckpoint(input) });
+    const post = (serialized: string) => app.request(CLOUD_WORKSPACE_CHECKPOINT_COMMIT_PATH, { method: "POST",
+      headers: { authorization: `Bearer ${heartbeatToken}`, "content-type": "application/json" }, body: serialized });
+    const first = await post(JSON.stringify(body));
+    expect(first.status).toBe(200);
+    const receipt = await first.json();
+    const replay = await post(JSON.stringify(Object.fromEntries(Object.entries(body).reverse()), null, 2));
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ ...receipt, replayed: true });
+    expect((await pool.query("SELECT final_save_body_sha256 FROM workspace_checkpoints WHERE id=$1", [receipt.checkpointId])).rows)
+      .toEqual([{ final_save_body_sha256: null }]);
+  });
+
   it("does not complete a final checkpoint before the exact native writer has sealed", async () => {
     const authority = engineAuthority();
     const bootId = (await pool.query("SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0].runtime_boot_id;
     const writerEpoch = await withSystemTx(pool, async tx => {
       const epoch = await reserveLocalCloudCommandWriter(tx, authority, bootId, fixture.userId, 1);
+      // Production bootstrap publishes this exact binding before activation;
+      // the writer row alone is not proof of the source's complete identity.
+      await tx.query(`INSERT INTO cloud_agent_boot_bindings
+        (workspace_id,org_id,generation,engine_instance_id,boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch)
+        VALUES($1,$2,1,$3,$4,$5,$6,1)`,
+      [fixture.workspaceId,fixture.organizationId,fixture.engineInstanceId,bootId,epoch,fixture.userId]);
       await activateLocalCloudCommandWriter(tx, authority, { bootId, writerEpoch: epoch });
       return epoch;
     });
@@ -459,7 +499,19 @@ d("cloud workspace content durability", () => {
       async stop() { stops++; observed = { ...observed!, state: "stopped" }; return observed; }, async start() { throw new Error("source must not restart"); },
       async archive() { throw new Error("unexpected archive"); }, async delete() {}, async *listManaged() {} };
     const worker = new CloudWorkspaceReconciler({ pool, provider, workosEnabled: false, intervalMs: 1000 });
-    await worker.runOnce(); expect(stops).toBe(1); expect(creates).toBe(0);
+    await worker.runOnce();
+    if (!finalRequest) {
+      // A caller's acknowledgement of possible loss cannot manufacture the
+      // missing final save or grant controlled source retirement.
+      expect(stops).toBe(0); expect(creates).toBe(0);
+      await worker.runOnce(); expect(stops).toBe(0); expect(creates).toBe(0);
+      expect((await pool.query("SELECT current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0]?.current_generation).toBe(1);
+      expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1", [fixture.workspaceId])).rows[0]?.state).toBe("draining");
+      expect((await pool.query("SELECT state FROM cloud_workspace_final_save_recoveries WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+        .toEqual([{ state: "capturing" }]);
+      return;
+    }
+    expect(stops).toBe(1); expect(creates).toBe(0);
     expect((await pool.query("SELECT current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0]?.current_generation).toBe(2);
     await worker.runOnce(); expect(creates).toBe(1);
     await expect(content.headForEngine({ ...engineAuthority(), afterPath: null })).rejects.toMatchObject({ code: "engine_authority_rejected" });

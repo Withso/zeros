@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Tx } from "../db.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
-import { recordCloudWorkspaceStopUnsealed } from "./stop-seal.js";
+import { ensureFinalSaveRecovery, finalSaveProven, scheduleFinalSaveRecovery } from "./final-save-recovery.js";
+import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 
 type WakeDrain = { id: string; failed: boolean; capturePending: boolean };
 
@@ -25,13 +26,14 @@ export async function preserveCloudWorkspaceWakeDrain(tx: Tx, input: {
   }>(`SELECT intent.id,intent.state,
       request.id AS checkpoint_id,request.state AS checkpoint_state,request.error_code AS checkpoint_error,
       coalesce(request.deadline_at>clock_timestamp(),false) AS checkpoint_live,
-      coalesce(request.state IN ('queued','delivered','cancelled') AND request.error_code IS DISTINCT FROM 'stop_unsealed'
-        AND request.deadline_at>clock_timestamp(),false) AS capture_pending
+      NOT cloud_final_save_proven(intent.id) AS capture_pending
     FROM cloud_workspace_lifecycle_intents intent
     LEFT JOIN workspace_checkpoint_requests request ON request.lifecycle_intent_id=intent.id
     WHERE intent.workspace_id=$1 AND intent.org_id=$2 AND intent.generation=$3
       AND intent.operation IN ('stop','archive') AND intent.state IN ('queued','observing','dispatching','failed','superseded')
-      AND (cloud_workspace_drain_is_mandatory(intent.id) OR ($4 AND intent.created_at>=$5))
+      AND (cloud_workspace_drain_is_mandatory(intent.id) OR ($4 AND intent.created_at>=$5)
+        OR EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries recovery
+          WHERE recovery.lifecycle_intent_id=intent.id AND recovery.state NOT IN ('proven','resolved')))
       AND (intent.state IN ('queued','observing','dispatching') OR intent.created_at>=$5
         OR (request.state='succeeded' AND NOT EXISTS (SELECT 1 FROM cloud_workspace_engine_instances engine
           WHERE engine.workspace_id=$1 AND engine.org_id=$2 AND engine.generation=$3 AND engine.created_at>request.completed_at))
@@ -45,16 +47,10 @@ export async function preserveCloudWorkspaceWakeDrain(tx: Tx, input: {
   if (drain) {
     const terminal = ["failed", "superseded"].includes(drain.state);
     if (terminal && !input.retryFailed) return { id: drain.id, failed: true, capturePending: false };
-    if (terminal && drain.checkpoint_id && drain.checkpoint_state !== "succeeded" && drain.checkpoint_error !== "stop_unsealed") {
-      // A fresh owner retry must not strand the same drain behind an expired
-      // request written before cancellation preservation. Keep its deadline.
-      await tx.query(`UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=coalesce(completed_at,now()),
-        error_code=$2 WHERE id=$1`, [drain.checkpoint_id, drain.checkpoint_live ? "mandatory_capture_cancelled" : "stop_unsealed"]);
-      drain.capture_pending = drain.checkpoint_live;
-      if (!drain.checkpoint_live) await recordCloudWorkspaceStopUnsealed(tx, {
-        ...input, intentId: drain.id, checkpointRequestId: drain.checkpoint_id, reason: "seal_deadline",
-      });
-    }
+    await ensureFinalSaveRecovery(tx, drain.id);
+    drain.capture_pending = !await finalSaveProven(tx, drain.id);
+    if (terminal && drain.capture_pending)
+      await scheduleFinalSaveRecovery(tx, { intentId: drain.id, failure: "legacy_cancelled", blocked: true });
     // Keep an active provider backoff and lease intact. Only a new explicit
     // retry can requeue a terminal failure; it keeps the same source/deadline.
     await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET affects_workspace=false,
@@ -71,7 +67,6 @@ export async function preserveCloudWorkspaceWakeDrain(tx: Tx, input: {
     return { id: drain.id, failed: false, capturePending: drain.capture_pending };
   }
   if (!input.retireSource || !source) return null;
-  await retireCloudWorkspaceRuntimeAccess(tx, { ...input, reason: "workspace_stop_requested" });
   const id = randomUUID();
   const key = `system:wake-drain:${id}`;
   await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
@@ -79,7 +74,16 @@ export async function preserveCloudWorkspaceWakeDrain(tx: Tx, input: {
     VALUES($1,$2,$3,$4,'stop',$5,$6,false)`,
   [id, input.workspaceId, input.generation, input.organizationId, key,
     createHash("sha256").update(JSON.stringify({ key, sourceBindingId: source.id })).digest()]);
-  return { id, failed: false, capturePending: false };
+  await enqueueWorkspaceCheckpointRequest(tx, { ...input, requestedBy: null, lifecycleIntentId: id,
+    reason: "before_stop", idempotencyKey: `wake-drain.${id}` });
+  // A stopped source may already have an exact final Archive/Stop receipt.
+  // Reuse only that frozen proof; otherwise the current engine keeps capture
+  // authority. Publishing a false pending capture would strand the dependent
+  // wake with the old desired state even after the saved drain succeeds.
+  await ensureFinalSaveRecovery(tx, id);
+  const capturePending = !await finalSaveProven(tx, id);
+  if (!capturePending) await retireCloudWorkspaceRuntimeAccess(tx, { ...input, reason: "workspace_stop_requested" });
+  return { id, failed: false, capturePending };
 }
 
 /** Link before releasing the claim. A failed automatic prerequisite stays

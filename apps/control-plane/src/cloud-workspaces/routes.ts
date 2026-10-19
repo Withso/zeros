@@ -52,6 +52,8 @@ import {
 } from "./authorization.js";
 import { cancelCloudWorkspaceGenerationTransition, lockCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { enqueueWorkspaceCheckpointRequest, loadCommittedFinalCheckpoint } from "./checkpoint-requests.js";
+import { CloudAcceptedLifecycleOperationSchema, CloudRestartInputSchema } from "./final-save-contract.js";
+import { ensureFinalSaveRecovery } from "./final-save-recovery.js";
 import { preserveCloudWorkspaceWakeDrain } from "./wake-drain.js";
 import { MAX_WORKSPACE_FILE_BYTES } from "./content-record.js";
 import {
@@ -341,6 +343,7 @@ export type WorkspaceRow = CloudRuntimePinRow & {
   repository_revision: string;
   status: string;
   interactive_ready?: boolean;
+  accepted_operation?: unknown;
   desired_state: string;
   current_generation: number;
   version: string | number;
@@ -376,6 +379,7 @@ type IntentRow = {
   id: string;
   requested_by: string | null;
   workspace_id: string;
+  generation: number;
   operation: "create" | LifecycleOperation;
   request_sha256: Buffer;
   state: string;
@@ -422,6 +426,7 @@ type ForkIntentRow = {
 const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
   SELECT ${actorSql} AS actor_role,cw.id, cw.org_id, cw.team_id, cw.created_by, cw.owner_user_id,
          cloud_workspace_interactive_live(cw.id,cw.org_id,cw.current_generation) AS interactive_ready,
+         cloud_workspace_accepted_lifecycle(cw.id,cw.org_id) AS accepted_operation,
          cw.agent_command_mode,cw.agent_boot_id AS agent_boot_pointer,
          EXISTS(SELECT 1 FROM cloud_workspace_local_command_writers writer
            WHERE writer.workspace_id=cw.id AND writer.org_id=cw.org_id AND writer.state IN ('active','retired')) AS agent_has_activated_writer,
@@ -620,6 +625,7 @@ function agentCredentialsDocument(row: WorkspaceRow) {
 }
 
 export function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|null) {
+  const accepted = CloudAcceptedLifecycleOperationSchema.safeParse(row.accepted_operation);
   const supported = isSupportedCloudWorkspaceProviderBinding({ provider: row.provider, credentialSource: row.credential_source, sandboxClass: row.sandbox_class });
   const executable=supported&&row.supported_generation;
   const canWrite=executable&&["prompter","developer","manager","owner"].includes(row.actor_role??"");
@@ -647,6 +653,8 @@ export function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackend
     capabilities:{canWrite,canEdit,canManage,canStart:reason===null,startUnavailableReason:reason},
     name: row.display_name,
     placement: "cloud" as const,
+    lifecycleVersion: 1 as const,
+    ...(accepted.success ? { acceptedOperation: accepted.data } : {}),
     status: row.interactive_ready === false && ["ready", "busy"].includes(row.status) ? "waking" : row.status,
     desiredState: row.desired_state,
     recovery: row.recovery,
@@ -872,7 +880,7 @@ async function loadIntentByKey(
   key: string,
 ): Promise<IntentRow | null> {
   const result = await tx.query<IntentRow>(
-    `SELECT id, workspace_id, requested_by, operation, request_sha256, state,
+    `SELECT id, workspace_id, generation, requested_by, operation, request_sha256, state,
             attempt_count, created_at, updated_at
      FROM cloud_workspace_lifecycle_intents
      WHERE org_id = $1 AND idempotency_key = $2`,
@@ -1618,15 +1626,15 @@ async function requestCloudWorkspaceLifecycleIntent(
   }) : null;
   const drainBeforeWake = drain?.id ?? null;
   const alreadySatisfied =
-    (operation === "stop" && workspace.status === "stopped") ||
+    (operation === "stop" && workspace.status === "stopped" && !!finalProof) ||
     (operation === "wake" &&
       !drainBeforeWake &&
       workspace.desired_state === "running" &&
       ["provisioning", "setting_up", "ready", "busy"].includes(
         workspace.status,
       )) ||
-    (operation === "archive" && workspace.status === "archived") ||
-    (operation === "delete" && workspace.status === "deleted");
+    (operation === "archive" && workspace.status === "archived" && !!finalProof) ||
+    (operation === "delete" && workspace.status === "deleted" && !!finalProof);
   const desiredState =
     operation === "wake"
       ? "running"
@@ -1675,7 +1683,7 @@ async function requestCloudWorkspaceLifecycleIntent(
        $9::cloud_workspace_intent_state,
        CASE WHEN $9 = 'succeeded' THEN now() ELSE NULL END
      )
-     RETURNING id, workspace_id, operation, request_sha256, state,
+     RETURNING id, workspace_id, generation, operation, request_sha256, state,
                attempt_count, created_at, updated_at`,
     [
       intentId,
@@ -1704,7 +1712,6 @@ async function requestCloudWorkspaceLifecycleIntent(
   const requiresFinalCheckpoint =
     !alreadySatisfied &&
     !finalProof &&
-    !discardUncheckpointed &&
     operation !== "wake" &&
     ["ready", "busy"].includes(workspace.status);
   const checkpointRequest = requiresFinalCheckpoint
@@ -1730,7 +1737,7 @@ async function requestCloudWorkspaceLifecycleIntent(
     cancelledSetupRunCount: 0,
     revokedEngineInstanceCount: 0,
   };
-  if (operation !== "wake" && !requiresFinalCheckpoint) {
+  if (operation !== "wake" && finalProof) {
     retired = await retireCloudWorkspaceRuntimeAccess(tx, {
       workspaceId,
       organizationId: orgId,
@@ -1743,7 +1750,7 @@ async function requestCloudWorkspaceLifecycleIntent(
     });
   }
 
-  if (!alreadySatisfied && !requiresFinalCheckpoint && !drain?.capturePending) {
+  if (!alreadySatisfied && !requiresFinalCheckpoint && !drain?.capturePending && (operation === "wake" || finalProof)) {
     await tx.query(
       `UPDATE cloud_workspaces
        SET desired_state = $2, status = $3, version = version + 1,
@@ -1754,6 +1761,11 @@ async function requestCloudWorkspaceLifecycleIntent(
       [workspaceId, desiredState, transitionStatus],
     );
   }
+
+  // Publishing accepted display state must not advance the ready engine's
+  // authority epoch while it is still producing the final checkpoint.
+  await tx.query(`UPDATE cloud_workspaces SET accepted_lifecycle_intent_id=$2,version=version+1,updated_at=now() WHERE id=$1`,
+    [workspaceId,intentId]);
 
   await audit(
     tx,
@@ -1781,6 +1793,38 @@ async function requestCloudWorkspaceLifecycleIntent(
     intent: inserted.rows[0]!,
     replayed: false,
   };
+}
+
+async function requestCloudWorkspaceRestart(tx: Tx, input: {
+  orgId: string; workspaceId: string; actorUserId: string; workspace: WorkspaceRow;
+  key: string; digest: Buffer; admissionStarted: number;
+}): Promise<{ workspace: WorkspaceRow; intent: IntentRow; replayed: boolean }> {
+  const { orgId,workspaceId,actorUserId,workspace,key,digest }=input;
+  const accepted=CloudAcceptedLifecycleOperationSchema.safeParse(workspace.accepted_operation);
+  if (accepted.success && accepted.data.kind==="restart" && accepted.data.state==="pending")
+    throw new HttpError(409,"cloud_workspace_restart_pending","A workspace restart is already running");
+  const original=(await tx.query<{id:string}>(`SELECT id FROM cloud_workspace_lifecycle_intents
+    WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND operation='stop' AND generation_transition_id IS NULL
+      AND state IN ('queued','observing','dispatching') ORDER BY created_at DESC,id LIMIT 1 FOR UPDATE`,
+  [workspaceId,orgId,workspace.current_generation])).rows[0];
+  const id=randomUUID();
+  const stop=original ?? (await requestCloudWorkspaceLifecycleIntent(tx, {
+    ...input,operation:"stop",key:`restart-stop:${id}`,digest:requestDigest({operation:"restart-stop",restartId:id}),discardUncheckpointed:false,
+  })).intent;
+  // This finite stop keeps the original source alive until final proof. The
+  // dependent wake is the accepted user action and is owned durably by CP.
+  await tx.query("UPDATE cloud_workspace_lifecycle_intents SET affects_workspace=false WHERE id=$1",[stop.id]);
+  const intent=(await tx.query<IntentRow>(`INSERT INTO cloud_workspace_lifecycle_intents
+    (id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256,resume_after_intent_id,restart_version)
+    VALUES($1,$2,$3,$4,$5,'wake',$6,$7,$8,1) RETURNING *`,
+  [id,workspaceId,orgId,workspace.current_generation,actorUserId,key,digest,stop.id])).rows[0]!;
+  await ensureFinalSaveRecovery(tx,stop.id);
+  await tx.query(`UPDATE cloud_workspaces SET accepted_lifecycle_intent_id=$2,desired_state='running',
+    version=version+1,updated_at=now() WHERE id=$1`,[workspaceId,id]);
+  await audit(tx,orgId,actorUserId,"cloud_workspace.restart_requested",{
+    workspaceId,intentId:id,stopIntentId:stop.id,generation:workspace.current_generation,phaseTiming:lifecycleAdmissionTiming(input.admissionStarted),
+  });
+  return {workspace:await loadWorkspaceRow(tx,orgId,workspaceId,false,actorUserId),intent,replayed:false};
 }
 
 /** The HTTP DELETE and guarded operator share authorization, replay and the
@@ -3391,12 +3435,13 @@ export function createCloudWorkspaceRoutes(
   app.post(`${base}/:workspace/runtime-upgrade`,
     bodyLimit({ maxSize: 4096 }), rateLimit("cloud-runtime-upgrade", 30, 60_000), c => replaceGeneration(c, true));
 
-  const lifecycle = async (c: Context, operation: LifecycleOperation) => {
+  const lifecycle = async (c: Context, operation: LifecycleOperation, restart = false) => {
     const admissionStarted = performance.now();
     const user = c.get("user");
     const orgId = uuidParam(c.req.param("organization"));
     const workspaceId = uuidParam(c.req.param("workspace"));
     const key = idempotencyKey(c.req.header("Idempotency-Key"));
+    const restartInput = restart ? parse(CloudRestartInputSchema,await c.req.json().catch(()=>null)) : null;
     let discardUncheckpointed = false;
     if (operation === "delete") {
       const source = await c.req.text();
@@ -3410,11 +3455,12 @@ export function createCloudWorkspaceRoutes(
       discardUncheckpointed = parse(DeleteWorkspaceSchema, body).discardUncheckpointed;
     }
     const digest = requestDigest({
-      operation,
+      operation: restart ? "restart" : operation,
       organizationId: orgId,
       workspaceId,
       // Retain the historical digest for ordinary empty-body DELETE retries.
       ...(discardUncheckpointed ? { discardUncheckpointed: true } : {}),
+      ...(restartInput ?? {}),
     });
 
     const result = await withSystemTx(pool, async (tx) => {
@@ -3424,9 +3470,10 @@ export function createCloudWorkspaceRoutes(
       }, admissionStarted);
       // A workspace guest has exact run authority, not tenant membership or
       // cleanup authority. Keep withdrawal/management on their existing path.
-      if (operation !== "wake") await requireOrganizationMembership(tx, orgId, user.id);
+      if (operation !== "wake" || restart) await requireOrganizationMembership(tx, orgId, user.id);
       await lockCloudOrganization(tx, orgId);
       let workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, user.id);
+      if (restart) await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
       if (operation === "wake") {
         await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"run"});
         // Ordinary use may wake sleeping compute or join an existing start.
@@ -3436,15 +3483,17 @@ export function createCloudWorkspaceRoutes(
       } else {
         await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
       }
-      if (operation === "wake")
-        await loadGenerationSource(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation });
-      const connection = await loadGenerationCloudProviderConnection(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation, requireActive: false });
-      if (!connection) throw new HttpError(409, "cloud_provider_unsupported", "This workspace uses unsupported compute authority");
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
         assertIdempotencyMatch(existing, workspaceId, digest,user.id);
         return { workspace, intent: existing, replayed: true };
       }
+      if (operation === "wake")
+        await loadGenerationSource(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation });
+      const connection = await loadGenerationCloudProviderConnection(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation, requireActive: false });
+      if (!connection) throw new HttpError(409, "cloud_provider_unsupported", "This workspace uses unsupported compute authority");
+      if (restartInput && restartInput.expectedGeneration!==workspace.current_generation)
+        throw new HttpError(409,"cloud_workspace_generation_changed","The workspace generation changed");
       if (operation === "wake" && !config) {
         throw new HttpError(
           503,
@@ -3464,7 +3513,7 @@ export function createCloudWorkspaceRoutes(
             WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND affects_workspace
               AND generation_transition_id IS NULL AND operation IN ('create','wake')
               AND state IN ('queued','dispatching','observing') LIMIT 1`,[workspaceId,orgId,workspace.current_generation])).rowCount : 0;
-        if (automatic || starting) {
+        if (!restart && (automatic || starting)) {
           // Each device retains its own replayable receipt; one shared
           // generation transition owns all compute and setup work.
           const receipt = (await tx.query<IntentRow>(`INSERT INTO cloud_workspace_lifecycle_intents
@@ -3522,7 +3571,10 @@ export function createCloudWorkspaceRoutes(
           organizationId: orgId,
           authorization,
         });
-        await assertWakeQuota(tx, orgId, workspace);
+        // Restart admits a future stopped -> running transition even while its
+        // source is still ready. Preserve the ordinary wake's quota gate.
+        if (restart) await loadQuota(tx, orgId);
+        else await assertWakeQuota(tx, orgId, workspace);
         const policy = await tx.query<{ current: boolean }>(
           `SELECT cloud_workspace_generation_policy_current(
              $1, $2, $3
@@ -3567,6 +3619,7 @@ export function createCloudWorkspaceRoutes(
         }
       }
 
+      if (restart) return requestCloudWorkspaceRestart(tx, {orgId,workspaceId,actorUserId:user.id,workspace,key,digest,admissionStarted});
       return requestCloudWorkspaceLifecycleIntent(tx, {
         orgId, workspaceId, actorUserId: user.id, workspace, operation, key, digest, discardUncheckpointed, admissionStarted,
       });
@@ -3577,6 +3630,8 @@ export function createCloudWorkspaceRoutes(
       {
         workspace: workspaceDocument(result.workspace,config),
         intent: intentDocument(result.intent),
+        ...(restart || operation!=="wake" ? {operation:{version:1 as const,id:result.intent.id,
+          kind:restart?"restart":operation,sourceGeneration:result.intent.generation}} : {}),
       },
       result.replayed ? 200 : 202,
     );
@@ -3585,6 +3640,7 @@ export function createCloudWorkspaceRoutes(
   for (const operation of ["stop", "wake", "archive"] as const) {
     app.post(`${base}/:workspace/${operation}`, (c) => lifecycle(c, operation));
   }
+  app.post(`${base}/:workspace/restart`, bodyLimit({maxSize:4096}), (c) => lifecycle(c,"wake",true));
   app.delete(`${base}/:workspace`, (c) => lifecycle(c, "delete"));
 
   return app;

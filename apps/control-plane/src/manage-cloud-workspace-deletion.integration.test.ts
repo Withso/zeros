@@ -172,7 +172,7 @@ d("guarded organization cloud workspace deletion", () => {
     const execution = await approve();
     const expected = await routeEffects(`operator-delete:${approvalId}:${fixture.workspaceId}`);
     const result = await manageCloudWorkspaceDeletion(pool, execution);
-    expect(result).toMatchObject({ state: "requested", workspaces: [{ status: "deleting", outcome: "requested", intentState: "queued" }] });
+    expect(result).toMatchObject({ state: "requested", workspaces: [{ status, outcome: "requested", intentState: "queued" }] });
     expect(await withSystemTx(pool, effects)).toEqual(expected);
     const receipts = (await pool.query(`SELECT actor_id,subject FROM audit_log
       WHERE action='cloud_workspace.operator_deletion_requested'`)).rows;
@@ -191,7 +191,7 @@ d("guarded organization cloud workspace deletion", () => {
       attempt_count=5,completed_at=now() WHERE workspace_id=$1`, [fixture.workspaceId]);
     const replay = await manageCloudWorkspaceDeletion(pool, execution);
     expect(replay).toMatchObject({ state: "replayed", workspaces: [{
-      intentId: first.workspaces[0]!.intentId, outcome: "replayed", status: "deleting", version: "2",
+      intentId: first.workspaces[0]!.intentId, outcome: "replayed", status: "archived", version: "2",
     }] });
     expect(await mutationCounts()).toEqual({ intents: "1", jobs: "1", audits: "2" });
     expect((await pool.query("SELECT state,attempt_count,error_code FROM workspace_deletion_jobs")).rows)
@@ -241,14 +241,14 @@ d("guarded organization cloud workspace deletion", () => {
     const execution = await approve({ allowRunning: true });
     const expected = await routeEffects(`operator-delete:${approvalId}:${fixture.workspaceId}`);
     const result = await manageCloudWorkspaceDeletion(pool, execution);
-    expect(result.workspaces[0]).toMatchObject({ status, version: "1", intentState: "queued" });
+    expect(result.workspaces[0]).toMatchObject({ status, version: "2", intentState: "queued" });
     expect(await withSystemTx(pool, effects)).toEqual(expected);
     expect((await pool.query("SELECT reason,state FROM workspace_checkpoint_requests")).rows)
       .toEqual([{ reason: "before_delete", state: "queued" }]);
     expect((await pool.query("SELECT revoked_at FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0].revoked_at).toBeNull();
   });
 
-  it("supersedes pending lifecycle work and its checkpoint exactly like HTTP deletion", async () => {
+  it("preserves an accepted final save exactly like HTTP deletion", async () => {
     await setStatus("ready");
     const previousIntent = randomUUID();
     await withSystemTx(pool, async tx => {
@@ -266,9 +266,9 @@ d("guarded organization cloud workspace deletion", () => {
     await manageCloudWorkspaceDeletion(pool, execution);
     expect(await withSystemTx(pool, effects)).toEqual(expected);
     expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [previousIntent])).rows)
-      .toEqual([{ state: "superseded" }]);
+      .toEqual([{ state: "queued" }]);
     expect((await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE lifecycle_intent_id=$1", [previousIntent])).rows)
-      .toEqual([{ state: "cancelled" }]);
+      .toEqual([{ state: "queued" }]);
   });
 
   it.each(["status", "version"])("rejects a stale %s before any workspace in the batch is mutated", async field => {

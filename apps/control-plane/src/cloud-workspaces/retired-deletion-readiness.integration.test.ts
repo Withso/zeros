@@ -113,6 +113,10 @@ suite("legacy retired Boat deletion readiness label", () => {
     { intentState: "queued" }, { intentState: "dispatching" }, { intentState: "failed" },
     { errorCode: null }, { errorCode: "provider_absence_unconfirmed" }, { provider: "daytona" as const },
   ])("keeps unconfirmed current-generation deletion outside the legacy label: %j", async options => {
+    if (options.intentState === "dispatching") {
+      await expect(deletingWorkspace("deleted", options)).rejects.toMatchObject({ code:"40001" });
+      return;
+    }
     await deletingWorkspace("deleted", options);
     await retiredDeletion({ generation: 3 });
     expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
@@ -195,6 +199,10 @@ suite("legacy retired Boat deletion readiness label", () => {
     { intentState: "queued" }, { intentState: "dispatching" }, { intentState: "failed" },
     { errorCode: "provider_absence_unconfirmed" }, { provider: "daytona" as const },
   ])("refuses incomplete or mismatched retirement evidence: %j", async options => {
+    if (options.intentState === "dispatching") {
+      await expect(retiredDeletion(options)).rejects.toMatchObject({ code:"40001" });
+      return;
+    }
     await retiredDeletion(options);
     expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
   });

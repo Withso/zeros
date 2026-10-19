@@ -174,6 +174,7 @@ export type CloudWorkspaceEngineRegistrationInput = {
   cloudLocalCommandsVersion?: 1;
   acceptedWorkVersion?: 1;
   coordinatorVersion?: 1;
+  finalSaveVersion?: 1;
   agentRuntime?: CloudAgentRuntime;
 };
 
@@ -183,6 +184,7 @@ export type CloudWorkspaceEngineHeartbeatInput = {
   organizationId: string;
   generation: number;
   engineInstanceId: string;
+  finalSaveVersion?: 1;
   coordinator?: import("./coordinator-contract.js").CloudCoordinatorStatus;
   observedPorts?: readonly { port: number; protocol: "tcp" }[];
   repositoryCredentialRefresh?: {
@@ -1507,7 +1509,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
              registered_at = now(), last_heartbeat_at = now(),
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
              updated_at = now(), actor_protocol_version = $4,
-             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7,cloud_local_commands_version=$8,accepted_work_version=$9${coordinatorSupported ? ",coordinator_version=1" : ""}
+             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7,cloud_local_commands_version=$8,accepted_work_version=$9,final_save_version=$10${coordinatorSupported ? ",coordinator_version=1" : ""}
          WHERE id = $1 AND state = 'starting'
          RETURNING lease_expires_at`,
         [
@@ -1520,6 +1522,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           input.agentCustomizationVersion ?? null,
           localCommandsSupported ? 1 : null,
           localCommandsSupported && input.acceptedWorkVersion === 1 ? 1 : null,
+          localCommandsSupported && input.finalSaveVersion === 1 ? 1 : null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {
@@ -1547,6 +1550,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         ...(localCommandsSupported ? { cloudLocalCommandsVersion: 1 as const, agentJournalMode,
           ...(input.acceptedWorkVersion === 1 ? { acceptedWorkVersion: 1 as const } : {}),
           ...(coordinatorSupported ? { coordinatorVersion: 1 as const } : {}),
+          ...(input.finalSaveVersion === 1 ? { finalSaveVersion: 1 as const } : {}),
           ...(journal.mode === "boot-owner-v1" ? { agentSourceWriterEpoch: journal.binding.writerEpoch } : {}) } : {}),
         leaseExpiresAtMs: updated.rows[0]!.lease_expires_at.getTime(),
         heartbeat: {
@@ -1683,6 +1687,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         );
       }
       const checkpointRequest = await deliverWorkspaceCheckpointRequest(tx, {
+        engineInstanceId: input.engineInstanceId,
+        ...(input.finalSaveVersion === 1 ? { finalSaveVersion: 1 as const } : {}),
         workspaceId: input.workspaceId,
         organizationId: input.organizationId,
         generation: input.generation,

@@ -34,6 +34,7 @@ import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
 import {retireCloudWorkspaceRuntimeAccess} from "./runtime-access.js";
+import {commitFinalSaveFixture,seedFinalSaveEngine,sealFinalSaveFixture} from "./final-save-test-fixtures.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -243,6 +244,7 @@ d("cloud workspace reconciliation", () => {
     intentState?: string;
     providerResourceId?: string | null;
     observedState?: string;
+    saved?: boolean;
   }) => {
     const workspaceId = randomUUID();
     const intentId = randomUUID();
@@ -250,6 +252,9 @@ d("cloud workspace reconciliation", () => {
     const status = input?.status ?? "requested";
     const operation = input?.operation ?? "create";
     let providerConnectionId = "";
+    let source: Awaited<ReturnType<typeof seedFinalSaveEngine>> | undefined;
+    if (input?.saved && (!["stop","archive","delete"].includes(operation) || !input.providerResourceId))
+      throw new Error("Saved dispatch fixture needs a destructive intent and exact provider source");
     await withSystemTx(pool, async (tx) => {
       const canonical = await seedCanonicalCloudWorkspacePrerequisites(tx, {
         organizationId: orgId,
@@ -272,8 +277,8 @@ d("cloud workspace reconciliation", () => {
           teamId,
           ownerId,
           canonical.repositoryId,
-          status,
-          desiredState,
+          input?.saved ? "ready" : status,
+          input?.saved ? "running" : desiredState,
         ],
       );
       await seedCanonicalCloudWorkspaceAuthority(tx, {
@@ -330,9 +335,10 @@ d("cloud workspace reconciliation", () => {
           workspaceId,
           orgId,
           input?.providerResourceId ?? null,
-          input?.observedState ?? "absent",
+          input?.saved ? "running" : input?.observedState ?? "absent",
         ],
       );
+      if (input?.saved) source = await seedFinalSaveEngine(tx,{workspaceId,organizationId:orgId,userId:ownerId});
       await tx.query(
         `INSERT INTO cloud_workspace_lifecycle_intents (
            id, workspace_id, org_id, requested_by, operation,
@@ -353,6 +359,11 @@ d("cloud workspace reconciliation", () => {
         ],
       );
     });
+    if (source) {
+      await commitFinalSaveFixture(pool,source,{intentId,userId:ownerId,reason:`before_${operation}` as "before_stop"|"before_archive"|"before_delete"});
+      await pool.query("UPDATE cloud_workspaces SET status=$2,desired_state=$3 WHERE id=$1",[workspaceId,status,desiredState]);
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state=$2 WHERE workspace_id=$1",[workspaceId,input?.observedState??"absent"]);
+    }
     return { workspaceId, intentId, providerConnectionId };
   };
 
@@ -387,23 +398,19 @@ d("cloud workspace reconciliation", () => {
     const resource=(await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1",[fixture.workspaceId])).rows[0].provider_resource_id;
     const provider=new FakeProvider();provider.resources.set(resource,provider.make({workspaceId:fixture.workspaceId,generation:1},"running",resource));
     if(failure)provider.stopFailure=new CloudProviderError("fixture_stop_unconfirmed","Synthetic stop unconfirmed",true);
+    const finalIntentId=randomUUID();
     await withSystemTx(pool,async tx=>{
-      await tx.query("UPDATE cloud_workspaces SET desired_state='stopped',status='stopping' WHERE id=$1",[fixture.workspaceId]);
-      await retireCloudWorkspaceRuntimeAccess(tx,{...scope,reason:"workspace_stop_requested"});
       await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
-        VALUES($1,$2,$3,1,$4,'stop',$5,$6)`,[randomUUID(),fixture.workspaceId,fixture.organizationId,fixture.userId,randomUUID(),randomBytes(32)]);
+        VALUES($1,$2,$3,1,$4,'stop',$5,$6)`,[finalIntentId,fixture.workspaceId,fixture.organizationId,fixture.userId,randomUUID(),randomBytes(32)]);
     });
     const writer=()=>pool.query("SELECT state,sealed_sequence FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1",[boot.writerEpoch]);
     expect((await writer()).rows[0]).toEqual({state:"active",sealed_sequence:null});
-    const stop = provider.stop.bind(provider);
-    provider.stop = async resourceId => {
-      expect((await pool.query("SELECT subject FROM audit_log WHERE action='cloud_workspace.stop_unsealed' AND subject->>'workspaceId'=$1", [fixture.workspaceId])).rows)
-        .toEqual([{ subject: expect.objectContaining({ outcome: "stop_unsealed", generation: 1, writerEpoch: boot.writerEpoch }) }]);
-      return stop(resourceId);
-    };
+    await sealFinalSaveFixture(pool,engine);
+    await commitFinalSaveFixture(pool,engine,{intentId:finalIntentId,userId:fixture.userId,reason:"before_stop"});
+    expect((await pool.query("SELECT id FROM audit_log WHERE action='cloud_workspace.stop_unsealed' AND org_id=$1",[fixture.organizationId])).rows).toEqual([]);
     await new CloudWorkspaceReconciler({pool,provider,intervalMs:1000}).runOnce();
     expect(provider.stopCount).toBe(1);
-    expect((await writer()).rows[0]).toEqual({state:failure?"active":"retired",sealed_sequence:null});
+    expect((await writer()).rows[0]).toEqual({state:failure?"active":"retired",sealed_sequence:"0"});
     expect((await pool.query("SELECT retired_at IS NOT NULL AS retired FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1",[fixture.engineInstanceId])).rows[0]).toEqual({retired:!failure});
     expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_credentials")).rows[0]).toEqual({count:failure?3:0});
     if(failure){
@@ -450,7 +457,7 @@ d("cloud workspace reconciliation", () => {
     "does not dispatch %s for a provider resource already observed as deleted",
     async (operation) => {
       const resourceId = `deleted-${operation}`;
-      const seeded = await seedWorkspace({
+      const seeded = await seedWorkspace({ saved: true,
         desiredState: operation === "stop" ? "stopped" : "archived",
         status: operation === "stop" ? "stopping" : "archiving",
         operation,
@@ -480,7 +487,7 @@ d("cloud workspace reconciliation", () => {
 
   it("completes portable VM archive using verified offloaded cold storage",async()=>{
     const resourceId="stopped-vm";
-    const seeded=await seedWorkspace({desiredState:"archived",status:"archiving",operation:"archive",providerResourceId:resourceId,observedState:"stopped"});
+    const seeded=await seedWorkspace({ saved: true,desiredState:"archived",status:"archiving",operation:"archive",providerResourceId:resourceId,observedState:"stopped"});
     const provider=new FakeProvider();
     const resource={...provider.make({workspaceId:seeded.workspaceId,generation:1},"stopped",resourceId),storageOffloaded:true};
     provider.resources.set(resourceId,resource);
@@ -580,216 +587,36 @@ d("cloud workspace reconciliation", () => {
     return { ...seeded, transitionId, candidateIntentId };
   };
 
-  const seedDrainingGenerationTransition = async () => {
-    const seeded = await seedWorkspace({
-      status: "ready",
-      intentState: "succeeded",
-      providerResourceId: "source-resource",
-      observedState: "running",
+  const seedDrainingGenerationTransition = async (save = true) => {
+    const seeded = await seedWorkspace({status:"ready",intentState:"succeeded",
+      providerResourceId:"source-resource",observedState:"running"});
+    const transitionId = randomUUID(), drainIntentId = randomUUID();
+    const source = await withSystemTx(pool, async tx => {
+      const source = await seedFinalSaveEngine(tx,{workspaceId:seeded.workspaceId,organizationId:orgId,userId:ownerId});
+      await seedSupportedCloudWorkspaceGeneration(tx,{workspaceId:seeded.workspaceId,organizationId:orgId,
+        ownerUserId:ownerId,generation:2,providerConnectionId:seeded.providerConnectionId});
+      const settingsDocument = {schemaVersion:1,values:{}};
+      const settingsId = await seedCanonicalWorkspaceSettingsVersion(tx,{workspaceId:seeded.workspaceId,
+        organizationId:orgId,generation:2,createdBy:ownerId,effectiveDocument:settingsDocument});
+      await tx.query(`INSERT INTO cloud_workspace_setup_specs(workspace_id,generation,org_id,repository_forge,
+        repository_owner,repository_name,repository_revision,settings_snapshot,settings_snapshot_sha256,workspace_settings_version_id)
+        VALUES($1,2,$2,'github.com','withso','zeros','main',$3::jsonb,digest($3::jsonb::text,'sha256'),$4)`,
+      [seeded.workspaceId,orgId,JSON.stringify(settingsDocument),settingsId]);
+      await tx.query(`INSERT INTO cloud_workspace_provider_bindings(workspace_id,generation,org_id,provider)
+        VALUES($1,2,$2,'boat')`,[seeded.workspaceId,orgId]);
+      await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,
+        operation,idempotency_key,request_sha256,affects_workspace) VALUES($1,$2,1,$3,$4,'stop',$5,$6,false)`,
+      [drainIntentId,seeded.workspaceId,orgId,ownerId,randomUUID(),randomBytes(32)]);
+      await tx.query(`INSERT INTO cloud_workspace_generation_transitions(id,workspace_id,org_id,requested_by,
+        operation,source_generation,template_generation,candidate_generation,state,drain_intent_id)
+        VALUES($1,$2,$3,$4,'upgrade',1,1,2,'draining',$5)`,[transitionId,seeded.workspaceId,orgId,ownerId,drainIntentId]);
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET generation_transition_id=$2 WHERE id=$1",[drainIntentId,transitionId]);
+      if (!save) await enqueueWorkspaceCheckpointRequest(tx,{workspaceId:seeded.workspaceId,organizationId:orgId,
+        generation:1,requestedBy:ownerId,lifecycleIntentId:drainIntentId,reason:"before_rebuild",idempotencyKey:`generation.${transitionId}`});
+      return source;
     });
-    const transitionId = randomUUID();
-    const drainIntentId = randomUUID();
-    await withSystemTx(pool, async (tx) => {
-      const setupRunId = randomUUID();
-      const registrationGrantId = randomUUID();
-      const engineInstanceId = randomUUID();
-      const checkpointId = randomUUID();
-      const manifestBlobId = randomUUID();
-      const contentDigest = createHash("sha256")
-        .update(`checkpoint:${checkpointId}`)
-        .digest();
-      await seedSupportedCloudWorkspaceGeneration(tx, {
-        workspaceId: seeded.workspaceId, organizationId: orgId, ownerUserId: ownerId,
-        generation: 2, providerConnectionId: seeded.providerConnectionId,
-      });
-      const settingsDocument = { schemaVersion: 1, values: {} };
-      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(
-        tx,
-        {
-          workspaceId: seeded.workspaceId,
-          organizationId: orgId,
-          generation: 2,
-          createdBy: ownerId,
-          effectiveDocument: settingsDocument,
-        },
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_setup_specs (
-           workspace_id, generation, org_id, repository_forge,
-           repository_owner, repository_name, repository_revision,
-           settings_snapshot, settings_snapshot_sha256,
-           workspace_settings_version_id
-         ) VALUES ($1, 2, $2, 'github.com', 'withso', 'zeros', 'main',
-                   $3::jsonb, digest($3::jsonb::text, 'sha256'), $4)`,
-        [
-          seeded.workspaceId,
-          orgId,
-          JSON.stringify(settingsDocument),
-          settingsVersionId,
-        ],
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_provider_bindings (
-           workspace_id, generation, org_id, provider
-         ) VALUES ($1, 2, $2, 'boat')`,
-        [seeded.workspaceId, orgId],
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_lifecycle_intents (
-           id, workspace_id, generation, org_id, requested_by, operation,
-           idempotency_key, request_sha256, affects_workspace
-         ) VALUES ($1, $2, 1, $3, $4, 'stop', $5, $6, false)`,
-        [
-          drainIntentId,
-          seeded.workspaceId,
-          orgId,
-          ownerId,
-          randomUUID(),
-          createHash("sha256").update(randomUUID()).digest(),
-        ],
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_generation_transitions (
-           id, workspace_id, org_id, requested_by, operation,
-           source_generation, template_generation, candidate_generation,
-           state, drain_intent_id
-         ) VALUES ($1, $2, $3, $4, 'upgrade', 1, 1, 2,
-                   'draining', $5)`,
-        [transitionId, seeded.workspaceId, orgId, ownerId, drainIntentId],
-      );
-      await tx.query(
-        `UPDATE cloud_workspace_lifecycle_intents
-         SET generation_transition_id = $2 WHERE id = $1`,
-        [drainIntentId, transitionId],
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_setup_runs (
-           id, workspace_id, generation, org_id, attempt, state, claim_count,
-           execution_fence, lease_owner, lease_expires_at, last_heartbeat_at,
-           started_at
-         ) VALUES ($1, $2, 1, $3, 1, 'running', 1, 1, 'fixture',
-                   now() + interval '10 minutes', now(), now())`,
-        [setupRunId, seeded.workspaceId, orgId],
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_endpoint_grants (
-           id, workspace_id, generation, org_id, account_user_id, purpose,
-           audience, token_hash, account_revision, authorization_revision,
-           expires_at, consumed_at, setup_run_id, setup_execution_fence
-         ) VALUES ($1, $2, 1, $3, $4, 'setup', 'fixture', $5,
-                   1, 1, now() + interval '10 minutes', now(), $6, 1)`,
-        [
-          registrationGrantId,
-          seeded.workspaceId,
-          orgId,
-          ownerId,
-          randomBytes(32),
-          setupRunId,
-        ],
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_engine_instances (
-           id, workspace_id, generation, org_id, account_user_id, setup_run_id,
-           setup_execution_fence, registration_grant_id, protocol_version,
-           state, bridge_token_hash, heartbeat_token_hash, registered_at,
-           last_heartbeat_at, lease_expires_at, actor_protocol_version,
-           runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,
-           runtime_profile,runtime_engine_protocol_version,runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id
-         ) SELECT $1, $2, 1, $3, $4, $5, 1, $6, g.runtime_engine_protocol_version, 'ready', $7, $8,
-                   now(), now(), now() + interval '10 minutes', 2,
-                   g.runtime_id,g.runtime_manifest_sha256,g.runtime_base_image_id,g.runtime_base_compatibility_id,
-                   g.runtime_profile,g.runtime_engine_protocol_version,$9,$10,$11
-           FROM cloud_workspace_generations g WHERE workspace_id=$2 AND generation=1 AND org_id=$3`,
-        [
-          engineInstanceId,
-          seeded.workspaceId,
-          orgId,
-          ownerId,
-          setupRunId,
-          registrationGrantId,
-          randomBytes(32),
-          randomBytes(32),
-          runtimeWitness.installerReceiptSha256, runtimeWitness.bootId, runtimeWitness.supervisorSessionId,
-        ],
-      );
-      await tx.query(
-        `INSERT INTO workspace_content_heads (
-           workspace_id, org_id, current_revision, durable_revision,
-           last_durable_at
-         ) VALUES ($1, $2, 1, 1, now())`,
-        [seeded.workspaceId, orgId],
-      );
-      await tx.query(
-        `INSERT INTO workspace_content_revisions (
-           workspace_id, org_id, revision, parent_revision, authority_epoch,
-           generation, engine_instance_id, idempotency_key, request_sha256,
-           changed_entry_count
-         ) VALUES ($1, $2, 1, 0, 1, 1, $3, $4, $5, 1)`,
-        [
-          seeded.workspaceId,
-          orgId,
-          engineInstanceId,
-          `checkpoint-content-${randomUUID()}`,
-          contentDigest,
-        ],
-      );
-      await tx.query(
-        `INSERT INTO workspace_blobs (
-           id, org_id, plaintext_sha256, ciphertext_sha256,
-           plaintext_bytes, ciphertext_bytes, object_key,
-           encryption_key_version, nonce, auth_tag, state, available_at
-         ) VALUES ($1, $2, $3, $3, 2, 2, $4, 1, $5, $6,
-                   'available', now())`,
-        [
-          manifestBlobId,
-          orgId,
-          contentDigest,
-          `fixture/checkpoint/${checkpointId}`,
-          randomBytes(12),
-          randomBytes(16),
-        ],
-      );
-      await tx.query(
-        `INSERT INTO workspace_checkpoints (
-           id, workspace_id, org_id, idempotency_key, request_sha256,
-           content_revision, record_revision, authority_epoch, generation,
-           reason, manifest_blob_id, inclusion_policy, file_count, total_bytes,
-           state, integrity_sha256, durable_at
-         ) VALUES ($1, $2, $3, $4, $5, 1, 0, 1, 1, 'before_rebuild',
-                   $6, '{}', 0, 0, 'durable', $5, now())`,
-        [
-          checkpointId,
-          seeded.workspaceId,
-          orgId,
-          `checkpoint-${randomUUID()}`,
-          contentDigest,
-          manifestBlobId,
-        ],
-      );
-      await tx.query(
-        `UPDATE workspace_content_heads
-         SET current_checkpoint_id = $2
-         WHERE workspace_id = $1`,
-        [seeded.workspaceId, checkpointId],
-      );
-      await tx.query(
-        `INSERT INTO workspace_checkpoint_requests (
-           workspace_id, generation, org_id, requested_by,
-           lifecycle_intent_id, reason, state, idempotency_key,
-           checkpoint_id, deadline_at, completed_at
-         ) VALUES ($1, 1, $2, $3, $4, 'before_rebuild', 'succeeded', $5,
-                   $6, now() + interval '10 minutes', now())`,
-        [
-          seeded.workspaceId,
-          orgId,
-          ownerId,
-          drainIntentId,
-          `generation.${transitionId}`,
-          checkpointId,
-        ],
-      );
-    });
-    return { ...seeded, transitionId, drainIntentId };
+    if (save) await commitFinalSaveFixture(pool,source,{intentId:drainIntentId,userId:ownerId,reason:"before_rebuild"});
+    return {...seeded,transitionId,drainIntentId};
   };
 
   const reconciler = (
@@ -921,7 +748,7 @@ d("cloud workspace reconciliation", () => {
 
     const stopping = async () => {
       const resourceId = "observed-resource";
-      const seeded = await seedWorkspace({ operation: "stop", desiredState: "stopped",
+      const seeded = await seedWorkspace({ saved: true, operation: "stop", desiredState: "stopped",
         status: "stopping", providerResourceId: resourceId, observedState: "stopping" });
       const provider = new FakeProvider();
       provider.resources.set(resourceId, provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "stopping", resourceId));
@@ -1072,7 +899,7 @@ d("cloud workspace reconciliation", () => {
     }
   });
 
-  it.each(["identity", "entitlement", "provider"])("stops a checkpoint-gated delete after %s authority is revoked without discarding data", async (revoked) => {
+  it.each(["identity", "entitlement", "provider"])("retains an unsaved delete after %s authority is revoked without stopping or discarding data", async (revoked) => {
     const seeded = await seedWorkspace({desiredState:"running",status:"ready",operation:"delete",providerResourceId:"bound-resource",observedState:"running"});
     await withSystemTx(pool,async tx=>{
       await enqueueWorkspaceCheckpointRequest(tx,{workspaceId:seeded.workspaceId,organizationId:orgId,generation:1,requestedBy:ownerId,lifecycleIntentId:seeded.intentId,reason:"before_delete",idempotencyKey:randomUUID()});
@@ -1085,17 +912,18 @@ d("cloud workspace reconciliation", () => {
     await expect(new DatabaseCloudWorkspacePaidAuthorityReconciler(pool,{workosEnabled:false}).runOnce()).resolves.toMatchObject({action:"stopped"});
     await new CloudWorkspaceCheckpointRequestWorker(pool).expireOnce();
     const worker = reconciler(provider);
-    await expect(worker.runOnce()).resolves.toBe(true);
-    expect(provider.stopCount).toBe(1);
+    await expect(worker.runOnce()).resolves.toBe(false);
+    expect(provider.stopCount).toBe(0);
     expect(provider.deleteCount).toBe(0);
-    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1",[seeded.intentId])).rows[0]).toEqual({state:"superseded"});
-    expect((await pool.query("SELECT desired_state,status FROM cloud_workspaces WHERE id=$1",[seeded.workspaceId])).rows[0]).toEqual({desired_state:"stopped",status:"stopped"});
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1",[seeded.intentId])).rows[0]).toEqual({state:"queued"});
+    expect((await pool.query("SELECT desired_state,status FROM cloud_workspaces WHERE id=$1",[seeded.workspaceId])).rows[0]).toEqual({desired_state:"stopped",status:"stopping"});
+    expect((await pool.query("SELECT state FROM cloud_workspace_final_save_recoveries WHERE lifecycle_intent_id=$1",[seeded.intentId])).rows[0]).toEqual({state:"blocked"});
     await worker.reconcileDriftOnce();
     expect(provider.deleteCount).toBe(0);
   });
 
-  it("expires a draining generation in lifecycle lock order while preserving its running source",async()=>{
-    const seeded=await seedDrainingGenerationTransition();
+  it("expires only the finite attempt in lifecycle lock order while preserving its source and candidate",async()=>{
+    const seeded=await seedDrainingGenerationTransition(false);
     const request=(await pool.query(`UPDATE workspace_checkpoint_requests SET state='queued',checkpoint_id=NULL,completed_at=NULL,
       created_at=now()-interval '10 minutes',deadline_at=now()-interval '1 second' WHERE lifecycle_intent_id=$1 RETURNING id`,[seeded.drainIntentId])).rows[0];
     await assertDatabaseLockOrder(pool,{
@@ -1104,8 +932,8 @@ d("cloud workspace reconciliation", () => {
       parentQuery:/FROM organizations|UPDATE cloud_workspace_generation_transitions/,
       action:controlled=>new CloudWorkspaceCheckpointRequestWorker(controlled).expireOnce(),
     });
-    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE id=$1",[seeded.transitionId])).rows[0].state).toBe("cancelled");
-    expect((await pool.query("SELECT retired_at IS NOT NULL AS retired FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2",[seeded.workspaceId])).rows[0].retired).toBe(true);
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE id=$1",[seeded.transitionId])).rows[0].state).toBe("draining");
+    expect((await pool.query("SELECT retired_at IS NOT NULL AS retired FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2",[seeded.workspaceId])).rows[0].retired).toBe(false);
     expect((await pool.query("SELECT desired_state,current_generation FROM cloud_workspaces WHERE id=$1",[seeded.workspaceId])).rows[0]).toEqual({desired_state:"running",current_generation:1});
   });
 
@@ -1165,7 +993,7 @@ d("cloud workspace reconciliation", () => {
   });
 
   it("allows delete to bypass an unfinished local-copy upload gate", async () => {
-    const seeded = await seedWorkspace({
+    const seeded = await seedWorkspace({ saved: true,
       desiredState: "deleted",
       status: "deleting",
       operation: "delete",
@@ -2013,7 +1841,7 @@ d("cloud workspace reconciliation", () => {
   it.each([
     { state: "archived", stopFails: false }, { state: "archived", stopFails: true },
     { state: "stopped", stopFails: false }, { state: "stopped", stopFails: true },
-  ] as const)("requires source retirement before resuming $state drift (stop failure=$stopFails)", async ({ state, stopFails }) => {
+  ] as const)("requires final proof before retiring or resuming $state drift (stop failure=$stopFails)", async ({ state, stopFails }) => {
     const fixture = await seedReadyCloudWorkspace(pool);
     const scope = { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
       generation: 1, engineInstanceId: fixture.engineInstanceId };
@@ -2057,11 +1885,12 @@ d("cloud workspace reconciliation", () => {
     // Permit the finite stop -> wake chain, without advancing failed claims or
     // allocating a substitute resource. Observe custody at the real dispatch.
     for (let step = 0; step < 3; step++) if (!await worker.runOnce()) break;
-    expect(atStart).toEqual(stopFails ? [] : [{ state: "retired", seal: null, seal_ack: null,
-      binding_retired: true, providerStops: 1 }]);
+    expect(atStart).toEqual([]);
+    expect(provider.stopCount).toBe(0);
+    expect(provider.startCount).toBe(0);
     expect(provider.createCount).toBe(0);
-    expect(await custody()).toMatchObject({ state: stopFails ? "active" : "retired",
-      binding_retired: !stopFails, seal: null, seal_ack: null });
+    expect(await custody()).toMatchObject({ state: "active",
+      binding_retired: false, seal: null, seal_ack: null });
   });
 
   it("discards cold drift observed before its provider binding was replaced", async () => {
@@ -2157,7 +1986,7 @@ d("cloud workspace reconciliation", () => {
     expect(provider.deleteCount).toBe(0);
   });
 
-  it.each(["stop", "delete"])("requires absence proof for retired-generation %s while the current workspace keeps running", async operation => {
+  it.each(["stop", "delete"])("retains an unsaved retired-generation %s while the current workspace keeps running", async operation => {
     const seeded = await seedWorkspace({status:"ready",intentState:"succeeded",providerResourceId:"current-resource",observedState:"running"});
     await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
       provider_connection_id,provider_connection_version,retired_at)
@@ -2173,32 +2002,30 @@ d("cloud workspace reconciliation", () => {
     provider.verifyAbsence = vi.fn(async () => false);
     const worker = reconciler(provider);
     await worker.runOnce();
-    expect(provider.verifyAbsence).toHaveBeenCalledWith(expect.objectContaining({workspaceId:seeded.workspaceId,generation:2}));
+    expect(provider.verifyAbsence).not.toHaveBeenCalled();
+    expect(provider.stopCount+provider.deleteCount).toBe(0);
     expect((await pool.query("SELECT state,error_code FROM cloud_workspace_lifecycle_intents WHERE id=$1", [cleanupId])).rows[0])
-      .toEqual({state:"observing",error_code:"provider_absence_unconfirmed"});
+      .toEqual({state:"queued",error_code:null});
+    expect((await pool.query("SELECT state FROM cloud_workspace_final_save_recoveries WHERE lifecycle_intent_id=$1",[cleanupId])).rows)
+      .toEqual([{state:"capturing"}]);
     expect((await pool.query("SELECT deletion_verified_at FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=2", [seeded.workspaceId])).rows[0].deletion_verified_at).toBeNull();
     expect((await pool.query("SELECT current_generation,desired_state,status FROM cloud_workspaces WHERE id=$1", [seeded.workspaceId])).rows[0])
       .toEqual({current_generation:1,desired_state:"running",status:"ready"});
   });
 
-  it("keeps a retired generation's verified deletion when a later stop observes it absent", async () => {
-    const seeded = await seedWorkspace({status:"ready",intentState:"succeeded",providerResourceId:"current-resource",observedState:"running"});
-    await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
-      provider_connection_id,provider_connection_version,retired_at)
-      SELECT workspace_id,2,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
-        provider_connection_id,provider_connection_version,now()
-      FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1`, [seeded.workspaceId]);
-    await pool.query(`INSERT INTO cloud_workspace_provider_bindings(workspace_id,generation,org_id,provider)
-      VALUES($1,2,$2,'boat')`, [seeded.workspaceId,orgId]);
+  it("keeps a saved generation's verified deletion when a later stop observes it absent", async () => {
+    const seeded = await seedWorkspace({saved:true,operation:"delete",desiredState:"deleted",status:"deleting",
+      providerResourceId:"saved-resource",observedState:"running"});
     // A compute stop queued earlier finishes only after the cleanup delete.
-    const deleteId = randomUUID(), stopId = randomUUID();
+    const deleteId = seeded.intentId, stopId = randomUUID();
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET affects_workspace=false WHERE id=$1",[deleteId]);
     await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace,next_attempt_at)
-      VALUES($1,$3,2,$4,'delete',$5,$6,false,now()),($2,$3,2,$4,'stop',$7,$8,false,now()+interval '1 hour')`,
-    [deleteId,stopId,seeded.workspaceId,orgId,randomUUID(),randomBytes(32),randomUUID(),randomBytes(32)]);
+      VALUES($1,$2,1,$3,'stop',$4,$5,false,now()+interval '1 hour')`,
+    [stopId,seeded.workspaceId,orgId,randomUUID(),randomBytes(32)]);
     const provider = new FakeProvider(); provider.verifyAbsence = async () => true;
     const worker = reconciler(provider);
     const binding = async () => (await pool.query(
-      "SELECT observed_state, deletion_verified_at IS NOT NULL AS verified FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=2",
+      "SELECT observed_state, deletion_verified_at IS NOT NULL AS verified FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1",
       [seeded.workspaceId])).rows[0];
     await worker.runOnce();
     expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [deleteId])).rows[0].state).toBe("succeeded");
@@ -2325,7 +2152,7 @@ d("cloud workspace reconciliation", () => {
     ]);
   });
 
-  it("does not dispatch a stale create after delete wins, but still discovers and deletes an unknown result", async () => {
+  it("does not dispatch a stale create or delete an unknown result without final proof", async () => {
     const seeded = await seedWorkspace({
       desiredState: "deleted",
       status: "deleting",
@@ -2361,19 +2188,22 @@ d("cloud workspace reconciliation", () => {
     expect(first.rows[0]).toEqual({ state: "superseded" });
 
     await worker.runOnce();
-    expect(provider.deleteCount).toBe(1);
+    expect(provider.deleteCount).toBe(0);
     const workspace = await pool.query(
       `SELECT status, deleted_at IS NOT NULL AS deleted
        FROM cloud_workspaces WHERE id = $1`,
       [seeded.workspaceId],
     );
-    expect(workspace.rows[0]).toEqual({ status: "deleted", deleted: true });
+    expect(workspace.rows[0]).toEqual({ status: "deleting", deleted: false });
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_final_save_recoveries WHERE workspace_id=$1 AND state NOT IN ('proven','resolved')",[seeded.workspaceId])).rows[0].count).toBe(1);
   });
 
   it.each(["organization", "team"] as const)(
-    "durably deletes provider resources when the owning %s is soft-deleted",
+    "durably deletes saved provider resources when the owning %s is soft-deleted",
     async (scope) => {
       const seeded = await seedWorkspace({
+        saved: true,
+        operation: "stop",
         status: "ready",
         intentState: "succeeded",
         providerResourceId: "bound-resource",
@@ -2434,7 +2264,7 @@ d("cloud workspace reconciliation", () => {
     },
   );
 
-  it("retires every provider generation and cancels replacement work when an organization is deleted", async () => {
+  it("preserves every unsaved provider generation when an organization is deleted", async () => {
     const seeded = await seedGenerationTransition();
     const provider = new FakeProvider();
     provider.resources.set(
@@ -2505,25 +2335,26 @@ d("cloud workspace reconciliation", () => {
     ]);
 
     const worker = reconciler(provider);
-    expect(await worker.runOnce()).toBe(true);
-    expect(await worker.runOnce()).toBe(true);
     expect(await worker.runOnce()).toBe(false);
-    expect(provider.deleteCount).toBe(2);
-    expect(provider.resources.size).toBe(0);
+    expect(provider.deleteCount).toBe(0);
+    expect(provider.resources.size).toBe(2);
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_final_save_recoveries WHERE workspace_id=$1 AND state NOT IN ('proven','resolved')",[seeded.workspaceId])).rows[0].count).toBe(2);
     const workspace = await pool.query(
       `SELECT status, desired_state, deleted_at IS NOT NULL AS deleted
        FROM cloud_workspaces WHERE id = $1`,
       [seeded.workspaceId],
     );
     expect(workspace.rows[0]).toEqual({
-      status: "deleted",
+      status: "deleting",
       desired_state: "deleted",
-      deleted: true,
+      deleted: false,
     });
   });
 
-  it("durably deletes paid compute when the temporary workspace owner account is deleted", async () => {
+  it("durably deletes saved compute when the temporary workspace owner account is deleted", async () => {
     const seeded = await seedWorkspace({
+      saved: true,
+      operation: "stop",
       status: "ready",
       intentState: "succeeded",
       providerResourceId: "owner-resource",
@@ -2579,7 +2410,7 @@ d("cloud workspace reconciliation", () => {
     { previous: "running", code: "provider_deletion_pending" },
     { previous: "archiving", code: "provider_deletion_pending" },
   ])("retains the observed stopped compute while deletion waits: $previous / $code", async ({ previous, code }) => {
-    const seeded = await seedWorkspace({ desiredState: "deleted", status: "deleting", operation: "delete",
+    const seeded = await seedWorkspace({ saved: true, desiredState: "deleted", status: "deleting", operation: "delete",
       providerResourceId: "bound-resource", observedState: previous });
     const provider = new FakeProvider();
     provider.resources.set("bound-resource", provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "archived", "bound-resource"));
@@ -2596,12 +2427,8 @@ d("cloud workspace reconciliation", () => {
   });
 
   it("retains the authority advanced by its own closed checkpoint gate when deletion is blocked", async () => {
-    const seeded = await seedWorkspace({ desiredState: "running", status: "ready", operation: "delete",
+    const seeded = await seedWorkspace({ saved: true, desiredState: "running", status: "ready", operation: "delete",
       providerResourceId: "bound-resource", observedState: "archiving" });
-    await pool.query(`INSERT INTO workspace_checkpoint_requests
-      (workspace_id,generation,org_id,requested_by,lifecycle_intent_id,reason,state,idempotency_key,error_code,created_at,deadline_at,completed_at)
-      VALUES($1,1,$2,$3,$4,'before_delete','cancelled',$5,'stop_unsealed',now()-interval '10 minutes',now()-interval '1 second',now())`,
-    [seeded.workspaceId, orgId, ownerId, seeded.intentId, `lifecycle.${seeded.intentId}`]);
     const provider = new FakeProvider();
     provider.resources.set("bound-resource", provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "archived", "bound-resource"));
     vi.spyOn(provider, "delete").mockRejectedValue(new CloudProviderError("provider_deletion_blocked", "Storage deletion is pending", true));
@@ -2616,7 +2443,7 @@ d("cloud workspace reconciliation", () => {
 
   it.each(["expired claim", "new authority", "new binding", "live compute", "unrelated failure"])(
     "does not retain an ineligible stopped observation after deletion: %s", async condition => {
-      const seeded = await seedWorkspace({ desiredState: "deleted", status: "deleting", operation: "delete",
+      const seeded = await seedWorkspace({ saved: true, desiredState: "deleted", status: "deleting", operation: "delete",
         providerResourceId: "bound-resource", observedState: "archiving" });
       const provider = new FakeProvider();
       provider.resources.set("bound-resource", provider.make({ workspaceId: seeded.workspaceId, generation: 1 },
@@ -2635,7 +2462,7 @@ d("cloud workspace reconciliation", () => {
   );
 
   it("does not complete delete until a post-dispatch inspection proves absence", async () => {
-    const seeded = await seedWorkspace({
+    const seeded = await seedWorkspace({ saved: true,
       desiredState: "deleted",
       status: "deleting",
       operation: "delete",
@@ -2705,7 +2532,7 @@ d("cloud workspace reconciliation", () => {
   it.each(["running", "stopped"] as const)(
     "publishes client-access revocation only after provider stop succeeds from %s",
     async (providerState) => {
-      const seeded = await seedWorkspace({
+      const seeded = await seedWorkspace({ saved: true,
         desiredState: "stopped",
         status: "stopping",
         operation: "stop",
@@ -2861,7 +2688,7 @@ d("cloud workspace reconciliation", () => {
       .toEqual({ deferred: true });
   });
 
-  it("recovers an unbound known generation and deletes only twice-observed aged true orphans", async () => {
+  it("recovers an unbound known generation and retains aged orphans for operator rescue without final proof", async () => {
     const seeded = await seedWorkspace({ intentState: "succeeded" });
     const provider = new FakeProvider();
     const recovered = provider.make({
@@ -2899,8 +2726,8 @@ d("cloud workspace reconciliation", () => {
       [orphan.resourceId],
     );
     await worker.reconcileOrphansOnce();
-    expect(provider.deleteCount).toBe(1);
-    expect(provider.resources.has(orphan.resourceId)).toBe(false);
+    expect(provider.deleteCount).toBe(0);
+    expect(provider.resources.has(orphan.resourceId)).toBe(true);
     expect(provider.resources.has(recovered.resourceId)).toBe(true);
 
     const record = await pool.query(
@@ -2909,7 +2736,7 @@ d("cloud workspace reconciliation", () => {
        WHERE provider_resource_id = $1`,
       [orphan.resourceId],
     );
-    expect(record.rows[0]).toMatchObject({ verified: true });
+    expect(record.rows[0]).toMatchObject({ verified: false });
     expect(record.rows[0].observation_count).toBeGreaterThanOrEqual(2);
   });
 
@@ -3370,7 +3197,7 @@ d("cloud workspace reconciliation", () => {
     });
   });
 
-  it("does not mark asynchronous orphan deletion verified until inspection proves it", async () => {
+  it("does not use repeated inventory observations as unsaved orphan deletion authority", async () => {
     const provider = new FakeProvider();
     provider.deleteObservedState = "deleting";
     const orphan = provider.make({
@@ -3395,8 +3222,8 @@ d("cloud workspace reconciliation", () => {
        WHERE provider_resource_id = $1`,
       [orphan.resourceId],
     );
-    expect(provider.deleteCount).toBe(1);
-    expect(provider.resources.get(orphan.resourceId)?.state).toBe("deleting");
+    expect(provider.deleteCount).toBe(0);
+    expect(provider.resources.get(orphan.resourceId)?.state).toBe("running");
     expect(record.rows[0]).toEqual({ verified: false });
 
     provider.deleteObservedState = null;
@@ -3407,9 +3234,9 @@ d("cloud workspace reconciliation", () => {
        WHERE provider_resource_id = $1`,
       [orphan.resourceId],
     );
-    expect(provider.deleteCount).toBe(2);
-    expect(provider.resources.has(orphan.resourceId)).toBe(false);
-    expect(record.rows[0]).toEqual({ verified: true });
+    expect(provider.deleteCount).toBe(0);
+    expect(provider.resources.has(orphan.resourceId)).toBe(true);
+    expect(record.rows[0]).toEqual({ verified: false });
   });
 
   it("fails permanently with a sanitized record when the provider rejects identity", async () => {

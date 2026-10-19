@@ -102,6 +102,42 @@ BEGIN
   RETURN NEW;
 END $$;`],
   },
+  "0171_cloud_final_save_recovery.sql": {
+    // These constraints are replaced immediately with the legacy states plus
+    // finite successor attempts. Neither statement removes an authority fence.
+    "widen-check": [
+      "ALTER TABLE workspace_checkpoint_requests DROP CONSTRAINT workspace_checkpoint_requests_state_check;",
+      "ALTER TABLE workspace_checkpoint_requests DROP CONSTRAINT workspace_checkpoint_requests_check1;",
+    ],
+    "privilege-tightening": [
+      "ensure_cloud_final_save_recovery(uuid)",
+      "cloud_final_save_admitted()",
+      "cloud_final_save_request_link()",
+      "cloud_final_save_attempt_immutable()",
+      "cloud_final_save_proven(uuid)",
+      "cloud_final_save_adopt_proof(uuid)",
+      "cloud_final_save_committed()",
+      "cloud_final_save_require_dispatch()",
+      "cloud_final_save_preserve_lifecycle()",
+      "cloud_final_save_preserve_transition()",
+      "cloud_final_save_preserve_candidate()",
+      "cloud_final_save_source_immutable()",
+      "cloud_final_save_attempt_settled()",
+      "cloud_final_save_jobs()",
+      "cloud_final_save_dispatch_claimed()",
+      "cloud_final_save_hold_source()",
+      "cloud_final_save_failure_audit()",
+      "cloud_final_save_deletion_claimable(uuid,uuid)",
+      "cloud_final_save_protect_erasure()",
+      "cloud_final_save_request_erasure()",
+      "cloud_final_save_request_erased()",
+      "cloud_accepted_lifecycle_scope()",
+      "cloud_restart_prerequisite_scope()",
+      "cloud_restart_ready(uuid)",
+      "cloud_workspace_accepted_lifecycle(uuid,uuid)",
+      "cloud_accepted_lifecycle_changed()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+  },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate
@@ -129,6 +165,11 @@ const providerRecoveryEvidenceDigest = "e5f93ac17017bc01286ac0e856530ed299bfb030
 const authorityDigest = "797f837c345244da5af77d503614c9ddf3abb03048998a0081b98a3c2512ab30";
 const deletedBootPointerDigest = "9cff55a9f31819e2468f331b64d2ba978b0e1dd2bdb39d332dad892fe49fc562";
 const authorityCacheExemptionDigest = "414aa4d5653660ef6eee4300d1e52889ba36e9ca26f325c12b574ad4b0ad86b7";
+// New recovery metadata is erased only after the existing request erasure is
+// authorized. The replacement purge predicate retains the existing fences and
+// additionally refuses unsaved recoveries or unresolved provider dispatches.
+const finalSavePurgeDigest = "06350d1e7c16d53a5dd4b49171ff868755547a455e12fc92e1419dca28d86da1";
+const finalSavePurgeAuthorityDigest = "1ffca4f787df85c473fe19c450b7cac2729c504aac4853f54a5d8a1f21b0dfee";
 
 /** Split only at top-level SQL semicolons. Dollar bodies, nested comments and
  * quoted values remain intact; an annotation inside a function cannot exempt
@@ -205,7 +246,11 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
       (rule === "provider-recovery-evidence" && file === "0146_cloud_provider_snapshot_recovery.sql" &&
         createHash("sha256").update(statement).digest("hex") === providerRecoveryEvidenceDigest) ||
       (rule === "authority-cache-exemption" && file === "0158_cloud_drift_inventory_pacing.sql" &&
-        createHash("sha256").update(statement).digest("hex") === authorityCacheExemptionDigest);
+        createHash("sha256").update(statement).digest("hex") === authorityCacheExemptionDigest) ||
+      (rule === "final-save-purge" && file === "0171_cloud_final_save_recovery.sql" &&
+        createHash("sha256").update(statement).digest("hex") === finalSavePurgeDigest) ||
+      (rule === "final-save-purge-authority" && file === "0171_cloud_final_save_recovery.sql" &&
+        createHash("sha256").update(statement).digest("hex") === finalSavePurgeAuthorityDigest);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

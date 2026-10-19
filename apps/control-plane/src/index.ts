@@ -1,3 +1,4 @@
+import { DatabaseCloudFinalSaveService } from "./cloud-workspaces/final-save-service.js";
 import { CloudAcceptedWorkOperationAuthority } from "./cloud-workspaces/accepted-work.js";
 import { createCloudComputerRetirementWorker } from "./cloud-workspaces/computer-retirement.js";
 // ──────────────────────────────────────────────────────────
@@ -386,7 +387,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   }) : null;
   const checkpointRequestWorker = workerPool ? new CloudWorkspaceCheckpointRequestWorker(
     workerPool,
-    workerPollingOptions(config.workerPollIntervalsMs, "checkpoints"),
+    { ...workerPollingOptions(config.workerPollIntervalsMs, "checkpoints"), workosEnabled: config.auth.provider === "workos" },
   ) : null;
   const contentService = new DatabaseCloudWorkspaceContentService({
     pool,
@@ -617,6 +618,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       heartbeat: (input) => materials.heartbeat(input),
       waitForCheckpointHint: (input, signal) => checkpointHints.wait(input, signal),
       reportCheckpointProgress: input => checkpointProgress.report(input),
+      reportFinalSave: input => new DatabaseCloudFinalSaveService(pool, config.auth.provider === "workos").report(input),
       admitEngineClient: (input) =>
         cloudWorkspaceEngineClientAdmissionService!.consume(input),
       admitActorClient: (input) => cloudWorkspaceEngineClientAdmissionService!.consumeActor(input),
@@ -719,6 +721,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       providerResolver: workerProviderResolver!,
       runtimeUpgradeConfig: cloud,
       runtimeRollbackCache: createCloudRuntimeRollbackCache(workerPool, cloud, runtimeArtifacts),
+      checkpointRequests: checkpointRequestWorker!,
       ...(cloud.computePolicy?{computePolicy:cloud.computePolicy}:{}),
       workosEnabled: config.auth.provider === "workos",
       ...workerPollingOptions(config.workerPollIntervalsMs, "lifecycle"),

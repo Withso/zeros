@@ -11,6 +11,7 @@ import { transferActive, vmTransferReport } from "./runtime-transfer-proof.test-
 import { DatabaseCloudRuntimeTransitionService } from "./runtime-transfer.js";
 import { seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
+import { commitFinalSaveFixture, sealFinalSaveFixture } from "./final-save-test-fixtures.js";
 
 /** Synthetic content plus real enrollment/transfer and actor-service writes.
  * No provider or object-store network calls are involved. */
@@ -78,7 +79,7 @@ export async function seedWorkspaceDeletionGraph(pool: pg.Pool, runtimeTransfer:
     JOIN cloud_workspace_engine_instances engine ON engine.setup_run_id=run.id WHERE run.workspace_id=$1`, [fixture.workspaceId]);
   await pool.query(`UPDATE cloud_workspace_setup_runs SET state='succeeded',completed_at=now(),lease_owner=NULL,
     lease_expires_at=NULL WHERE workspace_id=$1`, [fixture.workspaceId]);
-  let current = { generation: 1, engineInstanceId: fixture.engineInstanceId, active: transferActive };
+  let current = { generation: 1, engineInstanceId: fixture.engineInstanceId, heartbeatToken:fixture.heartbeatToken, active: transferActive };
   for (let index = 0; index < Number(runtimeTransfer); index++) current = await transferWorkspace(pool, fixture, current);
   const writerEpoch = randomUUID(), bindingId = randomUUID(), sourceId = randomUUID();
   const bootId = (await pool.query<{ boot_id: string }>(`SELECT runtime_boot_id AS boot_id
@@ -108,7 +109,28 @@ export async function seedWorkspaceDeletionGraph(pool: pg.Pool, runtimeTransfer:
     VALUES($1,$2,$3,$3,'deletion-chat',1,true,false,$4,1,1,'mutation',$5,$6::jsonb,1)`,
   [fixture.workspaceId, fixture.organizationId, writerEpoch, digest, sourceId,
     JSON.stringify({ kind: "mutation", mutationId: sourceId, operation: "edit" })]);
-  return { ...fixture, current, objects, store, blobId: blob.id, bindingId, checkpointId };
+  const result={ ...fixture, current, objects, store, blobId: blob.id, bindingId, checkpointId };
+  // Historical migration fixtures keep their original schema writer until
+  // migration. Current erasure controls start from a genuinely saved source.
+  if ((await pool.query("SELECT to_regclass('cloud_workspace_final_save_recoveries') AS relation")).rows[0].relation)
+    await saveWorkspaceDeletionGraph(pool,result);
+  return result;
+}
+
+export async function saveWorkspaceDeletionGraph(pool:pg.Pool, fixture: ReadyCloudWorkspaceFixture & {
+  current:{generation:number;engineInstanceId:string;heartbeatToken:string};
+}) {
+  const source={workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,...fixture.current};
+  await sealFinalSaveFixture(pool,source);
+  const intentId=randomUUID();
+  await withSystemTx(pool,async tx=>{
+    await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE",[fixture.organizationId]);
+    await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE",[fixture.workspaceId]);
+    await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
+      VALUES($1::uuid,$2,$3,$4,$5,'delete',$1::text,digest($1::text,'sha256'))`,
+    [intentId,fixture.workspaceId,fixture.organizationId,fixture.current.generation,fixture.userId]);
+  });
+  await commitFinalSaveFixture(pool,source,{intentId,userId:fixture.userId,reason:"before_delete"});
 }
 
 async function seedWorkspaceDeletionActorGraph(pool: pg.Pool, fixture: ReadyCloudWorkspaceFixture) {
@@ -128,7 +150,7 @@ async function seedWorkspaceDeletionActorGraph(pool: pg.Pool, fixture: ReadyClou
 }
 
 async function transferWorkspace(pool: pg.Pool, fixture: ReadyCloudWorkspaceFixture,
-  source: { generation: number; engineInstanceId: string; active: typeof transferActive }) {
+  source: { generation: number; engineInstanceId: string; heartbeatToken:string; active: typeof transferActive }) {
   const releaseOrder = (await pool.query<{ next: number }>(`SELECT (coalesce(max(release_order),0)+1)::int AS next
     FROM cloud_runtime_channel_releases WHERE channel='alpha'`)).rows[0]!.next;
   const generation = source.generation + 1, digit = releaseOrder.toString(16), runtimeId = `r1-${digit.repeat(64)}`;
@@ -158,7 +180,7 @@ async function transferWorkspace(pool: pg.Pool, fixture: ReadyCloudWorkspaceFixt
     installerReceiptSha256: active.installerReceiptSha256, supervisorSessionId: active.supervisorSessionId };
   const enrollment = await service.enroll(claim, { active, controller: source.active, report, rollback: false });
   if (!enrollment) throw new Error("Deletion fixture requires runtime enrollment");
-  await service.register({ ...claim, generation, setupRunId: enrollment.id, executionFence: enrollment.executionFence,
+  const registered=await service.register({ ...claim, generation, setupRunId: enrollment.id, executionFence: enrollment.executionFence,
     engineInstanceId: enrollment.engineInstanceId, token: enrollment.token, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     actorProtocolVersion: 2, agentCustomizationVersion: 3, agentRuntime: { ...report.runtime, profile: "zeros-cloud-worker-v4" } });
   if (!await service.verifyHealth(claim, async challenge => ({ challenge, executionFence: claim.executionFence,
@@ -168,7 +190,7 @@ async function transferWorkspace(pool: pg.Pool, fixture: ReadyCloudWorkspaceFixt
     fence: claim.executionFence, scope: { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
       sourceGeneration: source.generation, candidateGeneration: generation, sourceEngineInstanceId: source.engineInstanceId },
     operation: "activate", outcome: "healthy", active })) throw new Error("Deletion fixture requires a finished runtime transfer");
-  return { generation, engineInstanceId: enrollment.engineInstanceId, active };
+  return { generation, engineInstanceId: enrollment.engineInstanceId, heartbeatToken:registered.heartbeat.token, active };
 }
 
 export async function confirmWorkspaceDeletion(pool: pg.Pool, fixture: ReadyCloudWorkspaceFixture) {

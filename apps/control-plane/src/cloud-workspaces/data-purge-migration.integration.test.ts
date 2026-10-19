@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { withSystemTx } from "../db.js";
 import { planMigrations, runMigrations } from "../migrate.js";
-import { confirmWorkspaceDeletion, seedWorkspaceDeletionGraph } from "./deletion-test-fixtures.js";
+import { confirmWorkspaceDeletion, saveWorkspaceDeletionGraph, seedWorkspaceDeletionGraph } from "./deletion-test-fixtures.js";
 import * as computerWorkspaceSource from "./computer-workspace-source.js";
 import { loadPrePurgeComputerWorkspaceSource } from "./data-purge-legacy-source.test-fixtures.js";
 import { seedPrePurgeActorGraph } from "./data-purge-legacy-actor.test-fixtures.js";
@@ -66,10 +66,16 @@ suite("data-purge expansion on the populated previous schema", () => {
     for (const row of migrated.cloud_workspace_engine_instances) {
       expect(row.value.accepted_work_version).toBeNull();
       delete row.value.accepted_work_version;
+      expect(row.value.final_save_version).toBeNull();
+      delete row.value.final_save_version;
       expect(row.value).toMatchObject({ coordinator_version: null, interactive_revision: 0,
         interactive_frontend_id: null, interactive_ready_until: null });
       for (const key of ["coordinator_version", "interactive_revision", "interactive_frontend_id", "interactive_ready_until"])
         delete row.value[key];
+    }
+    for (const row of migrated.cloud_workspaces) {
+      expect(row.value.accepted_lifecycle_intent_id).toBeNull();
+      delete row.value.accepted_lifecycle_intent_id;
     }
     expect(migrated).toEqual(before);
     expect(await actorCounts()).toEqual(actorTables.map(() => 1));
@@ -82,12 +88,17 @@ suite("data-purge expansion on the populated previous schema", () => {
     // Same INSERT/UPDATE shapes as the deployed setup, local-command and
     // runtime-transfer services: no new columns or options are supplied.
     const after = await seedWorkspaceDeletionGraph(pool);
+    await saveWorkspaceDeletionGraph(pool,old);
     for (const fixture of [old, after]) {
       await pool.query(`INSERT INTO cloud_workspace_compute_rechecks
         (allocation_lease_id,workspace_id,org_id,generation,owner_revision,observed_stopped,requested_sequence)
         VALUES(gen_random_uuid(),$1,$2,1,0,true,1)`, [fixture.workspaceId, fixture.organizationId]);
       await confirmWorkspaceDeletion(pool, fixture);
-      await new CloudWorkspaceOperationsWorker(pool, fixture.objects, { workerId: "expand-purge-fixture" }).runOnce();
+      const worker=new CloudWorkspaceOperationsWorker(pool,fixture.objects,{workerId:"expand-purge-fixture"});
+      const purge=worker["purgeDeletionRecords"].bind(worker);let purgeError:unknown;
+      worker["purgeDeletionRecords"]=async job=>{try{await purge(job);}catch(error){purgeError=error;throw error;}};
+      await worker.runOnce();
+      if(purgeError)throw purgeError;
       expect((await pool.query("SELECT state FROM workspace_deletion_jobs WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state)
         .toBe("succeeded");
       expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_compute_rechecks WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].count)

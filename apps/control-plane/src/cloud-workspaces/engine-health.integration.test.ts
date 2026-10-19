@@ -93,7 +93,7 @@ suite("cloud engine liveness and compute convergence", () => {
     };
   }
   it.each(["expired", "revoked", "missing"])(
-    "stops a formerly ready allocation with an %s engine without replay or a fabricated checkpoint",
+    "retains an unsaved allocation with an %s engine for operator recovery without fabricating a checkpoint",
     async (kind) => {
       await pool.query(
         "UPDATE cloud_workspace_provider_bindings SET provider_resource_id='engine-health-fixture',last_observed_at=NULL WHERE workspace_id=$1",
@@ -123,15 +123,15 @@ suite("cloud engine liveness and compute convergence", () => {
             [f.workspaceId],
           )
         ).rows[0],
-      ).toEqual({ status: "stopped", desired_state: "stopped" });
-      expect(provider.stop).toHaveBeenCalledOnce();
+      ).toEqual({ status: "stopping", desired_state: "stopped" });
+      expect(provider.stop).not.toHaveBeenCalled();
       expect(provider.create).not.toHaveBeenCalled();
       expect(provider.start).not.toHaveBeenCalled();
       expect(provider.delete).not.toHaveBeenCalled();
       expect(
         (
           await pool.query(
-            "SELECT count(*)::int AS n FROM workspace_checkpoint_requests WHERE workspace_id=$1",
+            "SELECT count(*)::int AS n FROM workspace_checkpoints WHERE workspace_id=$1",
             [f.workspaceId],
           )
         ).rows[0].n,
@@ -144,8 +144,10 @@ suite("cloud engine liveness and compute convergence", () => {
           )
         ).rows[0].n,
       ).toBe(1);
+      expect((await pool.query(`SELECT state,checkpoint_id FROM cloud_workspace_final_save_recoveries
+        WHERE workspace_id=$1`,[f.workspaceId])).rows).toEqual([{state:"blocked",checkpoint_id:null}]);
       await tick();
-      expect(provider.stop).toHaveBeenCalledOnce();
+      expect(provider.stop).not.toHaveBeenCalled();
     },
   );
   it("preserves a healthy engine and its paid work", async () => {
@@ -165,7 +167,7 @@ suite("cloud engine liveness and compute convergence", () => {
       ).rows[0],
     ).toEqual({ status: "ready", desired_state: "running" });
   });
-  it("stops an unavailable customer-provider engine when the managed default is Boat", async () => {
+  it("holds an unsaved unavailable customer-provider engine when the managed default is Boat", async () => {
     await pool.query(
       "UPDATE cloud_workspace_provider_bindings SET provider_resource_id='engine-health-fixture',last_observed_at=NULL WHERE workspace_id=$1",
       [f.workspaceId],
@@ -176,7 +178,7 @@ suite("cloud engine liveness and compute convergence", () => {
     );
     const { provider, tick } = worker(true);
     await tick();
-    expect(provider.stop).toHaveBeenCalledOnce();
+    expect(provider.stop).not.toHaveBeenCalled();
     expect(
       (
         await pool.query(
