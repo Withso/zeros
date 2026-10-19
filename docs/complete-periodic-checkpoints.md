@@ -22,6 +22,20 @@ durability confirmation throws without erasing a possibly committed pending
 attempt. Original attempts, deadlines and source counters cannot be replaced
 or rolled backwards. Aliased or unsupported SQLite sidecars refuse access.
 
+The Linux adapter also proves the independently opened SQLite reader. Before
+accepting state, it requires exactly one new read/write FD with the retained
+original's inode, mount and private metadata, then binds it to SQLite's native
+RESERVED-byte lock through a bounded `BEGIN IMMEDIATE`/`ROLLBACK` probe. Linux
+`fdinfo` associates that lock with its owning open file description. A cached
+SQLite FD plus an unrelated new FD therefore cannot masquerade as the reader.
+The probe changes no rows. Missing, reused, replaced or ambiguous descriptors,
+unsupported lock evidence and another simultaneous native reservation refuse;
+every probe exit rolls back and failed opening closes its owned references.
+The retained original and native descriptor identities are rechecked for
+subsequent operations. A pathname, `database_list` or `/proc/self/fd` alias by
+itself is insufficient. This driver/kernel boundary needs native runtime
+qualification before enrollment; unsupported behavior has no permissive fallback.
+
 The journal belongs to the workspace trust domain. It cannot prove root/Host
 retirement or manufacture a private-store ACK. An unknown pending attempt
 needs exact external reconciliation before another coordinator can be used.
