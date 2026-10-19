@@ -32,7 +32,7 @@ export class CloudRuntimeStagingWorker {
   constructor(private readonly options: {
     store: RuntimeStagingStore; transitions: RuntimeStagingTransitions;
     artifacts: Pick<RuntimeArtifactStore, "presignGet">;
-    run(resourceId: string, input: StageInput, signal: AbortSignal): Promise<RuntimeUpdateResult>;
+    run(resourceId: string, input: StageInput, signal: AbortSignal, claim: CloudRuntimeTransitionClaim): Promise<RuntimeUpdateResult>;
     workerId?: string; intervalMs?: number; concurrency?: number;
     logger?: Pick<Console, "warn">;
   }) {
@@ -113,6 +113,7 @@ export class CloudRuntimeStagingWorker {
       if (this.stopped || abort.signal.aborted) return;
       const next = await transitions.reconcile(claim);
       if (next !== "stage" && next !== "activate") return;
+      await store.prepareRestore?.(claim);
       plan = await store.read(claim);
       if (!plan) { await transitions.cancelStaging(claim); return; }
       if (plan.phase === "staged") return;
@@ -133,7 +134,7 @@ export class CloudRuntimeStagingWorker {
       if (abort.signal.aborted || this.stopped) return;
       const input: StageInput = { ...plan.input, expiresAt: new Date(expiresAt).toISOString(),
         install: Buffer.from(JSON.stringify(install)).toString("base64url") };
-      const result = await this.options.run(plan.resourceId, input, abort.signal);
+      const result = await this.options.run(plan.resourceId, input, abort.signal, claim);
       if (abort.signal.aborted || this.stopped) return;
       if (!samePlan(plan, await store.read(claim))) { invalid = true; return; }
       if (abort.signal.aborted || this.stopped) return;

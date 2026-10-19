@@ -27,6 +27,9 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
 import { reportCloudEngineExit } from "./engine-exit.js";
+import { confirmWorkspaceDeletion } from "./deletion-test-fixtures.js";
+import { DatabaseCloudWorkspaceBlobService, MemoryCloudWorkspaceObjectStore } from "./object-store.js";
+import { CloudWorkspaceOperationsWorker } from "./operations.js";
 
 (process.env.TEST_DATABASE_URL ? describe : describe.skip)("retained cloud runtime transitions", () => {
   let pool: pg.Pool;
@@ -36,6 +39,9 @@ import { reportCloudEngineExit } from "./engine-exit.js";
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query(`INSERT INTO cloud_runtime_base_contracts(base_compatibility_id,contract_sha256,contract)
+      VALUES($1,$2,'{"schema":"zeros.base-compatibility/v1","runtimeRollbackCacheVersion":1}')`,
+    [runtimeWitness.baseCompatibilityId, "b".repeat(64)]);
     fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: true });
     await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     await pool.query(`INSERT INTO cloud_workspace_setup_attestations (
@@ -99,6 +105,110 @@ import { reportCloudEngineExit } from "./engine-exit.js";
     expect(await service.activate(claim,{controller:sourceActive(),policy:{id:"zeros_test_live_handoff",async authorize() {return true;} }})).toBe(true);
     return claim;
   }
+
+  describe("retained payload restoration", () => {
+    const policy = { id: "zeros_test_restore", async authorize() { return true; } };
+    async function retained(options: { expired?: boolean; staged?: boolean; foreignAllocation?: boolean; expiresInSeconds?: number } = {}) {
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='bx_restore' WHERE workspace_id=$1", [fixture.workspaceId]);
+      const claim = await claimed();
+      await qualifyTransfer();
+      if (options.staged) expect(await service.staged(claim)).toBe(true);
+      const runtime = (await pool.query("SELECT target_descriptor FROM cloud_workspace_runtime_transitions WHERE transition_id=$1", [claim.transitionId])).rows[0].target_descriptor;
+      const receipt = Buffer.from(JSON.stringify({ schema: "zeros.runtime-install-receipt/v1", runtimeId: runtime.runtimeId,
+        manifestSha256: runtime.manifestSha256, archiveSha256: runtime.archiveSha256, expandedBytes: runtime.expandedBytes,
+        baseCompatibilityId: runtimeWitness.baseCompatibilityId, bootstrapVersion: 1, fileCount: 1, installedAt: "2026-10-01T00:00:00Z" }));
+      const id = randomUUID(), intentId = randomUUID(), receiptSha256 = createHash("sha256").update(receipt).digest("hex");
+      const proof = { runtime, baseCompatibilityId: runtimeWitness.baseCompatibilityId, currentRuntimeId: runtimeWitness.runtimeId,
+        bootId: runtimeWitness.bootId, diskEpoch: 3, installerReceipt: receipt.toString("base64url"), installerReceiptSha256: receiptSha256,
+        scope: { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+          providerResourceId: options.foreignAllocation ? "bx_other" : "bx_restore", authorityEpoch: "1", intentId } };
+      await pool.query(`INSERT INTO cloud_workspace_runtime_rollback_refs(id,workspace_id,org_id,generation,provider_resource_id,
+        intent_id,runtime_id,base_compatibility_id,proof) VALUES($1,$2,$3,1,$8,$4,$5,$6,$7)`,
+      [id,fixture.workspaceId,fixture.organizationId,intentId,runtime.runtimeId,runtimeWitness.baseCompatibilityId,JSON.stringify(proof),proof.scope.providerResourceId]);
+      const row = (await pool.query<{ deadline_at: Date }>(`INSERT INTO cloud_workspace_runtime_rollback_restores
+        (transition_id,workspace_id,org_id,retention_id,created_at,deadline_at)
+        VALUES($1,$2,$3,$4,statement_timestamp()-($5::int+240)*interval '1 second',
+          statement_timestamp()-$5::int*interval '1 second') RETURNING deadline_at`,
+      [claim.transitionId,fixture.workspaceId,fixture.organizationId,id,options.expired ? 1 : -(options.expiresInSeconds ?? 120)])).rows[0]!;
+      return { claim, deadline: row.deadline_at, receiptSha256, retentionId: id, proof };
+    }
+    const sourceState = async () => (await pool.query("SELECT state,revoked_at FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0];
+
+    it("rejects a late stage result without retiring the serving source", async () => {
+      const f = await retained({ expired: true });
+      expect(await service.staged(f.claim)).toBe(false);
+      expect(await sourceState()).toEqual({ state: "ready", revoked_at: null });
+      expect(await service.reconcile(f.claim)).toBe("cancelled");
+    });
+    it("rejects activation after the original restore budget expires", async () => {
+      const f = await retained({ expired: true, staged: true });
+      expect(await service.activate(f.claim, { controller: sourceActive(), policy })).toBe(false);
+      expect(await sourceState()).toEqual({ state: "ready", revoked_at: null });
+    });
+    it("rechecks the restore deadline after an awaited activation policy", async () => {
+      const f = await retained({ expiresInSeconds: 2 });
+      expect(await service.staged(f.claim)).toBe(true);
+      let called = false;
+      expect(await service.activate(f.claim, { controller: sourceActive(), policy: { id: policy.id, async authorize(tx) {
+        called = true;
+        await tx.query("SELECT pg_sleep(greatest(0,extract(epoch FROM $1::timestamptz-clock_timestamp()))+0.01)", [f.deadline]);
+        return true;
+      } } })).toBe(false);
+      expect(called).toBe(true);
+      expect(await sourceState()).toEqual({ state: "ready", revoked_at: null });
+    });
+    it("refuses restoration proof retained for another allocation", async () => {
+      const f = await retained({ foreignAllocation: true });
+      expect(await service.staged(f.claim)).toBe(false);
+      expect(await sourceState()).toEqual({ state: "ready", revoked_at: null });
+    });
+    it("includes fetch time in activation and enrollment instead of granting another budget", async () => {
+      const f = await retained();
+      expect(await service.staged(f.claim)).toBe(true);
+      expect(await service.activate(f.claim, { controller: sourceActive(), policy })).toBe(true);
+      expect((await pool.query("SELECT activation_deadline_at FROM cloud_workspace_runtime_transitions WHERE transition_id=$1", [f.claim.transitionId])).rows[0].activation_deadline_at)
+        .toEqual(f.deadline);
+      const active = { ...targetActive(), installerReceiptSha256: f.receiptSha256 };
+      const enrollment = await service.enroll(f.claim, { active, controller: sourceActive(), report: report(active), rollback: false });
+      expect(enrollment).not.toBeNull();
+      expect(enrollment!.expiresAt.getTime()).toBeLessThanOrEqual(f.deadline.getTime());
+    });
+    it("rejects a reminted target receipt while accepting the exact retained receipt", async () => {
+      const f = await retained();
+      expect(await service.staged(f.claim)).toBe(true);
+      expect(await service.activate(f.claim, { controller: sourceActive(), policy })).toBe(true);
+      const changed = targetActive();
+      expect(await service.enroll(f.claim, { active: changed, controller: sourceActive(), report: report(changed), rollback: false }) === null).toBe(true);
+      const original = { ...changed, installerReceiptSha256: f.receiptSha256 };
+      expect(await service.enroll(f.claim, { active: original, controller: sourceActive(), report: report(original), rollback: false })).not.toBeNull();
+    });
+    it("preserves the ordinary rollback to the still-local serving source", async () => {
+      const f = await retained();
+      await service.staged(f.claim);
+      expect(await service.activate(f.claim, { controller: sourceActive(), policy })).toBe(true);
+      expect(await service.beginRollback(f.claim)).toBe(true);
+      const original = { ...sourceActive(), supervisorSessionId: randomUUID() };
+      expect(await service.enroll(f.claim, { active: original, controller: sourceActive(), report: report(original), rollback: true })).not.toBeNull();
+    });
+    it("purges restore metadata only for the deleted workspace and retains the shared archive", async () => {
+      const f = await retained();
+      const kept = await seedReadyCloudWorkspace(pool);
+      const proof = { ...f.proof, scope: { ...f.proof.scope, workspaceId: kept.workspaceId, organizationId: kept.organizationId, intentId: randomUUID() } };
+      const other = (await pool.query<{ id: string }>(`INSERT INTO cloud_workspace_runtime_rollback_refs
+        (workspace_id,org_id,generation,provider_resource_id,intent_id,runtime_id,base_compatibility_id,proof)
+        VALUES($1,$2,1,$3,$4,$5,$6,$7) RETURNING id`, [kept.workspaceId,kept.organizationId,proof.scope.providerResourceId,
+        proof.scope.intentId,proof.runtime.runtimeId,proof.baseCompatibilityId,JSON.stringify(proof)])).rows[0]!;
+      await confirmWorkspaceDeletion(pool, fixture);
+      const objects = new DatabaseCloudWorkspaceBlobService({ pool, objectStore: new MemoryCloudWorkspaceObjectStore(),
+        encryptionKeyV1: randomBytes(32).toString("base64url"), workosEnabled: false });
+      await new CloudWorkspaceOperationsWorker(pool, objects, { workerId: "retention-purge" }).runOnce();
+      expect((await pool.query("SELECT state FROM workspace_deletion_jobs WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state).toBe("succeeded");
+      expect((await pool.query("SELECT id FROM cloud_workspace_runtime_rollback_refs WHERE workspace_id=$1", [fixture.workspaceId])).rows).toEqual([]);
+      expect((await pool.query("SELECT transition_id FROM cloud_workspace_runtime_rollback_restores WHERE workspace_id=$1", [fixture.workspaceId])).rows).toEqual([]);
+      expect((await pool.query("SELECT id FROM cloud_workspace_runtime_rollback_refs WHERE workspace_id=$1", [kept.workspaceId])).rows).toEqual([other]);
+      expect((await pool.query("SELECT runtime_id FROM cloud_runtime_bundles WHERE runtime_id=$1", [proof.runtime.runtimeId])).rowCount).toBe(1);
+    });
+  });
 
   describe("resident handoff journal", () => {
     async function sourceLocalBoot(){

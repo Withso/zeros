@@ -852,6 +852,7 @@ describe("repository layout contracts", () => {
       "runtime-bundles.md",
       "runtime-images.md",
       "runtime-lifecycle-acceptance.md",
+      "runtime-rollback-cache.md",
       "runtime-skew-gate.md",
       "security.md",
       "template-forks.md",

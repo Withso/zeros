@@ -9,6 +9,10 @@ pins runtimes at creation, admits installation, and binds redemption,
 registration and readiness to that pin. The base installer, qualification workers
 and generation upgrade/recovery services have their own implementation boundaries.
 
+[Retained runtime payloads](runtime-rollback-cache.md) describes the qualified
+base capability for keeping previous runtime bytes outside a saved VM while
+preserving exact receipts, object retention and bounded explicit restoration.
+
 The [version-skew gate](runtime-skew-gate.md) pins historical runtime/desktop
 source contracts for required CI testing and documents pin advancement and
 cohort retirement. It verifies source compatibility; released-engine qualification remains

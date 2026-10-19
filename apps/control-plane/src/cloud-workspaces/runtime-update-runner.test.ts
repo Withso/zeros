@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { createRuntimeUpdateConversation, runtimeUpdateCommand } from "./runtime-update-runner.js";
+import { createRuntimeUpdateConversation, runtimeUpdateCommand, runRuntimeUpdate } from "./runtime-update-runner.js";
+import * as pinnedSsh from "./boat-pinned-ssh.js";
 
 const source = {
   schema: "zeros.active-runtime/v1" as const, runtimeId: `r1-${"a".repeat(64)}`, manifestSha256: "a".repeat(64),
@@ -42,6 +43,72 @@ const resident = { hostId: handoff.hostId, workspaceId: handoff.workspaceId, org
   scope: `${source.cgroupRoot}/engine-workload-${handoff.hostId}`, fence: 1, engineId: handoff.engineInstanceId, generation: 1 };
 const receipt = { ...handoff, version: 1, phase: "fenced", activityRevision: 7 };
 const detached = { ...resident, fence: 2, engineId: null, generation: null };
+
+describe("explicit off-VM runtime preparation", () => {
+  const restore = { retentionId: "99999999-9999-4999-8999-999999999999", installerReceiptSha256: "9".repeat(64),
+    deadline: "2026-10-06T00:04:00Z" };
+  function stageRequest() {
+    const { target: _target, ...input } = request;
+    return { ...input, operation: "stage" as const, restore,
+      install: Buffer.from(JSON.stringify({ schema: "zeros.runtime-install/v1", purpose: "qualification", runtime: target,
+        artifact: { url: "https://objects.example.test/exact-archive", expiresAt: request.expiresAt } })).toString("base64url") };
+  }
+  it("bounds the restore transport by the original preparation deadline", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const ssh = vi.spyOn(pinnedSsh, "executeBoatPinnedSsh").mockImplementation(async input => {
+      expect(input.timeoutSeconds).toBeLessThanOrEqual(240);
+      await input.onFrame!(frame("authorize_restore"));
+      await input.onFrame!(frame("authorize_restore"));
+      await input.onFrame!(JSON.stringify({ ...scope, operation: "stage", outcome: "staged" }));
+      return { exitCode: 0, outputTruncated: false, stdout: "", stderr: "" };
+    });
+    try {
+      const result = await runRuntimeUpdate("bx_restore", stageRequest(), { ...fixture().handlers, authorizeRestore: async () => true },
+        { client: {}, maxOutputBytes: 64 * 1024 } as Parameters<typeof runRuntimeUpdate>[3], new AbortController().signal);
+      expect(result.outcome).toBe("staged");
+    } finally { ssh.mockRestore(); clock.mockRestore(); }
+  });
+  it("requires fresh pre- and post-fetch checks before accepting a restored stage", async () => {
+    const handlers = { ...fixture().handlers, authorizeRestore: vi.fn(async () => true) };
+    const dialog = createRuntimeUpdateConversation(stageRequest(), handlers, () => now);
+    const done = JSON.stringify({ ...scope, operation: "stage", outcome: "staged" });
+    await expect(dialog.onFrame(done)).rejects.toThrow();
+    expect(JSON.parse((await dialog.onFrame(frame("authorize_restore")))!)).toMatchObject({ allow: true });
+    await expect(dialog.onFrame(done)).rejects.toThrow();
+    await dialog.onFrame(frame("authorize_restore"));
+    await dialog.onFrame(done);
+    expect(dialog.result().outcome).toBe("staged");
+    expect(handlers.authorize).not.toHaveBeenCalled();
+    expect(handlers.enroll).not.toHaveBeenCalled();
+  });
+  it.each(["authorize", "enroll", "health"] as const)("does not return a late %s grant beyond the restore deadline", async phase => {
+    let clock = now;
+    const handlers = fixture().handlers;
+    const dialog = createRuntimeUpdateConversation({ ...request, restore: { ...restore, installerReceiptSha256: active.installerReceiptSha256 } }, handlers, () => clock);
+    if (phase !== "authorize") await dialog.onFrame(frame("authorize", { controller: source }));
+    if (phase === "health") await dialog.onFrame(frame("enroll", { active, controller: source, report }));
+    if (phase === "enroll") handlers.enroll.mockImplementation(async () => {
+      clock = Date.parse(restore.deadline); return { privateFixture: "memory-only-canary" };
+    });
+    else handlers[phase].mockImplementation(async () => { clock = Date.parse(restore.deadline); return true; });
+    const fields = phase === "authorize" ? { controller: source } : phase === "enroll" ? { active, controller: source, report } : { active };
+    await expect(dialog.onFrame(frame(phase, fields))).rejects.toThrow("Runtime update response is invalid");
+  });
+  it("keeps missing restore authority and late results closed", async () => {
+    const denied = createRuntimeUpdateConversation(stageRequest(), fixture().handlers, () => now);
+    expect(JSON.parse((await denied.onFrame(frame("authorize_restore")))!)).toMatchObject({ allow: false });
+    let clock = now;
+    const handlers = { ...fixture().handlers, authorizeRestore: vi.fn(async () => { clock += 240_000; return true; }) };
+    const late = createRuntimeUpdateConversation(stageRequest(), handlers, () => clock);
+    await expect(late.onFrame(frame("authorize_restore"))).rejects.toThrow();
+  });
+  it("a restored target must enroll with the retained receipt", async () => {
+    const f = fixture(), dialog = createRuntimeUpdateConversation({ ...request, restore }, f.handlers, () => now);
+    await dialog.onFrame(frame("authorize", { controller: source }));
+    await expect(dialog.onFrame(frame("enroll", { active, controller: source, report }))).rejects.toThrow();
+    expect(f.handlers.enroll).not.toHaveBeenCalled();
+  });
+});
 
 describe("resident update conversation", () => {
   function residentFixture() {

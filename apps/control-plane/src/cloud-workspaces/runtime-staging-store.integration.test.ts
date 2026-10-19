@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { withSystemTx } from "../db.js";
@@ -17,7 +17,11 @@ import { notifyRuntimeStaging } from "./runtime-staging-notification.js";
   afterAll(async () => pool.end());
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query(`INSERT INTO cloud_runtime_base_contracts(base_compatibility_id,contract_sha256,contract)
+      VALUES($1,$2,'{"schema":"zeros.base-compatibility/v1","runtimeRollbackCacheVersion":1}')`,
+    [`bc1-${"b".repeat(64)}`, "b".repeat(64)]);
     fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: true });
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='bx_staging' WHERE workspace_id=$1", [fixture.workspaceId]);
     await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     await pool.query(`INSERT INTO cloud_workspace_setup_attestations (
       setup_run_id,workspace_id,generation,org_id,execution_fence,image_ref,image_source_commit,
@@ -77,6 +81,34 @@ import { notifyRuntimeStaging } from "./runtime-staging-notification.js";
       expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0])
         .toEqual({ state: "ready" });
     } finally { await stop(); }
+  });
+
+  it("gives an evicted target one durable preparation deadline while preserving the serving source", async () => {
+    const owned = await claim(), before = await store.read(owned);
+    expect(before).not.toBeNull();
+    const target = before!.target, receipt = Buffer.from(JSON.stringify({ schema: "zeros.runtime-install-receipt/v1",
+      runtimeId: target.runtimeId, manifestSha256: target.manifestSha256, archiveSha256: target.archiveSha256,
+      baseCompatibilityId: before!.input.source.baseCompatibilityId, bootstrapVersion: 1, expandedBytes: target.expandedBytes,
+      fileCount: 1, installedAt: "2026-10-01T00:00:00Z" }));
+    const resourceId = before!.resourceId;
+    const id = randomUUID(), intent = randomUUID();
+    const proof = { runtime: target, baseCompatibilityId: before!.input.source.baseCompatibilityId,
+      currentRuntimeId: before!.input.source.runtimeId, bootId: before!.input.source.bootId, diskEpoch: 3,
+      scope: { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+        providerResourceId: resourceId, authorityEpoch: "1", intentId: intent },
+      installerReceipt: receipt.toString("base64url"), installerReceiptSha256: createHash("sha256").update(receipt).digest("hex") };
+    await pool.query(`INSERT INTO cloud_workspace_runtime_rollback_refs(id,workspace_id,org_id,generation,provider_resource_id,intent_id,
+      runtime_id,base_compatibility_id,proof) VALUES($1,$2,$3,1,$4,$5,$6,$7,$8)`,
+    [id, fixture.workspaceId, fixture.organizationId, resourceId, intent, target.runtimeId, proof.baseCompatibilityId, JSON.stringify(proof)]);
+    await store.prepareRestore(owned);
+    const plan = await store.read(owned);
+    expect(plan!.input.restore).toMatchObject({ retentionId: id, installerReceiptSha256: proof.installerReceiptSha256 });
+    expect(plan!.deadline).toBeLessThanOrEqual(Date.now() + 240_000);
+    await store.prepareRestore(owned);
+    expect((await store.read(owned))!.input.restore).toEqual(plan!.input.restore);
+    expect((await pool.query("SELECT state,revoked_at FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0])
+      .toEqual({ state: "ready", revoked_at: null });
+    await expect(pool.query("UPDATE cloud_workspace_runtime_rollback_restores SET deadline_at=deadline_at+interval '1 second' WHERE transition_id=$1", [owned.transitionId])).rejects.toThrow();
   });
 
   it("recovers an expired offer under a fresh idempotency key without looping inside its retry window", async () => {
