@@ -37,6 +37,32 @@ Installed ELF objects must be x86-64 and require no GLIBC newer than 2.39.
 The receipt records GLIBCXX/CXXABI and library needs for base qualification.
 It does not qualify the production VM boundary, workload custody, or the base's OS libraries.
 
+## Cloud source and package closure
+
+The cloud builder inventories every retained engine, Host, setup and qualification
+source entry with esbuild before staging dependencies. The resulting
+`worker/runtime-source-closure.json` records relative source inputs, imports and
+package roots. Engine sources and standalone child helpers remain available to
+the existing source-mode qualification loader; desktop renderer source and engine
+source tests are excluded. Local desktop builds and their dependency graph are unchanged.
+
+Named native/CLI lookups and language servers have explicit roots in
+`source-closure.ts`. Each selected package keeps its complete declared dependency,
+optional and peer closure, package data, declarations, executable shims and notices,
+subject to the existing platform and per-package exclusions. A missing required
+edge still fails the build. Do not replace this with a blanket extension filter:
+language servers and late imports use files a JavaScript bundler cannot discover.
+
+New builds cap the combined `worker/node_modules`, `worker/apps`,
+`worker/packages`, `worker/dist-engine` and source-closure inventory at **1,000 MiB**
+and **23,000 entries**. These limits leave headroom above the measured candidate;
+a changed native payload or required dependency needs a measured budget review.
+They do not change historical archive verification limits or trim files to pass.
+
+The normal engine bundle, offline source/native/command probes, archive hashes,
+base attestation and live qualification remain required. A smaller package graph
+is a byte reduction, not evidence of a particular provider restore time.
+
 ## Bundled Git LFS and Design fonts
 
 `system-assets.ts` acquires Git LFS 3.7.1 from Ubuntu resolute and eight font

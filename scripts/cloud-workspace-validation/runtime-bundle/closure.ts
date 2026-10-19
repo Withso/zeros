@@ -249,7 +249,7 @@ function omitPackageFile(name: string, relative: string): boolean {
 export async function stageDependencyClosure(
   source: string,
   runtime: string,
-  options: { harnessRoots?: string[] } = {},
+  options: { harnessRoots?: string[]; productionRoots?: string[] } = {},
 ): Promise<DependencyInventoryEntry[]> {
   source = await realpath(source);
   const worker = path.join(runtime, "worker");
@@ -352,12 +352,13 @@ export async function stageDependencyClosure(
       await edge(name, physical, optional);
   }
   const roots = new Map<string, boolean>();
-  for (const name of Object.keys(root.dependencies ?? {}))
-    roots.set(name, false);
+  for (const name of options.productionRoots ?? Object.keys(root.dependencies ?? {}))
+    roots.set(name, Object.hasOwn(root.optionalDependencies ?? {}, name));
   for (const name of options.harnessRoots ?? HARNESS_ROOTS)
     roots.set(name, false);
-  for (const name of Object.keys(root.optionalDependencies ?? {}))
-    roots.set(name, true);
+  if (!options.productionRoots)
+    for (const name of Object.keys(root.optionalDependencies ?? {}))
+      roots.set(name, true);
   for (const [name, optional] of [...roots].sort(([a], [b]) => byteOrder(a, b)))
     await edge(name, source, optional);
 
@@ -438,13 +439,18 @@ export async function stageDependencyClosure(
 export async function stageSources(
   source: string,
   runtime: string,
+  options: { sourceFiles?: string[] } = {},
 ): Promise<void> {
   // Cloud's fixed supervisor import must survive source staging as a regular
   // module; following a source alias would hide a missing entry dependency.
   for (const relative of CLOUD_HOST_MODULES)
     check((await lstat(path.join(source, relative))).isFile(), "host_assets");
   const worker = path.join(runtime, "worker");
-  for (const relative of [...SOURCE_SLICES, ...SOURCE_FILES]) {
+  const slices = options.sourceFiles
+    ? SOURCE_SLICES.filter(slice => slice !== "apps/desktop/src")
+    : SOURCE_SLICES;
+  for (const relative of new Set([...slices, ...SOURCE_FILES, ...(options.sourceFiles ?? [])])) {
+    check(validPath(relative), "source_path");
     await copyPayload(
       path.join(source, relative),
       path.join(worker, relative),

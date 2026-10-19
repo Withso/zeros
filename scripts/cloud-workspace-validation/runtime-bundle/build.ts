@@ -42,6 +42,7 @@ import {
 } from "./toolchain";
 import { verifyBundleDirectory } from "./verify";
 import { stageRuntimeSystemAssets } from "./system-assets";
+import { enforceCloudSourceBudget, planCloudSourceClosure } from "./source-closure";
 
 export function buildPathPrefixes(paths: {
   work: string;
@@ -312,8 +313,14 @@ export async function buildRuntimeBundle(options: {
     const runtime = path.join(work, "runtime");
     await mkdir(runtime);
     const packages = await stage("stage_payload", async () => {
-      await stageSources(checkout, runtime);
-      const packages = await stageDependencyClosure(checkout, runtime);
+      const closure = await planCloudSourceClosure(checkout);
+      await stageSources(checkout, runtime, { sourceFiles: closure.sourceFiles });
+      const packages = await stageDependencyClosure(checkout, runtime, {
+        productionRoots: closure.dependencyRoots, harnessRoots: [],
+      });
+      await writeFile(path.join(runtime, "worker/runtime-source-closure.json"), canonicalJson(closure), {
+        mode: 0o444, flag: "wx",
+      });
       for (const library of ["protocol", "design-core", "design-web"]) {
         check(
           packages.some((entry) => entry.path === `worker/packages/${library}`),
@@ -399,6 +406,7 @@ export async function buildRuntimeBundle(options: {
     const entries = await stage("inventory_payload", () =>
       inventoryTree(runtime),
     );
+    await stage("source_closure_budget", async () => enforceCloudSourceBudget(entries));
     const nativeRequirements = await stage("verify_abi", () =>
       inspectNativeRequirements(runtime, entries, env),
     );
