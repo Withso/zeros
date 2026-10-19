@@ -12,6 +12,10 @@
 
 ## Act
 
+- **Database fixture disk pressure:** check free space and inodes after ENOSPC
+  before interpreting downstream failures. Reuse the worker's Postgres instance;
+  stop obsolete disposable clusters before removing their data directories.
+  Preserve the interrupted run as environment evidence, then rerun the gates.
 - **Git fixture isolation:** before any Git-bearing check, remove `GIT_DIR`,
   `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
   `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR` and

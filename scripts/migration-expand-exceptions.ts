@@ -91,6 +91,17 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
       "REVOKE ALL ON FUNCTION cloud_accepted_work_key_live(text) FROM PUBLIC;",
     ],
   },
+  "0169_cloud_compute_observation_rechecks.sql": {
+    // This runtime trigger purges only new scheduling data at the existing
+    // workspace erasure boundary. It neither deletes during expansion nor
+    // changes retention of any pre-existing table.
+    "new-scheduling-purge": [`CREATE FUNCTION purge_cloud_compute_rechecks() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+  DELETE FROM cloud_workspace_compute_rechecks WHERE workspace_id=NEW.id AND org_id=NEW.org_id;
+  RETURN NEW;
+END $$;`],
+  },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate

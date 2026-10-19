@@ -104,6 +104,11 @@
    reservation, generation and claim. Preserve existing prepaid runway only;
    never replay provider I/O or ambiguous funding. Keep monotonic DB-time bounds,
    closed throw sites, deadline stops and permanent-corruption controls covered.
+   For observation-driven rechecks, assert both durable-job and domain-claim
+   eligibility. Hold the lease row and provider I/O separately; preserve
+   requests after the claim snapshot, retry floors and independent meter lag.
+   Pin allocation identity before I/O, including same-resource lease replacement.
+   An enqueue or SKIP LOCKED write alone does not prove durable scheduling.
    For renewal telemetry, test real success, refusal, concurrency and retirement
    paths. Use a separate monotonic clock, closed labels and bounded aggregates;
    never let logging alter authority outcomes or add idle timers. State exactly

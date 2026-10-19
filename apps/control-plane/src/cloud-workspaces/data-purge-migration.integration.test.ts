@@ -83,10 +83,15 @@ suite("data-purge expansion on the populated previous schema", () => {
     // runtime-transfer services: no new columns or options are supplied.
     const after = await seedWorkspaceDeletionGraph(pool);
     for (const fixture of [old, after]) {
+      await pool.query(`INSERT INTO cloud_workspace_compute_rechecks
+        (allocation_lease_id,workspace_id,org_id,generation,owner_revision,observed_stopped,requested_sequence)
+        VALUES(gen_random_uuid(),$1,$2,1,0,true,1)`, [fixture.workspaceId, fixture.organizationId]);
       await confirmWorkspaceDeletion(pool, fixture);
       await new CloudWorkspaceOperationsWorker(pool, fixture.objects, { workerId: "expand-purge-fixture" }).runOnce();
       expect((await pool.query("SELECT state FROM workspace_deletion_jobs WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state)
         .toBe("succeeded");
+      expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_compute_rechecks WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].count)
+        .toBe(0);
     }
   }, 30_000);
 });
