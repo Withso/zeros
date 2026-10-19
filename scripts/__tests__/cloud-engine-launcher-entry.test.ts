@@ -4,6 +4,14 @@ import { launchCloudEngineEntry } from "../cloud-workspace-validation/sandbox/cl
 const runtime = { profile: "v4", cgroupRoot: "/sys/fs/cgroup/system.slice/zeros-host.service" };
 
 describe("cloud engine launcher entries", () => {
+  it("admits only the fixed bounded host boot check", async () => {
+    const launch = vi.fn(async () => 0), enterHost = vi.fn();
+    await expect(launchCloudEngineEntry(["--host-boot-check", "--budget-ms", "1000"], { launch, enterHost, resolveRuntime: () => runtime })).resolves.toBe(0);
+    expect(enterHost).toHaveBeenCalledWith(runtime);
+    expect(launch).toHaveBeenCalledWith({ runtime, operation: "boot-check", bootBudgetMs: 1000 });
+    for (const budget of ["0", "5001", "01", "NaN", "-1"])
+      expect(launchCloudEngineEntry(["--host-boot-check", "--budget-ms", budget], { launch, enterHost })).toBeNull();
+  });
   it("selects performance only for the fixed host qualification entry", async () => {
     const launch=vi.fn(async()=>0), enterHost=vi.fn();
     await expect(launchCloudEngineEntry(["--host-qualify", "--performance"], { launch, enterHost, resolveRuntime:()=>runtime })).resolves.toBe(0);

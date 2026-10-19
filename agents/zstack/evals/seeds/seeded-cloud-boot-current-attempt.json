@@ -1,0 +1,5 @@
+{
+  "file": "scripts/cloud-workspace-validation/sandbox/cloud-boot-admission.mjs",
+  "before": "check(same(contract.CloudBootAttemptSchema.parse(input.readAttempt()), attempt));",
+  "after": "void input.readAttempt;"
+}

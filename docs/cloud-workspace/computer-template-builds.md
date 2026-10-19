@@ -62,10 +62,58 @@ identities remain available for cleanup until that erasure.
 
 This slice has no production writer or selector. Creates and wakes still run
 full qualification, and Local and organization-local workspaces are unchanged.
-Activation requires separately reviewed build production, fresh per-boot
-integrity/identity/custody and single-use proof checks, final admission/revocation
-wiring, and exact runtime/base qualification. It does not enable agent runners
-or detached turns.
+Activation requires separately reviewed build production and base verification,
+final admission/revocation wiring, and exact runtime/base qualification. It does
+not enable agent runners or detached turns.
+
+### Dormant current-boot runtime interface
+
+`attestSelectedCloudWorker` and `consumeSelectedCloudAdmission` take the pinned
+Q1a selection, an expected setup attempt, its original deadline, a current-attempt
+reader and the required `verifyBuildQualification({selection, runtime})` adapter.
+There is no passing adapter default or production caller. Absent or exact
+`{mode:"full"}` keeps the original full v2 path; a malformed or selected build
+never falls back. The adapter runs before and after probe I/O and at consumption.
+It must return the closed `zeros.computer-build-verification/v1` identity matching
+the selection and original six-field runtime witness. The base owns executable,
+inventory, receipt, kernel and hydration verification.
+
+The attempt is `{execution:{organizationId,workspaceId,generation,setupRunId,
+executionFence},phase,nonce}`. Trusted setup supplies a fresh 32-byte hex nonce
+for each `preflight` or `launch` phase. Selection and attempt are copied before
+any await; the independent current-attempt reader is checked across I/O and at
+consumption. The original deadline is never renewed. Root acquires `setup.lock`
+before `engine.lock`, or validates inherited descriptors acquired in that order,
+and rechecks the original lock inodes throughout. Inherited locks remain owned
+by the caller so consumption can stay within the final launch lock lifetime.
+
+The fixed `--host-boot-check --budget-ms N` launcher entry runs a small helper in
+the normal native engine view. It observes actual UID/GID/maps, all five
+capability sets, NNP/seccomp, AppArmor attachment, mounts/backing storage,
+credential paths, live budgets and the complete original process/cgroup census.
+The root monitor validates the still-live controller record before acknowledging
+the report. It joins output and positively retires the original common tree
+through descriptors captured before probe I/O. The probe budget is at most five
+seconds and never shortens the existing cleanup ladder. Unknown cleanup keeps
+the root monitor, its inherited locks and custody until trusted VM retirement;
+it cannot authorize another launch. Final serve still acquires its own fresh
+process/cgroup custody.
+
+The closed local v3 proof retains the v2 fields and adds qualification, evidence,
+selection, integrity, kernel and boot-check digests, `checkedAtMs` and the attempt.
+`evidenceSha256` hashes canonical validated evidence; `selectionSha256` hashes
+the whole parsed selection including its snapshot; `kernelSha256` hashes canonical
+`evidence.kernel`. Historical `reportSha256` and `qualifiedAtMs` must equal the
+evidence. Only `checkedAtMs` supplies freshness, with the existing five-minute age
+and five-second future allowance. `bootCheckSha256` binds the closed fresh report,
+original witness/attempt and positive retirement. Reports separate `reusedBuild`
+from `bootCheck` and never claim historical functional roles ran on this boot.
+
+The proof remains at most 16 KiB, root:root 0400 under `/run/zeros`, with no-follow,
+single-link and atomic-publication checks. Consumption renames before validation
+and spends failures. A selected launch cannot consume v2 or preflight authority.
+Local Personal, organization-local and their owner switching remain on their
+original paths.
 
 ## Worker and durable authority
 
