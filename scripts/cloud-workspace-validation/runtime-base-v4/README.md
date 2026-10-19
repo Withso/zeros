@@ -257,8 +257,12 @@ user/agent-mutable trees. The engine still receives its existing read-only
 managed-settings copy; setup journals are never exposed.
 `/srv/zeros/runtime-installs` and `/opt/zeros/sessions` remain root-only metadata
 with atomic file publication. Immutable runtime directories stay at their final
-`/opt/zeros-infra/r1-*` paths. `/run/zeros`, namespace views and `/tmp` remain
-ephemeral. No persistent data is placed in the provider's `.cache`.
+`/opt/zeros-infra/r1-*` paths. The base builder's root-owned 0600
+`/opt/zeros/base-sanitation` fence also persists, outside sanitation and boot
+cleanup roots. A pending fence blocks base sanitation and verification after
+reboot; only fully synchronized sanitation clears it to an empty file.
+`/run/zeros`, namespace views and `/tmp` remain ephemeral. No persistent data
+is placed in the provider's `.cache`.
 
 V4 clone staging and the seed backup live under
 `/srv/zeros/files/.zeros-setup`: a root:10001 0710 parent containing private

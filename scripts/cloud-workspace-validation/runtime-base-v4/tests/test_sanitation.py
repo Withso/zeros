@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import stat
 import sys
@@ -148,7 +149,7 @@ class BaseSanitationTests(unittest.TestCase):
         self.sanitize()
         other = self.write('/outside/empty', b'')
         for path in ('/opt/zeros/disk-epoch', '/opt/zeros/sessions/boot.json',
-                     '/opt/zeros/sessions/reconciliation.json', fixtures.b.ACTIVE):
+                     '/opt/zeros/sessions/reconciliation.json', fixtures.b.ACTIVE, fixtures.b.BASE_SANITATION):
             target = self.app.path(path)
             for kind in ('mode', 'symlink', 'hardlink', 'directory'):
                 with self.subTest(path=path, kind=kind):
@@ -189,9 +190,83 @@ class BaseSanitationTests(unittest.TestCase):
         self.app.boot_id = lambda: '87654321-4321-4321-8321-876543210abc'
         self.app.boot()
         self.app.wait_ready()
-        self.app.atomic('/run/zeros/base-sanitation', b'pending\n')
+        self.app.atomic(fixtures.b.BASE_SANITATION, b'pending\n')
         verifier = fixtures.template('verify.py')
         with self.assertRaises(fixtures.b.Failure): verifier.verify_empty_base_state(fixtures.b, self.app)
+
+    def interrupt_exchange(self, *, top_level_cache=False):
+        link, document = self.prepare_stock_log()
+        self.prepare_base()
+        if top_level_cache:
+            link.unlink()
+            link = self.app.path('/home/user/.cache')
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(document.parent, target_is_directory=True)
+        template = fixtures.template('sanitize.py')
+        exchange = template.exchange_stock_leaf
+
+        def replace_before_exchange(source, source_name, destination, destination_name):
+            link.unlink()
+            link.write_bytes(b'unknown displaced synthetic bytes')
+            exchange(source, source_name, destination, destination_name)
+
+        with mock.patch.object(template, 'exchange_stock_leaf', side_effect=replace_before_exchange):
+            with self.assertRaises(RuntimeError): self.sanitize(template)
+        custody = list(link.parent.glob('.zeros-base-sanitize-*'))
+        self.assertEqual(len(custody), 1)
+        displaced = custody[0] / 'entry'
+        self.assertEqual(displaced.read_bytes(), b'unknown displaced synthetic bytes')
+        self.assertEqual(self.app.read(fixtures.b.BASE_SANITATION, 64, 0o600), b'pending\n')
+        return displaced
+
+    def fresh_boot(self):
+        # Drop only the test-owned volatile tree, then run real boot repair.
+        shutil.rmtree(self.app.path('/run/zeros'))
+        self.app.boot_id = lambda: '87654321-4321-4321-8321-876543210abc'
+        self.app.boot()
+        self.app.wait_ready()
+
+    def assert_pending_custody(self, displaced):
+        # Both the direct producer and cold empty-state consumer must refuse.
+        with self.assertRaises(fixtures.b.Failure): self.sanitize()
+        verifier = fixtures.template('verify.py')
+        with self.assertRaises(fixtures.b.Failure): verifier.verify_empty_base_state(fixtures.b, self.app)
+        self.assertEqual(displaced.read_bytes(), b'unknown displaced synthetic bytes')
+        self.assertEqual(self.app.read(fixtures.b.BASE_SANITATION, 64, 0o600), b'pending\n')
+
+    def test_control_same_boot_retry_keeps_unknown_custody(self):
+        displaced = self.interrupt_exchange()
+        with self.assertRaises(fixtures.b.Failure): self.sanitize_entry()
+        self.assert_pending_custody(displaced)
+
+    def test_control_successful_sanitation_survives_a_real_volatile_reset(self):
+        link, document = self.prepare_stock_log()
+        self.prepare_base()
+        self.sanitize_entry()
+        self.fresh_boot()
+        self.builder_ready(cold=True)
+        self.assertTrue(self.sanitize_entry()['clean'])
+        self.assertEqual(self.app.read(fixtures.b.BASE_SANITATION, 0, 0o600), b'')
+        self.assertEqual(link.read_bytes(), b'')
+        self.assertEqual(document.read_bytes(), b'public stock documentation')
+
+    def test_failed_custody_must_block_after_a_real_volatile_reset(self):
+        displaced = self.interrupt_exchange()
+        self.fresh_boot()
+        refused = False
+        try: self.sanitize_entry()
+        except (RuntimeError, fixtures.b.Failure): refused = True
+        self.assertTrue(refused, 'lost volatile marker allowed clean success after failed exchange; displaced length=' + str(displaced.stat().st_size))
+        self.assert_pending_custody(displaced)
+
+    def test_root_leaf_custody_must_not_escape_the_private_walk_after_reboot(self):
+        displaced = self.interrupt_exchange(top_level_cache=True)
+        self.fresh_boot()
+        refused = False
+        try: self.sanitize_entry()
+        except (RuntimeError, fixtures.b.Failure): refused = True
+        self.assertTrue(refused, 'lost volatile marker allowed clean success while out-of-walk custody retained nonempty bytes; displaced length=' + str(displaced.stat().st_size))
+        self.assert_pending_custody(displaced)
 
     def test_empty_builder_readiness_does_not_skip_native_cgroup_initialization(self):
         self.prepare_base()

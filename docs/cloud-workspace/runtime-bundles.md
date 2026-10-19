@@ -120,9 +120,13 @@ follows a link or connects to a socket. A private directory retains the
 displaced leaf until its original identity is confirmed, then retains an empty
 replacement at that name too. The operation permits at most 256 replacements;
 unsupported exchange, ambiguous custody or failed persistence refuses the build.
-A root-only pending record fences interrupted sanitation from being retried as
-ordinary cleanup. Default Computer sanitation still refuses aliases and special
-files, and the Computer saved-tree proof retains its existing empty-root rules.
+A single-link, root-owned 0600 record at `/opt/zeros/base-sanitation` fences
+interrupted sanitation from being retried as ordinary cleanup. It is persisted
+before mutation, survives reboot outside volatile and scrubbed roots, and is
+emptied only after all sanitation is synchronized. Pending or malformed records
+block sanitation and empty-base verification, including after a cold boot.
+Default Computer sanitation still refuses aliases and special files, and the
+Computer saved-tree proof retains its existing empty-root rules.
 
 Sanitation clears generated boot markers, including the disk epoch. Only the
 empty-base builder may verify the same boot with all four markers present as

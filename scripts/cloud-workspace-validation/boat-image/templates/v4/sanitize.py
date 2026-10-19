@@ -188,8 +188,9 @@ def sanitize_base(app):
     state = helper.ComputerBuild(app.root, uid=app.uid, gid=app.gid)
     # An interrupted attempt may hold an unrecognized displaced inode. Fence
     # retries before any mutation; only a complete synced sanitation clears it.
-    # This builder-only record is outside the roots the sanitizer empties.
-    app.atomic('/run/zeros/base-sanitation', b'pending\n')
+    # This persistent, root-only record is outside boot cleanup and every root
+    # the sanitizer empties. Losing /run must not authorize another attempt.
+    app.atomic('/opt/zeros/base-sanitation', b'pending\n')
     normalize_stock_private_state(app, helper.PRIVATE_HOME_PATHS)
     state.empty_private_state()
     # The base has no selected repositories. Keep bind-source identities while
@@ -199,7 +200,7 @@ def sanitize_base(app):
         state.empty_path('/' + str(child.relative_to(app.root)))
     state.empty_path('/root/zeros-base-v4-builds')
     os.sync()
-    app.atomic('/run/zeros/base-sanitation', b'')
+    app.atomic('/opt/zeros/base-sanitation', b'')
     # Provider-managed OS SSH identity and tools stay under Boat's lifecycle;
     # no workspace or account login grants survive the image capture.
     return {'schema': 'zeros.base-sanitation/v1', 'baseCompatibilityId': app.compat_id, 'clean': True}
