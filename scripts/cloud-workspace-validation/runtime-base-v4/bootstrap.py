@@ -2635,23 +2635,33 @@ def run_setup(command, payload, timeout=1100, *, on_performance=None, build_veri
 
     with contextlib.ExitStack() as resources:
         signals = resources.enter_context(SelectedSetupSignals()) if build_verifier is not None else None
-        channel, client, initial = None, None, b""
         selected_output = bytearray() if build_verifier is not None else None
-        environment, inherited = ENV, {}
-        if build_verifier is not None:
+        with contextlib.ExitStack() as transport:
+            channel, client, initial = None, None, b""
+            environment, inherited = ENV, {}
+            if build_verifier is not None:
+                current()
+                initial = verifier_packed(build_verifier.start(deadline, wall_deadline)) + b"\n"
+                current()
+                require(len(initial) <= MAX_INPUT, "input_too_large")
+                channel, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+                transport.callback(channel.close)
+                transport.callback(client.close)
+                channel.setblocking(False)
+                environment = {**ENV, "ZEROS_BUILD_VERIFY_FD": str(client.fileno())}
+                inherited = {"pass_fds": (client.fileno(),)}
+            result = _run_setup(command, payload, deadline=deadline, current=current, on_performance=on_performance,
+                              build_verifier=build_verifier, channel=channel, client=client, initial=initial,
+                              environment=environment, inherited=inherited, signals=signals, selected_output=selected_output)
+        if build_verifier is not None and result[0] == 0:
+            # Child/group retirement and every transport close precede this
+            # final full check of the original lock, runtime and selected bytes.
+            # Keep cancellation guarded through verification; never run it while
+            # an earlier failure is unwinding or after pending cancellation.
+            if signals is not None: signals.resume()
             current()
-            initial = verifier_packed(build_verifier.start(deadline, wall_deadline)) + b"\n"
+            build_verifier.finish()
             current()
-            require(len(initial) <= MAX_INPUT, "input_too_large")
-            channel, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-            resources.callback(channel.close)
-            resources.callback(client.close)
-            channel.setblocking(False)
-            environment = {**ENV, "ZEROS_BUILD_VERIFY_FD": str(client.fileno())}
-            inherited = {"pass_fds": (client.fileno(),)}
-        result = _run_setup(command, payload, deadline=deadline, current=current, on_performance=on_performance,
-                          build_verifier=build_verifier, channel=channel, client=client, initial=initial,
-                          environment=environment, inherited=inherited, signals=signals, selected_output=selected_output)
     if build_verifier is not None:
         current()
         if result[0] == 0 and selected_output:
@@ -2764,8 +2774,6 @@ def _run_setup(command, payload, *, deadline, current, on_performance, build_ver
             return 128 - code, ["process_signal"]
         if build_verifier is not None:
             require(code == 0 and exchanges > 0 and channel_closed, "setup_exit")
-            current()
-            build_verifier.finish()
             current()
         if captured is not None and helper_performance_supported(captured, code):
             try:

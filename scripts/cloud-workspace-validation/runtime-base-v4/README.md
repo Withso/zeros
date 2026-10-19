@@ -738,14 +738,18 @@ closed `zeros.computer-build-verification/v1` result. Requests are at most
 64 KiB, replies 16 KiB, with at most eight sequential exchanges and no retry,
 cached success or deadline restart. Selection/runtime equality, full runtime
 bytes, preserved evidence, protected closure, kernel and active boot witness
-are checked before setup, per request and after child exit. Successful setup
-requires an actual exchange and a joined channel.
+are checked before setup, per request and after child/group retirement and all
+transport descriptor closes. Successful setup requires an actual exchange and
+a joined channel. The final check still owns the original installer lock and
+cannot run while an earlier failure is unwinding.
 
 TERM, INT and ALRM cannot interrupt selected child retirement or release its
 original ownership during repeated cancellation. A signal during spawn is
 delivered after the child handle is owned. A kernel wait with unknown outcome
-retains ownership; it cannot produce successful setup. Selected stdout stays
-buffered until retirement, descriptor cleanup and final deadline acceptance.
+retains ownership; it cannot produce successful setup. Pending cancellation
+refuses before final verification; the same signal guards cover that verification.
+Selected stdout stays buffered until retirement, descriptor cleanup, final
+selected verification and acceptance within the original two-clock deadline.
 Frames and private evidence are never forwarded to stdout or stderr.
 
 The later runtime reader must still enforce its own frozen selection/attempt,
