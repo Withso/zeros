@@ -1,10 +1,12 @@
 import { capabilityProofMessage, connectRuntime, RuntimeConnectError, RuntimeRenewal, CloudRestError,
   type RuntimeConnection, type RuntimeSocketFactory } from "@zeros/cloud-client";
 import { CloudSdkCapabilityProofFieldsSchema, type CloudSdkRuntimeTarget } from "../../../../shared/cloud-sdk-contract";
-import { renewCloudSdkRuntimeCapabilities, signCloudSdkRuntimeProof } from "../cloud-sdk-runtime";
+import { renewCloudSdkRuntimeCapabilities, signCloudSdkRuntimeProof, activateCloudSdkRuntimeConnection,
+  retireCloudSdkRuntimeConnection, prepareCloudSdkCommandEnvelope, cancelCloudSdkRuntimeCommand } from "../cloud-sdk-runtime";
 import { subscribeCloudSdkRuntimeRenewals } from "../cloud-sdk-stream";
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import type { RuntimeTransportSocket } from "./runtime-client";
+import { CloudSdkCommandSender } from "./cloud-sdk-command-sender";
 
 /** The SDK's canonical proof string becomes a closed native request. Native
  * additionally requires its exact issued capability and current handle. */
@@ -43,6 +45,9 @@ export class CloudSdkSocket implements RuntimeTransportSocket {
   private readonly stop = new AbortController();
   private connection?: RuntimeConnection;
   private renewal?: RuntimeRenewal;
+  private attemptId?: string;
+  private commandSender?: CloudSdkCommandSender;
+  private readonly handshakeNonces = new Map<"direct" | "relay", string>();
   private readonly subscriptions: Array<() => void> = [];
 
   constructor(private readonly target: CloudSdkRuntimeTarget,
@@ -70,8 +75,11 @@ export class CloudSdkSocket implements RuntimeTransportSocket {
         createSocket, signal: this.stop.signal,
         signProof: async message => {
           this.assertLive();
-          const proof = await signCloudSdkRuntimeProof(this.target, parseCloudSdkCapabilityProof(message));
-          this.assertLive(); return proof;
+          const fields = parseCloudSdkCapabilityProof(message);
+          const proof = await signCloudSdkRuntimeProof(this.target, fields);
+          this.assertLive();
+          if (fields.aud === "zeros:engine") this.handshakeNonces.set(fields.route, fields.nonce);
+          return proof;
         } });
       if (this.stop.signal.aborted) { if (result.kind === "connected") result.connection.close(); return; }
       if (result.kind === "legacy") { await this.onLegacy(); this.close(); return; }
@@ -80,6 +88,21 @@ export class CloudSdkSocket implements RuntimeTransportSocket {
       this.subscriptions.push(connection.onClose((code) => {
         this.cloudFailure = closeFailure(code); this.close(code);
       }));
+      if (this.target.connect.runtimeBinding.acceptedWorkVersion === 1) {
+        const nonce = this.handshakeNonces.get(connection.route);
+        if (!nonce) throw new CloudRuntimeAccessError({ code: "bad_response", status: 201 });
+        const { attemptId } = await activateCloudSdkRuntimeConnection(this.target, nonce);
+        if (this.stop.signal.aborted || connection.closed) {
+          void retireCloudSdkRuntimeConnection(this.target, attemptId).catch(() => {});
+          this.close(1006); return;
+        }
+        this.attemptId = attemptId;
+        this.commandSender = new CloudSdkCommandSender({
+          assertCurrent: () => this.assertLive(), send: text => this.send(text),
+          prepare: text => prepareCloudSdkCommandEnvelope(this.target, attemptId, text),
+          cancel: requestId => { void cancelCloudSdkRuntimeCommand(this.target, attemptId, requestId).catch(() => {}); },
+        });
+      }
       this.renewal = new RuntimeRenewal({ workspaceId: this.target.workspaceId, clientSessionId: this.target.clientSessionId, connection,
         capabilities: this.target.connect.capabilities, fetchCapabilities: async () => {
           this.assertLive();
@@ -110,9 +133,17 @@ export class CloudSdkSocket implements RuntimeTransportSocket {
 
   send(text: string): void { this.assertLive(); if (!this.connection || this.readyState !== 1) throw new Error("Cloud runtime is not connected"); this.connection.send(text); }
 
+  sendCommand(text: string, signal: AbortSignal): Promise<void> {
+    if (this.target.connect.runtimeBinding.acceptedWorkVersion !== 1) { this.send(text); return Promise.resolve(); }
+    if (!this.commandSender) return Promise.reject(new CloudRuntimeAccessError({ code: "cloud_workspace_access_superseded", status: 409 }));
+    return this.commandSender.send(text, signal);
+  }
+
   close(code = 1000, _reason = "client_closed"): void {
     if (this.readyState === 3) return;
     this.readyState = 3; this.stop.abort(); this.renewal?.stop();
+    this.commandSender?.close(); this.commandSender = undefined; this.handshakeNonces.clear();
+    if (this.attemptId) { void retireCloudSdkRuntimeConnection(this.target, this.attemptId).catch(() => {}); this.attemptId = undefined; }
     for (const off of this.subscriptions.splice(0)) off();
     // Browser-originated closes accept 1000 or 3000-4999; transport failures
     // such as 1006 are observations, never arguments to WebSocket.close.

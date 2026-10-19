@@ -4,7 +4,8 @@ vi.mock("../runtime", () => ({ nativeInvoke: state.invoke }));
 vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => state.epoch }));
 vi.mock("../cloud-workspace-access", () => ({ closeCloudWorkspaceRuntime: state.close }));
 import { cloudSdkRuntimeIdentity, openCloudSdkWorkspaceRuntime, refreshCloudSdkWorkspaceRuntime,
-  fallbackCloudSdkWorkspaceRuntime, signCloudSdkRuntimeProof, renewCloudSdkRuntimeCapabilities } from "../cloud-sdk-runtime";
+  fallbackCloudSdkWorkspaceRuntime, signCloudSdkRuntimeProof, renewCloudSdkRuntimeCapabilities,
+  activateCloudSdkRuntimeConnection, retireCloudSdkRuntimeConnection, cancelCloudSdkRuntimeCommand, prepareCloudSdkCommandEnvelope } from "../cloud-sdk-runtime";
 import type { CloudSdkRuntimeTarget } from "../../../../shared/cloud-sdk-contract";
 import { CloudSdkTargetSchema } from "../../../../shared/cloud-sdk-contract";
 import { parseCloudWorkspaceKey } from "../bridge/cloud-workspace-key";
@@ -23,6 +24,34 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 beforeEach(() => { state.epoch = 1; vi.clearAllMocks(); });
 
 describe("renderer native SDK boundary", () => {
+  it("names the winning handshake then requests an opaque command with no renderer-selected authority", async () => {
+    state.invoke.mockResolvedValueOnce({ attemptId: id(12) });
+    expect(await activateCloudSdkRuntimeConnection(runtime, "h".repeat(22))).toEqual({ attemptId: id(12) });
+    expect(state.invoke).toHaveBeenLastCalledWith("cloud_workspace_sdk_runtime_connection",
+      { action: "activate", runtime: cloudSdkRuntimeIdentity(runtime), handshakeNonce: "h".repeat(22) });
+    state.invoke.mockResolvedValueOnce("complete opaque send envelope");
+    expect(await prepareCloudSdkCommandEnvelope(runtime, id(12), "unsigned command")).toBe("complete opaque send envelope");
+    expect(state.invoke).toHaveBeenLastCalledWith("cloud_workspace_sdk_runtime_command",
+      { runtime: cloudSdkRuntimeIdentity(runtime), attemptId: id(12), command: "unsigned command" });
+    state.invoke.mockResolvedValue(true);
+    await cancelCloudSdkRuntimeCommand(runtime, id(12), "request-1");
+    expect(state.invoke).toHaveBeenLastCalledWith("cloud_workspace_sdk_runtime_connection",
+      { action: "cancel", runtime: cloudSdkRuntimeIdentity(runtime), attemptId: id(12), requestId: "request-1" });
+    await retireCloudSdkRuntimeConnection(runtime, id(12));
+    expect(state.invoke).toHaveBeenLastCalledWith("cloud_workspace_sdk_runtime_connection",
+      { action: "retire", runtime: cloudSdkRuntimeIdentity(runtime), attemptId: id(12) });
+    expect(JSON.stringify(state.invoke.mock.calls)).not.toContain("synthetic-engine-capability");
+  });
+
+  it.each(["activation", "command"])("discards a late %s after account replacement", async kind => {
+    const gate = deferred<unknown>(); state.invoke.mockReturnValueOnce(gate.promise).mockResolvedValue(true);
+    const pending = kind === "activation" ? activateCloudSdkRuntimeConnection(runtime, "h".repeat(22)) : prepareCloudSdkCommandEnvelope(runtime, id(12), "unsigned command");
+    const rejected = expect(pending).rejects.toMatchObject({ code: "cloud_workspace_access_superseded" });
+    state.epoch++; gate.resolve(kind === "activation" ? { attemptId: id(12) } : "late opaque envelope"); await rejected;
+    if (kind === "activation") expect(state.invoke).toHaveBeenLastCalledWith("cloud_workspace_sdk_runtime_connection",
+      { action: "retire", runtime: cloudSdkRuntimeIdentity(runtime), attemptId: id(12) });
+  });
+
   it("reduces a parsed cloud navigation key to the closed native target before admission", async () => {
     state.invoke.mockImplementationOnce(async (_command, input) => { CloudSdkTargetSchema.parse(input); return runtime; });
     const parsed = parseCloudWorkspaceKey(`cloud://${target.organizationId}/${target.workspaceId}/src/index.ts`)!;

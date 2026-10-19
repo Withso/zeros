@@ -1,6 +1,7 @@
 import { createPublicKey, randomUUID, verify } from "node:crypto";
 import { cloudReplicaDeviceProofMessage } from "../../src/engine/cloud-replica-device";
 import { capabilityProofMessage, type DeviceProofRequest } from "@zeros/cloud-client";
+import { cloudAcceptedWorkProofMessage, type CloudAcceptedWorkProofBinding } from "@zeros/protocol/cloud-accepted-work-client";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -48,6 +49,36 @@ function memoryStore(): CloudReplicaDeviceSecretStore {
 }
 
 describe("main cloud access device authority", () => {
+  it("signs accepted work in its command domain with the same current funding owner's device", async () => {
+    const accountId = randomUUID(), deviceId = randomUUID(), store = memoryStore();
+    const pending = store.ensure(accountId);
+    store.bindRegistration({ accountUserId: accountId, deviceId, keyVersion: 1, publicKey: pending.active.publicKey });
+    const authority = new CloudAccessDeviceAuthority({ capabilityEnabled: () => true, store,
+      getSession: async () => ({ provider: "workos", accountId, accessToken: "current-token", sub: "fixture",
+        email: "fixture@example.test", name: null, clientKind: "desktop" }), register: vi.fn() });
+    const fields: CloudAcceptedWorkProofBinding = { aud: "zeros:engine", wsp: randomUUID(), jti: "a".repeat(22),
+      commandId: randomUUID(), conversationId: "conversation-1", payloadSha256: "c".repeat(64),
+      timestampMs: Date.now(), nonce: "b".repeat(22), route: "relay",
+      scope: { organizationId: randomUUID(), workspaceId: "", generation: 7, engineInstanceId: randomUUID(),
+        bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: accountId, fundingOwnerEpoch: 3 } };
+    fields.scope.workspaceId = fields.wsp;
+    const signature = await authority.signSdkAcceptedWorkProof("current-token", { deviceId, keyVersion: 1 }, fields);
+    const key = createPublicKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: pending.active.publicKey } });
+    const matches = (message: string) => verify(null, Buffer.from(message), key, Buffer.from(signature, "base64url"));
+    expect(matches(cloudAcceptedWorkProofMessage(fields))).toBe(true);
+    expect(matches(capabilityProofMessage(fields))).toBe(false);
+    expect(matches(cloudAcceptedWorkProofMessage({ ...fields, commandId: randomUUID() }))).toBe(false);
+    expect(matches(cloudAcceptedWorkProofMessage({ ...fields, scope: { ...fields.scope, fundingOwnerEpoch: 4 } }))).toBe(false);
+    await expect(authority.signSdkAcceptedWorkProof("old-token", { deviceId, keyVersion: 1 }, fields)).rejects.toThrow(/session changed/);
+    await expect(authority.signSdkAcceptedWorkProof("current-token", { deviceId, keyVersion: 2 }, fields)).rejects.toThrow(/identity changed/);
+    await expect(authority.signSdkAcceptedWorkProof("current-token", { deviceId, keyVersion: 1 },
+      { ...fields, scope: { ...fields.scope, fundingOwnerUserId: randomUUID() } })).rejects.toThrow(/funding owner/);
+    await expect(authority.signSdkAcceptedWorkProof("current-token", { deviceId, keyVersion: 1 },
+      { ...fields, timestampMs: Date.now() - 31_000 })).rejects.toThrow(/invalid/);
+    await expect(authority.signSdkAcceptedWorkProof("current-token", { deviceId, keyVersion: 1 },
+      { ...fields, aud: "zeros:api" } as unknown as CloudAcceptedWorkProofBinding)).rejects.toThrow(/invalid/);
+  });
+
   it("signs the three S3 device actions with fresh proofs and no key export", async () => {
     const accountId = randomUUID(), deviceId = randomUUID(), store = memoryStore();
     const pending = store.ensure(accountId);

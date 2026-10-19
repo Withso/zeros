@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const broker = vi.hoisted(() => ({ openSdkRuntime: vi.fn(), refreshSdkRuntime: vi.fn(), fallbackSdkRuntime: vi.fn(),
-  signSdkRuntimeProof: vi.fn(), renewSdkRuntimeCapabilities: vi.fn(), controlSdkStream: vi.fn() }));
+  signSdkRuntimeProof: vi.fn(), renewSdkRuntimeCapabilities: vi.fn(), controlSdkStream: vi.fn(),
+  controlSdkRuntimeConnection: vi.fn(), prepareSdkCommandEnvelope: vi.fn() }));
 vi.mock("../cloud-workspace-access-runtime", () => ({ getCloudWorkspaceAccessBroker: () => broker }));
 import { cloudWorkspaceSdkRuntimeOpen, cloudWorkspaceSdkRuntimeRefresh, cloudWorkspaceSdkRuntimeLegacy,
-  cloudWorkspaceSdkRuntimeProof, cloudWorkspaceSdkRuntimeCapabilities, cloudWorkspaceSdkStream } from "../ipc/commands/cloud-sdk-runtime";
+  cloudWorkspaceSdkRuntimeProof, cloudWorkspaceSdkRuntimeCapabilities, cloudWorkspaceSdkStream,
+  cloudWorkspaceSdkRuntimeConnection, cloudWorkspaceSdkRuntimeCommand } from "../ipc/commands/cloud-sdk-runtime";
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const identity = { ...target, runtimeId: "33333333-3333-4333-8333-333333333333", generation: 2, authorityEpoch: 3,
   engineInstanceId: "44444444-4444-4444-8444-444444444444", connectionSequence: 1 };
@@ -11,6 +13,21 @@ const fields = { aud: "zeros:engine", wsp: target.workspaceId, jti: "a".repeat(2
 const event = {} as Parameters<typeof cloudWorkspaceSdkRuntimeOpen>[1];
 beforeEach(() => vi.resetAllMocks());
 describe("closed native SDK IPC", () => {
+  it("activates only a native-recorded handshake and prepares only a complete command envelope", async () => {
+    const activate = { action: "activate", runtime: identity, handshakeNonce: "h".repeat(22) };
+    const command = { runtime: identity, attemptId: "55555555-5555-4555-8555-555555555555", command: "unsigned command" };
+    await cloudWorkspaceSdkRuntimeConnection(activate, event);
+    expect(broker.controlSdkRuntimeConnection).toHaveBeenCalledWith(activate, expect.any(Function));
+    broker.prepareSdkCommandEnvelope.mockResolvedValue("complete send envelope");
+    expect(await cloudWorkspaceSdkRuntimeCommand(command, event)).toBe("complete send envelope");
+    expect(broker.prepareSdkCommandEnvelope).toHaveBeenCalledWith(command);
+    for (const extra of [{ route: "relay" }, { token: "untrusted" }, { fields }, { scope: {} }, { acceptedWorkVersion: 1 }]) {
+      expect(await cloudWorkspaceSdkRuntimeConnection({ ...activate, ...extra }, event)).toMatchObject({ code: "invalid_input" });
+      expect(await cloudWorkspaceSdkRuntimeCommand({ ...command, ...extra }, event)).toMatchObject({ code: "invalid_input" });
+    }
+    expect(broker.controlSdkRuntimeConnection).toHaveBeenCalledOnce(); expect(broker.prepareSdkCommandEnvelope).toHaveBeenCalledOnce();
+  });
+
   it("exposes closed stream controls without accepting tickets, cursors, capabilities or remote URLs", async () => {
     for (const extra of [{ url: "wss://foreign.example.test" }, { ticket: "arbitrary" }, { cursor: "arbitrary" }, { capabilities: {} }]) {
       expect(await cloudWorkspaceSdkStream({ action: "start", target, ...extra }, event)).toMatchObject({ code: "invalid_input" });

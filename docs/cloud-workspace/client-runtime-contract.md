@@ -884,6 +884,34 @@ without changing the native runtime identity or publishing a disconnect. A
 reconnect obtains the next native connection sequence and repeats those checks.
 Cancellation closes both pending routes and fences late signing and admission.
 
+S3 1.4 can opt an exact boot into accepted work with
+`connect.runtimeBinding.acceptedWorkVersion: 1`. Its absence preserves ordinary
+command sends. On an opted-in connection, the renderer activates a native
+attempt by naming the winning engine-handshake nonce. Native resolves the route
+from its bounded handshake receipts; command preparation accepts only the exact
+runtime identity, that native attempt ID and an unsigned command frame.
+
+For an eligible boot enqueue from its funding owner, native adds
+`params.acceptedWorkProof` to a copied, validated command. Each transmission has
+a fresh S1 nonce and a second device signature over the canonical command,
+payload digest, complete boot/funding tuple, route and capability identity.
+The capability jti can span commands; the nonce is single-use. Native rechecks
+account, device, attempt, current token revision/expiry and boot ownership after
+asynchronous work. A retired attempt cannot be activated again.
+
+The renderer forwards the complete returned envelope unchanged. These transient
+bytes are inspectable within the existing renderer transport trust model;
+they are never logged, traced, journaled or stored with durable commands. The
+queue holds at most 16 commands and 1 MiB, with one native signing flight per
+runtime. RPC cancellation, timeout, renderer destruction and connection
+retirement discard pending output. Cancellation releases the send queue without
+waiting for native signing. The unresolved preparation retains its signing slot
+and payload budget; further proof requests fail busy until it settles, while
+reads, Stop and edits can proceed. PTY and file traffic keep their direct socket
+path. Reads, Stop, edits, native operations, Local and legacy sends keep their
+existing payloads. A proof failure never retries an unsigned command;
+an application retry signs the immutable command again with a fresh nonce.
+
 An initial `zeros-v1` negotiation selects one native legacy admission with the
 same boot binding, before the peer is published. A published peer never silently
 changes its native runtime ID; a later legacy-required result retires it so a

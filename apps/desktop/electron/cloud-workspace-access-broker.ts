@@ -1335,6 +1335,17 @@ export class CloudWorkspaceAccessBroker {
     return this.sdkRuntime.signCapabilityProof(input);
   }
 
+  controlSdkRuntimeConnection(input: Parameters<CloudSdkRuntimeBroker["controlConnection"]>[0],
+    lifetime?: Parameters<CloudSdkRuntimeBroker["controlConnection"]>[1]) {
+    if (!this.hasCurrentSession() || !this.sdkRuntime) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    return this.sdkRuntime.controlConnection(input, lifetime);
+  }
+
+  prepareSdkCommandEnvelope(input: Parameters<CloudSdkRuntimeBroker["prepareCommandEnvelope"]>[0]): Promise<string> {
+    if (!this.hasCurrentSession() || !this.sdkRuntime) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    return this.sdkRuntime.prepareCommandEnvelope(input);
+  }
+
   renewSdkRuntimeCapabilities(input: CloudWorkspaceRuntimeIdentity) {
     this.assertRuntime(input);
     if (!this.sdkRuntime?.owns(input.runtimeId)) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");

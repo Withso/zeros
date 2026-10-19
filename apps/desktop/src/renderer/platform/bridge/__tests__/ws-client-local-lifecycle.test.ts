@@ -11,6 +11,8 @@ class LocalSocket {
   static instances: LocalSocket[] = [];
   readyState = 0;
   sent: Array<Record<string, unknown>> = [];
+  texts: string[] = [];
+  sendCommand = vi.fn(async () => { throw new Error("Local must not prepare cloud commands"); });
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
@@ -19,6 +21,7 @@ class LocalSocket {
     LocalSocket.instances.push(this);
   }
   send(value: string) {
+    this.texts.push(value);
     this.sent.push(JSON.parse(value));
   }
   open() {
@@ -70,6 +73,15 @@ afterEach(() => {
 });
 
 describe("local sidecar transport after the cloud handshake changes", () => {
+  it.each(["/local/personal", "/local/organization"])("keeps %s request bytes on the Local socket even if a command hook exists", async cwd => {
+    await client.connect(); const socket = LocalSocket.instances[0]; socket.open();
+    const message = { type: "WORKSPACE_REQUEST" as const, op: "cloudCommands.request", params: { cwd, request: { kind: "read" } } };
+    const pending = client.request(message), sent = socket.sent[1];
+    expect(socket.texts[1]).toBe(JSON.stringify({ source: "browser", timestamp: sent.timestamp, ...message, id: sent.id }));
+    expect(socket.sendCommand).not.toHaveBeenCalled();
+    socket.answer(sent); await pending;
+  });
+
   it.each(["/local/personal", "/local/organization"])("reconnects %s explicitly after a terminal rejection and a sidecar replacement", async cwd => {
     await client.connect();
     const previous = LocalSocket.instances[0]; previous.open();

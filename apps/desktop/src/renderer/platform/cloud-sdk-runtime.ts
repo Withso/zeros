@@ -1,6 +1,7 @@
 import type { Capabilities, CapabilityProofFields } from "@zeros/cloud-client";
 import { CloudRuntimeConnectionTargetSchema, type CloudRuntimeConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
 import { CloudSdkCapabilitiesSchema, CloudSdkRuntimeTargetSchema, type CloudSdkRuntimeIdentity, type CloudSdkRuntimeTarget, type CloudSdkTarget } from "../../../shared/cloud-sdk-contract";
+import { CLOUD_SDK_COMMAND_ENVELOPE_MAX_BYTES, CloudSdkConnectionReceiptSchema } from "../../../shared/cloud-sdk-command-contract";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import { nativeInvoke } from "./runtime";
 import { closeCloudWorkspaceRuntime } from "./cloud-workspace-access";
@@ -54,6 +55,40 @@ export async function renewCloudSdkRuntimeCapabilities(target: CloudSdkRuntimeTa
   const epoch = getOrganizationStoreGeneration();
   const capabilities = unwrapCloudRuntimeAccess<unknown>(await nativeInvoke("cloud_workspace_sdk_runtime_capabilities", cloudSdkRuntimeIdentity(target)));
   assertAccount(epoch); return CloudSdkCapabilitiesSchema.parse(capabilities);
+}
+
+export async function activateCloudSdkRuntimeConnection(target: CloudSdkRuntimeTarget, handshakeNonce: string): Promise<{ attemptId: string }> {
+  const epoch = getOrganizationStoreGeneration();
+  const receipt = CloudSdkConnectionReceiptSchema.parse(unwrapCloudRuntimeAccess(await nativeInvoke("cloud_workspace_sdk_runtime_connection",
+    { action: "activate", runtime: cloudSdkRuntimeIdentity(target), handshakeNonce })));
+  if (epoch !== getOrganizationStoreGeneration()) {
+    await retireCloudSdkRuntimeConnection(target, receipt.attemptId).catch(() => false);
+    assertAccount(epoch);
+  }
+  return receipt;
+}
+
+export async function retireCloudSdkRuntimeConnection(target: CloudSdkRuntimeTarget, attemptId: string): Promise<boolean> {
+  return unwrapCloudRuntimeAccess(await nativeInvoke("cloud_workspace_sdk_runtime_connection",
+    { action: "retire", runtime: cloudSdkRuntimeIdentity(target), attemptId })) === true;
+}
+
+export async function cancelCloudSdkRuntimeCommand(target: CloudSdkRuntimeTarget, attemptId: string, requestId: string): Promise<boolean> {
+  return unwrapCloudRuntimeAccess(await nativeInvoke("cloud_workspace_sdk_runtime_connection",
+    { action: "cancel", runtime: cloudSdkRuntimeIdentity(target), attemptId, requestId })) === true;
+}
+
+/** Native returns an entire transient send envelope. The renderer forwards
+ * these bytes unchanged and never treats the response as a signing API. */
+export async function prepareCloudSdkCommandEnvelope(target: CloudSdkRuntimeTarget, attemptId: string, command: string): Promise<string> {
+  const epoch = getOrganizationStoreGeneration();
+  const envelope = unwrapCloudRuntimeAccess<unknown>(await nativeInvoke("cloud_workspace_sdk_runtime_command",
+    { runtime: cloudSdkRuntimeIdentity(target), attemptId, command }));
+  assertAccount(epoch);
+  if (typeof envelope !== "string" || !envelope.length || envelope.length > CLOUD_SDK_COMMAND_ENVELOPE_MAX_BYTES ||
+      new TextEncoder().encode(envelope).byteLength > CLOUD_SDK_COMMAND_ENVELOPE_MAX_BYTES)
+    throw new CloudRuntimeAccessError({ code: "bad_response", status: 201 });
+  return envelope;
 }
 
 function assertAccount(epoch: number): void {

@@ -1,18 +1,26 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { CloudRestClient, CloudRestError, probeFromConnectFailure, readRuntimeBinding,
   type CapabilityProofFields, type DeviceProofHeaders, type DeviceProofRequest, type DeviceSessionGrant } from "@zeros/cloud-client";
 import type { Capabilities, DeviceSessionResponse, RestOperationId } from "@zeros/cloud-client/generated/rest";
 import { CapabilityClaimsSchema, CapabilityHeaderSchema, CAPABILITY_POP_TIMESTAMP_LEEWAY_MS } from "@zeros/protocol/cloud-capabilities";
+import { CloudAcceptedWorkClientProofSchema, cloudAcceptedWorkCommandBinding,
+  type CloudAcceptedWorkProofBinding } from "@zeros/protocol/cloud-accepted-work-client";
 import { isCloudDirectProviderUrl } from "@zeros/protocol/cloud-runtime-connection";
 import { CloudSdkCapabilitiesSchema, CloudSdkConnectResponseSchema, CloudSdkDeviceSessionSchema, CloudSdkProofRequestSchema,
   CloudSdkRuntimeIdentitySchema, CloudSdkRuntimeTargetSchema, CloudSdkTargetSchema,
   type CloudSdkRuntimeIdentity, type CloudSdkRuntimeTarget, type CloudSdkTarget } from "../shared/cloud-sdk-contract";
 import { CloudWorkspaceAccessClientError } from "./cloud-workspace-access-client";
+import { CLOUD_SDK_COMMAND_MAX_BYTES, CloudSdkCommandEnvelopeRequestSchema, CloudSdkConnectionControlSchema,
+  CloudSdkUnsignedCommandSchema } from "../shared/cloud-sdk-command-contract";
 
 type Device = { deviceId: string; keyVersion: number };
 type Decision = { legacy: boolean; stop: AbortController };
-type StoredCapability = { aud: string; wsp: string; jti: string; exp: number };
+type StoredCapability = { aud: string; wsp: string; jti: string; exp: number; sub: string; role?: string; scp: string[] };
+type Handshake = { nonce: string; route: "direct" | "relay"; timestampMs: number; capabilities: Capabilities };
+type ActiveConnection = { attemptId: string; handshakeNonce: string; route: "direct" | "relay"; unbindRenderer?: () => void };
 type Entry = { target: CloudSdkRuntimeTarget; device: Device; capabilities: Capabilities; proofs: StoredCapability[]; stop: AbortController;
+  handshakes?: Map<"direct" | "relay", Handshake>; activated?: boolean; connection?: ActiveConnection;
+  command?: { requestId: string; cancelled: boolean };
   previous?: StoredCapability[]; renew?: Promise<Capabilities>; refresh?: { source: CloudSdkRuntimeIdentity; promise: Promise<CloudSdkRuntimeTarget> };
   receipt?: { source: CloudSdkRuntimeIdentity; target: CloudSdkRuntimeTarget } };
 type Session = { id: string; device: Device; streamOrigin: string; issuedAt: number;
@@ -29,6 +37,7 @@ export interface CloudSdkRuntimeBrokerOptions {
   readDevice(): Device | null;
   signRequest(token: string, request: DeviceProofRequest): Promise<DeviceProofHeaders>;
   signProof(token: string, device: Device, fields: CapabilityProofFields): Promise<string>;
+  signAcceptedWorkProof?(token: string, device: Device, fields: CloudAcceptedWorkProofBinding): Promise<string>;
   fetch: typeof fetch;
   onRetired(runtimeIds: string[]): void;
   now?: () => number;
@@ -214,7 +223,7 @@ export class CloudSdkRuntimeBroker {
       }));
       if (!previous && this.entries.has(runtime.runtimeId)) throw error();
       this.entries.set(runtime.runtimeId, { target: runtime, device: session.device, capabilities: runtime.connect.capabilities, proofs, stop: new AbortController() });
-      previous?.stop.abort();
+      if (previous) { this.retireConnection(previous); previous.stop.abort(); }
       this.runtimeChanged();
       return runtime;
     } catch (cause) {
@@ -257,7 +266,90 @@ export class CloudSdkRuntimeBroker {
     assert(); const token = await this.accessToken(); assert();
     const signature = await this.options.signProof(token, entry.device, fields); assert();
     if (!/^[A-Za-z0-9_-]{86}$/.test(signature)) throw error("bad_response", 201);
+    // At most one candidate per offered route. Activation names this native
+    // receipt; the command IPC never accepts a route or signing fields.
+    if (entry.target.connect.runtimeBinding.acceptedWorkVersion === 1 && !entry.activated &&
+        fields.aud === "zeros:engine" && fields.jti === entry.proofs[0]!.jti) {
+      (entry.handshakes ??= new Map()).set(fields.route, { nonce: fields.nonce, route: fields.route,
+        timestampMs: fields.timestampMs, capabilities: entry.capabilities });
+    }
     return signature;
+  }
+
+  controlConnection(raw: unknown, lifetime?: (onGone: () => void) => () => void): { attemptId: string } | boolean {
+    const parsed = CloudSdkConnectionControlSchema.safeParse(raw);
+    if (!parsed.success) throw error("invalid_input", 422);
+    const input = parsed.data, entry = this.current(input.runtime);
+    if (input.action === "activate") {
+      if (entry.target.connect.runtimeBinding.acceptedWorkVersion !== 1 || !this.options.signAcceptedWorkProof) throw error("invalid_input", 422);
+      if (entry.connection?.handshakeNonce === input.handshakeNonce) return { attemptId: entry.connection.attemptId };
+      const receipt = [...(entry.handshakes?.values() ?? [])].find(item => item.nonce === input.handshakeNonce);
+      if (entry.activated || !receipt || receipt.capabilities !== entry.capabilities ||
+          Math.abs(receipt.timestampMs - this.now()) > CAPABILITY_POP_TIMESTAMP_LEEWAY_MS || entry.proofs[0]!.exp * 1000 <= this.now()) throw error();
+      entry.activated = true; entry.handshakes = undefined;
+      entry.connection = { attemptId: randomUUID(), handshakeNonce: receipt.nonce, route: receipt.route };
+      const connection = entry.connection;
+      connection.unbindRenderer = lifetime?.(() => { if (entry.connection === connection) this.retireConnection(entry); });
+      return { attemptId: entry.connection.attemptId };
+    }
+    if (entry.connection?.attemptId !== input.attemptId) return false;
+    if (input.action === "retire") {
+      this.retireConnection(entry);
+      return true;
+    }
+    if (entry.command?.requestId !== input.requestId) return false;
+    entry.command.cancelled = true;
+    return true;
+  }
+
+  private retireConnection(entry: Entry): void {
+    const connection = entry.connection; entry.connection = undefined;
+    connection?.unbindRenderer?.();
+    if (entry.command) entry.command.cancelled = true;
+  }
+
+  /** One signing flight per admitted runtime, with no native queue. The
+   * renderer serializes a bounded command queue and forwards this entire frame
+   * once. The frame is transient wire data, never a durable command record. */
+  async prepareCommandEnvelope(raw: unknown): Promise<string> {
+    const parsed = CloudSdkCommandEnvelopeRequestSchema.safeParse(raw);
+    if (!parsed.success || Buffer.byteLength(parsed.data.command, "utf8") > CLOUD_SDK_COMMAND_MAX_BYTES) throw error("invalid_input", 422);
+    const input = parsed.data, entry = this.current(input.runtime), connection = entry.connection;
+    if (entry.target.connect.runtimeBinding.acceptedWorkVersion !== 1 || !connection ||
+        connection.attemptId !== input.attemptId || !this.options.signAcceptedWorkProof) throw error();
+    let command: ReturnType<typeof CloudSdkUnsignedCommandSchema.parse>;
+    let binding: ReturnType<typeof cloudAcceptedWorkCommandBinding>;
+    try {
+      command = CloudSdkUnsignedCommandSchema.parse(JSON.parse(input.command));
+      binding = cloudAcceptedWorkCommandBinding(command.params.request.mutation);
+    } catch { throw error("invalid_input", 422); }
+    if (command.params.bootId !== entry.target.bootScope.bootId || command.params.writerEpoch !== entry.target.bootScope.writerEpoch) throw error();
+    if (entry.command) throw error("rate_limited", 429);
+    const capabilities = entry.capabilities, capability = entry.proofs[0]!;
+    const flight = { requestId: command.id, cancelled: false }; entry.command = flight;
+    let timestampMs: number | undefined;
+    const assert = () => {
+      this.assertEntry(entry);
+      if (entry.command !== flight || flight.cancelled || entry.connection !== connection || entry.capabilities !== capabilities ||
+          entry.target.connect.runtimeBinding.acceptedWorkVersion !== 1 || capability.exp * 1000 <= this.now() ||
+          timestampMs !== undefined && Math.abs(timestampMs - this.now()) > CAPABILITY_POP_TIMESTAMP_LEEWAY_MS) throw error();
+      if (capability.aud !== "zeros:engine" || capability.sub !== `user:${entry.target.bootScope.fundingOwnerUserId}` ||
+          capability.role !== "owner" || !capability.scp.includes("ws:prompt")) throw error("forbidden", 403);
+    };
+    try {
+      assert(); const token = await this.accessToken(); assert();
+      timestampMs = this.now();
+      const fields = { aud: "zeros:engine" as const, wsp: capability.wsp, jti: capability.jti,
+        timestampMs, nonce: randomBytes(16).toString("base64url"), route: connection.route };
+      const signature = await this.options.signProof(token, entry.device, fields); assert();
+      if (!/^[A-Za-z0-9_-]{86}$/.test(signature)) throw error("bad_response", 201);
+      const commandSignature = await this.options.signAcceptedWorkProof(token, entry.device,
+        { ...fields, scope: entry.target.bootScope, ...binding }); assert();
+      const proof = CloudAcceptedWorkClientProofSchema.safeParse({ version: 1, capability: capabilities.engine.token,
+        proof: { timestampMs, nonce: fields.nonce, signature }, commandSignature });
+      if (!proof.success) throw error("bad_response", 201);
+      return JSON.stringify({ ...command, params: { ...command.params, acceptedWorkProof: proof.data } });
+    } finally { if (entry.command === flight) entry.command = undefined; }
   }
 
   async renewCapabilities(input: CloudSdkRuntimeIdentity): Promise<Capabilities> {
@@ -304,7 +396,7 @@ export class CloudSdkRuntimeBroker {
             claims.gen !== target.generation || claims.ein !== target.engineInstanceId || claims.ep.wa !== target.authorityEpoch ||
             claims.did !== device.deviceId || claims.ep.dk !== device.keyVersion || Date.parse(grant.expiresAt) !== claims.exp * 1000 ||
             claims.exp * 1000 - this.now() < 5_000 || claims.iat * 1000 > this.now() + 30_000) throw error();
-        return { aud: claims.aud, wsp: claims.wsp, jti: claims.jti, exp: claims.exp };
+        return { aud: claims.aud, wsp: claims.wsp, jti: claims.jti, exp: claims.exp, sub: claims.sub, role: claims.role, scp: claims.scp };
       } catch { throw error("bad_response", 201); }
     });
   }
@@ -363,14 +455,14 @@ export class CloudSdkRuntimeBroker {
   close(runtimeId: string): boolean {
     const entry = this.entries.get(runtimeId);
     if (!entry) return false;
-    this.entries.delete(runtimeId); entry.stop.abort();
+    this.entries.delete(runtimeId); this.retireConnection(entry); entry.stop.abort();
     try { this.options.onRetired([runtimeId]); } catch { /* retirement is already authoritative */ }
     this.runtimeChanged();
     return true;
   }
   dispose(): void {
     if (this.disposed) return; this.disposed = true;
-    for (const entry of this.entries.values()) entry.stop.abort();
+    for (const entry of this.entries.values()) { this.retireConnection(entry); entry.stop.abort(); }
     for (const decision of this.decisions.values()) decision.stop.abort();
     for (const controller of this.requests) controller.abort(); this.requests.clear();
     const ids = [...this.entries.keys()]; this.entries.clear(); this.opens.clear(); this.decisions.clear(); this.session = null; this.sessionFlight = null;

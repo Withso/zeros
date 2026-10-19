@@ -108,6 +108,9 @@ export interface RuntimeTransportSocket {
   onclose: ((event: CloseEvent) => unknown) | null;
   onerror: ((event: Event) => unknown) | null;
   send(text: string): void;
+  /** Optional SDK-only command preparation; its signal ends at RPC timeout,
+   * cancellation or disconnect so a late proof cannot dispatch an ended RPC. */
+  sendCommand?(text: string, signal: AbortSignal): Promise<void>;
   close(code?: number, reason?: string): void;
   readonly cloudFailure?: CloudRuntimeAccessError;
 }
@@ -330,6 +333,7 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout> | null;
   signal?: AbortSignal;
   onAbort?: () => void;
+  cancelTransport?: () => void;
   diagnostic: ReturnType<typeof requestDiagnostic>;
   scope?: CloudDiagnosticScope;
   startedAt: number;
@@ -381,6 +385,9 @@ function clearPendingRequest(pending: PendingRequest): void {
     pending.signal.removeEventListener("abort", pending.onAbort);
     pending.onAbort = undefined;
   }
+  const cancelTransport = pending.cancelTransport;
+  pending.cancelTransport = undefined;
+  cancelTransport?.();
 }
 
 // Renderer-process retirement memory also covers a late IPC result delivered
@@ -1301,7 +1308,15 @@ export class RuntimeClient {
       }
 
       this.pendingRequests.set(id, pending);
-      this.rawSend({ source: "browser", timestamp: Date.now(), ...msg, id });
+      const envelope = { source: "browser", timestamp: Date.now(), ...msg, id }, socket = this.ws;
+      if (this.connectionTarget.kind === "cloud" && this.connectionTarget.channel === "sdk-websocket" &&
+          msg.type === "WORKSPACE_REQUEST" && "op" in msg && msg.op === "cloudCommands.request" && socket?.sendCommand && socket.readyState === 1) {
+        const stop = new AbortController(); pending.cancelTransport = () => stop.abort();
+        const failed = (error: unknown) => {
+          if (this.pendingRequests.get(id) === pending) rejectPending(error instanceof Error ? error : new CloudRuntimeAccessError(error));
+        };
+        try { void socket.sendCommand(JSON.stringify(envelope), stop.signal).catch(failed); } catch (error) { failed(error); }
+      } else this.rawSend(envelope);
     });
   }
 
