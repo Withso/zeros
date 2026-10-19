@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { createRuntimeUpdateConversation, runtimeUpdateCommand } from "./runtime-update-runner.js";
+import { createRuntimeUpdateConversation, runtimeUpdateCommand, runRuntimeUpdate } from "./runtime-update-runner.js";
+import * as pinnedSsh from "./boat-pinned-ssh.js";
 
 const source = {
   schema: "zeros.active-runtime/v1" as const, runtimeId: `r1-${"a".repeat(64)}`, manifestSha256: "a".repeat(64),
@@ -52,6 +53,21 @@ describe("explicit off-VM runtime preparation", () => {
       install: Buffer.from(JSON.stringify({ schema: "zeros.runtime-install/v1", purpose: "qualification", runtime: target,
         artifact: { url: "https://objects.example.test/exact-archive", expiresAt: request.expiresAt } })).toString("base64url") };
   }
+  it("bounds the restore transport by the original preparation deadline", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const ssh = vi.spyOn(pinnedSsh, "executeBoatPinnedSsh").mockImplementation(async input => {
+      expect(input.timeoutSeconds).toBeLessThanOrEqual(240);
+      await input.onFrame!(frame("authorize_restore"));
+      await input.onFrame!(frame("authorize_restore"));
+      await input.onFrame!(JSON.stringify({ ...scope, operation: "stage", outcome: "staged" }));
+      return { exitCode: 0, outputTruncated: false, stdout: "", stderr: "" };
+    });
+    try {
+      const result = await runRuntimeUpdate("bx_restore", stageRequest(), { ...fixture().handlers, authorizeRestore: async () => true },
+        { client: {}, maxOutputBytes: 64 * 1024 } as Parameters<typeof runRuntimeUpdate>[3], new AbortController().signal);
+      expect(result.outcome).toBe("staged");
+    } finally { ssh.mockRestore(); clock.mockRestore(); }
+  });
   it("requires fresh pre- and post-fetch checks before accepting a restored stage", async () => {
     const handlers = { ...fixture().handlers, authorizeRestore: vi.fn(async () => true) };
     const dialog = createRuntimeUpdateConversation(stageRequest(), handlers, () => now);

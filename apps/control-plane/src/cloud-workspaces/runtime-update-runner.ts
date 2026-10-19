@@ -277,9 +277,15 @@ export async function runRuntimeUpdate(resourceId: string, input: RuntimeUpdateI
   options: BoatPinnedSshOptions, signal: AbortSignal): Promise<RuntimeUpdateResult> {
   requireValid(/^bx_[A-Za-z0-9_-]{1,128}$/.test(resourceId));
   const conversation = createRuntimeUpdateConversation(input, handlers);
+  let timeoutSeconds = input.operation === "stage" ? 930 : 1440;
+  if (input.operation === "stage" && input.restore) {
+    const remaining = Math.min(Date.parse(input.restore.deadline), Date.parse(input.expiresAt)) - Date.now();
+    requireValid(remaining > 0);
+    timeoutSeconds = Math.max(1, Math.ceil(remaining / 1000));
+  }
   const result = await executeBoatPinnedSsh({ resourceId, command: runtimeUpdateCommand(),
     stdin: runtimeUpdateProgram().source + JSON.stringify(conversation.input) + "\n",
-    timeoutSeconds: input.operation === "stage" ? 930 : 1440,
+    timeoutSeconds,
     onFrame: conversation.onFrame,
   }, { ...options, maxOutputBytes: Math.min(options.maxOutputBytes, 512 * 1024) }, signal);
   requireValid(result.exitCode === 0 && !result.outputTruncated);

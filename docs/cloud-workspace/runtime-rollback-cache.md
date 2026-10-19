@@ -65,6 +65,9 @@ publish readiness or return enrollment material. The existing fallback to the
 still-local serving source keeps its independent recovery deadline and exact
 source receipt check.
 
+The watchdog is armed before protected base validation can wait, and the
+preparation transport shares the same deadline.
+
 Retention does not override a revoked runtime/base qualification, source
 retirement, admission policy or a resident handoff. The cache introduces no
 automatic activation policy or user rollback trigger. Ordinary wake never

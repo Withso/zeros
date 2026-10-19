@@ -117,7 +117,64 @@ class RollbackAdapterTests(unittest.TestCase):
         result = self.activate()
         self.assertEqual(result['outcome'], 'healthy')
         self.assertEqual(result['active']['installerReceiptSha256'], b.sha(receipt))
-        self.assertEqual(deadlines, [180])
+        self.assertTrue(deadlines)
+        self.assertTrue(all(0 < seconds <= 180 for seconds in deadlines))
+
+    def test_restored_runtime_survives_two_cold_boots_without_reading_the_evicted_previous(self):
+        receipt = self.evicted()
+        self.stage()
+        active = self.activate()['active']
+        previous = self.app.current('previous')
+        self.app.evict_previous({'scope': self.eviction['scope'], 'current': active,
+                                 'expiresAt': self.eviction['expiresAt']},
+                                retain=lambda _: '88888888-8888-4888-8888-888888888888', authorize=lambda _: True)
+        read = self.app.read
+
+        def metadata_only(path, *args, **kwargs):
+            self.assertFalse(path.startswith(b.INFRA + '/' + previous + '/'))
+            return read(path, *args, **kwargs)
+
+        with mock.patch.object(self.app, 'read', side_effect=metadata_only), \
+                mock.patch.object(self.app, 'downloader', side_effect=AssertionError('ordinary boot fetched a runtime')):
+            for boot in ('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'):
+                self.app.boot_id = lambda: boot
+                self.app.boot()
+                self.app.install(fixtures.fixture.encoded(self.install))
+                current = json.loads(read(b.ACTIVE, 4096, 0o600))
+                self.assertEqual(current['bootId'], boot)
+                self.assertEqual(current['installerReceiptSha256'], b.sha(receipt))
+                self.assertEqual(current['runtimeId'], active['runtimeId'])
+                self.assertFalse(self.app.path(b.INFRA + '/' + previous).exists())
+
+    def test_restore_watchdog_is_armed_before_base_validation_can_wait(self):
+        self.evicted()
+        deadlines = []
+        self.adapter.arm_deadline = deadlines.append
+        base = self.app.base
+
+        def bounded_base():
+            self.assertTrue(deadlines, 'base validation ran before the restore watchdog')
+            self.assertLessEqual(deadlines[-1], 240)
+            base()
+
+        self.app.base = bounded_base
+        self.assertEqual(self.stage()['outcome'], 'staged')
+
+    def test_eviction_watchdog_is_armed_before_base_validation_can_wait(self):
+        self.pair()
+        deadlines = []
+        base = self.app.base
+
+        def bounded_base():
+            self.assertTrue(deadlines, 'base validation ran before the stop watchdog')
+            self.assertLessEqual(deadlines[-1], 60)
+            base()
+
+        self.app.base = bounded_base
+        pipe = mock.Mock()
+        pipe.cache_exchange.return_value = {'allow': True, 'retentionId': '77777777-7777-4777-8777-777777777777'}
+        result = update.RollbackCacheInstaller(b, self.app, pipe, arm_deadline=deadlines.append).run(self.eviction)
+        self.assertEqual(result['outcome'], 'evicted')
 
     def test_sealed_stop_adapter_joins_setup_and_update_locks_and_uses_private_ack(self):
         source, receipt = self.pair()

@@ -248,12 +248,20 @@ class RuntimeInstaller:
             b.text_match(request[key], b.UUID, "input_schema")
         validate_scope(b, request["scope"])
         active_document(b, request["source"])
-        app.base()
         if "restore" in request:
-            require(app.compat.get("runtimeRollbackCacheVersion") == 1)
             b.shape(request["restore"], ("retentionId", "installerReceiptSha256", "deadline"))
             b.text_match(request["restore"]["retentionId"], b.UUID, "input_schema")
             b.text_match(request["restore"]["installerReceiptSha256"], b.HEX, "input_schema")
+        self.check_expiry(request)
+        if "restore" in request:
+            # Protected base validation may wait for hydration. It belongs to
+            # this operation's existing budget, before any network or disk I/O.
+            end = min(b.timestamp(request["restore"]["deadline"], "input_schema"),
+                      b.timestamp(request["expiresAt"], "input_schema"))
+            self.arm_deadline(max(1, int((end - app.now()).total_seconds())))
+        app.base()
+        if "restore" in request:
+            require(app.compat.get("runtimeRollbackCacheVersion") == 1)
         self.check_expiry(request)
         if "handoff" in request:
             require(request["operation"] == "activate" and request["mode"] == "engine")
@@ -443,13 +451,13 @@ class RollbackCacheInstaller(RuntimeInstaller):
         b.shape(request, ("schema", "operation", "fence", "scope", "current", "expiresAt"))
         require(request["schema"] == "zeros.runtime-rollback-cache/v1" and request["operation"] == "evict")
         b.text_match(request["fence"], b.UUID, "input_schema")
-        app.base()
-        require(app.compat.get("runtimeRollbackCacheVersion") == 1)
-        b.validate_rollback_scope(request["scope"])
         active_document(b, request["current"])
         seconds = (b.timestamp(request["expiresAt"], "input_schema") - app.now()).total_seconds()
         require(0 < seconds <= 120)
         self.arm_deadline(max(1, int(seconds)))
+        app.base()
+        require(app.compat.get("runtimeRollbackCacheVersion") == 1)
+        b.validate_rollback_scope(request["scope"])
 
         def retain(offer):
             reply = self.pipe.cache_exchange(request, "retain", offer=offer)
