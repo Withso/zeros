@@ -182,6 +182,7 @@ export type EngineUplinkReadiness = Readonly<{
   ready: boolean;
   phase: "starting" | "preparing" | "ready" | "degraded" | "stopping";
   reason?: string;
+  coordinator?: import("@zeros/protocol/cloud-coordinator").CloudCoordinatorStatus;
 }>;
 
 export type EngineUplinkParkReason = "disabled" | "unauthenticated" | "forbidden" | "protocol_unsupported";

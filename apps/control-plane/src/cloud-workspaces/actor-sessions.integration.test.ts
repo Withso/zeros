@@ -77,6 +77,25 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
     expect(await service.authorizeRelay(grant.grantToken,{connected:true})).toBeNull();
   });
 
+  it("withdraws legacy issue, consume, renewal and relay while previously queued work still dispatches",async()=>{
+    await pool.query(`UPDATE cloud_workspace_engine_instances SET coordinator_version=1,
+      interactive_frontend_id=$2,interactive_ready_until=clock_timestamp()+interval '1 minute' WHERE id=$1`,
+    [fixture.engineInstanceId,randomUUID()]);
+    const signer=await device(),grant=await service.issue({...subject(),proof:signer.proof()});
+    const admitted=await service.consume({...engine(),token:grant.grantToken});
+    const pending=await service.issue({...subject(),proof:signer.proof()});
+    const commands=new DatabaseCloudWorkspaceCommandService({pool});
+    await commands.mutate({...engine(),actorSessionId:admitted.actorSessionId,deviceId:signer.id},queued());
+    await pool.query("UPDATE cloud_workspace_engine_instances SET interactive_ready_until=NULL WHERE id=$1",[fixture.engineInstanceId]);
+    await expect(service.issue({...subject(),proof:signer.proof()})).rejects.toBeDefined();
+    await expect(service.consume({...engine(),token:pending.grantToken})).rejects.toMatchObject({status:401});
+    await expect(service.consume({...engine(),token:grant.grantToken,renew:true})).rejects.toMatchObject({status:401});
+    expect(await service.authorizeRelay(pending.grantToken)).toBeNull();
+    expect(await service.authorizeRelay(grant.grantToken,{connected:true})).toBeNull();
+    await expect(commands.claim(engine(),"shared-chat","shared-execution"))
+      .resolves.toMatchObject({dispatchAllowed:true,actor:{userId:guest.id,deviceId:signer.id}});
+  });
+
   it("marks a Read-only actor's relay grant so the relay can keep writer capacity for writers",async()=>{
     const signer=await device(),writer=await service.issue({...subject(),proof:signer.proof()});
     expect(await service.authorizeRelay(writer.grantToken)).toMatchObject({readOnly:false});

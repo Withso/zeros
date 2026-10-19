@@ -968,7 +968,7 @@ export class CloudWorkspaceSetupWorker {
                AND ei.account_user_id = $5 AND ei.setup_run_id = $6
                AND ei.setup_execution_fence = $7
                AND ei.protocol_version = $8 AND ei.state = 'ready'
-               AND ei.actor_protocol_version = 2
+               AND ei.actor_protocol_version = 2 AND cloud_workspace_engine_interactive_live(ei)
                AND ei.revoked_at IS NULL AND ei.lease_expires_at > now()
                AND ei.registration_grant_id = $9
              FOR UPDATE OF ei`,

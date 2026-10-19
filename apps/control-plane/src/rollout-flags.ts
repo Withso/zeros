@@ -53,6 +53,8 @@ export const ROLLOUT_FLAGS = {
   turn_journal: { whileFeedUnavailable: "retain", summary: "Deliver the engine turn journal over the uplink (turns.v1)", requires: ["realtime_uplink"] },
   detached_turns: { whileFeedUnavailable: "off", summary: "Enroll exact owner-funded accepted work",
     requires: ["capabilities", "realtime_uplink", "credential_push", "turn_journal"] },
+  agent_runners: { whileFeedUnavailable: "off", summary: "Negotiate the stable cloud execution coordinator",
+    requires: ["detached_turns"] },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

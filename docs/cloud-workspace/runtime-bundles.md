@@ -453,6 +453,36 @@ CI integration, and disposable-VM smoke qualification belongs to its worker.
 
 ## Runtime smoke qualification
 
+### Optional coordinator ingress
+
+`runner.v1` keeps the composed cloud engine as the execution owner. Its fixed
+`cloud-interactive-frontend.mjs` child owns TCP ingress only, is launched by the
+original Host boundary as infrastructure, and receives only `PATH`/`LANG` plus
+bounded start/challenge frames. It has no configured heartbeat, capability,
+repository or provider credential, writer handle or dispatch RPC. Authenticated
+network bytes are forwarded unchanged to the owner, which retains all admission
+checks. The child is part of the existing Host census and drain; it never
+reopens the ledger or enrolls an additional writer or uplink.
+
+The owner exclusively creates a canonical directory under `/tmp` with mode
+0700 and owner UID 10003. Its Unix sockets are mode 0600. The spawner rejects
+noncanonical/symlink directories, wrong ownership and wider permissions. A
+separate private backend socket for genuine loopback TCP peers preserves the
+internal readiness probe boundary; request headers cannot select that socket.
+The VM remains one trust domain: these permissions prevent cross-user access
+and accidental disclosure, not malicious same-UID agents.
+
+Qualification must cover frontend exit, withheld challenges, parent pipe loss,
+replacement after positive Host retirement, preserved accepted work/one writer,
+and coordinator exit through R1. Per-process Stop still proves only the original
+Host group; escaped descendants remain subject to the complete VM census and
+final root-broker drain. Local Personal and organization-local never construct
+this child. A mock custody/process test does not qualify the actual Linux base.
+See [S2 runner.v1](contracts/s2-uplink.md#execution-coordinator-and-interactive-readiness-runnerv1)
+for opt-in and deadlines. This dormant slice adds no provider systemd runner.
+
+### Existing smoke approval
+
 `CLOUD_RUNTIME_QUALIFICATION_ENABLED` defaults to false. The worker runs only
 on Alpha with managed Boat and the shared runtime artifact store configured.
 It follows the existing background-worker pause and maintenance barriers; its

@@ -1,3 +1,4 @@
+import { cloudEngineInteractive } from "./coordinator-readiness.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
 import {z} from "zod";
@@ -175,6 +176,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
           AND workspace.current_generation=engine.generation AND workspace.owner_user_id=engine.account_user_id
         WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL AND workspace.desired_state='running'
           AND workspace.status IN ('ready','busy') AND engine.state='ready' AND engine.revoked_at IS NULL
+          AND cloud_workspace_engine_interactive_live(engine)
           AND engine.lease_expires_at>clock_timestamp()
           AND cloud_workspace_generation_policy_current(workspace.id,engine.generation,workspace.org_id)
           AND cloud_workspace_runtime_authority_live(workspace.id,engine.generation,workspace.owner_user_id,$3)
@@ -198,6 +200,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
         RETURNING admission_expires_at`,[randomUUID(),input.workspaceId,input.organizationId,engine.generation,engine.id,
         input.actorUserId,device.id,Number(device.key_version),engine.authority_epoch,actor.fingerprint,actor.role,hash(token),
         user.identity.subject,user.authentication.sessionId,source.created_at])).rows[0]!;
+      if (!await cloudEngineInteractive(tx,{...input,generation:engine.generation,engineInstanceId:engine.id})) rejected();
       return {version:2 as const,audience:CLOUD_ACTOR_ADMISSION_AUDIENCE,workspaceId:input.workspaceId,
         organizationId:input.organizationId,generation:engine.generation,authorityEpoch:Number(engine.authority_epoch),
         engineInstanceId:engine.id,remotePort:this.options.enginePort,grantToken:token,expiresAt:row.admission_expires_at.toISOString(),bridgeUrl:this.options.bridgeUrl};
@@ -307,6 +310,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
       const current=await recordedActorAuthority(tx,{workspaceId:input.workspaceId,organizationId:input.organizationId,actorUserId,
         actor:{actorUserId,deviceId:did,deviceKeyVersion,fingerprint:authority.fingerprint,sourceSessionId:id},capability:"read"},true);
       if(current.role!==authority.role)rejected();
+      if (!await cloudEngineInteractive(tx,input)) rejected();
       return {version:2 as const,audience:CLOUD_ACTOR_ADMISSION_AUDIENCE,admitted:true as const,authorityEpoch:engine.authorityEpoch,
         accountUserId:actorUserId,actorSessionId:id,deviceId:did,role:authority.role,fingerprint:authority.fingerprint,renewalToken:token};
     });
@@ -345,6 +349,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
           AND ((NOT $2::boolean AND consumed_at IS NULL AND admission_expires_at>clock_timestamp())
             OR ($2::boolean AND consumed_at IS NOT NULL AND last_renewed_at>clock_timestamp()-interval '30 seconds'))`,[row.id,input.renew===true]);
       if(current.rowCount!==1)rejected();
+      if (!await cloudEngineInteractive(tx,input)) rejected();
       return {version:2 as const,audience:CLOUD_ACTOR_ADMISSION_AUDIENCE,admitted:true as const,
         authorityEpoch:engine.authorityEpoch,accountUserId:actor.actorUserId,actorSessionId:row.id,
         deviceId:actor.deviceId,role:authority.role,fingerprint:actor.fingerprint};
@@ -365,7 +370,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
           AND workspace.current_generation=session.generation AND workspace.authority_epoch=session.authority_epoch
         JOIN cloud_workspace_engine_instances engine ON engine.id=session.engine_instance_id AND engine.workspace_id=workspace.id
           AND engine.generation=session.generation AND engine.actor_protocol_version=2 AND engine.account_user_id=workspace.owner_user_id
-          AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp()
+          AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp() AND cloud_workspace_engine_interactive_live(engine)
         JOIN cloud_workspace_provider_bindings binding ON binding.workspace_id=session.workspace_id AND binding.org_id=session.org_id
           AND binding.generation=session.generation AND binding.observed_state='running'
         WHERE session.token_hash=$1 AND session.session_kind='legacy' AND session.revoked_at IS NULL AND session.session_expires_at>clock_timestamp()

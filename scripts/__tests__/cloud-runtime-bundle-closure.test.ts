@@ -200,6 +200,11 @@ describe("pnpm runtime closure", () => {
     expect(SOURCE_SLICES).not.toContain("scripts/zsr-qualification");
     // Cloud agent context names this skill; the engine finds it under worker/.
     expect(SOURCE_SLICES).toContain("apps/desktop/resources/zeros-design-skill");
+    // This fixed executable is selected by path, not an import edge. Its
+    // source must travel with the original owner for runner.v1 ingress.
+    const frontend = "apps/desktop/src/engine/cloud-interactive-frontend.mjs";
+    expect(SOURCE_SLICES.some(slice => frontend.startsWith(`${slice}/`))).toBe(true);
+    expect((await readFile(frontend, "utf8")).length).toBeGreaterThan(0);
     const probe = await readFile("scripts/cloud-workspace-validation/runtime-bundle/probe.cjs", "utf8");
     expect(probe).not.toContain("@anthropic-ai/sandbox-runtime");
     expect(probe).not.toContain("zsr-supervisor.mjs");

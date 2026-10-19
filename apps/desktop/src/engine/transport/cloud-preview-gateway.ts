@@ -361,8 +361,10 @@ export class CloudRuntimePreviewGateway {
   handoffBusy(): boolean { return this.requests.size > 0 || this.pendingVerifications > 0; }
   setHandoffFenced(fenced: boolean): void { this.handoffFenced = fenced; }
 
+  disconnect(): void { for (const abort of [...this.requests]) abort(); }
+
   close(): void {
     this.closed = true;
-    for (const abort of [...this.requests]) abort();
+    this.disconnect();
   }
 }

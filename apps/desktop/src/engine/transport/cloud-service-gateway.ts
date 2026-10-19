@@ -152,9 +152,10 @@ export class CloudRuntimeServiceGateway {
    * in order to manufacture a safe point. Pending handshakes also count. */
   handoffBusy(): boolean { return this.streams.size > 0 || this.pendingVerifications > 0; }
   setHandoffFenced(fenced: boolean): void { this.handoffFenced = fenced; }
+  disconnect(): void { for (const abort of [...this.streams]) abort(); }
   close(): void {
     this.closed = true;
-    for (const abort of [...this.streams]) abort();
+    this.disconnect();
     this.server.close();
   }
 }

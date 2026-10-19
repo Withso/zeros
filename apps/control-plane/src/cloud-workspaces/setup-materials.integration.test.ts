@@ -1127,6 +1127,23 @@ d("cloud workspace setup material redemption", () => {
     expect((await pool.query("SELECT cloud_local_commands_version,accepted_work_version FROM cloud_workspace_engine_instances WHERE id=$1",[material.engine.instanceId])).rows[0])
       .toEqual({cloud_local_commands_version:1,accepted_work_version:acceptedWorkVersion??null});
   });
+  it("pins coordinator ownership at registration and carries frontend observations over the API heartbeat", async () => {
+    const material = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    const registered = await service.registerEngine({ token: material.engine.registration.token, ...material.execution,
+      engineInstanceId: material.engine.instanceId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2,
+      agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" }, agentCustomizationVersion: 3,
+      cloudLocalCommandsVersion: 1, acceptedWorkVersion: 1, coordinatorVersion: 1 });
+    expect(registered.coordinatorVersion).toBe(1);
+    const report = { version: 1 as const, bootId: runtimeWitness.bootId, revision: 1, frontendId: randomUUID(), ready: true, expiresAtMs: Date.now() + 60_000 };
+    const beat = (coordinator: typeof report) => service.heartbeat({ ...material.execution, engineInstanceId: material.engine.instanceId,
+      token: registered.heartbeat.token, coordinator });
+    await beat(report);
+    expect((await pool.query("SELECT cloud_workspace_engine_interactive_live(engine) AS live FROM cloud_workspace_engine_instances engine WHERE id=$1", [material.engine.instanceId])).rows[0].live).toBe(true);
+    await beat({ ...report, revision: 2, ready: false, expiresAtMs: 0 });
+    const row = (await pool.query("SELECT coordinator_version,state,interactive_revision,interactive_ready_until FROM cloud_workspace_engine_instances WHERE id=$1", [material.engine.instanceId])).rows[0];
+    expect(row).toEqual({ coordinator_version: 1, state: "ready", interactive_revision: "2", interactive_ready_until: null });
+  });
+
   it("refuses a local journal with a missing boot pointer before issuing registration material",async()=>{
     const material=await service.redeem({...redemptionInput(),materialVersion:2,runtime:runtimeWitness});
     await withCloudFixtureOwnerTx(pool,async tx=>{await tx.query("SET LOCAL session_replication_role=replica");

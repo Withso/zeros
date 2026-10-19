@@ -123,6 +123,29 @@ describe("cloud workspace internal setup routes", () => {
     expect(registerEngine.mock.calls[0]![0]).toMatchObject({cloudLocalCommandsVersion:1});
     expect(await response.json()).toEqual({version:1,durableRecordConnected:true});
   });
+  it.each([CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH, CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH])("keeps coordinator opt-in behind the supported offer and organization flag (%s)", async route => {
+    for (const on of [false, true]) for (const offered of [false, true]) {
+      const register = vi.fn<CloudWorkspaceInternalSetupService["registerEngine"]>(async input => ({ version: 1,
+        durableRecordConnected: true, cloudLocalCommandsVersion: 1, agentJournalMode: "legacy",
+        ...(input.coordinatorVersion ? { coordinatorVersion: 1, acceptedWorkVersion: 1 } : {}) }));
+      const { service } = harness({ registerEngine: register, registerTransitionEngine: register });
+      const app = createCloudWorkspaceInternalRoutes(service, { engineUplink: {
+        endpoint: "wss://realtime.example.test/v1/uplink", flags: { enabled: () => on },
+      } });
+      const { expected: _expected, ...binding } = body;
+      const response = await app.request(route, { method: "POST", headers: {
+        authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json", "x-zeros-cloud-local-commands": "1",
+        "x-zeros-cloud-accepted-work": "1", ...(offered ? { "x-zeros-cloud-coordinator": "1" } : {}),
+      }, body: JSON.stringify({ ...binding, engineInstanceId: "44444444-4444-4444-8444-444444444444",
+        protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2, agentCustomizationVersion: 3,
+        agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" } }) });
+      expect(response.status).toBe(200);
+      expect(register.mock.calls[0]![0].coordinatorVersion).toBe(on && offered ? 1 : undefined);
+      expect(response.headers.get("x-zeros-cloud-coordinator")).toBe(on && offered ? "1" : null);
+      expect(await response.json()).toEqual({ version: 1, durableRecordConnected: true });
+    }
+  });
+
   it("advertises the uplink endpoint only to opted-in engines of flagged organizations", async () => {
     let flagOn = true;
     const flagReads: string[] = [];

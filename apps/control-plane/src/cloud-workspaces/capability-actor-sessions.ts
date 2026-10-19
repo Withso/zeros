@@ -1,3 +1,4 @@
+import { cloudEngineInteractive } from "./coordinator-readiness.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type pg from "pg";
@@ -131,6 +132,7 @@ export class DatabaseCapabilityActorSessionService {
       // committed. Both original and replacement keys must still be live.
       await this.lockSigningKeys(tx, signingKids);
       await assertCloudEngineAuthorityDeadline(tx, input.engineInstanceId, this.workosEnabled);
+      if (!await cloudEngineInteractive(tx,input)) rejected();
       live();
       return CapabilitySessionResponseSchema.parse({
         version: 1, audience: CAPABILITY_SESSION_AUDIENCE, mode: "capability-session-v1", admitted: true,

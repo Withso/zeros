@@ -251,12 +251,15 @@ d("runtime connect and capability renewal with PostgreSQL", () => {
     expect(await inactive.json()).not.toHaveProperty("capabilities");
   });
 
-  it("refuses a lease that expires while the final writer lock is pending", async () => {
+  it.each(["engine", "interactive"])("refuses a %s lease that expires while the final writer lock is pending", async kind => {
     const boot = await bindActiveBoot();
     const blocker = await pool.connect();
     await blocker.query("BEGIN");
     const endpoint = async () => {
-      await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()+interval '2 seconds' WHERE id=$1", [fixture.engineInstanceId]);
+      if (kind === "engine") await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()+interval '2 seconds' WHERE id=$1", [fixture.engineInstanceId]);
+      else await pool.query(`UPDATE cloud_workspace_engine_instances SET coordinator_version=1,
+        interactive_frontend_id=$2,interactive_ready_until=clock_timestamp()+interval '2 seconds' WHERE id=$1`,
+      [fixture.engineInstanceId, randomUUID()]);
       await blocker.query("SELECT writer_epoch FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1 FOR UPDATE", [boot.writerEpoch]);
       return { url: DIRECT_ENDPOINT };
     };

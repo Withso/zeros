@@ -49,8 +49,8 @@ function fixture(cloud = true) {
     setupHostControlChannel: vi.fn(), setupParentDeathWatchdog: vi.fn(),
     local, transports: [local], setup: { reconcileStaleRuns: vi.fn() },
     activityHeartbeat: { start: vi.fn(), stop: vi.fn() },
-    // engineUplink: null is the CP not advertising an uplink (HTTP-only).
-    cloudRuntimeRegistration: cloud ? { start: vi.fn(), stop: vi.fn(), engineUplink: () => null } : null,
+    // Legacy HTTP-only runtime: neither an uplink nor coordinator is offered.
+    cloudRuntimeRegistration: cloud ? { start: vi.fn(), stop: vi.fn(), engineUplink: () => null, coordinatorOffered: () => false } : null,
     cloudEvents: cloud ? { start: vi.fn(), close: vi.fn() } : null,
     cloudIdleStop: { close: vi.fn() }, startGateway: vi.fn(), writePortFile: vi.fn(),
     agents: { revokeSessionTools: vi.fn(), dispose: vi.fn() },
@@ -172,8 +172,10 @@ describe("engine startup readiness", () => {
 
   it("keeps initial durable synchronization mandatory and starts no optional task on failure", async () => {
     const engine = fixture();
-    engine.cloudRuntimeRegistration.start.mockRejectedValue(new Error("durable sync failed"));
-    await expect(engine.start()).rejects.toThrow("cloud engine durable registration failed");
+    const failure = new Error("durable sync failed");
+    engine.cloudRuntimeRegistration.start.mockRejectedValue(failure);
+    await expect(engine.start()).rejects.toMatchObject({ message: "cloud engine durable registration failed", cause: failure });
+    expect(engine.cloudRuntimeRegistration.start).toHaveBeenCalledOnce();
     expect(engine.running).toBe(false);
     expect(engine.cloudEvents.start).not.toHaveBeenCalled();
     expect(capture.start).not.toHaveBeenCalled();

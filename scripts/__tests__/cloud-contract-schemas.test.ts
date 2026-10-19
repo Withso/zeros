@@ -6,7 +6,9 @@ import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
 import { CloudRuntimeBindingSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-connect-contract.js";
 import { DeviceStreamOrganizationFeaturesSchema } from "../../apps/control-plane/src/realtime/device-stream-protocol.js";
-import { UplinkAuthHealthRequestSchema, UplinkAuthHealthSchema, UplinkAuthHealthLostSchema } from "../../apps/control-plane/src/realtime/uplink-protocol.js";
+import { UplinkAuthHealthRequestSchema, UplinkAuthHealthSchema, UplinkAuthHealthLostSchema, UplinkStatusReadySchema } from "../../apps/control-plane/src/realtime/uplink-protocol.js";
+import * as engineCoordinator from "@zeros/protocol/cloud-coordinator";
+import * as apiCoordinator from "../../apps/control-plane/src/cloud-workspaces/coordinator-contract.js";
 
 const root = resolve(import.meta.dirname, "../..");
 const contracts = join(root, "docs/cloud-workspace/contracts");
@@ -256,6 +258,35 @@ describe("cloud workspace contract sketches", () => {
     const welcome = { protocol: 1, features: [], resumeToken: "a".repeat(32), resumed: false, pingIntervalMs: 20_000, leaseExpiresAtMs: 1_000 };
     expect(validate({ t: "sys.welcome", d: welcome })).toBe(true);
     expect(validate({ t: "sys.welcome", d: { ...welcome, connectionId: identity.connectionId } })).toBe(true);
+  });
+
+  it("S2 runner.v1 keeps strict coordinator snapshots in parity with the standalone API and legacy readiness valid", () => {
+    for (const key of ["CLOUD_COORDINATOR_FEATURE", "CLOUD_COORDINATOR_HEADER", "CLOUD_COORDINATOR_READINESS_MS", "CLOUD_COORDINATOR_HEARTBEAT_MS"] as const)
+      expect(apiCoordinator[key]).toBe(engineCoordinator[key]);
+    const validate = ajv().compile(json("s2-uplink-frames"));
+    const report = { version: 1, bootId: "11111111-1111-4111-8111-111111111111", revision: 1,
+      frontendId: "22222222-2222-4222-8222-222222222222", ready: true, expiresAtMs: 1792000090000 };
+    const cases: [Record<string, unknown>, boolean][] = [[report, true],
+      [{ ...report, ready: false, expiresAtMs: 0 }, true],
+      [{ ...report, ready: false, frontendId: null, expiresAtMs: 0 }, true],
+      [{ ...report, version: 2 }, false], [{ ...report, bootId: "foreign" }, false],
+      [{ ...report, revision: 0 }, false], [{ ...report, revision: Number.MAX_SAFE_INTEGER + 1 }, false],
+      [{ ...report, frontendId: null }, false], [{ ...report, expiresAtMs: 0 }, false],
+      [{ ...report, expiresAtMs: Number.MAX_SAFE_INTEGER + 1 }, false],
+      [{ ...report, ready: false }, false], [{ ...report, credential: "forbidden" }, false]];
+    for (const [coordinator, accepted] of cases) {
+      expect(engineCoordinator.CloudCoordinatorStatusSchema.safeParse(coordinator).success).toBe(accepted);
+      expect(apiCoordinator.CloudCoordinatorStatusSchema.safeParse(coordinator).success).toBe(accepted);
+      const d = { ready: coordinator.ready, phase: coordinator.ready ? "ready" : "starting", coordinator };
+      expect(UplinkStatusReadySchema.safeParse(d).success).toBe(accepted);
+      expect(validate({ t: "status.ready", s: 1, d }), JSON.stringify(validate.errors)).toBe(accepted);
+    }
+    const inconsistent = { ready: true, phase: "ready", coordinator: { ...report, ready: false, expiresAtMs: 0 } };
+    expect(UplinkStatusReadySchema.safeParse(inconsistent).success).toBe(false);
+    expect(validate({ t: "status.ready", s: 1, d: inconsistent })).toBe(false);
+    const legacy = { ready: true, phase: "ready" };
+    expect(UplinkStatusReadySchema.safeParse(legacy).success).toBe(true);
+    expect(validate({ t: "status.ready", s: 1, d: legacy })).toBe(true);
   });
 
   it.each([

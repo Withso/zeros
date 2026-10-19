@@ -32,6 +32,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { chmodSync } from "node:fs";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { CloudActorContextSchema, sameCloudActor, type CloudActorContext } from "@zeros/protocol/cloud-actors";
@@ -260,6 +261,8 @@ export function parseCloudTransportPort(
 export interface CloudTransportOptions {
   /** TCP port the in-sandbox engine binds (on 0.0.0.0) behind the preview proxy. */
   port: number;
+  /** Negotiated coordinator-only gate. Missing preserves legacy transports. */
+  interactiveReady?: () => boolean;
   /** Worker-minted connection token presented on the /ws upgrade. Browser
    *  clients use the WebSocket subprotocol carrier; trusted non-browser probes
    *  may use `x-zeros-cloud-token`. Credentials are never accepted in URLs.
@@ -464,6 +467,10 @@ export class CloudTransport implements Transport {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pendingUpgrades = 0;
   private handoffFenced = false;
+  private coordinatorSocket: string | null = null;
+  private coordinatorLoopback: { path: string; server: HttpServer } | null = null;
+  private readonly coordinatorLoopbackPeers = new WeakSet<object>();
+  private readonly interactiveReady: () => boolean;
   private getInfo:
     | (() => { version: string; uptime: number; connections: number })
     | null = null;
@@ -475,6 +482,7 @@ export class CloudTransport implements Transport {
     | null = null;
 
   constructor(opts: CloudTransportOptions) {
+    this.interactiveReady = opts.interactiveReady ?? (() => true);
     if (
       typeof opts.token !== "string" ||
       opts.token.length < 16 ||
@@ -591,6 +599,7 @@ export class CloudTransport implements Transport {
     });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
+      if (!this.interactiveReady()) { socket.destroy(); return; }
       if (this.serviceGateway?.handleUpgrade(request, socket, head)) return;
       if (this.previewGateway?.handleUpgrade(request, socket, head)) return;
       void this.handleUpgrade(request, socket, head);
@@ -836,7 +845,7 @@ export class CloudTransport implements Transport {
     client: CloudClient,
     msg: EngineMessage,
   ): Promise<void> {
-    if (!client.authorized()) return Promise.resolve();
+    if (!this.interactiveReady() || !client.authorized()) return Promise.resolve();
     try {
       return Promise.resolve(this.onMessageCb?.(client, msg));
     } catch (error) {
@@ -1136,22 +1145,36 @@ export class CloudTransport implements Transport {
   }
 
   async start(): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const onError = (err: Error) => {
-        this.httpServer.removeListener("listening", onListening);
-        reject(err);
-      };
-      const onListening = () => {
-        this.httpServer.removeListener("error", onError);
-        resolve();
-      };
-      this.httpServer.once("error", onError);
-      this.httpServer.once("listening", onListening);
-      // 0.0.0.0: reachable from the preview proxy, which terminates the
-      // public WSS and forwards to this port inside the sandbox.
-      this.httpServer.listen(this.port, "0.0.0.0");
-    });
-
+    try {
+      if (this.coordinatorLoopback) {
+        const { server, path } = this.coordinatorLoopback;
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(path, () => { server.off("error", reject); resolve(); });
+        });
+        chmodSync(path, 0o600);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error) => {
+          this.httpServer.removeListener("listening", onListening);
+          reject(err);
+        };
+        const onListening = () => {
+          this.httpServer.removeListener("error", onError);
+          resolve();
+        };
+        this.httpServer.once("error", onError);
+        this.httpServer.once("listening", onListening);
+        // 0.0.0.0: reachable from the preview proxy, which terminates the
+        // public WSS and forwards to this port inside the sandbox.
+        if (this.coordinatorSocket) this.httpServer.listen(this.coordinatorSocket);
+        else this.httpServer.listen(this.port, "0.0.0.0");
+      });
+      if (this.coordinatorSocket) chmodSync(this.coordinatorSocket, 0o600);
+    } catch (error) {
+      await this.closeHttpServers();
+      throw error;
+    }
     // When port 0 was requested, capture the ephemeral port the OS actually
     // assigned so callers (and the log line below) report the real port.
     const addr = this.httpServer.address();
@@ -1179,9 +1202,30 @@ export class CloudTransport implements Transport {
     }, PING_INTERVAL_MS);
     if (typeof this.pingTimer.unref === "function") this.pingTimer.unref();
 
-    console.log(
-      `[Zeros cloud] CloudTransport listening on 0.0.0.0:${this.port}`,
-    );
+    console.log(this.coordinatorSocket ? "[Zeros cloud] CloudTransport attached to coordinator" :
+      `[Zeros cloud] CloudTransport listening on 0.0.0.0:${this.port}`);
+  }
+
+  /** Set before start. The parent directory is fresh, mode 0700, and retained
+   * only for this coordinator. Authentication still runs in this process. */
+  useCoordinatorSocket(socketPath: string, loopbackPath: string): void {
+    if (this.httpServer.listening || this.coordinatorSocket) throw new Error("Cloud transport already started");
+    this.coordinatorSocket = socketPath;
+    // A distinct private socket preserves the pre-existing network boundary
+    // for Host probes. The child chooses it only for real loopback peers; a
+    // public peer cannot forge that classification in HTTP headers.
+    const server = createServer((req, res) => this.handleHTTP(req, res));
+    server.maxConnections = this.httpServer.maxConnections;
+    server.keepAliveTimeout = KEEPALIVE_TIMEOUT_MS;
+    server.headersTimeout = HEADERS_TIMEOUT_MS;
+    server.on("connection", socket => this.coordinatorLoopbackPeers.add(socket));
+    server.on("upgrade", (request, socket, head) => this.httpServer.emit("upgrade", request, socket, head));
+    this.coordinatorLoopback = { path: loopbackPath, server };
+  }
+  withdrawInteractive(): void {
+    this.refuseCapabilityHandshakes(RUNTIME_UNAVAILABLE);
+    for (const client of this.clients.values()) client.close(RUNTIME_UNAVAILABLE.code, RUNTIME_UNAVAILABLE.reason);
+    this.serviceGateway?.disconnect(); this.previewGateway?.disconnect();
   }
 
   async stop(): Promise<void> {
@@ -1197,14 +1241,21 @@ export class CloudTransport implements Transport {
     }
     this.clients.clear();
     await new Promise<void>((resolve) => this.wss.close(() => resolve()));
-    await new Promise<void>((resolve, reject) => {
-      this.httpServer.close((err) => (err ? reject(err) : resolve()));
-      // `close()` deliberately waits for existing HTTP connections. Remote
-      // peers are untrusted and can otherwise hold shutdown for the full
-      // headers timeout with a partial request, so terminate them after the
-      // listener has stopped accepting new sockets.
-      this.httpServer.closeAllConnections();
-    });
+    await this.closeHttpServers();
+  }
+
+  private async closeHttpServers(): Promise<void> {
+    await Promise.all([this.httpServer, this.coordinatorLoopback?.server].map(server => {
+      if (!server?.listening) return;
+      return new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+        // `close()` deliberately waits for existing HTTP connections. Remote
+        // peers are untrusted and can otherwise hold shutdown for the full
+        // headers timeout with a partial request, so terminate them after the
+        // listener has stopped accepting new sockets.
+        server.closeAllConnections();
+      });
+    }));
   }
 
   /** Parse one unambiguous credential carrier. Credentials use a header or
@@ -1266,6 +1317,7 @@ export class CloudTransport implements Transport {
     // defense for a 127.0.0.1 server). An exact capability is the boundary.
     if (
       url.pathname !== "/ws" ||
+      !this.interactiveReady() ||
       this.handoffFenced ||
       this.clients.size + this.pendingUpgrades >= this.maxConnections
     ) {
@@ -1291,7 +1343,7 @@ export class CloudTransport implements Transport {
       const admissionStartedAt = Date.now();
       const admission = await this.authenticateToken(credential);
       if (
-        !admission || this.handoffFenced ||
+        !admission || !this.interactiveReady() || this.handoffFenced ||
         (admission.accountUserId !== null &&
           Date.now() >= admissionStartedAt + this.clientAuthorityLeaseMs) ||
         socket.destroyed ||
@@ -1429,6 +1481,7 @@ export class CloudTransport implements Transport {
             return;
           }
           if (
+            !this.interactiveReady() ||
             this.handoffFenced ||
             ws.readyState !== WebSocket.OPEN ||
             this.clients.size >= this.maxConnections ||
@@ -1528,6 +1581,7 @@ export class CloudTransport implements Transport {
       void this.handleInternalReadiness(url, req, res).catch(() => res.destroy());
       return;
     }
+    if (!this.interactiveReady()) { res.writeHead(503, { "Cache-Control": "no-store" }); res.end("unavailable"); return; }
     if (this.previewGateway?.handle(req, res)) return;
     if (url.pathname === "/health" && req.method === "GET") {
       const info = this.getInfo?.() ?? {
@@ -1565,6 +1619,7 @@ export class CloudTransport implements Transport {
     };
     const remote = req.socket.remoteAddress ?? "";
     const remoteIsLoopback =
+      this.coordinatorLoopbackPeers.has(req.socket) ||
       remote === "127.0.0.1" ||
       remote === "::1" ||
       remote === "::ffff:127.0.0.1";

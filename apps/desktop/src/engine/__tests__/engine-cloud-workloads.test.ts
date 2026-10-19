@@ -24,6 +24,28 @@ describe('engine owned workload lifecycle',()=>{
   expect(()=>f.cloudWorkloads.assertAccepting()).toThrow();await stopped;
   expect(await f.cloudWorkloads.inspect()).toMatchObject({complete:true,pendingLaunches:0,workloadPids:[],infrastructurePids:[]});
  });
+ it.each(['retired','failed'] as const)('fences launches while coordinator retirement is pending and then %s',async outcome=>{
+  const f=await fixture();
+  const failure=new Error('frontend retirement proof failed');
+  let finish!:()=>void;
+  const retirement=new Promise<void>((resolve,reject)=>{finish=()=>outcome==='retired'?resolve():reject(failure);});
+  const stop=vi.fn(()=>retirement),drain=vi.spyOn(f.cloudWorkloads,'drain');
+  f.engine.cloudCoordinator={stop};
+  const stopped=f.engine.stop().then(()=>null,(error:unknown)=>error);
+  try{
+   expect(stop).toHaveBeenCalledOnce();
+   expect(()=>f.cloudWorkloads.assertAccepting()).toThrow();
+   expect(drain).not.toHaveBeenCalled();
+   finish();
+   const error=await stopped;
+   if(outcome==='failed'){
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toContain(failure);
+   }else expect(error).toBeNull();
+   expect(drain).toHaveBeenCalledOnce();
+   expect(await f.cloudWorkloads.inspect()).toMatchObject({complete:true,pendingLaunches:0,workloadPids:[],infrastructurePids:[]});
+  }finally{finish();await stopped;}
+ });
  it('drains the original registry before the durable writer freeze and retains the seal ticket',async()=>{
   const f=await fixture();let frozen=false;
   Object.assign(f.engine,{cloudAgentBoot:{authorityActive:true,quiesceForSeal:vi.fn(),executionFactory:{disposeBoot:vi.fn()}},

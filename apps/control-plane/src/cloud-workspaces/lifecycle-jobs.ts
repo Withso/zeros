@@ -47,16 +47,21 @@ const DUE: Record<LifecycleWork, string> = {
     SELECT workspace_id, org_id, next_check_at AS due_at FROM cloud_workspace_paid_authority_checks
     WHERE ($scope::uuid IS NULL OR workspace_id=$scope)`,
   engineHealth: `
-    SELECT workspace.id AS workspace_id, workspace.org_id, coalesce((SELECT max(engine.lease_expires_at) FROM cloud_workspace_engine_instances engine
-      WHERE engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id AND engine.generation=workspace.current_generation
-        AND engine.state='ready' AND engine.revoked_at IS NULL),now()) AS due_at
+    SELECT workspace.id AS workspace_id, workspace.org_id, least(
+      CASE WHEN NOT EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents intent
+        WHERE intent.workspace_id=workspace.id AND intent.org_id=workspace.org_id
+          AND (intent.generation=workspace.current_generation OR intent.affects_workspace)
+          AND intent.state IN ('queued','dispatching','observing'))
+        THEN coalesce((SELECT max(engine.lease_expires_at) FROM cloud_workspace_engine_instances engine
+          WHERE engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id AND engine.generation=workspace.current_generation
+            AND engine.state='ready' AND engine.revoked_at IS NULL),now()) END,
+      (SELECT min(engine.interactive_ready_until) FROM cloud_workspace_engine_instances engine
+        WHERE engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id AND engine.generation=workspace.current_generation
+          AND engine.coordinator_version=1)) AS due_at
     FROM cloud_workspaces workspace JOIN cloud_workspace_generations generation
       ON generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id AND generation.generation=workspace.current_generation
     WHERE ($scope::uuid IS NULL OR workspace.id=$scope) AND ($provider::text IS NULL OR generation.provider=$provider) AND workspace.desired_state='running'
-      AND workspace.status IN ('ready','busy') AND workspace.deleted_at IS NULL
-      AND NOT EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents intent
-        WHERE intent.workspace_id=workspace.id AND intent.org_id=workspace.org_id
-          AND (intent.generation=workspace.current_generation OR intent.affects_workspace) AND intent.state IN ('queued','dispatching','observing'))`,
+      AND workspace.status IN ('ready','busy') AND workspace.deleted_at IS NULL`,
   compute: `
     SELECT lease.workspace_id, lease.org_id, greatest(lease.next_check_at,
       CASE WHEN lease.lease_owner IS NOT NULL THEN lease.lease_expires_at END,

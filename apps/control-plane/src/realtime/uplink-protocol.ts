@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { CloudCoordinatorStatusSchema } from "../cloud-workspaces/coordinator-contract.js";
 
-/** S2 `zeros-uplink` wire constants (contract 1.4.0). The CP
+/** S2 `zeros-uplink` wire constants (contract 1.5.0). The CP
  * mirrors the contract here and never imports `@zeros/protocol`. */
 export const UPLINK_PATH = "/v1/uplink";
 export const UPLINK_SUBPROTOCOL = "zeros-uplink.v1";
@@ -76,6 +77,7 @@ export const UPLINK_CLOSE = {
 } as const;
 
 export const UPLINK_FEATURES = {
+  coordinator: "runner.v1",
   detached: "detached.v1",
   /** Credential-control revision push (`cred.revision` / `cred.ack`). */
   credentialControls: "cred.v1",
@@ -136,10 +138,11 @@ export type UplinkHello = z.infer<typeof UplinkHelloSchema>;
 
 export const UplinkPingSchema = z.object({ ts: timestampMs });
 export const UplinkStatusReadySchema = z.object({
+  coordinator: CloudCoordinatorStatusSchema.optional(),
   ready: z.boolean(),
   phase: z.enum(["starting", "preparing", "ready", "degraded", "stopping"]),
   reason: code.optional(),
-});
+}).refine(value => !value.ready || value.coordinator?.ready !== false);
 export const UplinkStatusReportSchema = z.object({
   engineVersion: z.string().max(64),
   health: z.enum(["ok", "degraded"]).optional(),

@@ -1,6 +1,8 @@
 import type pg from "pg";
 
 import { withSystemTx } from "../db.js";
+import { recordCloudCoordinatorReadiness } from "../cloud-workspaces/coordinator-readiness.js";
+import type { CloudCoordinatorStatus } from "../cloud-workspaces/coordinator-contract.js";
 
 export type UplinkPhase = "starting" | "preparing" | "ready" | "degraded" | "stopping";
 
@@ -20,6 +22,7 @@ export type UplinkPresenceSnapshot = Readonly<{
   connectedAtMs: number;
   lastSeenAtMs: number;
   disconnectedAtMs: number | null;
+  coordinator?: { report: CloudCoordinatorStatus; receivedAtMs: number };
 }>;
 
 export interface UplinkPresenceStore {
@@ -34,6 +37,7 @@ export class DatabaseUplinkPresenceStore implements UplinkPresenceStore {
       // A write that waits behind a lifecycle lock is retried by the queue
       // rather than holding a pool connection.
       await tx.query("SET LOCAL lock_timeout = '2s'");
+      if (s.coordinator) await recordCloudCoordinatorReadiness(tx, s, s.coordinator.report, s.coordinator.receivedAtMs);
       await tx.query(
         `INSERT INTO cloud_workspace_engine_uplinks AS current (
            engine_instance_id, workspace_id, org_id, generation, connection_id, realtime_instance, protocol,

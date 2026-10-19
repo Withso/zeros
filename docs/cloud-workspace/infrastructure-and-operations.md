@@ -115,6 +115,28 @@ and owns the final `populated=0` receipt because the kill also terminates the en
 
 ## Build and image contract
 
+The optional `agent_runners` rollout flag defaults off and requires
+`detached_turns`. Deploy the coordinator-readiness schema and CP readers before
+the runtime; qualify the actual supervisor and ingress child before enabling it.
+Only a fresh exact engine enrollment with local-command/accepted-work support
+and the supervisor's original R1 marker can acknowledge `runner.v1`.
+
+For an enrolled coordinator, verify that killing only its ingress child makes
+catalog/connect/actor/preview/service admission unavailable, then reattaches a
+fresh child without reopening the command ledger, writer or uplink. Suppress
+the child-exit notification separately: the owner proof expires in 10 s, and
+CP's observation expires within 90 s even if its withdrawal write is lost.
+Verify the independent API heartbeat still runs at most 60 s apart with only
+the realtime pool unavailable. Killing the actual coordinator must invoke R1,
+interrupt accepted work and retire its VM domain; no provider turn is restarted.
+
+Rollback disables new coordinator enrollments. Existing owners retain their
+readiness reporting and normal authority until drained; they do not downgrade
+live execution to legacy ownership. Runtime replacement requires the existing
+verified drain and pin/qualification path. See
+[the runtime boundary](runtime-bundles.md#optional-coordinator-ingress) and
+[S2 readiness](contracts/s2-uplink.md#execution-coordinator-and-interactive-readiness-runnerv1).
+
 The remote image must be reproducible from reviewed source and a pinned runtime
 set. It must include only the engine, approved agent runtimes, native modules for
 the image ABI, and documented operator tooling. Image creation fails when a

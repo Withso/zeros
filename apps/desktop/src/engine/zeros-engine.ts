@@ -239,6 +239,8 @@ import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-actio
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkActivity, type EngineUplinkReadiness } from "./cloud-engine-uplink";
+import { createCloudExecutionCoordinator, type CloudExecutionCoordinator } from "./cloud-execution-coordinator";
+import { cloudCoordinatorFrontendSpawner } from "./cloud-coordinator-frontend";
 import { CloudDetachedPushHealth } from "./cloud-detached-push-health";
 import {
   EngineCapabilityAuth,
@@ -1250,6 +1252,8 @@ export class ZerosEngine {
   /** S2 uplink client; null on Local placements and whenever the control
    * plane did not advertise an endpoint (rollout flag off or older CP). */
   private cloudEngineUplink: CloudEngineUplinkClient | null = null;
+  private cloudCoordinator: CloudExecutionCoordinator | null = null;
+  private cloudCoordinatorDirectory: string | null = null;
   private cloudCapabilityAuth: EngineCapabilityAuth | null = null;
   private cloudDetachedPushHealth: CloudDetachedPushHealth | null = null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
@@ -2305,6 +2309,7 @@ export class ZerosEngine {
       this.cloud = new CloudTransport({
         port: cloudPort,
         token: process.env.ZEROS_CLOUD_TOKEN?.trim() || "",
+        interactiveReady: () => !this.cloudCoordinator || this.cloudCoordinator.isInteractiveReady(),
         ...(this.cloudRuntimeRegistration && this.cloudRuntimeConfig
           ? {
               internalReadiness: {
@@ -2318,8 +2323,7 @@ export class ZerosEngine {
               renewToken: (token: string) => this.verifyCloudActorClient(token, true),
               // S3 Part 3 direct route; null until an advertised uplink starts the verifier.
               capabilityAuth: () => this.cloudCapabilityAuth,
-              verifyServiceAccess: (token: string) => this.cloudRuntimeCheckpointQuiescing || this.cloudLegacyResidentRequiresFreshView
-                ? Promise.resolve(null) : this.cloudRuntimeRegistration!.verifyServiceAccess(token),
+              verifyServiceAccess: (token: string) => this.verifyCloudInteractiveService(token),
               resolveAgentPreviewTarget: (target) => this.agents.resolveNativePreviewTarget(target),
               ...(humanServices ? { openServiceStream: (grant: Parameters<CloudRuntimeHumanServices["open"]>[0]) => humanServices.open(grant) } : {}),
               forbiddenPreviewPorts: Array.from({ length: this.portSpan }, (_, index) => this.portStart + index),
@@ -3620,19 +3624,10 @@ export class ZerosEngine {
     // (.mcp.json / .vscode/mcp.json generation removed — Zeros MCP is
     // disabled; we no longer write MCP config into the user's repo.)
 
-    // Start any non-local transports (e.g. the outbound relay control socket).
-    for (const t of this.transports) {
-      if (t !== this.local) await t.start();
-    }
-
     this.engineStopping = false;
     this.running = true;
     try {
-      this.cloudStartupPhase = "registration";
-      await this.cloudRuntimeRegistration?.start();
-      this.startCloudEngineUplink();
-      this.cloudEvents?.start();
-      await this.initializeCloudAgentBoot();
+      await this.startCloudTransportsAndOwner();
     } catch (error) {
       await this.stop().catch(() => undefined);
       throw new Error("cloud engine durable registration failed", {
@@ -3668,9 +3663,43 @@ export class ZerosEngine {
     }
   }
 
-  /**
-   * Stop the engine gracefully.
-   */
+  /** Keep the fully composed execution owner stable. Only an explicitly
+   * negotiated, supervisor-aware cloud runtime puts public ingress in a child.
+   * Legacy/Local startup retains its original transport and registration order. */
+  private async startCloudTransportsAndOwner(): Promise<void> {
+    const registration = this.cloudRuntimeRegistration;
+    const offered = !!this.cloudWorker && registration?.coordinatorOffered() === true;
+    this.cloudStartupPhase = "registration";
+    if (offered) await registration!.start();
+    const initialize = async () => {
+      this.startCloudEngineUplink();
+      this.cloudEvents?.start();
+      await this.initializeCloudAgentBoot();
+    };
+    if (offered && registration!.coordinatorNegotiated() && this.cloud) {
+      // mkdtemp is exclusive and mode 0700; no caller-selected path or shared
+      // socket survives an owner boot. Same-VM processes remain one trust domain.
+      const directory = this.cloudCoordinatorDirectory = fs.mkdtempSync("/tmp/zeros-coordinator-");
+      const socketPath = path.join(directory, "public.sock"), loopbackPath = path.join(directory, "loopback.sock");
+      this.cloud.useCoordinatorSocket(socketPath, loopbackPath);
+      this.cloudCoordinator = createCloudExecutionCoordinator({ cloud: true, negotiated: true,
+        bootId: registration!.runtimeBootId, initialize,
+        spawn: cloudCoordinatorFrontendSpawner(this.cloudExecutionBoundary, socketPath, loopbackPath, this.cloud.boundPort),
+        changed: () => {
+          if (!this.cloudCoordinator?.isInteractiveReady()) this.cloud?.withdrawInteractive();
+          this.cloudEngineUplink?.reportReadiness();
+          registration!.requestHeartbeatSoon();
+        },
+      });
+      registration!.attachCoordinatorStatus(() => this.cloudCoordinator!.snapshot());
+    }
+    for (const transport of this.transports) if (transport !== this.local) await transport.start();
+    if (!offered) await registration?.start();
+    if (this.cloudCoordinator) await this.cloudCoordinator.start();
+    else await initialize();
+  }
+
+  /** Stop the engine gracefully. */
   async stop(): Promise<void> {
     this.sessionUpdateBatcher?.flush();
     if (!this.cloudWorker) this.slowWorkspaceOperations?.dispose();
@@ -3680,9 +3709,15 @@ export class ZerosEngine {
     const failures: unknown[] = [];
     if (this.cloudLegacyResidentRetryTimer) clearTimeout(this.cloudLegacyResidentRetryTimer);
     this.cloudLegacyResidentRetryTimer = null;
+    // Close launch admission synchronously, before any frontend retirement.
     if (this.cloudWorkloads && !this.cloudWorkloadStopFence) {
       this.cloudWorkloadStopPreserved = this.cloudRuntimeHandoffFenced === true;
       this.cloudWorkloadStopFence = this.cloudWorkloads.fence({ preserveActive: this.cloudWorkloadStopPreserved });
+    }
+    // Withdraw ingress before any slow seal/retirement. Do not add an await
+    // to legacy/Local teardown when there is no coordinator to retire.
+    if (this.cloudCoordinator) {
+      try { await this.cloudCoordinator.stop(); } catch (error) { failures.push(error); }
     }
     // A submitted original root effect keeps registration/custody alive until
     // its exact receipt is joined. Unknown ACK retries the saved request only.
@@ -3854,6 +3889,11 @@ export class ZerosEngine {
     for (const transport of this.transports) {
       await settle(() => transport.stop());
     }
+    if (this.cloudCoordinatorDirectory && failures.length === 0) {
+      const directory = this.cloudCoordinatorDirectory;
+      await settle(() => fs.promises.rm(directory, { recursive: true, force: true }));
+      this.cloudCoordinatorDirectory = null;
+    }
     await settle(() => this.removePortFile());
     await settle(() => this.clearBusy());
 
@@ -3868,7 +3908,9 @@ export class ZerosEngine {
   }
 
   private cloudEngineUplinkReadiness(): EngineUplinkReadiness {
-    return { ready: this.running, phase: this.running ? "ready" : this.engineStopping ? "stopping" : "starting" };
+    const ready = this.running && (!this.cloudCoordinator || this.cloudCoordinator.isInteractiveReady());
+    return { ready, phase: ready ? "ready" : this.engineStopping ? "stopping" : "starting",
+      ...(this.cloudCoordinator ? { coordinator: this.cloudCoordinator.snapshot() } : {}) };
   }
 
   /** `activity.report`: counts the control plane can read, plus the
@@ -5096,7 +5138,7 @@ export class ZerosEngine {
   /** Registration alone precedes the local writer/replay cutover. Preserve
    * confirmed lifecycle authority while starts are fenced for a clean seal. */
   private cloudRuntimeReadiness(): ReturnType<CloudRuntimeRegistration["readiness"]> {
-    if (this.cloudLegacyResidentRequiresFreshView) return null;
+    if (this.cloudLegacyResidentRequiresFreshView || this.cloudCoordinator && !this.cloudCoordinator.isInteractiveReady()) return null;
     const registration = this.cloudRuntimeRegistration;
     const readiness = registration?.readiness() ?? null;
     if (readiness && this.cloudWorker && (registration!.localCommandsNegotiated() || this.cloudRecordRuntime?.usesLocalAgentJournal) &&
@@ -5172,11 +5214,24 @@ export class ZerosEngine {
   /** Redeems a client's credential behind this engine's admission gates: a
    * grant token (renewed with `renew`), or the control plane's admission of
    * a verified capability's actor. */
+  private async verifyCloudInteractiveService(token: string) {
+    const coordinator = this.cloudCoordinator, frontend = coordinator?.frontendId();
+    const available = () => !this.cloudRuntimeCheckpointQuiescing && !this.cloudLegacyResidentRequiresFreshView &&
+      (!coordinator || this.cloudCoordinator === coordinator && !!frontend && coordinator.frontendId() === frontend);
+    if (!available()) return null;
+    const grant = await this.cloudRuntimeRegistration!.verifyServiceAccess(token);
+    return available() ? grant : null;
+  }
+
   private async verifyCloudActorClient(
     credential: string | ((registration: CloudRuntimeRegistration) => Promise<CloudRuntimeClientAdmission | null>),
     renew = false,
   ) {
-    if (this.cloudLegacyResidentRequiresFreshView) return null;
+    const coordinator = this.cloudCoordinator;
+    const frontendId = coordinator?.frontendId();
+    const interactive = () => !coordinator || this.cloudCoordinator === coordinator &&
+      !!frontendId && coordinator.frontendId() === frontendId;
+    if (this.cloudLegacyResidentRequiresFreshView || !interactive()) return null;
     const registration = this.cloudRuntimeRegistration;
     if (!registration) return null;
     const boot = registration.localCommandsNegotiated() ? this.cloudAgentBoot : null;
@@ -5190,7 +5245,7 @@ export class ZerosEngine {
     }
     const admission = typeof credential === "string"
       ? await registration.verifyClientAdmission(credential, renew) : await credential(registration);
-    if (!admission || registration !== this.cloudRuntimeRegistration) return null;
+    if (!admission || registration !== this.cloudRuntimeRegistration || !interactive()) return null;
     if (registration.localCommandsNegotiated()) {
       if (!boot || boot !== this.cloudAgentBoot || !boot.active || this.cloudRuntimeAuthorityStopping) return null;
       try { await boot.confirmAdmission(admission, renew); }
@@ -5203,7 +5258,7 @@ export class ZerosEngine {
       if (registration !== this.cloudRuntimeRegistration || boot !== this.cloudAgentBoot || !boot.active ||
           this.cloudRuntimeAuthorityStopping) return null;
     }
-    return admission;
+    return interactive() ? admission : null;
   }
 
   /** S3 Part 3 direct route: the control plane admits the actor of a
