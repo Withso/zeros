@@ -811,7 +811,10 @@ class Bootstrap:
         raw = self.read("/opt/zeros-bootstrap/compatibility.json", 256 * 1024, 0o444)
         value = strict_json(raw, "base_compatibility")
         shape(value, ("arch", "artifactHostSuffixes", "bootstrapProtocolVersion", "glibc", "os", "protectedFiles",
-                      "schema", "supportedManifestSchemas", "systemdMin", "uids"), check="base_compatibility")
+                      "schema", "supportedManifestSchemas", "systemdMin", "uids"),
+              ("runtimeRollbackCacheVersion",), check="base_compatibility")
+        if "runtimeRollbackCacheVersion" in value:
+            integer(value["runtimeRollbackCacheVersion"], 1, 1, "base_compatibility")
         require(value["schema"] == "zeros.base-compatibility/v1" and value["arch"] == "x64" and
                 value["os"] == {"id": "ubuntu", "versionId": "24.04"} and value["glibc"] == "2.39" and
                 value["uids"] == {"agent": 10001, "capture": 10002, "engine": 10003, "coordinator": 10004} and
@@ -1349,19 +1352,73 @@ class Bootstrap:
 
     def receipt(self, runtime_id, manifest, descriptor=None):
         raw = self.read(RECEIPTS + "/" + runtime_id + ".json", 4096, 0o600)
+        return self.validate_receipt(raw, runtime_id, manifest, descriptor)
+
+    def validate_receipt(self, raw, runtime_id, manifest=None, descriptor=None):
         value = strict_json(raw, "cache_conflict")
         shape(value, ("archiveSha256", "baseCompatibilityId", "bootstrapVersion", "expandedBytes", "fileCount",
                       "installedAt", "manifestSha256", "runtimeId", "schema"), check="cache_conflict")
         require(value["schema"] == "zeros.runtime-install-receipt/v1" and value["runtimeId"] == runtime_id and
                 value["manifestSha256"] == runtime_id[3:] and value["baseCompatibilityId"] == self.compat_id and
                 type(value["bootstrapVersion"]) is int and value["bootstrapVersion"] == 1 and
-                type(value["fileCount"]) is int and value["fileCount"] == sum(e["type"] == "file" for e in manifest["files"]) and
-                type(value["expandedBytes"]) is int and value["expandedBytes"] == sum(e.get("size", 0) for e in manifest["files"]), "cache_conflict")
+                type(value["fileCount"]) is int and 1 <= value["fileCount"] <= MAX_ENTRIES and
+                type(value["expandedBytes"]) is int and 1 <= value["expandedBytes"] <= MAX_EXPANDED, "cache_conflict")
+        if manifest:
+            require(value["fileCount"] == sum(e["type"] == "file" for e in manifest["files"]) and
+                    value["expandedBytes"] == sum(e.get("size", 0) for e in manifest["files"]), "cache_conflict")
         text_match(value["archiveSha256"], HEX, "cache_conflict")
         timestamp(value["installedAt"], "cache_conflict")
         if descriptor:
-            require(value["archiveSha256"] == descriptor["archiveSha256"], "cache_conflict")
+            require(value["archiveSha256"] == descriptor["archiveSha256"] and
+                    value["expandedBytes"] == descriptor["expandedBytes"], "cache_conflict")
         return raw
+
+    def remember_descriptor(self, descriptor):
+        # The archive capability is deliberately not part of retained metadata.
+        if self.compat.get("runtimeRollbackCacheVersion") != 1:
+            return
+        path = RECEIPTS + "/" + descriptor["runtimeId"] + ".descriptor.json"
+        try:
+            require(strict_json(self.read(path, 4096, 0o600), "cache_conflict") == descriptor, "cache_conflict")
+        except FileNotFoundError:
+            self.atomic(path, packed(descriptor))
+
+    def rollback_reference(self, runtime_id):
+        text_match(runtime_id, RID, "cache_conflict")
+        try:
+            value = strict_json(self.read(RECEIPTS + "/" + runtime_id + ".rollback.json", 16384, 0o600), "cache_conflict")
+        except FileNotFoundError:
+            return None
+        require(self.compat.get("runtimeRollbackCacheVersion") == 1, "base_compatibility")
+        shape(value, ("schema", "retentionId", "runtime", "baseCompatibilityId", "installerReceipt",
+                      "installerReceiptSha256", "state", "scope", "currentRuntimeId", "bootId", "diskEpoch"), check="cache_conflict")
+        require(value["schema"] == "zeros.runtime-rollback-ref/v1" and
+                value["state"] in ("evicting", "evicted", "restored") and
+                value["baseCompatibilityId"] == self.compat_id, "cache_conflict")
+        validate_descriptor(value["runtime"])
+        require(value["runtime"]["runtimeId"] == runtime_id and value["currentRuntimeId"] != runtime_id, "cache_conflict")
+        text_match(value["currentRuntimeId"], RID, "cache_conflict")
+        for key in ("retentionId", "bootId"):
+            text_match(value[key], UUID, "cache_conflict")
+        integer(value["diskEpoch"], 1, 10**18 - 1, "cache_conflict")
+        scope = value["scope"]
+        shape(scope, ("workspaceId", "organizationId", "generation", "providerResourceId", "authorityEpoch", "intentId"), check="cache_conflict")
+        for key in ("workspaceId", "organizationId", "intentId"):
+            text_match(scope[key], UUID, "cache_conflict")
+        integer(scope["generation"], 1, 2**31 - 1, "cache_conflict")
+        text_match(scope["providerResourceId"], r"bx_[A-Za-z0-9_-]{1,128}", "cache_conflict")
+        text_match(scope["authorityEpoch"], r"[1-9][0-9]{0,18}", "cache_conflict")
+        text_match(value["installerReceiptSha256"], HEX, "cache_conflict")
+        text_match(value["installerReceipt"], r"[A-Za-z0-9_-]{1,5462}", "cache_conflict")
+        try:
+            raw = base64.b64decode(value["installerReceipt"] + "=" * (-len(value["installerReceipt"]) % 4), altchars=b"-_", validate=True)
+        except ValueError:
+            raise Failure("cache_conflict") from None
+        require(len(raw) <= 4096 and base64.urlsafe_b64encode(raw).rstrip(b"=").decode() == value["installerReceipt"] and
+                sha(raw) == value["installerReceiptSha256"] and
+                self.read(RECEIPTS + "/" + runtime_id + ".json", 4096, 0o600) == raw, "cache_conflict")
+        self.validate_receipt(raw, runtime_id, descriptor=value["runtime"])
+        return value
 
     def incomplete_marker(self, runtime_id):
         text_match(runtime_id, RID, "cache_conflict")
@@ -1385,6 +1442,7 @@ class Bootstrap:
                  "installedAt": self.now().isoformat().replace("+00:00", "Z"), "manifestSha256": descriptor["manifestSha256"],
                  "runtimeId": descriptor["runtimeId"], "schema": "zeros.runtime-install-receipt/v1"}
         raw = packed(value)
+        self.remember_descriptor(descriptor)
         self.atomic(RECEIPTS + "/" + descriptor["runtimeId"] + ".json", raw)
         self.fault("receipt_published")
         return raw
@@ -1501,9 +1559,16 @@ class Bootstrap:
         ids.update(value for value in (self.current(), self.current("previous")) if value)
         incomplete = []
         for runtime_id in sorted(ids):
+            reference = self.rollback_reference(runtime_id)
+            if reference and reference["state"] != "restored":
+                # A retained previous is deliberately not an executable tree.
+                # Do not even open its manifest or walk an interrupted eviction.
+                require(runtime_id != self.current(), "cache_conflict")
+                continue
             try:
                 self.runtime_metadata(runtime_id, descriptor if descriptor and descriptor["runtimeId"] == runtime_id else None)
             except (Failure, FileNotFoundError):
+                require(reference is None, "cache_conflict")
                 incomplete.append(runtime_id)
         return incomplete
 
@@ -1511,6 +1576,7 @@ class Bootstrap:
         # Caller holds both locks; boot runs before the host, while install
         # retires a host using an affected current before taking publication.lock.
         for runtime_id in runtime_ids:
+            require(self.rollback_reference(runtime_id) is None, "cache_conflict")
             marker = self.incomplete_marker(runtime_id)
             # Keep recovery restartable even if deletion itself is interrupted.
             self.atomic(marker, b"")
@@ -1520,6 +1586,7 @@ class Bootstrap:
             if self.current("previous") == runtime_id:
                 self.unlink(FACADE + "/previous")
             self.unlink(RECEIPTS + "/" + runtime_id + ".json")
+            self.unlink(RECEIPTS + "/" + runtime_id + ".descriptor.json")
             self.remove_entries(INFRA, [runtime_id])
             self.unlink(marker)
 
@@ -1554,6 +1621,8 @@ class Bootstrap:
             runtime_id = descriptor["runtimeId"]
             destination = INFRA + "/" + runtime_id
             self.stage = "check_cache"
+            reference = self.rollback_reference(runtime_id)
+            require(reference is None or reference["state"] == "restored", "cache_conflict")
             incomplete = self.incomplete_runtimes(descriptor)
             if incomplete:
                 if self.current() in incomplete:
@@ -1564,6 +1633,7 @@ class Bootstrap:
             if os.path.lexists(self.path(destination)):
                 with self.performance.measure("cache_verify"):
                     self.verify_runtime(runtime_id, descriptor=descriptor)
+                self.remember_descriptor(descriptor)
             else:
                 require(not os.path.lexists(self.path(RECEIPTS + "/" + runtime_id + ".json")), "cache_conflict")
                 self.stage = "check_space"
