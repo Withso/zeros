@@ -103,7 +103,6 @@ describe("computer template repository projection", () => {
           "cloud-engine-view.mjs",
           "cloud-computer-checkout.mjs",
           "cloud-engine-cgroup.mjs",
-          "cloud-boot-retirement.mjs",
           "cgroup-resources.mjs",
           "cloud-resource-admission.mjs",
           "publish-cloud-workload-custody.mjs",

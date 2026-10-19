@@ -353,7 +353,7 @@ function runV4Probe(runtime, helper, timeout, check, entry = "--qualify", collec
   return parseCloudV4Document(Buffer.from(result.stdout ?? ""), "diagnostic_missing");
 }
 
-export function v4DelegatedResources(runtime, qualification) {
+function v4DelegatedResources(runtime, qualification) {
   const root = runtime.cgroupRoot;
   requireCloudV4Check(statfsSync(root).type === 0x63677270, "cgroup_controllers");
   for (let cursor = root; ; cursor = path.dirname(cursor)) {
@@ -543,17 +543,6 @@ function attestV4CloudWorker() {
     process.stdout.write(`${JSON.stringify(withPerformance({ ...cloudV4Diagnostic(error ?? {}, stage), timings: timings.snapshot() }))}\n`);
     process.exitCode = 1;
   }
-}
-
-/** Dormant integration entry. Only an explicit pinned caller decision selects
- * build mode. The legacy CLI keeps its original report and proof shapes. */
-export async function attestSelectedCloudWorker(options = {}, ports = {}) {
-  const selection = options.selection;
-  if (selection === undefined || exactKeys(selection, ["mode"]) && selection.mode === "full")
-    return (ports.fullAttest ?? attestV4CloudWorker)();
-  const pinned = { ...options, selection: structuredClone(selection), attempt: structuredClone(options.attempt) };
-  const { attestCloudBuildQualification } = await import("./cloud-boot-admission.mjs");
-  return attestCloudBuildQualification(pinned, ports);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

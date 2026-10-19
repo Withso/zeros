@@ -1,9 +1,0 @@
-{
-  "id": "seeded-cloud-boot-current-attempt",
-  "kind": "seeded",
-  "area": "vm-image-bootstrap",
-  "fixedBy": "pr:629",
-  "symptom": "A deliberate mutation removes the independent current-attempt comparison, admitting a late short-probe or consumption result after the setup nonce changes.",
-  "rule": "zstack-review requires original-attempt fences after I/O; the dormant boot interface also requires them at single-use proof consumption.",
-  "check": "pnpm test:git scripts/__tests__/cloud-boot-admission.test.ts"
-}

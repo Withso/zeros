@@ -79,16 +79,6 @@ int refuse_legacy_identity_map(size_t count, const gid_t *groups) { (void)count;
   it.each([[], ["--v3"], ["--qualify"], ["--v3", "--qualify-agent"]].map(args => ({ args })))("rejects retired args $args before changing identity maps", ({ args }) => {
     expect(spawnSync(binary, args, { timeout: 3000 }).status).toBe(125);
   });
-  const selected = ["--runtime-id", `r1-${"a".repeat(64)}`, "--engine-scope",
-    "/sys/fs/cgroup/system.slice/zeros-host.service/engine-runtime/engine-12345678-1234-4234-8234-123456789abc@1:2"];
-  it("admits only the fixed boot role into the same native identity transition", () => {
-    expect(spawnSync(binary, [...selected, "--boot-check"], { timeout: 3000 }).status).toBe(99);
-  });
-  it.each([["--boot-check", "/tmp/probe"], ["--boot-check", "--qualify"], ["--boot-check=other"], ["--boot-check", "--budget-ms", "5000"]])(
-    "rejects boot command/path extensions before the identity transition: %j", (...extra) => {
-      expect(spawnSync(binary, [...selected, ...extra], { timeout: 3000 }).status).toBe(125);
-    },
-  );
 });
 
 describe.skipIf(process.platform !== "linux")("non-root shared engine identity map", () => {

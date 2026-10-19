@@ -116,7 +116,6 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
 `cd ${engineDirectory} && pnpm install --frozen-lockfile`,
 `cd ${engineDirectory} && pnpm build:ripgrep`,
 `cd ${engineDirectory} && pnpm build:engine`,
-`cd ${engineDirectory} && node scripts/cloud-workspace-validation/runtime-bundle/qualification.mjs --boot-contract-only`,
 // Pinned Playwright browser revision, installed read-only outside every
         // writable workspace. Capture shares UID10003 and Chromium sandboxing.
         `cd ${engineDirectory} && PLAYWRIGHT_BROWSERS_PATH=/opt/zeros/design-browsers pnpm exec playwright-core install --with-deps chromium`,
@@ -220,13 +219,6 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
     const archivePath = `sandbox/${path.basename(sourcePath)}`;
     contextList.push({ sourcePath, archivePath });
     lines.push(`COPY ${JSON.stringify([archivePath, "/opt/zeros-runtime/lib/zeros/cloud-engine-cgroup.mjs"])}`);
-  }
-  for (const name of ["cloud-boot-admission.mjs", "cloud-boot-proof.mjs", "cloud-boot-locks.mjs", "cloud-boot-retirement.mjs"]) {
-    const sourcePath = path.join(here, "sandbox", name), archivePath = `sandbox/${name}`;
-    const target = `/opt/zeros-runtime/lib/zeros/${name}`;
-    contextList.push({ sourcePath, archivePath });
-    lines.push(`COPY ${JSON.stringify([archivePath, target])}`);
-    lines.push(`RUN chown root:root ${target} && chmod 0444 ${target}`);
   }
   {
     const sourcePath = path.join(here, "sandbox", "cloud-engine-view.mjs");
