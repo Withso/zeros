@@ -121,6 +121,7 @@ describe("original final checkpoint exposure (explicit fake kernel IO)", () => {
 
   it.runIf(process.platform === "linux")("pairs the actual CP commit producer, passive GET and outside-root reader without another capture", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "zeros-final-receipt-"));
+    const data = await mkdtemp(path.join(tmpdir(), "zeros-final-receipt-data-"));
     const f = fixture(), checkpointId = randomUUID(), blobId = randomUUID();
     const exec = promisify(execFile);
     const git = (...args: string[]) => exec("git", args, { cwd: root,
@@ -147,11 +148,12 @@ describe("original final checkpoint exposure (explicit fake kernel IO)", () => {
         return Response.json({ id: blobId, plaintextSha256: createHash("sha256").update(init.body).digest("hex"), sizeBytes: init.body.length });
       }
       if (route.endsWith("/checkpoints/commit")) {
-        commit = JSON.parse(String(init?.body)); await gate; return Response.json({ checkpointId });
+        commit = JSON.parse(String(init?.body)); await gate;
+        return Response.json({ checkpointId, contentRevision: commit!.contentRevision });
       }
       throw new Error("unexpected fixture CP route");
     }) as typeof fetch;
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: cp });
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: cp, nativeRoots: { data } });
     Object.assign(f.state, { cloudDurabilityRuntime: runtime });
     const token = `zwr_${"R".repeat(43)}`;
     const transport = new CloudTransport({ port: 0, token: `zws_${"T".repeat(43)}`,
@@ -189,6 +191,7 @@ describe("original final checkpoint exposure (explicit fake kernel IO)", () => {
       expect(() => f.registry.assertAccepting()).toThrow();
     } finally {
       release(); await capture?.catch(() => undefined); await transport.stop(); await rm(root, { recursive: true, force: true });
+      await rm(data, { recursive: true, force: true });
     }
   });
 });

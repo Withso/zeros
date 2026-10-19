@@ -1,4 +1,6 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { CloudFinalSaveRequest, CloudFinalSaveResponse } from "@zeros/protocol/cloud-final-save";
+import { canonicalCloudLocalCommandHistoryJson } from "@zeros/protocol/cloud-local-mirror";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -43,6 +45,11 @@ const directive: CloudCheckpointDirective = {
   id: "idle-checkpoint", reason: "before_stop", deadlineAtMs: Date.now() + 60_000, idleStop: true,
 };
 const authority = {} as CloudDurabilityAuthority;
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
 const cleanups: (() => Promise<unknown> | void)[] = [];
 beforeEach(() => vi.mocked(hasCloudUserProcesses).mockReset().mockResolvedValue(false));
 afterEach(async () => {
@@ -92,7 +99,7 @@ async function fixture(withResident = false) {
     cloud: { setHumanServicesPaused: vi.fn() },
     cloudCheckpointScheduler: { pause: vi.fn(async () => {}), resume: vi.fn() },
     cloudRecordRuntime: { flush: vi.fn(async () => {}) },
-    cloudDurabilityRuntime: { checkpoint: vi.fn(async () => {}) },
+    cloudDurabilityRuntime: { checkpoint: vi.fn<(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority, stillIdle?: () => boolean, assertCurrent?: (mutation?: boolean) => void) => Promise<void>>(async () => {}) },
     globalDesignAuthorityStarts: new Set<Promise<void>>(), cloudWorkspaceMutations: new Set<Promise<void>>(),
     workspaceProcessStarts: new Map<string, Set<Promise<void>>>(),
     waitForWorkspaceProcessStartSnapshot: vi.fn(async () => {}),
@@ -149,7 +156,7 @@ describe("closed checkpoint progress before cleanup", () => {
     const requestFetch = vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise(() => {}));
     try {
       await expect(f.state.handleCloudCheckpointRequest(request, checkpointAuthority)).resolves.toBeUndefined();
-      expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledWith(request, checkpointAuthority, undefined);
+      expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledWith(request, checkpointAuthority, undefined, ...(cloud ? [expect.any(Function)] : []));
       // Local Personal and organization-local use the same non-cloud boundary:
       // even a stale cloud callback cannot create diagnostic network traffic.
       expect(requestFetch).toHaveBeenCalledTimes(cloud ? 1 : 0);
@@ -189,7 +196,8 @@ describe("closed checkpoint progress before cleanup", () => {
       await expect(flight).rejects.toMatchObject({ code: "command_storage_unavailable" });
       await vi.waitFor(() => expect(posted).toContainEqual(expect.objectContaining({ stage, state: "failed", reason: "storage" })));
       expect(posted.filter(value => value.state === "failed")).toHaveLength(1);
-      expect(order.indexOf("failed")).toBeLessThan(order.indexOf("cleanup"));
+      expect(order).toContain("failed");
+      expect(f.state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
       expect(JSON.stringify(posted)).not.toContain("private-cleanup-canary");
     } finally {
       failGate(new CloudCommandRuntimeError("command_storage_unavailable")); await Promise.allSettled([flight]);
@@ -500,7 +508,7 @@ async function frozenWriterFixture() {
 }
 
 describe("final checkpoint retry against an irreversible writer seal", () => {
-  it.each(["capture", "seal_ack"] as const)("finishes a later delete after cancelled %s without reopening the exact frozen writer", async boundary => {
+  it.each(["capture", "seal_ack"] as const)("retries the original request after failed %s without reopening the exact frozen writer", async boundary => {
     const f = await frozenWriterFixture();
     if (boundary === "capture") f.state.cloudDurabilityRuntime.checkpoint.mockRejectedValueOnce(new Error("Synthetic superseded capture"));
     else f.sealRequest.mockRejectedValueOnce(new Error("Synthetic seal acknowledgement lost"));
@@ -510,11 +518,11 @@ describe("final checkpoint retry against an irreversible writer seal", () => {
     expect(seal).not.toBeNull(); expect(f.normal.open).toBe(false);
     expect(f.queue.accepting).toBe(false);
     expect(f.state.cloudRuntimeCheckpointQuiescing).toBe(true);
-    expect(f.state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledWith({ kind: "cancel", requestId: first.id });
+    expect(f.state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
     const normalOpens = f.normalDb.mock.calls.length, flushes = f.recordFlush.mock.calls.length;
-    const next: CloudCheckpointDirective = { id: randomUUID(), reason: "before_delete", deadlineAtMs: Date.now() + 60_000 };
+    const next: CloudCheckpointDirective = { ...first };
     await expect(f.state.handleCloudCheckpointRequest(next, f.authority)).resolves.toBeUndefined();
-    expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenLastCalledWith(next, f.authority, undefined);
+    expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenLastCalledWith(next, f.authority, undefined, expect.any(Function));
     expect(f.lifecycle.readAcknowledgedSeal()).toEqual(seal);
     expect(f.lifecycle.captureCheckpoint).toHaveBeenCalled();
     expect(f.normalDb).toHaveBeenCalledTimes(normalOpens);
@@ -537,7 +545,7 @@ describe("final control remains fenced", () => {
     expect(f.queue.accepting).toBe(false); expect(f.state.cloudRuntimeCheckpointQuiescing).toBe(true);
     expect(f.state.cloudCommands.resumeClaims).not.toHaveBeenCalled();
     expect(f.state.cloudHumanServices.resume).not.toHaveBeenCalled();
-    const next: CloudCheckpointDirective = { ...first, id: randomUUID(), reason: "before_delete" };
+    const next: CloudCheckpointDirective = { ...first };
     await f.state.handleCloudCheckpointRequest(next, f.authority);
     expect(f.recordHandoff).toHaveBeenLastCalledWith({ retryFailedFlush: true });
     expect(f.lifecycle.readAcknowledgedSeal()).not.toBeNull();
@@ -551,7 +559,7 @@ describe("final control remains fenced", () => {
     const first: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000 };
     await expect(f.state.handleCloudCheckpointRequest(first, f.authority)).rejects.toThrow("Synthetic");
     const seal = f.lifecycle.seal;
-    const next: CloudCheckpointDirective = { ...first, id: randomUUID(), reason: "before_delete" };
+    const next: CloudCheckpointDirective = { ...first };
     const authority = { ...f.authority };
     if (change === "manual" || change === "before_fork") next.reason = change;
     if (change === "idle") { next.reason = "before_stop"; next.idleStop = true; }
@@ -570,17 +578,17 @@ describe("final control remains fenced", () => {
     expect(f.queue.accepting).toBe(false); expect(f.state.cloudCommands.resumeClaims).not.toHaveBeenCalled();
   });
 
-  it("reconciles the original cancellation before admitting a later final request", async () => {
+  it("keeps a different final request out while retrying the original accepted request", async () => {
     const f = await frozenWriterFixture();
     f.state.cloudDurabilityRuntime.checkpoint.mockRejectedValueOnce(new Error("Synthetic capture response lost"));
     f.state.cloudRuntimeRegistration.idleStopRequest.mockRejectedValueOnce(new Error("Synthetic cancellation response lost"));
     const first: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000 };
     const next: CloudCheckpointDirective = { ...first, id: randomUUID(), reason: "before_delete" };
     await expect(f.state.handleCloudCheckpointRequest(first, f.authority)).rejects.toThrow("Synthetic capture");
-    await expect(f.state.handleCloudCheckpointRequest(next, f.authority)).rejects.toThrow("awaiting final checkpoint reconciliation");
+    await expect(f.state.handleCloudCheckpointRequest(next, f.authority)).rejects.toThrow(/custody|reconciliation/);
     expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(1);
-    await expect(f.state.handleCloudCheckpointRequest(first, f.authority)).rejects.toThrow("final checkpoint cancelled");
-    await f.state.handleCloudCheckpointRequest(next, f.authority);
+    await f.state.handleCloudCheckpointRequest(first, f.authority);
+    expect(f.state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
     expect(f.lifecycle.readAcknowledgedSeal()).not.toBeNull();
     expect(f.state.cloudCommands.resumeClaims).not.toHaveBeenCalled();
   });
@@ -598,7 +606,8 @@ describe("final control remains fenced", () => {
       await expect(f.state.handleCloudCheckpointRequest(next, f.authority)).rejects.toThrow("already in progress");
       expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(1);
       finish(); await expect(flight).rejects.toThrow("Synthetic supersession");
-      await f.state.handleCloudCheckpointRequest(next, f.authority);
+      await expect(f.state.handleCloudCheckpointRequest(next, f.authority)).rejects.toThrow(/custody/);
+      await f.state.handleCloudCheckpointRequest(first, f.authority);
       expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(2);
       expect(f.normal.open).toBe(false); expect(f.queue.accepting).toBe(false);
     } finally { finish(); await Promise.allSettled([flight]); }
@@ -619,6 +628,20 @@ describe("final control remains fenced", () => {
   });
 });
 
+it("retries an explicit final capture on its original deadline without idle cancellation or reopening services", async () => {
+  const f = await frozenWriterFixture();
+  const request: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000 };
+  f.state.cloudDurabilityRuntime.checkpoint.mockRejectedValueOnce(new Error("Synthetic capture failed"));
+  await expect(f.state.handleCloudCheckpointRequest(request, f.authority)).rejects.toThrow("Synthetic capture failed");
+  expect(f.state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
+  expect(f.state.cloudCommands.resumeClaims).not.toHaveBeenCalled();
+  expect(f.normal.open).toBe(false);
+  await f.state.handleCloudCheckpointRequest(request, f.authority);
+  expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(2);
+  expect(f.state.cloudRecordRuntime.flush).toHaveBeenCalledTimes(1);
+  expect(f.state.cloudDurabilityRuntime.checkpoint.mock.calls.every(call => call[0].deadlineAtMs === request.deadlineAtMs)).toBe(true);
+});
+
 it("rechecks final authority after the original workload drain settles", async () => {
   const f = await frozenWriterFixture();
   f.state.cloudDurabilityRuntime.checkpoint.mockRejectedValueOnce(new Error("Synthetic capture failed"));
@@ -627,8 +650,136 @@ it("rechecks final authority after the original workload drain settles", async (
   f.state.terminals.clear.mockImplementationOnce(async () => {
     f.state.cloudRuntimeRegistration.hasRuntimeHandoffAuthority = () => false;
   });
-  const next: CloudCheckpointDirective = { ...first, id: randomUUID(), reason: "before_delete" };
+  const next: CloudCheckpointDirective = { ...first };
   await expect(f.state.handleCloudCheckpointRequest(next, f.authority)).rejects.toMatchObject({ code: "engine_authority_rejected" });
   expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(1);
   expect(f.normal.open).toBe(false); expect(f.queue.accepting).toBe(false);
+});
+
+it("freezes the exact final directive and transport authority before preparation awaits", async () => {
+  const f = await frozenWriterFixture();
+  const first: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000 };
+  const authority = { ...f.authority }, expected = structuredClone(first), expectedAuthority = { ...authority };
+  const entered = deferred(), release = deferred();
+  f.state.setup.stopAllAndProve.mockImplementationOnce(async () => { entered.resolve(); await release.promise; });
+  const task = f.state.handleCloudCheckpointRequest(first, authority); void task.catch(() => undefined);
+  try {
+    await entered.promise;
+    first.deadlineAtMs += 300_000; authority.heartbeatEndpoint = "https://replacement.test/heartbeat";
+    release.resolve(); await task;
+    expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledWith(expected, expectedAuthority, undefined, expect.any(Function));
+  } finally { release.resolve(); await Promise.allSettled([task]); }
+});
+
+async function negotiatedWriterFixture() {
+  const f = await frozenWriterFixture();
+  const source = { ...f.boot.scope, runtimeId: `r1-${"a".repeat(64)}`, authorityEpoch: 1,
+    registeredAtMs: Date.now(), allocationLeaseId: randomUUID(), providerResourceId: "fixture-resource" };
+  const request: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000,
+    finalSave: { version: 1, recoveryId: randomUUID(), attemptOrdinal: 0, predecessorRequestId: null, source,
+      sourceSha256: createHash("sha256").update(canonicalCloudLocalCommandHistoryJson(source)).digest("hex"), custodyId: null, retirementId: null } };
+  const echo = (input: CloudFinalSaveRequest) => ({ version: 1 as const, recoveryId: input.recoveryId, requestId: input.requestId,
+    attemptOrdinal: input.attemptOrdinal, sourceSha256: input.sourceSha256, custodyId: input.custodyId });
+  const report = vi.fn<(input:CloudFinalSaveRequest)=>Promise<CloudFinalSaveResponse>>(async (input) => ({ ...echo(input), state: "blocked" as const,
+    reason: "authority" as const, retryAtMs: Date.now() + 5_000 }));
+  const consume = vi.fn(async () => undefined);
+  Object.assign(f.state.cloudRuntimeRegistration, { matchesFinalSaveSource: () => true, supportsFinalSaveRecovery: () => true, reportFinalSave: report });
+  Object.assign(f.state.cloudDurabilityRuntime, { readFinalSaveCommit: vi.fn(async () => null), consumeFinalSaveResponse: consume });
+  return { ...f, request, echo, report, consume };
+}
+
+it("keeps reconciling an expired attempt after a bounded blocked reply without recapturing", async () => {
+  const f = await negotiatedWriterFixture();
+  f.state.cloudDurabilityRuntime.checkpoint.mockRejectedValueOnce(new Error("Synthetic capture failed"));
+  await expect(f.state.handleCloudCheckpointRequest(f.request, f.authority)).rejects.toThrow("Synthetic");
+  vi.spyOn(Date, "now").mockReturnValue(f.request.deadlineAtMs + 1);
+  await f.state.handleCloudCheckpointRequest(f.request, f.authority);
+  await f.state.handleCloudCheckpointRequest(f.request, f.authority);
+  expect(f.report).toHaveBeenCalledTimes(3);
+  expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(1);
+  expect(f.state.cloudCommands.resumeClaims).not.toHaveBeenCalled();
+});
+
+it("joins held capture before retirement and consumes one successor with the same sealed writer and drain ticket",async()=>{
+  const f=await negotiatedWriterFixture(),entered=deferred(),release=deferred(),retirementId=randomUUID();
+  const clock=vi.spyOn(Date,"now");
+  f.state.cloudDurabilityRuntime.checkpoint.mockImplementationOnce(async()=>{entered.resolve();await release.promise;throw new Error("held capture failed");});
+  f.report.mockImplementation(async input=>({...f.echo(input),state:"retired",retirementId,retryAtMs:Date.now()+5000}));
+  const first=f.state.handleCloudCheckpointRequest(f.request,f.authority);void first.catch(()=>undefined);
+  try{
+    await entered.promise;const fence=f.state.cloudWorkloadCheckpointFence;
+    clock.mockReturnValue(f.request.deadlineAtMs+1);
+    const premature={...f.request,id:randomUUID()};
+    await expect(f.state.handleCloudCheckpointRequest(premature,f.authority)).rejects.toThrow("already in progress");
+    expect(f.report).not.toHaveBeenCalled();expect(f.consume).not.toHaveBeenCalled();
+    expect(f.normal.open).toBe(false);expect(f.queue.accepting).toBe(false);
+    release.resolve();await expect(first).rejects.toThrow("held capture failed");
+    expect(f.report).toHaveBeenCalledOnce();expect(f.consume).toHaveBeenCalledOnce();
+    const old=f.report.mock.calls[0]![0];
+    const successor:CloudCheckpointDirective={...f.request,id:randomUUID(),deadlineAtMs:Date.now()+240_000,
+      finalSave:{...f.request.finalSave!,attemptOrdinal:1,predecessorRequestId:f.request.id,custodyId:old.custodyId,retirementId}};
+    await f.state.handleCloudCheckpointRequest(successor,f.authority);
+    expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(2);
+    expect(f.state.cloudDurabilityRuntime.checkpoint.mock.calls[1]![0]).toEqual(successor);
+    expect(f.state.cloudWorkloadCheckpointFence).toBe(fence);
+    expect(f.state.cloudRecordRuntime.flush).toHaveBeenCalledTimes(1);
+    expect(f.normal.open).toBe(false);expect(f.queue.accepting).toBe(false);
+    expect(f.state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
+  }finally{release.resolve();await Promise.allSettled([first]);}
+});
+
+it("refuses a late retirement response after original native boot replacement",async()=>{
+  const f=await negotiatedWriterFixture(),entered=deferred(),release=deferred();
+  f.state.cloudDurabilityRuntime.checkpoint.mockRejectedValueOnce(new Error("capture failed"));
+  f.report.mockImplementationOnce(async input=>{entered.resolve();await release.promise;return {...f.echo(input),
+    state:"retired",retirementId:randomUUID(),retryAtMs:Date.now()+5000};});
+  const first=f.state.handleCloudCheckpointRequest(f.request,f.authority);void first.catch(()=>undefined);
+  try{
+    await entered.promise;
+    Object.assign(f.state,{cloudAgentBoot:{...f.boot}});
+    release.resolve();await expect(first).rejects.toThrow("capture failed");
+    expect(f.consume).not.toHaveBeenCalled();expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(1);
+    expect(f.normal.open).toBe(false);expect(f.queue.accepting).toBe(false);
+  }finally{release.resolve();await Promise.allSettled([first]);}
+});
+
+it.each(["workload", "resident", "resident_owner", "resident_release"] as const)(
+  "refuses late retirement after replacement of the original %s control", async control => {
+    const f = await negotiatedWriterFixture(), entered = deferred(), release = deferred();
+    f.state.cloudDurabilityRuntime.checkpoint.mockRejectedValueOnce(new Error("capture failed"));
+    f.report.mockImplementationOnce(async input => {
+      entered.resolve(); await release.promise;
+      return { ...f.echo(input), state: "retired", retirementId: randomUUID(), retryAtMs: Date.now() + 5_000 };
+    });
+    const first = f.state.handleCloudCheckpointRequest(f.request, f.authority); void first.catch(() => undefined);
+    try {
+      await entered.promise;
+      if (control === "workload") f.state.cloudWorkloadCheckpointFence = f.registry.fence();
+      else if (control === "resident") Object.assign(f.state, { cloudResidentCheckpointFence: f.state.fenceCloudResidentWorkloads("drain") });
+      else if (control === "resident_owner") f.state.residentTerminals = null;
+      else f.state.cloudResidentWorkloadOwnerRelease = () => {};
+      release.resolve(); await expect(first).rejects.toThrow("capture failed");
+      expect(f.consume).not.toHaveBeenCalled();
+      expect(f.normal.open).toBe(false); expect(f.queue.accepting).toBe(false);
+    } finally { release.resolve(); await Promise.allSettled([first]); }
+  },
+);
+
+it("joins both preparation siblings and retains the first failure without retiring the explicit source", async () => {
+  const f = await frozenWriterFixture(), entered = deferred(), release = deferred();
+  const authorityLost = vi.fn(); Object.assign(f.state, { handleCloudRuntimeAuthorityLoss: authorityLost });
+  const first: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000 };
+  f.state.cloudHumanServices.pause.mockRejectedValueOnce(new Error("first preparation failure"));
+  f.state.cloudLanguageServices.pause.mockImplementationOnce(async () => { entered.resolve(); await release.promise; throw new Error("late preparation failure"); });
+  let settled = false;
+  const task = f.state.handleCloudCheckpointRequest(first, f.authority); void task.finally(() => { settled = true; }).catch(() => undefined);
+  try {
+    await entered.promise; await new Promise(resolve => setImmediate(resolve));
+    expect(settled).toBe(false); expect(authorityLost).not.toHaveBeenCalled();
+    release.resolve(); await expect(task).rejects.toThrow("first preparation failure");
+    expect(authorityLost).not.toHaveBeenCalled();
+    expect(f.state.cloudRuntimeCheckpointQuiescing).toBe(true);
+    expect(f.state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
+    expect(f.state.cloudCommands.resumeClaims).not.toHaveBeenCalled();
+  } finally { release.resolve(); await Promise.allSettled([task]); }
 });

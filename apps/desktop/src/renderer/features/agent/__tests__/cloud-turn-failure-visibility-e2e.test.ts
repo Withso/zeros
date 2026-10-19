@@ -106,7 +106,7 @@ function extract(file: URL, names: string[], callbacks: string[] = []) {
     readFileSync(file, "utf8"),
     ts.ScriptTarget.Latest,
     true,
-    ts.ScriptKind.TSX,
+    file.pathname.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const found = new Map<string, string>();
   function visit(node: ts.Node) {

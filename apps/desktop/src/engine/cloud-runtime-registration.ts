@@ -1,4 +1,6 @@
 import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import { CLOUD_FINAL_SAVE_VERSION_HEADER, CLOUD_FINAL_SAVE_PATH, CLOUD_FINAL_SAVE_MAX_BYTES, CloudFinalSaveDirectiveSchema,
+  CloudFinalSaveRequestSchema, CloudFinalSaveResponseSchema, type CloudFinalSaveDirective, type CloudFinalSaveRequest } from "@zeros/protocol/cloud-final-save";
 import { CLOUD_COORDINATOR_HEADER, CLOUD_COORDINATOR_FEATURE, type CloudCoordinatorStatus } from "@zeros/protocol/cloud-coordinator";
 import { CloudEngineExitReportSchema, CLOUD_ENGINE_EXIT_REPORT_ENV, CLOUD_ENGINE_EXIT_REPORT_FEATURE,
   CLOUD_CHECKPOINT_FALLBACK_FEATURE, type CloudEngineExitReport } from "@zeros/protocol/cloud-runtime-lifecycle";
@@ -95,6 +97,7 @@ export type CloudCheckpointDirective = {
     | "manual";
   deadlineAtMs: number;
   idleStop?: true;
+  finalSave?: CloudFinalSaveDirective;
 };
 
 export type CloudRuntimeConfig = {
@@ -481,11 +484,11 @@ export function consumeCloudRuntimeEnvironment(
   }
 }
 
-async function boundedResponseJson(response: Response): Promise<unknown> {
+async function boundedResponseJson(response: Response, maxBytes = MAX_RESPONSE_BYTES): Promise<unknown> {
   const declared = Number(response.headers.get("content-length"));
   if (
     Number.isFinite(declared) &&
-    (declared < 0 || declared > MAX_RESPONSE_BYTES)
+    (declared < 0 || declared > maxBytes)
   ) {
     await response.body?.cancel().catch(() => undefined);
     throw new CloudRuntimeRequestError(
@@ -507,7 +510,7 @@ async function boundedResponseJson(response: Response): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_RESPONSE_BYTES) {
+      if (size > maxBytes) {
         await reader.cancel().catch(() => undefined);
         throw new CloudRuntimeRequestError(
           "cloud runtime response is invalid",
@@ -606,6 +609,7 @@ export class CloudRuntimeRegistration {
   private localCommandsAcknowledged = false;
   private acceptedWorkAcknowledged = false;
   private coordinatorAcknowledged = false;
+  private finalSaveAcknowledged = false;
   private coordinatorStatus: (() => CloudCoordinatorStatus) | null = null;
   private agentJournalMode: "local" | "legacy" | undefined;
   private sourceWriterEpoch: string | null = null;
@@ -685,7 +689,7 @@ export class CloudRuntimeRegistration {
           this.sourceWriterEpoch = acknowledged && journalMode === "local" ? sourceWriterEpoch ?? null : null;
         } } : undefined,
       REQUEST_TIMEOUT_MS,
-      { [ENGINE_UPLINK_OPT_IN_HEADER]: "1", ...(this.negotiateLocalCommands ? { "x-zeros-cloud-accepted-work": "1" } : {}),
+      { [ENGINE_UPLINK_OPT_IN_HEADER]: "1", ...(this.negotiateLocalCommands ? { "x-zeros-cloud-accepted-work": "1", [CLOUD_FINAL_SAVE_VERSION_HEADER]: "1" } : {}),
         ...(this.coordinatorOffered() ? { [CLOUD_COORDINATOR_HEADER]: "1" } : {}) },
     );
     const document = this.parseRegistration(raw);
@@ -910,6 +914,31 @@ export class CloudRuntimeRegistration {
     const result = await requestCloudAction(this.authority(document), request, this.abortController.signal, this.fetch,actorSessionId);
     if (!this.hasControlAuthority(document)) throw new CloudCommandRuntimeError("engine_authority_rejected");
     return result;
+  }
+
+  supportsFinalSaveRecovery(): boolean {
+    return !this.stopped && this.document !== null && this.localCommandsAcknowledged && this.finalSaveAcknowledged;
+  }
+
+  matchesFinalSaveSource(source: CloudFinalSaveDirective["source"]): boolean {
+    return this.supportsFinalSaveRecovery() && this.agentRuntime.profile === "zeros-cloud-worker-v4" &&
+      this.agentRuntime.runtimeId === source.runtimeId && this.agentRuntime.bootId === source.bootId &&
+      this.config.engine.instanceId === source.engineInstanceId && this.config.execution.generation === source.generation &&
+      this.config.execution.organizationId === source.organizationId && this.config.execution.workspaceId === source.workspaceId;
+  }
+
+  async reportFinalSave(input: CloudFinalSaveRequest) {
+    const body = CloudFinalSaveRequestSchema.parse(input), document = this.document;
+    if (!document || this.stopped || !this.supportsFinalSaveRecovery() ||
+      body.workspaceId !== this.config.execution.workspaceId || body.organizationId !== this.config.execution.organizationId ||
+      body.generation !== this.config.execution.generation || body.engineInstanceId !== this.config.engine.instanceId ||
+      Buffer.byteLength(JSON.stringify(body)) > CLOUD_FINAL_SAVE_MAX_BYTES) throw new CloudRuntimeRequestError("final save report is unavailable", true);
+    // Historical resolution uses the original valid credential and document,
+    // without renewing the old mutation deadline or handing out fresh custody.
+    const raw = await this.post(new URL(CLOUD_FINAL_SAVE_PATH, document.heartbeat.endpoint).href, document.heartbeat.token, body,
+      undefined, REQUEST_TIMEOUT_MS, undefined, CLOUD_FINAL_SAVE_MAX_BYTES);
+    if (this.document !== document || this.stopped) throw new CloudRuntimeRequestError("final save report is no longer current", true);
+    return CloudFinalSaveResponseSchema.parse(raw);
   }
 
   async agentExecutionRequest(request:CloudAgentExecutionRequest,signal:AbortSignal):Promise<unknown>{
@@ -1341,6 +1370,7 @@ export class CloudRuntimeRegistration {
           ...(observedPorts === undefined ? {} : { observedPorts }),
           ...(this.coordinatorAcknowledged && this.coordinatorStatus ? { coordinator: this.coordinatorStatus() } : {}),
         },
+        undefined, REQUEST_TIMEOUT_MS, this.supportsFinalSaveRecovery() ? { [CLOUD_FINAL_SAVE_VERSION_HEADER]: "1" } : undefined,
       );
       if (this.document !== document || this.stopped || this.authorityLost) {
         finish("failed");
@@ -1631,7 +1661,9 @@ export class CloudRuntimeRegistration {
     if (raw === undefined || raw === null) return null;
     if (
       !isRecord(raw) ||
-      !exactKeys(raw, ["deadlineAtMs", "id", "reason", ...(raw.idleStop === undefined ? [] : ["idleStop"])]) ||
+      !exactKeys(raw, ["deadlineAtMs", "id", "reason", ...(raw.idleStop === undefined ? [] : ["idleStop"]), ...(raw.finalSave === undefined ? [] : ["finalSave"])]) ||
+      (raw.finalSave !== undefined && (!this.supportsFinalSaveRecovery() || !["before_stop","before_archive","before_delete","before_rebuild"].includes(String(raw.reason)) ||
+        !CloudFinalSaveDirectiveSchema.safeParse(raw.finalSave).success)) ||
       (raw.idleStop !== undefined && (raw.idleStop !== true || raw.reason !== "before_stop")) ||
       !UUID_PATTERN.test(String(raw.id ?? "")) ||
       ![
@@ -1656,6 +1688,7 @@ export class CloudRuntimeRegistration {
       reason: raw.reason as CloudCheckpointDirective["reason"],
       deadlineAtMs: Number(raw.deadlineAtMs),
       ...(raw.idleStop === true ? { idleStop: true as const } : {}),
+      ...(raw.finalSave === undefined ? {} : { finalSave: CloudFinalSaveDirectiveSchema.parse(raw.finalSave) }),
     };
   }
 
@@ -1830,6 +1863,7 @@ export class CloudRuntimeRegistration {
     negotiation?: { localCommandsVersion: 1; acknowledgement(acknowledged: boolean, journalMode?: "local" | "legacy", sourceWriterEpoch?: string): void },
     timeoutMs = REQUEST_TIMEOUT_MS,
     extraHeaders?: Record<string, string>,
+    maxResponseBytes = MAX_RESPONSE_BYTES,
   ): Promise<unknown> {
     let response: Response;
     try {
@@ -1874,7 +1908,7 @@ export class CloudRuntimeRegistration {
         true,
       );
     }
-    const result = await boundedResponseJson(response);
+    const result = await boundedResponseJson(response, maxResponseBytes);
     const journalMode = response.headers.get("x-zeros-cloud-agent-journal");
     if (negotiation && journalMode !== null && journalMode !== "local" && journalMode !== "legacy")
       throw new CloudRuntimeRequestError("cloud engine journal mode response is invalid", true);
@@ -1886,6 +1920,8 @@ export class CloudRuntimeRegistration {
       this.acceptedWorkAcknowledged = acknowledged && response.headers.get("x-zeros-cloud-accepted-work") === "1";
     if (extraHeaders?.[CLOUD_COORDINATOR_HEADER] === "1")
       this.coordinatorAcknowledged = this.acceptedWorkAcknowledged && response.headers.get(CLOUD_COORDINATOR_HEADER) === "1";
+    if (negotiation && extraHeaders?.[CLOUD_FINAL_SAVE_VERSION_HEADER] === "1")
+      this.finalSaveAcknowledged = acknowledged && response.headers.get(CLOUD_FINAL_SAVE_VERSION_HEADER) === "1";
     negotiation?.acknowledgement(acknowledged,
       journalMode === "local" || journalMode === "legacy" ? journalMode : undefined,
       acknowledged && journalMode === "local" && sourceWriter !== null ? sourceWriter : undefined);
