@@ -1,0 +1,9 @@
+{
+  "id": "empty-base-stock-leaves",
+  "kind": "replay",
+  "area": "vm-image-bootstrap",
+  "fixedBy": "pr:628",
+  "symptom": "The empty-base sanitizer refused stock log and agent aliases and cache sockets before image capture.",
+  "rule": "Exercise provider-shaped node kinds through real base sanitation, preserve target bytes and unknown custody, and retain strict default Computer sanitation and saved-tree checks.",
+  "check": "python3 -I scripts/cloud-workspace-validation/runtime-base-v4/tests/test_sanitation.py BaseSanitationTests.test_base_sanitation_replaces_stock_log_document_link_without_following_it BaseSanitationTests.test_base_sanitation_replaces_stock_directory_links_without_traversal BaseSanitationTests.test_base_sanitation_replaces_stock_cache_socket_without_connecting"
+}

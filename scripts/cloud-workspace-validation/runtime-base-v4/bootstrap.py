@@ -54,6 +54,8 @@ INFRA = "/opt/zeros-infra"
 FACADE = "/opt/zeros"
 RECEIPTS = "/srv/zeros/runtime-installs"
 ACTIVE = "/run/zeros/active-runtime.json"
+# Failed exchange custody must remain fenced across volatile-root recreation.
+BASE_SANITATION = "/opt/zeros/base-sanitation"
 PRIVATE_FAILURES = "/run/zeros/bootstrap-failures.jsonl"
 PERSIST_ROOT = "/home/user/.zeros-persist"
 PERSIST_RECORD = "/run/zeros/persistence.json"
@@ -1234,13 +1236,36 @@ class Bootstrap:
         except (FileNotFoundError, KeyError) as error:
             raise Failure("base_compatibility") from error
 
-    def wait_ready(self):
+    def require_empty_base(self):
+        # Only the root-owned base builder may opt into sanitized readiness.
+        # No installed, staged or receipted runtime can use that path.
+        require(self.current() is None and self.current("previous") is None, "cache_conflict")
+        for path, allowed in ((INFRA, {".staging"}), (INFRA + "/.staging", set()), (RECEIPTS, set())):
+            with self.directory(path) as directory:
+                require(set(os.listdir(directory)) <= allowed, "cache_conflict")
+        for path in (ACTIVE, BASE_SANITATION):
+            try:
+                require(self.read(path, 16384, 0o600) == b"", "cache_conflict")
+            except FileNotFoundError:
+                pass
+
+    def wait_ready(self, *, empty_base=False):
         # Wait for the boot oneshot and dispatch's cgroup initialization;
         # an active Type=simple unit alone does not acknowledge either.
         self.host.wait_ready()
-        with self.lock("runtime-publication.lock"):
+        with (self.lock("runtime-install.lock") if empty_base else contextlib.nullcontext()), \
+                self.lock("runtime-publication.lock"):
             require(self.read("/run/zeros/boot-id", 64, 0o600).decode() == self.boot_id(), "host_start")
-            require(self.epoch() > 0, "pointer_publish")
+            if empty_base:
+                self.require_empty_base()
+            if self.epoch() <= 0:
+                require(empty_base, "pointer_publish")
+                # Same-boot verification must leave the capture bytes empty.
+                # Missing, partial, aliased or malformed markers still refuse.
+                # Normal admission and cold verification require a real epoch.
+                for path in (FACADE + "/disk-epoch", FACADE + "/sessions/boot.json",
+                             FACADE + "/sessions/reconciliation.json", ACTIVE):
+                    require(self.read(path, 0, 0o600) == b"", "pointer_publish")
             for absolute, target in FACADE_LINKS:
                 parent, name = absolute.rsplit("/", 1)
                 with self.directory(parent or "/") as directory:

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
+import { verifyComputerTemplateSavedTree } from "../../apps/control-plane/src/cloud-workspaces/computer-template-snapshot-boat";
 import { builderCommand, KitError, main, parseArgs, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
 import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, pythonProbe, resumeOwned, v4Command, verifyBase, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
 import { cleanupLiveObjects, installOverSsh, presignGet, probePersistence, probeRuntime, runInstallerStep, runLiveStep, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
@@ -39,6 +40,26 @@ function deps(): KitDeps & { calls: { method: string; route: string; body: unkno
 }
 
 const envelope = { ok: true, type: "snapshot.tree", snapshotId: "snapshot_fixture", sandboxId: "bx_v4test1", treeAvailable: true, truncated: false };
+
+it.each(["__system__/var/log", "__system__/run/log/journal", "__system__/root/.codex", ".cache"])(
+  "keeps the downstream saved-tree refusal strict for normalized stock leaves under %s", root => {
+    const snapshot = { name: "fixture", snapshotId: envelope.snapshotId, sourceSandboxId: envelope.sandboxId };
+    const custody = `${root}/.zeros-base-sanitize-${"1".repeat(32)}`;
+    const entries = [
+      { path: "__system__/srv/zeros/computer-template.json", kind: "file", size: 1 },
+      { path: root, kind: "dir" }, { path: custody, kind: "dir" },
+      { path: `${root}/stock-leaf`, kind: "file", size: 0 }, { path: `${custody}/entry`, kind: "file", size: 0 },
+    ];
+    expect(verifyComputerTemplateSavedTree({ ...envelope, entries }, snapshot)).toMatchObject({ entryCount: entries.length });
+    // Replacing a leaf never authorizes an exemption for the original name or
+    // for the displaced name. Capture must retain the empty regular entries.
+    for (const index of [3, 4]) for (const residue of [{ kind: "symlink" }, { kind: "socket" }, { kind: "file", size: 1 }]) {
+      const changed = entries.map((entry, i) => i === index ? { ...entry, ...residue } : entry);
+      expect(() => verifyComputerTemplateSavedTree({ ...envelope, entries: changed }, snapshot))
+        .toThrow("Computer saved artifact could not be verified");
+    }
+  },
+);
 
 function fullKit(failColdBoot = false) {
   const d = deps(), root = temp();

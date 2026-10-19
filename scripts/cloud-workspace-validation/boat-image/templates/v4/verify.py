@@ -74,14 +74,7 @@ def private_state_clean(root='/', cold_boot=COLD_BOOT):
 
 def verify_empty_base_state(bootstrap, app):
     require = bootstrap.require
-    require(not os.path.lexists(app.path('/opt/zeros/previous')), 'cache_conflict')
-    try:
-        require(app.read(bootstrap.ACTIVE, 16384, 0o600) == b'', 'cache_conflict')
-    except FileNotFoundError:
-        pass
-    require(set(os.listdir(app.path('/opt/zeros-infra'))) <= {'.staging'} and
-            not os.listdir(app.path('/opt/zeros-infra/.staging')) and
-            not os.listdir(app.path('/srv/zeros/runtime-installs')), 'cache_conflict')
+    app.require_empty_base()
     require({'repos', '.zeros-setup', 'state', 'home', 'managed-settings'} <= set(os.listdir(app.path('/srv/zeros/files'))), 'base_compatibility')
     require({'agent', 'capture'} <= set(os.listdir(app.path('/srv/zeros/files/home'))), 'base_compatibility')
     for name in ('/srv/zeros/files', '/srv/zeros/repos', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/home',
@@ -115,7 +108,7 @@ def verify():
 
 def verify_host(bootstrap, app):
     app.base()
-    app.wait_ready()
+    app.wait_ready(empty_base=not COLD_BOOT)
     verify_protected_ancestry(app)
     require = bootstrap.require
     marker = json.loads(app.read('/etc/zeros/cloud-worker.json', 4096, 0o444))
