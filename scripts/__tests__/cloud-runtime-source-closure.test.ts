@@ -1,4 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { CLOUD_COMMAND_ROOTS, planCloudSourceClosure, type CloudSourceClosure } from "../cloud-workspace-validation/runtime-bundle/source-closure";
 
 describe("cloud runtime source closure", () => {
@@ -39,5 +42,26 @@ describe("cloud runtime source closure", () => {
     expect(closure.inputs["apps/desktop/src/engine/zeros-engine.ts"].imports.length).toBeGreaterThan(0);
     expect(JSON.stringify(closure)).not.toContain(process.cwd());
     expect(Object.keys(closure.inputs).every(file => !file.startsWith("/") && !file.split("/").includes(".."))).toBe(true);
+  });
+
+  it("discovers a standalone JavaScript child while retaining declarations as data", async () => {
+    const source = await mkdtemp(path.join(os.tmpdir(), "zeros-cloud-source-"));
+    try {
+      for (const directory of ["apps/desktop/src/engine", "scripts/cloud-workspace-validation/sandbox", "scripts/cloud-workspace-validation/lib"])
+        await mkdir(path.join(source, directory), { recursive: true });
+      await writeFile(path.join(source, "package.json"), JSON.stringify({
+        dependencies: Object.fromEntries([...CLOUD_COMMAND_ROOTS, "late-child"].map(name => [name, "1"])),
+      }));
+      await writeFile(path.join(source, "apps/desktop/src/cli.ts"), "export const cli = true;\n");
+      const child = "apps/desktop/src/engine/child.js", declaration = "apps/desktop/src/engine/child.d.mts";
+      await writeFile(path.join(source, child), 'import "late-child";\n');
+      await writeFile(path.join(source, declaration), 'export type Shape = import("types-only").Shape;\n');
+      const planned = await planCloudSourceClosure(source);
+      expect(planned.entryPoints).toContain(child);
+      expect(planned.dependencyRoots).toContain("late-child");
+      expect(planned.sourceFiles).toContain(declaration);
+      expect(planned.entryPoints).not.toContain(declaration);
+      expect(planned.dependencyRoots).not.toContain("types-only");
+    } finally { await rm(source, { recursive: true, force: true }); }
   });
 });

@@ -67,7 +67,7 @@ export async function planCloudSourceClosure(source: string): Promise<CloudSourc
   }
   for (const slice of CODE_SLICES) await visit(slice);
   await visit("apps/desktop/src/cli.ts");
-  const entryPoints = files.filter(file => /\.(?:ts|mjs|cjs)$/.test(file) && !file.endsWith(".d.ts")).sort(byteOrder);
+  const entryPoints = files.filter(file => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(file) && !/\.d\.[cm]?ts$/.test(file)).sort(byteOrder);
   const result = await build({
     absWorkingDir: source,
     entryPoints,
