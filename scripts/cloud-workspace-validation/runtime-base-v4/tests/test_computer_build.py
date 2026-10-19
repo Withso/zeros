@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -604,6 +605,15 @@ ENDFONT
                     self.assertEqual(victim.read_text(), "unrelated bytes")
                 finally:
                     target.unlink(missing_ok=True)
+
+    def test_default_computer_sanitation_keeps_cache_socket_refusal(self):
+        target = self.app.path('/home/user/.cache/stock.sock')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(target))
+            with self.assertRaises(build.Failure) as caught: self.app.sanitize(self.sanitation_request())
+            self.assertEqual(caught.exception.check, 'sanitation_failed')
+            self.assertTrue(stat.S_ISSOCK(target.lstat().st_mode))
 
     def test_sanitize_checks_opened_file_before_truncating_a_raced_hardlink(self):
         victim = self.write("/outside/private", "unrelated bytes")

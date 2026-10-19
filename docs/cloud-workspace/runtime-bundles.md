@@ -113,6 +113,26 @@ pointer for explicit rollback. `/zeros` is a facade for `/opt/zeros`. Writable
 sessions, logs, state and receipts live outside R. The base-owned bootstrap is
 under `/opt/zeros-bootstrap`; its worker marker is version 4.
 
+The empty-base builder sanitizes stock private state before both verification
+passes. Within the existing private roots, it can replace symlink and cache
+socket leaves with empty regular files using Linux atomic exchange. It never
+follows a link or connects to a socket. A private directory retains the
+displaced leaf until its original identity is confirmed, then retains an empty
+replacement at that name too. The operation permits at most 256 replacements;
+unsupported exchange, ambiguous custody or failed persistence refuses the build.
+A root-only pending record fences interrupted sanitation from being retried as
+ordinary cleanup. Default Computer sanitation still refuses aliases and special
+files, and the Computer saved-tree proof retains its existing empty-root rules.
+
+Sanitation clears generated boot markers, including the disk epoch. Only the
+empty-base builder may verify the same boot with all four markers present as
+empty, single-link, root-owned 0600 files. That path takes the install lock before
+the publication lock and requires no selected, previous, staged or receipted
+runtime, no unfinished sanitation, the current boot ID, Host/cgroup readiness,
+the exact facade and valid persistence. It does not recreate capture bytes.
+Ordinary workspace admission and cold-base verification still require a
+positive epoch from the normal boot path.
+
 ## Shared documents
 
 Every object is strict: additional fields reject. Digests are 64 lowercase hex
