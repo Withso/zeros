@@ -293,9 +293,9 @@ function retryDelayMs(attempt: number, providerDelayMs?: number): number {
   return Math.max(exponential, requested);
 }
 
-function observationDelayMs(attempt: number, elapsedMs: number): number {
+function observationDelayMs(attempt: number, elapsedMs: number, healthyCount: number | null): number {
   if (elapsedMs < 30_000) {
-    return Math.min(2_000, 500 * 2 ** Math.min(Math.max(attempt - 1, 0), 2));
+    return Math.min(2_000, 500 * 2 ** Math.min(Math.max((healthyCount ?? attempt) - 1, 0), 2));
   }
   // Resume the original exponential schedule by dispatch age. Extra healthy
   // polls must not turn a thirty-second transition into a four-minute wait;
@@ -852,8 +852,10 @@ export class CloudWorkspaceReconciler {
       if(current?.state==='running'&&['create','wake'].includes(intent.operation))
         await measureLifecyclePhase("funding", () => this.computeLeases.observeRunning(
           {workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current!));
+      let successfulStart = false;
       if (shouldDispatch) {
         current = await measureLifecyclePhase("dispatch", () => this.dispatch(provider, intent, current));
+        successfulStart = intent.operation === "create" || intent.operation === "wake";
         if (["stop", "archive", "delete"].includes(intent.operation)) {
           providerAccessRevocationProven = true;
         }
@@ -875,7 +877,7 @@ export class CloudWorkspaceReconciler {
           ),
         );
       } else {
-        await this.recordResult(intent, current, "observing");
+        await this.recordResult(intent, current, "observing", false, successfulStart);
       }
     } catch (error) {
       await this.recordFailure(intent, error, current);
@@ -1044,6 +1046,7 @@ export class CloudWorkspaceReconciler {
     resource: CloudProviderResource | null,
     intentState: "succeeded" | "superseded" | "observing",
     providerAccessRevocationProven = false,
+    successfulStart = false,
   ): Promise<void> {
     const resultStarted = performance.now();
     await this.resultTransaction(async (tx) => {
@@ -1067,8 +1070,10 @@ export class CloudWorkspaceReconciler {
         lease_current: boolean;
         attempt_count: number;
         dispatched_age_ms: string;
+        healthy_observation_count: number | null;
       }>(
-        `SELECT state, affects_workspace, lease_owner, attempt_count, lease_expires_at>clock_timestamp() AS lease_current,
+        `SELECT state, affects_workspace, lease_owner, attempt_count, healthy_observation_count,
+                lease_expires_at>clock_timestamp() AS lease_current,
                 extract(epoch FROM (now() - dispatched_at)) * 1000 AS dispatched_age_ms
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
@@ -1233,13 +1238,21 @@ export class CloudWorkspaceReconciler {
       }
 
       if (resultState === "observing") {
+        // Failed attempts never age this cadence. Initialize only from this
+        // exact claim's successful provider start/create, preserve legacy NULL,
+        // and never reset after errors or a later dispatch. The original
+        // dispatched_at remains the outer thirty-second bound.
+        const healthyCount = row.healthy_observation_count === null
+          ? successfulStart ? 1 : null
+          : Math.min(3, row.healthy_observation_count + 1);
         await tx.query(
           `UPDATE cloud_workspace_lifecycle_intents
            SET state = 'observing', lease_owner = NULL, lease_expires_at = NULL,
                next_attempt_at = now() + ($2::bigint * interval '1 millisecond'),
-               error_code = NULL, error_message = NULL, updated_at = now()
+               error_code = NULL, error_message = NULL, updated_at = now(),
+               healthy_observation_count = $3
            WHERE id = $1`,
-          [intent.id, observationDelayMs(intent.attemptCount, Number(row.dispatched_age_ms))],
+          [intent.id, observationDelayMs(intent.attemptCount, Number(row.dispatched_age_ms), healthyCount), healthyCount],
         );
       } else {
         await tx.query(
