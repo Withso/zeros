@@ -7,6 +7,7 @@ import {seedReadyCloudWorkspace,seedSupportedCloudWorkspaceGeneration,withCloudF
 import {DatabaseCloudWorkspaceBlobService,MemoryCloudWorkspaceObjectStore} from "./object-store.js";
 import {DatabaseCloudWorkspaceContentService} from "./content-record.js";
 import {ensureFinalSaveRecovery,finalSaveProven} from "./final-save-recovery.js";
+import {commitFinalSaveFixture} from "./final-save-test-fixtures.js";
 
 const suite=process.env.TEST_DATABASE_URL?describe:describe.skip;
 const directory=new URL("../../migrations/",import.meta.url),migration="0171_cloud_final_save_recovery.sql";
@@ -21,7 +22,8 @@ suite("final-save expansion adopts only exact historical evidence",()=>{
     try {for(const name of (await readdir(directory)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name<migration).sort()){
       await tx.query("BEGIN");await tx.query(await readFile(new URL(name,directory),"utf8"));await tx.query("COMMIT");
     }} finally {await tx.query("ROLLBACK");tx.release();}
-  });
+  // Replays the complete pre-expansion ladder for real legacy-row fixtures.
+  },30_000);
   const migrate=async()=>{
     const tx=await pool.connect();
     try {await tx.query("BEGIN");await tx.query(await readFile(new URL(migration,directory),"utf8"));await tx.query("COMMIT");}
@@ -80,6 +82,58 @@ suite("final-save expansion adopts only exact historical evidence",()=>{
     await pool.query("UPDATE cloud_workspace_engine_instances SET registered_at=clock_timestamp() WHERE id=$1",[f.engineInstanceId]);
     await migrate();await withSystemTx(pool,tx=>ensureFinalSaveRecovery(tx,f.intentId));
     expect(await withSystemTx(pool,tx=>finalSaveProven(tx,f.intentId))).toBe(false);
+  });
+  async function savedDelete(f:Awaited<ReturnType<typeof legacy>>) {
+    const intentId=randomUUID();
+    await withSystemTx(pool,tx=>tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
+      VALUES($1::uuid,$2,$3,1,$4,'delete',$1::text,digest($1::text,'sha256'))`,[intentId,f.workspaceId,f.organizationId,f.userId]));
+    await commitFinalSaveFixture(pool,{...f,generation:1},{intentId,userId:f.userId,reason:"before_delete"});
+    expect(await withSystemTx(pool,tx=>finalSaveProven(tx,intentId))).toBe(true);
+    return intentId;
+  }
+  const deletionClaimable=async(f:Awaited<ReturnType<typeof legacy>>)=>
+    (await withSystemTx(pool,tx=>tx.query("SELECT cloud_final_save_deletion_claimable($1,$2) AS allowed",[f.workspaceId,f.organizationId]))).rows[0].allowed as boolean;
+
+  it.each(["failed","superseded"].flatMap(intentState=>["cancelled","expired","failed"].map(requestState=>({intentState,requestState}))))(
+    "preserves pre-0171 reversible idle $intentState/$requestState history without demanding recovery",async({intentState,requestState})=>{
+      const f=await legacy(false);
+      await pool.query(`UPDATE workspace_checkpoint_requests SET idle_engine_instance_id=$2,state=$3,completed_at=clock_timestamp()
+        WHERE id=$1`,[f.requestId,f.engineInstanceId,requestState]);
+      await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET requested_by=NULL,idempotency_key=$2,state=$3,completed_at=clock_timestamp()
+        WHERE id=$1`,[f.intentId,`system:idle:${f.engineInstanceId}:${randomUUID()}`,intentState]);
+      await migrate();
+      await savedDelete(f);
+      await withSystemTx(pool,tx=>ensureFinalSaveRecovery(tx,f.intentId));
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_final_save_recoveries WHERE lifecycle_intent_id=$1",[f.intentId])).rows[0].n).toBe(0);
+      expect(await deletionClaimable(f)).toBe(true);
+    });
+
+  it.each(["stop","archive","delete"].flatMap(operation=>["failed","superseded","succeeded"].map(state=>({operation,state}))))(
+    "requires exact proof adoption for a pre-0171 explicit $operation/$state instead of ignoring history",async({operation,state})=>{
+      const f=await legacy(false);
+      await pool.query("UPDATE workspace_checkpoint_requests SET reason=$2,state='cancelled',completed_at=clock_timestamp() WHERE id=$1",[f.requestId,`before_${operation}`]);
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET operation=$2,state=$3,completed_at=clock_timestamp() WHERE id=$1",[f.intentId,operation,state]);
+      await migrate();
+      await savedDelete(f);
+      // Historical explicit failures are not replayed as new accepted actions.
+      // Their separately reviewed adoption must find this exact saved source.
+      expect(await deletionClaimable(f)).toBe(false);
+      await withSystemTx(pool,tx=>ensureFinalSaveRecovery(tx,f.intentId));
+      expect(await withSystemTx(pool,tx=>finalSaveProven(tx,f.intentId))).toBe(true);
+      expect(await deletionClaimable(f)).toBe(true);
+      expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1",[f.intentId])).rows[0].state).toBe(state);
+    });
+
+  it("requires recovery for a committed pre-0171 idle stop",async()=>{
+    const f=await legacy(true);
+    await pool.query("UPDATE workspace_checkpoint_requests SET idle_engine_instance_id=$2 WHERE id=$1",[f.requestId,f.engineInstanceId]);
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET requested_by=NULL,idempotency_key=$2 WHERE id=$1",[f.intentId,`system:idle:${f.engineInstanceId}:${randomUUID()}`]);
+    await migrate();
+    expect(await deletionClaimable(f)).toBe(false);
+    await withSystemTx(pool,tx=>ensureFinalSaveRecovery(tx,f.intentId));
+    expect(await withSystemTx(pool,tx=>finalSaveProven(tx,f.intentId))).toBe(true);
+    expect(await deletionClaimable(f)).toBe(true);
   });
   it("adopts a legacy drain before an old expiry writer tries to retire its candidate first",async()=>{
     const f=await legacy(false),transitionId=randomUUID();

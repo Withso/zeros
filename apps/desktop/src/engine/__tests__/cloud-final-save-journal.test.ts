@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { execFile } from "node:child_process";
+import { constants, promises as fs } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudFinalSaveJournal, CLOUD_FINAL_SAVE_BODY_BYTES, finalSaveCommitDescriptor } from "../cloud-final-save-journal";
 
@@ -65,6 +68,49 @@ describe.runIf(process.platform === "linux")("private final-save commit journal"
     await expect(f.journal.read(f.scope, f.attempt)).rejects.toThrow(/journal/);
     await expect(f.journal.prepare(f.scope, f.attempt, f.body)).rejects.toThrow(/journal/);
     if (change !== "missing") await expect(new CloudFinalSaveJournal(f.data).read(f.scope, f.attempt)).rejects.toThrow(/journal/);
+  });
+
+  it("refuses a real private FIFO without waiting for an external writer or abandoning its read", async () => {
+    const f = await fixture(); await f.journal.prepare(f.scope, f.attempt, f.body);
+    await fs.unlink(f.file);
+    await promisify(execFile)("mkfifo", ["-m", "600", f.file]);
+    const open = fs.open.bind(fs);
+    let entered!: () => void;
+    const opening = new Promise<void>(resolve => { entered = resolve; });
+    let leaf: FileHandle | undefined;
+    let byteReads = () => 0;
+    vi.spyOn(fs, "open").mockImplementation(async (name, ...args) => {
+      const isLeaf = String(name).endsWith(`/${f.scope.engineInstanceId}.json`);
+      if (isLeaf) entered();
+      const handle = await open(name, ...args);
+      if (isLeaf) {
+        leaf = handle;
+        const reads = vi.spyOn(handle, "read");
+        byteReads = () => reads.mock.calls.length;
+      }
+      return handle;
+    });
+    let settled = false, refused = false, refusedWithoutWriter = false;
+    const read = f.journal.read(f.scope, f.attempt).then(
+      () => { settled = true; },
+      error => { settled = true; refused = /journal/.test(String(error)); },
+    );
+    let writer: FileHandle | undefined, timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await opening;
+      // Observe the actual open before bounding the negative check. The writer
+      // stays absent throughout; cleanup below joins even the broken reader.
+      await Promise.race([read, new Promise<void>(resolve => { timer = setTimeout(resolve, 250); })]);
+      refusedWithoutWriter = settled && refused;
+    } finally {
+      clearTimeout(timer);
+      if (!settled) writer = await open(f.file, constants.O_RDWR | constants.O_NONBLOCK);
+      try { await read; } finally { await writer?.close(); }
+    }
+    expect(refused).toBe(true);
+    expect(byteReads()).toBe(0);
+    expect(leaf?.fd).toBe(-1);
+    expect(refusedWithoutWriter).toBe(true);
   });
 
   it("rejects an exposed or replaced directory, another attempt and an oversized body", async () => {

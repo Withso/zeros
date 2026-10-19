@@ -26,3 +26,15 @@ The complete browser smoke inventory exceeds a short per-command budget. Killing
 only a package-manager wrapper does not settle its browser runner. Keep the heavy
 slot until the owned runner and cleanup actually finish, and record the wrapper
 timeout separately from the runner's terminal check result.
+
+A historical coverage guard must agree with the admission rule about which
+actions own durable recovery. A reversible idle cancellation deliberately has
+none. Retain its real-service red and pre-expansion terminal-state matrix,
+including old-worker erasure claims, without exempting explicit, dispatched,
+mandatory or unresolved accepted work. Missing recovery by itself is never
+permission to erase a source.
+
+No-follow alone does not make a journal leaf safe to open: a private FIFO can
+block before descriptor validation. Open nonblocking, validate that same file
+descriptor before any read, and retain a real FIFO regression whose cleanup
+joins the pending operation. A timeout must not abandon final-save custody.

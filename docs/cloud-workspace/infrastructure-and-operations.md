@@ -222,6 +222,17 @@ and allocation through ambiguous replies and expired claims until a matching
 positive provider result is recorded. No workspace lock is held over provider
 I/O. The lease-to-workspace guard uses NOWAIT to preserve lock ordering.
 
+A reversible idle attempt that failed, expired or was cancelled before any
+provider dispatch does not own accepted final-save recovery. Its historical
+intent cannot veto a later saved Delete when the exact server-created idle
+request is terminal, has no checkpoint and has no mandatory or replacement
+dependency. The same SQL predicate covers current deletion eligibility and
+old-worker erasure claims. Explicit, dispatched, committed, mandatory and
+unresolved recovery records keep their proof requirements. Historical explicit
+terminal rows without recovery still need separately reviewed exact-source
+adoption; the migration neither treats their status as proof nor replays them
+as new user actions.
+
 The native companion uses `x-zeros-final-save-version: 1` alongside committed
 local-command negotiation for an exact qualified runtime registration. Its
 closed report endpoint is `/internal/v1/cloud-workspaces/engine/final-save`;

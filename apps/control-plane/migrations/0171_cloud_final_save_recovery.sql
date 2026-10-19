@@ -584,7 +584,23 @@ LANGUAGE sql STABLE SET search_path=pg_catalog,public,pg_temp AS $$
       WHERE workspace_id=target_workspace_id AND org_id=target_org_id AND settled_at IS NULL)
     AND NOT EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents intent
       WHERE intent.workspace_id=target_workspace_id AND intent.org_id=target_org_id AND intent.operation IN ('stop','archive','delete')
-        AND NOT EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries WHERE lifecycle_intent_id=intent.id))
+        AND NOT EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries WHERE lifecycle_intent_id=intent.id)
+        -- Admission deliberately leaves a reversible idle attempt without
+        -- recovery. Only its exact, retired, never-dispatched request can be
+        -- omitted from history coverage; status or a missing row is not proof.
+        AND NOT (intent.operation='stop' AND intent.requested_by IS NULL
+          AND intent.state IN ('failed','superseded') AND intent.attempt_count=0 AND intent.dispatched_at IS NULL
+          AND intent.generation_transition_id IS NULL AND NOT cloud_workspace_drain_is_mandatory(intent.id)
+          AND NOT EXISTS (SELECT 1 FROM cloud_workspace_generation_transitions transition
+            WHERE transition.workspace_id=intent.workspace_id AND transition.org_id=intent.org_id
+              AND transition.drain_intent_id=intent.id)
+          AND EXISTS (SELECT 1 FROM workspace_checkpoint_requests request
+            WHERE request.lifecycle_intent_id=intent.id AND request.workspace_id=intent.workspace_id
+              AND request.org_id=intent.org_id AND request.generation=intent.generation
+              AND request.reason='before_stop' AND request.idle_engine_instance_id IS NOT NULL
+              AND intent.idempotency_key LIKE 'system:idle:'||request.idle_engine_instance_id::text||':%'
+              AND request.state IN ('failed','cancelled','expired') AND request.completed_at IS NOT NULL
+              AND request.checkpoint_id IS NULL)))
     AND NOT EXISTS (SELECT 1 FROM cloud_workspaces workspace
       JOIN cloud_workspace_engine_instances engine ON engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id
         AND engine.generation=workspace.current_generation

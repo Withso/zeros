@@ -66,7 +66,9 @@ export class CloudFinalSaveJournal {
     let directory: FileHandle | undefined, file: FileHandle | undefined;
     try {
       directory = await this.directory();
-      try { file = await fs.open(this.file(directory, scope), constants.O_RDONLY | constants.O_NOFOLLOW); }
+      // A special leaf must reach same-descriptor validation without waiting
+      // for a peer. Keep the admitted open/read joined through final cleanup.
+      try { file = await fs.open(this.file(directory, scope), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT" && !this.record) return null;
         throw error;
