@@ -2,7 +2,7 @@
   "id": "cloud-stopped-compute-recheck",
   "kind": "replay",
   "area": "control-plane-lifecycle",
-  "fixedBy": "pending",
+  "fixedBy": "pr:623",
   "symptom": "An accepted stopping-to-stopped observation left the previous allocation on a future compute check, delaying rapid wakes; internal drains missed the workspace-status trigger too.",
   "rule": "bug-fix.md: prove both durable job and domain claim eligibility for observation-driven rechecks, with held-row and provider-I/O barriers, sequence acknowledgements, crash recovery, retry floors and independent final-meter proof.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/compute-leases.integration.test.ts -t 'promptly eligible|commits a stopped result|retains a stop accepted during compute I/O|positive stopped evidence retained|replacement allocation reusing'"
