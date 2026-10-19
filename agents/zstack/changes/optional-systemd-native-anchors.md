@@ -17,3 +17,5 @@ command entry point, restore its signal handlers and umask before the next
 test; otherwise a private-mode setting can contaminate a later native test.
 Trace consumer imports that reload a shipped helper: the temporary-root mount
 model must reach those fresh imports too, without replacing the real verifier.
+Closed diagnostic readers must also preserve cross-attempt invariants: a held
+root/usr pair cannot change from shared to split within one observation.

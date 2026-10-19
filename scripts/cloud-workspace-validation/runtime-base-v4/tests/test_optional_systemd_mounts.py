@@ -310,6 +310,25 @@ class NativeObservationSchemaTests(unittest.TestCase):
                     changed["anchorChecks"][index][key] = status
                     self.rejected(changed)
 
+    def test_shared_to_split_in_one_recovered_call_is_impossible(self):
+        value = self.value("recovered", 1, comparisons=[self.comparison()])
+        value["anchorChecks"][0]["usr"] = "root_ext4"
+        self.rejected(value)
+
+    def test_split_to_shared_in_one_recovered_call_is_impossible(self):
+        value = self.value("recovered", 1, comparisons=[self.comparison()])
+        value["anchorChecks"][1]["usr"] = "root_ext4"
+        self.rejected(value)
+
+    def test_unchanged_shared_or_split_anchors_remain_valid_for_all_attempts(self):
+        for classification in ("root_ext4", "split_ext4"):
+            for retry in range(3):
+                value = self.value("recovered" if retry else "stable", retry,
+                                   comparisons=[self.comparison(i) for i in range(retry)])
+                for row in value["anchorChecks"]:
+                    row["usr"] = classification
+                self.assertEqual(b.closed_optional_systemd_observation(value), value)
+
     def test_pre_anchor_mount_refusal_is_closed_without_a_fabricated_comparison(self):
         for key in ("root", "usr"):
             for status in ("non_native", "unavailable", "inconsistent"):

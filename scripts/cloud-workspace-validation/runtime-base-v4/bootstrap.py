@@ -297,6 +297,9 @@ def closed_optional_systemd_observation(value):
         completed = anchors if outcome != "refused" else anchors[:retry]
         require(all(row["root"] == "native_ext4" and row["usr"] in ("root_ext4", "split_ext4")
                     for row in completed), check)
+        # Retained original anchors cannot change their positive relationship
+        # within one call, including before a later terminal refusal.
+        require(len({row["usr"] for row in anchors if row["usr"] in ("root_ext4", "split_ext4")}) <= 1, check)
         require(not any(row[key] in ("non_native", "unavailable", "inconsistent")
                         for row in anchors for key in ("root", "usr")) or
                 (outcome == "refused" and terminal == "mount"), check)
