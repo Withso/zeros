@@ -16,6 +16,9 @@ SOURCE = Path(__file__).resolve().parents[1] / "bootstrap.py"
 spec = importlib.util.spec_from_file_location("absence_bootstrap", SOURCE)
 b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
+mount_spec = importlib.util.spec_from_file_location("optional_native_mounts", Path(__file__).with_name("mount_fixture.py"))
+mount_fixture = importlib.util.module_from_spec(mount_spec)
+mount_spec.loader.exec_module(mount_fixture)
 SURFACE = "/usr/local/lib/systemd/system"
 
 
@@ -27,6 +30,7 @@ class OptionalSystemdTests(unittest.TestCase):
         self.local = self.root / "usr/local"
         (self.local / "lib").mkdir(parents=True)
         self.app = b.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid())
+        self.app.mounts = mount_fixture.NativeMounts(self.root)
         self.provider = {"uid": 4242, "gid": 4242}
         self.owners = {self.local: (4242, 4242), self.local / "lib": (4242, 4242)}
         original_stat, original_fstat = os.stat, os.fstat

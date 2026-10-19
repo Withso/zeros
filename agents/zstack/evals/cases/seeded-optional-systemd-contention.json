@@ -1,0 +1,9 @@
+{
+  "id": "seeded-optional-systemd-contention",
+  "kind": "seeded",
+  "area": "vm-image-bootstrap",
+  "fixedBy": "pr:632",
+  "symptom": "A reproduced sibling write in a qualified provider-owned optional-systemd ancestor refused an otherwise unchanged strict observation; the earlier live cause remained unverified.",
+  "rule": "Retry only complete timestamp-contended passes within the original deadline, retaining ACL, mount, structural, absence and sealed-policy fences.",
+  "check": "pnpm test:git scripts/__tests__/cloud-runtime-bootstrap.test.ts"
+}

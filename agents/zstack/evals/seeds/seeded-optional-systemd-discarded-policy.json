@@ -1,0 +1,5 @@
+{
+  "file": "scripts/cloud-workspace-validation/runtime-base-v4/bootstrap.py",
+  "before": "                    observation.require(call_kind != \"verification\" or result == expected, \"policy\")\n",
+  "after": "                    observation.require(observation.pending or call_kind != \"verification\" or result == expected, \"policy\")\n"
+}

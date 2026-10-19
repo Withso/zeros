@@ -11,6 +11,7 @@ sys.dont_write_bytecode = True
 import base64
 from collections import deque
 import contextlib
+import copy
 import datetime
 import errno
 import fcntl
@@ -57,6 +58,8 @@ ACTIVE = "/run/zeros/active-runtime.json"
 # Failed exchange custody must remain fenced across volatile-root recreation.
 BASE_SANITATION = "/opt/zeros/base-sanitation"
 PRIVATE_FAILURES = "/run/zeros/bootstrap-failures.jsonl"
+OPTIONAL_SYSTEMD_OBSERVATIONS = "/run/zeros/optional-systemd-observations.jsonl"
+OPTIONAL_SYSTEMD_FIELDS = ("dev", "ino", "mode", "uid", "gid", "mtime", "ctime", "mount_id")
 PERSIST_ROOT = "/home/user/.zeros-persist"
 PERSIST_RECORD = "/run/zeros/persistence.json"
 PERSIST_RESIDUE = "/run/zeros/persistence-residue.json"
@@ -236,6 +239,128 @@ def shape(value, required, optional=(), check="input_schema"):
 
 def integer(value, low, high, check):
     require(type(value) is int and low <= value <= high, check)
+
+
+def closed_optional_systemd_observation(value):
+    """Project bounded history, not evidence of any particular caller's result."""
+    check = "diagnostic_missing"
+    require(type(value) is dict and value.get("schema") in
+            ("zeros.optional-systemd-observation/v1", "zeros.optional-systemd-observation/v2"), check)
+    native = value["schema"] == "zeros.optional-systemd-observation/v2"
+    shape(value, ("schema", "callKind", "outcome", "retryCount", "terminalCheck", "comparisons") +
+          (("anchorChecks",) if native else ()), check=check)
+    require(value["callKind"] in ("qualification", "verification", "observation"), check)
+    outcome, retry, terminal = value["outcome"], value["retryCount"], value["terminalCheck"]
+    integer(retry, 0, 2, check)
+    require(type(value["comparisons"]) is list and len(value["comparisons"]) <= 6, check)
+    comparisons, attempts, seen = [], [[], [], []], set()
+    for entry in value["comparisons"]:
+        shape(entry, ("ancestorIndex", "phase", "retryCount", "failedFields", "mountCheck") +
+              (("mountReference",) if native else ()), check=check)
+        index, attempt, fields, mount = entry["ancestorIndex"], entry["retryCount"], entry["failedFields"], entry["mountCheck"]
+        integer(index, 0, 6, check)
+        integer(attempt, 0, retry, check)
+        require(entry["phase"] in ("open", "original", "named", "reopened") and
+                mount in ("equal", "different", "unavailable", "not_checked"), check)
+        require(type(fields) is list and len(fields) <= len(OPTIONAL_SYSTEMD_FIELDS) and
+                all(type(field) is str and field in OPTIONAL_SYSTEMD_FIELDS for field in fields) and
+                fields == [field for field in OPTIONAL_SYSTEMD_FIELDS if field in fields], check)
+        require(("mount_id" in fields) == (mount == "different") and (fields or mount == "unavailable"), check)
+        row = {"ancestorIndex": index, "phase": entry["phase"], "retryCount": attempt,
+               "failedFields": list(fields), "mountCheck": mount}
+        if native:
+            require(entry["mountReference"] == ("root" if index == 0 else "usr"), check)
+            row["mountReference"] = entry["mountReference"]
+        encoded = packed(row)
+        require(encoded not in seen and len(attempts[attempt]) < 2 and
+                (not comparisons or attempt >= comparisons[-1]["retryCount"]), check)
+        seen.add(encoded)
+        comparisons.append(row)
+        attempts[attempt].append(row)
+
+    def eligible(row):
+        return (row["ancestorIndex"] in (2, 3) and row["mountCheck"] == "equal" and
+                bool(row["failedFields"]) and set(row["failedFields"]) <= {"mtime", "ctime"})
+
+    anchors = []
+    if native:
+        require(type(value["anchorChecks"]) is list and len(value["anchorChecks"]) <= 3, check)
+        for index, entry in enumerate(value["anchorChecks"]):
+            shape(entry, ("retryCount", "root", "usr"), check=check)
+            integer(entry["retryCount"], index, index, check)
+            require(entry["root"] in ("unobserved", "native_ext4", "non_native", "unavailable", "inconsistent") and
+                    entry["usr"] in ("unobserved", "root_ext4", "split_ext4", "non_native", "unavailable", "inconsistent"), check)
+            require(entry["root"] != "unobserved" or entry["usr"] == "unobserved", check)
+            anchors.append(dict(entry))
+        require(len(anchors) == retry + 1 or
+                (not anchors and retry == 0 and outcome == "refused" and terminal in ("policy", "io") and not comparisons), check)
+        completed = anchors if outcome != "refused" else anchors[:retry]
+        require(all(row["root"] == "native_ext4" and row["usr"] in ("root_ext4", "split_ext4")
+                    for row in completed), check)
+        # Retained original anchors cannot change their positive relationship
+        # within one call, including before a later terminal refusal.
+        require(len({row["usr"] for row in anchors if row["usr"] in ("root_ext4", "split_ext4")}) <= 1, check)
+        require(not any(row[key] in ("non_native", "unavailable", "inconsistent")
+                        for row in anchors for key in ("root", "usr")) or
+                (outcome == "refused" and terminal == "mount"), check)
+
+    require(all(attempts[attempt] and all(eligible(row) for row in attempts[attempt]) for attempt in range(retry)), check)
+    if outcome == "stable":
+        require(retry == 0 and terminal == "none" and not comparisons, check)
+    elif outcome == "recovered":
+        require(retry in (1, 2) and terminal == "none" and not attempts[retry] and all(map(eligible, comparisons)), check)
+    elif outcome == "refused":
+        require(terminal in ("identity", "mount", "metadata", "absence", "policy", "bounds", "io"), check)
+        current = attempts[retry]
+        require(len(current) < 2 or eligible(current[0]), check)
+        if terminal == "identity":
+            require(current and any(field != "mount_id" for field in current[-1]["failedFields"]), check)
+        if terminal == "mount":
+            failed_anchor = bool(native and anchors and any(anchors[-1][key] in
+                                 ("non_native", "unavailable", "inconsistent") for key in ("root", "usr")))
+            require((current and current[-1]["mountCheck"] in ("different", "unavailable")) or failed_anchor, check)
+    elif outcome == "deadline":
+        require(terminal == "deadline" and comparisons and all(map(eligible, comparisons)), check)
+    elif outcome == "attempt_limit":
+        require(retry == 2 and terminal == "attempt_limit" and attempts[2] and all(map(eligible, comparisons)), check)
+    else:
+        raise Failure(check)
+    result = {"schema": value["schema"], "callKind": value["callKind"], "outcome": outcome,
+              "retryCount": retry, "terminalCheck": terminal, "comparisons": comparisons}
+    if native:
+        result["anchorChecks"] = anchors
+    return result
+
+
+class OptionalSystemdObservation:
+    """Internal per-call state; pending contention is not permission to retry."""
+    def __init__(self, call_kind):
+        self.call_kind, self.retry_count = call_kind, 0
+        self.outcome, self.terminal = "refused", "policy"
+        self.comparisons, self.pending = [], False
+        self.anchors = []
+
+    def require(self, ok, check):
+        if not ok:
+            self.terminal = check
+            raise Failure("base_compatibility")
+
+    def comparison(self, index, phase, fields, mount, terminal=False):
+        row = {"ancestorIndex": index, "phase": phase, "retryCount": self.retry_count,
+               "failedFields": fields, "mountCheck": mount, "mountReference": "root" if index == 0 else "usr"}
+        if (terminal or not self.pending) and row not in self.comparisons:
+            self.comparisons.append(row)
+        if not terminal:
+            self.pending = True
+
+    def limit(self, outcome):
+        self.outcome = self.terminal = outcome
+        raise Failure("base_compatibility")
+
+    def record(self):
+        return {"schema": "zeros.optional-systemd-observation/v2", "callKind": self.call_kind,
+                "outcome": self.outcome, "retryCount": self.retry_count, "terminalCheck": self.terminal,
+                "comparisons": self.comparisons, "anchorChecks": self.anchors}
 
 
 def text_match(value, pattern, check):
@@ -754,20 +879,36 @@ class Bootstrap:
             if isinstance(cause, OSError) and type(cause.errno) is int and cause.errno in errno.errorcode:
                 value["errno"] = {"name": errno.errorcode[cause.errno], "number": cause.errno}
             require(value["stage"] in (*STAGES, "verify", "sanitize", "resume"), "diagnostic_missing")
+            return self.append_private_diagnostic(PRIVATE_FAILURES, value)
+        except (OSError, Failure, ValueError):
+            # Evidence must not mask the original failure or prevent cleanup.
+            return False
+
+    def append_private_diagnostic(self, absolute, value):
+        """Fixed private files only; dropping evidence never changes admission."""
+        try:
+            require(absolute in (PRIVATE_FAILURES, OPTIONAL_SYSTEMD_OBSERVATIONS), "diagnostic_missing")
+            if absolute == OPTIONAL_SYSTEMD_OBSERVATIONS:
+                value = closed_optional_systemd_observation(value)
+            line = packed(value) + b"\n"
+            require(len(line) <= 32768, "diagnostic_missing")
             with self.directory("/run/zeros", create=True, mode=0o700) as directory:
                 require(stat.S_IMODE(os.fstat(directory).st_mode) == 0o700, "file_mode")
             with self.lock("diagnostic.lock"):
                 try:
-                    previous = self.read(PRIVATE_FAILURES, 65536, 0o600)
+                    previous = self.read(absolute, 65536, 0o600)
                 except FileNotFoundError:
                     previous = b""
-                line = packed(value) + b"\n"
+                require(not previous or previous.endswith(b"\n"), "diagnostic_missing")
                 if len(previous) + len(line) > 65536:
                     previous = previous[-32768:].partition(b"\n")[2]
-                self.atomic(PRIVATE_FAILURES, previous + line)
+                self.atomic(absolute, previous + line)
             return True
-        except (OSError, Failure, ValueError):
-            # Evidence must not mask the original failure or prevent cleanup.
+        except Failure as error:
+            if error.checks[0] in ("timeout", "process_signal"):
+                raise
+            return False
+        except Exception:
             return False
 
     def unlink(self, absolute):
@@ -858,109 +999,250 @@ class Bootstrap:
         self.compat, self.compat_id = value, "bc1-" + sha(raw)
 
     def qualify_optional_systemd(self, provider):
+        provider = copy.deepcopy(provider)
         return {"schema": "zeros.optional-systemd-absence/v1", "provider": provider,
-                "snapshot": self.optional_systemd_snapshot(provider)}
+                "snapshot": self._optional_systemd_observe(provider, "qualification")}
 
     def optional_systemd_absence(self, policy):
         shape(policy, ("schema", "provider", "snapshot"), check="base_compatibility")
         require(policy["schema"] == "zeros.optional-systemd-absence/v1", "base_compatibility")
-        observed = self.optional_systemd_snapshot(policy["provider"])
-        require(observed == policy["snapshot"], "base_compatibility")
-        return observed
+        # Every completed pass compares with this original policy, even a pass
+        # discarded for contention. A retry cannot qualify a changed surface.
+        return self._optional_systemd_observe(policy["provider"], "verification", copy.deepcopy(policy["snapshot"]))
 
     def optional_systemd_snapshot(self, provider):
-        """Only an absent override may have qualified provider-owned parents.
+        return self._optional_systemd_observe(provider, "observation")
 
-        Descriptors pin each component until the final identity/absence pass.
-        Inodes and mount IDs are checked within a pass, never sealed across a
-        restore. All actual protected files still use directory()/read().
+    def _optional_systemd_observe(self, provider, call_kind, expected=None):
+        observation = OptionalSystemdObservation(call_kind)
+        deadline = time.monotonic() + 0.5
+        with contextlib.ExitStack() as anchor_stack:
+            anchors = {}
+            try:
+                shape(provider, ("uid", "gid"), check="base_compatibility")
+                for key, root_id in (("uid", self.uid), ("gid", self.gid)):
+                    integer(provider[key], 1, 2**31 - 1, "base_compatibility")
+                    require(provider[key] not in {root_id, 10001, 10002, 10003, 10004}, "base_compatibility")
+                provider = dict(provider)
+                while True:
+                    result = self._optional_systemd_pass(provider, observation, anchors, anchor_stack)
+                    observation.require(call_kind != "verification" or result == expected, "policy")
+                    if not observation.pending:
+                        if observation.retry_count and time.monotonic() >= deadline:
+                            observation.limit("deadline")
+                        observation.outcome, observation.terminal = ("recovered" if observation.retry_count else "stable"), "none"
+                        break
+                    # Stronger failures and completed-pass policy equality have
+                    # already been checked. Only the outer anchor references remain.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        observation.limit("deadline")
+                    if observation.retry_count == 2:
+                        observation.limit("attempt_limit")
+                    time.sleep(min((0.025, 0.05)[observation.retry_count], remaining))
+                    if time.monotonic() >= deadline:
+                        observation.limit("deadline")
+                    observation.retry_count += 1
+                    observation.pending = False
+            except OSError as error:
+                observation.terminal = "io"
+                raise Failure("base_compatibility") from error
+            finally:
+                self.append_private_diagnostic(OPTIONAL_SYSTEMD_OBSERVATIONS, observation.record())
+            # Best-effort diagnostic I/O cannot extend a retried proof's deadline.
+            # A preceding record describes an observation, not the public result.
+            if observation.retry_count and time.monotonic() >= deadline:
+                raise Failure("base_compatibility")
+            return result
+
+    def _optional_systemd_pass(self, provider, observation, anchors, anchor_stack):
+        """Pin the complete strict view; only two fixed edges may mark contention.
+
+        Pending timestamps never waive a comparison. All authority, ACL, mount,
+        absence and final reopen checks still run before the wrapper may retry.
+        Original root/usr references survive backoff, never a call or boot.
         """
-        shape(provider, ("uid", "gid"), check="base_compatibility")
-        for key, root_id in (("uid", self.uid), ("gid", self.gid)):
-            integer(provider[key], 1, 2**31 - 1, "base_compatibility")
-            require(provider[key] not in {root_id, 10001, 10002, 10003, 10004}, "base_compatibility")
         surface = "/usr/local/lib/systemd/system"
+        paths = ("/", "/usr", "/usr/local", "/usr/local/lib", "/usr/local/lib/systemd", surface)
         result = {"ancestors": {}, "directories": {}, "absent": None, "protectedAbsent": True}
         watches, missing = [], None
+        anchor_row = {"retryCount": observation.retry_count, "root": "unobserved", "usr": "unobserved"}
+        observation.anchors.append(anchor_row)
         attributes = {"system.posix_acl_access", "system.posix_acl_default", "security.capability"}
+        pair = (provider["uid"], provider["gid"])
 
         def identity(info):
             return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_mtime_ns, info.st_ctime_ns)
 
         def metadata(fd, provider_owned):
             info = os.fstat(fd)
-            allowed = {(self.uid, self.gid)} | ({(provider["uid"], provider["gid"])} if provider_owned else set())
-            require(stat.S_ISDIR(info.st_mode) and (info.st_uid, info.st_gid) in allowed and not info.st_mode & 0o7022,
-                    "base_compatibility")
+            allowed = {(self.uid, self.gid)} | ({pair} if provider_owned else set())
+            observation.require(stat.S_ISDIR(info.st_mode) and (info.st_uid, info.st_gid) in allowed and
+                                not info.st_mode & 0o7022, "metadata")
             acl = sorted(attributes & set(os.listxattr(fd)))
-            require(not acl, "base_compatibility")
+            observation.require(not acl, "metadata")
             return info, {"uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode), "acl": acl}
 
-        try:
-            with contextlib.ExitStack() as stack:
-                root = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-                stack.callback(os.close, root)
-                root_mount = self.mounts.mount_id(root)
+        with contextlib.ExitStack() as stack:
+            root = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            stack.callback(os.close, root)
+            def compare(before, after, fd, path, phase, provider_owned, fresh=True, expected_mount=None):
+                index = paths.index(path) if path in paths else 6
+                fields = [field for field, left, right in zip(OPTIONAL_SYSTEMD_FIELDS, before, after) if left != right]
+                try:
+                    expected = anchors["/" if index == 0 else "/usr"]["mount"] if expected_mount is None else expected_mount
+                    mount = "equal" if self.mounts.mount_id(fd) == expected else "different"
+                except (OSError, Failure) as error:
+                    if isinstance(error, Failure) and error.checks != ["base_compatibility"]:
+                        raise
+                    observation.comparison(index, phase, fields, "unavailable", terminal=True)
+                    observation.terminal = "mount"
+                    raise Failure("base_compatibility") from error
+                if mount == "different":
+                    fields.append("mount_id")
+                if not fields:
+                    return
+                eligible = (index in (2, 3) and before[3:5] == pair and after[3:5] == pair and
+                            mount == "equal" and set(fields) <= {"mtime", "ctime"})
+                observation.comparison(index, phase, fields, mount, terminal=not eligible)
+                observation.require(eligible, "identity" if any(field != "mount_id" for field in fields) else "mount")
+                if fresh:
+                    # In particular, the final reopened fstat is after its ACL
+                    # read. A late ACL may explain ctime drift; observe that ACL
+                    # now instead of treating a stale clean read as retry proof.
+                    metadata(fd, provider_owned)
+                    compare(before, identity(os.fstat(fd)), fd, path, phase, provider_owned, fresh=False, expected_mount=expected_mount)
 
-                def opened(parent, name, path, provider_owned):
+            def native_anchor(fd, path, info, phase):
+                """Only / and root-owned /usr can establish native anchors."""
+                index, key = (0, "root") if path == "/" else (1, "usr")
+
+                def refused(status):
+                    anchor_row[key] = status
+                    observation.require(False, "mount")
+
+                try:
+                    mount = self.mounts.mount_id(fd)
+                except (OSError, Failure) as error:
+                    if isinstance(error, Failure) and error.checks != ["base_compatibility"]:
+                        raise
+                    observation.comparison(index, phase, [], "unavailable", terminal=True)
+                    refused("unavailable")
+                if type(mount) is not int or mount <= 0:
+                    refused("unavailable")
+                previous = anchors.get(path)
+                if previous:
+                    # A held reference prevents ordinary mount-ID recycling;
+                    # it does not establish current named attachment by itself.
+                    pinned, _ = metadata(previous["fd"], False)
+                    compare(previous["identity"], identity(pinned), previous["fd"], path, "original", False,
+                            expected_mount=previous["mount"])
+                    compare(previous["identity"], identity(info), fd, path, phase, False,
+                            expected_mount=previous["mount"])
+                shared = path == "/" or mount == anchors["/"]["mount"]
+                target = str(self.root if shared else self.root / "usr")
+                try:
+                    table = self.mounts.table()
+                except (OSError, Failure) as error:
+                    if isinstance(error, Failure) and error.checks != ["base_compatibility"]:
+                        raise
+                    refused("unavailable")
+                entries = [entry for entry in table if entry["id"] == mount]
+                targets = [entry for entry in table if entry["target"] == target]
+                if len(entries) != 1 or len(targets) != 1 or entries[0] != targets[0]:
+                    refused("inconsistent")
+                entry = entries[0]
+                if entry["device"] != f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}":
+                    refused("inconsistent")
+                if path == "/usr" and shared and any(row["target"] == str(self.root / "usr") for row in table):
+                    refused("inconsistent")
+                if entry["filesystem"] != "ext4":
+                    refused("non_native")
+                if previous and entry != previous["table"]:
+                    refused("inconsistent")
+                # Close the table/descriptor observation window, including ACL
+                # mutation during the table read. Neither anchor is retryable.
+                current, _ = metadata(fd, False)
+                compare(identity(info), identity(current), fd, path, phase, False, expected_mount=mount)
+                if previous is None:
+                    held = os.dup(fd)
+                    anchor_stack.callback(os.close, held)
+                    require(not os.get_inheritable(held), "base_compatibility")
+                    anchors[path] = {"fd": held, "mount": mount, "identity": identity(current), "table": copy.deepcopy(entry)}
+                anchor_row[key] = "native_ext4" if path == "/" else ("root_ext4" if shared else "split_ext4")
+
+            def opened(parent, name, path, provider_owned, before):
+                observation.require(stat.S_ISDIR(before.st_mode), "metadata")
+                observation.require(len(watches) < 256, "bounds")
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                stack.callback(os.close, fd)
+                info, record = metadata(fd, provider_owned)
+                if path == "/usr":
+                    native_anchor(fd, path, info, "open")
+                compare(identity(before), identity(info), fd, path, "open", provider_owned)
+                watches.append((parent, name, path, fd, identity(info), provider_owned, record))
+                return fd, record
+
+            info, record = metadata(root, False)
+            native_anchor(root, "/", info, "open")
+            watches.append((None, self.root, "/", root, identity(info), False, record))
+            result["ancestors"]["/"] = record
+            parent, path = root, ""
+            for index, name in enumerate(surface.strip("/").split("/")):
+                path += "/" + name
+                try:
                     before = os.stat(name, dir_fd=parent, follow_symlinks=False)
-                    require(stat.S_ISDIR(before.st_mode) and len(watches) < 256, "base_compatibility")
-                    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
-                    stack.callback(os.close, fd)
-                    info, record = metadata(fd, provider_owned)
-                    require(identity(before) == identity(info) and self.mounts.mount_id(fd) == root_mount, "base_compatibility")
-                    watches.append((parent, name, fd, identity(info), provider_owned, record))
-                    return fd, record
-
-                info, record = metadata(root, False)
-                watches.append((None, self.root, root, identity(info), False, record))
-                result["ancestors"]["/"] = record
-                parent, path = root, ""
-                for index, name in enumerate(surface.strip("/").split("/")):
-                    path += "/" + name
-                    try:
-                        child, record = opened(parent, name, path, index >= 1)
-                    except FileNotFoundError:
-                        require(index >= 3, "base_compatibility")
-                        result["absent"], missing = path, (parent, name)
-                        break
-                    result["ancestors"][path] = record
-                    parent = child
+                except FileNotFoundError:
+                    observation.require(index >= 3, "absence")
+                    result["absent"], missing = path, (parent, name)
+                    break
+                child, record = opened(parent, name, path, index >= 1, before)
+                result["ancestors"][path] = record
+                parent = child
+            else:
+                pending, count = [(parent, surface, 0)], 0
+                while pending:
+                    directory, path, depth = pending.pop()
+                    names = sorted(os.listdir(directory))
+                    count += len(names)
+                    observation.require(count <= 4096 and depth <= 16, "bounds")
+                    for name in names:
+                        observation.require(not name.startswith("zeros-") and name != "service.d", "absence")
+                        entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                        observation.require(not stat.S_ISLNK(entry.st_mode), "metadata")
+                        if stat.S_ISDIR(entry.st_mode):
+                            child_path = path + "/" + name
+                            child, record = opened(directory, name, child_path, True, entry)
+                            result["directories"][child_path] = record
+                            pending.append((child, child_path, depth + 1))
+                        else:
+                            observation.require(stat.S_ISREG(entry.st_mode), "metadata")
+            # Re-resolve every pinned component, including same-inode binds.
+            for parent, name, path, fd, before, provider_owned, record in reversed(watches):
+                info, current = metadata(fd, provider_owned)
+                observation.require(current == record, "metadata")
+                compare(before, identity(info), fd, path, "original", provider_owned)
+                compare(before, identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), fd, path, "named", provider_owned)
+                reopened = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                try:
+                    _, current = metadata(reopened, provider_owned)
+                    observation.require(current == record, "metadata")
+                    compare(before, identity(os.fstat(reopened)), reopened, path, "reopened", provider_owned)
+                    if path in ("/", "/usr"):
+                        native_anchor(reopened, path, os.fstat(reopened), "reopened")
+                finally:
+                    os.close(reopened)
+            if missing:
+                try:
+                    os.stat(missing[1], dir_fd=missing[0], follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
                 else:
-                    pending, count = [(parent, surface, 0)], 0
-                    while pending:
-                        directory, path, depth = pending.pop()
-                        names = sorted(os.listdir(directory))
-                        count += len(names)
-                        require(count <= 4096 and depth <= 16, "base_compatibility")
-                        for name in names:
-                            require(not name.startswith("zeros-") and name != "service.d", "base_compatibility")
-                            entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                            require(not stat.S_ISLNK(entry.st_mode), "base_compatibility")
-                            if stat.S_ISDIR(entry.st_mode):
-                                child_path = path + "/" + name
-                                child, record = opened(directory, name, child_path, True)
-                                result["directories"][child_path] = record
-                                pending.append((child, child_path, depth + 1))
-                            else:
-                                require(stat.S_ISREG(entry.st_mode), "base_compatibility")
-                # Re-resolve every pinned component without following links.
-                # Also catches same-filesystem bind mounts and same-mode swaps.
-                for parent, name, fd, before, provider_owned, record in reversed(watches):
-                    info, current = metadata(fd, provider_owned)
-                    require(identity(info) == before and current == record and self.mounts.mount_id(fd) == root_mount and
-                            identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "base_compatibility")
-                    reopened = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
-                    try:
-                        require(identity(os.fstat(reopened)) == before and self.mounts.mount_id(reopened) == root_mount,
-                                "base_compatibility")
-                    finally: os.close(reopened)
-                if missing:
-                    try: os.stat(missing[1], dir_fd=missing[0], follow_symlinks=False)
-                    except FileNotFoundError: pass
-                    else: raise Failure("base_compatibility")
-        except OSError:
-            raise Failure("base_compatibility") from None
+                    observation.require(False, "absence")
+            for path in ("/", "/usr"):
+                held = anchors[path]["fd"]
+                info, _ = metadata(held, False)
+                native_anchor(held, path, info, "original")
         return result
 
     def layout(self):

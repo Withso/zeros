@@ -4,6 +4,7 @@ Only the rootless host/mount fixture and final exec are substituted. In
 particular, ComputerBuild imports the shipped bootstrap, with no verifier stub.
 """
 import contextlib
+import importlib.machinery
 import importlib.util
 import io
 import json
@@ -19,6 +20,7 @@ from test_bootstrap import BootstrapTests, HERE, b, canonical, digest
 def verify(archive, descriptor, rejected=None):
     case = BootstrapTests()
     case.setUp()
+    mount_patch = None
     try:
         base = case.root / "opt/zeros-bootstrap"
         source = (HERE.parent / "bootstrap.py").read_bytes()
@@ -66,6 +68,17 @@ def verify(archive, descriptor, rejected=None):
         spec = importlib.util.spec_from_file_location("computer_build", HERE.parent / "computer-build.py")
         computer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(computer)
+        original_execute = importlib.machinery.SourceFileLoader.exec_module
+
+        def execute_with_fixture_mounts(loader, module):
+            original_execute(loader, module)
+            if Path(loader.path) == base / "bootstrap.py":
+                # ComputerBuild reloads the exact shipped helper. Supply the
+                # same temporary-root mount model without replacing a verifier.
+                module.BindMounts = lambda: case.mounts
+
+        mount_patch = mock.patch.object(importlib.machinery.SourceFileLoader, "exec_module", execute_with_fixture_mounts)
+        mount_patch.start()
         builder = computer.ComputerBuild(case.root, uid=os.getuid(), gid=os.getgid())
         environment = builder.install_environment()
         case.assertEqual(environment, {**computer.ENVIRONMENT,
@@ -111,6 +124,8 @@ def verify(archive, descriptor, rejected=None):
                 "fonts": len(assets["fonts"]), "copyrights": len(b.SYSTEM_ASSET_PACKAGES),
                 "dispatchRehashed": dispatch_rehashed, "fullRehashed": full_rehashed}
     finally:
+        if mount_patch is not None:
+            mount_patch.stop()
         case.tearDown()
 
 

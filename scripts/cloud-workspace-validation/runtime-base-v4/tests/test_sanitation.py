@@ -182,7 +182,8 @@ class BaseSanitationTests(unittest.TestCase):
 
         with mock.patch.object(self.app, 'lock', side_effect=observed):
             self.builder_ready()
-        self.assertEqual(calls, [('runtime-install.lock',), ('runtime-install.lock', 'runtime-publication.lock')])
+        self.assertEqual(calls, [('diagnostic.lock',), ('runtime-install.lock',),
+                                 ('runtime-install.lock', 'runtime-publication.lock')])
 
     def test_base_verification_refuses_unfinished_sanitation_even_after_fresh_boot(self):
         self.prepare_base()
