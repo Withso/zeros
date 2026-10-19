@@ -53,6 +53,7 @@ import {
 } from "./runtime-access.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceComputeLeaseCoordinator, type ManagedComputePolicy } from "./compute-leases.js";
+import { computeObservationAllocationIdSql, requestComputeObservationRecheck } from "./compute-rechecks.js";
 import {retireCloudAgentBootSources} from "./agent-boot-credentials.js";
 import type { CloudRuntimeRollbackCache } from "./runtime-rollback.js";
 
@@ -67,6 +68,9 @@ type ClaimedIntent = {
   desiredState: DesiredState;
   generation: number;
   provider: string;
+  providerConnectionId: string;
+  providerConnectionVersion: string;
+  allocationLeaseId: string | null;
   imageRef: string;
   architecture: "linux/amd64" | "linux/arm64";
   cpuMillicores: number;
@@ -90,6 +94,9 @@ type DriftCandidate = {
   version: string | number;
   generation: number;
   provider: string;
+  providerConnectionId: string;
+  providerConnectionVersion: string;
+  allocationLeaseId: string | null;
   providerResourceId: string | null;
   driftLeaseUntil: Date;
   /** This candidate's observation cadence, by its settled state. */
@@ -530,6 +537,9 @@ export class CloudWorkspaceReconciler {
         current_generation: number;
         generation: number;
         provider: string;
+        provider_connection_id: string;
+        provider_connection_version: string;
+        allocation_lease_id: string | null;
         image_ref: string;
         architecture: "linux/amd64" | "linux/arm64";
         cpu_millicores: number;
@@ -550,6 +560,8 @@ export class CloudWorkspaceReconciler {
                 cw.desired_state, cw.current_generation, cw.authority_epoch, cw.agent_boot_id, i.generation,
                 i.requested_by,i.created_at,
                 i.affects_workspace, i.generation_transition_id, g.provider,
+                g.provider_connection_id, g.provider_connection_version::text,
+                ${computeObservationAllocationIdSql} AS allocation_lease_id,
                 g.image_ref, g.architecture, g.cpu_millicores,
                 g.memory_mib, g.storage_mib, pb.provider_resource_id,
                 i.attempt_count, checkpoint_request.id AS checkpoint_request_id,
@@ -693,6 +705,9 @@ export class CloudWorkspaceReconciler {
         desiredState,
         generation: row.generation,
         provider: row.provider,
+        providerConnectionId: row.provider_connection_id,
+        providerConnectionVersion: row.provider_connection_version,
+        allocationLeaseId: row.allocation_lease_id,
         imageRef: row.image_ref,
         architecture: row.architecture,
         cpuMillicores: row.cpu_millicores,
@@ -994,9 +1009,10 @@ export class CloudWorkspaceReconciler {
         state: string;
         affects_workspace: boolean;
         lease_owner: string | null;
+        lease_current: boolean;
         dispatched_age_ms: string;
       }>(
-        `SELECT state, affects_workspace, lease_owner,
+        `SELECT state, affects_workspace, lease_owner, lease_expires_at>clock_timestamp() AS lease_current,
                 extract(epoch FROM (now() - dispatched_at)) * 1000 AS dispatched_age_ms
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
@@ -1022,6 +1038,8 @@ export class CloudWorkspaceReconciler {
       const observedState =
         resource?.state ??
         (intent.operation === "delete" ? "deleted" : "absent");
+      if (resultState !== "superseded" && row.state === "dispatching" && row.lease_current)
+        await requestComputeObservationRecheck(tx, { ...intent, organizationId: intent.orgId }, resource);
       // A later stop or archive that finds a deleted generation absent must
       // not clear its deletion verification; only a live resource can.
       await tx.query(
@@ -1276,6 +1294,7 @@ export class CloudWorkspaceReconciler {
           observed && (["stopped", "archived"].includes(observed.state) || observed.computeStopped === true)) {
         assertProviderResourceIdentity(observed, intent);
         const observedState = ["stopped", "archived"].includes(observed.state) ? observed.state : "deleting";
+        await requestComputeObservationRecheck(tx, { ...intent, organizationId: intent.orgId }, observed);
         await tx.query(`UPDATE cloud_workspace_provider_bindings
           SET observed_state=$4, observed_metadata=$7::jsonb, last_observed_at=now(), updated_at=now()
           WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND provider=$5
@@ -1405,10 +1424,15 @@ export class CloudWorkspaceReconciler {
         version: string | number;
         current_generation: number;
         provider: string;
+        provider_connection_id: string;
+        provider_connection_version: string;
+        allocation_lease_id: string | null;
         provider_resource_id: string | null;
       }>(
         `SELECT cw.id AS workspace_id, cw.org_id, cw.desired_state,
                 cw.status, cw.version, cw.current_generation, pb.provider,
+                pb.provider_connection_id, pb.provider_connection_version::text,
+                ${computeObservationAllocationIdSql} AS allocation_lease_id,
                 pb.provider_resource_id
          FROM cloud_workspaces cw
          JOIN cloud_workspace_provider_bindings pb
@@ -1452,6 +1476,9 @@ export class CloudWorkspaceReconciler {
             version: row.version,
             generation: row.current_generation,
             provider: row.provider,
+            providerConnectionId: row.provider_connection_id,
+            providerConnectionVersion: row.provider_connection_version,
+            allocationLeaseId: row.allocation_lease_id,
             providerResourceId: row.provider_resource_id,
             driftLeaseUntil: claim.rows[0]!.next_drift_check_at,
             intervalMs: driftCadenceMs(row.desired_state, row.status, this.intervalMs, this.stoppedDriftIntervalMs),
@@ -1551,6 +1578,7 @@ export class CloudWorkspaceReconciler {
       const observedState =
         resource?.state ??
         (workspace.desired_state === "deleted" ? "deleted" : "absent");
+      await requestComputeObservationRecheck(tx, { ...candidate, organizationId: candidate.orgId }, resource);
       await tx.query(
         `UPDATE cloud_workspace_provider_bindings
          SET provider_resource_id = coalesce($3, provider_resource_id),

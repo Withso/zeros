@@ -14,7 +14,7 @@ import {
   vi,
 } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
-import { withSystemTx, createPool, DatabaseConnectionLostError } from "../db.js";
+import { withSystemTx, withUserTx, createPool, DatabaseConnectionLostError } from "../db.js";
 import { CloudWorkspaceCheckpointRequestWorker, completeWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import {
   seedProviderLossAttestation,
@@ -46,6 +46,8 @@ import { recoverCloudDiagnostic, retainCloudDiagnostic } from "./cloud-diagnosti
 import { createCloudWorkspaceRoutes } from "./routes.js";
 import { stopUnavailableCloudEngine } from "./engine-health.js";
 import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
+import { auditLifecycleJobs, readLifecycleDueInMs } from "./lifecycle-jobs.js";
+import { claimJobs, completeJob } from "../job-queue.js";
 
 /** Inject a real server-side transaction abort into the original DB calls.
  * All statement/value authority and transaction lifecycle stay production-owned. */
@@ -1669,6 +1671,426 @@ suite("managed compute lifecycle admission", () => {
     expect(await change("UPDATE cloud_workspaces SET desired_state=desired_state WHERE id=$1")).toEqual({ lease_due: false, job_due: false });
     expect(await change("UPDATE cloud_workspaces SET desired_state='stopped' WHERE id=$1", true)).toEqual({ lease_due: false, job_due: false });
   });
+  describe("accepted stopped compute rechecks", () => {
+    const scope = { provider: null, driftIntervalMs: 1000 };
+    const due = () => readLifecycleDueInMs(pool, "compute", f.workspaceId, scope);
+    const reconciler = (db = pool) => new CloudWorkspaceReconciler({
+      pool: db, provider: asProvider(), workosEnabled: false, intervalMs: 1000,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    async function stopping(operation: "stop" | "archive" | "delete" = "stop", internal = false) {
+      await ready(); await age();
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [input.intentId]);
+      await pool.query(`UPDATE cloud_workspaces SET desired_state=$2,status=$3 WHERE id=$1`,
+        [f.workspaceId, operation === "delete" ? "deleted" : operation === "archive" ? "archived" : "stopped",
+          operation === "delete" ? "deleting" : operation === "archive" ? "archiving" : "stopping"]);
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='stopping' WHERE workspace_id=$1", [f.workspaceId]);
+      const intentId = randomUUID();
+      await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+        (id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace)
+        VALUES($1::uuid,$2,1,$3,$4,$1::text,$5,$6)`, [intentId, f.workspaceId, f.organizationId, operation, randomBytes(32), !internal]);
+      await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()+interval '10 minutes' WHERE id=$1", [input.intentId]);
+      await pool.query("UPDATE control_plane_jobs SET run_at=clock_timestamp()+interval '10 minutes' WHERE kind='cloud_compute_lease' AND workspace_id=$1", [f.workspaceId]);
+      provider.stop.mockResolvedValue({ ...resource(), state: "stopped" });
+      provider.archive.mockResolvedValue({ ...resource(), state: "archived" });
+      return intentId;
+    }
+
+    it.each([
+      { operation: "stop", internal: false },
+      { operation: "archive", internal: false },
+      { operation: "stop", internal: true },
+    ] as const)("makes accepted $operation (internal=$internal) promptly eligible without borrowing its stopped proof", async ({ operation, internal }) => {
+      const intentId = await stopping(operation, internal);
+      expect(await due()).toBeGreaterThan(590_000);
+      expect(await reconciler().runOnce(f.workspaceId)).toBe(true);
+      expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [intentId])).rows[0].state).toBe("succeeded");
+      expect(await due()).toBeLessThanOrEqual(0);
+      expect((await pool.query("SELECT run_at<=clock_timestamp() AS due FROM control_plane_jobs WHERE kind='cloud_compute_lease' AND workspace_id=$1", [f.workspaceId])).rows[0].due).toBe(true);
+      expect((await pool.query("SELECT stopped_observed_at FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].stopped_observed_at).toBeNull();
+      // An old lifecycle timestamp is not a final-meter proof.
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=now()-interval '1 day' WHERE workspace_id=$1", [f.workspaceId]);
+      stoppedMeter(); provider.inspect.mockClear();
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(true);
+      expect(provider.inspect).toHaveBeenCalledOnce();
+      const check = await nextCheck();
+      expect(check.state).not.toBe("settled");
+      expect(Number(check.after_stop)).toBeCloseTo(6, 2);
+      expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(false);
+    });
+
+    it("commits a stopped result while another transaction holds the compute row, then recovers its request", async () => {
+      const intentId = await stopping();
+      const holder = await pool.connect();
+      const writer = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: "-c lock_timeout=1000" });
+      try {
+        await holder.query("BEGIN");
+        await holder.query("SELECT 1 FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE", [input.intentId]);
+        expect(await reconciler(writer).runOnce(f.workspaceId)).toBe(true);
+        expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [intentId])).rows[0].state).toBe("succeeded");
+        expect(await due()).toBeLessThanOrEqual(0);
+      } finally { await holder.query("ROLLBACK"); holder.release(); await writer.end(); }
+      stoppedMeter();
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+    });
+
+    it("retains a stop accepted during compute I/O for a fresh independent pass after restart", async () => {
+      await stopping();
+      await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp() WHERE id=$1", [input.intentId]);
+      let release!: (value: CloudProviderResource) => void, reached!: () => void;
+      const inspecting = new Promise<void>(resolve => { reached = resolve; });
+      provider.inspect.mockImplementationOnce(() => { reached(); return new Promise(resolve => { release = resolve; }); });
+      const flight = coordinator.runOnce(f.workspaceId);
+      try {
+        await inspecting;
+        expect(await reconciler().runOnce(f.workspaceId)).toBe(true);
+        expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+      } finally { release(resource()); await flight; }
+      expect(await due()).toBeLessThanOrEqual(0);
+      stoppedMeter(); provider.inspect.mockClear();
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+      expect(provider.inspect).toHaveBeenCalledOnce();
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+    });
+
+    it("makes an accepted stopped drift observation promptly eligible", async () => {
+      const intentId = await stopping();
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [intentId]);
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=now()-interval '1 day',next_drift_check_at=now() WHERE workspace_id=$1", [f.workspaceId]);
+      stoppedMeter();
+      expect(await reconciler().reconcileDriftOnce(f.workspaceId)).toBe(true);
+      expect(await due()).toBeLessThanOrEqual(0);
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(true);
+    });
+
+    it("requests a check for positive stopped evidence retained during a storage-blocked delete", async () => {
+      await stopping("delete");
+      // Isolate the accepted blocked-delete result boundary; final-meter and
+      // beforeDelete accounting controls run separately in this same suite.
+      vi.spyOn(CloudWorkspaceComputeLeaseCoordinator.prototype, "beforeDelete").mockResolvedValueOnce(true);
+      stoppedMeter();
+      provider.delete.mockRejectedValue(new CloudProviderError("provider_deletion_blocked", "Storage deletion is pending", true));
+      expect(await reconciler().runOnce(f.workspaceId)).toBe(true);
+      expect((await pool.query("SELECT observed_state,deletion_verified_at FROM cloud_workspace_provider_bindings WHERE workspace_id=$1", [f.workspaceId])).rows[0])
+        .toMatchObject({ observed_state: "archived", deletion_verified_at: null });
+      expect(await due()).toBeLessThanOrEqual(0);
+      expect((await pool.query("SELECT stopped_observed_at,state FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0])
+        .toEqual({ stopped_observed_at: null, state: "active" });
+    });
+
+    const marker = async () => (await pool.query(`SELECT requested_sequence,handled_sequence,observed_stopped
+      FROM cloud_workspace_compute_rechecks WHERE allocation_lease_id=$1`, [input.intentId])).rows[0];
+    async function drift(state: "running" | "archived") {
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=now()-interval '1 day',next_drift_check_at=now() WHERE workspace_id=$1", [f.workspaceId]);
+      provider.inspect.mockResolvedValueOnce({ ...resource(), state });
+      expect(await reconciler().reconcileDriftOnce(f.workspaceId)).toBe(true);
+    }
+
+    it("coalesces repeated archived observations after handling them without an immediate loop", async () => {
+      await stopping(); await reconciler().runOnce(f.workspaceId);
+      stoppedMeter(); await coordinator.runOnce(f.workspaceId);
+      expect(await marker()).toEqual({ requested_sequence: "1", handled_sequence: "1", observed_stopped: true });
+      const before = await nextCheck();
+      await drift("archived"); await drift("archived");
+      expect(await marker()).toEqual({ requested_sequence: "1", handled_sequence: "1", observed_stopped: true });
+      expect((await nextCheck()).after_stop).toBe(before.after_stop);
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(false);
+    });
+
+    it("acknowledges only the captured sequence and retains a second stop accepted in flight", async () => {
+      await stopping(); await reconciler().runOnce(f.workspaceId);
+      let release!: (value: CloudProviderResource) => void, reached!: () => void;
+      const inspecting = new Promise<void>(resolve => { reached = resolve; });
+      provider.inspect.mockImplementationOnce(() => { reached(); return new Promise(resolve => { release = resolve; }); });
+      const flight = coordinator.runOnce(f.workspaceId);
+      try {
+        await inspecting;
+        await drift("running"); // Accepted non-stopped observation starts a new episode.
+        expect(await reconciler().runOnce(f.workspaceId)).toBe(true);
+        expect(await marker()).toMatchObject({ requested_sequence: "2", handled_sequence: "0" });
+      } finally { release(resource()); await flight; }
+      expect(await marker()).toMatchObject({ requested_sequence: "2", handled_sequence: "1" });
+      expect(await due()).toBeLessThanOrEqual(0);
+      stoppedMeter();
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+      expect(await marker()).toMatchObject({ requested_sequence: "2", handled_sequence: "2" });
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+    });
+
+    it("keeps both an established error floor and a new in-flight Retry-After ahead of a pending request", async () => {
+      await stopping(); await reconciler().runOnce(f.workspaceId);
+      await pool.query(`UPDATE managed_compute_allocation_leases SET first_error_at=now(),last_error_code='provider_request_unavailable',
+        next_check_at=now()+interval '2 minutes' WHERE id=$1`, [input.intentId]);
+      expect(await due()).toBeGreaterThan(119_000);
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(false);
+      await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+      let release!: () => void, reached!: () => void;
+      const inspecting = new Promise<void>(resolve => { reached = resolve; });
+      provider.inspect.mockImplementationOnce(async () => {
+        reached(); await new Promise<void>(resolve => { release = resolve; });
+        throw new CloudProviderError("provider_request_unavailable", "Provider retry fixture", true, { retryAfterMs: 120_000 });
+      });
+      const flight = coordinator.runOnce(f.workspaceId);
+      try {
+        await inspecting;
+        await drift("running"); await reconciler().runOnce(f.workspaceId);
+      } finally { release(); await flight; }
+      expect(await marker()).toMatchObject({ requested_sequence: "2", handled_sequence: "0" });
+      expect(await due()).toBeGreaterThan(119_000);
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+      await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+      stoppedMeter();
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+      expect(await marker()).toMatchObject({ requested_sequence: "2", handled_sequence: "2" });
+    });
+
+    it("keeps the captured request after claim loss and lets the replacement recover it", async () => {
+      await stopping(); await reconciler().runOnce(f.workspaceId);
+      provider.inspect.mockImplementationOnce(async () => {
+        await pool.query(`UPDATE managed_compute_allocation_leases SET lease_owner='replacement',
+          lease_expires_at=now()+interval '1 minute' WHERE id=$1`, [input.intentId]);
+        return { ...resource(), state: "archived" };
+      });
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(true);
+      expect(await marker()).toMatchObject({ requested_sequence: "1", handled_sequence: "0" });
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+      await pool.query("UPDATE managed_compute_allocation_leases SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [input.intentId]);
+      stoppedMeter();
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+      expect(await marker()).toMatchObject({ requested_sequence: "1", handled_sequence: "1" });
+    });
+
+    it.each(["before", "after"] as const)("recovers bookkeeping uncertainty %s COMMIT without losing a request or spinning", async boundary => {
+      await stopping(); await reconciler().runOnce(f.workspaceId);
+      stoppedMeter();
+      let interrupted = false;
+      const db = new Proxy(pool, { get(target, key) {
+        if (key === "connect") return async () => {
+          const client = await target.connect(); let acknowledgement = false;
+          return new Proxy(client, { get(target, key) {
+            if (key === "query") return async (...args: unknown[]) => {
+              const sql = typeof args[0] === "string" ? args[0] : "";
+              if (sql.includes("SET handled_sequence=")) acknowledgement = true;
+              if (!interrupted && acknowledgement && sql === "COMMIT") {
+                interrupted = true;
+                if (boundary === "after") await Reflect.apply(target.query, target, args);
+                throw new DatabaseConnectionLostError();
+              }
+              return Reflect.apply(target.query, target, args);
+            };
+            const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+          } });
+        };
+        const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+      } });
+      await expect(originalCoordinator(db).runOnce(f.workspaceId)).rejects.toBeInstanceOf(DatabaseConnectionLostError);
+      expect(interrupted).toBe(true);
+      expect(await marker()).toMatchObject({ requested_sequence: "1", handled_sequence: boundary === "after" ? "1" : "0" });
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+      if (boundary === "before") {
+        await pool.query("UPDATE managed_compute_allocation_leases SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [input.intentId]);
+        // The independent stopped observation committed before bookkeeping.
+        // Recovery keeps its six-second meter schedule, not the old ten-minute check.
+        expect(await due()).toBeGreaterThan(0);
+        expect(await due()).toBeLessThanOrEqual(6_000);
+        await pool.query("UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '6 seconds' WHERE id=$1", [input.intentId]);
+        expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+        expect(await marker()).toMatchObject({ requested_sequence: "1", handled_sequence: "1" });
+        expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+      }
+    });
+
+    it("recovers lost enqueues and preserves a rerun recorded on an already-running compute job", async () => {
+      await stopping();
+      await pool.query("UPDATE control_plane_jobs SET run_at=now() WHERE kind='cloud_compute_lease' AND workspace_id=$1", [f.workspaceId]);
+      const jobs = await claimJobs(pool, { owner: "recheck-fixture", limit: 1, kinds: [{ kind: "cloud_compute_lease", leaseMs: 60_000 }] });
+      expect(jobs.jobs).toHaveLength(1);
+      await reconciler().runOnce(f.workspaceId);
+      expect(await completeJob(pool, jobs.jobs[0]!)).toBe("requeued");
+      await pool.query("DELETE FROM control_plane_jobs WHERE kind='cloud_compute_lease' AND workspace_id=$1", [f.workspaceId]);
+      expect(await auditLifecycleJobs(pool, scope)).toMatchObject({ compute: 1 });
+      expect(await auditLifecycleJobs(pool, scope)).toEqual({});
+      stoppedMeter();
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(true);
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(false);
+    });
+
+    it("keeps scheduling data invisible and unwritable to user transactions, including its own org", async () => {
+      await stopping(); await reconciler().runOnce(f.workspaceId);
+      expect(await withUserTx(pool, f.userId, tx => tx.query("SELECT * FROM cloud_workspace_compute_rechecks")))
+        .toMatchObject({ rowCount: 0 });
+      expect(await withUserTx(pool, f.userId, tx => tx.query("UPDATE cloud_workspace_compute_rechecks SET handled_sequence=requested_sequence")))
+        .toMatchObject({ rowCount: 0 });
+      const other = await seedReadyCloudWorkspace(pool);
+      expect(await withUserTx(pool, other.userId, tx => tx.query("SELECT * FROM cloud_workspace_compute_rechecks")))
+        .toMatchObject({ rowCount: 0 });
+      await expect(withUserTx(pool, f.userId, tx => tx.query(`INSERT INTO cloud_workspace_compute_rechecks
+        (allocation_lease_id,workspace_id,org_id,generation,owner_revision,observed_stopped,requested_sequence)
+        VALUES($1,$2,$3,1,0,true,1)`, [randomUUID(), f.workspaceId, f.organizationId])))
+        .rejects.toMatchObject({ code: "42501" });
+      expect(await marker()).toMatchObject({ requested_sequence: "1", handled_sequence: "0" });
+    });
+
+    it.each(["lost claim", "expired claim", "replaced resource", "foreign labels", "changed account"] as const)("ignores stopped evidence with a %s", async changed => {
+      const intentId = await stopping();
+      provider.stop.mockImplementationOnce(async () => {
+        if (changed === "lost claim") await pool.query("UPDATE cloud_workspace_lifecycle_intents SET lease_owner='replacement' WHERE id=$1", [intentId]);
+        if (changed === "expired claim") await pool.query("UPDATE cloud_workspace_lifecycle_intents SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [intentId]);
+        if (changed === "replaced resource") await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='replacement-resource' WHERE workspace_id=$1", [f.workspaceId]);
+        if (changed === "changed account") {
+          await pool.query(`INSERT INTO provider_connection_versions(connection_id,org_id,version,credential_source,endpoint)
+            SELECT provider_connection_id,org_id,2,'hosted','https://provider.fixture.example'
+            FROM cloud_workspace_provider_bindings WHERE workspace_id=$1`, [f.workspaceId]);
+          await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_connection_version=2 WHERE workspace_id=$1", [f.workspaceId]);
+        }
+        return { ...resource(), state: "stopped", ...(changed === "foreign labels" ? { workspaceId: randomUUID() } : {}) };
+      });
+      await reconciler().runOnce(f.workspaceId);
+      expect(await marker()).toBeUndefined();
+      // An unrelated terminal failure may invoke the existing 0160 trigger;
+      // the new exact-allocation signal must still be absent.
+      if (changed !== "foreign labels") expect(await due()).toBeGreaterThan(590_000);
+    });
+
+    async function secondGeneration() {
+      await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,
+        cpu_millicores,memory_mib,storage_mib,created_by,provider_connection_id,provider_connection_version,sandbox_class,source_commit,
+        runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version)
+        SELECT workspace_id,2,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,created_by,provider_connection_id,
+          provider_connection_version,sandbox_class,source_commit,runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,
+          runtime_profile,runtime_engine_protocol_version FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1`, [f.workspaceId]);
+    }
+    async function allocationOwner(generation: number) {
+      await pool.query(`INSERT INTO cloud_workspace_allocation_owners
+        (workspace_id,org_id,provider_resource_id,original_generation,current_generation,allocation_lease_id)
+        SELECT workspace_id,org_id,provider_resource_id,1,$2,id FROM managed_compute_allocation_leases WHERE id=$1`, [input.intentId, generation]);
+    }
+
+    it.each([
+      { observation: "lifecycle", owner: false }, { observation: "lifecycle", owner: true },
+      { observation: "drift", owner: false }, { observation: "drift", owner: true },
+    ] as const)("does not signal a replacement allocation reusing the resource/generation during $observation I/O (owner=$owner)", async ({ observation, owner }) => {
+      const stopId = await stopping();
+      if (owner) await allocationOwner(1);
+      if (observation === "drift") {
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [stopId]);
+        await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=now()-interval '1 day',next_drift_check_at=now() WHERE workspace_id=$1", [f.workspaceId]);
+      }
+      const replacementId = randomUUID();
+      let replacementError: unknown;
+      const replaceAllocation = async () => {
+        await withSystemTx(pool, async tx => {
+          await tx.query("UPDATE managed_compute_allocation_leases SET state='settled',settled_at=now() WHERE id=$1", [input.intentId]);
+          await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
+            (id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,state,completed_at)
+            VALUES($1::uuid,$2,1,$3,'wake',$1::text,$4,'succeeded',now())`, [replacementId, f.workspaceId, f.organizationId, randomBytes(32)]);
+          await tx.query(`INSERT INTO managed_compute_allocation_leases
+            (id,workspace_id,org_id,generation,billing_epoch,user_id,lifecycle_intent_id,provider,provider_resource_id,
+              policy_id,seconds_per_dollar,weight_numerator,weight_denominator,ttl_seconds,requested_at,
+              funded_until,provider_expires_at,state,next_check_at)
+            SELECT $2,workspace_id,org_id,generation,billing_epoch,user_id,$2,provider,provider_resource_id,
+              policy_id,seconds_per_dollar,weight_numerator,weight_denominator,ttl_seconds,requested_at,
+              funded_until,provider_expires_at,'active',clock_timestamp()+interval '10 minutes'
+            FROM managed_compute_allocation_leases WHERE id=$1`, [input.intentId, replacementId]);
+          if (owner) await tx.query("UPDATE cloud_workspace_allocation_owners SET allocation_lease_id=$2 WHERE allocation_lease_id=$1", [input.intentId, replacementId]);
+        }).catch(error => { replacementError = error; throw error; });
+        return { ...resource(), state: "stopped" as const };
+      };
+      if (observation === "lifecycle") {
+        provider.stop.mockImplementationOnce(replaceAllocation);
+        expect(await reconciler().runOnce(f.workspaceId)).toBe(true);
+      } else {
+        provider.inspect.mockImplementationOnce(replaceAllocation);
+        expect(await reconciler().reconcileDriftOnce(f.workspaceId)).toBe(true);
+      }
+      expect(replacementError).toBeUndefined();
+      expect((await pool.query("SELECT state FROM managed_compute_allocation_leases WHERE id=$1", [replacementId])).rows[0]?.state).toBe("active");
+      expect((await pool.query("SELECT allocation_lease_id FROM cloud_workspace_compute_rechecks WHERE workspace_id=$1", [f.workspaceId])).rows).toEqual([]);
+      expect(await due()).toBeGreaterThan(590_000);
+    });
+
+    it.each(["activated", "rolling_back"] as const)("retains an unhandled request behind a live %s runtime transition", async phase => {
+      await stopping(); await reconciler().runOnce(f.workspaceId);
+      await secondGeneration(); await allocationOwner(1);
+      const transitionId = randomUUID();
+      await pool.query(`INSERT INTO cloud_workspace_generation_transitions
+        (id,workspace_id,org_id,requested_by,operation,source_generation,template_generation,candidate_generation,state,execution_mode)
+        VALUES($1,$2,$3,$4,'upgrade',1,1,2,'draining','retain_allocation')`, [transitionId, f.workspaceId, f.organizationId, f.userId]);
+      await pool.query(`INSERT INTO cloud_workspace_runtime_transitions
+        (transition_id,workspace_id,org_id,operation_id,source_engine_instance_id,provider_resource_id,mode,phase,
+          source_active,target_descriptor,activation_deadline_at,rollback_deadline_at)
+        VALUES($1,$2,$3,$1,$4,$5,'engine',$6,'{}','{}',now()+interval '1 minute',now()+interval '1 minute')`,
+      [transitionId, f.workspaceId, f.organizationId, f.engineInstanceId, resource().resourceId, phase]);
+      expect(await due()).toBeGreaterThan(59_000);
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(false);
+      expect(await marker()).toMatchObject({ requested_sequence: "1", handled_sequence: "0" });
+      await pool.query("UPDATE cloud_workspace_runtime_transitions SET phase='cancelled',completed_at=now() WHERE transition_id=$1", [transitionId]);
+      expect(await due()).toBeLessThanOrEqual(0);
+      stoppedMeter();
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+    });
+
+    it("resolves a transferred allocation through its owner while preserving its original labels and billing generation", async () => {
+      const stopId = await stopping();
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [stopId]);
+      await secondGeneration(); await allocationOwner(2);
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=NULL WHERE workspace_id=$1", [f.workspaceId]);
+      await pool.query(`INSERT INTO cloud_workspace_provider_bindings(workspace_id,org_id,generation,provider,provider_resource_id,observed_state)
+        VALUES($1,$2,2,'boat',$3,'stopping')`, [f.workspaceId, f.organizationId, resource().resourceId]);
+      await pool.query("UPDATE cloud_workspaces SET current_generation=2 WHERE id=$1", [f.workspaceId]);
+      await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now()+interval '10 minutes' WHERE id=$1", [input.intentId]);
+      stoppedMeter();
+      const worker = new CloudWorkspaceReconciler({ pool, provider: asProvider(), providerResolver: originalResolver(pool), workosEnabled: false });
+      expect(await worker.reconcileDriftOnce(f.workspaceId)).toBe(true);
+      expect(await due()).toBeLessThanOrEqual(0);
+      expect((await pool.query("SELECT generation FROM cloud_workspace_compute_rechecks WHERE allocation_lease_id=$1", [input.intentId])).rows[0].generation).toBe(2);
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+      expect((await pool.query("SELECT generation,stopped_observed_at IS NOT NULL AS inspected FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0])
+        .toEqual({ generation: 1, inspected: true });
+      expect((await pool.query("SELECT original_generation,current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=$1", [input.intentId])).rows[0])
+        .toEqual({ original_generation: 1, current_generation: 2 });
+    });
+
+    it("ignores a late stopped observation and pending hint from the previous allocation owner", async () => {
+      await stopping(); await reconciler().runOnce(f.workspaceId);
+      await secondGeneration(); await allocationOwner(2);
+      expect(await due()).toBeGreaterThan(590_000);
+      await drift("archived"); // Old binding still exists, but no longer owns the allocation.
+      expect(await marker()).toMatchObject({ requested_sequence: "1", handled_sequence: "0" });
+      expect(await due()).toBeGreaterThan(590_000);
+    });
+
+    it("leaves a new request pending across an old worker's claim and completion", async () => {
+      await stopping();
+      // Pre-expansion claim/update shapes: no sequence is read or acknowledged.
+      await pool.query(`UPDATE managed_compute_allocation_leases SET lease_owner='old-worker',lease_expires_at=now()+interval '5 minutes'
+        WHERE id=$1`, [input.intentId]);
+      await reconciler().runOnce(f.workspaceId);
+      expect(await coordinator.runOnce(f.workspaceId)).toBe(false);
+      await pool.query(`UPDATE managed_compute_allocation_leases SET lease_owner=NULL,lease_expires_at=NULL,
+        next_check_at=now()+interval '10 minutes' WHERE id=$1 AND lease_owner='old-worker'`, [input.intentId]);
+      expect(await marker()).toMatchObject({ requested_sequence: "1", handled_sequence: "0" });
+      expect(await due()).toBeLessThanOrEqual(0);
+      stoppedMeter();
+      expect(await originalCoordinator(pool).runOnce(f.workspaceId)).toBe(true);
+    });
+
+    it("does not signal a settled allocation or retain an observation whose transaction rolled back", async () => {
+      const stopId = await stopping();
+      const db = abortingPool(pool, { code: "40001", count: 1, when: sql => sql.includes("INSERT INTO audit_log") });
+      await reconciler(db.pool).runOnce(f.workspaceId);
+      expect(db.observed.aborts).toBe(1);
+      expect(await marker()).toBeUndefined();
+      expect((await pool.query("SELECT stopped_observed_at FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].stopped_observed_at).toBeNull();
+      // A finalized allocation has no scheduling work to request.
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now(),lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [stopId]);
+      await pool.query("UPDATE managed_compute_allocation_leases SET state='settled',settled_at=now() WHERE id=$1", [input.intentId]);
+      await drift("archived");
+      expect(await marker()).toBeUndefined();
+    });
+  });
   it("re-checks an unsettled previous allocation at once when a start is refused for it", async () => {
     await ready();
     await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [input.intentId]);
@@ -1753,7 +2175,7 @@ suite("managed compute lifecycle admission", () => {
       .rejects.toMatchObject({ code: "compute_previous_lease_pending" });
     expect(await pokedSince(pool, at)).toBe(true);
   });
-  it("wakes only a start that was refused for the unsettled allocation", async () => {
+  it.each(["16 seconds", "-16 seconds"])("wakes only a start refused for the unsettled allocation (previous due=%s)", async previousDue => {
     await ready();
     await age();
     stoppedMeter();
@@ -1770,6 +2192,7 @@ suite("managed compute lifecycle admission", () => {
         VALUES ($1,$2,1,$3,$4,'wake',$5,$6,'observing',$7,now()+interval '16 seconds')`,
         [id, f.workspaceId, f.organizationId, f.userId, randomUUID(), randomBytes(32), code],
       );
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+$2::interval WHERE id=$1", [waiting, previousDue]);
     await pool.query(
       "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '10 seconds',next_check_at=now() WHERE id=$1",
       [input.intentId],
@@ -1784,6 +2207,7 @@ suite("managed compute lifecycle admission", () => {
     ).rows[0]!.due;
     expect(await due(waiting)).toBe(true);
     expect(await due(throttled)).toBe(false);
+    expect(await readLifecycleDueInMs(pool, "lifecycle", f.workspaceId, { provider: null, driftIntervalMs: 1000 })).toBeLessThanOrEqual(0);
   });
   it("retains credit when disappearance is unconfirmed", async () => {
     await ready();
