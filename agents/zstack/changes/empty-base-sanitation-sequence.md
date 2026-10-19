@@ -15,3 +15,10 @@
 - Encoded in `runtime-base-v4/tests/test_sanitation.py`, the default Computer
   socket refusal, saved-tree controls in `cloud-runtime-base-v4.test.ts`, and
   the `empty-base-stock-leaves` and `empty-base-same-boot-readiness` evals.
+
+CI follow-up: composing the stock-leaf and reboot fixtures installed the same
+0444/0555 files twice. The sandbox's nonzero UID retained DAC override
+capabilities, masking the rewrite failure. Prepare the base once, preserve its
+read-only modes, and run the actual Python Vitest wrapper with all Linux
+capability sets empty. The four existing custody/reboot cases retain this
+regression; no production check or test assertion is relaxed.

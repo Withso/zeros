@@ -196,7 +196,6 @@ class BaseSanitationTests(unittest.TestCase):
 
     def interrupt_exchange(self, *, top_level_cache=False):
         link, document = self.prepare_stock_log()
-        self.prepare_base()
         if top_level_cache:
             link.unlink()
             link = self.app.path('/home/user/.cache')
@@ -241,7 +240,6 @@ class BaseSanitationTests(unittest.TestCase):
 
     def test_control_successful_sanitation_survives_a_real_volatile_reset(self):
         link, document = self.prepare_stock_log()
-        self.prepare_base()
         self.sanitize_entry()
         self.fresh_boot()
         self.builder_ready(cold=True)
@@ -344,8 +342,8 @@ class BaseSanitationTests(unittest.TestCase):
                     target.unlink()
 
     def prepare_stock_log(self, target='../../usr/share/doc/systemd/README.logs'):
-        self.write('/etc/zeros/cloud-worker.json', json.dumps({'version': 4}).encode(), 0o444)
-        self.write('/opt/zeros-bootstrap/computer-build.py', (HERE.parent / 'computer-build.py').read_bytes(), 0o555)
+        # Install the read-only base files once, including the readiness stub.
+        self.prepare_base()
         document = self.write('/usr/share/doc/systemd/README.logs', b'public stock documentation', 0o644)
         link = self.app.path('/var/log/README')
         link.parent.mkdir(parents=True, exist_ok=True)
