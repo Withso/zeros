@@ -106,6 +106,31 @@ describe("cloud engine admission and lifecycle", () => {
     expect(f.publish).toHaveBeenCalledWith({ ...f.inner, retirement: await f.original.retire.mock.results[0].value, outputJoined: true });
     expect(f.scope.retire).not.toHaveBeenCalled();
     expect(f.retainBootCustody).not.toHaveBeenCalled();
+    expect(f.signals.listenerCount("SIGTERM")).toBe(0); expect(f.signals.listenerCount("SIGINT")).toBe(0);
+  });
+  it("a refused initial scope leaves no boot custody or signal handlers", async () => {
+    const f = boot(); f.scope.prepare.mockImplementation(() => { throw new Error("scope refused"); });
+    await expect(launchCloudEngine(f.options)).rejects.toThrow("scope refused");
+    expect(f.original.retire).not.toHaveBeenCalled(); expect(f.retainBootCustody).not.toHaveBeenCalled();
+    expect(f.signals.listenerCount("SIGTERM")).toBe(0); expect(f.signals.listenerCount("SIGINT")).toBe(0);
+  });
+  it("repeated boot cancellation keeps handlers and the original TERM deadline until retirement", async () => {
+    vi.useFakeTimers(); const f = boot(); f.barrier.removeAllListeners("finish");
+    const running = launchCloudEngine(f.options).catch(error => error);
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      f.signals.emit("SIGTERM"); f.signals.emit("SIGTERM");
+      f.signals.emit("SIGINT"); f.signals.emit("SIGINT");
+      expect(f.signals.listenerCount("SIGTERM")).toBe(1); expect(f.signals.listenerCount("SIGINT")).toBe(1);
+      expect(f.child.kill).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(9999); expect(f.original.retire).not.toHaveBeenCalled();
+      f.stdout.end(); await vi.advanceTimersByTimeAsync(1);
+      expect(await running).toBeInstanceOf(Error); expect(f.original.retire).toHaveBeenCalledOnce();
+      expect(f.child.kill).toHaveBeenCalledTimes(2); expect(f.child.kill).toHaveBeenLastCalledWith("SIGKILL");
+      expect(f.publish).not.toHaveBeenCalled();
+      expect(f.signals.listenerCount("SIGTERM")).toBe(0); expect(f.signals.listenerCount("SIGINT")).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { f.stdout.end(); f.finish(125); await running; vi.clearAllTimers(); vi.useRealTimers(); }
   });
   it("late_probe_cannot_publish_or_retire_replacement and retains unknown custody", async () => {
     const f = boot(); f.original.assertCurrent.mockImplementation(() => { throw new Error("original replaced"); });

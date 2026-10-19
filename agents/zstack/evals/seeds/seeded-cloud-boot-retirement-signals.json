@@ -1,0 +1,5 @@
+{
+  "file": "scripts/cloud-workspace-validation/sandbox/cloud-engine-launcher.mjs",
+  "before": "signals.on(\"SIGTERM\", bootTerm);\n      signals.on(\"SIGINT\", bootInterrupt);",
+  "after": "signals.once(\"SIGTERM\", bootTerm);\n      signals.once(\"SIGINT\", bootInterrupt);"
+}

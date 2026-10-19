@@ -439,13 +439,12 @@ function spawnCloudEngine(file, args, options) {
 /** @type {import('node:events').EventEmitter} */
 const cloudEngineSignals = process;
 
-function retainUnknownCloudBootCustody(signals) {
+function retainUnknownCloudBootCustody() {
   // A root-only CLI exiting would close its original cgroup and inherited
   // setup/engine lock FDs. Keep that owner alive on unknown cleanup; the
   // caller's bounded refusal/TERM cannot turn it into a new launch. Trusted
   // VM retirement remains responsible for this unresolved lifetime.
-  signals.on("SIGTERM", () => {});
-  signals.on("SIGINT", () => {});
+  // The boot lifetime's persistent signal guards remain installed.
   setInterval(() => {}, 2 ** 30);
 }
 
@@ -476,7 +475,7 @@ export async function launchCloudEngine({
   bootBudgetMs,
   assertBootIdle = () => new CloudDelegatedCgroups({ runtime }).assertRetired(),
   loadBootContract = () => import(pathToFileURL(`${runtime.workerRoot}/dist-engine/cloud-boot-contract.mjs`).href),
-  retainBootCustody = () => retainUnknownCloudBootCustody(signals),
+  retainBootCustody = retainUnknownCloudBootCustody,
 } = {}) {
   if (runtime.profile !== "v4") throw new Error("Isolated cloud engine profile required");
   assertOutside(runtime);
@@ -487,6 +486,21 @@ export async function launchCloudEngine({
   let args, environment;
   let prepared = false;
   let bootRetirement, bootReceipt, bootRetired = false, bootRetirementAttempted = false;
+  let bootCancelled = false, cancelBoot, bootCustodyTimer;
+  const bootTerm = () => { bootCancelled = true; cancelBoot?.("SIGTERM"); };
+  const bootInterrupt = () => { bootCancelled = true; cancelBoot?.("SIGINT"); };
+  const finishBootCustody = () => {
+    if (!boot) return;
+    cancelBoot = undefined;
+    if (prepared && !bootRetired) retainBootCustody();
+    else {
+      signals.off("SIGTERM", bootTerm);
+      signals.off("SIGINT", bootInterrupt);
+    }
+    // Unknown cleanup installs its retained owner before this pending hold
+    // ends. Its original signal guards stay inert and cannot target a child.
+    clearInterval(bootCustodyTimer);
+  };
   const retireBoot = async () => {
     if (bootRetired) return bootReceipt;
     if (bootRetirementAttempted || !bootRetirement) throw new Error("Cloud boot original retirement unconfirmed");
@@ -499,7 +513,15 @@ export async function launchCloudEngine({
   const metrics = operation === "qualify" && collectPerformance ? setupPerformance("attester_preflight") : undefined;
   const finishView = metrics?.start("launcher_view");
   try {
-    if (boot) assertBootIdle();
+    if (boot) {
+      // Cover preparation failure and every awaited retirement, including
+      // repeated cancellation. A pending Promise alone does not retain the
+      // root process or its inherited setup/engine locks.
+      signals.on("SIGTERM", bootTerm);
+      signals.on("SIGINT", bootInterrupt);
+      bootCustodyTimer = setInterval(() => {}, 2 ** 30);
+      assertBootIdle();
+    }
     if (!scope) {
       let instanceId;
       {
@@ -547,8 +569,8 @@ export async function launchCloudEngine({
       // or unexpectedly populated scope belongs to no new launch.
       if (prepared) { if (boot) { if (!bootRetirementAttempted) await retireBoot(); } else await scope.retire(); }
     } finally {
-      if (!boot || bootRetired) profile?.releaseView?.();
-      else if (prepared) retainBootCustody();
+      try { if (!boot || bootRetired) profile?.releaseView?.(); }
+      finally { finishBootCustody(); }
     }
     throw error;
   }
@@ -586,10 +608,14 @@ export async function launchCloudEngine({
   };
   const term = () => stop("SIGTERM");
   const interrupt = () => stop("SIGINT");
-  signals.once("SIGTERM", term);
-  signals.once("SIGINT", interrupt);
+  if (boot) cancelBoot = stop;
+  else {
+    signals.once("SIGTERM", term);
+    signals.once("SIGINT", interrupt);
+  }
   try {
     if (boot) {
+      if (bootCancelled) throw new Error("Cloud engine launch was cancelled");
       if (Date.now() >= bootDeadline) throw new Error("Cloud boot check deadline expired");
       bootTimer = setTimeout(() => stop("SIGTERM"), bootDeadline - Date.now());
     }
@@ -732,8 +758,11 @@ export async function launchCloudEngine({
   } finally {
     bootAcknowledgementOpen = false;
     finishSpawn?.("failed");
-    signals.off("SIGTERM", term);
-    signals.off("SIGINT", interrupt);
+    if (boot) cancelBoot = undefined;
+    else {
+      signals.off("SIGTERM", term);
+      signals.off("SIGINT", interrupt);
+    }
     clearTimeout(stopTimer);
     clearTimeout(bootTimer);
     if (!admitted) forward("SIGKILL");
@@ -742,8 +771,8 @@ export async function launchCloudEngine({
       else if (operation === "qualify") { if (!wholeTreeRetired) await retireRuntime(); }
       else await scope.retire();
     } finally {
-      if (!boot || bootRetired) profile?.releaseView?.();
-      else retainBootCustody();
+      try { if (!boot || bootRetired) profile?.releaseView?.(); }
+      finally { finishBootCustody(); }
       child?.stdio[3]?.destroy();
       child?.unref();
     }
