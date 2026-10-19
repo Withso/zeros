@@ -960,6 +960,40 @@ sys.stdout.buffer.write(out.getvalue())`]);
     expect(build).not.toMatch(/chown[^\n]*(?:-R|\/opt\/\*)/);
   });
 
+  it("keeps unqualified runner support out of the default base advertisement", () => {
+    const payload = basePayload(ROOT, "1".repeat(40), "2".repeat(32));
+    const build = payload.files.find(file => file.name === "build.sh")!.data.toString();
+    expect(payload.files.map(file => file.name)).not.toContain("base/runner-support.json");
+    expect(build).not.toMatch(/^install[^\n]*\/usr\/lib\/zeros-runner\/support\.json$/m);
+    expect(build).not.toMatch(/^protected[^\n]*\/usr\/lib\/zeros-runner\/support\.json/m);
+    // Dormant assets remain available, but only the absent marker selects the
+    // existing runtime path. A product flag does not gate base qualification.
+    expect(payload.files.map(file => file.name)).toContain("base/zeros-runner.target");
+    expect(build).toContain("install -o root -g root -m 0444 base/zeros-runner.target /usr/lib/zeros-runner/zeros-runner.target");
+    expect(build).toContain("protected += ['/usr/lib/zeros-runner/zeros-runner.target']");
+  });
+
+  it.each(["file", "dangling symlink"])("refuses inherited runner support (%s) without removing it", kind => {
+    const payload = basePayload(ROOT, "1".repeat(40), "2".repeat(32));
+    const build = payload.files.find(file => file.name === "build.sh")!.data.toString();
+    const marker = "/usr/lib/zeros-runner/support.json";
+    const guards = build.match(/^test ! -(?:e|L) \/usr\/lib\/zeros-runner\/support\.json$/gm) ?? [];
+    expect(guards).toHaveLength(2);
+    expect(build.indexOf(guards[1])).toBeLessThan(build.indexOf("chown root:root /opt"));
+    const directory = temp(), file = path.join(directory, "support.json");
+    const run = () => spawnSync("bash", ["-euc", guards.join("\n").replaceAll(marker, '"$1"'), "base-marker-guard", file], { encoding: "utf8" });
+    // Execute the actual generated shell guard with a fixed disposable path.
+    expect(run().status).toBe(0);
+    if (kind === "file") fs.writeFileSync(file, "unqualified advertisement", { mode: 0o444 });
+    else fs.symlinkSync("missing-marker", file);
+    const before = fs.lstatSync(file);
+    expect(run().status).toBe(1);
+    const after = fs.lstatSync(file);
+    expect([after.dev, after.ino, after.mode, after.size]).toEqual([before.dev, before.ino, before.mode, before.size]);
+    expect(kind === "file" ? fs.readFileSync(file, "utf8") : fs.readlinkSync(file))
+      .toBe(kind === "file" ? "unqualified advertisement" : "missing-marker");
+  });
+
   it("installs and protects every bootstrap helper the builder commands and TCB check require", () => {
     const payload = basePayload(ROOT, "1".repeat(40), "2".repeat(32));
     const build = payload.files.find(file => file.name === "build.sh")!.data.toString();
