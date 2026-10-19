@@ -2,7 +2,7 @@
   "id": "seeded-runtime-base-rollout",
   "kind": "seeded",
   "area": "cloud workspace runtime selection",
-  "fixedBy": "pending",
+  "fixedBy": "pr:625",
   "symptom": "Dropping an explicit base rollout policy silently restores global newest-base discovery and bypasses candidate isolation.",
   "rule": "zstack-review traces configured admission through the locked organization, observation and image production; absent and invalid policy must remain distinct.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/runtime-base-rollout.test.ts"
