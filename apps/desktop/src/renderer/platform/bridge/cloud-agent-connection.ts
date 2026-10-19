@@ -126,6 +126,7 @@ export class CloudAgentConnection {
   private cloudTurnProtocolVersion=0;
   private localCommandsBinding?: CloudAgentBootConversation;
   private readonly attaching = new Map<string, number>();
+  private readonly snapshotRetries = new Map<string, ReturnType<typeof setTimeout>>();
   private listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 
   constructor(
@@ -331,12 +332,37 @@ export class CloudAgentConnection {
 
   async refreshAttachments(conversationId?: string): Promise<void> {
     await Promise.allSettled(
-      [...this.conversations.values()].filter(owner => !conversationId || owner.id === conversationId).map(async (owner) => {
-        const state = await this.restoreNativeState(owner);
-        this.attachSnapshot(state);
-        this.publishControls(state);
-      }),
+      [...this.conversations.values()].filter(owner => !conversationId || owner.id === conversationId)
+        .map(owner => this.refreshAttachment(owner, true)),
     );
+  }
+
+  private async refreshAttachment(owner: Conversation, retry: boolean): Promise<void> {
+    this.clearSnapshotRetry(owner.id);
+    const restoration = this.restoreNativeState(owner);
+    const revision = owner.snapshotRevision, execution = owner.execution;
+    const current = () => !this.closed && this.client.status === "connected" &&
+      this.conversations.get(owner.id) === owner && owner.snapshotRevision === revision && owner.execution === execution;
+    try {
+      const state = await restoration;
+      this.attachSnapshot(state);
+      this.publishControls(state);
+    } catch {
+      // The final turn may have landed while ingress was unavailable, leaving
+      // no live frame to trigger another read. Retry observation once, without
+      // a grant, wake or command. A new snapshot/attachment retires this retry.
+      if (!retry || !current()) return;
+      this.snapshotRetries.set(owner.id, setTimeout(() => {
+        this.snapshotRetries.delete(owner.id);
+        if (current()) void this.refreshAttachment(owner, false);
+      }, 1_500));
+    }
+  }
+
+  private clearSnapshotRetry(conversationId: string): void {
+    const timer = this.snapshotRetries.get(conversationId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.snapshotRetries.delete(conversationId);
   }
 
   private async restoreNativeState(owner:Conversation):Promise<NativeSnapshot> {
@@ -460,6 +486,7 @@ export class CloudAgentConnection {
   }
 
   private detach(owner: Conversation): void {
+    this.clearSnapshotRetry(owner.id);
     this.conversations.delete(owner.id);
     this.events?.forgetAttachment(owner.id);
     for (const [execution, chat] of this.executionOwners) if (chat === owner.id) this.executionOwners.delete(execution);
@@ -1093,6 +1120,8 @@ export class CloudAgentConnection {
 
   dispose(): void {
     this.closed = true;
+    for (const timer of this.snapshotRetries.values()) clearTimeout(timer);
+    this.snapshotRetries.clear();
     this.conversations.clear();
     this.attaching.clear();
     this.executionOwners.clear();
