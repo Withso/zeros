@@ -21,8 +21,10 @@
 - Worker-source imports passed while installed helper copies lacked a new
   dependency → deployment layouts and executable helpers have separate closure
   requirements → test every install inventory, staged helper syntax and native
-  shared-library load, then require actual installed runner qualification on
-  supporting bases → runtime bundle, engine-view and qualification regressions.
+  shared-library load, including the checked-in Dockerfile as well as generated
+  and Boat recipes, then require actual installed runner qualification on
+  supporting bases → runtime bundle, engine-view, qualification and real-loader
+  recipe-inventory regressions (`cloud-runner-recipe.test.ts`).
 - Independent branches added a third qualification argument and adjacent
   phases → retain one options contract and test runner admission with existing
   timers together → close the completed human-service timer before the runner
