@@ -10,6 +10,7 @@ const MODULES = [
   "qualify-cloud-actor-tools.ts",
   "qualify-cloud-capture.ts",
   "qualify-cloud-human-services.ts",
+  "qualify-cloud-runners.ts",
   // The offline closure probe also exercises the serialized identity check.
   "cloud-role-identity.ts",
 ];

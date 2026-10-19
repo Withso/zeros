@@ -286,9 +286,9 @@ const checks = {
       const { roles, unregister } = await loadCloudQualificationRoles();
       const compiled = await import(pathToFileURL(worker + '/dist-engine/cloud-qualification-roles.mjs'));
       assert.equal(compiled.createCloudCaptureQualificationRuntime, roles.createCloudQualificationRuntime);
-      for (const name of ['createCloudQualificationRuntime', 'qualifyCloudActorTools', 'qualifyCloudCapture', 'qualifyCloudHumanServices']) {
-        assert.equal(typeof roles[name], 'function');
-        assert.equal(roles[name], compiled[name]);
+      for (const [name, role] of Object.entries(roles)) {
+        assert.equal(typeof role, 'function');
+        assert.equal(role, compiled[name]);
       }
       await unregister();
       process.stdout.write('qualified-role-imports');
