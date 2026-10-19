@@ -65,6 +65,9 @@ failing input, or a reproduction. Drop anything you can't substantiate.
   externally observable identifiers are preserved or migrated explicitly.
 - Retired request fields are not sent. Check the current route contract, not
   memory.
+- When absence permits a legacy path, look up immutable evidence before
+  filtering eligibility or revocation. A recorded rejection must not become
+  absence, and a selected attempt cannot downgrade after a later read fails.
 
 **Tests**
 - Bug fixes include a regression that fails without the fix.

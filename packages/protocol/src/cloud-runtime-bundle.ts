@@ -1,5 +1,6 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { z } from "zod";
+import { CloudComputerQualificationSelectionSchema } from "./cloud-build-qualification.js";
 
 const utf8 = new TextEncoder();
 const maxArchiveBytes = 2 * 1024 ** 3;
@@ -321,12 +322,20 @@ export const RuntimeInstallInputSchema = z
         ...installScope,
         purpose: z.literal("workspace-setup"),
         setup: z.string().min(1),
+        // Reader first; emit only after exact runtime/base negotiation.
+        buildQualification: CloudComputerQualificationSelectionSchema.optional(),
       })
       .strict(),
     z.object({ ...installScope, purpose: z.literal("build") }).strict(),
     z.object({ ...installScope, purpose: z.literal("qualification") }).strict(),
   ])
   .superRefine((value, context) => {
+    if (value.purpose === "workspace-setup" && value.buildQualification?.mode === "build") {
+      const expected = value.buildQualification.evidence.runtime;
+      if (value.runtime.runtimeId !== expected.runtimeId || value.runtime.manifestSha256 !== expected.manifestSha256 ||
+          value.runtime.archiveSha256 !== expected.archiveSha256 || value.runtime.engineProtocolVersion !== expected.engineProtocolVersion)
+        context.addIssue({ code: "custom", message: "Build qualification runtime does not match the install pin" });
+    }
     // This bounds even the shortest encoding. The stdin consumer must also
     // enforce the 64 KiB bound on the actual base64url bytes before decoding.
     if (
