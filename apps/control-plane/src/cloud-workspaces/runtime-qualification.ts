@@ -128,16 +128,25 @@ export class RuntimeQualificationWorker {
         JOIN cloud_runtime_bundles bundle USING (runtime_id)
         WHERE run.state='queued' ORDER BY run.created_at,run.id LIMIT 1 FOR UPDATE OF run`)).rows[0];
       if (!queued) {
-        const candidate = (await tx.query<{ runtime_id: string }>(`SELECT bundle.runtime_id FROM cloud_runtime_channel_releases release
+        // Bound discovery before removing completed/qualified candidates so a
+        // new base cannot walk all historical releases. A failed newest release
+        // blocks automatic fallback; queued work and explicit retries stay above.
+        const candidate = (await tx.query<{ runtime_id: string }>(`WITH recent_releases AS MATERIALIZED (
+          SELECT bundle.runtime_id,release.release_order FROM cloud_runtime_channel_releases release
           JOIN cloud_runtime_bundles bundle USING (runtime_id)
           WHERE release.channel='alpha' AND release.confirmed_at IS NOT NULL AND release.revoked_at IS NULL AND bundle.revoked_at IS NULL
             AND bundle.engine_protocol_version=$1
+          ORDER BY release.release_order DESC LIMIT 2
+        ) SELECT release.runtime_id FROM recent_releases release
+          WHERE NOT EXISTS (SELECT 1 FROM cloud_runtime_qualification_runs failed
+            WHERE failed.runtime_id=(SELECT runtime_id FROM recent_releases ORDER BY release_order DESC LIMIT 1)
+              AND failed.base_compatibility_id=$2 AND failed.state='failed')
             AND EXISTS (SELECT 1 FROM unnest($3::text[]) required(kind) WHERE NOT EXISTS (
-              SELECT 1 FROM cloud_runtime_qualifications q WHERE q.runtime_id=bundle.runtime_id AND q.base_compatibility_id=$2
+              SELECT 1 FROM cloud_runtime_qualifications q WHERE q.runtime_id=release.runtime_id AND q.base_compatibility_id=$2
                 AND q.credential_kind=required.kind AND q.profile='zeros-cloud-worker-v4' AND q.enabled AND q.revoked_at IS NULL
                 AND q.evidence->>'mode' IN ('smoke','full')))
             AND NOT EXISTS (SELECT 1 FROM cloud_runtime_qualification_runs run
-              WHERE run.runtime_id=bundle.runtime_id AND run.base_compatibility_id=$2 AND run.state IN ('failed','succeeded'))
+              WHERE run.runtime_id=release.runtime_id AND run.base_compatibility_id=$2 AND run.state IN ('failed','succeeded'))
           ORDER BY release.release_order DESC LIMIT 1`, [CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, base.base_compatibility_id, RUNTIME_QUALIFICATION_KINDS])).rows[0];
         if (!candidate) return null;
         queued = (await tx.query<Run>(`INSERT INTO cloud_runtime_qualification_runs (runtime_id) VALUES ($1) RETURNING *`, [candidate.runtime_id])).rows[0];

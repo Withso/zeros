@@ -530,15 +530,23 @@ startup does not depend on workspace setup being enabled. Qualification mode
 remains a separate admission setting: Alpha must select `smoke` to admit smoke
 evidence. The default `full` admits none of these smoke approvals.
 
-Publication completion and staff retries enqueue durable runs. A 30-second tick
-also discovers the newest confirmed, unrevoked, unqualified runtime for the
-current approved base compatibility. The database permits one running smoke
-globally, including runs awaiting cleanup. Each claim selects the newest
-approved, unrevoked Boat base and records a 25-minute deadline. A failed run is
-not retried automatically for the same runtime/base compatibility; staff may
-retry explicitly. The claim transaction also prepares the builder allocation
-intent, so an expired claim cannot be marked cleaned while a suspended worker
-can still dispatch an unjournalled create.
+Publication completion and staff retries enqueue durable runs. When no run is
+queued, a 30-second tick discovers candidates only among the newest two
+confirmed, unrevoked Alpha releases on the current engine protocol, ordered by
+`release_order`. This window is chosen before excluding qualified or completed
+runtimes, so a new base cannot trigger a sweep of release history. A recorded
+failure of the newest eligible release on that base compatibility blocks
+automatic fallback to older releases. A later release advances the window;
+existing queued runs and explicit staff requalification retain their dispatch
+and cleanup rules.
+
+The database permits one running smoke globally, including runs awaiting
+cleanup. Each claim selects the newest approved, unrevoked Boat base and records
+a 25-minute deadline. A failed run is not retried automatically for the same
+runtime/base compatibility; staff may retry explicitly. The claim transaction
+also prepares the builder allocation intent, so an expired claim cannot be
+marked cleaned while a suspended worker can still dispatch an unjournalled
+create.
 
 The worker creates `zeros-v2-qual-<runtime-short>` with a 30-minute provider TTL,
 waits up to 12 minutes for bootstrap to report `idle` or `waiting_for_runtime`,
