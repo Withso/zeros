@@ -137,7 +137,7 @@ static void require_kernel_control(const char *name) {
       (filesystem.f_type != 0x9fa0 && filesystem.f_type != 0x65735546)) fail();
 }
 
-static void validate_view(int qualification, int resident, int cursor_probe, int boot_check) {
+static void validate_view(int qualification, int resident, int cursor_probe) {
   struct statfs root;
   if (statfs("/", &root) || root.f_type != 0x01021994 ||
       !(root.f_flags & MS_RDONLY)) fail();
@@ -188,7 +188,6 @@ static void validate_view(int qualification, int resident, int cursor_probe, int
     require_worker_path("scripts/cloud-workspace-validation/sandbox", 1);
     require_worker_path("scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", 0);
   }
-  if (boot_check) require_worker_path("scripts/cloud-workspace-validation/sandbox/cloud-engine-boot-check.mjs", 0);
   if (cursor_probe) {
     char probe[PATH_MAX];
     if (snprintf(probe, sizeof(probe), "%s/lib/zeros/runtime-self-test.mjs", runtime_root) >= (int)sizeof(probe)) fail();
@@ -429,11 +428,10 @@ int main(int argc, char **argv) {
     strcmp(argv[option], "--qualify") == 0 : 0;
   const int resident = argc == option + 1 && strcmp(argv[option], "--resident") == 0;
   const int cursor_probe = argc == option + 1 && strcmp(argv[option], "--probe-cursor") == 0;
-  const int boot_check = argc == option + 1 && strcmp(argv[option], "--boot-check") == 0;
-  if ((argc != option && !qualification && !resident && !cursor_probe && !boot_check) || getuid() != 0 || geteuid() != 0 || getgid() != 0 ||
+  if ((argc != option && !qualification && !resident && !cursor_probe) || getuid() != 0 || geteuid() != 0 || getgid() != 0 ||
       setgroups(0, NULL)) fail();
   require_root_outside();
-  validate_view(qualification, resident, cursor_probe, boot_check);
+  validate_view(qualification, resident, cursor_probe);
   struct rlimit core = { .rlim_cur = 0, .rlim_max = 0 };
   if (setrlimit(RLIMIT_CORE, &core)) fail();
   /* No inherited file capability, directory, socket or engine-lock descriptor
@@ -463,12 +461,11 @@ int main(int argc, char **argv) {
     byte_io(ready[1], 1);
     byte_io(go[0], 0);
     (void)close(ready[1]); (void)close(go[0]);
-    char engine[PATH_MAX], qualify[PATH_MAX], host[PATH_MAX], cursor[PATH_MAX], boot[PATH_MAX];
+    char engine[PATH_MAX], qualify[PATH_MAX], host[PATH_MAX], cursor[PATH_MAX];
     if (snprintf(cursor, sizeof(cursor), "%s/lib/zeros/runtime-self-test.mjs", runtime_root) >= (int)sizeof(cursor)) fail();
     worker_path(engine, sizeof(engine), "dist-engine/cli.js");
     worker_path(qualify, sizeof(qualify), "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs");
     worker_path(host, sizeof(host), "dist-engine/resident-pty.js");
-    worker_path(boot, sizeof(boot), "scripts/cloud-workspace-validation/sandbox/cloud-engine-boot-check.mjs");
     char *arguments[] = {
       runtime_node, engine,
       "serve", "--root", "/srv/zeros/workspace", NULL,
@@ -478,8 +475,7 @@ int main(int argc, char **argv) {
     };
     char *resident_arguments[] = { runtime_node, host, NULL };
     char *cursor_arguments[] = { runtime_node, cursor, "--engine-cursor-probe", NULL };
-    char *boot_arguments[] = { runtime_node, boot, NULL };
-    execv(arguments[0], boot_check ? boot_arguments : (cursor_probe ? cursor_arguments : (resident ? resident_arguments : (qualification ? qualification_arguments : arguments))));
+    execv(arguments[0], cursor_probe ? cursor_arguments : (resident ? resident_arguments : (qualification ? qualification_arguments : arguments)));
     fail();
   }
   child_pid = (sig_atomic_t)child;

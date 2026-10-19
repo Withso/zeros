@@ -26,7 +26,7 @@ export function cloudEngineWorkerProjection(runtime) {
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
 export function cloudEngineViewArguments(operation = "serve",version=4,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository,residentHostId,placement,runnerSupport=cloudRunnerBaseSupported()) {
-  if (!["serve", "qualify", "resident", "probe-cursor", "boot-check"].includes(operation))
+  if (!["serve", "qualify", "resident", "probe-cursor"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   if(version!==4 || runtime.profile!=="v4")throw new Error("Invalid cloud engine profile version");
   if (residentHostId !== undefined && (!["serve", "resident"].includes(operation) ||
@@ -202,7 +202,6 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
   if (operation === "qualify") args.push("--qualify");
   if (operation === "resident") args.push("--resident");
   if (operation === "probe-cursor") args.push("--probe-cursor");
-  if (operation === "boot-check") args.push("--boot-check");
   return args;
 }
 
@@ -210,7 +209,7 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
  * listings. Every authority-bearing variable is selected explicitly from the
  * existing supervisor contract; ambient provider/loader variables are absent. */
 export function cloudEngineViewEnvironment(source, operation = "serve", runtime=resolveCloudRuntime()) {
-  if (!["serve", "qualify", "resident", "probe-cursor", "boot-check"].includes(operation) || runtime.profile !== "v4")
+  if (!["serve", "qualify", "resident", "probe-cursor"].includes(operation) || runtime.profile !== "v4")
     throw new Error("Invalid cloud engine launch operation");
   const environment = {
     ...cloudRuntimeAssetEnvironment(runtime),

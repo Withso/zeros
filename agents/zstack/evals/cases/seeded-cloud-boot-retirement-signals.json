@@ -1,9 +1,0 @@
-{
-  "id": "seeded-cloud-boot-retirement-signals",
-  "kind": "seeded",
-  "area": "vm-image-bootstrap",
-  "fixedBy": "pr:629",
-  "symptom": "A deliberate one-shot signal-guard mutation lets repeated TERM release the boot monitor's inherited launch locks while original retirement remains pending or unconfirmed.",
-  "rule": "Boot cancellation guards and the root owner span preparation and every pending cleanup; only positive original retirement permits release.",
-  "check": "pnpm test:git scripts/__tests__/cloud-boot-retirement-signal.test.ts"
-}

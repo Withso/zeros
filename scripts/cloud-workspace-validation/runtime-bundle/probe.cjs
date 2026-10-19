@@ -294,21 +294,6 @@ const checks = {
       process.stdout.write('qualified-role-imports');
     `, worker]), "qualified-role-imports");
   },
-  boot_contract() {
-    const entry = path.join(worker, "dist-engine/cloud-boot-contract.mjs");
-    assert(fs.lstatSync(entry).isFile()); internal(entry);
-    assert.equal(execute(node, ["--input-type=module", "-e", `
-      import assert from 'node:assert/strict';
-      import {registerHooks} from 'node:module';
-      import {pathToFileURL} from 'node:url';
-      registerHooks({resolve(s,c,next){if(s.endsWith('.ts')||['tsx','esbuild'].includes(s.split('/')[0]))throw new Error('Runtime compiler refused');return next(s,c);}});
-      const m=await import(pathToFileURL(process.argv[1]));
-      assert.deepEqual(m.parseCloudBootSelection({mode:'full'}),{mode:'full'});
-      assert.throws(()=>m.parseCloudBootSelection({mode:'build'}));
-      assert.equal(m.CloudBuildAdmissionProofSchema.safeParse({version:2}).success,false);
-      process.stdout.write('boot-contract-import');
-    `, entry]), "boot-contract-import");
-  },
   engine_help() {
     assert(
       execute(node, [
@@ -328,8 +313,7 @@ const selectedChecks = Object.entries(checks).filter(([name]) =>
   (phase === "cursor" ? name === "cursor_load" : name !== "cursor_load") &&
   // Old immutable archives have no compiled entry. New builds always add it;
   // verification of an old artifact must not invent a new required payload.
-  (name !== "qualification_roles" || manifest.files?.some(entry => entry.path === "worker/dist-engine/cloud-qualification-roles.mjs")) &&
-  (name !== "boot_contract" || manifest.files?.some(entry => ["worker/dist-engine/cloud-boot-contract.mjs", "lib/zeros/cloud-boot-admission.mjs"].includes(entry.path))),
+  (name !== "qualification_roles" || manifest.files?.some(entry => entry.path === "worker/dist-engine/cloud-qualification-roles.mjs")),
 );
 for (const [name, run] of selectedChecks) {
   try {

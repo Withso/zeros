@@ -260,18 +260,6 @@ loader; a present but invalid compiled entry never falls back to source.
 Every dynamic identity, descendant, timeout, census and retirement check still
 runs at qualification time. Local engine builds do not generate this entry.
 
-Cloud builds also compile `worker/dist-engine/cloud-boot-contract.mjs` as a
-separate small graph containing the unchanged Q1a selection schema and dormant
-v3 boot-proof schema. The `boot_contract` publication check imports it with
-runtime TypeScript compilation disabled. A new root boot-admission helper
-requires that entry even if the entry is missing from the manifest; unchanged
-old archives skip this new check. The fixed boot probe and resource checker ship
-in the worker source inventory, and admission, proof, lock and original-retirement
-helpers ship under `lib/zeros`. No runtime-manifest field or Local build entry
-changes. See the [dormant runtime interface](computer-template-builds.md#dormant-current-boot-runtime-interface)
-for the required base adapter and fresh-check boundaries; packaging alone does
-not qualify or activate build-mode admission.
-
 `ClosedDiagnostic` (`zeros.diagnostic/v1`) contains only `component`, `stage`,
 `ok`, nullable `exitCode`, `timedOut`, and deduplicated `failedChecks` (at most 32).
 Components are `bundle`, `publication`, `base`, `bootstrap`, `installer`,
