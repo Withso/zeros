@@ -217,9 +217,14 @@ const checks = {
       "host-process-supervisor.mjs",
       "cloud-host-workload-entry.mjs",
       "cloud-workload-cgroup.mjs",
+      "cloud-runner-base.mjs",
+      "cloud-runner-manager.mjs",
+      "cloud-agent-runner.mjs",
+      "cloud-runner-transport.mjs",
     ].map(name => path.join(worker, "apps/desktop/src/engine/agents/containment", name));
     for (const relative of [
       "bin/cloud-engine-namespace",
+      "bin/cloud-runner-bus",
       "worker/binaries/rg",
     ])
       internal(path.join(root, relative));
@@ -228,6 +233,8 @@ const checks = {
       internal(filename);
       execute(node, ["--check", filename]);
     }
+    assert.deepEqual(JSON.parse(execute(path.join(root, "bin/cloud-runner-bus"), ["--self-test"])),
+      { schema: "zeros.cloud-runner-native/v1", linked: true });
     assert(
       execute(path.join(worker, "binaries/rg"), ["--version"]).startsWith(
         "ripgrep ",

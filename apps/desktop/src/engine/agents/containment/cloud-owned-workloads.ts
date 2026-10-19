@@ -47,6 +47,20 @@ export interface CloudWorkloadOwnerChannel {
   classifyWorkloads(request: ResidentWorkloadCensusRequest): Promise<ResidentWorkloadClassification | null>;
 }
 interface OriginalOwnerChannel extends CloudWorkloadOwnerChannel { readonly source: CloudWorkloadOwnerChannel }
+/** Additional native custody owned by the same admitted scope. A transport's
+ * exit cannot remove this veto or stand in for retirement of a systemd unit. */
+export interface CloudOwnedNativeLifecycle {
+  snapshot(): { complete: boolean; pendingLaunches: number; failedRetirements: number };
+  joinPending(): Promise<void>;
+  stopAndProve(): Promise<void>;
+}
+export interface CloudWorkloadMetadata {
+  kind: CloudWorkloadKind; role: CloudWorkloadRole; terminalIdle?: () => unknown;
+  /** Engine-owned service kept through reversible checkpoints. Only these
+   * exact original births are infrastructure; descendants remain workloads.
+   * Its coordinator explicitly retires it before engine shutdown. */
+  coordinatorService?: () => readonly { pid: number; startToken: string }[];
+}
 interface Scope {
   executionId: string; generation: TerritoryGeneration; kind: CloudWorkloadKind; role: CloudWorkloadRole;
   state: "preparing" | "active" | "stopping" | "failed"; controller: AbortController; signal: AbortSignal;
@@ -54,6 +68,8 @@ interface Scope {
   stopping?: Promise<void>;
   terminalIdle?: () => unknown;
   observed: Map<number, string>;
+  native: Set<CloudOwnedNativeLifecycle>;
+  coordinatorService?: CloudWorkloadMetadata["coordinatorService"];
 }
 interface KernelProcess { pid: number; parent: number; group: number; session: number; tty: number; foreground: number; startTicks: string; state: string }
 async function kernelProcesses(): Promise<Map<number, KernelProcess>> {
@@ -93,6 +109,19 @@ export function assertCloudOwnedScopeLive(boundary: PreparedBoundary): void {
   owner.registry.assertScope(owner.scope);
 }
 
+export function cloudOwnedRegistryFor(boundary: PreparedBoundary): CloudOwnedWorkloadRegistry {
+  const owner = originalScopes.get(boundary);
+  if (!owner) throw new Error("cloud workload requires its original scope");
+  return owner.registry;
+}
+export function attachCloudOwnedNativeLifecycle(boundary: PreparedBoundary, lifecycle: CloudOwnedNativeLifecycle): void {
+  const owner = originalScopes.get(boundary);
+  if (!owner || owner.scope.native.size >= 16 || owner.scope.native.has(lifecycle))
+    throw new Error("native custody requires its original cloud scope");
+  owner.registry.assertScope(owner.scope);
+  owner.scope.native.add(lifecycle);
+}
+
 /** Lifecycle ownership only. The VM is the isolation boundary. */
 export class CloudOwnedWorkloadRegistry {
   private readonly scopes = new Set<Scope>();
@@ -124,7 +153,7 @@ export class CloudOwnedWorkloadRegistry {
     const ticket = Object.freeze({ id: randomUUID() });
     const preserveActive = options.preserveActive === true;
     this.fences.add(ticket); fenceOwners.set(ticket, { registry: this, drained: false, preserveActive, joined: false, ownedProof: null });
-    for (const scope of this.scopes) if (!preserveActive || scope.state === "preparing")
+    for (const scope of this.scopes) if (!scope.coordinatorService && (!preserveActive || scope.state === "preparing"))
       scope.controller.abort(new AdmissionCancelledError("cloud workloads are draining"));
     return ticket;
   }
@@ -140,7 +169,10 @@ export class CloudOwnedWorkloadRegistry {
       await scope.ready;
       if (!this.scopes.has(scope)) return;
       if (scope.state !== "active" || scope.signal.aborted) await this.retire(scope);
-      else if (scope.prepared) await hostFenceUnstartedLaunches(scope.prepared);
+      else if (scope.prepared) {
+        await hostFenceUnstartedLaunches(scope.prepared);
+        await Promise.all([...scope.native].map(native => native.joinPending()));
+      }
     }));
     const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
     if (failures.length) throw failures.length === 1 ? failures[0] : new AggregateError(failures, "cloud admission join failed");
@@ -149,13 +181,13 @@ export class CloudOwnedWorkloadRegistry {
     owner.joined = true;
   }
   private async drainOwnerScopes(): Promise<void> {
-    const results = await Promise.allSettled([...this.scopes].map(async (scope) => {
+    const results = await Promise.allSettled([...this.scopes].filter(scope => !scope.coordinatorService).map(async (scope) => {
       await scope.ready;
       if (this.scopes.has(scope)) await this.retire(scope);
     }));
     const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
     if (failures.length) throw failures.length === 1 ? failures[0] : new AggregateError(failures, "cloud workload retirement failed");
-    if (this.scopes.size) throw new Error("cloud workload drain has unresolved scopes");
+    if ([...this.scopes].some(scope => !scope.coordinatorService)) throw new Error("cloud workload drain has unresolved scopes");
     this.overflow = false;
     const snapshot = this.snapshot();
     if (!snapshot.complete || snapshot.pendingLaunches || snapshot.failedRetirements)
@@ -197,7 +229,7 @@ export class CloudOwnedWorkloadRegistry {
     const snapshot = this.snapshot();
     if (this.overflow || (owner.preserveActive
       ? (!owner.joined && !owner.drained) || !snapshot.complete || !!snapshot.pendingLaunches || !!snapshot.failedRetirements
-      : !owner.drained || !!this.scopes.size)) throw new Error("cloud workload fence has no completed drain proof");
+      : !owner.drained || [...this.scopes].some(scope => !scope.coordinatorService))) throw new Error("cloud workload fence has no completed drain proof");
     this.fences.delete(ticket);
   }
   snapshot(): CloudOwnedWorkloadSnapshot {
@@ -208,6 +240,15 @@ export class CloudOwnedWorkloadRegistry {
       if (scope.state === "failed") failedRetirements++;
       if (scope.prepared && !state) complete = false;
       pendingLaunches += state?.pendingLaunches ?? 0;
+      for (const native of scope.native) {
+        try {
+          const view = native.snapshot();
+          if (!Number.isSafeInteger(view.pendingLaunches) || view.pendingLaunches < 0 ||
+            !Number.isSafeInteger(view.failedRetirements) || view.failedRetirements < 0) throw new Error("invalid native census");
+          complete &&= view.complete === true;
+          pendingLaunches += view.pendingLaunches; failedRetirements += view.failedRetirements;
+        } catch { complete = false; }
+      }
       return { executionId: scope.executionId, generation: scope.generation, kind: scope.kind, role: scope.role,
         state: scope.state, processGroups: state?.groups.map((group) => group.pid) ?? [] };
     });
@@ -346,7 +387,20 @@ export class CloudOwnedWorkloadRegistry {
       // birth and descendants, including workers that changed job groups.
       const owned = this.members(scope, processes, true);
       if (!owned.complete || owned.groups.some(group => !group.startTicks)) { complete = false; continue; }
-      for (const member of owned.members) {
+      let members = owned.members;
+      if (scope.coordinatorService) {
+        try {
+          const births = scope.coordinatorService();
+          if (!Array.isArray(births) || births.length < 1 || births.length > 8 || new Set(births.map(birth => birth.pid)).size !== births.length)
+            throw new Error("invalid coordinator service births");
+          members = births.map(birth => {
+            const member = owned.members.find(member => member.pid === birth.pid && member.startTicks === birth.startToken);
+            if (!member || processes.get(member.pid)?.uid !== 10003) throw new Error("coordinator service birth changed");
+            return member;
+          });
+        } catch { complete = false; continue; }
+      }
+      for (const member of members) {
         if (processes.get(member.pid)?.uid !== 10003) { complete = false; continue; }
         pids.add(member.pid);
       }
@@ -453,8 +507,10 @@ export class CloudOwnedWorkloadRegistry {
       workloadPids: workloadPids.sort((a, b) => a - b), infrastructurePids: infrastructurePids.sort((a, b) => a - b) };
   }
   async prepare(host: HostExecutionBoundary, request: BoundaryRequest, control: AdmissionControl | undefined,
-    metadata: { kind: CloudWorkloadKind; role: CloudWorkloadRole; terminalIdle?: () => unknown }): Promise<PreparedBoundary> {
+    metadata: CloudWorkloadMetadata): Promise<PreparedBoundary> {
     this.assertAccepting();
+    if (metadata.coordinatorService && (metadata.kind !== "service" || metadata.role !== "infrastructure" ||
+      this.custody?.controller.kind !== "engine")) throw new Error("coordinator service requires original engine custody");
     if (metadata.terminalIdle && (metadata.kind !== "terminal" || metadata.role !== "workload"))
       throw new Error("only an original human terminal can supply an idle proof");
     if (!(host instanceof HostExecutionBoundary)) throw new Error("cloud workload must use the Host supervisor");
@@ -468,7 +524,7 @@ export class CloudOwnedWorkloadRegistry {
     const controller = new AbortController();
     const signal = control?.signal ? AbortSignal.any([control.signal, controller.signal]) : controller.signal;
     const scope: Scope = { ...metadata, executionId: request.executionId, generation: `preparing-${randomUUID()}` as TerritoryGeneration,
-      state: "preparing", host, controller, signal, ready, resolveReady, observed: new Map() };
+      state: "preparing", host, controller, signal, ready, resolveReady, observed: new Map(), native: new Set() };
     this.scopes.add(scope);
     try {
       scope.prepared = await host.prepare(request, { ...control, signal, retainFailedPreparationProof: true });
@@ -525,6 +581,9 @@ export class CloudOwnedWorkloadRegistry {
       if (!this.custody && scope.prepared && (scope.observed.size || hostOwnedLifecycleSnapshot(scope.prepared)?.groups.length)) {
         if (!this.members(scope, await kernelProcesses()).complete) throw new Error("cloud descendant ownership is unproven");
       }
+      // Keep the Host transport and manager alive until original unit custody
+      // has joined. An unknown native retirement must remain retryable and busy.
+      await Promise.all([...scope.native].map(native => native.stopAndProve()));
       if (scope.prepared) await scope.prepared.stopAndProve();
       else await scope.host.proveFailedPreparationStopped(scope.executionId);
       if (!this.custody && scope.observed.size) {

@@ -141,14 +141,15 @@ describe("Boat image kit", () => {
     const migration = "node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs\n";
     expect(script).toContain(migration);
     const resolver = " cloud-runtime-root.mjs cloud-runtime-assets.mjs";
-    expect(script).toContain(`cloud-runtime-profile.mjs${resolver} cloud-engine-cgroup.mjs`);
+    const runner = " cloud-runner-base.mjs";
+    expect(script).toContain(`cloud-runtime-profile.mjs${resolver}${runner} cloud-engine-cgroup.mjs`);
     const timings = " cloud-setup-timings.mjs";
     const performanceHelper = " cloud-setup-performance.mjs";
     const checkout = " cloud-computer-checkout.mjs";
     expect(script).toContain(`cloud-setup-process.mjs${timings}${performanceHelper}${checkout} cloud-engine-view.mjs`);
     // Historical recipe compatibility, not qualification of the new image.
     // The new layout/source still requires fresh immutable-image attestation.
-    expect(sha256(script.replace(migration, "").replace(resolver, "").replace(timings, "").replace(performanceHelper, "").replace(checkout, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
+    expect(sha256(script.replace(migration, "").replace(resolver, "").replace(runner, "").replace(timings, "").replace(performanceHelper, "").replace(checkout, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
   });
 
   it("keeps templates and shared image scripts free of build identities and private paths", () => {

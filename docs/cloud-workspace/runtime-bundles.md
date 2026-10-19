@@ -483,7 +483,8 @@ Host group; escaped descendants remain subject to the complete VM census and
 final root-broker drain. Local Personal and organization-local never construct
 this child. A mock custody/process test does not qualify the actual Linux base.
 See [S2 runner.v1](contracts/s2-uplink.md#execution-coordinator-and-interactive-readiness-runnerv1)
-for opt-in and deadlines. This dormant slice adds no provider systemd runner.
+for opt-in and deadlines. Provider runner selection also requires the protected
+base support described below.
 
 ### Existing smoke approval
 
@@ -892,20 +893,32 @@ execution and renewal share the exact per-kind v4 qualification join, including
 evidence mode and independent MCP/native-capability requirements. No v3 worker credential-qualification fallback remains. Revocation closes new admissions without choosing a
 different runtime; existing in-flight credentials retain their lease deadlines.
 
-## Dormant per-execution runner contract
+## Qualified per-execution runners
 
 The engine's `cloud-runner-contract.ts` and `cloud-runner-lifecycle.ts` define a
-dormant ownership boundary for a future qualified systemd backend. They do not
-install units, provide a runner executable or native transport, or select a
-production spawn path. Local Personal, organization-local and existing cloud
-Host execution retain their current implementations. Flags remain off.
+single-use ownership boundary. `cloud-runner-runtime.ts` selects the native
+backend only after this boot negotiates `runner.v1` and the installed base
+provides `/usr/lib/zeros-runner/support.json`. An absent marker retains the
+existing Host execution path; a present but invalid marker refuses startup.
+Local Personal, organization-local and unnegotiated cloud retain their current
+implementations. Flags remain off until the exact base/runtime is qualified.
+
+The composed engine owns one credential-free private systemd user manager in
+`zeros-host.service/engine-runtime/engine-workload-shared/workload/runner-<bootId>`.
+The original Host supervisor launches the manager, which execs in the same
+PID birth and moves into `init.scope`. Fixed generator and unit paths prevent
+loading the account's ordinary user services. There is no system-manager,
+session-bus or ordinary user-manager fallback. The manager and all turn units
+remain beneath zeros-host's existing CPU, memory and process budget.
 
 The fixed policy names `zeros-agent-runner@<executionId>.service`, with a UUID
 execution ID, UID/GID 10003, `Restart=no`, `KillMode=control-group`, ten-second
-start/stop limits, a private umask and null standard streams. Only the qualified
-backend may resolve its fixed entrypoint. Callers cannot supply arbitrary unit
-properties, shell commands or unit environment. The policy alone does not
-establish the qualified base's resource or process security posture.
+start/stop limits and a private umask. Each actual SDK child has a fresh UUID,
+including multiple children of one admitted execution. The native backend
+resolves the fixed entrypoint and supplies inherited anonymous standard-stream
+descriptors in place of the policy's default null streams. Callers cannot
+supply arbitrary unit properties, shell commands or unit environment. The
+policy alone does not establish the qualified base's process security posture.
 
 Before native submission, the lifecycle exclusively reserves and fsyncs a
 private receipt containing only immutable identity and phase. Its scope includes
@@ -926,6 +939,10 @@ establishment must also verify the canonical owner-only socket or descriptor,
 peer UID, PID/start token and original cgroup before material is captured.
 Backend I/O must be bounded and joined, including uncertain starts and late
 connections; the lifecycle does not turn a timed-out promise into exit proof.
+The private native client checks the socket's ownership and permissions,
+`SO_PEERCRED`, original manager birth and cgroup. It holds the original cgroup
+descriptor and PID handle. Retirement writes through that descriptor, so a
+replacement unit with the same name cannot receive the original Stop.
 
 Selected provider material, cwd and arguments travel once in a bounded 64 KiB
 private request, never in unit metadata, argv, unit environment, general logs
@@ -936,21 +953,35 @@ remains `starting` until that private handoff is acknowledged. Stop cancels
 preparation and retires the original custody even if the receipt has become
 unwritable. Material is released only after positive original-process and
 complete empty-cgroup evidence. Failed cleanup or final persistence remains
-busy; a late reply cannot restore authority.
+busy; a late reply cannot restore authority. Provider stdin remains gated until
+the ACK and a fresh authority check, with a separate 8 MiB queue bound. Normal
+completion joins child pipe closure and native retirement; unread final output
+remains available to the provider adapter after a normal EOF.
 
 Runner census is an additional veto on idle/checkpoint sealing, not a
 replacement for the existing complete Host census. Even zero counts require
 the current owner scope, a fresh challenge and the current registry revision.
 Pending starts, failed retirements, escaped processes and unknown or partial
-observations remain busy. The next implementation must wire all turn units
-into **zeros-host's shared resource budget, census and final drain**, including
-workspace-user descendants outside individual unit cgroups. An ordinary
-systemd sibling service outside that tree is not a valid implementation.
+observations remain busy. The original Host registry retains native custody
+until positive retirement. Only the manager's exact original births count as
+infrastructure; its descendants remain workloads, including reparented unit
+members and workspace-user processes outside individual unit cgroups. A
+reversible checkpoint keeps the idle manager available. Engine Stop retires
+turn units, joins control I/O and retires the pinned manager group before its
+Host transport. Final root drain continues to cover the complete workload tree.
 
-Activation requires the native backend, fixed runner, bounded registry, full
-execution/event/census integration and a newly qualified base/runtime together.
-Qualification must include real systemd start/ACK loss, escaped-child drain,
-frontend replacement, coordinator-loss withdrawal and checkpoint fallback.
-The injected-driver tests establish only the dormant contract. They do not
-qualify systemd, a provider turn or a base; no in-place change of an old runtime
-pin or downgrade of an active execution is permitted.
+The protected base support and empty generator/boot-marker directories are
+installed with the base. New runtime artifacts include the four runner modules
+and the native `cloud-runner-bus` helper linked against the base's libsystemd.
+Offline artifact closure checks syntax, presence and native library loading;
+that check creates no unit and proves no execution authority.
+
+On a supporting base, the installed `qualify-cloud-runners.ts` role must prove
+manager identity, private material delivery, byte-preserving stdio/EOF,
+original retirement, reparented-child retirement, census, revocation and manager
+retirement before engine qualification succeeds. The root launcher still owns
+the independent final VM drain. Activation also requires live systemd start/ACK
+loss, frontend replacement, coordinator-loss withdrawal, checkpoint fallback
+and real provider-turn drills on the exact base/runtime. Unit tests and offline
+closure do not substitute for these drills. No in-place change of an old
+runtime pin or downgrade of an active execution is permitted.

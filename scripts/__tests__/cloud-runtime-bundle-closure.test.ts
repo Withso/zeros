@@ -41,7 +41,8 @@ import {
 } from "../cloud-workspace-validation/runtime-bundle/manifest";
 
 const temporary: string[] = [];
-const hostSources = ["host-process-supervisor.mjs", "cloud-host-workload-entry.mjs", "cloud-workload-cgroup.mjs"]
+const hostSources = ["host-process-supervisor.mjs", "cloud-host-workload-entry.mjs", "cloud-workload-cgroup.mjs",
+  "cloud-runner-base.mjs", "cloud-runner-manager.mjs", "cloud-agent-runner.mjs", "cloud-runner-transport.mjs"]
   .map(name => `apps/desktop/src/engine/agents/containment/${name}`);
 async function directory() {
   const root = await mkdtemp(path.join(os.tmpdir(), "zeros-closure-unit-"));
@@ -65,7 +66,7 @@ afterEach(async () => {
   );
 });
 
-async function hostAssetProbe(options: { missing?: string; invalid?: string } = {}) {
+async function hostAssetProbe(options: { missing?: string; invalid?: string; native?: "missing" | "failed" } = {}) {
   const root = await directory(), worker = path.join(root, "worker");
   for (const source of hostSources) {
     const target = path.join(worker, source);
@@ -77,6 +78,8 @@ async function hostAssetProbe(options: { missing?: string; invalid?: string } = 
   await json(path.join(root, "manifest.json"), {});
   await mkdir(path.join(root, "bin"));
   await writeFile(path.join(root, "bin/cloud-engine-namespace"), "fixture");
+  if (options.native !== "missing") await writeFile(path.join(root, "bin/cloud-runner-bus"), options.native === "failed" ? "#!/bin/sh\nexit 70\n" :
+    '#!/bin/sh\nprintf \'{"schema":"zeros.cloud-runner-native/v1","linked":true}\\n\'\n', { mode: 0o555 });
   await mkdir(path.join(worker, "binaries"));
   await writeFile(path.join(worker, "binaries/rg"), '#!/bin/sh\nprintf "ripgrep fixture\\n"\n', { mode: 0o555 });
   const source = await readFile("scripts/cloud-workspace-validation/runtime-bundle/probe.cjs", "utf8");
@@ -111,6 +114,10 @@ describe("cloud Host staged entry closure (portable syntax/existence only)", () 
     const result = await hostAssetProbe({ invalid });
     expect(result).toMatchObject({ exitCode: 1, diagnostic: { ok: false, failedChecks: ["host_assets"] } });
     expect(result.output).not.toContain("INVALID_SYNTAX_SENTINEL");
+  });
+  it.each(["missing", "failed"] as const)("refuses %s native runner library closure", async native => {
+    const result = await hostAssetProbe({ native });
+    expect(result).toMatchObject({ exitCode: 1, diagnostic: { ok: false, failedChecks: ["host_assets"] } });
   });
 });
 

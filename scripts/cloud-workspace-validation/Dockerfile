@@ -101,6 +101,7 @@ COPY sandbox/cloud-computer-checkout.mjs /opt/zeros-runtime/lib/zeros/cloud-comp
 COPY sandbox/cloud-runtime-profile.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs
 # The resolver is the same source used by the engine in the pinned checkout.
 RUN install -o root -g root -m 0444 /opt/zeros/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-root.mjs
+RUN install -o root -g root -m 0444 /opt/zeros/apps/desktop/src/engine/agents/containment/cloud-runner-base.mjs /opt/zeros-runtime/lib/zeros/cloud-runner-base.mjs
 RUN install -o root -g root -m 0444 /opt/zeros/apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-assets.mjs
 COPY sandbox/cloud-engine-cgroup.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-cgroup.mjs
 COPY sandbox/cloud-engine-view.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-view.mjs

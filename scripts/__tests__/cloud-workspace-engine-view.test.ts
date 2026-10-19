@@ -13,6 +13,15 @@ const runtime = testCloudRuntime();
 const view = "/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111";
 
 describe("fixed cloud engine mount and environment contract", () => {
+  it("projects only a protected empty boot marker and machine identity for a supporting runner base", () => {
+    const old = cloudEngineViewArguments("serve", 4, runtime, view, undefined, undefined, undefined, false);
+    const next = cloudEngineViewArguments("serve", 4, runtime, view, undefined, undefined, undefined, true);
+    expect(next.join("\n")).toContain("--ro-bind\n/etc/machine-id\n/etc/machine-id");
+    expect(next.join("\n")).toContain("--ro-bind\n/usr/lib/zeros-runner/booted\n/run/systemd/system");
+    expect(old).not.toContain("/etc/machine-id");
+    expect(old).not.toContain("/run/systemd/system");
+    expect(next).not.toContain("/run/systemd/private");
+  });
   it.each(["serve", "qualify", "resident", "probe-cursor"])("selects LFS and font configuration from the physical %s runtime", operation => {
     const env = cloudEngineViewEnvironment({ GIT_CONFIG_SYSTEM: "/untrusted/gitconfig", GIT_EXEC_PATH: "/untrusted/git-exec", FONTCONFIG_FILE: "/untrusted/fonts.conf" }, operation, runtime);
     expect(env).toMatchObject({ GIT_EXEC_PATH: `/opt/zeros-infra/.git-exec/${runtime.runtimeId}`, GIT_CONFIG_SYSTEM: `${runtime.workerRoot}/gitconfig`,

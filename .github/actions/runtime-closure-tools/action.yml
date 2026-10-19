@@ -1,6 +1,6 @@
 name: Offline Runtime Closure Tools
 description: >-
-  Install bubblewrap and setpriv for read-only offline artifact closure checks.
+  Install namespace and native systemd build tools for offline artifact checks.
   These tools qualify the shipped bundle; agents use the workspace VM identity.
 
 runs:
@@ -19,7 +19,7 @@ runs:
             "$runner_ubuntu_sources"
         fi
         sudo apt-get update
-        sudo apt-get install --yes bubblewrap util-linux
+        sudo apt-get install --yes bubblewrap util-linux libsystemd-dev
         command -v setpriv
 
     - name: Verify offline artifact namespace prerequisites

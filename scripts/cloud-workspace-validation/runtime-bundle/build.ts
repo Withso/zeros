@@ -350,12 +350,14 @@ export async function buildRuntimeBundle(options: {
         }),
         { mode: 0o444, flag: "wx" },
       );
-      for (const [name, source, mode] of [
+      for (const [name, source, mode, libraries] of [
         [
           "cloud-engine-namespace",
           "scripts/cloud-workspace-validation/sandbox/cloud-engine-namespace.c",
           0o500,
+          [],
         ],
+        ["cloud-runner-bus", "scripts/cloud-workspace-validation/sandbox/cloud-runner-bus.c", 0o555, ["-lsystemd"]],
       ] as const) {
         await runTool(
           "cc",
@@ -366,6 +368,7 @@ export async function buildRuntimeBundle(options: {
             "-Wextra",
             "-Werror",
             source,
+            ...libraries,
             "-o",
             path.join(runtime, "bin", name),
           ],

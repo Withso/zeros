@@ -10,13 +10,17 @@ import { CloudAgentLease } from "../../cloud-agent-lease";
 import { CloudNativeBoundary, cloudNativeProviderEnvironment } from "../cloud-native-boundary";
 import { createCloudNativeHome } from "../cloud-native-home";
 import { CloudExecutionBoundary } from "../cloud-execution-boundary";
-import type { BoundaryProcess, BoundarySpawnRequest, PreparedBoundary } from "../types";
+import type { BoundaryProcess, BoundarySpawnRequest } from "../types";
+import type { CloudRunnerBoundary } from "../cloud-runner-boundary";
 
 vi.mock("../cloud-runtime-root.mjs",async original=>({
   ...await original<typeof import("../cloud-runtime-root.mjs")>(),
   resolveCloudRuntime:(await import("../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
 }));
-const mocked = vi.hoisted(() => ({ rm: vi.fn(async (_file: import("node:fs").PathLike, _options?: import("node:fs").RmOptions) => {}) }));
+const mocked = vi.hoisted(() => ({ rm: vi.fn(async (_file: import("node:fs").PathLike, _options?: import("node:fs").RmOptions) => {}),
+  runner: null as CloudRunnerBoundary | null, servers: vi.fn(async (_roots: readonly number[]) => true) }));
+vi.mock("../cloud-runner-runtime", async original => ({ ...await original<object>(), cloudRunnerForBoundary: () => mocked.runner }));
+vi.mock("../cloud-background-processes", () => ({ hasCloudBackgroundServers: mocked.servers }));
 const configuration = vi.hoisted(() => ({ version: 4 as const, backend: "cloud-worker" as const, profile: "zeros-cloud-worker-v4" as const,
   uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0,
   toolchain: { node: process.execPath, supervisor: `${process.cwd()}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs` } }));
@@ -24,7 +28,7 @@ vi.mock("../cloud-worker-config", () => ({ loadCloudWorkerConfiguration: () => c
 const gitAuthor = { name: "Test Member", email: "1234+test-member@users.noreply.github.com" };
 vi.mock("node:fs/promises", async original => ({ ...await original<typeof import("node:fs/promises")>(), rm: mocked.rm }));
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.clearAllMocks(); });
+afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.clearAllMocks(); mocked.runner = null; });
 
 async function fixture() {
   const admission = { executionId: randomUUID(), delegationId: randomUUID(), provider: "cursor" as const, model: "qualified-model",
@@ -56,6 +60,21 @@ async function fixture() {
 }
 
 describe("native provider process ownership", () => {
+  it("includes original unit descendants even when no SDK process remains tracked", async () => {
+    mocked.runner = { backgroundRoots: () => [{ pid: 401, startToken: "4010" }] } as unknown as CloudRunnerBoundary;
+    const { boundary, lease } = await fixture();
+    try {
+      expect(await boundary.hasBackgroundServers()).toBe(true);
+      expect(mocked.servers).toHaveBeenCalledExactlyOnceWith([401]);
+    } finally { await lease.close(); }
+  });
+  it("refuses a background observation when original unit births change during IO", async () => {
+    const roots = vi.fn().mockReturnValueOnce([{ pid: 401, startToken: "4010" }]).mockReturnValue([{ pid: 401, startToken: "4011" }]);
+    mocked.runner = { backgroundRoots: roots } as unknown as CloudRunnerBoundary;
+    const { boundary, lease } = await fixture();
+    try { await expect(boundary.hasBackgroundServers()).rejects.toThrow(); }
+    finally { await lease.close(); }
+  });
   it.each(["sdk-ts","cli","invalid","sdk-ts\n"])("allowlists the pinned SDK entrypoint only (%j)",async entrypoint=>{
     const {boundary,lease,workload,nativeHome}=await fixture();
     try{
