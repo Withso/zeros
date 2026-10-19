@@ -75,6 +75,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "packages/protocol/src/cloud-agent-bootstrap.ts",
   "packages/protocol/src/cloud-agent-execution.ts",
   "packages/protocol/src/cloud-bridge-diagnostics.ts",
+  "packages/protocol/src/cloud-build-qualification.ts",
   "packages/protocol/src/cloud-commands.ts",
   "packages/protocol/src/cloud-capabilities.ts",
   "packages/protocol/src/cloud-capability-sessions.ts",

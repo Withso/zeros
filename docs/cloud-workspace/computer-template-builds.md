@@ -25,6 +25,48 @@ Completed builds also require a ready [durable named snapshot](computer-named-sn
 with an exact saved-tree proof. New workspace allocations use the saved name;
 legacy accepted generation pins keep their original fork path.
 
+## Build qualification evidence (dormant)
+
+`cloud_computer_build_qualifications` records one immutable, bounded
+`zeros.computer-build-qualification/v1` document per exact organization,
+configuration and build. It binds the original builder operation/helper fence,
+runtime manifest/archive/installer receipt, registered base and compatibility
+bytes, protected and boot-integrity digests, running-kernel fingerprint, policy,
+and complete role/retirement results. Canonical UTF-8 JSON and its SHA-256 are
+stored together. This record is behavioral evidence, not a credential.
+
+The system-only writer requires a current, uncancelled integrity-stage build
+and its exact live builder. An identical acknowledged result may be reread
+after a fenced handoff; different bytes cannot replace it. The build deadline
+is checked with the current database clock after INSERT and lock waits.
+Evidence alone is ineligible. Selection also requires successful build
+completion, matching sanitation, a ready named snapshot and its immutable
+saved-tree proof, and current runtime/base approval. It holds those rows through
+the caller's admission transaction. No provider I/O belongs under those locks.
+
+The organization flag `build_qualification` defaults off and reads off when its
+feed is unavailable. Supported readers accept optional private installer
+`buildQualification` metadata: `{mode:"full"}` or a closed `{mode:"build", ...}`
+selection containing the evidence ID, digest, document and exact snapshot.
+The existing encoded 64-KiB installer limit still applies. Producers must not
+emit it before both the exact base and runtime support version 1. A legitimately
+absent record or unsupported cohort can preselect full qualification; malformed,
+revoked or incomplete selected evidence cannot downgrade. A new runtime needs
+its own qualification. A pinned attempt retains its original mode when the
+rollout flag changes.
+
+Only one-way revocation is mutable. Tenant contexts cannot read or write these
+rows. Normal deletion is refused; the existing organization eraser cascades
+through the template only under its exact live purge lease. Historical
+identities remain available for cleanup until that erasure.
+
+This slice has no production writer or selector. Creates and wakes still run
+full qualification, and Local and organization-local workspaces are unchanged.
+Activation requires separately reviewed build production, fresh per-boot
+integrity/identity/custody and single-use proof checks, final admission/revocation
+wiring, and exact runtime/base qualification. It does not enable agent runners
+or detached turns.
+
 ## Worker and durable authority
 
 `apps/control-plane/src/cloud-workspaces/computer-template-worker.ts` consumes

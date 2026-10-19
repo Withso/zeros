@@ -55,6 +55,7 @@ export const ROLLOUT_FLAGS = {
     requires: ["capabilities", "realtime_uplink", "credential_push", "turn_journal"] },
   agent_runners: { whileFeedUnavailable: "off", summary: "Negotiate the stable cloud execution coordinator",
     requires: ["detached_turns"] },
+  build_qualification: { whileFeedUnavailable: "off", summary: "Reuse exact Computer build qualification with fresh boot checks" },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

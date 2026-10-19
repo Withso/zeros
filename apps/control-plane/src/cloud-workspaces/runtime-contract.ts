@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CloudComputerQualificationSelectionSchema } from "./computer-build-qualification-contract.js";
 import { setupTimingsSchema } from "./setup-timings.js";
 
 // The control plane is an isolated Zod 3 build. These trust-boundary readers
@@ -33,10 +34,17 @@ const scope = {
   }).strict(),
 };
 export const RuntimeInstallInputSchema = z.discriminatedUnion("purpose", [
-  z.object({ ...scope, purpose: z.literal("workspace-setup"), setup: z.string().min(1) }).strict(),
+  z.object({ ...scope, purpose: z.literal("workspace-setup"), setup: z.string().min(1),
+    buildQualification: CloudComputerQualificationSelectionSchema.optional() }).strict(),
   z.object({ ...scope, purpose: z.literal("build") }).strict(),
   z.object({ ...scope, purpose: z.literal("qualification") }).strict(),
-]).refine(value => Math.ceil(Buffer.byteLength(JSON.stringify(value), "utf8") * 4 / 3) <= RUNTIME_INSTALL_MAX_ENCODED_BYTES);
+]).refine(value => Math.ceil(Buffer.byteLength(JSON.stringify(value), "utf8") * 4 / 3) <= RUNTIME_INSTALL_MAX_ENCODED_BYTES)
+  .refine(value => {
+    if (value.purpose !== "workspace-setup" || value.buildQualification?.mode !== "build") return true;
+    const expected = value.buildQualification.evidence.runtime;
+    return value.runtime.runtimeId === expected.runtimeId && value.runtime.manifestSha256 === expected.manifestSha256 &&
+      value.runtime.archiveSha256 === expected.archiveSha256 && value.runtime.engineProtocolVersion === expected.engineProtocolVersion;
+  });
 
 export const RuntimeBaseStatusSchema = z.object({
   schema: z.literal("zeros.base-status/v1"), baseCompatibilityId: compatibilityId, bootId: uuid,

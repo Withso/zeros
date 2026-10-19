@@ -37,7 +37,7 @@ function harness(initial: Array<{ org_id: string; flag: string }> = []) {
 describe("rollout flag snapshot", () => {
   it("registers the initial flags and defaults every organization to off", async () => {
     expect(Object.keys(ROLLOUT_FLAGS).sort()).toEqual([
-      "agent_runners", "authority_cache_enforce", "authority_cache_shadow", "capabilities", "capability_actor_sessions", "checkpoint_push", "cp_idle_stop", "credential_push", "detached_turns",
+      "agent_runners", "authority_cache_enforce", "authority_cache_shadow", "build_qualification", "capabilities", "capability_actor_sessions", "checkpoint_push", "cp_idle_stop", "credential_push", "detached_turns",
       "device_stream", "engine_lease_over_uplink", "presence_in_memory", "realtime_uplink", "relay_over_uplink", "runtime_connect",
       "turn_journal",
     ]);
@@ -49,6 +49,21 @@ describe("rollout flag snapshot", () => {
     h.handlers.onReady();
     await h.snapshot.reload();
     for (const flag of Object.keys(ROLLOUT_FLAGS)) expect(h.snapshot.enabled(ORG, flag as never)).toBe(false);
+    await h.snapshot.stop();
+  });
+
+  it("keeps build qualification off on feed loss and isolated across A to B to A", async () => {
+    const h = harness([{ org_id: ORG, flag: "build_qualification" }]);
+    expect(isRolloutFlagName("build_qualification")).toBe(true);
+    await h.snapshot.start();
+    expect(flagEffective(new Set(["build_qualification"]), "build_qualification", false)).toBe(false);
+    h.handlers.onReady();
+    await h.snapshot.reload();
+    for (const organization of [ORG, OTHER, ORG]) {
+      expect(h.snapshot.enabled(organization, "build_qualification" as never)).toBe(organization === ORG);
+    }
+    h.handlers.onUnavailable();
+    expect(h.snapshot.enabled(ORG, "build_qualification" as never)).toBe(false);
     await h.snapshot.stop();
   });
 

@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/cloud-workspaces/computer-build-qualifications.ts",
+  "before": "FROM cloud_computer_build_qualifications WHERE build_id=$1 AND org_id=$2 FOR SHARE",
+  "after": "FROM cloud_computer_build_qualifications WHERE build_id=$1 AND org_id=$2 AND revoked_at IS NULL FOR SHARE"
+}
