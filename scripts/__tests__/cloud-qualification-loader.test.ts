@@ -113,7 +113,7 @@ function installedLoader(bundle: string) {
   } finally { rmSync(worker, { recursive: true, force: true }); }
 }
 
-const compiledRoles = ["createCloudQualificationRuntime", "qualifyCloudActorTools", "qualifyCloudCapture", "qualifyCloudHumanServices"];
+const compiledRoles = ["createCloudQualificationRuntime", "qualifyCloudActorTools", "qualifyCloudCapture", "qualifyCloudHumanServices", "qualifyCloudRunners"];
 const compiledExports = compiledRoles.map(name => `export function ${name}() { throw new Error('role must not run during loading'); }`).join("\n");
 
 it("loads the installed fixed roles without registering any runtime transformer", () => {
@@ -123,6 +123,8 @@ it("loads the installed fixed roles without registering any runtime transformer"
 it.each([
   { name: "incomplete role graph", source: compiledExports.replace("export function qualifyCloudCapture", "function qualifyCloudCapture") },
   { name: "invalid role export", source: compiledExports.replace(/export function qualifyCloudCapture[^\n]+/, "export const qualifyCloudCapture = false;") },
+  { name: "missing runner role", source: compiledExports.replace("export function qualifyCloudRunners", "function qualifyCloudRunners") },
+  { name: "invalid runner role", source: compiledExports.replace(/export function qualifyCloudRunners[^\n]+/, "export const qualifyCloudRunners = false;") },
   { name: "broken compiled dependency", source: "import './absent-compiled-dependency.mjs';\n" + compiledExports },
 ])("refuses $name without falling back to source compilation", ({ source }) => {
   const result = installedLoader(source);

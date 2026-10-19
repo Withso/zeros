@@ -52,10 +52,11 @@ it("loads the relocated production graph without TypeScript, transform workers o
     });
     process.stdout.write(JSON.stringify({ roles: Object.keys(roles), children,
       sameRuntime: compiled.createCloudCaptureQualificationRuntime === roles.createCloudQualificationRuntime,
-      sameActor: compiled.qualifyCloudActorTools === roles.qualifyCloudActorTools }));
+      sameActor: compiled.qualifyCloudActorTools === roles.qualifyCloudActorTools,
+      sameRunner: compiled.qualifyCloudRunners === roles.qualifyCloudRunners }));
   `);
-  expect(JSON.parse(value)).toEqual({ roles: ["createCloudQualificationRuntime", "qualifyCloudActorTools", "qualifyCloudCapture", "qualifyCloudHumanServices"],
-    children: [], sameRuntime: true, sameActor: true });
+  expect(JSON.parse(value)).toEqual({ roles: ["createCloudQualificationRuntime", "qualifyCloudActorTools", "qualifyCloudCapture", "qualifyCloudHumanServices", "qualifyCloudRunners"],
+    children: [], sameRuntime: true, sameActor: true, sameRunner: true });
 });
 
 it("runs the compiled serialized identity proof with every privilege guard intact", () => {
@@ -91,6 +92,7 @@ it("keeps module-relative assets, CLI guards and one original boundary graph", a
     expect(source).toContain(`../${sandbox}/${name}`);
   for (const name of ["cloud-execution-boundary.ts", "cloud-owned-workloads.ts", "cloud-workload-custody.ts"])
     expect(Object.keys(metadata.inputs).filter(file => file.endsWith(`/containment/${name}`))).toHaveLength(1);
+  expect(Object.keys(metadata.inputs).filter(file => file.endsWith("/sandbox/qualify-cloud-runners.ts"))).toHaveLength(1);
   expect(Object.values(metadata.outputs).flatMap(output => output.imports).some(edge => edge.path.startsWith("@zeros/") || edge.path.endsWith(".ts"))).toBe(false);
   // Flattening import.meta must not turn the generated entry into all three
   // standalone role CLIs. No process or proof is started just by loading it.
@@ -143,7 +145,7 @@ it("preserves per-module createRequire resolution after relocation", async () =>
   try {
     await writeFile(path.join(source, "package.json"), "{}");
     await mkdir(path.join(source, sandbox), { recursive: true });
-    for (const name of ["cloud-qualification-runtime", "qualify-cloud-actor-tools", "qualify-cloud-capture", "qualify-cloud-human-services", "cloud-role-identity"])
+    for (const name of ["cloud-qualification-runtime", "qualify-cloud-actor-tools", "qualify-cloud-capture", "qualify-cloud-human-services", "qualify-cloud-runners", "cloud-role-identity"])
       await writeFile(path.join(source, sandbox, name + ".ts"), name === "cloud-role-identity"
         ? `import {createRequire} from 'node:module'; export const value = createRequire(import.meta.url)('./source-relative.json');`
         : "export {};\n");
