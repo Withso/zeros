@@ -108,6 +108,12 @@ RUN install -o root -g root -m 0444 /opt/zeros/apps/desktop/src/engine/agents/co
 RUN install -o root -g root -m 0444 /opt/zeros/apps/desktop/src/engine/agents/containment/cloud-runner-base.mjs /opt/zeros-runtime/lib/zeros/cloud-runner-base.mjs
 RUN install -o root -g root -m 0444 /opt/zeros/apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-assets.mjs
 COPY sandbox/cloud-engine-cgroup.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-cgroup.mjs
+COPY sandbox/cloud-boot-admission.mjs /opt/zeros-runtime/lib/zeros/cloud-boot-admission.mjs
+COPY sandbox/cloud-boot-proof.mjs /opt/zeros-runtime/lib/zeros/cloud-boot-proof.mjs
+COPY sandbox/cloud-boot-locks.mjs /opt/zeros-runtime/lib/zeros/cloud-boot-locks.mjs
+COPY sandbox/cloud-boot-retirement.mjs /opt/zeros-runtime/lib/zeros/cloud-boot-retirement.mjs
+RUN chown root:root /opt/zeros-runtime/lib/zeros/cloud-boot-*.mjs \
+ && chmod 0444 /opt/zeros-runtime/lib/zeros/cloud-boot-*.mjs
 COPY sandbox/cloud-engine-view.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-view.mjs
 COPY sandbox/cloud-engine-launcher.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs
 COPY sandbox/cloud-engine-namespace.c /tmp/cloud-engine-namespace.c

@@ -21,6 +21,7 @@ import { performance } from "node:perf_hooks";
 import { resolveCloudRuntime, isCloudRuntimeCgroupRoot } from "./cloud-runtime-root.mjs";
 import { validCloudResourceContract } from "./cloud-resource-admission.mjs";
 import { effectiveCloudResourceLimits } from "./cgroup-resources.mjs";
+import { pinCloudBootRetirement } from "./cloud-boot-retirement.mjs";
 
 export const CLOUD_ENGINE_CGROUP = "/sys/fs/cgroup/zeros-cloud-engine";
 export const CLOUD_SETUP_CGROUP = "/sys/fs/cgroup/zeros-cloud-setup";
@@ -505,6 +506,11 @@ export class CloudEngineCgroup {
     this.custodySeed();
     const identity = this.original.control;
     return `${identity.directory}@${identity.dev}:${identity.ino}`;
+  }
+
+  pinBootRetirement() {
+    this.custodySeed();
+    return pinCloudBootRetirement(this.original.common);
   }
 
   get currentIdentity() {

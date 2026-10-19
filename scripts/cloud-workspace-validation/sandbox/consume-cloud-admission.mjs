@@ -57,6 +57,17 @@ function consumeV4CloudAdmission() {
   process.exitCode = diagnostic.exitCode;
 }
 
+/** A selected build can never consume a v2 proof. Expected scope and the live
+ * fence come from the trusted caller, not from the file being consumed. */
+export async function consumeSelectedCloudAdmission(options = {}, ports = {}) {
+  const selection = options.selection;
+  if (selection === undefined || selection !== null && typeof selection === "object" && !Array.isArray(selection) &&
+      Object.keys(selection).join(",") === "mode" && selection.mode === "full") return (ports.fullConsume ?? consumeV4CloudAdmission)();
+  const pinned = { ...options, selection: structuredClone(selection), attempt: structuredClone(options.attempt) };
+  const { consumeCloudBuildAdmission } = await import("./cloud-boot-admission.mjs");
+  return consumeCloudBuildAdmission(pinned, ports);
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   consumeV4CloudAdmission();
 }

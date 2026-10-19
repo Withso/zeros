@@ -21,8 +21,8 @@ import {
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { CloudEngineCgroup, CloudRuntimeCgroup, enterCloudRootHost } from "./cloud-engine-cgroup.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { CloudDelegatedCgroups, CloudEngineCgroup, CloudRuntimeCgroup, enterCloudRootHost } from "./cloud-engine-cgroup.mjs";
 import {
   cloudEngineViewArguments,
   cloudEngineViewEnvironment,
@@ -372,6 +372,7 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
   const viewDirectory = `/run/zeros/view/runtime-${randomUUID()}`;
   let rootContextFile;
   let rootRecordFile;
+  let rootContext;
   privateDirectory(viewDirectory, 0, 0, 0o700);
   try {
     privateDirectory(`${viewDirectory}/etc`, 0, 0, 0o755);
@@ -396,6 +397,7 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
       const context = { version: 1, episode: randomUUID(),
         runtime: { runtimeId: runtime.runtimeId, bootId: runtime.bootId, supervisorSessionId: runtime.supervisorSessionId },
         scope: { directory, dev, ino }, owner: { pid: original.pid, startToken: original.startToken } };
+      rootContext = context;
       publishViewFile(rootContextFile, JSON.stringify(context), 0, 0, 0o444);
     }
     for (const [name, target] of Object.entries({ current: `../zeros-infra/${runtime.runtimeId}`, bin: "current/bin",
@@ -406,6 +408,7 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     if (!/^[0-9]+\n?$/.test(epoch.toString("utf8"))) throw new Error("Invalid cloud disk epoch");
     publishViewFile(`${viewDirectory}/facade/disk-epoch`, epoch, 0, 0, 0o444);
     return {...profile, runtime, viewDirectory, residentHostId,
+      readBootController: () => readCloudRootControllerRecord(rootContext),
       ...(computer ? { primaryRepository: computer.repositoryDirectory } : {}),
       releaseView: () => {
         rmSync(viewDirectory, {recursive:true,force:true});
@@ -436,6 +439,15 @@ function spawnCloudEngine(file, args, options) {
 /** @type {import('node:events').EventEmitter} */
 const cloudEngineSignals = process;
 
+function retainUnknownCloudBootCustody() {
+  // A root-only CLI exiting would close its original cgroup and inherited
+  // setup/engine lock FDs. Keep that owner alive on unknown cleanup; the
+  // caller's bounded refusal/TERM cannot turn it into a new launch. Trusted
+  // VM retirement remains responsible for this unresolved lifetime.
+  // The boot lifetime's persistent signal guards remain installed.
+  setInterval(() => {}, 2 ** 30);
+}
+
 /** The root wrapper remains outside delegation. Its fixed C transition
  * verifies and places only the unreaped, blocked, fully dropped direct child.
  * The outside root owner alone survives final whole-tree retirement.
@@ -445,7 +457,9 @@ const cloudEngineSignals = process;
  * signals?: import('node:events').EventEmitter,
  * assertOutside?: typeof assertCloudRootOutside,
  * retireRuntime?: () => Promise<unknown>, publish?: (report: unknown) => void,
- * collectPerformance?: boolean}} options */
+ * collectPerformance?: boolean, bootBudgetMs?: number,
+ * assertBootIdle?: () => void, loadBootContract?: () => Promise<any>,
+ * retainBootCustody?: () => void}} options */
 export async function launchCloudEngine({
   operation = "serve",
   source = process.env,
@@ -458,15 +472,56 @@ export async function launchCloudEngine({
   retireRuntime = () => new CloudRuntimeCgroup({ runtime }).retire(),
   publish = report => process.stdout.write(JSON.stringify(report) + "\n"),
   collectPerformance = false,
+  bootBudgetMs,
+  assertBootIdle = () => new CloudDelegatedCgroups({ runtime }).assertRetired(),
+  loadBootContract = () => import(pathToFileURL(`${runtime.workerRoot}/dist-engine/cloud-boot-contract.mjs`).href),
+  retainBootCustody = retainUnknownCloudBootCustody,
 } = {}) {
   if (runtime.profile !== "v4") throw new Error("Isolated cloud engine profile required");
   assertOutside(runtime);
+  const boot = operation === "boot-check";
+  if (boot && (!Number.isInteger(bootBudgetMs) || bootBudgetMs < 1 || bootBudgetMs > 5000)) throw new Error("Invalid cloud boot check deadline");
+  const bootDeadline = boot ? Date.now() + bootBudgetMs : null;
   let profile;
   let args, environment;
   let prepared = false;
+  let bootRetirement, bootReceipt, bootRetired = false, bootRetirementAttempted = false;
+  let bootCancelled = false, cancelBoot, bootCustodyTimer;
+  const bootTerm = () => { bootCancelled = true; cancelBoot?.("SIGTERM"); };
+  const bootInterrupt = () => { bootCancelled = true; cancelBoot?.("SIGINT"); };
+  const finishBootCustody = () => {
+    if (!boot) return;
+    cancelBoot = undefined;
+    if (prepared && !bootRetired) retainBootCustody();
+    else {
+      signals.off("SIGTERM", bootTerm);
+      signals.off("SIGINT", bootInterrupt);
+    }
+    // Unknown cleanup installs its retained owner before this pending hold
+    // ends. Its original signal guards stay inert and cannot target a child.
+    clearInterval(bootCustodyTimer);
+  };
+  const retireBoot = async () => {
+    if (bootRetired) return bootReceipt;
+    if (bootRetirementAttempted || !bootRetirement) throw new Error("Cloud boot original retirement unconfirmed");
+    bootRetirementAttempted = true;
+    bootRetirement.assertCurrent();
+    const receipt = await bootRetirement.retire();
+    if (!receipt || receipt.populated !== 0 || receipt.pruned !== true) throw new Error("Cloud boot original retirement unconfirmed");
+    bootReceipt = receipt; bootRetired = true; bootRetirement.close(); return receipt;
+  };
   const metrics = operation === "qualify" && collectPerformance ? setupPerformance("attester_preflight") : undefined;
   const finishView = metrics?.start("launcher_view");
   try {
+    if (boot) {
+      // Cover preparation failure and every awaited retirement, including
+      // repeated cancellation. A pending Promise alone does not retain the
+      // root process or its inherited setup/engine locks.
+      signals.on("SIGTERM", bootTerm);
+      signals.on("SIGINT", bootInterrupt);
+      bootCustodyTimer = setInterval(() => {}, 2 ** 30);
+      assertBootIdle();
+    }
     if (!scope) {
       let instanceId;
       {
@@ -480,6 +535,7 @@ export async function launchCloudEngine({
     }
     scope.prepare();
     prepared = true;
+    if (boot) { bootRetirement = scope.pinBootRetirement(); bootRetirement.assertCurrent(); }
     let infrastructure = [];
     if (operation === "serve" && source.ZEROS_ROOT_RESIDENT_CUSTODY_B64 !== undefined) {
       let expected;
@@ -511,8 +567,11 @@ export async function launchCloudEngine({
     try {
       // Only successful original admission grants cleanup custody. A refused
       // or unexpectedly populated scope belongs to no new launch.
-      if (prepared) await scope.retire();
-    } finally { profile?.releaseView?.(); }
+      if (prepared) { if (boot) { if (!bootRetirementAttempted) await retireBoot(); } else await scope.retire(); }
+    } finally {
+      try { if (!boot || bootRetired) profile?.releaseView?.(); }
+      finally { finishBootCustody(); }
+    }
     throw error;
   }
   let child;
@@ -524,6 +583,8 @@ export async function launchCloudEngine({
   let qualification = "";
   let qualificationInvalid = false;
   let qualificationDone;
+  let outputEnded = false, bootReport, bootAcknowledgement, bootTimer;
+  let bootAcknowledgementOpen = true;
   let wholeTreeRetired = false;
   let finishSpawn;
   const cancelled = new Promise((resolve) => {
@@ -547,9 +608,17 @@ export async function launchCloudEngine({
   };
   const term = () => stop("SIGTERM");
   const interrupt = () => stop("SIGINT");
-  signals.once("SIGTERM", term);
-  signals.once("SIGINT", interrupt);
+  if (boot) cancelBoot = stop;
+  else {
+    signals.once("SIGTERM", term);
+    signals.once("SIGINT", interrupt);
+  }
   try {
+    if (boot) {
+      if (bootCancelled) throw new Error("Cloud engine launch was cancelled");
+      if (Date.now() >= bootDeadline) throw new Error("Cloud boot check deadline expired");
+      bootTimer = setTimeout(() => stop("SIGTERM"), bootDeadline - Date.now());
+    }
     finishSpawn = metrics?.start("launcher_spawn");
     child = spawnProcess(
       runtime.engineNamespace,
@@ -559,24 +628,49 @@ export async function launchCloudEngine({
         env: environment,
         // The resident entry receives only the supervisor's private control
         // pipe. Its lifetime never depends on an engine attachment socket.
-        stdio: [operation === "resident" ? "inherit" : "ignore", operation === "qualify" ? "pipe" : "inherit", "inherit", "pipe"],
+        stdio: [boot ? "pipe" : operation === "resident" ? "inherit" : "ignore", operation === "qualify" || boot ? "pipe" : "inherit", "inherit", "pipe"],
       },
     );
     exit = new Promise((resolve) => {
       child.on("error", () => resolve({ code: null, failed: true }));
       child.once("exit", (code) => resolve({ code, failed: false }));
     });
-    if (operation === "qualify") {
+    if (operation === "qualify" || boot) {
       if (!child.stdout) throw new Error("Cloud qualification output is unavailable");
       child.stdout.setEncoding("utf8");
       qualificationDone = new Promise(resolve => {
-        child.stdout.once("end", resolve); child.stdout.once("error", resolve); child.stdout.once("close", resolve);
+        child.stdout.once("end", () => { outputEnded = true; resolve(); }); child.stdout.once("error", resolve); child.stdout.once("close", resolve);
       });
       child.stdout.on("error", () => { qualificationInvalid = true; });
       child.stdout.on("data", chunk => {
         if (qualificationInvalid) return;
         qualification += chunk;
-        if (Buffer.byteLength(qualification) > 256 * 1024) { qualificationInvalid = true; qualification = ""; forward("SIGKILL"); }
+        if (Buffer.byteLength(qualification) > (boot ? 65536 : 256 * 1024)) {
+          qualificationInvalid = true; qualification = ""; if (boot) stop("SIGTERM"); else forward("SIGKILL");
+        }
+        if (boot && !bootAcknowledgement && qualification.includes("\n")) {
+          bootAcknowledgement = (async () => {
+            const contract = await loadBootContract();
+            if (!bootAcknowledgementOpen || stopping || qualificationInvalid || Date.now() >= bootDeadline || !/^\{[^\n]*\}\n$/.test(qualification)) throw new Error();
+            const report = contract.CloudBootInnerProbeSchema.parse(JSON.parse(qualification));
+            bootRetirement.assertCurrent();
+            const record = profile.readBootController(), seed = scope.custodySeed();
+            const same = (a, b) => contract.cloudBootDigest(a) === contract.cloudBootDigest(b);
+            if (!same(record.scope, report.custody.controller.scope) || record.birth.pid !== report.custody.controller.pid ||
+                record.birth.startToken !== report.custody.controller.startToken ||
+                !same(record.common, seed.common) || !same(record.workload, seed.workload) ||
+                !same(record.common, report.custody.common) || !same(record.workload, report.custody.workload)) throw new Error();
+            if (!bootAcknowledgementOpen || stopping || Date.now() >= bootDeadline || !child.stdin) throw new Error();
+            bootReport = report;
+            await new Promise((resolve, reject) => {
+              child.stdin.on("error", reject);
+              child.stdin.end("1", error => error ? reject(error) : resolve());
+            });
+          })().catch(() => {
+            if (!bootAcknowledgementOpen) return;
+            qualificationInvalid = true; stop("SIGTERM");
+          });
+        }
       });
     }
     await new Promise((resolve, reject) => {
@@ -609,6 +703,20 @@ export async function launchCloudEngine({
     admitted = true;
     finishSpawn?.();
     const outcome = await Promise.race([exit, cancelled]);
+    if (boot) {
+      // Decoding/acknowledging the probe is never cleanup custody. A stalled
+      // import or pipe callback must not hold original retirement hostage.
+      await Promise.race([bootAcknowledgement ?? Promise.resolve(), cancelled]);
+      bootAcknowledgementOpen = false;
+      const receipt = await retireBoot();
+      let outputTimer;
+      try { await Promise.race([qualificationDone, new Promise(resolve => { outputTimer = setTimeout(() => { qualificationInvalid = true; resolve(); }, 5000); })]); }
+      finally { clearTimeout(outputTimer); }
+      if (stopping || Date.now() >= bootDeadline || qualificationInvalid || !outputEnded || !bootReport || outcome.failed || outcome.code !== 0 ||
+          !/^\{[^\n]*\}\n$/.test(qualification)) throw new Error("Cloud current boot probe was refused");
+      assertBootIdle();
+      publish({ ...bootReport, retirement: receipt, outputJoined: true }); return 0;
+    }
     if (operation === "qualify") {
       const finishRetire = metrics?.start("launcher_retire");
       try {
@@ -648,16 +756,23 @@ export async function launchCloudEngine({
     if (outcome.failed || !Number.isInteger(outcome.code)) return 125;
     return outcome.code;
   } finally {
+    bootAcknowledgementOpen = false;
     finishSpawn?.("failed");
-    signals.off("SIGTERM", term);
-    signals.off("SIGINT", interrupt);
+    if (boot) cancelBoot = undefined;
+    else {
+      signals.off("SIGTERM", term);
+      signals.off("SIGINT", interrupt);
+    }
     clearTimeout(stopTimer);
+    clearTimeout(bootTimer);
     if (!admitted) forward("SIGKILL");
     try {
-      if (operation === "qualify") { if (!wholeTreeRetired) await retireRuntime(); }
+      if (boot) { if (!bootRetirementAttempted) await retireBoot(); }
+      else if (operation === "qualify") { if (!wholeTreeRetired) await retireRuntime(); }
       else await scope.retire();
     } finally {
-      profile?.releaseView?.();
+      try { if (!boot || bootRetired) profile?.releaseView?.(); }
+      finally { finishBootCustody(); }
       child?.stdio[3]?.destroy();
       child?.unref();
     }
@@ -671,6 +786,11 @@ export async function launchCloudEngine({
 export function launchCloudEngineEntry(args, {
   launch = launchCloudEngine, enterHost = enterCloudRootHost, resolveRuntime = resolveCloudRuntime,
 } = {}) {
+  if (args.length === 3 && args[0] === "--host-boot-check" && args[1] === "--budget-ms" &&
+      /^[1-9][0-9]{0,3}$/.test(args[2]) && Number(args[2]) <= 5000) return (async () => {
+    const runtime = resolveRuntime(); enterHost(runtime);
+    return launch({ runtime, operation: "boot-check", bootBudgetMs: Number(args[2]) });
+  })();
   if (args[0] === "--host-qualify" && (args.length === 1 || (args.length === 2 && args[1] === "--performance"))) return (async () => {
     const runtime = resolveRuntime();
     enterHost(runtime);
