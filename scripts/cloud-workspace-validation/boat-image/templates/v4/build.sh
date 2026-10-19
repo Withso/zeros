@@ -19,6 +19,11 @@ PY
 # base mutation. The owned build directory holds this temporary evidence.
 python3 -I -B base/stock-prerequisites.py > stock-prerequisites.json
 
+# Runner support needs separate native qualification before it is advertised.
+# A stock base must not inherit a marker that enables the runner path.
+test ! -e /usr/lib/zeros-runner/support.json
+test ! -L /usr/lib/zeros-runner/support.json
+
 # Boat stock owns /opt as user:user. Protect the bootstrap's ancestry without
 # changing ownership of any provider-managed children under /opt.
 chown root:root /opt
@@ -48,7 +53,6 @@ install -o root -g root -m 0444 base/zeros-host.service /etc/systemd/system/zero
 install -o root -g root -m 0444 base/zeros.conf /etc/tmpfiles.d/zeros.conf
 install -o root -g root -m 0444 base/zeros-cloud-engine.apparmor /etc/apparmor.d/zeros-cloud-engine
 install -d -o root -g root -m 0555 /usr/lib/zeros-runner /usr/lib/zeros-runner/empty /usr/lib/zeros-runner/booted
-install -o root -g root -m 0444 base/runner-support.json /usr/lib/zeros-runner/support.json
 install -o root -g root -m 0444 base/zeros-runner.target /usr/lib/zeros-runner/zeros-runner.target
 
 python3 -I -B - <<'PY'
@@ -63,7 +67,7 @@ protected = ['/opt/zeros-bootstrap/' + name for name in ('bootstrap.py', 'boot.s
                                                      'computer-build.py', 'computer-boot-integrity.py', 'computer-build-qualification.py', 'computer-git-askpass.py', 'stock-prerequisites.py', 'stock-prerequisites.json')]
 protected += ['/etc/zeros/cloud-worker.json', '/etc/systemd/system/zeros-boot.service',
               '/etc/systemd/system/zeros-host.service', '/etc/tmpfiles.d/zeros.conf', '/etc/apparmor.d/zeros-cloud-engine']
-protected += ['/usr/lib/zeros-runner/support.json', '/usr/lib/zeros-runner/zeros-runner.target']
+protected += ['/usr/lib/zeros-runner/zeros-runner.target']
 compat = json.loads(pathlib.Path('base/compatibility.json').read_bytes())
 compat['protectedFiles'] = [{'path': name, 'mode': format(pathlib.Path(name).stat().st_mode & 0o7777, '04o'),
                              'sha256': sha(pathlib.Path(name).read_bytes())} for name in sorted(protected)]

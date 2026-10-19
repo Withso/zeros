@@ -6,6 +6,16 @@ payload. The installer accepts the single-redemption contract: a descriptor,
 short-lived artifact URL, and (for workspace setup) the unchanged nested setup
 payload. Runtime installation grants no engine or credential authority.
 
+The default base leaves cloud runners dormant: it neither uploads nor installs
+`/usr/lib/zeros-runner/support.json`, and refuses a pre-existing marker (including
+a dangling symlink) before base mutation. The target and empty directories remain
+root-owned dormant assets. An absent marker selects the existing runtime path;
+a present marker still requires strict validation and the full native runner
+qualification, independently of the `agent_runners` product flag. Re-enabling
+the marker requires separate runner qualification on the actual base. This
+fallback isolates that rollout; it does not identify the first failed sub-step
+in the earlier `engine_lifecycle` refusals.
+
 ## Slim stock prerequisite contract
 
 New bases start from stock Ubuntu 24.04 without a package update, install,
