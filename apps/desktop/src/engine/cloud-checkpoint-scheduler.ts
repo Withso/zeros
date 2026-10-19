@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { CloudCompleteCheckpointCoordinator, type CompleteCheckpointOptions } from "./cloud-complete-checkpoint-coordinator";
 import type { CloudCheckpointCapture, CloudDurabilityAuthority } from "./cloud-durability-runtime";
 
 /** Heartbeat-driven recovery points never retire agents or pause user work.
@@ -11,6 +12,7 @@ export class CloudCheckpointScheduler {
   private closed = false;
   private readonly now: () => number;
   private readonly intervalMs: number;
+  private readonly complete: CloudCompleteCheckpointCoordinator | null;
 
   constructor(private readonly options: {
     capture: (directive: CloudCheckpointCapture, authority: CloudDurabilityAuthority) => Promise<void>;
@@ -18,14 +20,21 @@ export class CloudCheckpointScheduler {
     failed?: (error: unknown) => void;
     now?: () => number;
     intervalMs?: number;
+    /** Dormant until enrollment supplies a qualified producer and durable journal. */
+    complete?: CompleteCheckpointOptions | { enabled: false };
   }) {
     this.now = options.now ?? Date.now;
     this.intervalMs = options.intervalMs ?? 5 * 60_000;
     if (!Number.isSafeInteger(this.intervalMs) || this.intervalMs < 30_000 || this.intervalMs > 30 * 60_000)
       throw new Error("cloud checkpoint interval is invalid");
+    if (options.complete !== undefined && options.complete?.enabled !== true && options.complete?.enabled !== false)
+      throw new Error("complete checkpoint selection is invalid");
+    this.complete = options.complete?.enabled === true
+      ? new CloudCompleteCheckpointCoordinator(options.complete, { now: this.now, eligible: options.eligible }) : null;
   }
 
   consider(authority: CloudDurabilityAuthority): void {
+    if (this.complete) { this.complete.consider(authority); return; }
     if (this.closed || this.paused || this.active || !this.options.eligible()) return;
     const now = this.now();
     if (this.nextAt === null) this.nextAt = now + this.intervalMs;
@@ -48,17 +57,20 @@ export class CloudCheckpointScheduler {
   }
 
   async pause(): Promise<void> {
+    if (this.complete) { await this.complete.pause(); return; }
     this.paused = true;
     await this.active;
   }
 
   resume(): void {
+    if (this.complete) { this.complete.resume(); return; }
     if (this.closed) return;
     this.paused = false;
     this.nextAt = this.now() + this.intervalMs;
   }
 
   async close(): Promise<void> {
+    if (this.complete) { await this.complete.close(); return; }
     this.closed = true;
     await this.pause();
   }
