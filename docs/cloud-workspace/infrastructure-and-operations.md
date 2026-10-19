@@ -187,12 +187,111 @@ wire values become compatibility contracts when introduced.
 - A failed setup retains bounded logs and a safe retry/delete path.
 - Idle policy never stops a workspace with active agent work, an acknowledged
   interactive terminal, or an in-flight durable write.
-- Delete revokes grants first and completes only after provider inspection says
+- Stop, Archive and Delete retain final-save authority until an exact final
+  checkpoint is committed. They then retire runtime access before destructive
+  provider dispatch. Delete completes only after provider inspection confirms
   the execution resource is gone.
 - A local↔cloud fork has a record-before-upload intent, distinct source/target
   UUIDs, an expected snapshot/checkpoint, bounded staging, and a deadline. It
   completes only after the destination is integrity-verified; it never revokes
   or changes the source.
+
+### Accepted final saves
+
+Migration `0171_cloud_final_save_recovery.sql` separates an accepted Stop,
+Archive, Delete or dependent Restart from its finite checkpoint attempt. The
+original request retains its unique lifecycle link, deadline and immutable
+identity. A recovery row retains the original engine registration/token
+incarnation, boot/writer, funding, authority and allocation. Successors use a
+separate recovery link and increasing attempt ordinal; their
+`recovery_queued`/`recovery_delivered` states are invisible to old delivery SQL.
+Indexed `cloud_final_save_recovery` jobs use database-time retry floors of
+5, 15, 30, 60, 120 and 300 seconds. A failed capture never becomes an idle
+activity cancellation or a terminal accepted Stop failure.
+The existing hourly job audit also covers this index, adding one transaction
+per audit. It adds no fixed-interval workspace polling; the load budget keeps
+the existing statement and round-trip ceilings.
+
+The SQL dispatch guard requires a committed final checkpoint from that exact
+source. A writer seal alone, a cancelled request, a missing engine, provider
+absence or the legacy `stop_unsealed` label does not satisfy it. Mandatory,
+funding and dependent stops use the same rule. An old worker's unsafe claim
+raises a serialization failure; silently changing its returned row would leave
+its in-memory provider call authorized. An admitted dispatch holds the source
+and allocation through ambiguous replies and expired claims until a matching
+positive provider result is recorded. No workspace lock is held over provider
+I/O. The lease-to-workspace guard uses NOWAIT to preserve lock ordering.
+
+The native companion uses `x-zeros-final-save-version: 1` alongside committed
+local-command negotiation for an exact qualified runtime registration. Its
+closed report endpoint is `/internal/v1/cloud-workspaces/engine/final-save`;
+canonical schemas live in `packages/protocol/src/cloud-final-save.ts` and the
+standalone CP mirror. Reports are at most 8 KiB, with no commit body or bearer.
+The engine retains all admitted I/O and its original native drain objects,
+sealed writer and deadlines. It writes one exact commit body to a private
+0700 directory/0600 file, fsyncs the file and directory before first send, and
+replays those bytes and that key after an uncertain ACK. A fresh scan cannot
+replace an ambiguous body. No other process may adopt the journal as authority.
+Successor capture needs authenticated positive predecessor retirement,
+unchanged original native custody and current mutation authority at consumption.
+Historical receipt reads still require the original valid credential and
+registration; they bypass only mutation/lease freshness. No recovery operation
+renews engine, compute, funding or native authority.
+
+Workspace documents advertise optional `lifecycleVersion: 1` and a closed
+`acceptedOperation` display projection. A versioned Restart accepts the exact
+body `{version:1,expectedGeneration}` and idempotency key, atomically stores
+Stop plus dependent Wake, and returns a separate immutable operation receipt.
+Replay retains that receipt across generation replacement and later actions.
+Completion requires a fresh, interactively ready post-stop engine belonging to
+the same Restart, including its proved automatic replacement/rollback lineage.
+The app withdraws old input once, then observes for its original 60-second
+budget. Pending saves continue in the shared catalog; detached/retired observers
+neither show a failure toast nor claim Archive/Delete/Restart completion.
+Unknown v1 replies never downgrade an uncertain send to legacy Stop plus Wake.
+Local Personal and organization-local execution retain their existing paths.
+
+### Final-save deployment, rollback and rescue
+
+1. On Alpha, pause every destructive lifecycle, compute, authority, engine-health,
+   runtime-transition and deletion worker on every CP replica. Drain or terminate
+   old provider calls, and inspect outstanding dispatches under the normal
+   operator authorization. Migration cannot revoke a call already admitted in
+   process memory. Do not declare the gate active without this drain proof.
+2. Take the normal database backup, install `0171`, then deploy all guarded CP
+   workers. Verify old-worker SQL refusals, source custody, durable retry jobs
+   and aggregate health before unpausing. Keep the migration's SQL gate and
+   recovery rows during application rollback; turning retries off leaves
+   operator-owned blocked saves, never an unsaved fallback.
+3. Configure `OPERATIONS_ALERT_EMAIL` and the existing alert transport. Test
+   delivery, persisted deduplication, reminders and resolution while lifecycle
+   workers are paused. Publish/qualify the new runtime and exercise the exact
+   fixture pin through capture failure, lost ACK, finite expiry, successor,
+   saved Stop and Wake. Package/verify the matching app path separately.
+4. Mixed fleets remain safe but may stop making progress: old engines receive no
+   successor; their cancelled request is truthfully retired while the accepted
+   action stays pending and alerted. New engines with old CP can retry only
+   within their original window. Upgrading or restarting an unsaved source is
+   not a recovery shortcut. Restore prerequisites in place, or keep custody for
+   separately authorized operator rescue.
+5. For `final_save_retrying`, `final_save_blocked` or `final_save_worker_stalled`,
+   use bounded, target-authorized reads of the recovery, request, dispatch and
+   existing closed capture diagnostics. Preserve VM, disk, native journal and
+   all original identities. Repair object storage, quota, network or worker
+   availability without changing an uncertain body/key. The existing durable
+   job retries after its stored floor. Missing credentials or native custody
+   require operator escalation; never rewrite a proof, extend old authority,
+   force-stop/delete the VM or mark recovery resolved from resource absence.
+
+The health alert worker owns operator notification: two degraded reads,
+durable cross-replica deduplication, six-hour reminders, retry on send failure
+and two healthy reads for resolution. At its default one-minute cadence, a
+persistent failure becomes alertable after two observations. It runs even when
+background lifecycle workers are paused. User-facing lifecycle documents carry
+no recovery failure text, retry counts or operator reasons. A canary must retain
+source custody after failed saving; unconditional cleanup in `finally` is not
+an acceptable failure handler. External provider TTL or loss remains a possible
+data-loss boundary; these guards do not extend it or claim it was saved.
 
 ## Readiness and health
 
@@ -324,6 +423,9 @@ target-bound approval, and change nothing until rerun unchanged with
 | `object_deletion_stalled` | An unfenced blob deletion is 15 minutes old or failed three times. | Check object-store credentials, reachability and the bucket's retention settings. |
 | `provider_orphans_stalled` | A provider orphan has been unverified for an hour. | Compare the provider inventory for the account scope with the bindings and remove the orphan through the provider after confirming it is not bound. |
 | `durability_stalled` | A ready or busy workspace has had non-durable content or record state for 15 minutes. | Check the engine's checkpoint uploads, object-store health and the byte limits (`cloud-object-storage:manage`). |
+| `final_save_retrying` | An accepted final save has failed and remains in durable recovery. | Follow the final-save rescue procedure above; preserve the source and exact commit journal while repairing prerequisites. |
+| `final_save_blocked` | Recovery lacks current authority, original custody or another required proof. | Escalate to the operations owner. Do not restart or destroy the unsaved source. |
+| `final_save_worker_stalled` | An unresolved recovery's next attempt is more than five minutes overdue. | Restore the durable job worker and its database access without resetting the attempt deadline or native authority. |
 | `compute_settlement_stalled` | An unsettled compute lease has had an error for 5 minutes, or its next check is 5 minutes overdue. | Read the lease `last_error_code`; failing leases retry with backoff up to five minutes. Meter or provider errors need provider access fixed. A stopped allocation whose provider reading fell below its confirmed meter (`compute_credit_meter_rejected`) settles at that meter without action once its stop was first observed 15 minutes earlier. `compute_absence_unconfirmed` means the create journal cannot close until absence is proven with `cloud-provider-absence:manage`. `provider_not_found` or `compute_final_meter_unavailable` on a bound allocation the provider lost needs `cloud-provider-loss:manage`. |
 | `compute_lease_expired` | An active or draining lease is 5 minutes past its provider expiry. | Check renewal, the Organization's credit (`cloud-compute:grant`) and the provider's TTL. A sandbox may be running unfunded. |
 | `compute_platform_exposure` | Provider overrun was recorded as platform exposure in the last 24 hours. | Reconcile the provider meter against the ledger and review the affected credit period. |

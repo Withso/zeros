@@ -14,6 +14,15 @@ const document = {
 };
 
 describe("cloud workspace sharing projection", () => {
+  it("keeps the final-save companion optional and closed, without inventing native support", () => {
+    const acceptedOperation={version:1,id:document.id,kind:"restart",sourceGeneration:1,phase:"saving",state:"pending"};
+    expect(CloudWorkspaceDocumentSchema.parse({...document,lifecycleVersion:1,acceptedOperation})).toMatchObject({lifecycleVersion:1,acceptedOperation});
+    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("lifecycleVersion");
+    const oldReader=CloudWorkspaceDocumentSchema.omit({lifecycleVersion:true,acceptedOperation:true});
+    expect(oldReader.parse({...document,lifecycleVersion:1,acceptedOperation})).toEqual(oldReader.parse(document));
+    for (const change of [{phase:"unknown"},{state:"failed"},{phase:"completed"},{sourceGeneration:0},{token:"rejected"}])
+      expect(CloudWorkspaceDocumentSchema.safeParse({...document,lifecycleVersion:1,acceptedOperation:{...acceptedOperation,...change}}).success).toBe(false);
+  });
   it("retains only a closed additive history-gap receipt, never fabricated empty coverage", () => {
     const historyRecovery = { recoveryId: "88888888-8888-4888-8888-888888888888", code: "history_recovered_with_gap", coverage: "unknown",
       generation: 1, engineInstanceId: "66666666-6666-4666-8666-666666666666", bootId: "44444444-4444-4444-8444-444444444444",

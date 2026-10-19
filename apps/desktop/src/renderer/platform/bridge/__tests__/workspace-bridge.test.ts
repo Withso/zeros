@@ -62,6 +62,12 @@ describe("chat snapshot authority", () => {
 });
 
 describe("requestWorkspaceList", () => {
+  it.each(["background_pending", "retired"] as const)("preserves the %s lifecycle result through both cloud facades", async kind => {
+    const result = kind === "retired" ? { kind } : { kind, operationId: "77777777-7777-4777-8777-777777777777" };
+    const bridge = fakeBridge({ type: "WORKSPACE_RESPONSE", result });
+    await expect(bridgeWorkspaceArchive(bridge, { workspaceId: "cloud://org/workspace" })).resolves.toEqual(result);
+    await expect(bridgeWorkspaceDelete(bridge, { workspaceId: "cloud://org/workspace", includeBranch: false })).resolves.toEqual(result);
+  });
   it("binds snapshot disposal to the reviewed archive and routes recovery separately", async () => {
     const calls: unknown[] = [];
     const bridge = {

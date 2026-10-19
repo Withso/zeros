@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControlPlaneError } from "../../features/team/control-plane";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
-const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), recover: vi.fn(), projects: vi.fn(() => [] as unknown[]), rollout: false }));
+const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), accepted: vi.fn(), recover: vi.fn(), forget: vi.fn(), projects: vi.fn(() => [] as unknown[]), rollout: false }));
+vi.mock("../../platform/cloud-workspace-access", async importOriginal => ({
+  ...await importOriginal<typeof import("../../platform/cloud-workspace-access")>(), forgetCloudWorkspacePortForwarding:api.forget,
+}));
 vi.mock("../cloud-workspace-stream-rollout", () => ({ cloudCatalogStreamRolloutEnabled: () => api.rollout }));
 vi.mock("../../platform/cloud-workspaces", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../platform/cloud-workspaces")>()),
   listCloudWorkspaceDocuments: api.list,
   getCloudWorkspaceDocument: api.read,
   changeCloudWorkspaceLifecycle: api.lifecycle,
+  changeCloudWorkspaceLifecycleWithReceipt: api.accepted,
   recoverCloudWorkspace: api.recover,
 }));
 vi.mock("../projects-store", () => ({ loadProjects: api.projects }));
@@ -77,6 +81,7 @@ beforeEach(() => {
   api.rollout = false; setCloudWorkspaceStreamCoverage(null);
   clearCloudWorkspaceCatalog();
   vi.clearAllMocks();
+  api.forget.mockResolvedValue(undefined);
   api.projects.mockReturnValue([]);
 });
 
@@ -444,7 +449,7 @@ describe("cloud workspace catalog ownership", () => {
       acceptCloudWorkspaceDocument(doc(3, "stopped"));
       await vi.advanceTimersByTimeAsync(0);
       expect(settled).toBe(true);
-      expect((await joined).status).toBe("stopped");
+      expect(await joined).toMatchObject({status:"stopped"});
       expect(api.lifecycle).toHaveBeenCalledExactlyOnceWith(target, "stop", expect.any(String));
       expect(api.read).not.toHaveBeenCalled();
       expect(vi.getTimerCount()).toBe(0);
@@ -747,4 +752,156 @@ it("unchanged list polls retain details while status-only changes notify documen
     expect(documents).toHaveBeenCalledOnce();
     expect(rows).not.toHaveBeenCalled();
   } finally { off.forEach(stop => stop()); }
+});
+
+describe("accepted final-save background observations",()=>{
+  const id="77777777-7777-4777-8777-777777777777";
+  const accepted=(kind:"stop"|"archive"|"delete"="stop",status="ready")=>({...doc(2,status),lifecycleVersion:1 as const,
+    acceptedOperation:{version:1 as const,id,kind,sourceGeneration:1,phase:"saving" as const,state:"pending" as const}});
+  beforeEach(()=>{vi.useFakeTimers();api.read.mockReset().mockReturnValue(new Promise(()=>{}));});
+  afterEach(()=>{clearCloudWorkspaceCatalog();vi.useRealTimers();});
+  it("retains delete preferences through background saving and clears them only on actual completion",async()=>{
+    const initial=accepted("delete");acceptCloudWorkspaceDocument(initial);
+    const waiting=waitForCloudWorkspaceLifecycle(target,"delete",initial);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await waiting).toEqual({kind:"background_pending",operationId:id});
+    expect(api.forget).not.toHaveBeenCalled();
+    api.forget.mockRejectedValueOnce(new Error("Native cleanup unavailable"));
+    const completed={...initial,version:3,status:"deleted",deletedAt:"2026-09-26T01:00:00Z",
+      acceptedOperation:{...initial.acceptedOperation,phase:"completed" as const,state:"completed" as const}};
+    acceptCloudWorkspaceDocument(completed);await Promise.resolve();
+    expect(api.forget).toHaveBeenCalledExactlyOnceWith(target);
+    acceptCloudWorkspaceDocument({...completed,version:4});
+    expect(api.forget).toHaveBeenCalledOnce();
+    expect(cloudWorkspaceDocument(target)?.status).toBe("deleted");
+  });
+  it.each(["stop","archive","delete"] as const)("detaches a %s waiter at 60 seconds without a fake terminal document",async operation=>{
+    const initial=accepted(operation);acceptCloudWorkspaceDocument(initial);
+    const waiting=waitForCloudWorkspaceLifecycle(target,operation,initial).then(result=>({result}),error=>({error}));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await waiting).toEqual({result:{kind:"background_pending",operationId:id}});
+    expect(vi.getTimerCount()).toBe(0);expect(api.read).toHaveBeenCalledOnce();
+    expect(cloudWorkspaceDocument(target)?.status).toBe("ready");
+  });
+  it.each(["stop", "archive", "delete"] as const)("keeps an accepted %s pending while saving its already-failed source", async operation => {
+    const initial = { ...accepted(operation, "failed"), error: { code: "source_failed", message: "Earlier source failure" } };
+    acceptCloudWorkspaceDocument(initial);
+    const waiting = waitForCloudWorkspaceLifecycle(target, operation, initial).then(result => ({ result }), error => ({ error }));
+    acceptCloudWorkspaceDocument({ ...initial, version: 3 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await waiting).toEqual({ result: { kind: "background_pending", operationId: id } });
+    expect(cloudWorkspaceDocument(target)?.status).toBe("failed");
+    expect(api.forget).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(["stop", "archive", "delete"] as const)("finishes %s from a failed source only on its exact accepted completion", async operation => {
+    const initial = accepted(operation, "failed");
+    acceptCloudWorkspaceDocument(initial);
+    const settled = vi.fn();
+    const waiting = waitForCloudWorkspaceLifecycle(target, operation, initial).then(
+      result => settled({ result }), error => settled({ error }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).not.toHaveBeenCalled();
+    const completed = { ...initial, version: 3,
+      acceptedOperation: { ...initial.acceptedOperation, phase: "completed" as const, state: "completed" as const } };
+    acceptCloudWorkspaceDocument(completed);
+    await waiting;
+    expect(settled).toHaveBeenCalledExactlyOnceWith({ result: completed });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(["changed error", "source recovered", "save finished"] as const)("surfaces a new failure after %s instead of retaining the original source exception", async change => {
+    const initial = { ...accepted("stop", "failed"), error: { code: "source_failed", message: "Earlier source failure" } };
+    acceptCloudWorkspaceDocument(initial);
+    const waiting = waitForCloudWorkspaceLifecycle(target, "stop", initial).then(result => ({ result }), error => ({ error }));
+    const settled = vi.fn();
+    void waiting.then(settled);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).not.toHaveBeenCalled();
+    if (change === "source recovered") acceptCloudWorkspaceDocument({ ...initial, version: 3, status: "ready" });
+    if (change === "save finished") acceptCloudWorkspaceDocument({ ...initial, version: 3, status: "stopping",
+      acceptedOperation: { ...initial.acceptedOperation, phase: "stopping" } });
+    const message = change === "changed error" ? "A new provider failure" : initial.error.message;
+    acceptCloudWorkspaceDocument({ ...initial, version: 4, error: { ...initial.error, message } });
+    expect(await waiting).toEqual({ error: expect.objectContaining({ message }) });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("surfaces an initially failed provider stop after saving has finished", async () => {
+    const initial = { ...accepted("stop", "failed"), error: { code: "provider_failed", message: "Stop failed" },
+      acceptedOperation: { ...accepted().acceptedOperation, phase: "stopping" as const } };
+    acceptCloudWorkspaceDocument(initial);
+    await expect(waitForCloudWorkspaceLifecycle(target, "stop", initial)).rejects.toThrow("Stop failed");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("shares the original observation budget with later joined callers", async () => {
+    const initial=accepted();acceptCloudWorkspaceDocument(initial);
+    const first=waitForCloudWorkspaceLifecycle(target,"stop",initial);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const second=waitForCloudWorkspaceLifecycle(target,"stop",initial);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await first).toEqual({kind:"background_pending",operationId:id});
+    expect(await second).toEqual({kind:"background_pending",operationId:id});
+    expect(api.read).toHaveBeenCalledOnce();expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(["account","owner","generation","operation"] as const)("silently retires an accepted waiter after %s replacement",async change=>{
+    const initial=accepted();acceptCloudWorkspaceDocument(initial);
+    const waiting=waitForCloudWorkspaceLifecycle(target,"stop",initial).then(result=>({result}),error=>({error}));
+    await vi.advanceTimersByTimeAsync(1_000);
+    if(change==="account")clearCloudWorkspaceCatalog();
+    if(change==="owner"){
+      applyCloudWorkspaceStreamCatalog({t:"catalog.changed",c:"remove",d:{workspaceId:target.workspaceId,version:3,catalogVersion:3,op:"remove"}});
+      acceptCloudWorkspaceDocument({...initial,version:4});
+    }
+    if(change==="generation")acceptCloudWorkspaceDocument({...initial,version:4,generation:{...initial.generation,number:2},acceptedOperation:undefined});
+    if(change==="operation")acceptCloudWorkspaceDocument({...initial,version:4,acceptedOperation:{...initial.acceptedOperation,id:crypto.randomUUID()}});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await waiting).toEqual({result:{kind:"retired"}});expect(vi.getTimerCount()).toBe(0);
+  });
+  it("requires accepted completion even if the source status is already stopped",async()=>{
+    const initial=accepted("stop","stopped");acceptCloudWorkspaceDocument(initial);const settled=vi.fn();
+    const waiting=waitForCloudWorkspaceLifecycle(target,"stop",initial).then(settled);
+    await vi.advanceTimersByTimeAsync(0);expect(settled).not.toHaveBeenCalled();
+    acceptCloudWorkspaceDocument({...initial,version:3,acceptedOperation:{...initial.acceptedOperation,state:"completed",phase:"completed"}});
+    await waiting;expect(settled).toHaveBeenCalledWith(expect.objectContaining({status:"stopped",version:3}));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(["workspace.archive","workspace.delete"])("preserves background state through the %s facade",async operation=>{
+    const initial=accepted(operation==="workspace.archive"?"archive":"delete");
+    acceptCloudWorkspaceDocument(doc(1));api.lifecycle.mockResolvedValue(initial);
+    const waiting=cloudWorkspaceOperation(target,operation).then(result=>({result}),error=>({error}));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await waiting).toEqual({result:{kind:"background_pending",operationId:id}});
+  });
+  it("releases terminal submission and observation slots across more historical actions than the live bound", async () => {
+    api.accepted.mockImplementation(async next => {
+      const operation = { version: 1 as const, id: crypto.randomUUID(), kind: "stop" as const, sourceGeneration: 1 };
+      return { operation, workspace: { ...doc(3,"stopped"), id: next.workspaceId, lifecycleVersion: 1,
+        acceptedOperation: { ...operation, state: "completed", phase: "completed" } } };
+    });
+    for (let i = 0; i < 130; i++) {
+      const next = { ...target, workspaceId: crypto.randomUUID() };
+      acceptCloudWorkspaceDocument({ ...doc(2), id: next.workspaceId, lifecycleVersion: 1 });
+      await expect(manageCloudWorkspace(next,"stop",true)).resolves.toMatchObject({ status: "stopped" });
+    }
+    expect(api.accepted).toHaveBeenCalledTimes(130); expect(vi.getTimerCount()).toBe(0);
+  });
+  it("bounds unresolved sends without discarding their original replay identities", async () => {
+    api.accepted.mockImplementation(async next => {
+      const operation = { version: 1 as const, id: crypto.randomUUID(), kind: "stop" as const, sourceGeneration: 1 };
+      return { operation, workspace: { ...doc(3), id: next.workspaceId, lifecycleVersion: 1,
+        acceptedOperation: { ...operation, state: "pending", phase: "saving" } } };
+    });
+    const tasks: Promise<unknown>[] = [];
+    try {
+      for (let i = 0; i < 128; i++) {
+        const next = { ...target, workspaceId: crypto.randomUUID() };
+        acceptCloudWorkspaceDocument({ ...doc(2), id: next.workspaceId, lifecycleVersion: 1 });
+        tasks.push(manageCloudWorkspace(next,"stop",true));
+      }
+      const next = { ...target, workspaceId: crypto.randomUUID() };
+      acceptCloudWorkspaceDocument({ ...doc(2), id: next.workspaceId, lifecycleVersion: 1 });
+      await expect(manageCloudWorkspace(next,"stop",true)).rejects.toThrow("Too many workspace lifecycle requests");
+      expect(api.accepted).toHaveBeenCalledTimes(128);
+    } finally { clearCloudWorkspaceCatalog(); await Promise.allSettled(tasks); }
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

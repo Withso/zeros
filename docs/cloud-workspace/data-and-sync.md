@@ -155,6 +155,10 @@ contract, not a side effect of this classification.
 
 ### Recovery after an unsealed stop
 
+This is recovery for historical/external interruption, not authorization for a
+new controlled unsaved stop. The [final-save recovery gate](infrastructure-and-operations.md#accepted-final-saves)
+keeps accepted destructive operations pending until their exact final proof.
+
 An interrupted stop can positively retire the last writer before it publishes
 a sealed checkpoint. The authenticated `recover-history` boot operation is an
 explicit exception to sealed custody, selected only after strict restore reports
@@ -216,7 +220,7 @@ The notice grants no send or execution permission.
 
 Roll out migration and CP support before publishing a recovery-capable runtime;
 then qualify the exact base/runtime and rebuild the test Computer through product
-paths. Rehearse a slow stop plus a lease tick, explicit `stop_unsealed`, resume,
+paths. Rehearse a slow stop plus a lease tick, a historical `stop_unsealed` fixture, resume,
 one committed gap audit, no inherited execution and the warning/dismissal flow.
 Also crash after each local prepare step, repeat at least four activated unsealed
 handoffs, and complete the next sealed stop/restore with edit/delete and ACK

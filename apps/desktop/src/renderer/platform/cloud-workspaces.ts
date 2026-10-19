@@ -17,6 +17,8 @@ import { WorkspaceRuntimeClient, type CloudResourceUsageConnection } from "./bri
 import { bridgeWorkspaceResourceUsage } from "./bridge/workspace-bridge";
 import { forgetCloudWorkspacePortForwarding } from "./cloud-workspace-access";
 import { isFeatureEnabled } from "../config/release-channel";
+import { CloudAcceptedLifecycleReceiptSchema, CloudRestartInputSchema,
+  type CloudAcceptedLifecycleReceipt } from "@zeros/protocol/cloud-final-save";
 
 async function readCloudJson(response: Response): Promise<unknown> {
   const reader = response.body?.getReader();
@@ -314,6 +316,48 @@ export async function changeCloudWorkspaceLifecycle(
     await forgetCloudWorkspacePortForwarding(target).catch(() => undefined);
   }
   return workspace;
+}
+
+export type CloudLifecycleAcceptance = {
+  workspace: CloudWorkspaceDocument;
+  operation: CloudAcceptedLifecycleReceipt;
+};
+const LifecycleAcceptanceSchema = z.object({
+  workspace: CloudWorkspaceDocumentSchema,
+  operation: CloudAcceptedLifecycleReceiptSchema,
+});
+
+function validateLifecycleAcceptance(target: CloudWorkspaceTarget,
+  kind: CloudAcceptedLifecycleReceipt["kind"], result: CloudLifecycleAcceptance): CloudLifecycleAcceptance {
+  if (result.workspace.id !== target.workspaceId || result.workspace.organizationId !== target.organizationId ||
+      result.operation.kind !== kind) throw new Error("Cloud lifecycle response changed identity");
+  return result;
+}
+
+/** Discovery is chosen before sending. An uncertain v1 send never falls back
+ * to the legacy path, including when a retry reaches an older CP instance. */
+export async function changeCloudWorkspaceLifecycleWithReceipt(
+  target: CloudWorkspaceTarget, operation: "stop" | "archive" | "delete", idempotencyKey: string,
+): Promise<CloudLifecycleAcceptance> {
+  target = Object.freeze({ ...target });
+  return validateLifecycleAcceptance(target, operation, await request(
+    `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}${operation === "delete" ? "" : `/${operation}`}`,
+    LifecycleAcceptanceSchema, { body: {}, idempotencyKey, method: operation === "delete" ? "DELETE" : "POST" },
+  ));
+}
+
+export async function restartCloudWorkspaceLifecycle(target: CloudWorkspaceTarget,
+  input: z.infer<typeof CloudRestartInputSchema>, idempotencyKey: string,
+): Promise<CloudLifecycleAcceptance> {
+  target = Object.freeze({ ...target });
+  const body = Object.freeze(CloudRestartInputSchema.parse(input));
+  const result = validateLifecycleAcceptance(target, "restart", await request(
+    `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/restart`,
+    LifecycleAcceptanceSchema, { body, idempotencyKey },
+  ));
+  if (result.operation.sourceGeneration !== body.expectedGeneration)
+    throw new Error("Cloud Restart receipt changed its original generation");
+  return result;
 }
 
 export const CloudWorkspaceRecoveryInputSchema = z.object({

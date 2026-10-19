@@ -74,6 +74,11 @@
    reopening NORMAL or claims; exercise heartbeat delivery, failed handoff flush,
    lost seal ACK, cancellation ACK, replacement final capture and original drain
    tickets together. A generic cancellation label does not identify the failed gate.
+   Keep accepted destructive recovery separate from finite attempt retirement.
+   An ambiguous commit retains exact journaled bytes and key after all admitted
+   I/O joins. A successor needs positive predecessor retirement and the same
+   native custody at consumption. Old claims that ignore RETURNING must fail in
+   SQL, and pending/retired app observations must reach every terminal facade.
    Bound draining compute retries by the next finite stop deadline, and attempt
    due escalation before provider I/O. Test both stopped-but-unsettled metering
    and already-expired budgets so a past deadline cannot create a hot retry loop.
@@ -119,7 +124,7 @@
    add no observation queries or provider calls, and fence closed nested scopes.
    For stop/resume races, hold the final checkpoint open across a real lease
    tick. Preserve its lifecycle intent; test every direct provider-stop caller,
-   the native writer seal, and an audited deadline fallback before dispatch.
+   the native writer seal, and refusal of unsaved dispatch after deadline expiry.
    A stop decision is not provider retirement proof or older-checkpoint custody.
    For migration fixtures, seed historical receipts against the schema at the
    migration cutoff. A current completion service can require tables that did
