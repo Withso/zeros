@@ -1289,6 +1289,43 @@ describe("workspace runtime routing", () => {
     } finally { off(); client.dispose(); }
   });
 
+  it("owner_a_b_a_never_cross_attaches a retired history response or queued event to the returning owner", async () => {
+    const other = { ...a, organizationId: "44444444-4444-4444-8444-444444444444" };
+    const old = fakePeer(a), middle = fakePeer(other), current = fakePeer(a);
+    const subscriptions = vi.spyOn(old.peer.client, "on");
+    const open = vi.fn().mockResolvedValueOnce(old.peer).mockResolvedValueOnce(middle.peer).mockResolvedValueOnce(current.peer);
+    let identity = "account-A";
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [], identity: () => identity });
+    const updates = vi.fn(); client.on("AGENT_SESSION_UPDATE", updates);
+    const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window",
+      params: { chatId: cloudScopedId(a, "chat"), limit: 100 } };
+    try {
+      await client.warmWorkspace(a);
+      const pending = deferred<Record<string, unknown>>();
+      old.request.mockImplementationOnce(() => pending.promise);
+      const response = client.request(request), rejected = expect(response).rejects.toThrow(/changed|retired/i);
+      await vi.waitFor(() => expect(old.request).toHaveBeenCalledTimes(2));
+      const stale = subscriptions.mock.calls.find(([type]) => type === "AGENT_SESSION_UPDATE")![1];
+      identity = "account-B"; client.clearCloudConnections(); await client.warmWorkspace(other);
+      identity = "account-A"; client.clearCloudConnections(); await client.warmWorkspace(a);
+      const frame = { agentId: "codex", chatId: "chat", executionId: "native", notification: { sessionId: "native",
+        update: { sessionUpdate: "agent_message_chunk" as const, content: { type: "text" as const, text: "retired" } } } };
+      stale({ type: "AGENT_SESSION_UPDATE", ...frame } as BridgeMessage);
+      middle.emit("AGENT_SESSION_UPDATE", frame);
+      pending.resolve({ type: "WORKSPACE_RESPONSE", op: "messages.window", result: { messages: [{ text: "retired" }] } });
+      await rejected;
+      expect(updates).not.toHaveBeenCalled();
+      current.emit("AGENT_SESSION_UPDATE", frame);
+      expect(updates).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: cloudScopedId(a, "chat") }));
+      current.request.mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", op: "messages.window", result: { messages: [{ text: "current" }] } });
+      await expect(client.request(request)).resolves.toMatchObject({ result: { messages: [{ text: "current" }] } });
+      expect(open.mock.calls.map(([target]) => target)).toEqual([a, other, a]);
+      expect(old.release).toHaveBeenCalledOnce(); expect(middle.release).toHaveBeenCalledOnce();
+      expect(current.release).not.toHaveBeenCalled();
+      for (const peer of [old, middle, current]) expect(peer.send).not.toHaveBeenCalled();
+    } finally { client.dispose(); }
+  });
+
   it("closes late connections after sign-out and never dispatches their pending write", async () => {
     const wait = deferred<CloudPeer>();
     const pa = fakePeer(a);

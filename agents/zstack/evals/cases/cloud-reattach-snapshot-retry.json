@@ -1,0 +1,9 @@
+{
+  "id": "cloud-reattach-snapshot-retry",
+  "kind": "replay",
+  "area": "desktop-cloud-ui-state",
+  "fixedBy": "pr:620",
+  "symptom": "After a cloud frontend reconnect, a completed turn remains stale if its first automatic snapshot read fails and no more live events arrive.",
+  "rule": "Retry the observation once under the exact attachment, snapshot, execution and connection lifetime, without grants, wakes or redispatch. See agents/zstack/changes/cloud-reattach-snapshot-retry.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/platform/bridge/__tests__/cloud-agent-connection.test.ts"
+}

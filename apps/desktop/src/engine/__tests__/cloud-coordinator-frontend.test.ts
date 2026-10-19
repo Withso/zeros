@@ -3,12 +3,25 @@ import { chmodSync, existsSync, lstatSync, mkdtempSync, rmSync, readFileSync, wr
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
+import type { CloudCommandClaim, CloudCommandSnapshot } from "@zeros/protocol/cloud-commands";
+import type { CloudEventClientRequestSchema, CloudEventCursor } from "@zeros/protocol/cloud-events";
+import type { z } from "zod";
 import { CloudExecutionBoundary } from "../agents/containment/cloud-execution-boundary";
 import { portableCloudWorkloads } from "../agents/containment/__tests__/helpers/portable-cloud-custody";
 import { CloudTransport } from "../transport/cloud";
 import { cloudCoordinatorFrontendSpawner } from "../cloud-coordinator-frontend";
 import { CloudExecutionCoordinator } from "../cloud-execution-coordinator";
+import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
+import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
+import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
+import { CloudEventRuntime } from "../cloud-event-runtime";
+import { CloudCommandRuntime } from "../cloud-command-runtime";
+import { CloudEventReader } from "../../renderer/platform/bridge/cloud-event-reader";
+import type { ConnectionStatus, RuntimeClient } from "../../renderer/platform/bridge/ws-client";
+import { applyUpdate, type AgentMessage } from "../../renderer/features/agent/use-agent-session";
 
 const configuration = vi.hoisted(() => ({ uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0,
   version: 4 as const, backend: "cloud-worker" as const, profile: "zeros-cloud-worker-v4" as const,
@@ -50,10 +63,163 @@ async function fixture() {
       headers: { "x-zeros-readiness-token": token } }, response => { response.resume(); resolve(response.statusCode!); });
     req.on("error", reject);
   });
-  return { child, request, prepare, frames, launch, exited, workloads, port, directory, socket, loopback, boundary };
+  return { child, request, prepare, frames, launch, exited, workloads, port, directory, socket, loopback, boundary, transport };
+}
+
+/** Real WebSocket bytes, with only the desktop's native admission replaced by
+ * the existing qualification token. This is not an S1/provider/base proof. */
+function replayClient(port: number) {
+  let socket: WebSocket | undefined;
+  const listeners = new Map<string, Set<(frame: BridgeMessage) => void>>();
+  const statuses = new Set<(status: ConnectionStatus) => void>();
+  const request = vi.fn((input: object) => new Promise<BridgeMessage>((resolve, reject) => {
+    const current = socket!, id = randomUUID();
+    if (!current || current.readyState !== WebSocket.OPEN) { reject(new Error("Fixture transport disconnected")); return; }
+    const done = () => { clearTimeout(timer); current.off("message", receive); current.off("close", closed); };
+    const closed = () => { done(); reject(new Error("Fixture transport closed")); };
+    const receive = (bytes: Buffer) => {
+      const frame = JSON.parse(bytes.toString()) as BridgeMessage;
+      if ("requestId" in frame && frame.requestId === id) { done(); resolve(frame); }
+    };
+    const timer = setTimeout(() => { done(); reject(new Error("Fixture request timed out")); }, 2_000);
+    current.on("message", receive); current.on("close", closed);
+    current.send(JSON.stringify({ ...input, id, source: "browser", timestamp: Date.now() }));
+  }));
+  const client = { request,
+    on(type: string, listener: (frame: BridgeMessage) => void) {
+      const callbacks = listeners.get(type) ?? new Set(); callbacks.add(listener); listeners.set(type, callbacks);
+      return () => callbacks.delete(listener);
+    },
+    onStatusChange(listener: (status: ConnectionStatus) => void) { statuses.add(listener); return () => statuses.delete(listener); },
+  } as unknown as RuntimeClient;
+  cleanup.push(async () => { socket?.terminate(); });
+  return { client, request, async connect() {
+    const current = new WebSocket(`ws://127.0.0.1:${port}/ws`, ["zeros-v1",
+      `zeros-cloud-token.${Buffer.from("qualification-only-token").toString("base64url")}`]);
+    socket = current;
+    current.on("message", bytes => {
+      if (socket !== current) return;
+      const frame = JSON.parse(bytes.toString()) as BridgeMessage;
+      for (const listener of listeners.get(frame.type) ?? []) listener(frame);
+    });
+    current.on("close", () => { if (socket === current) for (const listener of statuses) listener("disconnected"); });
+    await new Promise<void>((resolve, reject) => { current.once("open", resolve); current.once("error", reject); });
+    current.send(JSON.stringify(createMessage({ type: "CONNECTED", source: "browser", capabilities: [] })));
+    for (const listener of statuses) listener("connected");
+  } };
 }
 
 describe.skipIf(process.platform !== "linux")("Host-owned cloud frontend (portable custody fixture, real processes)", () => {
+  it.each([8192, 1])("kill_frontend_mid_turn_then_reattach_without_redispatch (retained events=%s)", async maxEntries => {
+    const f = await fixture(); await f.child.stopAndProve();
+    const scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID(),
+      bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 1 };
+    const now = 1_000_000, actorSessionId = randomUUID(), conversationId = randomUUID(), executionId = randomUUID(), turnId = randomUUID();
+    const engineLive = () => true;
+    const actors = new CloudActorAuthorityRegistry({ scope, engineLive, time: { wall: () => now, monotonic: () => 0 } });
+    actors.confirm({ scope, actorSessionId, authorityEpoch: 1, confirmedUntilMs: now + 9_000, fundingConsentVersion: 1,
+      fundingGrant: { kind: "owner" }, actor: { userId: scope.fundingOwnerUserId, deviceId: randomUUID(), deviceKeyVersion: 1,
+        role: "owner", fingerprint: "a".repeat(64) } });
+    const file = path.join(f.directory, "queue.sqlite");
+    const queue = new CloudLocalCommandQueue({ file, scope, actors, engineLive, now: () => now,
+      history: () => ({ recordSequence: 1, eventSequence: 0 }), ready: () => true, selectExecution: () => ({ executionId }) });
+    const store = new CloudLocalCommandEventStore({ file, queue, engineLive, maxEntries });
+    const unexpected = vi.fn(async () => { throw new Error("Unexpected control-plane event request"); });
+    const events = new CloudEventRuntime(scope.engineInstanceId, { request: unexpected, onFailure: vi.fn() });
+    let history: AgentMessage[] = [], displayed: AgentMessage[] = [];
+    let activeTurn: { turnId: string; startedAt: number } | null = null;
+    let complete!: () => void;
+    const terminal = new Promise<void>(resolve => { complete = resolve; });
+    let latestTurn: { turnId: string; status: "completed" } | null = null;
+    const publish = (frame: BridgeMessage) => {
+      if (frame.type === "AGENT_SESSION_UPDATE") history = applyUpdate(history, frame.notification);
+      const retained = events.capture(frame); f.transport.broadcast(retained); return retained;
+    };
+    const text = (value: string) => publish(createMessage({ type: "AGENT_SESSION_UPDATE", source: "engine", chatId: conversationId,
+      agentId: "codex", notification: { sessionId: executionId, update: { sessionUpdate: "agent_message_chunk", messageId: "answer",
+        content: { type: "text", text: value } } } }));
+    const dispatch = vi.fn(async (_claim: CloudCommandClaim) => {
+      activeTurn = { turnId, startedAt: now }; text("Before restart. ");
+      await terminal;
+      activeTurn = null; latestTurn = { turnId, status: "completed" };
+      return { state: "succeeded" as const, resultCode: null };
+    });
+    const commands = new CloudCommandRuntime({ request: unexpected, validate() {}, execution: () => executionId,
+      dispatch, cancel: vi.fn(async () => {}), changed() {} });
+    cleanup.push(async () => { complete(); commands.close(); events.close(); store.close(); queue.close(); actors.dispose(); });
+    const initialize = vi.fn(async () => { commands.installLocalQueue(queue); events.start(); await events.installLocalStore(store); });
+    const owner = new CloudExecutionCoordinator({ bootId: scope.bootId, initialize,
+      spawn: cloudCoordinatorFrontendSpawner(f.boundary, f.socket, f.loopback, f.port), changed() {} });
+    cleanup.push(() => owner.stop());
+    await owner.start(); await expect.poll(() => owner.isInteractiveReady()).toBe(true);
+    f.transport.onMessage(async (client, message) => {
+      if (message.type !== "WORKSPACE_REQUEST" || message.op !== "cloudEvents.request") return;
+      const input = (message.params as { request: z.infer<typeof CloudEventClientRequestSchema> }).request;
+      try {
+        const result = input.kind === "snapshot" ? await events.snapshot(() => ({ conversationId, executionId, history, activeTurn, latestTurn }))
+          : await events.replay(input.cursor);
+        client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: message.id, op: message.op, result }));
+      } catch (error) {
+        client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: message.id, op: message.op,
+          code: (error as { code: string }).code, message: "Snapshot required" }));
+      }
+    });
+    const peer = replayClient(f.port);
+    let resnapshots = 0;
+    const snapshot = async () => {
+      const installation = reader.beginSnapshot({ conversationId, executionId });
+      try {
+        const response = await peer.client.request({ type: "WORKSPACE_REQUEST", op: "cloudEvents.request",
+          params: { request: { kind: "snapshot", conversationId } } });
+        const result = (response as unknown as { result: { cursor: CloudEventCursor; snapshot: { history: AgentMessage[] } } }).result;
+        installation.install(result.cursor, { conversationId, executionId }, () => { displayed = result.snapshot.history; });
+      } finally { installation.finish(); }
+    };
+    const reader = new CloudEventReader(peer.client, () => { resnapshots++; void snapshot(); });
+    cleanup.push(async () => { reader.dispose(); });
+    const updates = vi.fn((frame: BridgeMessage) => {
+      if (frame.type === "AGENT_SESSION_UPDATE") displayed = applyUpdate(displayed, frame.notification);
+    });
+    reader.on("AGENT_SESSION_UPDATE", updates);
+    await commands.handle({ kind: "mutate", mutation: { conversationId, operationId: randomUUID(), expectedRevision: 0,
+      action: { kind: "enqueue", commandId: randomUUID(), payload: { agentId: "codex", model: "test-model", modeRevision: 0,
+        userMessageId: turnId, prompt: [{ type: "text", text: "Synthetic" }] } } } }, actorSessionId);
+    await expect.poll(() => dispatch.mock.calls.length).toBe(1);
+    await peer.connect(); await snapshot();
+    expect(displayed).toEqual(history);
+    const original = owner.frontendId();
+    const prepared = await f.prepare.mock.results.at(-1)!.value;
+    const child = await vi.mocked(prepared.spawn).mock.results[0]!.value;
+    await child.signal("SIGKILL");
+    await expect.poll(() => owner.isInteractiveReady()).toBe(false);
+    text("While disconnected. ");
+    complete();
+    await expect.poll(async () => (await commands.handle({ kind: "snapshot", conversationId }, actorSessionId) as CloudCommandSnapshot).receipts[0]?.state)
+      .toBe("succeeded");
+    const finalFrame = text("Completed once.");
+    await expect.poll(() => owner.frontendId(), { timeout: 4_000 }).toSatisfy(value => !!value && value !== original);
+    await peer.connect();
+    // The reducer stamps delivery time, so compare transcript identity/content
+    // before the authoritative snapshot restores the original timestamps.
+    const transcript = (rows: AgentMessage[]) => rows.map(row => ({ id: row.id, kind: row.kind,
+      ...(row.kind === "text" ? { text: row.text } : {}) }));
+    await expect.poll(() => transcript(displayed)).toEqual(transcript(history));
+    f.transport.broadcast(finalFrame); // An already replayed delivery cannot append again.
+    // A response on the same ordered socket is a barrier for that delivery.
+    await peer.client.request({ type: "WORKSPACE_REQUEST", op: "cloudEvents.request",
+      params: { request: { kind: "replay", cursor: events.cursor } } });
+    expect(transcript(displayed)).toEqual(transcript(history));
+    expect(updates).toHaveBeenCalledTimes(maxEntries === 1 ? 0 : 2);
+    await snapshot();
+    expect(displayed).toEqual(history);
+    expect(displayed.filter(row => row.kind === "text").map(row => row.text)).toEqual(["Before restart. While disconnected. Completed once."]);
+    expect(resnapshots).toBe(maxEntries === 1 ? 1 : 0);
+    expect(queue.turnJournal(0, 64).map(entry => [entry.state, entry.turnId])).toEqual([["started", turnId], ["completed", turnId]]);
+    queue.acknowledgeTurnJournal(2); queue.acknowledgeTurnJournal(2); queue.acknowledgeTurnJournal(1);
+    expect(queue.turnJournalAcked()).toBe(2);
+    expect(dispatch).toHaveBeenCalledOnce(); expect(initialize).toHaveBeenCalledOnce(); expect(unexpected).not.toHaveBeenCalled();
+  }, 15_000);
+
   it("forwards unchanged authenticated bytes, retains the loopback probe boundary and owns no credential", async () => {
     const f = await fixture();
     expect(await f.request("/health")).toBe(200);
