@@ -54,6 +54,7 @@ import {
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceComputeLeaseCoordinator, type ManagedComputePolicy } from "./compute-leases.js";
 import {retireCloudAgentBootSources} from "./agent-boot-credentials.js";
+import type { CloudRuntimeRollbackCache } from "./runtime-rollback.js";
 
 type LifecycleOperation = "create" | "stop" | "wake" | "archive" | "delete";
 type DesiredState = "running" | "stopped" | "archived" | "deleted";
@@ -112,6 +113,7 @@ export type CloudWorkspaceReconcilerOptions = {
   maxManagedResourcesPerSweep?: number;
   workosEnabled?: boolean;
   runtimeUpgradeConfig?: CloudWorkspaceBackendConfig;
+  runtimeRollbackCache?: Pick<CloudRuntimeRollbackCache, "beforeStop"> | null;
   paidAuthorityRecheckIntervalMs?: number;
   workerId?: string;
   logger?: ReconcileLogger;
@@ -329,6 +331,7 @@ export class CloudWorkspaceReconciler {
   private readonly paidAuthority: DatabaseCloudWorkspacePaidAuthorityReconciler;
   private readonly computeLeases: CloudWorkspaceComputeLeaseCoordinator;
   private readonly runtimeUpgradeConfig: CloudWorkspaceBackendConfig | null;
+  private readonly runtimeRollbackCache: CloudWorkspaceReconcilerOptions["runtimeRollbackCache"];
   private readonly workosEnabled: boolean;
   private readonly scheduler: CloudWorkerScheduler;
   private readonly jobs: JobRunner;
@@ -344,6 +347,7 @@ export class CloudWorkspaceReconciler {
     this.provider = options.provider;
     this.providerResolver = options.providerResolver ?? null;
     this.runtimeUpgradeConfig = options.runtimeUpgradeConfig ?? null;
+    this.runtimeRollbackCache = options.runtimeRollbackCache;
     this.workosEnabled = options.workosEnabled === true;
     this.computeLeases = new CloudWorkspaceComputeLeaseCoordinator({pool:options.pool,provider:options.provider,
       ...(options.providerResolver?{providerResolver:options.providerResolver}:{}),workosEnabled:options.workosEnabled===true,
@@ -936,6 +940,10 @@ export class CloudWorkspaceReconciler {
       }
       case "stop": {
         if (!current) return null;
+        if (intent.affectsWorkspace && current.state === "running" && this.runtimeRollbackCache &&
+            !await this.runtimeRollbackCache.beforeStop({ workspaceId: intent.workspaceId, organizationId: intent.orgId,
+              generation: intent.generation, providerResourceId: current.resourceId, intentId: intent.id,
+              authorityEpoch: intent.authorityEpoch, workerId: this.workerId, sourceBindingId: intent.sourceBindingId })) return current;
         const next = await provider.stop(current.resourceId);
         assertProviderResourceIdentity(next, intent);
         return next;

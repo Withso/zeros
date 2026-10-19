@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { CloudActiveRuntimeSchema, RuntimeDescriptorSchema, type CloudActiveRuntime, type RuntimeDescriptor } from "./runtime-contract.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { lockCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
@@ -9,6 +9,8 @@ import { cloudRuntimePin, loadPinnedCloudRuntime, type CloudRuntimePinRow } from
 import { readCloudWorkspaceCredentialKinds, selectCloudWorkspaceRuntimeUpgrade } from "./runtime-upgrade-availability.js";
 import type { DatabaseCloudRuntimeTransitionService, CloudRuntimeTransitionClaim } from "./runtime-transfer.js";
 import type { RuntimeUpdateInput } from "./runtime-update-runner.js";
+import { parseRuntimeRollbackOffer } from "./runtime-rollback-contract.js";
+import { readRuntimeRollbackRestore, runtimeRollbackCacheSupported } from "./runtime-rollback-restore.js";
 
 export type RuntimeStagePlan = {
   resourceId: string; phase: "offered" | "staged"; objectKey: string; deadline: number;
@@ -23,6 +25,7 @@ export type RuntimeStagingStore = {
     items: Array<Pick<CloudRuntimeTransitionClaim, "workspaceId" | "organizationId" | "transitionId">>; cursor: string | null;
   }>;
   read(claim: CloudRuntimeTransitionClaim): Promise<RuntimeStagePlan | null>;
+  prepareRestore?(claim: CloudRuntimeTransitionClaim): Promise<void>;
 };
 
 type Offer = Parameters<DatabaseCloudRuntimeTransitionService["offer"]>[0];
@@ -105,7 +108,30 @@ export class DatabaseRuntimeStagingStore implements RuntimeStagingStore {
   }
 
   read(claim: CloudRuntimeTransitionClaim): Promise<RuntimeStagePlan | null> {
+    return withSystemTx(this.options.pool, tx => this.readTx(tx, claim));
+  }
+
+  /** Pin the explicit target before issuing a download capability. This
+   * preparation never closes source admission or changes the selected runtime. */
+  prepareRestore(claim: CloudRuntimeTransitionClaim): Promise<void> {
     return withSystemTx(this.options.pool, async tx => {
+      const plan = await this.readTx(tx, claim);
+      if (!plan || plan.input.restore || !await runtimeRollbackCacheSupported(tx, plan.input.source.baseCompatibilityId)) return;
+      const ref = (await tx.query<{ id: string; proof: unknown }>(`SELECT id,proof FROM cloud_workspace_runtime_rollback_refs
+        WHERE workspace_id=$1 AND org_id=$2 AND provider_resource_id=$3 AND runtime_id=$4 AND base_compatibility_id=$5
+        ORDER BY created_at DESC,id DESC LIMIT 1`, [claim.workspaceId,claim.organizationId,plan.resourceId,
+        plan.target.runtimeId,plan.input.source.baseCompatibilityId])).rows[0];
+      if (!ref) return;
+      const proof = parseRuntimeRollbackOffer(ref.proof);
+      if (Object.entries(plan.target).some(([key,value]) => proof.runtime[key as keyof RuntimeDescriptor] !== value))
+        throw new Error("Runtime rollback proof is invalid");
+      await tx.query(`INSERT INTO cloud_workspace_runtime_rollback_restores(transition_id,workspace_id,org_id,retention_id,deadline_at)
+        VALUES($1,$2,$3,$4,least($5::timestamptz,statement_timestamp()+interval '240 seconds')) ON CONFLICT DO NOTHING`,
+      [claim.transitionId,claim.workspaceId,claim.organizationId,ref.id,new Date(plan.deadline)]);
+    });
+  }
+
+  private async readTx(tx: Tx, claim: CloudRuntimeTransitionClaim): Promise<RuntimeStagePlan | null> {
       await lockCloudWorkspaceGenerationTransition(tx, claim);
       const row = (await tx.query<{ source_generation: number; candidate_generation: number; source_engine_instance_id: string;
         source_active: CloudActiveRuntime; target_descriptor: RuntimeDescriptor; provider_resource_id: string;
@@ -149,12 +175,14 @@ export class DatabaseRuntimeStagingStore implements RuntimeStagingStore {
       if (Object.entries(descriptor).some(([key, value]) => selection.selected!.descriptor[key as keyof RuntimeDescriptor] !== value) ||
         active.runtimeId !== source.runtime.runtimeId || active.manifestSha256 !== source.runtime.manifestSha256 ||
         active.baseCompatibilityId !== source.runtime.baseCompatibilityId) return null;
+      const restore = await readRuntimeRollbackRestore(tx, claim, active.baseCompatibilityId);
+      if (restore && Date.parse(restore.deadline) <= Date.now()) return null;
+      const deadline = Math.min(row.stage_deadline_at.getTime(), restore ? Date.parse(restore.deadline) : Infinity);
       return { resourceId: row.provider_resource_id, phase: row.phase, objectKey: selection.selected.objectKey,
-        deadline: row.stage_deadline_at.getTime(), target: descriptor,
+        deadline, target: descriptor,
         input: { schema: "zeros.runtime-update/v1", operation: "stage", transitionId: claim.transitionId, fence: claim.executionFence,
           scope: { workspaceId: claim.workspaceId, organizationId: claim.organizationId, sourceGeneration: row.source_generation,
             candidateGeneration: row.candidate_generation, sourceEngineInstanceId: row.source_engine_instance_id },
-          mode: row.mode, expiresAt: row.stage_deadline_at.toISOString(), source: active } };
-    });
+          mode: row.mode, expiresAt: new Date(deadline).toISOString(), source: active, ...(restore ? { restore } : {}) } };
   }
 }

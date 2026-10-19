@@ -160,12 +160,42 @@ class RuntimeInstaller:
         for name in ("current", "previous"):
             runtime_id = self.app.current(name)
             if runtime_id:
-                require(not os.path.lexists(self.app.path(self.app.incomplete_marker(runtime_id))))
+                if os.path.lexists(self.app.path(self.app.incomplete_marker(runtime_id))):
+                    # Only this explicitly authorized restore may recover its
+                    # own interrupted target. Current/source remains strict.
+                    ref = self.app.rollback_reference(runtime_id) if "restore" in request else None
+                    require(name == "previous" and ref and ref["state"] != "restored" and
+                            ref["retentionId"] == request["restore"]["retentionId"] and
+                            ref["installerReceiptSha256"] == request["restore"]["installerReceiptSha256"])
         self.check_expiry(request)
 
     def check_expiry(self, request):
         remaining = (self.b.timestamp(request["expiresAt"], "input_schema") - self.app.now()).total_seconds()
         require(0 < remaining <= 900)
+        if "restore" in request:
+            require(0 < (self.b.timestamp(request["restore"]["deadline"], "input_schema") - self.app.now()).total_seconds() <= 240)
+
+    def check_prepared_restore(self, request):
+        # Only the new base understands retained payloads. A completed stage
+        # cannot be turned into an ordinary activation to renew its budget.
+        if self.app.compat.get("runtimeRollbackCacheVersion") != 1:
+            require("restore" not in request)
+            return
+        target = request["target"]["runtimeId"]
+        ref = self.app.rollback_reference(target)
+        if not ref:
+            require("restore" not in request)
+            return
+        restore = request.get("restore")
+        require(restore and ref["state"] == "restored" and
+                ref["retentionId"] == restore["retentionId"] and
+                ref["installerReceiptSha256"] == restore["installerReceiptSha256"])
+        journal = self.b.strict_json(self.app.read(self.b.RECEIPTS + "/" + target + ".restore.json", 4096, 0o600), "input_schema")
+        self.b.shape(journal, ("operationId", "retentionId", "deadline", "phase"))
+        require(journal["phase"] == "restored" and journal["operationId"] == request["transitionId"] and
+                journal["retentionId"] == restore["retentionId"] and
+                self.b.timestamp(journal["deadline"], "input_schema") == self.b.timestamp(restore["deadline"], "input_schema"))
+        self.check_expiry(request)
 
     def journal(self, request, phase):
         # Only immutable identities and closed states. Never persist grants,
@@ -211,14 +241,27 @@ class RuntimeInstaller:
     def run(self, request):
         b, app = self.b, self.app
         b.shape(request, ("schema", "operation", "transitionId", "fence", "scope", "expiresAt", "source", "mode"),
-                ("install", "target", "handoff"))
+                ("install", "target", "handoff", "restore"))
         require(request["schema"] == SCHEMA and request["operation"] in ("stage", "activate"))
         require(request["mode"] in ("bootstrap", "engine"))
         for key in ("transitionId", "fence"):
             b.text_match(request[key], b.UUID, "input_schema")
         validate_scope(b, request["scope"])
         active_document(b, request["source"])
+        if "restore" in request:
+            b.shape(request["restore"], ("retentionId", "installerReceiptSha256", "deadline"))
+            b.text_match(request["restore"]["retentionId"], b.UUID, "input_schema")
+            b.text_match(request["restore"]["installerReceiptSha256"], b.HEX, "input_schema")
+        self.check_expiry(request)
+        if "restore" in request:
+            # Protected base validation may wait for hydration. It belongs to
+            # this operation's existing budget, before any network or disk I/O.
+            end = min(b.timestamp(request["restore"]["deadline"], "input_schema"),
+                      b.timestamp(request["expiresAt"], "input_schema"))
+            self.arm_deadline(max(1, int((end - app.now()).total_seconds())))
         app.base()
+        if "restore" in request:
+            require(app.compat.get("runtimeRollbackCacheVersion") == 1)
         self.check_expiry(request)
         if "handoff" in request:
             require(request["operation"] == "activate" and request["mode"] == "engine")
@@ -233,6 +276,7 @@ class RuntimeInstaller:
             require(request["target"]["runtimeId"] != request["source"]["runtimeId"])
             with app.lock("runtime-install.lock"):
                 self.check_source(request)
+                self.check_prepared_restore(request)
                 _, receipt = app.verify_runtime(request["source"]["runtimeId"], full=True)
                 require(b.sha(receipt) == request["source"]["installerReceiptSha256"])
                 app.verify_runtime(request["target"]["runtimeId"], full=True, descriptor=request["target"])
@@ -271,6 +315,24 @@ class RuntimeInstaller:
         staged.__dict__.update(app.__dict__)
         staged.host = NoHostChanges()
         try:
+            if "restore" in request:
+                restore = request["restore"]
+                ref = app.rollback_reference(value["runtime"]["runtimeId"])
+                require(ref and ref["retentionId"] == restore["retentionId"] and
+                        ref["installerReceiptSha256"] == restore["installerReceiptSha256"])
+                deadline = b.timestamp(restore["deadline"], "input_schema")
+                self.arm_deadline(max(1, int((deadline - app.now()).total_seconds())))
+
+                def authorize():
+                    owner.check_source(request)
+                    return owner.runtime.authorize_restore(request)
+
+                staged.restore_rollback(value, ref, deadline=deadline, authorize=authorize,
+                                        operation_id=request["transitionId"])
+                # Full proof, including the original receipt, before allowing
+                # the existing activation path to retire the serving source.
+                require(authorize())
+                staged.switch(value["runtime"]["runtimeId"])
             staged.install(request["install"].encode("ascii"))
         except Staged:
             return self.response(request, "staged")
@@ -290,10 +352,15 @@ class RuntimeInstaller:
                 # The CP's compare-and-set has now closed admission. A stale
                 # source or expired permit must still fail before retirement.
                 owner.check_source(request)
-                deadline = time.monotonic() + ACTIVATION_SECONDS
+                owner.check_prepared_restore(request)
+                seconds = ACTIVATION_SECONDS
+                if "restore" in request:
+                    seconds = min(seconds, (owner.b.timestamp(request["restore"]["deadline"], "input_schema") - app.now()).total_seconds())
+                require(seconds > 0)
+                deadline = time.monotonic() + seconds
                 owner.journal(request, "consumption_authorized" if "handoff" in request else "activating")
                 started = True
-                owner.arm_deadline(ACTIVATION_SECONDS)
+                owner.arm_deadline(max(1, int(seconds)))
                 if request["mode"] == "bootstrap":
                     original_host.stop()
                 else:
@@ -371,6 +438,44 @@ class RuntimeInstaller:
             app.host = host
 
 
+class RollbackCacheInstaller(RuntimeInstaller):
+    """Sealed-stop metadata custody, using the same root lock order as setup.
+    No caller-selected program, path or artifact URL enters this operation.
+    """
+    def __init__(self, b, app, pipe, arm_deadline=lambda _seconds: None):
+        super().__init__(b, app, None, arm_deadline)
+        self.pipe = pipe
+
+    def run(self, request):
+        b, app = self.b, self.app
+        b.shape(request, ("schema", "operation", "fence", "scope", "current", "expiresAt"))
+        require(request["schema"] == "zeros.runtime-rollback-cache/v1" and request["operation"] == "evict")
+        b.text_match(request["fence"], b.UUID, "input_schema")
+        active_document(b, request["current"])
+        seconds = (b.timestamp(request["expiresAt"], "input_schema") - app.now()).total_seconds()
+        require(0 < seconds <= 120)
+        self.arm_deadline(max(1, int(seconds)))
+        app.base()
+        require(app.compat.get("runtimeRollbackCacheVersion") == 1)
+        b.validate_rollback_scope(request["scope"])
+
+        def retain(offer):
+            reply = self.pipe.cache_exchange(request, "retain", offer=offer)
+            require(reply["allow"])
+            return reply.get("retentionId")
+
+        def authorize(phase):
+            return self.pipe.cache_exchange(request, phase)["allow"]
+
+        with self.setup_lock(), app.lock("runtime-update.lock"):
+            retention = app.evict_previous({key: request[key] for key in ("scope", "current", "expiresAt")},
+                                           retain=retain, authorize=authorize)
+        result = {key: request[key] for key in ("schema", "fence", "scope")}
+        result["outcome"] = "evicted" if retention else "unchanged"
+        if retention: result["retentionId"] = retention
+        return result
+
+
 class Pipe:
     """One bounded request/response at a time over the pinned root SSH pipe."""
     def __init__(self, b):
@@ -416,6 +521,18 @@ class Pipe:
         require(type(reply["allow"]) is bool)
         return reply
 
+    def cache_exchange(self, request, phase, offer=None):
+        value = {key: request[key] for key in ("schema", "fence", "scope")}
+        value["phase"] = phase
+        if offer is not None: value["offer"] = offer
+        self.write(value)
+        reply = self.read(65 if phase == "retain" else 15)
+        self.b.shape(reply, ("schema", "fence", "scope", "phase", "allow"), ("retentionId",))
+        require(all(reply[key] == value[key] for key in ("schema", "fence", "scope", "phase")))
+        require(type(reply["allow"]) is bool)
+        require(("retentionId" in reply) == (phase == "retain" and reply["allow"]))
+        return reply
+
 
 class SystemRuntime:
     def __init__(self, b, app, pipe, request):
@@ -427,6 +544,9 @@ class SystemRuntime:
         self.resident_enrollment = None
         self.resident_prepare_fields = None
         self.enrolled_engine_instances = set()
+
+    def authorize_restore(self, request):
+        return self.pipe.exchange(request, "authorize_restore")["allow"]
 
     def authorize(self, request):
         if "handoff" in request:
@@ -744,7 +864,10 @@ def main():
     request = pipe.read(15)
     runtime = SystemRuntime(b, app, pipe, request)
     try:
-        pipe.write(RuntimeInstaller(b, app, runtime, arm_deadline=signal.alarm).run(request))
+        installer = (RollbackCacheInstaller(b, app, pipe, arm_deadline=signal.alarm)
+                     if request.get("schema") == "zeros.runtime-rollback-cache/v1"
+                     else RuntimeInstaller(b, app, runtime, arm_deadline=signal.alarm))
+        pipe.write(installer.run(request))
     finally:
         signal.alarm(0)
 

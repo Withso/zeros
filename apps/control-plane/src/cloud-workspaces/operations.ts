@@ -846,6 +846,10 @@ export class CloudWorkspaceOperationsWorker {
         // One statement also handles chained transfers whose target engine is
         // the next transfer's source. Enrollment/attestation cascades are
         // operational data; allocation and generation audit rows stay intact.
+        `DELETE FROM cloud_workspace_runtime_rollback_restores
+         WHERE workspace_id = $1 AND org_id = $2`,
+        `DELETE FROM cloud_workspace_runtime_rollback_refs
+         WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM cloud_workspace_runtime_transitions
          WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM cloud_workspace_setup_runs
