@@ -139,9 +139,18 @@ const checks = {
     }
   },
   browser_assets() {
-    const playwright = fromWorker("playwright-core");
-    const browser = internal(playwright.chromium.executablePath());
+    // chromium.executablePath() names the headed browser. Cloud capture uses
+    // headless:true without a channel, which selects the pinned headless shell.
+    // Resolve through this package's registry, never an ambient browser/cache.
+    const playwright = path.dirname(internal(fromWorker.resolve("playwright-core/package.json")));
+    const { registry } = fromWorker(internal(path.join(playwright, "lib/server/registry/index.js")));
+    const selected = registry.findExecutable("chromium-headless-shell");
+    assert(selected && /^\d+\.\d+\.\d+\.\d+$/.test(selected.browserVersion));
+    const browser = internal(selected.executablePath());
     assert(browser.startsWith(path.join(worker, "design-browsers") + "/"));
+    assert(fs.lstatSync(browser).isFile());
+    assert.equal(execute(browser, ["--version"]).split(/\s/).at(-1), selected.browserVersion);
+    internal(path.join(path.dirname(browser), "LICENSE.headless_shell"));
     assert(fs.existsSync(path.join(worker, "design-browsers/NOTICE.txt")));
   },
   runtime_system_assets() {

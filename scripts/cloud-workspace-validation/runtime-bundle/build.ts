@@ -295,7 +295,7 @@ export async function buildRuntimeBundle(options: {
     await stage("download_browsers", async () => {
       await runTool(
         tools.pnpm,
-        ["exec", "playwright-core", "install", "chromium"],
+        ["exec", "playwright-core", "install", "--only-shell", "chromium"],
         {
           ...command,
           env: {
@@ -374,8 +374,8 @@ export async function buildRuntimeBundle(options: {
       );
       await writeFile(
         path.join(runtime, "worker/design-browsers/NOTICE.txt"),
-        `Chromium assets selected by playwright-core ${PLAYWRIGHT_VERSION} for Ubuntu 24.04 x64.\n` +
-          "All downloaded browser resources and upstream notices are retained, including ABOUT, LICENSE.headless_shell and WidevineCdm/LICENSE.\n" +
+        `Chromium headless-shell and FFmpeg assets selected by playwright-core ${PLAYWRIGHT_VERSION} for Ubuntu 24.04 x64.\n` +
+          "All downloaded resources and upstream notices are retained, including LICENSE.headless_shell.\n" +
           "Playwright's license is retained in worker/node_modules/playwright-core/LICENSE.\n",
         { mode: 0o444, flag: "wx" },
       );

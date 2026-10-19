@@ -263,8 +263,18 @@ x64 variants remain in the closure.
 
 Node's complete upstream license/provenance lives in `lib/node/`; package
 licenses remain beside their packages and the Linux dependency inventory is
-`worker/runtime-dependencies.json`. Playwright 1.59.1 installs the Ubuntu 24.04
-Chromium, headless-shell and FFmpeg assets with their original notices.
+`worker/runtime-dependencies.json`. Playwright 1.59.1 installs its pinned Ubuntu
+24.04 Chromium headless-shell and FFmpeg assets with their original notices.
+The unused headed Chromium download is omitted with `install --only-shell
+chromium`; cloud capture already selects the shell with `headless: true` and no
+channel. The offline closure probe resolves that exact shell from the staged
+Playwright registry, verifies its runtime-local executable and version, and
+requires its license. The opt-in native asset suite exercises default sandboxed
+headless launch, bundled-font rendering, PNG output and process exit with full
+Chromium absent (`ZEROS_RUNTIME_SYSTEM_ASSETS_HEADLESS` names the acquired shell
+binary; `ZEROS_RUNTIME_SYSTEM_ASSETS_TEST_DIR` names the staged asset/runtime
+tree). Runtime/base capture qualification remains required before admission;
+archive closure never grants VM authority. Local capture still uses Electron.
 
 The manifest lists `selfTest` only when B7's regular self-test file is included;
 every listed entrypoint must be a regular inventory file. B2's runtime-root
