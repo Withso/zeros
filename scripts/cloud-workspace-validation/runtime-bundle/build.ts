@@ -42,7 +42,7 @@ import {
 } from "./toolchain";
 import { verifyBundleDirectory } from "./verify";
 import { stageRuntimeSystemAssets } from "./system-assets";
-import { planCloudSourceClosure } from "./source-closure";
+import { enforceCloudSourceBudget, planCloudSourceClosure } from "./source-closure";
 
 export function buildPathPrefixes(paths: {
   work: string;
@@ -406,6 +406,7 @@ export async function buildRuntimeBundle(options: {
     const entries = await stage("inventory_payload", () =>
       inventoryTree(runtime),
     );
+    await stage("source_closure_budget", async () => enforceCloudSourceBudget(entries));
     const nativeRequirements = await stage("verify_abi", () =>
       inspectNativeRequirements(runtime, entries, env),
     );

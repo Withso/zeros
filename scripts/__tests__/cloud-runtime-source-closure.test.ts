@@ -2,7 +2,30 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { CLOUD_COMMAND_ROOTS, planCloudSourceClosure, type CloudSourceClosure } from "../cloud-workspace-validation/runtime-bundle/source-closure";
+import { CLOUD_COMMAND_ROOTS, enforceCloudSourceBudget, planCloudSourceClosure, type CloudSourceClosure } from "../cloud-workspace-validation/runtime-bundle/source-closure";
+import type { ManifestEntry } from "../cloud-workspace-validation/runtime-bundle/manifest";
+
+describe("cloud source payload budget", () => {
+  const file = (name: string, size: number): ManifestEntry => ({ path: name, type: "file", mode: "0444", size, sha256: "a".repeat(64) });
+  it("rejects the former desktop package footprint without trimming required files", () => {
+    expect(() => enforceCloudSourceBudget([file("worker/node_modules/vendor/payload", 1_105_015_512)]))
+      .toThrow("source_closure_bytes");
+  });
+  it("rejects the former entry footprint independently of byte size", () => {
+    expect(() => enforceCloudSourceBudget(Array.from({ length: 39_084 }, (_, i) => file(`worker/node_modules/p/${i}`, 1))))
+      .toThrow("source_closure_entries");
+  });
+  it("accounts for source, package and bundle bytes without applying this budget to other assets", () => {
+    expect(enforceCloudSourceBudget([
+      file("worker/node_modules/vendor/payload", 907_480_690),
+      file("worker/apps/engine.ts", 13_781_158),
+      file("worker/packages/library/data", 2_035_757),
+      file("worker/dist-engine/cli.js", 27_342_952),
+      file("worker/runtime-source-closure.json", 746_948),
+      file("worker/design-browsers/shell", 500_000_000),
+    ])).toEqual({ bytes: 951_387_505, entries: 5 });
+  });
+});
 
 describe("cloud runtime source closure", () => {
   let closure: CloudSourceClosure;

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-runtime-source-roots",
+  "kind": "replay",
+  "area": "vm-image-bootstrap",
+  "fixedBy": "pending",
+  "symptom": "Cold cloud restores downloaded desktop renderer packages and source tests because the runtime copier started from every production dependency in the shared root.",
+  "rule": "Derive the cloud package roots from retained engine and qualification sources plus explicit native, CLI and language-server lookups; retain package data and relocated late imports.",
+  "check": "pnpm test:git scripts/__tests__/cloud-runtime-bundle-closure.test.ts -t 'selected cloud package roots|selected source and helper'"
+}

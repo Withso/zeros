@@ -3,7 +3,7 @@ import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { isBuiltin } from "node:module";
 import path from "node:path";
 import { forbiddenPayloadPath, HARNESS_ROOTS, ROOT_METADATA, SOURCE_SLICES, within } from "./closure";
-import { byteOrder, check, validPath } from "./manifest";
+import { byteOrder, check, validPath, type ManifestEntry } from "./manifest";
 
 const ENGINE = "apps/desktop/src/engine";
 const CODE_SLICES = [
@@ -37,6 +37,19 @@ export type CloudSourceClosure = {
   dependencyRoots: string[];
   inputs: Metafile["inputs"];
 };
+
+// Measured after selecting runtime roots. Applies only to newly built cloud
+// source/package payloads; historical archive acceptance limits are unchanged.
+export const CLOUD_SOURCE_BUDGET = { bytes: 1000 * 1024 ** 2, entries: 23_000 } as const;
+export function enforceCloudSourceBudget(entries: readonly ManifestEntry[]): { bytes: number; entries: number } {
+  const roots = ["worker/node_modules", "worker/apps", "worker/packages", "worker/dist-engine"];
+  const selected = entries.filter(entry => entry.path === "worker/runtime-source-closure.json" ||
+    roots.some(root => entry.path === root || entry.path.startsWith(`${root}/`)));
+  const bytes = selected.reduce((sum, entry) => sum + (entry.type === "file" ? entry.size : 0), 0);
+  check(bytes <= CLOUD_SOURCE_BUDGET.bytes, "source_closure_bytes");
+  check(selected.length <= CLOUD_SOURCE_BUDGET.entries, "source_closure_entries");
+  return { bytes, entries: selected.length };
+}
 
 function sourceTest(relative: string): boolean {
   return relative.split("/").some(part => ["__tests__", "__fixtures__", "tests"].includes(part)) ||
