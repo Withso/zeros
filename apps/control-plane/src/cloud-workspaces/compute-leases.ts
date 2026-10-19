@@ -2,7 +2,7 @@ import { requireFinalSaveDispatch } from "./final-save-recovery.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { retryAbortedDatabaseTransaction, withRetryableSystemTx } from "../db-retry.js";
-import { isDatabaseUnavailable } from "../db.js";
+import { isDatabaseUnavailable, type Tx } from "../db.js";
 import { audit } from "../audit.js";
 import { DatabaseManagedComputeCreditLedger, readManagedComputeAllocationLost } from "./compute-credits.js";
 import {computeUserFundingAuthorityLive,lockComputeUserFunding,prepareComputeUserPeriods,readStaffComputeAllowance} from "./compute-funding.js";
@@ -71,6 +71,7 @@ type Lease = {
   lease_expires_at: Date | null;
   last_error_code: string | null;
 };
+type GenerationScope = Pick<ManagedComputeStart, "workspaceId" | "organizationId" | "generation">;
 type Scope = {
   user_id: string;
   billing_epoch: string;
@@ -196,47 +197,55 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       throw new Error("Invalid compute usage meter window");
     this.usageMeterWindowMs = window;
   }
-  private async scope(input: {
-    workspaceId: string;
-    organizationId: string;
-    generation: number;
-  }): Promise<Scope> {
-    return withRetryableSystemTx(this.options.pool, async (tx) => {
-      const row = (
-        await tx.query<Scope>(
-          `SELECT workspace.owner_user_id AS user_id,workspace.current_billing_epoch AS billing_epoch,
-        workspace.desired_state,workspace.current_generation AS generation,billing.entitlement_plan,
-        (
-          SELECT CASE WHEN setup.state='failed' THEN setup.error_code ELSE NULL END
-          FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=workspace.id AND setup.org_id=workspace.org_id
-            AND setup.generation=workspace.current_generation ORDER BY setup.attempt DESC LIMIT 1
-        ) AS setup_failure_code,
-        version.credential_source='hosted' AND coalesce(requirement.require_credit,true) AS requires_credit,
-        cloud_workspace_paid_authority_live(workspace.id,workspace.owner_user_id,$4)
-          AND workspace.status<>'failed'
-          AND (workspace.status NOT IN ('ready','busy') OR EXISTS (
-            SELECT 1 FROM cloud_workspace_engine_instances engine WHERE engine.workspace_id=workspace.id
-              AND engine.org_id=workspace.org_id AND engine.generation=workspace.current_generation
-              AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp()
-          )) AS live
-        FROM cloud_workspaces workspace JOIN cloud_workspace_generations generation
-          ON generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id AND generation.generation=$3
-        JOIN workspace_billing_epochs billing ON billing.workspace_id=workspace.id AND billing.org_id=workspace.org_id AND billing.billing_epoch=workspace.current_billing_epoch
-        JOIN provider_connection_versions version ON version.connection_id=generation.provider_connection_id
-          AND version.org_id=generation.org_id AND version.version=generation.provider_connection_version
-        LEFT JOIN managed_compute_provider_requirements requirement ON requirement.provider=generation.provider
-        WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL`,
-          [
-            input.workspaceId,
-            input.organizationId,
-            input.generation,
-            this.options.workosEnabled,
-          ],
-        )
-      ).rows[0];
-      if (!row) throw failure("compute_scope_unavailable");
-      if(row.live&&row.requires_credit&&row.entitlement_plan==='pro')row.live=await computeUserFundingAuthorityLive(tx,row.user_id);
-      return row;
+  private scope(input: GenerationScope): Promise<Scope> {
+    return withRetryableSystemTx(this.options.pool, tx => this.readScope(tx, input));
+  }
+  private async readScope(tx: Tx, input: GenerationScope): Promise<Scope> {
+    const row = (
+      await tx.query<Scope>(
+        `SELECT workspace.owner_user_id AS user_id,workspace.current_billing_epoch AS billing_epoch,
+      workspace.desired_state,workspace.current_generation AS generation,billing.entitlement_plan,
+      (
+        SELECT CASE WHEN setup.state='failed' THEN setup.error_code ELSE NULL END
+        FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=workspace.id AND setup.org_id=workspace.org_id
+          AND setup.generation=workspace.current_generation ORDER BY setup.attempt DESC LIMIT 1
+      ) AS setup_failure_code,
+      version.credential_source='hosted' AND coalesce(requirement.require_credit,true) AS requires_credit,
+      cloud_workspace_paid_authority_live(workspace.id,workspace.owner_user_id,$4)
+        AND workspace.status<>'failed'
+        AND (workspace.status NOT IN ('ready','busy') OR EXISTS (
+          SELECT 1 FROM cloud_workspace_engine_instances engine WHERE engine.workspace_id=workspace.id
+            AND engine.org_id=workspace.org_id AND engine.generation=workspace.current_generation
+            AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp()
+        )) AS live
+      FROM cloud_workspaces workspace JOIN cloud_workspace_generations generation
+        ON generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id AND generation.generation=$3
+      JOIN workspace_billing_epochs billing ON billing.workspace_id=workspace.id AND billing.org_id=workspace.org_id AND billing.billing_epoch=workspace.current_billing_epoch
+      JOIN provider_connection_versions version ON version.connection_id=generation.provider_connection_id
+        AND version.org_id=generation.org_id AND version.version=generation.provider_connection_version
+      LEFT JOIN managed_compute_provider_requirements requirement ON requirement.provider=generation.provider
+      WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL`,
+        [
+          input.workspaceId,
+          input.organizationId,
+          input.generation,
+          this.options.workosEnabled,
+        ],
+      )
+    ).rows[0];
+    if (!row) throw failure("compute_scope_unavailable");
+    if(row.live&&row.requires_credit&&row.entitlement_plan==='pro')row.live=await computeUserFundingAuthorityLive(tx,row.user_id);
+    return row;
+  }
+  private async recheckAllocationScope(input: ManagedComputeStart, lease: Lease): Promise<void> {
+    await withRetryableSystemTx(this.options.pool, async tx => {
+      const scope = await this.readScope(tx, input);
+      if (!scope.live || scope.desired_state !== "running" || scope.generation !== input.generation ||
+          scope.user_id !== lease.user_id || money(scope.billing_epoch) !== money(lease.billing_epoch))
+        throw failure("compute_lease_superseded");
+      // Read time after the complete fresh scope check, including Pro funding.
+      // The original lease deadline is never derived again from mutable state.
+      await this.assertAllocationRetryDeadline(tx, lease);
     });
   }
   private async prepare(
@@ -343,7 +352,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
 
   private async plan(
     lease: Lease,
-    fixedTtl = false,
+    { fixedTtl = false, allocationRetry = false }: { fixedTtl?: boolean; allocationRetry?: boolean } = {},
   ): Promise<ComputeCreditPlan | null> {
     const policy = this.options.policy;
     if (
@@ -353,6 +362,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     )
       throw failure("compute_policy_changed");
     return withRetryableSystemTx(this.options.pool, async (tx) => {
+      if (allocationRetry) await this.assertAllocationRetryDeadline(tx, lease);
       const billing=(await tx.query<{entitlement_plan:string}>(`SELECT entitlement_plan FROM workspace_billing_epochs
         WHERE workspace_id=$1 AND org_id=$2 AND billing_epoch=$3 AND billing_owner_user_id=$4`,
         [lease.workspace_id,lease.org_id,lease.billing_epoch,lease.user_id])).rows[0];
@@ -364,10 +374,12 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         staffAllowance=Boolean(await readStaffComputeAllowance(tx,lease.user_id));
         await prepareComputeUserPeriods(tx,{userId:lease.user_id,organizationId:lease.org_id});
       }
-      const now = (await tx.query<{now:Date}>("SELECT clock_timestamp() AS now")).rows[0]!.now.getTime();
       const rows = (
         await tx.query(
-          `SELECT period.*,reservation.meter_since,reservation.meter_through,reservation.billable_seconds,
+          `WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS now)
+        SELECT eligible.*,observation.now AS planning_now FROM observation
+        LEFT JOIN LATERAL (
+        SELECT period.*,reservation.meter_since,reservation.meter_through,reservation.billable_seconds,
         EXISTS(SELECT 1 FROM managed_compute_pro_allowances WHERE period_id=period.funding_period_id) AS monthly_allowance,
         reservation.actual_micro_usd,reservation.debited_micro_usd AS reservation_debited,reservation.authorized_micro_usd,reservation.covered_until,
         CASE WHEN period.funding_mode='pro_user' THEN
@@ -378,12 +390,15 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           ELSE period.granted_micro_usd-period.debited_micro_usd-period.reserved_micro_usd-period.returned_micro_usd END AS available
         FROM managed_compute_credit_periods period LEFT JOIN managed_compute_credit_reservations reservation
           ON reservation.period_id=period.id AND reservation.id=$3 AND reservation.state='open'
-        WHERE period.org_id=$1 AND period.user_id=$2 AND period.ends_at>clock_timestamp()
-          AND period.starts_at<clock_timestamp()+interval '2 hours' ORDER BY period.starts_at,period.id LIMIT 17`,
+        WHERE period.org_id=$1 AND period.user_id=$2 AND period.ends_at>observation.now
+          AND period.starts_at<observation.now+interval '2 hours' ORDER BY period.starts_at,period.id LIMIT 17
+        ) eligible ON true`,
           [lease.org_id, lease.user_id, lease.id,staffAllowance],
         )
       ).rows;
-      const periods: ComputeCreditPlanningPeriod[] = rows.map((r) => ({
+      // The singleton observation also returns time when there is no credit.
+      const now = (rows[0]!.planning_now as Date).getTime();
+      const periods: ComputeCreditPlanningPeriod[] = rows.filter(r => r.id !== null).map((r) => ({
         id: r.id,
         startsAtMs: r.starts_at.getTime(),
         endsAtMs: r.ends_at.getTime(),
@@ -477,22 +492,14 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     const owner = `allocation:${randomUUID()}`;
     const lease = await measureLifecyclePhase("funding", () => this.prepare(input, scope, metered, owner));
     try {
-      await measureLifecyclePhase("funding", () => this.assertAllocationRetryDeadline(lease));
-      const plan = await measureLifecyclePhase("funding", () => this.plan(lease, lease.state !== "funding"));
+      const plan = await measureLifecyclePhase("funding", () => this.plan(lease, {
+        fixedTtl: lease.state !== "funding", allocationRetry: true,
+      }));
       if (!plan) throw failure("compute_credit_exhausted");
       await measureLifecyclePhase("funding", () => this.fund(lease, plan, owner));
       // A lifecycle/ownership change during funding prevents dispatch, while
       // the reservation remains until independent absence/stop evidence.
-      const currentScope = await measureLifecyclePhase("funding", () => this.scope(input));
-      if (
-        !currentScope.live ||
-        currentScope.desired_state !== "running" ||
-        currentScope.generation !== input.generation ||
-        currentScope.user_id !== lease.user_id ||
-        money(currentScope.billing_epoch) !== money(lease.billing_epoch)
-      )
-        throw failure("compute_lease_superseded");
-      await measureLifecyclePhase("funding", () => this.assertAllocationRetryDeadline(lease));
+      await measureLifecyclePhase("funding", () => this.recheckAllocationScope(input, lease));
       const resource = current
         ? await metered.startWithComputeLease(
             current.resourceId,
@@ -544,22 +551,26 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     { requestCheck = true }: { requestCheck?: boolean } = {},
   ): Promise<void> {
     assertProviderResourceIdentity(resource, input);
-    const scope = await this.scope(input);
-    if (!scope.requires_credit) return;
     const expires =
       typeof resource.metadata.computeLeaseExpiresAt === "string"
         ? Date.parse(resource.metadata.computeLeaseExpiresAt)
         : NaN;
     await withRetryableSystemTx(this.options.pool, async (tx) => {
+      const scope = await this.readScope(tx, input);
+      if (!scope.requires_credit) return;
       const lease = (
-        await tx.query<Lease>(
-          `SELECT * FROM managed_compute_allocation_leases lease WHERE workspace_id=$1 AND org_id=$2 AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$3 AND state<>'settled' FOR UPDATE`,
+        await tx.query<Lease & { observed_at: Date }>(
+          // Evaluate the clock only after LockRows finishes. A clock in the
+          // locked SELECT's target list could be sampled before a long wait.
+          `WITH locked AS MATERIALIZED (
+            SELECT * FROM managed_compute_allocation_leases lease WHERE workspace_id=$1 AND org_id=$2
+              AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$3
+              AND state<>'settled' FOR UPDATE
+          ) SELECT locked.*,clock_timestamp() AS observed_at FROM locked`,
           [input.workspaceId, input.organizationId, input.generation],
         )
       ).rows[0];
-      const now = (
-        await tx.query<{ now: Date }>("SELECT clock_timestamp() AS now")
-      ).rows[0]!.now.getTime();
+      const now = lease?.observed_at.getTime() ?? 0;
       if (
         !lease ||
         lease.provider !== provider.name ||
@@ -627,9 +638,10 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       ).rows[0]!.now.getTime(),
     );
   }
-  private async assertAllocationRetryDeadline(lease: Lease): Promise<void> {
-    if (lease.provider_expires_at === null &&
-        (await this.now()) >= lease.requested_at.getTime() + ALLOCATION_RETRY_WINDOW_MS)
+  private async assertAllocationRetryDeadline(tx: Tx, lease: Lease): Promise<void> {
+    if (lease.provider_expires_at !== null) return;
+    const now = (await tx.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now.getTime();
+    if (now >= lease.requested_at.getTime() + ALLOCATION_RETRY_WINDOW_MS)
       throw failure("compute_allocation_retry_expired");
   }
 

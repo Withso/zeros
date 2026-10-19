@@ -50,6 +50,7 @@ import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 import { auditLifecycleJobs, readLifecycleDueInMs } from "./lifecycle-jobs.js";
 import { claimJobs, completeJob } from "../job-queue.js";
 import { withLifecycleTiming, readLifecycleTiming } from "./lifecycle-timing.js";
+import { lifecycleDatabaseCost } from "./lifecycle-cost-test-fixtures.js";
 
 /** Inject a real server-side transaction abort into the original DB calls.
  * All statement/value authority and transaction lifecycle stay production-owned. */
@@ -298,6 +299,100 @@ suite("managed compute lifecycle admission", () => {
   function originalCoordinator(db: pg.Pool) {
     return new CloudWorkspaceComputeLeaseCoordinator({pool: db, providerResolver: originalResolver(db), workosEnabled: false, policy, usageMeterWindowMs: 0});
   }
+
+  describe("T6 C1 funding and observation batching", () => {
+    it("reduces real allocation round trips while funding commits before provider I/O", async () => {
+      await grant();
+      const cost = lifecycleDatabaseCost(pool);
+      let beforeProvider: ReturnType<typeof cost.snapshot> | undefined;
+      provider.createWithComputeLease.mockImplementationOnce(async (_input, ttl) => {
+        beforeProvider = cost.snapshot();
+        expect(beforeProvider.checkedOut).toBe(0);
+        const reservation = (await pool.query("SELECT state,authorized_micro_usd FROM managed_compute_credit_reservations WHERE id=$1", [input.intentId])).rows[0];
+        expect(reservation.state).toBe("open");
+        expect(Number(reservation.authorized_micro_usd)).toBeGreaterThan(0);
+        return resource(ttl);
+      });
+      await withLifecycleTiming(async () => {
+        await expect(originalCoordinator(cost.pool).allocate(input, asProvider(), null)).resolves.toMatchObject({ state: "running" });
+        const complete = cost.snapshot();
+        console.info("[t6-c1-cost]", JSON.stringify({ version: 1, operation: "funded-allocation", beforeProvider, complete,
+          phaseTiming: readLifecycleTiming(), providerCreates: provider.createWithComputeLease.mock.calls.length }));
+        expect(provider.createWithComputeLease).toHaveBeenCalledOnce();
+        expect(complete.checkedOut).toBe(0);
+        expect(complete.maximumCheckedOut).toBe(1);
+        expect(complete.checkouts).toBe(8);
+        expect(complete.timeOnlyReads).toBe(2);
+      });
+    });
+
+    it("observes current funding and its locked lease in one transaction", async () => {
+      await ready();
+      const cost = lifecycleDatabaseCost(pool);
+      await originalCoordinator(cost.pool).observeRunning(input, asProvider(), resource());
+      const complete = cost.snapshot();
+      console.info("[t6-c1-cost]", JSON.stringify({ version: 1, operation: "funded-observation", complete }));
+      expect(complete.checkedOut).toBe(0);
+      expect(complete.checkouts).toBe(1);
+      expect(complete.timeOnlyReads).toBe(0);
+    });
+
+    it("checks the original retry deadline again after held funding finishes", async () => {
+      await grant();
+      provider.createWithComputeLease.mockRejectedValueOnce(new CloudProviderError("provider_timeout", "Ambiguous allocation", true));
+      await expect(coordinator.allocate(input, asProvider(), null)).rejects.toMatchObject({ code: "provider_timeout" });
+      const deadline = (await pool.query(`UPDATE managed_compute_allocation_leases
+        SET requested_at=clock_timestamp()-interval '45 minutes'+interval '2 seconds' WHERE id=$1
+        RETURNING requested_at+interval '45 minutes' AS at`, [input.intentId])).rows[0].at;
+      let held = 0;
+      const cost = lifecycleDatabaseCost(pool, async sql => {
+        if (!sql.startsWith("UPDATE managed_compute_allocation_leases SET funded_until=greatest")) return;
+        held++;
+        expect((await pool.query("SELECT clock_timestamp()<$1 AS before_deadline", [deadline])).rows[0].before_deadline).toBe(true);
+        // Hold the actual funding boundary until PostgreSQL proves that the
+        // original finite deadline passed; no fabricated application clock.
+        await expect.poll(async () => (await pool.query("SELECT clock_timestamp()>=$1 AS expired", [deadline])).rows[0].expired,
+          { timeout: 5_000, interval: 10 }).toBe(true);
+      });
+      await expect(originalCoordinator(cost.pool).allocate(input, asProvider(), null)).rejects.toMatchObject({ code: "compute_allocation_retry_expired" });
+      expect(held).toBe(1);
+      expect(provider.createWithComputeLease).toHaveBeenCalledOnce();
+      expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+      expect(cost.snapshot().checkedOut).toBe(0);
+    });
+
+    it("samples the observation clock after waiting for the exact allocation row lock", async () => {
+      await ready();
+      const observerPool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1,
+        application_name: "t6-c1-clock-observer" });
+      const locker = await pool.connect();
+      let observing: Promise<unknown> | undefined;
+      try {
+        await locker.query("BEGIN");
+        await locker.query("SELECT 1 FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE", [input.intentId]);
+        const { pid, expires } = (await locker.query("SELECT pg_backend_pid() AS pid,clock_timestamp()+interval '2 seconds' AS expires")).rows[0];
+        const observed = resource();
+        observed.metadata.computeLeaseExpiresAt = expires.toISOString();
+        observing = originalCoordinator(observerPool).observeRunning(input, asProvider(), observed).then(
+          () => null, error => error,
+        );
+        await expect.poll(async () => (await pool.query(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+          WHERE datname=current_database() AND application_name='t6-c1-clock-observer'
+            AND $1=ANY(pg_blocking_pids(pid))) AS waiting`, [pid])).rows[0].waiting,
+          { timeout: 5_000, interval: 10 }).toBe(true);
+        expect((await pool.query("SELECT clock_timestamp()<$1 AS before_deadline", [expires])).rows[0].before_deadline).toBe(true);
+        await expect.poll(async () => (await pool.query("SELECT clock_timestamp()>=$1 AS expired", [expires])).rows[0].expired,
+          { timeout: 5_000, interval: 10 }).toBe(true);
+        await locker.query("COMMIT");
+        expect(await observing).toMatchObject({ code: "compute_lease_unconfirmed" });
+        expect((await pool.query("SELECT provider_expires_at>$2 AS retained FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId, expires])).rows[0].retained).toBe(true);
+      } finally {
+        await locker.query("ROLLBACK"); locker.release();
+        await observing;
+        await observerPool.end();
+      }
+    });
+  });
   const providerLookup = (sql: string) => sql.startsWith("SELECT connection.id AS connection_id");
   async function expectNoStop() {
     expect((await pool.query("SELECT desired_state FROM cloud_workspaces WHERE id=$1", [f.workspaceId])).rows[0].desired_state).toBe("running");

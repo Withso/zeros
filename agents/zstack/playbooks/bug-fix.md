@@ -103,6 +103,11 @@
    Inventory independent session-lock holders and hold them concurrently across
    provider barriers; their callbacks and an unrelated worker transaction must
    still progress. Count every lock pool in steady and rollout surge budgets.
+   When batching lifecycle reads, retain full post-I/O checks for no-dispatch
+   results and retry the whole DB-only admission after a confirmed abort.
+   Prove expiry while the actual row lock is held: a clock in a locking SELECT's
+   target list can be evaluated before that wait. Keep original deadlines after
+   funding, and measure complete passes as well as the shortened region.
    For finite compute leases, distinguish unavailable DB proof from revoked
    authority. Terminate the real connection before and after COMMIT, exhaust
    pool capacity and transaction retries, then re-observe the same allocation,
