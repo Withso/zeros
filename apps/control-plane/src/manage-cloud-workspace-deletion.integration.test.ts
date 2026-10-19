@@ -124,6 +124,15 @@ d("guarded organization cloud workspace deletion", () => {
       WHERE workspace_id=$1 ORDER BY created_at,id`, [fixture.workspaceId])).rows;
     const audits = (await tx.query(`SELECT org_id,actor_id,action,subject FROM audit_log
       WHERE org_id=$1 AND action='cloud_workspace.delete_requested' ORDER BY id`, [fixture.organizationId])).rows;
+    for (const audit of audits) {
+      const timing = audit.subject.phaseTiming;
+      expect(timing).toEqual({ version: 1, monotonicMs: { admission: expect.any(Number) }, databaseElapsedMs: {} });
+      expect(Number.isFinite(timing.monotonicMs.admission)).toBe(true);
+      expect(timing.monotonicMs.admission).toBeGreaterThanOrEqual(0);
+      expect(timing.monotonicMs.admission).toBeLessThanOrEqual(86_400_000);
+      // Each admission has its own elapsed time; compare all other effects exactly.
+      timing.monotonicMs.admission = 0;
+    }
     const engine = (await tx.query(`SELECT revoked_at IS NOT NULL AS revoked FROM cloud_workspace_engine_instances
       WHERE workspace_id=$1`, [fixture.workspaceId])).rows;
     const setup = (await tx.query(`SELECT state,error_code FROM cloud_workspace_setup_runs

@@ -27,6 +27,7 @@ import type pg from "pg";
 import { z } from "zod";
 
 import { audit } from "../audit.js";
+import { lifecycleAdmissionTiming } from "./lifecycle-timing.js";
 import {
   HttpError,
   requireOrganizationMembership,
@@ -1606,6 +1607,7 @@ async function requestCloudWorkspaceLifecycleIntent(
   input: {
     orgId: string; workspaceId: string; actorUserId: string; workspace: WorkspaceRow;
     operation: LifecycleOperation; key: string; digest: Buffer; discardUncheckpointed: boolean;
+    admissionStarted: number;
   },
 ): Promise<{ workspace: WorkspaceRow; intent: IntentRow; replayed: boolean }> {
   const { orgId, workspaceId, actorUserId, workspace, operation, key, digest, discardUncheckpointed } = input;
@@ -1771,6 +1773,7 @@ async function requestCloudWorkspaceLifecycleIntent(
         retired.revocationPendingClientAccessCount,
       cancelledSetupRunCount: retired.cancelledSetupRunCount,
       revokedEngineInstanceCount: retired.revokedEngineInstanceCount,
+      phaseTiming: lifecycleAdmissionTiming(input.admissionStarted),
     },
   );
   return {
@@ -1788,6 +1791,7 @@ export async function requestCloudWorkspaceDeletion(
     organizationId: string; workspaceId: string; actorUserId: string; idempotencyKey: string;
     requestSha256?: Buffer; discardUncheckpointed?: boolean;
   },
+  admissionStarted = performance.now(),
 ): Promise<{ workspace: WorkspaceRow; intent: IntentRow; replayed: boolean }> {
   const { organizationId: orgId, workspaceId, actorUserId, idempotencyKey: key } = input;
   const discardUncheckpointed = input.discardUncheckpointed ?? false;
@@ -1817,7 +1821,7 @@ export async function requestCloudWorkspaceDeletion(
   });
   if (restoredGeneration !== null) workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, actorUserId);
   return requestCloudWorkspaceLifecycleIntent(tx, {
-    orgId, workspaceId, actorUserId, workspace, operation: "delete", key, digest, discardUncheckpointed,
+    orgId, workspaceId, actorUserId, workspace, operation: "delete", key, digest, discardUncheckpointed, admissionStarted,
   });
 }
 
@@ -2678,6 +2682,7 @@ export function createCloudWorkspaceRoutes(
   });
 
   async function createWorkspace(c: Context, adminRequest?: CloudComputerV2AdminWorkspaceRequest) {
+    const admissionStarted = performance.now();
     if (!config || !repositoryResolver) {
       throw new HttpError(
         503,
@@ -3268,6 +3273,7 @@ export function createCloudWorkspaceRoutes(
         ],
       );
       await audit(tx, orgId, user.id, "cloud_workspace.create_requested", {
+        phaseTiming: lifecycleAdmissionTiming(admissionStarted),
         workspaceId,
         intentId,
         teamId,
@@ -3386,6 +3392,7 @@ export function createCloudWorkspaceRoutes(
     bodyLimit({ maxSize: 4096 }), rateLimit("cloud-runtime-upgrade", 30, 60_000), c => replaceGeneration(c, true));
 
   const lifecycle = async (c: Context, operation: LifecycleOperation) => {
+    const admissionStarted = performance.now();
     const user = c.get("user");
     const orgId = uuidParam(c.req.param("organization"));
     const workspaceId = uuidParam(c.req.param("workspace"));
@@ -3414,7 +3421,7 @@ export function createCloudWorkspaceRoutes(
       if (operation === "delete") return requestCloudWorkspaceDeletion(tx, {
         organizationId: orgId, workspaceId, actorUserId: user.id, idempotencyKey: key,
         requestSha256: digest, discardUncheckpointed,
-      });
+      }, admissionStarted);
       // A workspace guest has exact run authority, not tenant membership or
       // cleanup authority. Keep withdrawal/management on their existing path.
       if (operation !== "wake") await requireOrganizationMembership(tx, orgId, user.id);
@@ -3561,7 +3568,7 @@ export function createCloudWorkspaceRoutes(
       }
 
       return requestCloudWorkspaceLifecycleIntent(tx, {
-        orgId, workspaceId, actorUserId: user.id, workspace, operation, key, digest, discardUncheckpointed,
+        orgId, workspaceId, actorUserId: user.id, workspace, operation, key, digest, discardUncheckpointed, admissionStarted,
       });
     });
 

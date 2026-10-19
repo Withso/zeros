@@ -113,6 +113,10 @@
    paths. Use a separate monotonic clock, closed labels and bounded aggregates;
    never let logging alter authority outcomes or add idle timers. State exactly
    which boundary completed: a valid transport response is not final admission.
+   An audit inside a transaction can record only its pre-insert timing; use the
+   existing completed transaction hook for time through COMMIT/rollback, without
+   inventing a commit outcome. Keep DB-clock waits separate from monotonic spans,
+   add no observation queries or provider calls, and fence closed nested scopes.
    For stop/resume races, hold the final checkpoint open across a real lease
    tick. Preserve its lifecycle intent; test every direct provider-stop caller,
    the native writer seal, and an audited deadline fallback before dispatch.

@@ -48,6 +48,7 @@ import { stopUnavailableCloudEngine } from "./engine-health.js";
 import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 import { auditLifecycleJobs, readLifecycleDueInMs } from "./lifecycle-jobs.js";
 import { claimJobs, completeJob } from "../job-queue.js";
+import { withLifecycleTiming, readLifecycleTiming } from "./lifecycle-timing.js";
 
 /** Inject a real server-side transaction abort into the original DB calls.
  * All statement/value authority and transaction lifecycle stay production-owned. */
@@ -776,6 +777,13 @@ suite("managed compute lifecycle admission", () => {
     expect(provider.createWithComputeLease).toHaveBeenCalledTimes(1);expect(provider.create).not.toHaveBeenCalled();
     expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
     expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1",[input.intentId])).rows[0].state).toBe('succeeded');
+    const audits = (await pool.query("SELECT subject FROM audit_log WHERE action='cloud_workspace.create_succeeded' AND subject->>'intentId'=$1", [input.intentId])).rows;
+    expect(audits).toHaveLength(1);
+    expect(audits[0].subject.phaseTiming).toMatchObject({ version: 1, monotonicMs: {
+      funding: expect.any(Number), dispatch: expect.any(Number), postDispatchObservation: expect.any(Number),
+    } });
+    expect(provider.inspect).not.toHaveBeenCalled();
+    await reconciler.stop();
   });
 
   it("meters cumulative usage and commits additional credit before extending the provider deadline", async () => {
@@ -2479,9 +2487,11 @@ suite("managed compute lifecycle admission", () => {
   });
 
   it("does not call the provider when no seat credit is funded", async () => {
-    await expect(
-      coordinator.allocate(input, asProvider(), null),
-    ).rejects.toMatchObject({ code: "compute_credit_exhausted" });
+    const timing = await withLifecycleTiming(async () => {
+      await expect(coordinator.allocate(input, asProvider(), null)).rejects.toMatchObject({ code: "compute_credit_exhausted" });
+      return readLifecycleTiming();
+    });
+    expect(timing).toEqual({ version: 1, monotonicMs: { funding: expect.any(Number) }, databaseElapsedMs: {} });
     expect(provider.createWithComputeLease).not.toHaveBeenCalled();
     expect(provider.create).not.toHaveBeenCalled();
     expect(
