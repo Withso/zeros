@@ -6,6 +6,7 @@ if ! test -x /usr/lib/openssh/sftp-server; then apt-get update; apt-get install 
 CI=true pnpm install --frozen-lockfile
 pnpm build:zsr-supervisor
 pnpm build:engine
+node scripts/cloud-workspace-validation/runtime-bundle/qualification.mjs
 if ! getent group zeros-coordinator >/dev/null; then groupadd --gid 10004 zeros-coordinator; fi
 if ! id zeros-coordinator >/dev/null 2>&1; then useradd --uid 10004 --gid 10004 --no-create-home --shell /usr/sbin/nologin zeros-coordinator; fi
 test "$(id -u zeros-coordinator)" = 10004

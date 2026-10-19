@@ -264,6 +264,36 @@ const checks = {
       ),
     );
   },
+  qualification_roles() {
+    const entry = path.join(worker, "dist-engine/cloud-qualification-roles.mjs");
+    assert(fs.lstatSync(entry).isFile());
+    internal(entry);
+    // The source/import probe above covers historical source consumers. This
+    // separate Node must load the new fixed graph with no TypeScript hooks.
+    assert.equal(execute(node, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import { registerHooks } from 'node:module';
+      import { pathToFileURL } from 'node:url';
+      const worker = process.argv[1];
+      registerHooks({ resolve(specifier, context, next) {
+        if (['tsx', 'esbuild'].includes(specifier.split('/')[0]) || specifier.endsWith('.ts'))
+          throw new Error('Qualification runtime transform is unavailable');
+        return next(specifier, context);
+      } });
+      const sandbox = worker + '/scripts/cloud-workspace-validation/sandbox';
+      const { loadCloudQualificationRoles } = await import(pathToFileURL(sandbox + '/cloud-qualification-loader.mjs'));
+      process.argv[1] = sandbox + '/qualify-cloud-engine.mjs';
+      const { roles, unregister } = await loadCloudQualificationRoles();
+      const compiled = await import(pathToFileURL(worker + '/dist-engine/cloud-qualification-roles.mjs'));
+      assert.equal(compiled.createCloudCaptureQualificationRuntime, roles.createCloudQualificationRuntime);
+      for (const [name, role] of Object.entries(roles)) {
+        assert.equal(typeof role, 'function');
+        assert.equal(role, compiled[name]);
+      }
+      await unregister();
+      process.stdout.write('qualified-role-imports');
+    `, worker]), "qualified-role-imports");
+  },
   engine_help() {
     assert(
       execute(node, [
@@ -280,7 +310,10 @@ const checks = {
 
 const failedChecks = [];
 const selectedChecks = Object.entries(checks).filter(([name]) =>
-  phase === "cursor" ? name === "cursor_load" : name !== "cursor_load",
+  (phase === "cursor" ? name === "cursor_load" : name !== "cursor_load") &&
+  // Old immutable archives have no compiled entry. New builds always add it;
+  // verification of an old artifact must not invent a new required payload.
+  (name !== "qualification_roles" || manifest.files?.some(entry => entry.path === "worker/dist-engine/cloud-qualification-roles.mjs")),
 );
 for (const [name, run] of selectedChecks) {
   try {

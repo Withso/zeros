@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
@@ -76,3 +76,59 @@ it("runs the serialized privilege parser of a hook-compiled role probe in a fres
   `);
   expect(JSON.parse(stdout)).toEqual({ engine: null, root: 91 });
 }, 150_000);
+
+// Recreate the installed worker paths. The source hook remains available so
+// a broken compiled entry cannot be hidden by a successful source fallback.
+function installedLoader(bundle: string) {
+  const worker = mkdtempSync(path.join(os.tmpdir(), "zeros-compiled-qualification-"));
+  try {
+    const installed = path.join(worker, "scripts/cloud-workspace-validation/sandbox");
+    mkdirSync(installed, { recursive: true });
+    mkdirSync(path.join(worker, "dist-engine"));
+    copyFileSync(path.join(sandbox, "cloud-qualification-loader.mjs"), path.join(installed, "cloud-qualification-loader.mjs"));
+    symlinkSync(path.resolve("node_modules"), path.join(worker, "node_modules"));
+    writeFileSync(path.join(worker, "dist-engine/cloud-qualification-roles.mjs"), bundle);
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { registerHooks } from 'node:module';
+      import { pathToFileURL } from 'node:url';
+      let transforms = 0;
+      registerHooks({ resolve(specifier, context, next) {
+        if (['tsx', 'esbuild'].includes(specifier.split('/')[0])) {
+          transforms++; throw new Error('unexpected runtime transform');
+        }
+        return next(specifier, context);
+      } });
+      const { loadCloudQualificationRoles } = await import(pathToFileURL(process.argv[1]));
+      process.argv[1] = process.argv[1].replace('cloud-qualification-loader.mjs', 'qualify-cloud-engine.mjs');
+      let names = null, error = null;
+      try {
+        const loaded = await loadCloudQualificationRoles();
+        names = Object.keys(loaded.roles);
+        await loaded.unregister();
+      } catch (value) { error = value.message; }
+      process.stdout.write(JSON.stringify({ names, error, transforms }));
+    `, path.join(installed, "cloud-qualification-loader.mjs")], { encoding: "utf8", timeout: 30_000 });
+    expect(result.status, result.stderr).toBe(0);
+    return JSON.parse(result.stdout);
+  } finally { rmSync(worker, { recursive: true, force: true }); }
+}
+
+const compiledRoles = ["createCloudQualificationRuntime", "qualifyCloudActorTools", "qualifyCloudCapture", "qualifyCloudHumanServices", "qualifyCloudRunners"];
+const compiledExports = compiledRoles.map(name => `export function ${name}() { throw new Error('role must not run during loading'); }`).join("\n");
+
+it("loads the installed fixed roles without registering any runtime transformer", () => {
+  expect(installedLoader(compiledExports)).toEqual({ names: compiledRoles, error: null, transforms: 0 });
+});
+
+it.each([
+  { name: "incomplete role graph", source: compiledExports.replace("export function qualifyCloudCapture", "function qualifyCloudCapture") },
+  { name: "invalid role export", source: compiledExports.replace(/export function qualifyCloudCapture[^\n]+/, "export const qualifyCloudCapture = false;") },
+  { name: "missing runner role", source: compiledExports.replace("export function qualifyCloudRunners", "function qualifyCloudRunners") },
+  { name: "invalid runner role", source: compiledExports.replace(/export function qualifyCloudRunners[^\n]+/, "export const qualifyCloudRunners = false;") },
+  { name: "broken compiled dependency", source: "import './absent-compiled-dependency.mjs';\n" + compiledExports },
+])("refuses $name without falling back to source compilation", ({ source }) => {
+  const result = installedLoader(source);
+  expect(result.names).toBeNull();
+  expect(result.error).not.toBeNull();
+  expect(result.transforms).toBe(0);
+});
