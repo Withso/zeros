@@ -805,6 +805,82 @@ d("cloud workspace reconciliation", () => {
       ...options,
     });
 
+  describe("lifecycle phase timing", () => {
+    const timingAudit = async (intentId: string) => (await pool.query(
+      "SELECT action,subject FROM audit_log WHERE subject->>'intentId'=$1 ORDER BY created_at", [intentId],
+    )).rows;
+
+    it("records bounded phase durations in the existing result audit without another provider dispatch", async () => {
+      const seeded = await seedWorkspace();
+      const provider = new FakeProvider();
+      const info = vi.fn();
+      const worker = reconciler(provider, { logger: { info, warn() {}, error() {} } });
+      expect(await worker.runOnce(seeded.workspaceId)).toBe(true);
+      expect(provider.createCount).toBe(1);
+      const rows = await timingAudit(seeded.intentId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].action).toBe("cloud_workspace.create_succeeded");
+      expect(rows[0].subject.phaseTiming).toEqual({
+        version: 1,
+        monotonicMs: {
+          claim: expect.any(Number), providerResolution: expect.any(Number), inspect: expect.any(Number),
+          funding: expect.any(Number), dispatch: expect.any(Number), resultWritePrecommit: expect.any(Number),
+        },
+        databaseElapsedMs: { firstClaimWait: expect.any(Number) },
+      });
+      for (const group of [rows[0].subject.phaseTiming.monotonicMs, rows[0].subject.phaseTiming.databaseElapsedMs])
+        for (const value of Object.values(group)) {
+          expect(Number.isFinite(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(0);
+          expect(value).toBeLessThanOrEqual(86_400_000);
+        }
+      expect(info).not.toHaveBeenCalled();
+      await worker.stop();
+      expect(info).toHaveBeenCalledOnce();
+      const report = JSON.parse(info.mock.calls[0]![0].replace("[database] timing ", ""));
+      expect(report.series).toEqual([
+        expect.objectContaining({ method: "WORKER", route: "cloud-workspace/lifecycle-result", kind: "pool-wait", count: 1 }),
+        expect.objectContaining({ method: "WORKER", route: "cloud-workspace/lifecycle-result", kind: "transaction", count: 1, unknownOutcome: 1 }),
+      ]);
+      expect(JSON.stringify(report)).not.toContain(seeded.workspaceId);
+      expect(JSON.stringify(report)).not.toContain(seeded.intentId);
+      expect(await timingAudit(seeded.intentId)).toHaveLength(1);
+    });
+
+    it.each(["compute_previous_lease_pending", "provider_rate_limited"])("separates prior %s wait from first-claim and local phase time", async errorCode => {
+      const seeded = await seedWorkspace({ intentState: "observing" });
+      await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET attempt_count=2,error_code=$2,
+        updated_at=clock_timestamp()-interval '11 seconds',next_attempt_at=now() WHERE id=$1`, [seeded.intentId, errorCode]);
+      const provider = new FakeProvider();
+      const worker = reconciler(provider);
+      expect(await worker.runOnce(seeded.workspaceId)).toBe(true);
+      const timing = (await timingAudit(seeded.intentId))[0].subject.phaseTiming;
+      expect(timing).toBeDefined();
+      expect(timing.databaseElapsedMs.firstClaimWait).toBeUndefined();
+      if (errorCode === "compute_previous_lease_pending") {
+        expect(timing.databaseElapsedMs.previousLeaseWait).toBeGreaterThanOrEqual(11_000);
+        expect(timing.databaseElapsedMs.previousLeaseWait).toBeLessThan(30_000);
+      } else expect(timing.databaseElapsedMs.previousLeaseWait).toBeUndefined();
+      expect(provider.createCount).toBe(1);
+      await worker.stop();
+    });
+
+    it("retains the elapsed failing provider phase in the existing retry audit", async () => {
+      const seeded = await seedWorkspace();
+      const provider = new FakeProvider();
+      provider.createFailure = new CloudProviderError("provider_request_unavailable", "Synthetic provider failure", true);
+      const worker = reconciler(provider);
+      expect(await worker.runOnce(seeded.workspaceId)).toBe(true);
+      const rows = await timingAudit(seeded.intentId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ action: "cloud_workspace.create_retry_scheduled", subject: {
+        phaseTiming: { version: 1, monotonicMs: { dispatch: expect.any(Number), resultWritePrecommit: expect.any(Number) } },
+      } });
+      expect(provider.createCount).toBe(1);
+      await worker.stop();
+    });
+  });
+
   describe("durable retry deadlines", () => {
     const nextDelay = () => readLifecycleDueInMs(pool, "lifecycle", null, { provider: "boat", driftIntervalMs: 1_000 });
 

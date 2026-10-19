@@ -5,7 +5,10 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { CLOUD_WORKSPACE_V2_REQUIRED, requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
+import { createDatabaseTimingReporter } from "../database-timing.js";
+import { observeTransactionTiming } from "../request-timing.js";
+import { measureLifecyclePhase, readLifecycleTiming, recordLifecycleDatabaseElapsed, withLifecycleTiming } from "./lifecycle-timing.js";
 import { deferCloudRecoveryResourceBlock, enqueueCloudMissingSnapshotRecovery } from "./automatic-recovery.js";
 import { requireGenerationRuntime } from "./generation-pins.js";
 import { CloudRuntimeError } from "./runtime-selection.js";
@@ -333,6 +336,7 @@ export class CloudWorkspaceReconciler {
   private cleanupScopeOffset = 0;
   private readonly workerId: string;
   private readonly logger: ReconcileLogger;
+  private readonly resultTiming: ReturnType<typeof createDatabaseTimingReporter>;
   private readonly paidAuthority: DatabaseCloudWorkspacePaidAuthorityReconciler;
   private readonly computeLeases: CloudWorkspaceComputeLeaseCoordinator;
   private readonly runtimeUpgradeConfig: CloudWorkspaceBackendConfig | null;
@@ -396,6 +400,7 @@ export class CloudWorkspaceReconciler {
       throw new Error("Cloud workspace reconciler worker identity is invalid");
     }
     this.logger = options.logger ?? console;
+    this.resultTiming = createDatabaseTimingReporter({ log: line => this.logger.info(line) });
     this.jobAuditIntervalMs = options.jobAuditIntervalMs ?? 60 * 60_000;
     if (!Number.isSafeInteger(this.jobAuditIntervalMs) || this.jobAuditIntervalMs < 1_000 ||
       this.jobAuditIntervalMs > 24 * 60 * 60_000 ||
@@ -447,7 +452,8 @@ export class CloudWorkspaceReconciler {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    await Promise.all([this.scheduler.stop(), this.jobs.stop(), this.authExpiryRepair]);
+    try { await Promise.all([this.scheduler.stop(), this.jobs.stop(), this.authExpiryRepair]); }
+    finally { this.resultTiming.flush(); }
   }
 
   private async tick(): Promise<void> {
@@ -551,10 +557,16 @@ export class CloudWorkspaceReconciler {
         agent_boot_id: string | null;
         requested_by: string | null;
         created_at: Date;
+        first_claim_wait_ms: string | null;
+        previous_lease_wait_ms: string | null;
       }>(
         `SELECT i.id, i.workspace_id, i.org_id, i.operation,
                 cw.desired_state, cw.current_generation, cw.authority_epoch, cw.agent_boot_id, i.generation,
                 i.requested_by,i.created_at,
+                CASE WHEN i.attempt_count=0
+                  THEN extract(epoch FROM (clock_timestamp()-i.created_at))*1000 END AS first_claim_wait_ms,
+                CASE WHEN i.error_code='compute_previous_lease_pending'
+                  THEN extract(epoch FROM (clock_timestamp()-i.updated_at))*1000 END AS previous_lease_wait_ms,
                 i.affects_workspace, i.generation_transition_id, g.provider,
                 g.provider_connection_id, g.provider_connection_version::text,
                 ${computeObservationAllocationIdSql} AS allocation_lease_id,
@@ -610,6 +622,8 @@ export class CloudWorkspaceReconciler {
       );
       const row = result.rows[0];
       if (!row) return null;
+      recordLifecycleDatabaseElapsed("firstClaimWait", row.first_claim_wait_ms);
+      recordLifecycleDatabaseElapsed("previousLeaseWait", row.previous_lease_wait_ms);
 
       if (row.operation === "wake" && row.affects_workspace && row.current_generation === row.generation && row.desired_state === "running") {
         // Cover requests admitted by an older route, including those with no
@@ -722,39 +736,45 @@ export class CloudWorkspaceReconciler {
   }
 
   async runOnce(workspaceId: string | null = null): Promise<boolean> {
-    const intent = await this.claimIntent(workspaceId);
+    return withLifecycleTiming(() => this.runTimedAttempt(workspaceId));
+  }
+
+  private async runTimedAttempt(workspaceId: string | null): Promise<boolean> {
+    const intent = await measureLifecyclePhase("claim", () => this.claimIntent(workspaceId));
     if (!intent) return false;
     if ("deferred" in intent) return true;
     const mayUpgradeOnWake = !!this.runtimeUpgradeConfig && intent.affectsWorkspace &&
       !intent.generationTransitionId && ["create", "wake"].includes(intent.operation);
     let provider: CloudWorkspaceProvider;
     try {
-      if (intent.operation === "create" || intent.operation === "wake") {
-        await withSystemTx(this.pool, async tx => {
-          await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
-          await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [intent.workspaceId, intent.orgId]);
-          await requireSupportedCloudWorkspaceGeneration(tx, {
-            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+      provider = await measureLifecyclePhase("providerResolution", async () => {
+        if (intent.operation === "create" || intent.operation === "wake") {
+          await withSystemTx(this.pool, async tx => {
+            await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
+            await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [intent.workspaceId, intent.orgId]);
+            await requireSupportedCloudWorkspaceGeneration(tx, {
+              workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+            });
           });
-        });
-      }
-      if (!mayUpgradeOnWake && (intent.operation === "create" || intent.operation === "wake")) {
-        await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
-          workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
-        }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
-      }
-      provider = this.providerResolver
-        ? (
-            await this.providerResolver.resolve({
-              workspaceId: intent.workspaceId,
-              organizationId: intent.orgId,
-              generation: intent.generation,
-              purpose: ["create", "wake"].includes(intent.operation)
-                ? "lifecycle"
-                : "cleanup",
-            })
-          ).provider
-        : this.provider;
+        }
+        if (!mayUpgradeOnWake && (intent.operation === "create" || intent.operation === "wake")) {
+          await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
+            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+          }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
+        }
+        return this.providerResolver
+          ? (
+              await this.providerResolver.resolve({
+                workspaceId: intent.workspaceId,
+                organizationId: intent.orgId,
+                generation: intent.generation,
+                purpose: ["create", "wake"].includes(intent.operation)
+                  ? "lifecycle"
+                  : "cleanup",
+              })
+            ).provider
+          : this.provider;
+      });
     } catch (error) {
       await this.recordFailure(intent, error);
       return true;
@@ -773,7 +793,7 @@ export class CloudWorkspaceReconciler {
 
     let current: CloudProviderResource | null = null;
     try {
-      current = await this.observe(provider, intent);
+      current = await measureLifecyclePhase("inspect", () => this.observe(provider, intent));
       let providerAccessRevocationProven =
         current === null || current.state === "deleted";
 
@@ -806,7 +826,8 @@ export class CloudWorkspaceReconciler {
         workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation,
       },this.runtimeUpgradeConfig?.runtime?.qualificationMode));
       if(current?.state==='running'&&['create','wake'].includes(intent.operation))
-        await this.computeLeases.observeRunning({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current);
+        await measureLifecyclePhase("funding", () => this.computeLeases.observeRunning(
+          {workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current!));
 
       // The provider adapter's destructive lifecycle contract includes
       // provider-wide access revocation. Even when provider state already
@@ -821,7 +842,7 @@ export class CloudWorkspaceReconciler {
           forceProviderAccessDrain) &&
         (!isTransitional(current) || current?.computeStopped === true)
       ) {
-        current = await this.dispatch(provider, intent, current);
+        current = await measureLifecyclePhase("dispatch", () => this.dispatch(provider, intent, current));
         if (["stop", "archive", "delete"].includes(intent.operation)) {
           providerAccessRevocationProven = true;
         }
@@ -977,13 +998,34 @@ export class CloudWorkspaceReconciler {
     }
   }
 
+  /** Observe the existing result transaction after its COMMIT/rollback hook.
+   * Only a static worker category reaches the bounded histogram reporter. */
+  private async resultTransaction<T>(work: (tx: Tx) => Promise<T>): Promise<T> {
+    let status: number | "error" = "error";
+    return observeTransactionTiming(async () => {
+      const result = await withSystemTx(this.pool, work);
+      status = 200;
+      return result;
+    }, timing => this.resultTiming.observe({
+      version: 1, scope: "transaction-helpers-and-provider-locks",
+      method: "WORKER", route: "cloud-workspace/lifecycle-result", status, droppedSpans: 0,
+      spans: [
+        ...(timing.transactions || timing.waitMs ? [{ kind: "pool-wait" as const, offsetMs: 0,
+          durationMs: timing.waitMs, purpose: null, failed: timing.transactions === 0 }] : []),
+        ...(timing.transactions ? [{ kind: "transaction" as const, offsetMs: timing.waitMs,
+          durationMs: timing.heldMs, purpose: null, failed: null }] : []),
+      ],
+    }));
+  }
+
   private async recordResult(
     intent: ClaimedIntent,
     resource: CloudProviderResource | null,
     intentState: "succeeded" | "superseded" | "observing",
     providerAccessRevocationProven = false,
   ): Promise<void> {
-    await withSystemTx(this.pool, async (tx) => {
+    const resultStarted = performance.now();
+    await this.resultTransaction(async (tx) => {
       // Lifecycle routes lock workspace before touching intents. Keep the same
       // order here so a provider response racing stop/delete cannot deadlock.
       const workspace = await tx.query<{
@@ -1191,6 +1233,7 @@ export class CloudWorkspaceReconciler {
           providerState: observedState,
           staleGeneration: !generationIsCurrent,
           desiredStateChanged: !intentIsCurrent && generationIsCurrent,
+          phaseTiming: readLifecycleTiming(resultStarted),
         },
       );
     });
@@ -1201,8 +1244,9 @@ export class CloudWorkspaceReconciler {
     error: unknown,
     observed: CloudProviderResource | null = null,
   ): Promise<void> {
+    const resultStarted = performance.now();
     const failure = safeFailure(error);
-    await withSystemTx(this.pool, async (tx) => {
+    await this.resultTransaction(async (tx) => {
       const current = await tx.query<{
         desired_state: DesiredState;
         current_generation: number;
@@ -1269,6 +1313,7 @@ export class CloudWorkspaceReconciler {
             code: failure.code,
             staleGeneration:
               workspace?.current_generation !== intent.generation,
+            phaseTiming: readLifecycleTiming(resultStarted),
           },
         );
         return;
@@ -1401,6 +1446,7 @@ export class CloudWorkspaceReconciler {
           generation: intent.generation,
           code: failure.code,
           attempt: intent.attemptCount,
+          phaseTiming: readLifecycleTiming(resultStarted),
         },
       );
     });

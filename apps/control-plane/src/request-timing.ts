@@ -537,11 +537,45 @@ export function recordVerifiedEngineRequestOrigin(rawHeader: string | undefined,
   } catch { return reject(); }
 }
 
+export type TransactionTimingSummary = Readonly<{ transactions: number; waitMs: number; heldMs: number }>;
+type TransactionTimingScope = { summary: { transactions: number; waitMs: number; heldMs: number }; closed: boolean; parent: TransactionTimingScope | undefined };
+const transactionTimingScopes = new AsyncLocalStorage<TransactionTimingScope>();
+const timingBoundMs = 86_400_000;
+
+/** Observe completed shared-helper timings in a background scope without
+ * replacing request accounting or reading the database. The existing hook
+ * includes COMMIT/rollback and does not prove which outcome occurred. */
+export async function observeTransactionTiming<T>(work: () => Promise<T>, observe: (summary: TransactionTimingSummary) => void): Promise<T> {
+  const scope: TransactionTimingScope = { summary: { transactions: 0, waitMs: 0, heldMs: 0 }, closed: false,
+    parent: transactionTimingScopes.getStore() };
+  try { return await transactionTimingScopes.run(scope, work); }
+  finally {
+    scope.closed = true;
+    try {
+      const returned = observe(Object.freeze({ ...scope.summary }));
+      if (observablePromise(returned)) void Promise.prototype.then.call(returned, () => undefined, () => undefined);
+    } catch { /* Timing sinks cannot change transaction outcomes. */ }
+  }
+}
+
+function recordScopedTransactionTiming(waitMs: number, totalMs?: number): void {
+  if (!Number.isFinite(waitMs) || (totalMs !== undefined && !Number.isFinite(totalMs))) return;
+  for (let scope = transactionTimingScopes.getStore(); scope; scope = scope.parent) {
+    if (scope.closed) break;
+    scope.summary.waitMs = Math.min(timingBoundMs, scope.summary.waitMs + Math.max(0, waitMs));
+    if (totalMs !== undefined) {
+      scope.summary.transactions = Math.min(1_000_000, scope.summary.transactions + 1);
+      scope.summary.heldMs = Math.min(timingBoundMs, scope.summary.heldMs + Math.max(0, totalMs - waitMs));
+    }
+  }
+}
+
 /** Attribute one shared-helper transaction to the request being served: its
  * pool wait, and the remaining time it held the connection. Work outside a
  * request (background loops) and work that outlives the logged request
  * (detached stream callbacks, timers) is not counted. */
 export function recordTransactionTiming(waitMs: number, totalMs: number): void {
+  recordScopedTransactionTiming(waitMs, totalMs);
   const timing = active.getStore();
   if (!timing || timing.closed) return;
   timing.transactions += 1;
@@ -555,6 +589,7 @@ export function recordTransactionTiming(waitMs: number, totalMs: number): void {
 /** Attribute an acquire outside the transaction helper. By default it ended
  * without a connection; manual lock owners also record successful acquires. */
 export function recordPoolWait(waitMs: number, failed = true): void {
+  recordScopedTransactionTiming(waitMs);
   const timing = active.getStore();
   if (!timing || timing.closed) return;
   timing.waitMs += waitMs;

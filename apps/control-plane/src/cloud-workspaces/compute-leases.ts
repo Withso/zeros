@@ -26,6 +26,7 @@ import { classifyCloudFailure, diagnosticCode, type CloudDiagnostic, type CloudD
 import { retainCloudDiagnostic, diagnosticStorageFailed, recoverCloudDiagnostic } from "./cloud-diagnostic-store.js";
 import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
 import { computeLeaseDueAtSql } from "./compute-rechecks.js";
+import { measureLifecyclePhase } from "./lifecycle-timing.js";
 
 export type ManagedComputePolicy = {
   provider: string;
@@ -458,7 +459,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     provider: CloudWorkspaceProvider,
     current: CloudProviderResource | null,
   ): Promise<CloudProviderResource> {
-    const scope = await this.scope(input);
+    const scope = await measureLifecyclePhase("funding", () => this.scope(input));
     if (
       !scope.live ||
       scope.desired_state !== "running" ||
@@ -473,15 +474,15 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     // The lifecycle worker already serializes each intent. Claim this lease as
     // well so the metering worker cannot settle it during a provider request.
     const owner = `allocation:${randomUUID()}`;
-    const lease = await this.prepare(input, scope, metered, owner);
+    const lease = await measureLifecyclePhase("funding", () => this.prepare(input, scope, metered, owner));
     try {
-      await this.assertAllocationRetryDeadline(lease);
-      const plan = await this.plan(lease, lease.state !== "funding");
+      await measureLifecyclePhase("funding", () => this.assertAllocationRetryDeadline(lease));
+      const plan = await measureLifecyclePhase("funding", () => this.plan(lease, lease.state !== "funding"));
       if (!plan) throw failure("compute_credit_exhausted");
-      await this.fund(lease, plan, owner);
+      await measureLifecyclePhase("funding", () => this.fund(lease, plan, owner));
       // A lifecycle/ownership change during funding prevents dispatch, while
       // the reservation remains until independent absence/stop evidence.
-      const currentScope = await this.scope(input);
+      const currentScope = await measureLifecyclePhase("funding", () => this.scope(input));
       if (
         !currentScope.live ||
         currentScope.desired_state !== "running" ||
@@ -490,7 +491,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         money(currentScope.billing_epoch) !== money(lease.billing_epoch)
       )
         throw failure("compute_lease_superseded");
-      await this.assertAllocationRetryDeadline(lease);
+      await measureLifecyclePhase("funding", () => this.assertAllocationRetryDeadline(lease));
       const resource = current
         ? await metered.startWithComputeLease(
             current.resourceId,
@@ -498,7 +499,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           )
         : await metered.createWithComputeLease(input, plan.ttlSeconds);
       assertProviderResourceIdentity(resource, input);
-      await this.observeRunning(input, provider, resource);
+      await measureLifecyclePhase("postDispatchObservation", () => this.observeRunning(input, provider, resource));
       return resource;
     } catch (error) {
       if (
