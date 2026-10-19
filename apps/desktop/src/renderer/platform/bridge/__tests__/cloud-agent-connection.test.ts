@@ -91,9 +91,10 @@ function fixture(receiptIdentity: Record<string, unknown> = {}, cloudTurnProtoco
     return { type: "WORKSPACE_RESPONSE", op: message.op, result };
   });
   const authorize = vi.fn(async () => grant);
+  const client = { request, status: "connected", executionIdentity: peer,
+    supportsEngineCapability: (feature: string) => capable && !!metadata && feature === "cloud.localCommands.v1" };
   const connection = new CloudAgentConnection(
-    { request, status: "connected", executionIdentity: peer,
-      supportsEngineCapability: (feature: string) => capable && !!metadata && feature === "cloud.localCommands.v1" } as unknown as RuntimeClient,
+    client as unknown as RuntimeClient,
     "local-main",
     authorize,
   );
@@ -101,13 +102,14 @@ function fixture(receiptIdentity: Record<string, unknown> = {}, cloudTurnProtoco
     connection,
     request,
     authorize,
+    disconnect: () => { client.status = "disconnected"; },
     getEnqueued: () => enqueued,
     setState: (value: string) => {
       state = value;
     },
   };
 }
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("cloud Claude preference carriage", () => {
   const choices = [
@@ -185,6 +187,103 @@ describe("cloud Claude preference carriage", () => {
 });
 
 describe("cloud snapshot and replay installation", () => {
+  it("recovers a completed turn after the first reattach snapshot fails, without redispatch", async () => {
+    vi.useFakeTimers();
+    const f = fixture(), original = f.request.getMockImplementation()!, snapshots = vi.fn();
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    f.connection.on("AGENT_SESSION_CREATED", frame => {
+      if ("cloudSnapshot" in frame) snapshots(frame.cloudSnapshot);
+    });
+    let reads = 0;
+    f.request.mockImplementation(async message => {
+      if (message.op !== "cloudEvents.request") return original(message);
+      if (++reads === 1) throw new Error("Snapshot transport interrupted");
+      return { type: "WORKSPACE_RESPONSE", op: message.op, result: { snapshot: { conversationId: chat, agentId: "codex",
+        executionId: "original-execution", activeTurn: null, messages: [], permissions: [], questions: [],
+        latestTurn: { turnId: "accepted-turn", status: "completed", stopReason: "end_turn" } } } };
+    });
+    try {
+      await f.connection.refreshAttachments();
+      expect(snapshots).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(reads).toBe(2);
+      expect(snapshots).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        activeTurn: null, latestTurn: { turnId: "accepted-turn", status: "completed", stopReason: "end_turn" },
+      }));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(reads).toBe(2);
+      expect(f.authorize).not.toHaveBeenCalled();
+      expect(f.getEnqueued()).toBeUndefined();
+      expect(f.request.mock.calls.filter(([message]) => message.op === "cloudCommands.request")
+        .every(([message]) => (message.params as { request: { kind: string } }).request.kind === "snapshot")).toBe(true);
+    } finally { f.connection.dispose(); }
+  });
+
+  it("bounds a failed reattach to one retry and leaves explicit refresh available", async () => {
+    vi.useFakeTimers();
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    let reads = 0;
+    f.request.mockImplementation(async message => {
+      if (message.op === "cloudEvents.request") { reads++; throw new Error("Snapshot unavailable"); }
+      return original(message);
+    });
+    try {
+      await f.connection.refreshAttachments();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(reads).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+      await f.connection.refreshAttachments();
+      expect(reads).toBe(3);
+    } finally { f.connection.dispose(); }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["detached-and-restored", "disposed", "newer-snapshot", "disconnected"] as const)("retires the failed snapshot's retry on %s", async retirement => {
+    vi.useFakeTimers();
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    let reads = 0;
+    f.request.mockImplementation(async message => {
+      if (message.op === "cloudEvents.request" && ++reads === 1) throw new Error("Snapshot unavailable");
+      return original(message);
+    });
+    try {
+      await f.connection.refreshAttachments();
+      if (retirement === "disposed") f.connection.dispose();
+      else if (retirement === "disconnected") f.disconnect();
+      else if (retirement === "detached-and-restored") {
+        await f.connection.request({ type: "AGENT_CLOSE_SESSION", chatId: chat });
+        await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+      } else await f.connection.refreshAttachments();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(reads).toBe(retirement === "newer-snapshot" ? 2 : 1);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(f.getEnqueued()).toBeUndefined();
+    } finally { f.connection.dispose(); }
+  });
+
+  it("does not schedule an old failed read after a newer snapshot has restored the attachment", async () => {
+    vi.useFakeTimers();
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    let fail!: (reason: Error) => void, reads = 0;
+    f.request.mockImplementation(message => {
+      if (message.op === "cloudEvents.request" && ++reads === 1)
+        return new Promise((_resolve, reject) => { fail = reject; });
+      return original(message);
+    });
+    try {
+      const old = f.connection.refreshAttachments();
+      await f.connection.refreshAttachments();
+      fail(new Error("Old transport failed")); await old;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(reads).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(f.getEnqueued()).toBeUndefined();
+    } finally { f.connection.dispose(); }
+  });
+
   it("skips the renderer credential grant only on the exact negotiated boot peer", async () => {
     const f = fixture({}, 1, boot);
     await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
