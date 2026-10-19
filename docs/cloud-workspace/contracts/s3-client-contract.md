@@ -1,7 +1,7 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **FROZEN** · Contract ID `zeros-client` · Version `1.3.0`
-(runtime boot binding and organization stream coverage; see [Changelog](#changelog)) ·
+Status: **FROZEN** · Contract ID `zeros-client` · Version `1.4.0`
+(accepted-work boot support; see [Changelog](#changelog)) ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
 [Draft schema: device stream frames](#draft-schema-device-stream-frames),
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
@@ -178,6 +178,21 @@ exact `CloudAgentBootScope`: `organizationId`, `workspaceId`, `generation`,
 `fundingOwnerEpoch`. Its organization matches the request and its workspace,
 generation and engine match the response. `authorityEpoch` is exactly the
 issued S1 tokens' `ep.wa`. This metadata confers no actor or funding grant.
+
+Since 1.4, `connect.runtimeBinding.acceptedWorkVersion?: 1` advertises
+accepted-work support for that exact boot and funding scope. The CP includes
+it only for the exact eligible funding owner when the active engine is
+qualified for `detached.v1` and the required organization flags are enabled.
+Other actors keep legacy command admission. An absent field leaves the legacy command
+lifetime; clients never infer support from an account, SDK version or another
+connection. The value is retained with the native connection/token attempt,
+and invalid metadata is refused. The optional `params.acceptedWorkProof` on
+`cloudCommands.request` is defined by
+`packages/protocol/src/cloud-accepted-work-client.ts`. A fresh S1 proof and
+same-device command signature bind the exact immutable command, boot, funding
+scope, token, timestamp, nonce and selected route. Ordinary S1 checks and new
+command expiry limits remain unchanged. A supplied invalid proof cannot fall
+back to an ordinary command.
 
 The CP reads the active writer in the same authority boundary as issuance.
 Provider endpoint I/O holds no database locks; afterward the CP rechecks the
@@ -562,7 +577,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.3.0
+  version: 1.4.0
   description: >-
     FROZEN reference sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
@@ -1185,6 +1200,7 @@ components:
       properties:
         authorityEpoch: { type: integer, minimum: 1, maximum: 9007199254740991 }
         bootScope: { $ref: '#/components/schemas/CloudAgentBootScope' }
+        acceptedWorkVersion: { const: 1 }
     ConnectResponse:
       type: object
       required: [workspaceId, generation, capabilities, routes, renewAt, relayHedgeMs]
@@ -1728,6 +1744,11 @@ is a review aid until freeze; the frozen source of truth will be Zod in
 
 ## Changelog
 
+- **1.4.0** (2026-10-18, additive optional response field; major remains 1):
+  - `runtimeBinding.acceptedWorkVersion?: 1` declares exact-boot support for
+    accepted work for the eligible funding owner. Other actors and older
+    responses omit it and retain legacy command lifetime.
+    No S1 claims, proof messages, grants or request requirements change.
 - **1.3.0** (2026-10-18, additive optional response fields; major remains 1):
   - `runtime/connect` can carry the exact active `runtimeBinding`, tied to
     issued authority and rechecked after endpoint I/O. Native handles remain

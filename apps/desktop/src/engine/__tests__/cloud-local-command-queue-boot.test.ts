@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
+import { CloudCommandRuntime } from "../cloud-command-runtime";
 import { testCloudBootFixture } from "../agents/__tests__/helpers/test-cloud-boot";
 import { cloudBootNativeAuthority, isCloudBootAgentExecutionFactory, isCloudBootAgentSelection, type CloudBootAgentExecutionFactory } from "../agents/cloud-provider-execution";
 import type { CloudLocalCommandQueue } from "../cloud-local-command-queue";
@@ -21,6 +22,9 @@ import { CloudTransport } from "../transport/cloud";
 import type { TransportClient } from "../transport/types";
 import { CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
 import { DesignCatalogReader, type DesignCatalogSnapshot } from "../design/catalog";
+import { isCloudAcceptedWork } from "../agents/cloud-accepted-work-authority";
+import { cloudExecutionPrincipalSession } from "../agents/cloud-execution-principal";
+import { testAcceptedWorkOptions } from "../agents/__tests__/helpers/test-accepted-work";
 
 type Readiness = ReturnType<CloudRuntimeRegistration["readiness"]>;
 const engineMethods = ZerosEngine.prototype as unknown as {
@@ -31,6 +35,7 @@ const engineMethods = ZerosEngine.prototype as unknown as {
   cloudEngineUplinkReadiness(this: unknown): { ready: boolean; phase: string };
   handleConnect(this: unknown, client: TransportClient): Promise<void>;
   handleDisconnect(this: unknown, client: TransportClient): void;
+  handleCloudCommandOperation(this: unknown, op: string, params: Record<string, unknown>, client: TransportClient): Promise<unknown>;
 };
 /** Exercise the actual transport callback without starting a native engine. */
 function internalReadiness(engine: unknown): () => Readiness {
@@ -50,6 +55,7 @@ function internalReadiness(engine: unknown): () => Readiness {
 }
 
 const cleanups: (() => void | Promise<void>)[] = [];
+vi.mock("../agents/cloud-mcp", async original => ({ ...await original<typeof import("../agents/cloud-mcp")>(), readCloudRepositoryMcp: vi.fn(async () => []) }));
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.useRealTimers(); });
 async function fixture(provider: "cursor" | "codex" = "cursor") {
   const directory = mkdtempSync(path.join(tmpdir(), "zeros-boot-runtime-"));
@@ -83,7 +89,8 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
     history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed,
     controlsPollIntervalMs: undefined as (() => number) | undefined,
     controlsExchange: undefined as ((ok: boolean) => void) | undefined,
-    turnJournalChanged: undefined as (() => void) | undefined };
+    turnJournalChanged: undefined as (() => void) | undefined,
+    accepted: undefined as ConstructorParameters<typeof CloudLocalAgentBootRuntime>[0]["accepted"] };
   const boot = new CloudLocalAgentBootRuntime(options); cleanups.push(() => boot.dispose());
   const admission = { accountUserId: f.provenance.actor.userId, authorityEpoch: f.provenance.authorityEpoch,
     actor: { sessionId: f.provenance.actorSessionId, deviceId: f.provenance.actor.deviceId,
@@ -145,6 +152,84 @@ function enqueueActorWork(f: Awaited<ReturnType<typeof fixture>>) {
   { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
   return { commandId, conversationId, payload };
 }
+
+async function acceptedFixture() {
+  const f = await fixture(), accepted = await testAcceptedWorkOptions(f.f);
+  cleanups.push(accepted.close); f.expireAuthorityAt(Date.now() + 3_600_000);
+  f.options.accepted = accepted.options;
+  await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+  f.boot.attachActor(f.admission.actor.sessionId, accepted.clientSessionId);
+  const request = { kind: "mutate" as const, mutation: { conversationId: f.f.input.conversationId,
+    operationId: randomUUID(), expectedRevision: 0, action: { kind: "enqueue" as const, commandId: randomUUID(), payload: {
+      agentId: "cursor" as const, model: f.f.input.model, permissionMode: "auto" as const, modeRevision: 0,
+      userMessageId: randomUUID(), prompt: [{ type: "text" as const, text: "accepted owner work" }] } } } };
+  return { ...f, ...accepted, bootOptions: f.options, requestCommand: request, senderProof: () => accepted.senderProof(request) };
+}
+
+describe("accepted work boot wiring", () => {
+  it("keeps accepted work and its context live during a start-only checkpoint pause, then retires on seal", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await acceptedFixture(); let startsAllowed = true;
+    Object.assign(f.bootOptions, { startsAllowed: () => startsAllowed });
+    await f.boot.acceptCommand(f.requestCommand, f.senderProof(), f.clientSessionId, f.admission.actor.sessionId, "direct");
+    await vi.advanceTimersByTimeAsync(1);
+    const claim = CloudBootCommandClaimSchema.parse(f.boot.queue.handle({ kind: "claim", conversationId: f.f.input.conversationId,
+      claimId: randomUUID(), executionId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch }));
+    const selection = f.boot.selectClaim(claim);
+    startsAllowed = false;
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(f.boot.active).toBe(false); expect(f.boot.authorityActive).toBe(true);
+    expect(selection.actor.signal.aborted).toBe(false);
+    selection.actor.assertLive(); selection.context.assertLive();
+    await f.boot.quiesceForSeal();
+    expect(selection.actor.signal.aborted).toBe(true);
+  });
+
+  it("dispatches exact accepted work after 300 seconds without keeping desktop actor confirmations", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await acceptedFixture();
+    await f.boot.acceptCommand(f.requestCommand, f.senderProof(), f.clientSessionId, f.admission.actor.sessionId, "direct");
+    f.boot.releaseActor(f.admission.actor.sessionId, f.clientSessionId); f.auth.closeClient(f.clientSessionId); f.request.mockClear();
+    await vi.advanceTimersByTimeAsync(301_000);
+    expect(f.request.mock.calls.some(([op]) => op === "actor-confirm" || op === "warm-context")).toBe(false);
+    expect(f.warm.mock.calls.length).toBeGreaterThan(2);
+    expect(f.boot.queue.acceptedWork.get(f.requestCommand.mutation.action.commandId)?.state).toBe("accepted");
+    const claim = CloudBootCommandClaimSchema.parse(f.boot.queue.handle({ kind: "claim", conversationId: f.f.input.conversationId,
+      claimId: randomUUID(), executionId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch }));
+    expect(claim.dispatchAllowed).toBe(true);
+    const selection = f.boot.selectClaim(claim);
+    expect(isCloudAcceptedWork(selection.actor)).toBe(true);
+    selection.actor.assertLive(); selection.context.assertLive();
+    expect(f.boot.queue.handle({ kind: "claim", conversationId: f.f.input.conversationId, claimId: randomUUID(), executionId: randomUUID() },
+      { writerEpoch: f.f.scope.writerEpoch })).toBeNull();
+    f.losePush();
+    expect(selection.actor.signal.aborted).toBe(true);
+    await Promise.resolve(); expect(f.closed).toHaveBeenCalledOnce();
+  });
+
+  it("routes only a supplied proof through the boot and derives its route from the actual capability session", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await acceptedFixture(), legacy = vi.fn(async () => { throw new Error("legacy network used"); }), validate = vi.fn();
+    const commands = new CloudCommandRuntime({ request: legacy, validate, execution: () => null,
+      dispatch: async () => { throw new Error("claims are paused"); }, cancel: async () => {}, changed: () => {} });
+    cleanups.push(() => commands.close()); commands.installLocalQueue(f.boot.queue); commands.pauseClaims();
+    const engine = { cloudCommands: commands, cloudAgentBoot: f.boot, cloudCapabilityAuth: f.auth };
+    const client: TransportClient = { id: f.clientSessionId, kind: "cloud", cloudActor: f.admission.actor,
+      accountUserId: f.admission.accountUserId, authorized: () => true, send: vi.fn(), close: vi.fn() };
+    const params = { request: f.requestCommand, cloudLocalCommandsVersion: 1, bootId: f.f.scope.bootId,
+      writerEpoch: f.f.scope.writerEpoch, cloudTurnProtocolVersion: 1, claudePreferencesVersion: 1 };
+    const result = await engineMethods.handleCloudCommandOperation.call(engine, "cloudCommands.request", { ...params, acceptedWorkProof: f.senderProof() }, client);
+    expect(result).toMatchObject({ pending: [{ commandId: f.requestCommand.mutation.action.commandId }] });
+    expect(commands.hasActiveWork()).toBe(true);
+    expect(validate).toHaveBeenCalledWith(f.f.input.conversationId, f.requestCommand.mutation.action.payload);
+    expect(legacy).not.toHaveBeenCalled();
+    await expect(engineMethods.handleCloudCommandOperation.call(engine, "cloudCommands.request", { ...params, acceptedWorkProof: null }, client)).rejects.toThrow();
+    expect(legacy).not.toHaveBeenCalled();
+    await engineMethods.handleCloudCommandOperation.call(engine, "cloudCommands.request", {
+      ...params, request: { kind: "snapshot", conversationId: f.f.input.conversationId } }, client);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+});
 
 describe("cloud actor socket lifetime", () => {
   it("admits more than 256 historical sessions after their last sockets disconnect", async () => {
@@ -1371,7 +1456,7 @@ describe("engine boot-mode orchestration", () => {
     f.request.mockClear();
     const selection = f.boot.selectClaim(claim);
     expect(isCloudBootAgentSelection(selection)).toBe(true);
-    expect(selection.actor.provenance.actorSessionId).toBe(f.admission.actor.sessionId);
+    expect(cloudExecutionPrincipalSession(selection.actor)).toBe(f.admission.actor.sessionId);
     expect(f.request).not.toHaveBeenCalled(); expect(f.f.legacy.prepare).not.toHaveBeenCalled();
   });
   it("does not turn repeated conversation reads into per-Send context validation", async () => {

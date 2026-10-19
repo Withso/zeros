@@ -1,6 +1,6 @@
 # S2. VM uplink protocol
 
-Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.3.0` (additive;
+Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.4.0` (additive;
 see [Changelog](#changelog)) ·
 Schema: [Draft schema: uplink text frames](#draft-schema-uplink-text-frames)
 
@@ -204,6 +204,9 @@ not survive a reconnect.
 | auth | `auth.epochs` | C | U | Delta of the same shape + `authCursor` | Relay 5 s revalidation, client lease renewals |
 | auth | `auth.applied` | E | U | `{ syncId, authCursor }` after applying a snapshot (with its `syncId`) or an epochs delta (without); `realtime` records `capability_revocation_push_ms` from it | — |
 | auth | `auth.keys` | C | U | JWKS (`next`, `current`, `retiring`); replaces the engine's key set | — |
+| auth | `auth.health_request` | E | U | `{ connectionId, syncId, challengeId, authCursor }` only with retained accepted work and `detached.v1` | — |
+| auth | `auth.health` | C | U | `{ connectionId, syncId, challengeId, authCursor, healthy }` from a fresh shared authority observation | — |
+| auth | `auth.health_lost` | C | U | `{ connectionId, syncId }` on known source failure | — |
 | auth | `auth.capability` | C | U | Engine capability (S1) for `zeros:api`; on every connection after `auth.applied`, then at 60% lifetime | Actor-confirm renewal, `cloud-local-command-queue-boot.ts:380-396` |
 | status | `status.ready` | E | R | `{ ready, phase, reason? }` on change | Ready inference from heartbeat/registration |
 | status | `status.report` | E | R | Coalesced, latest-wins: `observedPorts`, runtime health, engine version | Heartbeat `observedPorts` field |
@@ -304,6 +307,49 @@ the old (`4409`). Relay channels on the draining instance are closed with
   renews the lease and the uplink only reports what it read. An engine that
   loses the uplink keeps working until the lease deadline (decision G:
   never stop on an unknown error).
+
+### Accepted work push health (`detached.v1`)
+
+The engine offers this feature only after CP acknowledges
+`x-zeros-cloud-accepted-work: 1` on the qualified v4 boot registration. CP
+persists that support on the exact engine instance; S3 advertises it as
+`connect.runtimeBinding.acceptedWorkVersion: 1` only with current boot/writer
+and funding authority. Selection requires the organization's `capabilities`,
+`realtime_uplink`, `credential_push`, `turn_journal` and `detached_turns`
+flags. All remain off by default. The protocol major remains 1; omission
+keeps the previous runtime and client behavior.
+
+`sys.welcome` supplies a fresh UUID `connectionId`. With retained accepted
+work, the engine sends at most one `auth.health_request` at a time, no more
+frequently than every 5 s. Each request has a fresh UUID `challengeId` and
+pins the current connection, `syncId`, applied `authCursor` and local auth
+revision. The window ends 10 s after the engine's monotonic request start;
+receiving a late reply never extends that window. No work means no health
+timer or additional source observation.
+
+`realtime` coalesces requests into process-wide observations at most once
+per 5 s. Each positive response observes sources after its challenge arrived:
+the event feed and committed unpublished backlog, target snapshots and
+revocations, keyring and rollout flags must all be current. Auth ACKs must
+be complete on the same connection. A request arriving during a read waits
+for a newer observation. A hung observation is bounded to 5 s and occupies
+its one flight until it actually settles. Known source loss immediately
+sends `auth.health_lost`; frames are never replayed after reconnect.
+
+The engine applies positive health in its serialized auth chain, after all
+earlier keys/epochs/revocations have been durably applied, and rejects a
+changed connection, sync, cursor or revision. Pongs, HTTP API success,
+lease renewal and cached auth readiness cannot substitute for this proof.
+
+Only the exact durably accepted owner command can continue after its original
+client capability expiry. Known push loss after that expiry ends it
+immediately; loss before expiry permits at most the original expiry unless
+a fresh current-connection sync/challenge restores authority first. Silent
+failure is bounded by the 10 s challenge window. Original finite provider
+expiry, engine/writer/funding authority, signing-key removal and S1 revocations
+still end the work. Context proofs stay independently bounded to 10 s. No
+accepted principal can accept another command, renew a client, mint a generic
+grant or revive closed work; ordinary S1 rules are unchanged.
 
 ### Engine lease (`lease.v1`)
 
@@ -591,6 +637,9 @@ review aid until freeze; the frozen source of truth will be Zod in
     { "$ref": "#/$defs/auth.sync" },
     { "$ref": "#/$defs/auth.epochs" },
     { "$ref": "#/$defs/auth.applied" },
+    { "$ref": "#/$defs/auth.health_request" },
+    { "$ref": "#/$defs/auth.health" },
+    { "$ref": "#/$defs/auth.health_lost" },
     { "$ref": "#/$defs/auth.keys" },
     { "$ref": "#/$defs/auth.capability" },
     { "$ref": "#/$defs/status.ready" },
@@ -712,6 +761,7 @@ review aid until freeze; the frozen source of truth will be Zod in
           "required": ["protocol", "features", "resumeToken", "resumed", "pingIntervalMs", "leaseExpiresAtMs"],
           "properties": {
             "protocol": { "type": "integer", "minimum": 1 },
+            "connectionId": { "$ref": "#/$defs/uuid" },
             "features": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string" } },
             "resumeToken": { "type": "string", "minLength": 16, "maxLength": 512 },
             "resumed": { "type": "boolean" },
@@ -795,6 +845,107 @@ review aid until freeze; the frozen source of truth will be Zod in
             "epochs": { "$ref": "#/$defs/epochSet" },
             "revocations": { "$ref": "#/$defs/revocations" },
             "authCursor": { "$ref": "#/$defs/cursor" }
+          }
+        }
+      }
+    },
+    "auth.health_request": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unreliable"
+        }
+      ],
+      "properties": {
+        "t": {
+          "const": "auth.health_request"
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "connectionId",
+            "syncId",
+            "challengeId",
+            "authCursor"
+          ],
+          "properties": {
+            "connectionId": {
+              "$ref": "#/$defs/uuid"
+            },
+            "syncId": {
+              "$ref": "#/$defs/uuid"
+            },
+            "challengeId": {
+              "$ref": "#/$defs/uuid"
+            },
+            "authCursor": {
+              "$ref": "#/$defs/cursor"
+            }
+          }
+        }
+      }
+    },
+    "auth.health": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unreliable"
+        }
+      ],
+      "properties": {
+        "t": {
+          "const": "auth.health"
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "connectionId",
+            "syncId",
+            "challengeId",
+            "authCursor",
+            "healthy"
+          ],
+          "properties": {
+            "connectionId": {
+              "$ref": "#/$defs/uuid"
+            },
+            "syncId": {
+              "$ref": "#/$defs/uuid"
+            },
+            "challengeId": {
+              "$ref": "#/$defs/uuid"
+            },
+            "authCursor": {
+              "$ref": "#/$defs/cursor"
+            },
+            "healthy": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "auth.health_lost": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/unreliable"
+        }
+      ],
+      "properties": {
+        "t": {
+          "const": "auth.health_lost"
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "connectionId",
+            "syncId"
+          ],
+          "properties": {
+            "connectionId": {
+              "$ref": "#/$defs/uuid"
+            },
+            "syncId": {
+              "$ref": "#/$defs/uuid"
+            }
           }
         }
       }
@@ -1038,6 +1189,12 @@ review aid until freeze; the frozen source of truth will be Zod in
 ```
 
 ## Changelog
+
+- **1.4.0** (2026-10-18, additive): add qualified `detached.v1`, per-connection
+  challenged authority health and optional welcome `connectionId`. Only exact
+  accepted owner work can outlive its original client token under current
+  push authority. Provider and context deadlines remain independent; S1 and
+  protocol major 1 are unchanged.
 
 - **1.3.0** (2026-10-18, additive): require `exit.report.v1` before granting
   `lease.v1`, with exact supervisor exit withdrawal through the API; require

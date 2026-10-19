@@ -86,6 +86,7 @@ export class CapabilityRevocationPush {
   private stopped = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryDelayMs = CAPABILITY_REVOCATION_RETRY_MIN_MS;
+  private readonly lossListeners = new Set<() => void>();
   private readonly unsubscribe: () => void;
   private readonly now: () => number;
   private readonly logger: Pick<Console, "warn">;
@@ -110,6 +111,15 @@ export class CapabilityRevocationPush {
   /** Resolves once queued work has been pushed. */
   async settled(): Promise<void> {
     while (this.running) await this.running;
+  }
+
+  /** Settling a failed pass is not evidence that its snapshots were pushed. */
+  caughtUp(): boolean {
+    return !this.stopped && !this.running && !this.retryTimer && !this.pending.resync && !this.pending.events.length;
+  }
+  onHealthLost(listener: () => void): () => void {
+    this.lossListeners.add(listener);
+    return () => { this.lossListeners.delete(listener); };
   }
 
   private events(batch: readonly RealtimeSecurityEvent[]): void {
@@ -144,6 +154,7 @@ export class CapabilityRevocationPush {
 
   /** The failed pass may have lost events: re-read every owned uplink. */
   private retryLater(): void {
+    for (const listener of [...this.lossListeners]) listener();
     if (this.stopped || this.retryTimer) return;
     const delay = this.retryDelayMs;
     this.retryDelayMs = Math.min(CAPABILITY_REVOCATION_RETRY_MAX_MS, delay * 2);

@@ -1,5 +1,7 @@
 import { createHash, createHmac, hkdfSync, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
+import type { CloudAcceptedWorkOperationAuthority } from "./accepted-work.js";
+import { CloudAcceptedWorkContextRequestSchema, CloudAcceptedWorkContextResponseSchema, type CloudAcceptedWorkReceipt } from "./accepted-work-contract.js";
 import { HttpError } from "../authz.js";
 import { authorizeCloudAgentHistoryRecovery, checkCloudAgentHistoryActivation, completeCloudAgentHistoryActivation } from "./agent-history-recovery.js";
 import type pg from "pg";
@@ -579,6 +581,23 @@ export async function readCloudAgentBootAvailability(tx:Tx,input:{workspaceId:st
 export class DatabaseCloudAgentBootService {
   constructor(private readonly pool:pg.Pool,private readonly keys:CloudAgentCredentialKeys,private readonly workosEnabled:boolean,
     private readonly settingsEncryption:SecretEncryptionConfiguration={},private readonly codexRenewal=new DatabaseCodexAuthRenewal(pool,keys)){}
+  async acceptedContext(engine:BootEngineScope,value:unknown,authority:CloudAcceptedWorkOperationAuthority):Promise<unknown> {
+    const parsed=CloudAcceptedWorkContextRequestSchema.safeParse(value);
+    if(!parsed.success)throw new HttpError(422,"invalid_agent_execution","invalid_agent_execution");
+    const {repositoryServers,...operation}=parsed.data;
+    for(const field of ["organizationId","workspaceId","generation","engineInstanceId"] as const)
+      if(engine[field]!==operation.scope[field])rejected();
+    return this.withReadBinding(engine,"warm-context",operation.scope,async(tx,row,identity,deadline)=>{
+      const receipt=await authority.authorizeInTx(tx,engine,operation);
+      const {fundingOwnerUserId:_owner,fundingOwnerEpoch:_epoch,...reference}=receipt.scope;
+      const actor:CloudActorProvenance={scope:receipt.scope,actorSessionId:receipt.actorSessionId,actor:receipt.actor,
+        authorityEpoch:receipt.epochs.wa,fundingGrant:{kind:"owner"},fundingConsentVersion:1,
+        confirmedUntilMs:Math.min(deadline,receipt.providerExpiresAtMs)};
+      const request=CloudAgentWarmActorRequestSchema.parse({...reference,version:1,mode:"boot-owner-v1",actorSessionId:receipt.actorSessionId,
+        provider:receipt.command.provider,conversationId:receipt.command.conversationId,model:receipt.command.model,cwd:receipt.command.cwd,repositoryServers});
+      return this.warmContext(tx,engine,row,identity,actor,request,{receipt,recheck:()=>authority.authorizeInTx(tx,engine,operation)});
+    });
+  }
   async execute(engine:BootEngineScope,operation:CloudAgentBootOperation,value:unknown):Promise<unknown> {
     const request=bootSchemas[operation].safeParse(value);
     if(!request.success)throw new HttpError(422,"invalid_agent_execution","invalid_agent_execution");
@@ -787,7 +806,7 @@ export class DatabaseCloudAgentBootService {
     return parsed.data;
   }
   private async warmContext(tx:Tx,engine:BootEngineScope,row:BootRow,identity:z.infer<typeof CloudAgentBootIdentitySchema>,actor:CloudActorProvenance,
-    request:z.infer<typeof CloudAgentWarmActorRequestSchema>) {
+    request:z.infer<typeof CloudAgentWarmActorRequestSchema>,accepted?:{receipt:CloudAcceptedWorkReceipt;recheck():Promise<CloudAcceptedWorkReceipt>}) {
     if(actor.actor.role==="viewer"||!actor.fundingGrant||actor.fundingConsentVersion!==1)rejected();
     const provider=await this.readWarmProvider(tx,row,request.provider);
     if(!provider.models.includes(request.model))rejected();
@@ -800,9 +819,12 @@ export class DatabaseCloudAgentBootService {
     const environment={version:1 as const,revision:environmentRevision,values,history};
     const previous=(await tx.query<{context_id:string;context_revision:string}>(`SELECT context_id,context_revision FROM cloud_agent_boot_contexts WHERE binding_id=$1
       AND actor_session_id=$2 AND provider=$3 AND conversation_id=$4 AND model=$5 AND cwd=$6 AND retired_at IS NULL AND expires_at>clock_timestamp()
-      ORDER BY created_at DESC,context_id DESC LIMIT 1`,[row.id,request.actorSessionId,request.provider,request.conversationId,request.model,request.cwd])).rows[0];
+      AND binding->>'acceptedWorkId' IS NOT DISTINCT FROM $7::text
+      ORDER BY created_at DESC,context_id DESC LIMIT 1`,[row.id,request.actorSessionId,request.provider,request.conversationId,request.model,request.cwd,
+        accepted?.receipt.acceptedWorkId??null])).rows[0];
     let contextId=previous?.context_id??randomUUID();
-    const capture=async()=>admitBootCustomization(tx,{...bootScope(row),contextId,actorSessionId:request.actorSessionId,actorUserId:actor.actor.userId,
+    const capture=async()=>admitBootCustomization(tx,{...bootScope(row),contextId,...(accepted?{acceptedWorkId:accepted.receipt.acceptedWorkId}:{}),
+      actorSessionId:request.actorSessionId,actorUserId:actor.actor.userId,
       actorDeviceId:actor.actor.deviceId,actorDeviceKeyVersion:actor.actor.deviceKeyVersion,actorFingerprint:actor.actor.fingerprint,
       authorityEpoch:identity.authorityEpoch,fundingGrant:actor.fundingGrant!,provider:request.provider,conversationId:request.conversationId,
       model:request.model,cwd:request.cwd},request.repositoryServers,this.keys,{consistentRead:true});
@@ -824,7 +846,8 @@ export class DatabaseCloudAgentBootService {
       const count=(await tx.query<{count:number}>("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts WHERE binding_id=$1",[row.id])).rows[0]!.count;
       if(count>=4096)throw new HttpError(429,"cloud_validation_execution_limit","cloud_validation_execution_limit");
     }
-    const current=await this.confirmActor(tx,bootScope(row),request.actorSessionId,identity.authorityEpoch,true);
+    if(accepted)await accepted.recheck();
+    const current=accepted?{...actor}:await this.confirmActor(tx,bootScope(row),request.actorSessionId,identity.authorityEpoch,true);
     current.confirmedUntilMs=Math.min(current.confirmedUntilMs,actor.confirmedUntilMs);
     if(bootMetadataJson([current.actor,current.fundingGrant])!==bootMetadataJson([actor.actor,actor.fundingGrant])||current.confirmedUntilMs<=Date.now())rejected();
     await assertCloudEngineAuthorityDeadline(tx,engine.engineInstanceId,this.workosEnabled);
@@ -838,9 +861,12 @@ export class DatabaseCloudAgentBootService {
         customization.organizationRevision,customization.memberRevision,customization.repositoryDigest,customization.digest,customization.keyVersion,
         customization.envelope.nonce,customization.envelope.ciphertext,customization.envelope.authTag,new Date(current.confirmedUntilMs)]);
     if(published.rowCount!==1)rejected();
-    return CloudAgentWarmActorResponseSchema.parse({...identity,contextId,contextRevision,actor:current,provider:request.provider,conversationId:request.conversationId,
+    if(accepted)await accepted.recheck();
+    const material={...identity,contextId,contextRevision,provider:request.provider,conversationId:request.conversationId,
       model:request.model,cwd:request.cwd,gitAuthor,customization:customization.snapshot,
-      environment,nativeCapabilities:provider.nativeCapabilities,backgroundTasksVersion:1});
+      environment,nativeCapabilities:provider.nativeCapabilities,backgroundTasksVersion:1};
+    return accepted?CloudAcceptedWorkContextResponseSchema.parse({...material,acceptedWork:{acceptedWorkId:accepted.receipt.acceptedWorkId,
+      confirmedUntilMs:current.confirmedUntilMs}}):CloudAgentWarmActorResponseSchema.parse({...material,actor:current});
   }
   private async synchronize(tx:Tx,row:BootRow,identity:z.infer<typeof CloudAgentBootIdentitySchema>):Promise<CloudAgentBootCredentialResponse> {
     const scope=bootScope(row),compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);

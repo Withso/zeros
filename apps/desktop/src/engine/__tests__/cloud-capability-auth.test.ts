@@ -519,7 +519,8 @@ describe("engine capability verifier Local boundary", () => {
     const files = ["src", "electron"].flatMap(root => sources(join(ENGINE, root)));
     const importers = files.filter(file => /from "\.\/cloud-capability-(?:auth|verifier)"|control-plane\/src\/cloud-workspaces\/capability-verifier/.test(readFileSync(file, "utf8")))
       .map(file => relative(ENGINE, file)).sort();
-    expect(importers).toEqual(["src/engine/cloud-capability-auth.ts", "src/engine/cloud-capability-verifier.ts", "src/engine/zeros-engine.ts"]);
+    expect(importers).toEqual(["src/engine/cloud-capability-auth.ts", "src/engine/cloud-capability-verifier.ts",
+      "src/engine/cloud-local-command-queue-boot.ts", "src/engine/zeros-engine.ts"]);
     const engine = readFileSync(join(ENGINE, "src", "engine", "zeros-engine.ts"), "utf8");
     const constructions = [...engine.matchAll(/new EngineCapabilityAuth\(/g)].map(match => match.index!);
     expect(constructions).toHaveLength(1);

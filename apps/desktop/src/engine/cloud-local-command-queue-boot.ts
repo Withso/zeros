@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -6,8 +7,13 @@ import {
   CloudAgentBootScopeSchema, CloudAgentBootConversationSchema, CloudActorProvenanceSchema,
   type CloudAgentBootScope, type CloudAgentBootConversation, type CloudAgentWarmActorRequest,
 } from "@zeros/protocol/cloud-agent-bootstrap";
-import { CloudBootCommandClaimSchema, type CloudBootCommandClaim } from "@zeros/protocol/cloud-commands";
-import { CloudActorAuthorityRegistry, type CloudAuthorizedActor, type CloudAgentLeaseSupervisor } from "./agents/cloud-agent-lease";
+import { CloudBootCommandClaimSchema, CloudBootCommandClientRequestSchema, type CloudBootCommandClaim } from "@zeros/protocol/cloud-commands";
+import { CloudAcceptedWorkClientProofSchema } from "@zeros/protocol/cloud-accepted-work-client";
+import type { CloudAcceptedWorkEnrollRequest, CloudAcceptedWorkContextRequest, CloudAcceptedWorkCloseRequest } from "@zeros/protocol/cloud-accepted-work";
+import { CloudActorAuthorityRegistry, type CloudAgentLeaseSupervisor } from "./agents/cloud-agent-lease";
+import { CloudAcceptedWorkAuthority, type CloudAcceptedWork, type AcceptedWorkPushHealth } from "./agents/cloud-accepted-work-authority";
+import type { CloudExecutionPrincipal } from "./agents/cloud-execution-principal";
+import type { EngineCapabilityAuth, CapabilityRoute } from "./cloud-capability-auth";
 import { CloudAgentCredentialCache } from "./agents/cloud-agent-credential-cache";
 import { CloudAgentContextCache, createCloudBootAgentExecutionFactory, cloudBootNativeAuthority, type CloudAgentExecutionFactory,
   type CloudBootAgentExecutionFactory, type CloudBootAgentSelection, type CloudBootSelectionInput,
@@ -33,6 +39,7 @@ type Reference = Pick<CloudAgentBootScope, "organizationId" | "workspaceId" | "g
 type Conversation = { provider: "claude" | "codex" | "cursor"; model: string; cwd: string };
 type Interest = Conversation & { key: string; conversationId: string; sessionId: string; timer: ReturnType<typeof setTimeout> | null;
   flight: Promise<void> | null; proof: { contextId: string; confirmedUntilMs: number } | null; confirmedUntilMs: number };
+type AcceptedInterest = { work: CloudAcceptedWork; timer: ReturnType<typeof setTimeout> | null; flight: Promise<void> | null };
 type Actor = { admission: CloudRuntimeClientAdmission; confirmedUntilMs: number; timer: ReturnType<typeof setTimeout> | null;
   sockets: Set<string>; pendingAdmissions: number; controller: AbortController; confirmations: Map<string, Promise<void>> };
 type Options = {
@@ -40,7 +47,7 @@ type Options = {
   predecessor?: CloudLocalCommandPredecessor | null;
   registration: Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootAuthorityRemainingMs" | "agentBootRequest" | "credentialControlsRequest">;
   legacy: CloudAgentExecutionFactory; supervisor: CloudAgentLeaseSupervisor; engineLive(): boolean;
-  isAdmittedCwd(cwd: string, actor: CloudAuthorizedActor): boolean;
+  isAdmittedCwd(cwd: string, actor: CloudExecutionPrincipal): boolean;
   resolveConversation(conversationId: string): Conversation | null;
   executionFor?(input: Omit<CloudBootSelectionInput, "executionId"> & { candidateExecutionId: string }): string;
   history(): CloudLocalCommandHistory;
@@ -69,6 +76,14 @@ type Options = {
   controlsExchange?(ok: boolean): void;
   /** The queue committed turn journal entries, or the boot activated. */
   turnJournalChanged?(): void;
+  /** Present only on an acknowledged qualified boot. Never falls back to a
+   * generic actor request when exact accepted authority is unavailable. */
+  accepted?: {
+    auth(): EngineCapabilityAuth | null; runtimeId: string; enabled(): boolean; health: AcceptedWorkPushHealth;
+    enroll(request: CloudAcceptedWorkEnrollRequest, signal: AbortSignal): Promise<unknown>;
+    context(request: CloudAcceptedWorkContextRequest, signal: AbortSignal): Promise<unknown>;
+    close(request: CloudAcceptedWorkCloseRequest): Promise<unknown>;
+  };
 };
 
 /** Registration establishes a candidate; only an exact activation response
@@ -93,6 +108,8 @@ export class CloudLocalAgentBootRuntime {
   private readonly actors = new Map<string, Actor>();
   private readonly actorConfirmations = new Set<Promise<void>>();
   private readonly interests = new Map<string, Interest>();
+  private acceptedAuthority: CloudAcceptedWorkAuthority | null = null;
+  private readonly acceptedInterests = new Map<string, AcceptedInterest>();
   private readonly flights = new Set<Promise<unknown>>();
   private cacheTimer: ReturnType<typeof setTimeout> | null = null;
   private controlsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -283,6 +300,7 @@ export class CloudLocalAgentBootRuntime {
       this.enterStartupPhase("boot_durability");
       this.contexts = new CloudAgentContextCache({ scope: this.scope, registry: this.registry, engineLive: () => this.live(),
         isAdmittedCwd: (cwd, actor) => this.options.isAdmittedCwd(cwd, actor),
+        ...(this.options.accepted ? { acceptedRequest: (body: CloudAcceptedWorkContextRequest, signal: AbortSignal) => this.options.accepted!.context(body, signal) } : {}),
         request: (body, signal) => this.requestContext(body, signal) });
       mkdirSync(path.dirname(this.options.file), { recursive: true, mode: 0o700 });
       this.fencesValue = new CloudCredentialStartFences({ file: this.options.file, scope: this.scope, engineLive: () => this.live(),
@@ -298,6 +316,12 @@ export class CloudLocalAgentBootRuntime {
         actorWorkChanged: () => this.releaseUnusedActors(),
         canStart: run => !this.sealing && (this.options.startsAllowed?.() ?? true) && this.fencesValue!.canStart(run) });
       this.queueValue = new CloudLocalCommandQueue({ file: this.options.file, scope: this.scope, actors: this.registry,
+        ...(this.options.accepted ? { accepted: {
+          get: (id: string) => this.acceptedAuthority?.get(id),
+          ready: (work: CloudAcceptedWork) => this.acceptedReady(work),
+          selectExecution: (input: Parameters<NonNullable<ConstructorParameters<typeof CloudLocalCommandQueue>[0]["accepted"]>["selectExecution"]>[0]) =>
+            this.selectAcceptedExecution(input),
+        } } : {}),
         pendingActorsChanged: () => this.releaseUnusedActors(),
         ...(this.options.captureHistory ? { captureHistory: this.options.captureHistory } : {}),
         engineLive: () => this.live(), history: () => this.options.history(), ready: (payload, provenance, conversationId) => {
@@ -516,6 +540,84 @@ export class CloudLocalAgentBootRuntime {
     void task.finally(() => { if (interest.flight === task) interest.flight = null; this.flights.delete(task); }).catch(() => {});
     return task;
   }
+  async acceptCommand(raw: unknown, rawProof: unknown, clientSessionId: string, actorSessionId: string, route: CapabilityRoute) {
+    this.authorizeActor(actorSessionId, "run");
+    const accepted = this.options.accepted, auth = accepted?.auth();
+    const request = CloudBootCommandClientRequestSchema.parse(raw), proof = CloudAcceptedWorkClientProofSchema.parse(rawProof);
+    if (!accepted?.enabled() || !auth || request.kind !== "mutate" ||
+      request.mutation.action.kind !== "enqueue" || request.mutation.action.payload.operation)
+      throw new CloudCommandRuntimeError("invalid_command");
+    const { mutation } = request, action = mutation.action;
+    if (action.kind !== "enqueue") throw new CloudCommandRuntimeError("invalid_command");
+    const conversation = this.options.resolveConversation(mutation.conversationId);
+    if (!conversation || conversation.provider !== action.payload.agentId || conversation.model !== action.payload.model)
+      throw new CloudCommandRuntimeError("command_context_changed");
+    this.acceptedAuthority ??= new CloudAcceptedWorkAuthority({ ledger: this.queue.acceptedWork, auth, runtimeId: accepted.runtimeId,
+      engineLive: () => this.authorityActive, enabled: () => accepted.enabled(), continuation: accepted.health,
+      enroll: (body, signal) => accepted.enroll(body, AbortSignal.any([signal, this.controller.signal])),
+      close: receipt => accepted.close({ version: 1, scope: receipt.scope, acceptedWorkId: receipt.acceptedWorkId, commandId: receipt.command.commandId }) });
+    const executionId = this.queue.acceptedWork.get(action.commandId)?.command.executionId ?? randomUUID();
+    const result = await this.acceptedAuthority.accept({ mutation, cwd: conversation.cwd, executionId,
+      clientSessionId, actorSessionId, auth: proof, route });
+    if (!this.acceptedInterests.has(result.work.receipt.acceptedWorkId)) {
+      const work = result.work, interest: AcceptedInterest = { work, timer: null, flight: null };
+      this.acceptedInterests.set(work.receipt.acceptedWorkId, interest);
+      work.signal.addEventListener("abort", () => {
+        if (interest.timer) clearTimeout(interest.timer);
+        this.acceptedInterests.delete(work.receipt.acceptedWorkId);
+        this.options.changed(work.receipt.command.conversationId);
+      }, { once: true });
+      void this.warmAccepted(interest).catch(() => {});
+    }
+    this.releaseUnusedActors(); this.options.changed(mutation.conversationId); return result.snapshot;
+  }
+  private acceptedInput(work: CloudAcceptedWork) {
+    work.assertLive("context");
+    const command = work.receipt.command, conversation = this.options.resolveConversation(command.conversationId);
+    if (!conversation || conversation.provider !== command.provider || conversation.model !== command.model || conversation.cwd !== command.cwd)
+      throw new CloudCommandRuntimeError("command_context_changed");
+    return { actor: work, provider: command.provider, model: command.model, cwd: command.cwd, conversationId: command.conversationId };
+  }
+  private acceptedReady(work: CloudAcceptedWork): boolean {
+    if (!this.active) return false;
+    try {
+      const input = this.acceptedInput(work), ready = this.credentials!.readiness(input.provider, input.model);
+      return ready.state === "unavailable" || ready.state === "ready" && this.contexts!.readiness(input).state === "ready";
+    } catch { return false; }
+  }
+  private selectAcceptedExecution(input: Parameters<NonNullable<ConstructorParameters<typeof CloudLocalCommandQueue>[0]["accepted"]>["selectExecution"]>[0]) {
+    const selected = this.acceptedInput(input.work), executionId = input.work.receipt.command.executionId;
+    const ready = this.credentials!.readiness(selected.provider, selected.model);
+    if (ready.state === "pending" || this.selections.has(input.claimId) || this.selections.size >= 32) return null;
+    if (ready.state === "unavailable") return { executionId };
+    const context = this.contexts!.authorize(selected), selection = this.factory!.selectBoot({ ...selected, context, executionId });
+    const lifetime = cloudBootNativeAuthority(selection).lifetime;
+    try { this.factory!.assertBootStart(selection); }
+    catch { this.closeUnused(lifetime); return null; }
+    this.selections.set(input.claimId, { commandId: input.commandId, conversationId: input.conversationId,
+      payload: structuredClone(input.payload), selection, lifetime, consumed: false });
+    return { executionId, credentialRun: selection.credentialRun };
+  }
+  private warmAccepted(interest: AcceptedInterest): Promise<void> {
+    if (interest.flight) return interest.flight;
+    if (!this.authorityActive || interest.work.signal.aborted) return Promise.resolve();
+    const current = () => this.authorityActive && !interest.work.signal.aborted && this.acceptedInterests.get(interest.work.receipt.acceptedWorkId) === interest;
+    const task = (async () => {
+      const context = await this.contexts!.warm(this.acceptedInput(interest.work), AbortSignal.any([this.controller.signal, interest.work.signal]));
+      if (!current()) return;
+      this.options.changed(interest.work.receipt.command.conversationId);
+      this.schedule(interest, this.contexts!.remainingMs(context) / 2, () => this.warmAccepted(interest), current);
+    })().catch(error => {
+      if (current()) {
+        if (isTransientCloudAgentAuthorityError(error)) this.schedule(interest, 500, () => this.warmAccepted(interest), current);
+        else this.queueValue!.acceptedWork.close(interest.work.receipt.command.commandId);
+      }
+      throw error;
+    });
+    interest.flight = task; this.flights.add(task);
+    void task.finally(() => { if (interest.flight === task) interest.flight = null; this.flights.delete(task); }).catch(() => {});
+    return task;
+  }
   selectClaim(value: unknown): CloudBootAgentSelection {
     if (!this.active) throw new CloudCommandRuntimeError("cloud_commands_unavailable");
     const claim = CloudBootCommandClaimSchema.parse(value), actor = this.queue.authorizeClaim(claim);
@@ -526,7 +628,7 @@ export class CloudLocalAgentBootRuntime {
     const record = this.selections.get(claim.claimId);
     if (!record || record.consumed || record.commandId !== claim.commandId || record.conversationId !== claim.conversationId ||
         record.selection.executionId !== claim.executionId || !isDeepStrictEqual(record.payload, claim.payload) ||
-        !isDeepStrictEqual(record.selection.actor.provenance.actor, actor.provenance.actor))
+        record.selection.actor !== actor)
       throw new CloudCommandRuntimeError("command_conflict");
     this.factory!.assertBootStart(record.selection); record.consumed = true; return record.selection;
   }
@@ -577,6 +679,7 @@ export class CloudLocalAgentBootRuntime {
   }
   async dispose(): Promise<void> {
     this.closed = true; this.activated = false; this.controller.abort();
+    this.acceptedAuthority?.dispose();
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
     if (this.controlsTimer) clearTimeout(this.controlsTimer);
     for (const record of [...this.actors.values(), ...this.interests.values()]) if (record.timer) clearTimeout(record.timer);
@@ -591,6 +694,7 @@ export class CloudLocalAgentBootRuntime {
   async quiesceForSeal(): Promise<void> {
     if (!this.authorityActive || !this.queueValue) throw new CloudCommandRuntimeError("engine_authority_rejected");
     this.sealing = true; this.queueValue.fenceAcceptance(); this.controller.abort();
+    this.acceptedAuthority?.dispose();
     if (this.cacheTimer) clearTimeout(this.cacheTimer); this.cacheTimer = null;
     if (this.controlsTimer) clearTimeout(this.controlsTimer); this.controlsTimer = null;
     for (const record of [...this.actors.values(), ...this.interests.values()]) if (record.timer) clearTimeout(record.timer);

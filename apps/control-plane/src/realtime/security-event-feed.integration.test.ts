@@ -60,4 +60,22 @@ const url = process.env.TEST_DATABASE_URL;
       info.mockRestore();
     }
   });
+  it("does not mistake SKIP LOCKED publication for a complete committed source cut", async () => {
+    const suffix = randomUUID();
+    const user = await ensureUser(pool, { provider: "workos", providerSubject: `user_cut_${suffix}`,
+      email: `cut-${suffix}@example.test`, displayName: "Cut" });
+    const feed = new DatabaseRealtimeSecurityEventFeed(new DatabaseSecurityEventSource(pool));
+    await publishPendingSecurityEvents(pool); await feed.start();
+    const row = (await pool.query("INSERT INTO security_events(kind,user_id) VALUES ('account.authorization_changed',$1) RETURNING sequence", [user.id])).rows[0];
+    const holder = await pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT sequence FROM security_events WHERE sequence=$1 FOR UPDATE", [row.sequence]);
+      expect(await feed.observeAuthority()).toBe(false);
+      expect((await pool.query("SELECT delivery_sequence FROM security_events WHERE sequence=$1", [row.sequence])).rows[0].delivery_sequence).toBeNull();
+      await holder.query("COMMIT");
+      expect(await feed.observeAuthority()).toBe(true);
+    } finally { await holder.query("ROLLBACK"); holder.release(); await feed.stop(); }
+  });
+
 });

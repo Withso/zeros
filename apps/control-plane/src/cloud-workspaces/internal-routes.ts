@@ -11,7 +11,7 @@ import {
 } from "./capability-actor-contract.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import type { DatabaseCloudAcceptedWorkService } from "./accepted-work.js";
-import { CloudAcceptedWorkEnrollRequestSchema } from "./accepted-work-contract.js";
+import { CloudAcceptedWorkEnrollRequestSchema, CloudAcceptedWorkContextRequestSchema, CloudAcceptedWorkCloseRequestSchema } from "./accepted-work-contract.js";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { CloudRuntimeWitnessSchema, CloudAgentRuntimeSchema } from "./runtime-contract.js";
@@ -97,6 +97,8 @@ export const CLOUD_WORKSPACE_USAGE_PATH =
 export const CLOUD_WORKSPACE_SETUP_RECOVERY_PATH =
   "/internal/v1/cloud-workspaces/setup/recovery";
 export const CLOUD_ACCEPTED_WORK_PATH = "/internal/v2/cloud-workspaces/engine/accepted-work";
+export const CLOUD_ACCEPTED_WORK_CONTEXT_PATH = `${CLOUD_ACCEPTED_WORK_PATH}/context`;
+export const CLOUD_ACCEPTED_WORK_CLOSE_PATH = `${CLOUD_ACCEPTED_WORK_PATH}/close`;
 
 /** Registration-time uplink advertisement (S2): the response gains
  * `uplink.endpoint` only for an engine that opted in with
@@ -627,7 +629,7 @@ export const cloudWorkspaceInternalResponseHeaders: MiddlewareHandler = async (c
 export function createCloudWorkspaceInternalRoutes(
   service: CloudWorkspaceInternalSetupService,
   options?: { engineUplink?: CloudWorkspaceEngineUplinkAdvertisement; engineCapabilities?: EngineCapabilityGate;
-    clientCapabilities?: EngineClientCapabilityGate; acceptedWork?: Pick<DatabaseCloudAcceptedWorkService, "enroll"> },
+    clientCapabilities?: EngineClientCapabilityGate; acceptedWork?: DatabaseCloudAcceptedWorkService },
 ): Hono {
   const routes = new Hono();
   /** The additive `uplink` member, only for an opted-in engine of an
@@ -667,9 +669,11 @@ export function createCloudWorkspaceInternalRoutes(
     CAPABILITY_SESSION_ADMISSION_PATH,
     CAPABILITY_SESSION_RENEWAL_PATH,
     CLOUD_ACCEPTED_WORK_PATH,
+    CLOUD_ACCEPTED_WORK_CLOSE_PATH,
   ]) {
     routes.use(path, bodyLimit({ maxSize: INTERNAL_BODY_BYTES }));
   }
+  routes.use(CLOUD_ACCEPTED_WORK_CONTEXT_PATH, bodyLimit({ maxSize: 1024 * 1024 }));
   routes.use(CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, bodyLimit({ maxSize: 2_048 }));
 
   routes.post(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, async (c) => {
@@ -714,7 +718,8 @@ export function createCloudWorkspaceInternalRoutes(
       const {actorProtocolVersion,agentRuntime,agentCustomizationVersion,...binding}=input;
       const localMode=c.req.header("x-zeros-cloud-local-commands")==="1"&&actorProtocolVersion===2&&agentCustomizationVersion===3&&agentRuntime?.profile==="zeros-cloud-worker-v4";
       const registered=await service.registerEngine({ ...binding, token,
-        ...(localMode?{cloudLocalCommandsVersion:1 as const}:{}),
+        ...(localMode?{cloudLocalCommandsVersion:1 as const,
+          ...(c.req.header("x-zeros-cloud-accepted-work")==="1"?{acceptedWorkVersion:1 as const}:{})}:{}),
         ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion}),
         ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}) });
       const confirmed=z.object({cloudLocalCommandsVersion:z.literal(1),durableRecordConnected:z.literal(true)}).passthrough().safeParse(registered);
@@ -727,10 +732,11 @@ export function createCloudWorkspaceInternalRoutes(
           c.header("x-zeros-cloud-agent-source-writer",sourceWriter.data);
         }
         c.header("x-zeros-cloud-local-commands","1");
+        if(confirmed.data.acceptedWorkVersion===1)c.header("x-zeros-cloud-accepted-work","1");
         c.header("x-zeros-cloud-agent-journal",journal.data);
       }
       const metadata=z.record(z.unknown()).safeParse(registered);
-      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,acceptedWorkVersion:_accepted,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
         return c.json(withUplinkAdvertisement(legacy,input.organizationId,c.req.header(CLOUD_ENGINE_UPLINK_OPT_IN_HEADER)==="1"));}
       return c.json(registered);
     } catch (error) {
@@ -752,7 +758,8 @@ export function createCloudWorkspaceInternalRoutes(
       const {actorProtocolVersion,agentRuntime,agentCustomizationVersion,...binding}=input;
       const localMode=c.req.header("x-zeros-cloud-local-commands")==="1"&&actorProtocolVersion===2&&agentCustomizationVersion===3&&agentRuntime?.profile==="zeros-cloud-worker-v4";
       const registered=await service.registerTransitionEngine({...binding,token,
-        ...(localMode?{cloudLocalCommandsVersion:1 as const}:{}),
+        ...(localMode?{cloudLocalCommandsVersion:1 as const,
+          ...(c.req.header("x-zeros-cloud-accepted-work")==="1"?{acceptedWorkVersion:1 as const}:{})}:{}),
         ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}),
         ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion})});
       const confirmed=z.object({cloudLocalCommandsVersion:z.literal(1),durableRecordConnected:z.literal(true)}).passthrough().safeParse(registered);
@@ -765,10 +772,11 @@ export function createCloudWorkspaceInternalRoutes(
           c.header("x-zeros-cloud-agent-source-writer",sourceWriter.data);
         }
         c.header("x-zeros-cloud-local-commands","1");
+        if(confirmed.data.acceptedWorkVersion===1)c.header("x-zeros-cloud-accepted-work","1");
         c.header("x-zeros-cloud-agent-journal",journal.data);
       }
       const metadata=z.record(z.unknown()).safeParse(registered);
-      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,acceptedWorkVersion:_accepted,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
         return c.json(withUplinkAdvertisement(legacy,input.organizationId,c.req.header(CLOUD_ENGINE_UPLINK_OPT_IN_HEADER)==="1"));}
       return c.json(registered);
     } catch {
@@ -912,6 +920,26 @@ export function createCloudWorkspaceInternalRoutes(
   }
   if (options?.acceptedWork) {
     const acceptedWork = options.acceptedWork;
+    for (const operation of ["context", "close"] as const) {
+      routes.post(operation === "context" ? CLOUD_ACCEPTED_WORK_CONTEXT_PATH : CLOUD_ACCEPTED_WORK_CLOSE_PATH, async c => {
+        const heartbeatToken = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
+        if (!heartbeatToken) return c.json({ error: { code: "invalid_capability" } }, 401);
+        const input = operation === "context" ? await strictJson(c.req, CloudAcceptedWorkContextRequestSchema)
+          : await strictJson(c.req, CloudAcceptedWorkCloseRequestSchema);
+        if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+        const { workspaceId, organizationId, generation, engineInstanceId } = input.scope;
+        const engine = { workspaceId, organizationId, generation, engineInstanceId, heartbeatToken };
+        try {
+          if (operation === "close") { await acceptedWork.close(engine, input); return c.json({ closed: true }); }
+          if (!service.agentExecutions) return c.json({ error: { code: "accepted_work_rejected" } }, 403);
+          return c.json(await service.agentExecutions.acceptedContext(engine, input, acceptedWork));
+        } catch (error) {
+          if (error instanceof HttpError) return c.json({ error: { code: error.code } }, error.status);
+          if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: { code: "accepted_work_rejected" } }, 403);
+          throw error;
+        }
+      });
+    }
     routes.post(CLOUD_ACCEPTED_WORK_PATH, async c => {
       const heartbeatToken = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
       if (!heartbeatToken) return c.json({ error: { code: "invalid_capability" } }, 401);

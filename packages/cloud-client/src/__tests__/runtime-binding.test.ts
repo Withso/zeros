@@ -12,10 +12,22 @@ describe("runtime binding admission metadata", () => {
     expect(readRuntimeBinding(legacy, target)).toBeNull();
   });
 
+  it("retains CP-owned accepted-work support on the exact admitted boot", () => {
+    const runtimeBinding = { ...RUNTIME_BINDING, acceptedWorkVersion: 1 as const };
+    const binding = readRuntimeBinding({ ...REST_FIXTURES.ConnectResponse, runtimeBinding }, target);
+    expect(binding).toEqual(runtimeBinding);
+    expect(Object.isFrozen(binding)).toBe(true);
+    expect(readRuntimeBinding(REST_FIXTURES.ConnectResponse, target)).not.toHaveProperty("acceptedWorkVersion");
+  });
+
   it.each([
     null,
     { ...RUNTIME_BINDING, authorityEpoch: 0 },
     { ...RUNTIME_BINDING, authorityEpoch: Number.MAX_SAFE_INTEGER + 1 },
+    { ...RUNTIME_BINDING, acceptedWorkVersion: 0 },
+    { ...RUNTIME_BINDING, acceptedWorkVersion: 2 },
+    { ...RUNTIME_BINDING, acceptedWorkVersion: "1" },
+    { ...RUNTIME_BINDING, acceptedWorkVersion: null },
     { ...RUNTIME_BINDING, bootScope: { ...BOOT_SCOPE, writerEpoch: "missing" } },
     { ...RUNTIME_BINDING, bootScope: { ...BOOT_SCOPE, generation: 8 } },
     { ...RUNTIME_BINDING, bootScope: { ...BOOT_SCOPE, organizationId: CLIENT_SESSION } },

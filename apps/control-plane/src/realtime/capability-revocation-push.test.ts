@@ -96,6 +96,16 @@ const event = (sequence: number, fields: Partial<RealtimeSecurityEvent>): Realti
   ({ sequence, kind: CAPABILITY_EPOCH_EVENT_KIND, userId: null, organizationId: null, workspaceId: null, providerSessionId: null, ...fields });
 
 describe("capability revocation push", () => {
+  it("a failed targeted snapshot stays unhealthy after its flight settles", async () => {
+    vi.useFakeTimers(); const f = setup(), lost = vi.fn(); f.push.onHealthLost(lost);
+    f.snapshot.mockRejectedValueOnce(new Error("realtime pool unavailable"));
+    f.feed.subscriber!.events([event(1, { workspaceId: W1 })]);
+    expect(f.push.caughtUp()).toBe(false); await f.push.settled();
+    expect(f.push.caughtUp()).toBe(false); expect(lost).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000); await f.push.settled();
+    expect(f.push.caughtUp()).toBe(true); f.push.stop();
+  });
+
   it("pushes a wa bump to the workspace's uplink and revokes its device capabilities", async () => {
     const f = setup({ details: { 1: { createdAtMs: T0, epoch: "wa", workspaceId: W1 } } });
     f.feed.subscriber!.events([event(1, { organizationId: ORG })]);

@@ -171,6 +171,7 @@ export type CloudWorkspaceEngineRegistrationInput = {
   actorProtocolVersion?: 2;
   agentCustomizationVersion?: 3;
   cloudLocalCommandsVersion?: 1;
+  acceptedWorkVersion?: 1;
   agentRuntime?: CloudAgentRuntime;
 };
 
@@ -1502,7 +1503,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
              registered_at = now(), last_heartbeat_at = now(),
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
              updated_at = now(), actor_protocol_version = $4,
-             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7,cloud_local_commands_version=$8
+             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7,cloud_local_commands_version=$8,accepted_work_version=$9
          WHERE id = $1 AND state = 'starting'
          RETURNING lease_expires_at`,
         [
@@ -1514,6 +1515,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           null,
           input.agentCustomizationVersion ?? null,
           localCommandsSupported ? 1 : null,
+          localCommandsSupported && input.acceptedWorkVersion === 1 ? 1 : null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {
@@ -1539,6 +1541,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         engineInstanceId: input.engineInstanceId,
         durableRecordConnected: true as const,
         ...(localCommandsSupported ? { cloudLocalCommandsVersion: 1 as const, agentJournalMode,
+          ...(input.acceptedWorkVersion === 1 ? { acceptedWorkVersion: 1 as const } : {}),
           ...(journal.mode === "boot-owner-v1" ? { agentSourceWriterEpoch: journal.binding.writerEpoch } : {}) } : {}),
         leaseExpiresAtMs: updated.rows[0]!.lease_expires_at.getTime(),
         heartbeat: {

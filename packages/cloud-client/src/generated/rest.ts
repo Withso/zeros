@@ -91,6 +91,7 @@ export type CloudAgentBootScope = {
 export type RuntimeBinding = {
   authorityEpoch: number;
   bootScope: CloudAgentBootScope;
+  acceptedWorkVersion?: 1;
 };
 
 export type ConnectResponse = {

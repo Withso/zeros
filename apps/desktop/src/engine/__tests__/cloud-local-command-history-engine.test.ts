@@ -114,7 +114,8 @@ describe("current local-writer history exposure", () => {
       cloudLocalCommandPredecessor: null as checkpoint.CloudLocalCommandPredecessor | null, cloudAgentLegacyFactory: {},
       cloudRecordRuntime: { usesLocalAgentJournal: true }, cloudWorker: {},
       cloudRuntimeConfig: { execution: { ...scope, generation: scope.generation + (kind === "replacement" ? 1 : 0) }, engine: { instanceId: scope.engineInstanceId } },
-      cloudRuntimeRegistration: { agentSourceWriterEpoch: scope.writerEpoch, localCommandsNegotiated: () => true },
+      cloudRuntimeRegistration: { agentSourceWriterEpoch: scope.writerEpoch, localCommandsNegotiated: () => true,
+        acceptedWorkNegotiated: () => false },
       restoreCloudLocalHistory() { return methods.restoreCloudLocalHistory.call(this); } };
     const boot = vi.spyOn(CloudLocalAgentBootRuntime.prototype, "initialize").mockImplementation(function (this: CloudLocalAgentBootRuntime) {
       expect((this as unknown as { options: { predecessor: unknown } }).options.predecessor).toBe(predecessor);

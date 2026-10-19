@@ -1116,15 +1116,16 @@ d("cloud workspace setup material redemption", () => {
     expect(renewed.leaseExpiresAtMs).toBeLessThan(Date.now() + 95_000);
   });
 
-  it("persists local-command opt-in only with an attested supported registration",async()=>{
+  it.each([undefined, 1] as const)("persists local-command and accepted-work opt-in only with an attested supported registration (%s)",async acceptedWorkVersion=>{
     const material=await service.redeem({...redemptionInput(),materialVersion:2,runtime:runtimeWitness});
     const registered=await service.registerEngine({token:material.engine.registration.token,...material.execution,
       engineInstanceId:material.engine.instanceId,protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,actorProtocolVersion:2,
-      agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"},agentCustomizationVersion:3,cloudLocalCommandsVersion:1});
+      agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"},agentCustomizationVersion:3,cloudLocalCommandsVersion:1,acceptedWorkVersion});
     expect(registered).toMatchObject({cloudLocalCommandsVersion:1,durableRecordConnected:true,agentJournalMode:"legacy"});
     expect(registered).not.toHaveProperty("agentSourceWriterEpoch");
-    expect((await pool.query("SELECT cloud_local_commands_version FROM cloud_workspace_engine_instances WHERE id=$1",[material.engine.instanceId])).rows[0])
-      .toEqual({cloud_local_commands_version:1});
+    expect(registered.acceptedWorkVersion).toBe(acceptedWorkVersion);
+    expect((await pool.query("SELECT cloud_local_commands_version,accepted_work_version FROM cloud_workspace_engine_instances WHERE id=$1",[material.engine.instanceId])).rows[0])
+      .toEqual({cloud_local_commands_version:1,accepted_work_version:acceptedWorkVersion??null});
   });
   it("refuses a local journal with a missing boot pointer before issuing registration material",async()=>{
     const material=await service.redeem({...redemptionInput(),materialVersion:2,runtime:runtimeWitness});

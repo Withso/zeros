@@ -233,16 +233,18 @@ export const CloudAgentWarmActorRequestSchema = z.object({
 }).strict();
 export type CloudAgentWarmActorRequest = z.infer<typeof CloudAgentWarmActorRequestSchema>;
 
-export const CloudAgentWarmActorResponseSchema = CloudAgentBootIdentitySchema.extend({
+export const CloudAgentContextMaterialSchema = CloudAgentBootIdentitySchema.extend({
   contextId: z.string().uuid(), contextRevision: z.string().regex(/^[a-f0-9]{64}$/),
-  actor: CloudActorProvenanceSchema,
   conversationId: identity, provider: CloudAgentProviderSchema, model, cwd,
   gitAuthor: CloudGitAuthorSchema.nullable(),
   customization: CloudCustomizationSnapshotSchema.nullable(),
   environment: CloudComputerExecutionEnvironmentSchema,
   nativeCapabilities: CloudNativeCapabilitiesSchema,
   backgroundTasksVersion: z.literal(1).optional(), computerToolsVersion: z.literal(1).optional(),
-}).strict().superRefine((value, context) => {
+}).strict();
+export type CloudAgentContextMaterial = z.infer<typeof CloudAgentContextMaterialSchema>;
+export const CloudAgentWarmActorResponseSchema = CloudAgentContextMaterialSchema.extend({ actor: CloudActorProvenanceSchema })
+.strict().superRefine((value, context) => {
   const actor = value.actor;
   if (!cloudActorCan(actor.actor.role, "run") || actor.fundingConsentVersion !== 1 || !actor.fundingGrant ||
       actor.authorityEpoch !== value.authorityEpoch ||

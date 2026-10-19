@@ -1,9 +1,11 @@
 import { z } from "zod";
-import { CloudAgentBootScopeSchema } from "./cloud-agent-bootstrap.js";
+import { CloudAgentBootScopeSchema, CloudAgentContextMaterialSchema } from "./cloud-agent-bootstrap.js";
 import { CloudCommandActorSchema } from "./cloud-actors.js";
 
 /** Engine-only accepted-work v1. A receipt is an identifier and immutable
  * evidence, never a bearer credential or a generic actor/grant. */
+import { CloudRepositoryMcpSchema } from "./cloud-customization.js";
+
 const revision = z.number().int().positive().safe();
 const timestamp = z.number().int().positive().max(253402300799999);
 const identity = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
@@ -25,6 +27,7 @@ export const CloudAcceptedWorkEnrollRequestSchema = z.object({
   capability: z.string().min(32).max(4096).regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/),
   proof: z.object({ timestampMs: z.number().int().nonnegative().safe(),
     nonce: z.string().regex(/^[A-Za-z0-9_-]{22}$/), signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict(),
+  commandSignature: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
   route: z.enum(["direct", "relay"]),
 }).strict();
 export type CloudAcceptedWorkEnrollRequest = z.infer<typeof CloudAcceptedWorkEnrollRequestSchema>;
@@ -53,3 +56,23 @@ export const CloudAcceptedWorkOperationSchema = z.object({
   operation: z.enum(["context", "native-git"]),
 }).strict();
 export type CloudAcceptedWorkOperation = z.infer<typeof CloudAcceptedWorkOperationSchema>;
+
+/** A separate context proof, never a client actor confirmation. The engine
+ * caps the response by the request-start ten-second monotonic deadline. */
+export const CloudAcceptedWorkContextRequestSchema = CloudAcceptedWorkOperationSchema.extend({
+  operation: z.literal("context"), repositoryServers: CloudRepositoryMcpSchema,
+}).strict();
+export type CloudAcceptedWorkContextRequest = z.infer<typeof CloudAcceptedWorkContextRequestSchema>;
+export const CloudAcceptedWorkContextResponseSchema = CloudAgentContextMaterialSchema.extend({
+  acceptedWork: z.object({ acceptedWorkId: z.string().uuid(), confirmedUntilMs: timestamp }).strict(),
+}).strict().superRefine((value, context) => {
+  if (value.customization && !value.customization.history)
+    context.addIssue({ code: "custom", message: "Accepted work customization requires private history authority" });
+});
+export type CloudAcceptedWorkContextResponse = z.infer<typeof CloudAcceptedWorkContextResponseSchema>;
+
+/** Closure is terminal and idempotent; it never authorizes an operation. */
+export const CloudAcceptedWorkCloseRequestSchema = z.object({ version: z.literal(1),
+  scope: CloudAgentBootScopeSchema, acceptedWorkId: z.string().uuid(), commandId: z.string().uuid(),
+}).strict();
+export type CloudAcceptedWorkCloseRequest = z.infer<typeof CloudAcceptedWorkCloseRequestSchema>;

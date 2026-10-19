@@ -6,6 +6,7 @@ import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
 import { CloudRuntimeBindingSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-connect-contract.js";
 import { DeviceStreamOrganizationFeaturesSchema } from "../../apps/control-plane/src/realtime/device-stream-protocol.js";
+import { UplinkAuthHealthRequestSchema, UplinkAuthHealthSchema, UplinkAuthHealthLostSchema } from "../../apps/control-plane/src/realtime/uplink-protocol.js";
 
 const root = resolve(import.meta.dirname, "../..");
 const contracts = join(root, "docs/cloud-workspace/contracts");
@@ -240,6 +241,23 @@ describe("cloud workspace contract sketches", () => {
     expect(validate({ t: "cred.revision", d: { kind: "agent-controls", revision: 1 } })).toBe(false);
   });
 
+  it("S2 detached health mirrors the bounded unsequenced contract while keeping the previous welcome valid", () => {
+    const validate = ajv().compile(json("s2-uplink-frames"));
+    const identity = { connectionId: "11111111-1111-4111-8111-111111111111", syncId: "22222222-2222-4222-8222-222222222222" };
+    const request = { ...identity, challengeId: "33333333-3333-4333-8333-333333333333", authCursor: "cursor-1" };
+    for (const [t, schema, d] of [["auth.health_request", UplinkAuthHealthRequestSchema, request],
+      ["auth.health", UplinkAuthHealthSchema, { ...request, healthy: true }], ["auth.health_lost", UplinkAuthHealthLostSchema, identity]] as const) {
+      expect(validate({ t, d }), JSON.stringify(validate.errors)).toBe(true);
+      expect(schema.safeParse(d).success).toBe(true);
+      expect(validate({ t, s: 1, d })).toBe(false);
+      expect(validate({ t, d: { ...d, syncId: "wrong" } })).toBe(false);
+      expect(schema.safeParse({ ...d, syncId: "wrong" }).success).toBe(false);
+    }
+    const welcome = { protocol: 1, features: [], resumeToken: "a".repeat(32), resumed: false, pingIntervalMs: 20_000, leaseExpiresAtMs: 1_000 };
+    expect(validate({ t: "sys.welcome", d: welcome })).toBe(true);
+    expect(validate({ t: "sys.welcome", d: { ...welcome, connectionId: identity.connectionId } })).toBe(true);
+  });
+
   it.each([
     ["s2-uplink.md", "s2-uplink-frames"],
     ["s3-client-contract.md", "s3-device-stream-events"],
@@ -311,9 +329,9 @@ describe("cloud workspace contract sketches", () => {
     }
   });
 
-  it("S3 1.3 runtime binding is optional for older peers and matches the standalone CP schema", () => {
+  it("S3 1.4 runtime binding is optional for older peers and matches the standalone CP schema", () => {
     const api = load(block("s3-client-api")) as { info: { version: string }; components: { schemas: JsonObject } };
-    expect(api.info.version).toBe("1.3.0");
+    expect(api.info.version).toBe("1.4.0");
     const instance = ajv();
     instance.addSchema({ $id: "s3-api", $defs: rewriteRefs(api.components.schemas) });
     const connect = instance.getSchema("s3-api#/$defs/ConnectResponse")!;
@@ -323,6 +341,8 @@ describe("cloud workspace contract sketches", () => {
     const valid = fixture.current.connect.runtimeBinding;
     for (const [value, accepted] of [
       [valid, true], [{ ...valid, futureField: true }, true], [{}, false], [null, false],
+      [{ ...valid, acceptedWorkVersion: 1 }, true], [{ ...valid, acceptedWorkVersion: 2 }, false],
+      [{ ...valid, acceptedWorkVersion: null }, false], [{ ...valid, acceptedWorkVersion: "1" }, false],
       [{ ...valid, authorityEpoch: 0 }, false], [{ ...valid, authorityEpoch: Number.MAX_SAFE_INTEGER + 1 }, false],
       [{ ...valid, bootScope: { ...valid.bootScope, writerEpoch: "not-a-writer" } }, false],
       [{ ...valid, bootScope: { ...valid.bootScope, generation: 0 } }, false],
@@ -343,6 +363,10 @@ describe("cloud workspace contract sketches", () => {
     delete withoutEngine.engineInstanceId;
     expect(old(withoutEngine)).toBe(true);
     expect(connect(withoutEngine)).toBe(false);
+    const priorSchemas = structuredClone(api.components.schemas) as Record<string, JsonObject>;
+    delete (priorSchemas.RuntimeBinding!.properties as JsonObject).acceptedWorkVersion;
+    const prior = ajv().compile({ $defs: rewriteRefs(priorSchemas), $ref: "#/$defs/ConnectResponse" });
+    expect(prior({ ...fixture.current.connect, runtimeBinding: { ...valid, acceptedWorkVersion: 1 } })).toBe(true);
   });
 
   it("S3 1.3 ready coverage stays bounded, optional and compatible with older clients", () => {

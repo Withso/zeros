@@ -6,12 +6,13 @@
   //
   // Two overrides vs the base config:
   //   • noEmit — we only want diagnostics, never output.
-  //   • rootDir ".." — the main process imports shared engine code from ../src
+  //   • rootDir "../.." — the main process imports shared engine code from ../src
   //     (apps/desktop/src/engine/git, apps/desktop/src/engine/settings, …). The
   //     base config's rootDir "." constrains optional direct `tsc` output; under
   //     this full typecheck program those cross-directory imports trip TS6059
   //     ("not under rootDir"). Widening
-  //     rootDir to the desktop app root keeps the "all inputs under rootDir" invariant
+  //     rootDir to apps/ also includes the shared S1 verifier source imported
+  //     by engine authority types. This keeps the "all inputs under rootDir" invariant
   //     satisfied with no other effect (noEmit ⇒ no output layout to constrain).
   //
   // `include` is restated (not inherited) so the glob resolves against apps/desktop/electron/.
@@ -22,7 +23,7 @@
     // likewise named for the native compiler.
     "incremental": true,
     "tsBuildInfoFile": "../../../node_modules/.cache/zeros-typecheck/electron.native.tsbuildinfo",
-    "rootDir": "..",
+    "rootDir": "../..",
     // The base config compiles to CommonJS (tsup's emit target). For TYPE
     // CHECKING we override to ESM module settings so the shared engine code this
     // pulls in from ../src (written for moduleResolution:bundler, using

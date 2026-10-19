@@ -10,7 +10,7 @@ const command = { commandId: randomUUID(), conversationId: "chat:one", turnId: "
 const runtimeId = `r1-${"b".repeat(64)}`, actorSessionId = randomUUID();
 const request = { version: 1, scope, runtimeId, actorSessionId, command,
   capability: ["a".repeat(24), "b".repeat(24), "c".repeat(86)].join("."),
-  proof: { timestampMs: 1_000, nonce: "a".repeat(22), signature: "b".repeat(86) }, route: "direct" };
+  proof: { timestampMs: 1_000, nonce: "a".repeat(22), signature: "b".repeat(86) }, commandSignature: "c".repeat(86), route: "direct" };
 const receipt = { version: 1, acceptedWorkId: randomUUID(), revision: 1, scope, runtimeId, actorSessionId,
   actor: { userId: scope.fundingOwnerUserId, deviceId: randomUUID(), deviceKeyVersion: 1, role: "owner", fingerprint: "c".repeat(64) },
   sourceSessionId: randomUUID(), kid: "cap-2026-10-example", capabilityId: "a".repeat(22), devicePublicKey: "b".repeat(43),
@@ -42,6 +42,11 @@ describe("accepted work stays a closed engine-only contract across deployments",
     ["CloudAcceptedWorkOperationSchema", { ...operation, operation: "native-git" }, true],
     ["CloudAcceptedWorkOperationSchema", { ...operation, operation: "generic-grant" }, false],
     ["CloudAcceptedWorkOperationSchema", { ...operation, credentialId: randomUUID() }, false],
+    ["CloudAcceptedWorkContextRequestSchema", { ...operation, repositoryServers: [] }, true],
+    ["CloudAcceptedWorkContextRequestSchema", { ...operation, repositoryServers: [], operation: "native-git" }, false],
+    ["CloudAcceptedWorkContextRequestSchema", { ...operation, repositoryServers: [], actorSessionId }, false],
+    ["CloudAcceptedWorkCloseRequestSchema", { version: 1, acceptedWorkId: receipt.acceptedWorkId, scope, commandId: command.commandId }, true],
+    ["CloudAcceptedWorkCloseRequestSchema", { version: 1, acceptedWorkId: receipt.acceptedWorkId, scope, commandId: command.commandId, capability: request.capability }, false],
   ] as const)("keeps %s strict and aligned (%#)", (name, input, valid) => {
     const client = wire[name].safeParse(input), backend = server[name].safeParse(input);
     expect(client.success).toBe(valid); expect(backend.success).toBe(valid);

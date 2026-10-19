@@ -35,6 +35,8 @@ suite("data-purge expansion on the populated previous schema", () => {
     expect((await pool.query("SELECT to_regclass('cloud_computer_template_snapshots') AS relation")).rows[0].relation).toBeNull();
     expect((await pool.query(`SELECT column_name FROM information_schema.columns
       WHERE table_schema='public' AND table_name='cloud_workspace_actor_sessions' AND column_name='session_kind'`)).rows).toEqual([]);
+    expect((await pool.query(`SELECT column_name FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='cloud_workspace_engine_instances' AND column_name='accepted_work_version'`)).rows).toEqual([]);
     // Keep admission on the actual pre-0142 reader while seeding the old
     // schema. Restore today's reader before migration and every purge check.
     const legacyReader = vi.spyOn(computerWorkspaceSource, "loadComputerWorkspaceSource")

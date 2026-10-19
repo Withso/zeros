@@ -7,12 +7,13 @@ import {CloudBootCustomizationBindingSchema} from "./mcp-contract.js";
 import {lockCustomization,readCustomizationRows} from "./customization-store.js";
 import {readCloudAgentFundingConsent} from "./agent-funding-consent.js";
 import {assertCloudEngineAuthorityDeadline} from "./engine-authority.js";
+import type { CloudAcceptedWorkOperationAuthority } from "./accepted-work.js";
 const denied = () => new HttpError(403, "github_cloud_write_denied", "Current repository write authority is required.");
 
 /** A connected desktop may courier authority only for this live native source.
  * Agent execution authority and terminal session authority remain separate. */
 export async function assertNativeGithubActor(tx: Tx, scope: Omit<CloudActorEngineScope, "heartbeatToken">,
-  source: CloudGithubNativeSource, workosEnabled: boolean) {
+  source: CloudGithubNativeSource, workosEnabled: boolean, accepted?: CloudAcceptedWorkOperationAuthority) {
   const current = (await tx.query<{live:boolean;fenced:boolean;authority_epoch:string}>(
     "SELECT live,fenced,authority_epoch FROM cloud_workspace_engine_authority_current($1,$2,$3,$4,$5,true)",
     [scope.workspaceId,scope.organizationId,scope.generation,scope.engineInstanceId,workosEnabled])).rows[0];
@@ -48,17 +49,24 @@ export async function assertNativeGithubActor(tx: Tx, scope: Omit<CloudActorEngi
       const parsed=CloudBootCustomizationBindingSchema.safeParse(row?.binding);
       if(!row||!parsed.success)throw denied();
       const binding=parsed.data;
-      const sender=await confirmDetachedCloudActor(tx,scope,row.actor_session_id);
+      const acceptedSender=async()=>{
+        if(!accepted)throw denied();
+        const receipt=await accepted.authorizeContextInTx(tx,scope,binding);
+        return {actorUserId:receipt.actor.userId,deviceId:receipt.actor.deviceId,deviceKeyVersion:receipt.actor.deviceKeyVersion,
+          fingerprint:receipt.actor.fingerprint,role:receipt.actor.role,sourceSessionId:receipt.actorSessionId};
+      };
+      const sender=binding.acceptedWorkId?await acceptedSender():await confirmDetachedCloudActor(tx,scope,row.actor_session_id);
       if(sender.actorUserId!==binding.actorUserId||sender.deviceId!==binding.actorDeviceId||sender.deviceKeyVersion!==binding.actorDeviceKeyVersion||
         sender.fingerprint!==binding.actorFingerprint||Number(current.authority_epoch)!==binding.authorityEpoch)throw denied();
-      await assertRecordedCloudActor(tx,{...scope,actorUserId:sender.actorUserId,actor:sender,capability:"edit"});
+      if(!binding.acceptedWorkId)await assertRecordedCloudActor(tx,{...scope,actorUserId:sender.actorUserId,actor:sender,capability:"edit"});
       const grant=await readCloudAgentFundingConsent(tx,binding,{userId:sender.actorUserId,role:sender.role});
       if(!isDeepStrictEqual(grant,binding.fundingGrant))throw denied();
       await lockCustomization(tx,scope.organizationId);
       const customization=await readCustomizationRows(tx,scope.organizationId,sender.actorUserId);
       if(Number(row.organization_revision)!==Number(customization.find(value=>value.owner_user_id===null)?.revision??0)||
         Number(row.member_revision)!==Number(customization.find(value=>value.owner_user_id===sender.actorUserId)?.revision??0))throw denied();
-      await confirmDetachedCloudActor(tx,scope,row.actor_session_id);
+      if(binding.acceptedWorkId)await acceptedSender();
+      else await confirmDetachedCloudActor(tx,scope,row.actor_session_id);
       await assertCloudEngineAuthorityDeadline(tx,scope.engineInstanceId,workosEnabled);
       if((await tx.query("SELECT 1 FROM cloud_agent_boot_contexts WHERE context_id=$1 AND retired_at IS NULL AND expires_at>clock_timestamp()",[source.contextId])).rowCount!==1)throw denied();
       actor=sender;

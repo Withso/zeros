@@ -388,6 +388,23 @@ describe("cloud runtime registration", () => {
     } finally { release(); await registration.stop(); }
   });
 
+  it.each([true, false])("offers detached support only after the exact registration ACK (%s)", async accepted => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), { headers: {
+      "x-zeros-cloud-local-commands": "1", ...(accepted ? { "x-zeros-cloud-accepted-work": "1" } : {}),
+    } }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      expect(registration.acceptedWorkNegotiated()).toBe(accepted);
+      expect(registration.uplinkFeatures().includes("detached.v1")).toBe(accepted);
+      expect(fetcher.mock.calls[0]![1].headers["x-zeros-cloud-accepted-work"]).toBe("1");
+      expect(JSON.parse(fetcher.mock.calls[0]![1].body)).not.toHaveProperty("acceptedWorkVersion");
+    } finally { await registration.stop(); }
+    expect(registration.acceptedWorkNegotiated()).toBe(false);
+  });
+
   it("bounds the boot budget by the existing authority margin and fences handoff without renewing", async () => {
     let now = NOW;
     const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => now)!;
