@@ -2,7 +2,7 @@
   "id": "cloud-runtime-libc-optional-closure",
   "kind": "replay",
   "area": "vm-image-bootstrap",
-  "fixedBy": "pending",
+  "fixedBy": "pr:613",
   "symptom": "The Linux glibc cloud runtime also shipped an incompatible optional musl agent payload, increasing the disk downloaded on cold restore.",
   "rule": "Honor the fixed runtime libc target before staging optional package payload, links, shims or exclusive transitives; reject incompatible required edges and retain packages without libc metadata.",
   "check": "pnpm test:git scripts/__tests__/cloud-runtime-bundle-closure.test.ts"
