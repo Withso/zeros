@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { withSystemTx } from "../db.js";
 import type { ClaimedJob } from "../job-queue.js";
+import { computeLeaseDueAtSql } from "./compute-rechecks.js";
 
 /** Lifecycle due work on the durable job queue (migration 0157). Triggers on
  * every deadline's source table enqueue a job per (kind, workspace) at a lower
@@ -63,7 +64,7 @@ const DUE: Record<LifecycleWork, string> = {
     WHERE ($scope::uuid IS NULL OR workspace.id=$scope) AND ($provider::text IS NULL OR generation.provider=$provider) AND workspace.desired_state='running'
       AND workspace.status IN ('ready','busy') AND workspace.deleted_at IS NULL`,
   compute: `
-    SELECT lease.workspace_id, lease.org_id, greatest(lease.next_check_at,
+    SELECT lease.workspace_id, lease.org_id, greatest(${computeLeaseDueAtSql},
       CASE WHEN lease.lease_owner IS NOT NULL THEN lease.lease_expires_at END,
       (SELECT max(CASE WHEN runtime.phase IN ('activated','enrolling','checking') THEN runtime.activation_deadline_at ELSE runtime.rollback_deadline_at END)
         FROM cloud_workspace_runtime_transitions runtime WHERE runtime.workspace_id=lease.workspace_id

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { COMPUTER_NAMED_REF, isComputerTemplateSnapshotName, type ComputerSnapshotChannel } from "./computer-template-name.js";
 import type { ComputerSnapshotIdentity } from "./computer-template-snapshot-boat.js";
 import { assertHostedDevAdmission } from "../development-environment.js";
+import { measureLifecyclePhase } from "./lifecycle-timing.js";
 import { z } from "zod";
 import { BoatApiClient, BoatCreateRejectedError, BoatSnapshotExpiredError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
 import { setBoatDisplayName, type BoatDisplayName } from "./boat-display-name.js";
@@ -370,7 +371,7 @@ export class BoatWorkspaceProvider
     });
     if (record.createClosedAt) throw failure("provider_generation_retired");
     this.usable(record);
-    if (record.resourceId) return this.allocatableResource(record, undefined, true);
+    if (record.resourceId) return measureLifecyclePhase("postDispatchObservation", () => this.allocatableResource(record, undefined, true));
     const age = this.now() - record.createdAt.getTime();
     if (!Number.isFinite(age) || age < -60_000 || age >= CREATE_RETRY_WINDOW_MS)
       throw failure("provider_create_outcome_unknown");
@@ -393,7 +394,7 @@ export class BoatWorkspaceProvider
     // another request using the same key receives a definite refusal later.
     const attemptId = randomUUID();
     const dispatch = await this.options.operations.beginCreateAttempt(input, attemptId);
-    if (dispatch.resourceId) return this.allocatableResource(dispatch, undefined, true);
+    if (dispatch.resourceId) return measureLifecyclePhase("postDispatchObservation", () => this.allocatableResource(dispatch, undefined, true));
     let response: Record<string, unknown>;
     try {
       response = await this.client.request(this.templateSandboxId ? `/sandboxes/${this.templateSandboxId}/fork` : "/sandboxes", {
@@ -422,11 +423,11 @@ export class BoatWorkspaceProvider
       // Fork is a 202 action receipt, not readiness. Read the bound child even
       // when the response includes a sandbox; lost replies replay the same
       // journal key to recover its ID and follow this identical GET path.
-      return this.allocatableResource(bound, undefined, true);
+      return measureLifecyclePhase("postDispatchObservation", () => this.allocatableResource(bound, undefined, true));
     }
     if (!id.success) throw failure("provider_response_invalid");
     const bound = await this.options.operations.bindResource(input, id.data.id);
-    return this.allocatableResource(bound, response.sandbox, true);
+    return measureLifecyclePhase("postDispatchObservation", () => this.allocatableResource(bound, response.sandbox, true));
   }
 
   /** Boat reports an organization-billed sandbox's wallet as `team`; null is
@@ -611,7 +612,7 @@ export class BoatWorkspaceProvider
       throw error;
     }
     return (
-      (await this.inspect(resourceId)) ??
+      (await measureLifecyclePhase("postDispatchObservation", () => this.inspect(resourceId))) ??
       (() => {
         throw failure("provider_generation_retired");
       })()

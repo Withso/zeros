@@ -7,6 +7,7 @@ import type {
   CloudProviderOperationStore,
 } from "./provider-operation-store.js";
 import { CloudProviderError, type CloudProviderCreateInput } from "./provider.js";
+import { measureLifecyclePhase, readLifecycleTiming, withLifecycleTiming } from "./lifecycle-timing.js";
 
 const NOW = Date.parse("2026-09-18T12:00:00Z");
 const RESOURCE = "bx_23456789";
@@ -1151,6 +1152,23 @@ describe('Boat compute metering and lease authority', () => {
     expect(await f.provider.startWithComputeLease(RESOURCE,600)).toMatchObject({ state: 'running' });
     const resumed = f.fetcher.mock.calls.find(call => String(call[0]).endsWith('/resume'))!;
     expect(resumed[1]).toMatchObject({ method: 'POST', body: JSON.stringify({ ttlSeconds: 600 }) });
+  });
+  it("separates post-dispatch inspect timing without another provider read", async () => {
+    const f = fixture(); await f.allocate(); f.fetcher.mockClear();
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    f.fetcher.mockImplementationOnce(async () => { now += 7; return json(sandbox("archived", { lastSnapshotStatus: "completed" })); })
+      .mockImplementationOnce(async () => { now += 11; return json({ ok: true }); })
+      .mockImplementationOnce(async () => { now += 13; return json(sandbox("running", { archiveAfter: new Date(NOW + 600_000).toISOString() })); });
+    try {
+      const timing = await withLifecycleTiming(async () => {
+        expect(await measureLifecyclePhase("dispatch", () => f.provider.startWithComputeLease(RESOURCE, 600))).toMatchObject({ state: "running" });
+        return readLifecycleTiming();
+      });
+      expect(f.fetcher).toHaveBeenCalledTimes(3);
+      expect(f.fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "POST", "GET"]);
+      expect(timing).toEqual({ version: 1, monotonicMs: { dispatch: 18, postDispatchObservation: 13 }, databaseElapsedMs: {} });
+    } finally { clock.mockRestore(); }
   });
   it.each([0,-1,Infinity,1.5,2592001])('rejects an unfunded or unbounded initial lease: %s', async ttl => {
     const f = fixture();

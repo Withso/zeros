@@ -144,6 +144,10 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   database: migration 0004 creates the cluster-wide `zeros_app` role with a
   check-then-create race. Without Docker or sudo, signature-verified PGDG
   packages unpacked with `dpkg -x` run as an unprivileged user.
+- Parallel schema resets in separate databases on one retained test server
+  still share PostgreSQL's lock table. Size `max_locks_per_transaction` for
+  that concurrency before sharding; `out of shared memory` at reset is a
+  fixture failure, not a product regression.
 - CI's PostgreSQL runs in a service container in another PID namespace, so a
   test cannot signal or inspect the server's processes. Reproduce connection
   races at the protocol layer, for example an in-test TCP relay that holds
