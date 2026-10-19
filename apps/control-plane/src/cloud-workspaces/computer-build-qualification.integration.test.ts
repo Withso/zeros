@@ -5,7 +5,7 @@ import { withSystemTx, withUserTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { seedBuildQualification, insertQualification, publishQualifiedBuild } from "./computer-build-qualification.test-fixtures.js";
-import { recordComputerBuildQualification, selectComputerBuildQualification, type ComputerBuildQualificationInput } from "./computer-build-qualifications.js";
+import { readComputerBuildQualificationCheckpoint, recordComputerBuildQualification, selectComputerBuildQualification, type ComputerBuildQualificationInput } from "./computer-build-qualifications.js";
 import type { CloudComputerBuildQualification, CloudComputerBuildSelection } from "./computer-build-qualification-contract.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -44,6 +44,8 @@ database("dormant Computer qualification admission", () => {
       resourcePolicySha256: evidence.policy.resourcePolicySha256, runtimeVersion: 1, baseVersion: 1 };
   }
   const record = () => withSystemTx(pool, tx => recordComputerBuildQualification(tx, { evidence, workerFence: 1 }));
+  const checkpoint = (workerFence = 1, manifestSha256 = evidence.sanitationManifestSha256) => withSystemTx(pool, tx =>
+    readComputerBuildQualificationCheckpoint(tx, { ...evidence.scope, workerFence, manifestSha256 }));
   const select = (change: Partial<ComputerBuildQualificationInput> = {}, required?: CloudComputerBuildSelection) =>
     withSystemTx(pool, tx => selectComputerBuildQualification(tx, { ...input(), ...change }, { flags, required }));
   async function published() {
@@ -51,6 +53,55 @@ database("dormant Computer qualification admission", () => {
     await withSystemTx(pool, tx => publishQualifiedBuild(tx, evidence));
     return receipt;
   }
+
+  it("reads absence separately from an immutable acknowledged producer checkpoint across handoff", async () => {
+    expect(await checkpoint()).toBeNull();
+    const receipt = await record();
+    expect(await checkpoint()).toEqual({ ...receipt, evidence });
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_computer_v2_builds SET worker_fence=2,stage='sanitation' WHERE id=$1", [evidence.scope.buildId]));
+    expect(await checkpoint(2)).toEqual({ ...receipt, evidence });
+    await expect(checkpoint()).rejects.toThrow("qualification_unavailable");
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_computer_build_qualifications")).rows[0].count).toBe(1);
+  });
+
+  it("never converts a revoked or differently sanitized producer checkpoint into absence", async () => {
+    const receipt = await record();
+    await expect(checkpoint(1, "0".repeat(64))).rejects.toThrow("qualification_unavailable");
+    expect(await checkpoint()).toEqual({ ...receipt, evidence });
+    await withSystemTx(pool, tx => tx.query(`UPDATE cloud_computer_build_qualifications
+      SET revoked_at=clock_timestamp(),revocation_reason='qualification_withdrawn' WHERE build_id=$1`, [evidence.scope.buildId]));
+    await expect(checkpoint()).rejects.toThrow("qualification_unavailable");
+  });
+
+  it("binds the checkpoint to the original scope and live registry even after the producer hands off", async () => {
+    await record();
+    for (const key of ["organizationId", "buildId", "configId", "channel", "accountScope", "billingOrg"] as const) {
+      await expect(withSystemTx(pool, tx => readComputerBuildQualificationCheckpoint(tx, {
+        ...evidence.scope, workerFence: 1, manifestSha256: evidence.sanitationManifestSha256,
+        [key]: key.endsWith("Id") ? randomUUID() : "other",
+      }))).rejects.toThrow("qualification_unavailable");
+    }
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_runtime_base_images SET revoked_at=clock_timestamp() WHERE base_image_id=$1", [evidence.base.baseImageId]));
+    await expect(checkpoint()).rejects.toThrow("qualification_unavailable");
+  });
+
+  it("rechecks the checkpoint deadline after waiting for the original evidence lock", async () => {
+    await record();
+    const blocker = await pool.connect();
+    let reading: Promise<unknown> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM cloud_computer_build_qualifications WHERE build_id=$1 FOR UPDATE", [evidence.scope.buildId]);
+      await pool.query("UPDATE cloud_computer_v2_builds SET deadline_at=clock_timestamp()+interval '1 second' WHERE id=$1", [evidence.scope.buildId]);
+      reading = checkpoint().then(() => "unexpected_success", error => error.message);
+      await vi.waitFor(async () => expect((await pool.query(`SELECT 1 FROM pg_stat_activity
+        WHERE datname=current_database() AND cardinality(pg_blocking_pids(pid))>0
+          AND query LIKE '%FROM cloud_computer_build_qualifications%'`)).rowCount).toBe(1));
+      await vi.waitFor(async () => expect((await pool.query("SELECT deadline_at<=clock_timestamp() AS expired FROM cloud_computer_v2_builds WHERE id=$1", [evidence.scope.buildId])).rows[0].expired).toBe(true), { timeout: 3000 });
+      await blocker.query("COMMIT");
+      expect(await reading).toBe("cloud_computer_build_qualification_unavailable");
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); await reading; }
+  });
 
   it("stores only one identical acknowledged result and makes it eligible only after exact publication", async () => {
     const first = await record();

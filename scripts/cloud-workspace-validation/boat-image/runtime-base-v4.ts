@@ -195,7 +195,7 @@ export function basePayload(root: string, commit: string, attemptHex: string): P
   for (const name of ["bootstrap.py", "boot.sh", "dispatch.sh", "install-runtime.sh", "compatibility.json", "cloud-worker.json",
     "zeros-boot.service", "zeros-host.service", "zeros.conf", "zeros-cloud-engine.apparmor", "runner-support.json", "zeros-runner.target",
     // Cloud Computer build helpers, invoked by fixed builder commands.
-    "computer-build.py", "computer-git-askpass.py", "stock-prerequisites.py"]) {
+    "computer-build.py", "computer-boot-integrity.py", "computer-build-qualification.py", "computer-git-askpass.py", "stock-prerequisites.py"]) {
     add(`base/${name}`, fs.readFileSync(path.join(base, name)));
   }
   const templates = path.join(root, "scripts/cloud-workspace-validation/boat-image/templates");

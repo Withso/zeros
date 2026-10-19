@@ -20,7 +20,7 @@ export const templateRuntime: ComputerTemplateRuntime = {
     engineProtocolVersion: 20,
   },
 };
-export async function seedComputerTemplateRuntime(pool: pg.Pool) {
+export async function seedComputerTemplateRuntime(pool: pg.Pool, options: { buildQualificationVersion?: 1; qualified?: boolean } = {}) {
   const value = templateRuntime,
     descriptor = value.descriptor;
   await withSystemTx(pool, async (tx) => {
@@ -30,7 +30,7 @@ export async function seedComputerTemplateRuntime(pool: pg.Pool) {
       [
         value.baseCompatibilityId,
         "b".repeat(64),
-        JSON.stringify({ schema: "zeros.base-compatibility/v1" }),
+        JSON.stringify({ schema: "zeros.base-compatibility/v1", ...(options.buildQualificationVersion ? { buildQualificationVersion: 1 } : {}) }),
       ],
     );
     await tx.query(
@@ -55,6 +55,11 @@ export async function seedComputerTemplateRuntime(pool: pg.Pool) {
         descriptor.sourceCommit,
       ],
     );
+    if (options.qualified) for (const kind of ["claude-setup-token", "codex-chatgpt", "cursor-api-key"]) {
+      await tx.query(`INSERT INTO cloud_runtime_qualifications(runtime_id,base_compatibility_id,credential_kind,
+        profile,enabled,mcp_qualified,evidence,qualified_at) VALUES($1,$2,$3,'zeros-cloud-worker-v4',true,true,'{"mode":"full"}',now())`,
+      [descriptor.runtimeId, value.baseCompatibilityId, kind]);
+    }
   });
 }
 

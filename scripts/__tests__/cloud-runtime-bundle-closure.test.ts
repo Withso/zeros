@@ -228,6 +228,32 @@ describe("pnpm runtime closure", () => {
       expect((await lstat(path.join(runtime, helper.target))).isFile()).toBe(true);
   });
 
+  it.each([true, false])("stages the build-qualification offer only when the selected source offers it (%s)", async offered => {
+    const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
+    for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
+    for (const relative of new Set([...ROOT_METADATA, ...SOURCE_FILES,
+      ...RUNTIME_HELPERS.filter(helper => !helper.optional).map(helper => helper.source),
+      ...hostSources, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"])) {
+      await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+      await writeFile(path.join(source, relative), "fixture");
+    }
+    const name = "build-qualification-support.json";
+    const contents = '{"schema":"zeros.build-qualification-support/v1","version":1}\n';
+    if (offered) await writeFile(path.join(source, "scripts/cloud-workspace-validation/sandbox", name), contents);
+    await stageSources(source, runtime, { sourceFiles: hostSources });
+    const target = path.join(runtime, "lib/zeros", name);
+    if (offered) {
+      expect(await readFile(target, "utf8")).toBe(contents);
+      const info = await lstat(target);
+      expect(info.isFile()).toBe(true);
+      expect(info.mode & 0o7777).toBe(0o444);
+      expect(info.nlink).toBe(1);
+      expect(await inventoryTree(runtime)).toContainEqual(expect.objectContaining({
+        path: `lib/zeros/${name}`, type: "file", mode: "0444", size: Buffer.byteLength(contents),
+      }));
+    } else await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("stages every transitive engine source import outside apps/desktop/src", async () => {
     // Bundling discovers eager and lazy source edges without executing native
     // modules. Bare packages belong to stageDependencyClosure instead.

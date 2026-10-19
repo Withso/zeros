@@ -19,6 +19,7 @@ install -d -o root -g root -m 0755 /opt/zeros-runtime/lib/zeros /opt/zeros-runti
 for name in runtime-layout.json cgroup-resources.mjs cloud-resource-admission.mjs image-build-contract.mjs cloud-runtime-profile.mjs cloud-runtime-root.mjs cloud-runtime-assets.mjs cloud-runner-base.mjs cloud-engine-cgroup.mjs cloud-setup-process.mjs cloud-setup-timings.mjs cloud-setup-performance.mjs cloud-computer-self-test.mjs cloud-computer-checkout.mjs cloud-engine-view.mjs cloud-engine-launcher.mjs write-image-build-metadata.mjs attest-cloud-worker.mjs consume-cloud-admission.mjs install-cloud-preview-links.mjs install-cloud-github-credential.mjs cloud-github-refresh-request.mjs cloud-git-askpass.mjs cloud-worker-supervisor.mjs ensure-cloud-worker-supervisor.mjs setup-cloud-workspace.mjs; do
  install -o root -g root -m 0555 "scripts/cloud-workspace-validation/sandbox/$name" "/opt/zeros-runtime/lib/zeros/$name"
 done
+install -o root -g root -m 0444 scripts/cloud-workspace-validation/sandbox/build-qualification-support.json /opt/zeros-runtime/lib/zeros/build-qualification-support.json
 install -o root -g root -m 0555 scripts/cloud-workspace-validation/sandbox/start-engine.sh /opt/zeros-runtime/bin/start-engine.sh
 node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs
 install -o root -g root -m 0444 scripts/cloud-workspace-validation/sandbox/cloud-worker.json /etc/zeros/cloud-worker.json

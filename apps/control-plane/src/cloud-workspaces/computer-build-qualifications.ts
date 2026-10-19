@@ -100,6 +100,66 @@ export async function recordComputerBuildQualification(tx: Tx, input: {
   return { qualificationId: row.id, evidenceSha256: digest.toString("hex") };
 }
 
+export type ComputerBuildQualificationCheckpoint = {
+  qualificationId: string; evidenceSha256: string; evidence: CloudComputerBuildQualification;
+};
+
+/** Read the acknowledged producer result before a worker chooses any flag or
+ * fallback. A local file is never evidence that the producer committed. The
+ * caller retains the organization/build locks through its publication. */
+export async function readComputerBuildQualificationCheckpoint(tx: Tx, input: CloudComputerBuildQualification["scope"] & {
+  manifestSha256: string; workerFence?: number; qualificationMode?: CloudRuntimeQualificationMode;
+}): Promise<ComputerBuildQualificationCheckpoint | null> {
+  const build = await lockBuild(tx, input.organizationId, input.buildId);
+  if (input.provider !== "boat" || build.config_id !== input.configId || build.account_scope !== input.accountScope || build.billing_org !== input.billingOrg)
+    unavailable();
+  if (input.workerFence !== undefined) {
+    if (!Number.isSafeInteger(input.workerFence) || build.state !== "running" || build.template_state !== "pending" ||
+      !["integrity", "sanitation", "stopping", "capture_confirmed"].includes(build.stage) ||
+      Number(build.worker_fence) !== input.workerFence || build.cancel_requested_at || build.handoff_at) unavailable();
+  } else if (build.state !== "succeeded" || build.stage !== "done" || build.template_state !== "ready" ||
+    !build.completed_at || build.cancel_requested_at) unavailable();
+  const row = await readEvidence(tx, input.organizationId, input.buildId);
+  let checkpoint: ComputerBuildQualificationCheckpoint | null = null;
+  if (row) {
+    const evidence = parseEvidence(row);
+    bindBuild(build, evidence);
+    if (row.revoked_at || evidence.scope.channel !== input.channel || evidence.sanitationManifestSha256 !== input.manifestSha256 ||
+      (build.manifest_sha256 !== null && build.manifest_sha256.toString("hex") !== input.manifestSha256)) unavailable();
+    await validateRegistry(tx, evidence, input.qualificationMode ?? "full");
+    checkpoint = { qualificationId: row.id, evidenceSha256: row.evidence_sha256.toString("hex"), evidence };
+  }
+  // Both evidence and registry locks can wait past the original deadline.
+  // Absence is usable only by a still-current producer, too.
+  if (input.workerFence !== undefined && !(await tx.query(`SELECT 1 FROM cloud_computer_v2_builds
+    WHERE id=$1 AND deadline_at>clock_timestamp()`, [input.buildId])).rowCount) unavailable();
+  return checkpoint;
+}
+
+export type ComputerBuildQualificationBase = Pick<CloudComputerBuildQualification["base"],
+  "baseImageId" | "baseCompatibilityId" | "compatibilitySha256" | "sourceCommit" | "architecture">;
+
+/** The registered base advertises its fixed producer. Runtime support is
+ * then read from its fully verified manifest by that producer, not guessed
+ * from a release date or a self-test entrypoint. */
+export async function computerBuildQualificationBase(tx: Tx, input: {
+  baseImageId: string; baseCompatibilityId: string;
+}): Promise<ComputerBuildQualificationBase | null> {
+  const row = (await tx.query<{ source_commit: string; architecture: string; contract_sha256: string; contract: Record<string, unknown> }>(
+    `SELECT base.source_commit,base.architecture,contract.contract_sha256,contract.contract
+     FROM cloud_runtime_base_images base JOIN cloud_runtime_base_contracts contract USING(base_compatibility_id)
+     WHERE base.base_image_id=$1 AND base.base_compatibility_id=$2 AND base.revoked_at IS NULL
+       AND contract.revoked_at IS NULL AND base.approved_at<=clock_timestamp() FOR SHARE OF base,contract`,
+  [input.baseImageId, input.baseCompatibilityId])).rows[0];
+  if (!row || !row.contract || typeof row.contract !== "object" || Array.isArray(row.contract)) unavailable();
+  if (!Object.hasOwn(row.contract, "buildQualificationVersion")) return null;
+  if (row.contract.buildQualificationVersion !== 1 || row.architecture !== "linux/amd64" ||
+    !/^[a-f0-9]{40}$/.test(row.source_commit) || !/^[a-f0-9]{64}$/.test(row.contract_sha256) ||
+    input.baseCompatibilityId !== `bc1-${row.contract_sha256}`) unavailable();
+  return { baseImageId: input.baseImageId, baseCompatibilityId: input.baseCompatibilityId,
+    compatibilitySha256: row.contract_sha256, sourceCommit: row.source_commit, architecture: "linux/amd64" };
+}
+
 export type ComputerBuildQualificationInput = {
   organizationId: string; buildId: string; configId: string; runtimeId: string; baseImageId: string; baseCompatibilityId: string;
   channel: CloudComputerBuildQualification["scope"]["channel"]; accountScope: string; billingOrg: string;

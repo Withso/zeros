@@ -1,0 +1,5 @@
+{
+  "file": "scripts/cloud-workspace-validation/runtime-base-v4/bootstrap.py",
+  "before": "signals = resources.enter_context(SelectedSetupSignals()) if build_verifier is not None else None",
+  "after": "signals = None"
+}

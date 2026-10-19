@@ -342,7 +342,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const computerV2 = new DatabaseCloudComputerV2Service(pool, cloud, { sanitizeLog: sanitizeComputerTemplateLog });
   const computerTemplateWorker = workerPool && migrationResult.status.state !== "controlled_migration_pending"
     ? createComputerTemplateWorker(config, workerPool, runtimeArtifacts, github,
-      new DatabaseCloudComputerV2Service(workerPool, cloud, { sanitizeLog: sanitizeComputerTemplateLog })) : null;
+      new DatabaseCloudComputerV2Service(workerPool, cloud, { sanitizeLog: sanitizeComputerTemplateLog }), rolloutFlagSnapshot ?? undefined) : null;
   cloudWorkspaceRepositoryResolver = new GithubCloudWorkspaceRepositoryResolver(
     { credential: github },
   );

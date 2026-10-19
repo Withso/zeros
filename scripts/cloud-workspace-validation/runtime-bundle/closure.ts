@@ -87,6 +87,11 @@ export const RUNTIME_HELPERS = [
     target: "lib/zeros/runtime-self-test.mjs",
     optional: true,
   },
+  {
+    source: `${SANDBOX}/build-qualification-support.json`,
+    target: "lib/zeros/build-qualification-support.json",
+    optional: true,
+  },
 ];
 export const SOURCE_SLICES = [
   // Workspace packages (protocol/design-core/design-web) are copied in full by

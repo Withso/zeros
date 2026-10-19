@@ -7,6 +7,7 @@ import { sanitizeComputerTemplateLog } from "./computer-template-logs.js";
 import { ComputerTemplateWorker, type ComputerTemplateWorkerDependencies } from "./computer-template-worker.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
 import type { RuntimeArtifactStore } from "./runtime-artifact-store.js";
+import { ROLLOUT_FLAGS_OFF, type RolloutFlagReader } from "../rollout-flags.js";
 
 /** Construction performs no provider I/O. The entrypoint owns start/stop and
  * the maintenance, migration and background-worker role guards. */
@@ -16,6 +17,7 @@ export function createComputerTemplateWorker(
   artifacts: RuntimeArtifactStore | null,
   github: ComputerTemplateWorkerDependencies["github"],
   service?: DatabaseCloudComputerV2Service,
+  flags: RolloutFlagReader = ROLLOUT_FLAGS_OFF,
 ): ComputerTemplateWorker | null {
   const cloud = config.cloudWorkspaces;
   if (config.deploymentChannel !== "alpha" || cloud?.provider !== "boat" || !cloud.boat || !artifacts) return null;
@@ -36,6 +38,9 @@ export function createComputerTemplateWorker(
     artifacts,
     accountScope,
     billingOrg,
+    flags,
+    channel: config.deploymentChannel,
+    qualificationMode: cloud.runtime?.qualificationMode ?? "full",
     ...(cloud.runtime?.imagesEnabled === true ? { runtimeImageChannel: config.deploymentChannel } : {}),
     maxConcurrentBuilds: cloud.computerMaxConcurrentBuilds ?? 2,
     ...workerPollingOptions(config.workerPollIntervalsMs, "templates"),

@@ -133,6 +133,7 @@ export function imageContractSha256(): string {
     "sandbox/cloud-setup-process.mjs",
     "sandbox/cloud-setup-performance.mjs",
     "sandbox/cloud-computer-self-test.mjs",
+    "sandbox/build-qualification-support.json",
     "sandbox/cloud-runtime-profile.mjs",
     "sandbox/cloud-engine-cgroup.mjs",
     "sandbox/cloud-engine-view.mjs",

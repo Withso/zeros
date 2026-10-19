@@ -186,6 +186,14 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
     lines.push(`RUN chown root:root ${target} && chmod 0444 ${target}`);
   }
   {
+    const sourcePath = path.join(here, "sandbox", "build-qualification-support.json");
+    const archivePath = `sandbox/${path.basename(sourcePath)}`;
+    const target = "/opt/zeros-runtime/lib/zeros/build-qualification-support.json";
+    contextList.push({ sourcePath, archivePath });
+    lines.push(`COPY ${JSON.stringify([archivePath, target])}`);
+    lines.push(`RUN chown root:root ${target} && chmod 0444 ${target}`);
+  }
+  {
     const sourcePath = path.join(here, "sandbox", "image-build-contract.mjs");
     const archivePath = `sandbox/${path.basename(sourcePath)}`;
     contextList.push({ sourcePath, archivePath });

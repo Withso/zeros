@@ -969,7 +969,8 @@ sys.stdout.buffer.write(out.getvalue())`]);
     const computerBuild = fs.readFileSync(path.join(BASE, "computer-build.py"), "utf8");
     const required = new Set([...commands.matchAll(/\/opt\/zeros-bootstrap\/([\w.-]+)/g)].map(match => match[1]));
     for (const match of computerBuild.matchAll(/"\/opt\/zeros-bootstrap\/([\w.-]+\.py)"/g)) required.add(match[1]);
-    expect(required).toEqual(new Set(["bootstrap.py", "computer-build.py", "computer-git-askpass.py"]));
+    expect(required).toEqual(new Set(["bootstrap.py", "computer-build.py", "computer-boot-integrity.py",
+      "computer-build-qualification.py", "computer-git-askpass.py"]));
     for (const name of required) {
       expect(payload.files.map(file => file.name)).toContain(`base/${name}`);
       expect(installed).toContain(name);

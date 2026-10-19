@@ -38,7 +38,7 @@ useradd --uid 10004 --gid 10004 --no-log-init --no-create-home --shell /usr/sbin
 # then binds the logical paths before initializing homes/settings/workspaces.
 install -d -o root -g root -m 0700 /srv/zeros/runtime-installs /run/zeros
 install -d -o root -g root -m 0755 /opt/zeros-bootstrap /opt/zeros-infra /opt/zeros /etc/zeros
-for name in bootstrap.py boot.sh dispatch.sh install-runtime.sh computer-build.py computer-git-askpass.py stock-prerequisites.py; do
+for name in bootstrap.py boot.sh dispatch.sh install-runtime.sh computer-build.py computer-boot-integrity.py computer-build-qualification.py computer-git-askpass.py stock-prerequisites.py; do
   install -o root -g root -m 0555 "base/$name" "/opt/zeros-bootstrap/$name"
 done
 install -o root -g root -m 0444 stock-prerequisites.json /opt/zeros-bootstrap/stock-prerequisites.json
@@ -60,7 +60,7 @@ def raw(value):
 def sha(value):
     return hashlib.sha256(value).hexdigest()
 protected = ['/opt/zeros-bootstrap/' + name for name in ('bootstrap.py', 'boot.sh', 'dispatch.sh', 'install-runtime.sh',
-                                                     'computer-build.py', 'computer-git-askpass.py', 'stock-prerequisites.py', 'stock-prerequisites.json')]
+                                                     'computer-build.py', 'computer-boot-integrity.py', 'computer-build-qualification.py', 'computer-git-askpass.py', 'stock-prerequisites.py', 'stock-prerequisites.json')]
 protected += ['/etc/zeros/cloud-worker.json', '/etc/systemd/system/zeros-boot.service',
               '/etc/systemd/system/zeros-host.service', '/etc/tmpfiles.d/zeros.conf', '/etc/apparmor.d/zeros-cloud-engine']
 protected += ['/usr/lib/zeros-runner/support.json', '/usr/lib/zeros-runner/zeros-runner.target']

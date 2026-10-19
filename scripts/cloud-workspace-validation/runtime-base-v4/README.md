@@ -688,3 +688,69 @@ Exact re-registration succeeds; conflicting identity fails.
 Requests and response sizes are bounded, redirects are rejected, and only a
 closed diagnostic reaches the registration step's output. No OIDC/shared
 publication credential is stored in the receipt.
+
+## Build qualification and fixed verifier transport
+
+`buildQualificationVersion:1` in the registered compatibility contract pins
+`computer-boot-integrity.py` and `computer-build-qualification.py` alongside
+the existing Computer helpers. The fixed `qualify-build` command produces
+immutable canonical evidence only after the complete runtime self-test,
+protected system/Python byte closure and running-kernel checks. Dependency
+discovery runs only during this full build. The original wall and monotonic
+deadline bounds discovery, the self-test and final acceptance; no subprocess
+gets a new build budget. Full runtime hashing is retained.
+
+The private integrity document is at most 8 MiB with 16,384 inventory entries,
+512 MiB per protected file and 1 GiB aggregate file reads per capture. These
+are refusal bounds, never truncation or a claim that an unmeasured image fits.
+Public evidence and report are separately bounded at 64 KiB. Cross-boot
+equality uses bytes, policy metadata, semantic systemd absence and kernel
+identity; transient inode IDs, boot IDs and timestamps are local witnesses.
+Only `/usr/local` and `/usr/local/lib` directory ancestors may use the exact
+provider UID/GID sealed by the base's optional-systemd policy. Deeper selected
+directories/files stay root-owned, with no alias, mode or ACL exemption.
+The base's native-mount and optional-systemd checks still run independently.
+
+Sanitation holds the three original qualification files and their ancestry
+through private-state clearing, template publication and sync. Replaced or
+modified records refuse, even when a replacement carries identical bytes.
+Saved-tree verification requires exactly the acknowledged build's records.
+
+The optional installer field `buildQualification` is accepted only for
+`workspace-setup`. Absent or `{mode:"full"}` preserves ordinary setup. A build
+selection must match the external base/runtime pins before the base loads
+helpers. The loader compiles the same protected bytes it checked, including
+the injected integrity companion. Selected setup additionally requires the
+manifest-bound `lib/zeros/build-boot-support.json` with exactly
+`{"schema":"zeros.build-boot-support/v1","version":1}`. This boot offer is not
+emitted yet; the producer offer cannot substitute for it.
+
+Selected setup uses an installer-owned socketpair. Only the verified root
+setup child inherits the client descriptor named by `ZEROS_BUILD_VERIFY_FD`.
+There is no input-selected path, executable or listener. The original
+installer lock stays held; each callback acquires only the publication lock
+and checks the original installer lock's identity and kernel flock record.
+
+The first canonical UTF-8 line is
+`{schema:"zeros.computer-build-verifier-session/v1",selection,deadlineMs}`.
+Each request is exactly `{selection,runtime}`; each response is the unchanged
+closed `zeros.computer-build-verification/v1` result. Requests are at most
+64 KiB, replies 16 KiB, with at most eight sequential exchanges and no retry,
+cached success or deadline restart. Selection/runtime equality, full runtime
+bytes, preserved evidence, protected closure, kernel and active boot witness
+are checked before setup, per request and after child exit. Successful setup
+requires an actual exchange and a joined channel.
+
+TERM, INT and ALRM cannot interrupt selected child retirement or release its
+original ownership during repeated cancellation. A signal during spawn is
+delivered after the child handle is owned. A kernel wait with unknown outcome
+retains ownership; it cannot produce successful setup. Selected stdout stays
+buffered until retirement, descriptor cleanup and final deadline acceptance.
+Frames and private evidence are never forwarded to stdout or stderr.
+
+The later runtime reader must still enforce its own frozen selection/attempt,
+setup and engine locks, actual-view boot probe and fresh single-use launch
+proof. This transport alone grants no workspace admission. No runtime launch
+caller or CP build-mode selection is activated here, and Local placements
+remain unchanged. Live native qualification and measurements of repeated full
+verification remain release gates; no speedup is inferred from these tests.

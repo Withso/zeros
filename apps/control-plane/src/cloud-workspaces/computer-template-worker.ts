@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
-import type { Tx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
+import { ROLLOUT_FLAGS_OFF, type RolloutFlagReader } from "../rollout-flags.js";
+import { lockCloudComputerOrganization } from "./computer-identity.js";
+import { CloudComputerBuildQualificationSchema } from "./computer-build-qualification-contract.js";
+import { computerBuildQualificationBase, readComputerBuildQualificationCheckpoint, recordComputerBuildQualification,
+  type ComputerBuildQualificationCheckpoint } from "./computer-build-qualifications.js";
+import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import {
   DatabaseCloudComputerV2Service,
@@ -83,6 +89,11 @@ const SanitationResult = z
     manifestSha256: hash,
   })
   .strict();
+const BuildProducerResult = z.discriminatedUnion("mode", [
+  z.object({ schema: z.literal("zeros.computer-build-producer/v1"), mode: z.literal("full") }).strict(),
+  z.object({ schema: z.literal("zeros.computer-build-producer/v1"), mode: z.literal("build"),
+    evidence: CloudComputerBuildQualificationSchema }).strict(),
+]);
 
 class BuildFailure extends Error {
   constructor(readonly code: CloudComputerV2BuildError, readonly diagnostic: ClosedDiagnostic | null = null) {
@@ -116,6 +127,9 @@ export type ComputerTemplateWorkerDependencies = {
   };
   accountScope: string;
   billingOrg: string;
+  flags?: RolloutFlagReader;
+  channel?: RuntimeImageChannel;
+  qualificationMode?: CloudRuntimeQualificationMode;
   runtimeImageChannel?: RuntimeImageChannel;
   maxConcurrentBuilds?: number;
   pollMs?: number;
@@ -257,6 +271,29 @@ export class ComputerTemplateWorker {
       throw new BuildFailure(
         authority.expired ? "build_timeout" : "build_failed",
       );
+  }
+  private qualificationScope(claim: CloudComputerV2Claim) {
+    return { organizationId: claim.organizationId, buildId: claim.build.id, configId: claim.config.id,
+      provider: "boat" as const, channel: this.deps.channel ?? "alpha", accountScope: this.deps.accountScope, billingOrg: this.deps.billingOrg };
+  }
+  private async qualificationTx<T>(claim: CloudComputerV2Claim, action: (tx: Tx) => Promise<T>): Promise<T> {
+    try {
+      return await withSystemTx(this.deps.pool, async tx => {
+        if (!(await tx.query(`SELECT id FROM organizations WHERE id=$1 AND NOT is_personal
+          AND deleted_at IS NULL AND lifecycle_status='active' FOR SHARE`, [claim.organizationId])).rowCount)
+          throw new BuildFailure("integrity_failed");
+        await lockCloudComputerOrganization(tx, claim.organizationId);
+        return action(tx);
+      });
+    } catch { throw new BuildFailure("integrity_failed"); }
+  }
+  private async qualificationCheckpoint(tx: Tx, claim: CloudComputerV2Claim, manifestSha256: string,
+    required?: ComputerBuildQualificationCheckpoint | null) {
+    const value = await readComputerBuildQualificationCheckpoint(tx, { ...this.qualificationScope(claim),
+      workerFence: claim.workerFence, manifestSha256, qualificationMode: this.deps.qualificationMode ?? "full" });
+    if (required && (value?.qualificationId !== required.qualificationId || value.evidenceSha256 !== required.evidenceSha256))
+      throw new BuildFailure("integrity_failed");
+    return value;
   }
   private async checkpoint(claim: CloudComputerV2Claim) {
     if (!this.stopping) return;
@@ -445,18 +482,6 @@ export class ComputerTemplateWorker {
         await this.stage(claim, "integrity");
         await this.checkpoint(claim);
       }
-      if (claim.build.stage === "integrity") {
-        const checked = result(TcbResult, await this.fixed(vm, "computer:verify-tcb",
-          { ...tcbInput, action: "verify", protectedContractDigest: baseline.protectedContractDigest },
-          "tcb_modified", this.timeout(claim, 180_000), "build", "integrity"), "tcb_modified");
-        if (canonical(checked) !== canonical(baseline))
-          throw new BuildFailure("tcb_modified");
-        await this.fixed(vm, "runtime-self-test", undefined, "integrity_failed", this.timeout(claim, 120_000), "qualification", "self_test");
-        await this.stage(claim, "sanitation");
-        await this.checkpoint(claim);
-      }
-      if (!["sanitation", "stopping", "capture_confirmed"].includes(claim.build.stage))
-        throw new BuildFailure("tcb_modified");
       const manifest = {
         schema: "zeros.computer-template/v1",
         buildId: id,
@@ -466,15 +491,61 @@ export class ComputerTemplateWorker {
         repositoryManifest: repositories,
         protectedContractDigest: baseline.protectedContractDigest,
       };
-      const manifestSha256 = createHash("sha256")
-        .update(canonical(manifest))
-        .digest("hex");
+      const manifestSha256 = createHash("sha256").update(canonical(manifest)).digest("hex");
+      failure = "integrity_failed";
+      // Read the durable result before flags or fallback. This also covers an
+      // integrity-stage handoff after recording but before the stage write.
+      let qualification = await this.qualificationTx(claim, tx => this.qualificationCheckpoint(tx, claim, manifestSha256));
+      if (claim.build.stage === "integrity") {
+        const checked = result(TcbResult, await this.fixed(vm, "computer:verify-tcb",
+          { ...tcbInput, action: "verify", protectedContractDigest: baseline.protectedContractDigest },
+          "tcb_modified", this.timeout(claim, 180_000), "build", "integrity"), "tcb_modified");
+        if (canonical(checked) !== canonical(baseline))
+          throw new BuildFailure("tcb_modified");
+        if (!qualification) {
+          const base = (this.deps.flags ?? ROLLOUT_FLAGS_OFF).enabled(claim.organizationId, "build_qualification")
+            ? await this.qualificationTx(claim, async tx => {
+              if (!await this.deps.runtime.validate(tx, runtime)) throw new BuildFailure("integrity_failed");
+              return computerBuildQualificationBase(tx, runtime);
+            }) : null;
+          if (base) {
+            const scope = this.qualificationScope(claim);
+            const produced = result(BuildProducerResult, await this.fixed(vm, "computer:qualify-build", {
+              schema: "zeros.computer-build-qualification-input/v1", ...job, producerFence: fence, scope,
+              builder: { operationKey: vm.operationKey, sandboxId: vm.sandboxId },
+              runtime: { runtimeId: runtime.descriptor.runtimeId, manifestSha256: runtime.descriptor.manifestSha256,
+                archiveSha256: runtime.descriptor.archiveSha256, engineProtocolVersion: runtime.descriptor.engineProtocolVersion },
+              base, protectedContractSha256: baseline.protectedContractDigest, sanitationManifestSha256: manifestSha256,
+              deadlineAt: claim.deadlineAt,
+            }, "integrity_failed", this.timeout(claim, 600_000), "build", "integrity"), "integrity_failed");
+            if (produced.mode === "build") {
+              if (canonical(produced.evidence.scope) !== canonical(scope)) throw new BuildFailure("integrity_failed");
+              qualification = await this.qualificationTx(claim, async tx => {
+                await recordComputerBuildQualification(tx, { evidence: produced.evidence, workerFence: fence,
+                  qualificationMode: this.deps.qualificationMode ?? "full" });
+                const saved = await this.qualificationCheckpoint(tx, claim, manifestSha256);
+                if (!saved) throw new BuildFailure("integrity_failed");
+                return saved;
+              });
+            }
+          }
+          if (!qualification) await this.fixed(vm, "runtime-self-test", undefined, "integrity_failed",
+            this.timeout(claim, 120_000), "qualification", "self_test");
+        }
+        await this.stage(claim, "sanitation");
+        await this.checkpoint(claim);
+      }
+      if (!["sanitation", "stopping", "capture_confirmed"].includes(claim.build.stage))
+        throw new BuildFailure("tcb_modified");
       if (claim.build.stage === "sanitation") {
+        qualification = await this.qualificationTx(claim, tx => this.qualificationCheckpoint(tx, claim, manifestSha256, qualification));
         const sanitation = result(SanitationResult, await this.fixed(vm, "computer:sanitize",
-          { schema: "zeros.computer-sanitation-input/v1", ...job, manifest, manifestSha256 },
+          { schema: "zeros.computer-sanitation-input/v1", ...job, manifest, manifestSha256,
+            ...(qualification ? { qualification: { evidenceSha256: qualification.evidenceSha256 } } : {}) },
           "sanitation_failed", this.timeout(claim, 120_000), "build", "sanitation"), "sanitation_failed");
         if (sanitation.buildId !== id || sanitation.manifestSha256 !== manifestSha256)
           throw new BuildFailure("sanitation_failed");
+        await this.qualificationTx(claim, tx => this.qualificationCheckpoint(tx, claim, manifestSha256, qualification));
         await this.journal.recordDigest(id, fence, manifestSha256, "manifest");
         allocation.manifest_sha256 = Buffer.from(manifestSha256, "hex");
         await this.stage(claim, "stopping");
@@ -520,7 +591,10 @@ export class ComputerTemplateWorker {
             stoppedAt: allocation.stopped_at.toISOString(),
           },
         },
-        (tx) => this.deps.runtime.validate(tx, runtime),
+        async tx => {
+          await this.qualificationCheckpoint(tx, claim, manifestSha256, qualification);
+          return this.deps.runtime.validate(tx, runtime);
+        },
       );
     } catch (error) {
       if (error instanceof BuildHandoff) return;

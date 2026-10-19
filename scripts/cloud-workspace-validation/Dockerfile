@@ -98,6 +98,9 @@ COPY sandbox/cloud-setup-process.mjs /opt/zeros-runtime/lib/zeros/cloud-setup-pr
 COPY sandbox/cloud-setup-performance.mjs /opt/zeros-runtime/lib/zeros/cloud-setup-performance.mjs
 RUN chown root:root /opt/zeros-runtime/lib/zeros/cloud-setup-performance.mjs \
  && chmod 0444 /opt/zeros-runtime/lib/zeros/cloud-setup-performance.mjs
+COPY sandbox/build-qualification-support.json /opt/zeros-runtime/lib/zeros/build-qualification-support.json
+RUN chown root:root /opt/zeros-runtime/lib/zeros/build-qualification-support.json \
+ && chmod 0444 /opt/zeros-runtime/lib/zeros/build-qualification-support.json
 COPY sandbox/cloud-computer-self-test.mjs /opt/zeros-runtime/lib/zeros/cloud-computer-self-test.mjs
 RUN chown root:root /opt/zeros-runtime/lib/zeros/cloud-computer-self-test.mjs \
  && chmod 0444 /opt/zeros-runtime/lib/zeros/cloud-computer-self-test.mjs
