@@ -131,6 +131,49 @@ durable heads and generation recovery pins protect their referenced blobs under
 the [checkpoint retention policy](checkpoint-native-format.md). Explicit workspace
 or organization erasure remains separate.
 
+## Dormant complete-checkpoint coordinator
+
+`CloudCheckpointScheduler` has an optional `complete` mode for a future qualified
+complete-data producer. The engine does not select it. The existing periodic
+projection and recovery coverage above remain the deployed contract. Local
+Personal and organization-local workspaces do not instantiate this cloud mode.
+
+The mode requires explicit bounded scheduling inputs, an exact writer/scope
+source, a complete-cut producer, a durable compare-and-swap attempt journal and
+an operator observation sink. It has no default producer, journal or measured
+production policy. A selected complete mode never falls back to a partial
+projection. Its in-process types are not a negotiated server capability or a
+public checkpoint wire format.
+
+One coordinator debounces changes without resetting the earliest uncovered
+change, applies a separate rate floor and retry time, and journals an immutable
+attempt before producer I/O. An unconfirmed journal or producer outcome retains
+custody and prevents a successor. Restart sees that pending attempt and requires
+external reconciliation; silent change hints cannot establish a clean inventory.
+The future change source must cover every writer and explicitly invalidate
+coverage after overflow or other lost observations.
+
+Accepted receipts bind the original attempt, writer, scope and covered sequences.
+Later changes remain dirty. Operator evidence measures age from the data cut;
+an upload acknowledgement cannot make an old cut appear fresh. Dirty age is
+unknown until the observation interval is covered. Stale alerts are bounded and
+deduplicated, and diagnostic failure has no retirement authority. No new notice
+is sent to workspace users. Final capture must join or positively retire the
+background lane and obtain its own fresh seal; a periodic receipt cannot finish
+a lifecycle operation. Each final caller pairs its completed pause with one
+resume; overlapping callers retain their own admission holds.
+
+This coordinator alone supplies no whole-data or native consistency proof. Before
+enrollment, qualify all-writer quiescence and immutable staging, the periodic
+engine export, complete inventory and encryption, durable journal/storage
+adapters, lifetime retention and independent restore. Measure cut pause,
+debounce, maximum dirty age, transfer/rate and alert budgets against real data.
+Cut, acknowledgement and persisted due times require a qualified common clock
+contract; the coordinator's monotonic age floor covers observations within its
+own process and is not an independent clock-recovery proof.
+Combined abrupt VM and provider-storage loss can still lose changes after the
+last complete cut; this design does not claim zero loss.
+
 ## User-visible state and rollout
 
 During recovery the existing restoring, waiting and attention states remain.
