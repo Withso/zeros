@@ -29,6 +29,7 @@ export function createComputerTemplateWorker(
       accountScope,
       billingOrg,
       qualificationMode: cloud.runtime?.qualificationMode ?? "full",
+      ...(cloud.runtime?.baseRollout ? { baseRollout: cloud.runtime.baseRollout } : {}),
       deploymentChannel: config.deploymentChannel,
     }),
     github,

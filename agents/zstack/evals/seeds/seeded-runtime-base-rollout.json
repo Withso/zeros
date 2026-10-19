@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/cloud-workspaces/runtime-config.ts",
+  "before": "loadRuntimeBaseRollout(env.CLOUD_RUNTIME_BASE_ROLLOUT_JSON)",
+  "after": "loadRuntimeBaseRollout(undefined)"
+}

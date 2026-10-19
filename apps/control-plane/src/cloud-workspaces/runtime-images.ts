@@ -16,6 +16,7 @@ import { CloudProviderError } from "./provider.js";
 import { RuntimeDescriptorSchema, RuntimeInstallInputSchema, type RuntimeDescriptor } from "./runtime-contract.js";
 import type { RuntimeArtifactStore } from "./runtime-artifact-store.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
+import type { CloudRuntimeBaseRollout } from "./runtime-base-rollout.js";
 import { loadPinnedCloudRuntime, selectCloudRuntime } from "./runtime-selection.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
 
@@ -173,6 +174,7 @@ export class RuntimeImageWorker {
     pool: pg.Pool; enabled: boolean; channel: RuntimeImageChannel; mode: CloudRuntimeQualificationMode;
     accountScope: string; billingOrg: string; vms: CloudBuilderVms; operations: BuilderVmOperationStore;
     artifacts: RuntimeArtifactStore; snapshots: RuntimeImageSnapshots;
+    baseRollout?: CloudRuntimeBaseRollout;
     intervalMs?: number; maintenanceBatchSize?: number; now?: () => number; wait?: (ms: number) => Promise<void>;
   }) {
     this.now = options.now ?? Date.now;
@@ -212,6 +214,20 @@ export class RuntimeImageWorker {
     return [this.options.channel, this.options.accountScope, this.options.billingOrg];
   }
 
+  /** The global claim lock serializes these attempts across replicas. Rotate
+   * by persisted attempt time so neither explicit target monopolizes the slot. */
+  private async baseTargets(tx: Tx): Promise<Array<string | undefined>> {
+    const policy = this.options.baseRollout;
+    if (!policy) return [undefined];
+    const targets = [policy.defaultBaseImageId, ...(policy.candidate ? [policy.candidate.baseImageId] : [])];
+    if (targets.length === 1) return targets;
+    const attempts = (await tx.query<{ base_image_id: string; attempted_at: Date }>(`SELECT base_image_id,max(created_at) AS attempted_at
+      FROM cloud_runtime_images WHERE channel=$1 AND account_scope=$2 AND lower(billing_org)=lower($3)
+        AND base_image_id=ANY($4::text[]) GROUP BY base_image_id`, [...this.scope(), targets])).rows;
+    const times = new Map(attempts.map(row => [row.base_image_id, row.attempted_at.getTime()]));
+    return targets.sort((a, b) => (times.get(a) ?? 0) - (times.get(b) ?? 0));
+  }
+
   private async claim(): Promise<{ row: ImageRow; reconcile: boolean } | null> {
     const { mode } = this.options, scope = this.scope();
     return withSystemTx(this.options.pool, async tx => {
@@ -227,24 +243,27 @@ export class RuntimeImageWorker {
         return expired ? { row: expired, reconcile: true } : null;
       }
       if (!this.options.enabled) return null;
-      const selected = await selectCloudRuntime(tx, mode);
-      if (!selected) return null;
-      const pair = [...scope, selected.pin.runtimeId, selected.pin.baseImageId];
-      if ((await tx.query(`SELECT 1 FROM cloud_runtime_images WHERE channel=$1 AND account_scope=$2 AND lower(billing_org)=lower($3)
-        AND runtime_id=$4 AND base_image_id=$5 AND state='ready'`, pair)).rowCount) return null;
-      const failed = (await tx.query<{ attempts: string; recent: boolean }>(`SELECT count(*) AS attempts,
-          coalesce(max(finished_at)>clock_timestamp()-$6*interval '1 millisecond',false) AS recent
-        FROM cloud_runtime_images WHERE channel=$1 AND account_scope=$2 AND lower(billing_org)=lower($3)
-          AND runtime_id=$4 AND base_image_id=$5 AND state='failed'`, [...pair, RETRY_AFTER_FAILURE_MS])).rows[0]!;
-      if (Number(failed.attempts) >= MAX_FAILED_ATTEMPTS || failed.recent) return null;
-      const name = `zeros-rtimg-${scope[0]}-${selected.pin.runtimeId.slice(3, 15)}-${randomBytes(4).toString("hex")}`;
-      const row = (await tx.query<ImageRow>(`INSERT INTO cloud_runtime_images
-        (channel,account_scope,billing_org,runtime_id,base_image_id,base_compatibility_id,snapshot_name,deadline_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,clock_timestamp()+$8*interval '1 millisecond') RETURNING *`,
-      [...pair, selected.pin.baseCompatibilityId, name, RUN_MS])).rows[0]!;
-      // The selected base row is locked by selection; prepare without provider I/O.
-      await prepareBuilderVmOperation(this.options.operations, builderIntent(row), async () => builderVmBaseSnapshot(selected.base.imageRef), tx);
-      return { row, reconcile: false };
+      for (const baseImageId of await this.baseTargets(tx)) {
+        const selected = await selectCloudRuntime(tx, mode, baseImageId);
+        if (!selected) continue;
+        const pair = [...scope, selected.pin.runtimeId, selected.pin.baseImageId];
+        if ((await tx.query(`SELECT 1 FROM cloud_runtime_images WHERE channel=$1 AND account_scope=$2 AND lower(billing_org)=lower($3)
+          AND runtime_id=$4 AND base_image_id=$5 AND state='ready'`, pair)).rowCount) continue;
+        const failed = (await tx.query<{ attempts: string; recent: boolean }>(`SELECT count(*) AS attempts,
+            coalesce(max(finished_at)>clock_timestamp()-$6*interval '1 millisecond',false) AS recent
+          FROM cloud_runtime_images WHERE channel=$1 AND account_scope=$2 AND lower(billing_org)=lower($3)
+            AND runtime_id=$4 AND base_image_id=$5 AND state='failed'`, [...pair, RETRY_AFTER_FAILURE_MS])).rows[0]!;
+        if (Number(failed.attempts) >= MAX_FAILED_ATTEMPTS || failed.recent) continue;
+        const name = `zeros-rtimg-${scope[0]}-${selected.pin.runtimeId.slice(3, 15)}-${randomBytes(4).toString("hex")}`;
+        const row = (await tx.query<ImageRow>(`INSERT INTO cloud_runtime_images
+          (channel,account_scope,billing_org,runtime_id,base_image_id,base_compatibility_id,snapshot_name,deadline_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,clock_timestamp()+$8*interval '1 millisecond') RETURNING *`,
+        [...pair, selected.pin.baseCompatibilityId, name, RUN_MS])).rows[0]!;
+        // The selected base row is locked by selection; prepare without provider I/O.
+        await prepareBuilderVmOperation(this.options.operations, builderIntent(row), async () => builderVmBaseSnapshot(selected.base.imageRef), tx);
+        return { row, reconcile: false };
+      }
+      return null;
     });
   }
 
@@ -494,7 +513,8 @@ export class RuntimeImageWorker {
     });
   }
 
-  /** Keep the newest ready images; withdraw older or revoked ones, then delete
+  /** Keep the newest ready images (one per target during a two-base rollout);
+   * withdraw older or revoked ones, then delete
    * a withdrawn name only once no Computer builder that recorded it remains
    * unstopped and uncleaned. Failed or cancelled builds can still replay an
    * unknown create, so their state never shortens this wait. */
@@ -508,10 +528,13 @@ export class RuntimeImageWorker {
     // Only usable images count toward the newest kept.
     let kept = 0;
     const keptImages: ImageRow[] = [];
+    const policy = this.options.baseRollout;
+    const targetSlots = policy?.candidate ? new Set([policy.defaultBaseImageId, policy.candidate.baseImageId]) : null;
     for (const image of ready) {
       await withSystemTx(pool, async tx => {
         const usable = await this.pinned(tx, image);
-        if (usable && kept < KEEP_READY) { kept++; keptImages.push(image); return; }
+        const hasSlot = targetSlots ? targetSlots.has(image.base_image_id) : kept < KEEP_READY;
+        if (usable && hasSlot) { kept++; targetSlots?.delete(image.base_image_id); keptImages.push(image); return; }
         // The row lock waits for any consumer claim holding its share lock.
         if (!(await tx.query(`SELECT 1 FROM cloud_runtime_images WHERE image_id=$1 AND state='ready' FOR UPDATE`, [image.image_id])).rowCount) return;
         await tx.query(`UPDATE cloud_runtime_images SET state='retiring',retire_requested_at=clock_timestamp(),diagnostic=$2
@@ -568,6 +591,7 @@ export function createRuntimeImageWorker(config: Config, pool: pg.Pool, artifact
   const vms = new BoatCloudBuilderVms({ client, billingOrg: cloud.boat.billingOrg, operations, resolveSource: builderVmSourceResolver(pool),
     resolveDisplayName: intent => boatRuntimeDisplayName(channel, intent.source.kind === "image" ? "check" : "build") });
   return new RuntimeImageWorker({ pool, enabled: cloud.runtime?.imagesEnabled === true, channel,
+    ...(cloud.runtime?.baseRollout ? { baseRollout: cloud.runtime.baseRollout } : {}),
     mode: cloud.runtime?.qualificationMode ?? "full", accountScope: cloud.boat.accountScope, billingOrg: cloud.boat.billingOrg,
     vms, operations, artifacts, snapshots: new BoatRuntimeImageSnapshots(client),
     ...workerPollingOptions(config.workerPollIntervalsMs, "runtimeImages") });

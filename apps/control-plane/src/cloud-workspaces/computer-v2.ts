@@ -23,6 +23,7 @@ import { builderVmBaseSnapshot, prepareBuilderVmOperation } from "./cloud-builde
 import type { BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
 import { lockReadyRuntimeImage, type RuntimeImageChannel } from "./runtime-images.js";
 import { observeCloudRuntimeSelection } from "./runtime-selection.js";
+import { runtimeBaseForOrganization } from "./runtime-base-rollout.js";
 import { COMPUTER_TEMPLATE_RETENTION_CHANNEL } from "./computer-template-retention.js";
 import { updateRepositorySetupScript } from "./computer-repository-setup.js";
 import {
@@ -1280,7 +1281,8 @@ export class DatabaseCloudComputerV2Service {
       await authority(tx, org, user, false, false);
       const build = await buildRow(tx, org, id);
       const mode = this.config.runtime?.qualificationMode ?? "full";
-      const selected = await observeCloudRuntimeSelection(tx, mode);
+      const selected = await observeCloudRuntimeSelection(tx, mode,
+        runtimeBaseForOrganization(this.config.runtime?.baseRollout, build.org_id));
       return { buildId: build.id, version: integer(build.version), runtimeId: build.runtime_id, baseImageId: build.base_image_id,
         selected: selected ? { runtimeId: selected.pin.runtimeId, baseImageId: selected.pin.baseImageId,
           sourceCommit: selected.descriptor.sourceCommit, qualificationMode: mode } : null };
@@ -1418,7 +1420,7 @@ export class DatabaseCloudComputerV2Service {
   /** No allocation: a global DB lock makes the running-count cap atomic across
    * API processes. Take the org lock before locking its build, as all writers do. */
   async claimNextBuild(fence: number, builder?: {
-    selectRuntime: (tx: Tx) => Promise<{ baseImageId: string; runtimeId: string } | null>;
+    selectRuntime: (tx: Tx, organizationId: string) => Promise<{ baseImageId: string; runtimeId: string } | null>;
     loadRuntime?: (tx: Tx, pin: { baseImageId: string; runtimeId: string }) => Promise<boolean>;
     operations: BuilderVmOperationStore;
     accountScope: string; billingOrg: string; namePrefix?: string;
@@ -1478,7 +1480,7 @@ export class DatabaseCloudComputerV2Service {
       const { build } = await this.lockedBuild(tx, candidate.id);
       if (build.state !== "queued") return null;
       const config = await configuration(tx, build.org_id, build.config_id);
-      const selected = builder ? await builder.selectRuntime(tx) : undefined;
+      const selected = builder ? await builder.selectRuntime(tx, build.org_id) : undefined;
       if (selected === null) {
         await tx.query("UPDATE cloud_computer_v2_builds SET state='failed',error_code='runtime_unavailable',completed_at=now() WHERE id=$1", [build.id]);
         return null;

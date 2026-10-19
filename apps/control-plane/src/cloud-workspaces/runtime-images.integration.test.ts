@@ -14,6 +14,7 @@ import { RuntimeImageWorker, lockReadyRuntimeImage, quarantineRuntimeImage, type
   type RuntimeImageSnapshots } from "./runtime-images.js";
 import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { loadCloudRuntimeConfig } from "./runtime-config.js";
 
 const SCOPE = "zeros-v2-test-account";
 const WALLET = "team_11111111-1111-4111-8111-111111111111";
@@ -28,6 +29,7 @@ type Sandbox = { key: string; from: string | null; runtimeId: string | null; hos
 /** Two independent provider sandboxes over the real builder journal. */
 class FakeVms implements CloudBuilderVms {
   readonly sandboxes = new Map<string, Sandbox>();
+  readonly baseCompatibilityIds = new Map([["zeros-v2-test-base", runtimeBase.compatibilityId]]);
   readonly calls: string[] = [];
   readonly installs: Array<{ purpose: string; runtime: { runtimeId: string } }> = [];
   readonly tcbInputs: Array<Record<string, unknown>> = [];
@@ -56,7 +58,9 @@ class FakeVms implements CloudBuilderVms {
   }
   private status(vm: BuilderVm): BaseStatus {
     const sandbox = this.sandboxes.get(vm.sandboxId)!;
-    return { schema: "zeros.base-status/v1", baseCompatibilityId: runtimeBase.compatibilityId,
+    const restored = sandbox.from ? this.snapshots.saved.get(sandbox.from) : undefined;
+    const base = restored ? this.sandboxes.get(restored.sourceSandboxId)! : sandbox;
+    return { schema: "zeros.base-status/v1", baseCompatibilityId: this.baseCompatibilityIds.get(base.from!) ?? runtimeBase.compatibilityId,
       bootId: "11111111-1111-4111-8111-111111111111", currentRuntimeId: sandbox.runtimeId, hostState: sandbox.hostState } as BaseStatus;
   }
   async baseStatus(vm: BuilderVm) { return this.status(vm); }
@@ -139,7 +143,8 @@ const url = process.env.TEST_DATABASE_URL;
   let artifacts: RuntimeArtifactStore;
   let clock: number;
   let runtimeId: string;
-  const worker = (enabled = true, options: { accountScope?: string; maintenanceBatchSize?: number } = {}) => new RuntimeImageWorker({ pool, enabled, channel: "alpha",
+  const worker = (enabled = true, options: { accountScope?: string; maintenanceBatchSize?: number;
+    baseRollout?: ReturnType<typeof loadCloudRuntimeConfig>["baseRollout"] } = {}) => new RuntimeImageWorker({ pool, enabled, channel: "alpha",
     mode: "full", accountScope: options.accountScope ?? SCOPE, billingOrg: WALLET, vms, operations, artifacts, snapshots,
     ...options,
     now: () => clock, wait: async ms => { clock += ms; } });
@@ -160,6 +165,71 @@ const url = process.env.TEST_DATABASE_URL;
       url: "https://objects.example.test/private-artifact-value", expiresAt: new Date(clock + 600_000).toISOString(),
     })) };
     runtimeId = await withSystemTx(pool, async tx => { await seedRuntimeBase(tx); return (await seedRuntimeBundle(tx)).descriptor.runtimeId; });
+  });
+
+  const addCandidate = async (qualified: boolean) => {
+    const base = { ...runtimeBase, id: "zeros-v2-test-candidate", imageRef: `boat:zeros-v2-test-candidate@sha256:${"c".repeat(64)}`,
+      compatibilityId: `bc1-${"8".repeat(64)}` };
+    vms.baseCompatibilityIds.set(base.id, base.compatibilityId);
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBase(tx, base, new Date());
+      if (qualified) await seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2, baseCompatibilityId: base.compatibilityId });
+    });
+    return loadCloudRuntimeConfig({ CLOUD_RUNTIME_BASE_ROLLOUT_JSON: JSON.stringify({ version: 1,
+      defaultBaseImageId: runtimeBase.id, candidate: { baseImageId: base.id, organizationIds: [randomUUID()] } }) });
+  };
+
+  it("candidate_success_does_not_promote_global_default: both exact image targets progress", async () => {
+    const runtime = await addCandidate(true);
+    await worker(true, runtime).tick();
+    await worker(true, runtime).tick();
+    expect((await images()).map(row => [row.base_image_id, row.state]).sort()).toEqual([
+      [runtimeBase.id, "ready"], ["zeros-v2-test-candidate", "ready"],
+    ].sort());
+    await worker(true, runtime).tick();
+    expect(await images()).toHaveLength(2);
+  });
+
+  it("keeps the candidate image when only the default receives successive runtime releases", async () => {
+    const runtime = await addCandidate(true);
+    await worker(true, runtime).tick();
+    await worker(true, runtime).tick();
+    const candidateImage = (await images()).find(row => row.base_image_id === "zeros-v2-test-candidate")!;
+    for (const digit of ["2", "3"]) {
+      await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit, releaseOrder: Number(digit) + 1 }));
+      await worker(true, runtime).tick();
+    }
+    await worker(true, runtime).tick();
+    const rows = await images();
+    expect(rows).toHaveLength(4); // No redundant candidate capture during default-only upgrades.
+    expect(rows.find(row => row.image_id === candidateImage.image_id)).toMatchObject({ state: "ready" });
+    expect(rows.filter(row => row.state === "ready").map(row => row.base_image_id).sort())
+      .toEqual([runtimeBase.id, "zeros-v2-test-candidate"].sort());
+  });
+
+  it("registered_unqualified_candidate_keeps_default_image_production_usable", async () => {
+    const runtime = await addCandidate(false);
+    await worker(true, runtime).tick();
+    expect(await images()).toEqual([expect.objectContaining({ base_image_id: runtimeBase.id, state: "ready" })]);
+  });
+
+  it("a failed candidate image cannot starve the configured default", async () => {
+    await worker().tick();
+    const runtime = await addCandidate(true);
+    const nextDefault = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "2", releaseOrder: 3 }));
+    const runFixed = vms.runFixed.bind(vms);
+    vi.spyOn(vms, "runFixed").mockImplementation(async (vm, command, input) => {
+      if (command === "install-runtime" && vms.sandboxes.get(vm.sandboxId)?.from === "zeros-v2-test-candidate")
+        return { exitCode: 1, stdout: "", diagnostic: failed("installer", "extract", "integrity_failed") };
+      return runFixed(vm, command, input);
+    });
+    await worker(true, runtime).tick();
+    expect((await images()).at(-1)).toMatchObject({ base_image_id: "zeros-v2-test-candidate", state: "failed" });
+    await worker(true, runtime).tick();
+    expect(await images()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ base_image_id: runtimeBase.id, runtime_id: nextDefault.pin.runtimeId, state: "ready" }),
+      expect.objectContaining({ base_image_id: "zeros-v2-test-candidate", state: "failed" }),
+    ]));
   });
 
   it("publishes a cold-verified image only after its builder and probe are deleted", async () => {

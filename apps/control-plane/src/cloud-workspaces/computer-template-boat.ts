@@ -6,6 +6,7 @@ import { boatComputerDisplayName } from "./boat-display-name.js";
 import { BoatCloudBuilderVms, builderVmSourceResolver } from "./cloud-builder-vm.js";
 import { DatabaseBuilderVmOperationStore, type BuilderVmIntent } from "./cloud-builder-vm-store.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
+import { runtimeBaseForOrganization, type CloudRuntimeBaseRollout } from "./runtime-base-rollout.js";
 import { loadPinnedCloudRuntime, selectCloudRuntime } from "./runtime-selection.js";
 import type { RuntimeDescriptor } from "./runtime-contract.js";
 import { BoatComputerTemplateSnapshots } from "./computer-template-snapshot-boat.js";
@@ -36,6 +37,7 @@ export type ComputerTemplateRuntime = {
 export function createComputerTemplateBoatAdapters(input: {
   pool: pg.Pool; client: Pick<BoatApiClient, "request">;
   accountScope: string; billingOrg: string; qualificationMode: CloudRuntimeQualificationMode;
+  baseRollout?: CloudRuntimeBaseRollout;
   deploymentChannel: Config["deploymentChannel"];
 }) {
   const operations = new DatabaseBuilderVmOperationStore(input.pool, input.accountScope);
@@ -52,8 +54,9 @@ export function createComputerTemplateBoatAdapters(input: {
         version: row.version, channel: input.deploymentChannel }) : null;
     } });
   const runtime = {
-    async select(tx: Tx): Promise<ComputerTemplateRuntime | null> {
-      const selected = await selectCloudRuntime(tx, input.qualificationMode);
+    async select(tx: Tx, organizationId: string): Promise<ComputerTemplateRuntime | null> {
+      const selected = await selectCloudRuntime(tx, input.qualificationMode,
+        runtimeBaseForOrganization(input.baseRollout, organizationId));
       return selected ? { baseImageId: selected.pin.baseImageId, baseCompatibilityId: selected.pin.baseCompatibilityId,
         descriptor: selected.descriptor, objectKey: selected.objectKey } : null;
     },

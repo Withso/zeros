@@ -116,7 +116,13 @@ fall back to the base while the producer prepares a replacement.
 ## Retention and recovery
 
 The image worker retains up to two newest ready images in its channel and
-provider scope. Older, revoked or confirmed-missing images become retiring.
+provider scope. With both default and candidate configured in
+`CLOUD_RUNTIME_BASE_ROLLOUT_JSON`, those two slots retain the newest usable image
+for each exact base. Successive releases on one base do not retire and recreate
+the other base's unchanged image. Production rotates by persisted attempt time;
+an unqualified, ready or retry-delayed target leaves the slot available to the
+other target. See [base rollout selection](runtime-bundles.md#control-plane-admission).
+Older, revoked or confirmed-missing images become retiring.
 Named snapshots have their own provider billing lifecycle; their existence is
 periodically checked. An unavailable provider response is not proof that a name
 is missing.

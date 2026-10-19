@@ -125,8 +125,8 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
 
 /** Read-only diagnostic snapshot of the builder's selection. It grants no
  * authority: admissions still use selectCloudRuntime and its revocation locks. */
-export async function observeCloudRuntimeSelection(tx: Tx, mode: CloudRuntimeQualificationMode) {
-  return resolveCloudRuntimeSelection(tx, mode, undefined, [], false);
+export async function observeCloudRuntimeSelection(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId?: string) {
+  return resolveCloudRuntimeSelection(tx, mode, baseImageId, [], false);
 }
 
 async function resolveCloudRuntimeSelection(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId: string | undefined,
