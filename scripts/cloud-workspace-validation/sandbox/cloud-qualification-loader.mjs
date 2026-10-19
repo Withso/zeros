@@ -5,6 +5,7 @@ const ROLES = [
   ["./qualify-cloud-actor-tools.ts", "qualifyCloudActorTools"],
   ["./qualify-cloud-capture.ts", "qualifyCloudCapture"],
   ["./qualify-cloud-human-services.ts", "qualifyCloudHumanServices"],
+  ["./qualify-cloud-runners.ts", "qualifyCloudRunners"],
 ];
 
 /** Loads the fixed TypeScript role probes through the shipped tsx CommonJS

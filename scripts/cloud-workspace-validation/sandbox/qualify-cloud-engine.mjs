@@ -26,6 +26,7 @@ import { loadCloudWorkloadCustody, nativeCloudWorkloadIO } from "../../../apps/d
 import { cloudEnginePrivilegeStatus } from "./cloud-engine-privilege.mjs";
 import { loadCloudQualificationRoles } from "./cloud-qualification-loader.mjs";
 import { setupPerformance, notifySetupPerformance } from "./cloud-setup-performance.mjs";
+import { cloudRunnerBaseSupported, cloudRunnerQualificationPassed } from "./cloud-runner-base.mjs";
 
 function optional(file) {
   try {
@@ -222,7 +223,7 @@ export async function qualifyCloudEngineIdentity(context) {
  * non-escaped members; this does not prove retirement of arbitrary setsid escapes. */
 /** @param {Awaited<ReturnType<typeof qualifyCloudEngineIdentity>>} [identity]
  * @param {typeof loadCloudQualificationRoles} [loadRoles]
- * @param {{onPerformance?: (value: unknown) => void, now?: () => number}} [options] */
+ * @param {{onPerformance?: (value: unknown) => void, now?: () => number, runnerSupport?: typeof cloudRunnerBaseSupported}} [options] */
 export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQualificationRoles, options = {}) {
   const metrics = options.onPerformance ? setupPerformance("attester_preflight", options.now) : undefined;
   let finish;
@@ -266,6 +267,14 @@ export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQ
     const human = await qualifyCloudHumanServices(context);
     if (human?.sameEngineIdentity !== true || human.noSandbox !== true) return report;
     report.humanServices = { sameEngineIdentity: true, noSandbox: true };
+    // The deployed timer schema has no runner label. Keep this separate gate
+    // from changing the duration or outcome of either neighboring stage.
+    finish?.(); finish = undefined;
+    if ((options.runnerSupport ?? cloudRunnerBaseSupported)()) {
+      const runners = await loaded.roles.qualifyCloudRunners(context);
+      if (!cloudRunnerQualificationPassed(runners)) return report;
+      report.runners = runners;
+    }
     next("census");
     const inspection = await context.workloads.inspect();
     if (!inspection.complete || inspection.pendingLaunches || inspection.failedRetirements || inspection.workloadPids.length) return report;

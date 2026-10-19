@@ -121,8 +121,8 @@ class RunnerJournal {
   }
 }
 
-/** Dormant contract: no production factory selects this yet. A qualified
- * backend must keep units inside the existing Host resource/census/drain tree.
+/** Selected only by a negotiated boot on a supporting, qualified base. The
+ * backend keeps units inside the existing Host resource/census/drain tree.
  * Local and legacy cloud still use their original Host implementation. */
 export class CloudRunnerLifecycle {
   private readonly intent: CloudRunnerIntent;
@@ -147,6 +147,7 @@ export class CloudRunnerLifecycle {
     this.intent = freezeCloudRunnerValue({ version: 1, attemptId: randomUUID(), scope: parseCloudRunnerScope(options.scope) });
     this.journal = new RunnerJournal(options.journalDirectory, this.intent.scope.executionId);
   }
+  get launchIntent(): CloudRunnerIntent { return this.intent; }
   busy(): boolean { return this.queued || this.recovery || this.phase !== null && !["retired", "interrupted"].includes(this.phase); }
   private current(): void {
     if (this.stopping) throw authorityError();

@@ -50,7 +50,7 @@ it("loads every role probe once, without a second entry run or any lingering tra
   `);
   expect(stdout.trim().split("\n")).toHaveLength(1);
   expect(JSON.parse(stdout)).toEqual({ children: [], laterChildren: [], setting: null, roles: { createCloudQualificationRuntime: "function",
-    qualifyCloudActorTools: "function", qualifyCloudCapture: "function", qualifyCloudHumanServices: "function" } });
+    qualifyCloudActorTools: "function", qualifyCloudCapture: "function", qualifyCloudHumanServices: "function", qualifyCloudRunners: "function" } });
 }, 150_000);
 
 it("runs the serialized privilege parser of a hook-compiled role probe in a fresh context", () => {

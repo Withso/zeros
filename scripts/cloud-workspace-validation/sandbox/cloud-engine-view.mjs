@@ -3,6 +3,7 @@ import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { CLOUD_GIT_EXEC_ROOT, cloudRuntimeAssetEnvironment } from "./cloud-runtime-assets.mjs";
 import { isCloudComputerRepositoryDirectory } from "./cloud-computer-checkout.mjs";
 import { CLOUD_ENGINE_MUTABLE_LAYOUT } from "./prepare-cloud-image-files.mjs";
+import { cloudRunnerBaseSupported } from "./cloud-runner-base.mjs";
 
 /** Credential-free alias metadata for engine-owned publication and policy.
  * The launcher supplies only a primary from its validated private admission. */
@@ -24,7 +25,7 @@ export function cloudEngineWorkerProjection(runtime) {
  * engine request. The host launcher verifies their physical ownership first.
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
-export function cloudEngineViewArguments(operation = "serve",version=4,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository,residentHostId,placement) {
+export function cloudEngineViewArguments(operation = "serve",version=4,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository,residentHostId,placement,runnerSupport=cloudRunnerBaseSupported()) {
   if (!["serve", "qualify", "resident", "probe-cursor"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   if(version!==4 || runtime.profile!=="v4")throw new Error("Invalid cloud engine profile version");
@@ -50,6 +51,10 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     "--ro-bind",
     "/usr",
     "/usr",
+    // A private user manager needs machine identity and sd_booted(). Expose
+    // only a protected empty marker, never the host system manager's sockets.
+    ...(runnerSupport ? ["--ro-bind", "/etc/machine-id", "/etc/machine-id",
+      "--ro-bind", "/usr/lib/zeros-runner/booted", "/run/systemd/system"] : []),
     "--symlink",
     "usr/bin",
     "/bin",

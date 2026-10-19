@@ -197,6 +197,7 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
   }
   lines.push(...[
 `install -o root -g root -m 0444 ${engineDirectory}/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-root.mjs`,
+`install -o root -g root -m 0444 ${engineDirectory}/apps/desktop/src/engine/agents/containment/cloud-runner-base.mjs /opt/zeros-runtime/lib/zeros/cloud-runner-base.mjs`,
 `install -o root -g root -m 0444 ${engineDirectory}/apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-assets.mjs`
   ].map(command => `RUN ${command}`));
   {

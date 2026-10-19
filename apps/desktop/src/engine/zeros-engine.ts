@@ -241,6 +241,7 @@ import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkActivity, type EngineUplinkReadiness } from "./cloud-engine-uplink";
 import { createCloudExecutionCoordinator, type CloudExecutionCoordinator } from "./cloud-execution-coordinator";
 import { cloudCoordinatorFrontendSpawner } from "./cloud-coordinator-frontend";
+import { startCloudRunnerRuntime, type CloudRunnerRuntime } from "./agents/containment/cloud-runner-runtime";
 import { CloudDetachedPushHealth } from "./cloud-detached-push-health";
 import {
   EngineCapabilityAuth,
@@ -1253,6 +1254,7 @@ export class ZerosEngine {
    * plane did not advertise an endpoint (rollout flag off or older CP). */
   private cloudEngineUplink: CloudEngineUplinkClient | null = null;
   private cloudCoordinator: CloudExecutionCoordinator | null = null;
+  private cloudRunners: CloudRunnerRuntime | null = null;
   private cloudCoordinatorDirectory: string | null = null;
   private cloudCapabilityAuth: EngineCapabilityAuth | null = null;
   private cloudDetachedPushHealth: CloudDetachedPushHealth | null = null;
@@ -4252,6 +4254,8 @@ export class ZerosEngine {
     if (this.cloudWorkloadStopPreserved)
       await this.joinCloudPreservedWorkloads(this.cloudWorkloadStopFence, this.cloudResidentStopFence);
     else await this.drainCloudWorkloads(this.cloudWorkloadStopFence, this.cloudResidentStopFence);
+    await this.cloudRunners?.stop();
+    this.cloudRunners = null;
   }
 
   private async setCloudHandoffFence(fenced: boolean): Promise<void> {
@@ -4846,6 +4850,16 @@ export class ZerosEngine {
         await this.cloudEvents?.flush();
       },
       install: async (factory, queue) => {
+        if (this.cloudCoordinator && registration.coordinatorNegotiated()) {
+          const { organizationId, workspaceId, generation, engineInstanceId, bootId, writerEpoch } = queue.scope;
+          this.cloudRunners = await startCloudRunnerRuntime({ boundary: this.cloudExecutionBoundary, negotiated: true,
+            scope: { organizationId, workspaceId, generation, engineInstanceId, bootId, writerEpoch, runtimeId: registration.runtimeId },
+            assertCurrent: () => {
+              if (!this.running || this.engineStopping || this.cloudRuntimeAuthorityStopping || this.cloudRuntimeHandoffFenced ||
+                this.cloudRuntimeCheckpointQuiescing || this.cloudRuntimeRegistration !== registration || !registration.coordinatorNegotiated())
+                throw new CloudCommandRuntimeError("engine_authority_rejected");
+            }, failed: () => this.handleCloudRuntimeAuthorityLoss() });
+        }
         await this.cloudRecordRuntime!.installLocalQueue(queue);
         this.cloudLocalEvents ??= new CloudLocalCommandEventStore({ file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
           queue,engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,

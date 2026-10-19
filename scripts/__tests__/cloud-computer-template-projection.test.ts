@@ -109,6 +109,7 @@ describe("computer template repository projection", () => {
           "cloud-runtime-profile.mjs",
           "cloud-runtime-root.mjs",
           "cloud-runtime-assets.mjs",
+          "cloud-runner-base.mjs",
           "runtime-layout.json",
           "prepare-cloud-image-files.mjs",
           "prepare-cloud-git.mjs",
