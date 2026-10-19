@@ -4,6 +4,7 @@ import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { authorizeReadyCloudWorkspaceAccess } from "./access.js";
+import { cloudEngineInteractive } from "./coordinator-readiness.js";
 import { consumeCloudWorkspaceDeviceProof, type CloudWorkspaceDeviceProof } from "./replicas.js";
 import { assertProviderPreviewEndpoint } from "./provider.js";
 import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
@@ -110,9 +111,10 @@ export class DatabaseCloudRuntimeServiceAccess {
       if (previous) throw new HttpError(409, previous.request_sha256.equals(requestHash)
         ? "runtime_service_response_not_replayable" : "idempotency_conflict", "Request a new service grant with a new idempotency key");
       const engines = (await tx.query<{ id: string }>(
-        `SELECT id FROM cloud_workspace_engine_instances
+        `SELECT id FROM cloud_workspace_engine_instances engine
          WHERE workspace_id = $1 AND org_id = $2 AND generation = $3
            AND state = 'ready' AND revoked_at IS NULL AND lease_expires_at > now()
+         AND cloud_workspace_engine_interactive_live(engine)
          LIMIT 2`, [input.workspaceId, input.organizationId, workspace.generation],
       )).rows;
       if (engines.length !== 1) throw rejected();
@@ -141,6 +143,8 @@ export class DatabaseCloudRuntimeServiceAccess {
       await audit(tx, input.organizationId, input.accountUserId, "cloud_workspace.runtime_service_issued", {
         workspaceId: input.workspaceId, grantId: result.rows[0]!.id, kind: input.kind, generation: workspace.generation,
       });
+      if (!await cloudEngineInteractive(tx, { ...input, generation: workspace.generation, engineInstanceId: engines[0]!.id }))
+        throw rejected();
       return result.rows[0]!;
     });
     const url = new URL(`${CLOUD_RUNTIME_SERVICE_PATH}/${grant.kind}/${grant.id}`, this.origin);
@@ -179,9 +183,10 @@ export class DatabaseCloudRuntimeServiceAccess {
     if (workspace.actorFingerprint!==grant.actor_fingerprint || workspace.generation !== grant.generation || String(workspace.authority_epoch) !== String(grant.authority_epoch) ||
         workspace.provider_resource_id !== grant.provider_resource_id) return null;
     const engine = (await tx.query<{ lease_expires_at: Date }>(
-      `SELECT lease_expires_at FROM cloud_workspace_engine_instances
+      `SELECT lease_expires_at FROM cloud_workspace_engine_instances engine
        WHERE id = $1 AND workspace_id = $2 AND org_id = $3 AND generation = $4
-         AND state = 'ready' AND revoked_at IS NULL AND lease_expires_at > now()`,
+         AND state = 'ready' AND revoked_at IS NULL AND lease_expires_at > now()
+         AND cloud_workspace_engine_interactive_live(engine)`,
       [grant.engine_instance_id, grant.workspace_id, grant.org_id, grant.generation],
     )).rows[0];
     if (!engine) return null;

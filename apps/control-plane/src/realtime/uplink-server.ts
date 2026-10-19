@@ -102,6 +102,7 @@ export type UplinkPresenceView = Readonly<{
 /** Reliable-channel state that survives a resume on this instance. `auth`
  * and `relay` state is per connection and never part of it. */
 type Lineage = {
+  coordinator?: UplinkPresenceSnapshot["coordinator"];
   outbox: ReliableOutbox;
   inbound: InboundSequence;
   ready: boolean;
@@ -275,6 +276,8 @@ export class CloudEngineUplinkServer {
         this.options.flags.enabled(organizationId, "engine_lease_over_uplink")) features.add(UPLINK_FEATURES.lease);
     if (this.options.idle && offered.has(UPLINK_FEATURES.idle) &&
         this.options.flags.enabled(organizationId, "cp_idle_stop")) features.add(UPLINK_FEATURES.idle);
+    if (offered.has(UPLINK_FEATURES.coordinator) && this.options.flags.enabled(organizationId, "agent_runners"))
+      features.add(UPLINK_FEATURES.coordinator);
     return features;
   }
 
@@ -650,10 +653,20 @@ class UplinkConnection {
     if (t === "status.ready") {
       const ready = UplinkStatusReadySchema.safeParse(d);
       if (!ready.success) return "invalid";
+      const coordinator = ready.data.coordinator;
+      if (!coordinator && (this.features.has(UPLINK_FEATURES.coordinator) || lineage.coordinator)) return "invalid";
+      if (coordinator) {
+        if (coordinator.bootId !== this.identity?.bootId) return "invalid";
+        // A reliable replay or a late original frontend cannot change either
+        // the projection or its receive-time bound. API reports use the same
+        // revision CAS, independently of this uplink connection's lifetime.
+        if (lineage.coordinator && coordinator.revision <= lineage.coordinator.report.revision) return "ok";
+        lineage.coordinator = { report: coordinator, receivedAtMs: this.now() };
+      }
       const changed = lineage.ready !== ready.data.ready || lineage.phase !== ready.data.phase;
       lineage.ready = ready.data.ready;
       lineage.phase = ready.data.phase;
-      if (changed) this.writeReadiness();
+      if (changed || coordinator) this.writeReadiness();
       return "ok";
     }
     if (t === "status.report") {
@@ -957,6 +970,7 @@ class UplinkConnection {
       connected: !closed, ready: !closed && lineage.ready, phase: lineage.phase,
       connectedAtMs: this.connectedAtMs, lastSeenAtMs: Math.max(this.connectedAtMs, this.lastSeenAtMs),
       disconnectedAtMs: closed ? Math.max(this.connectedAtMs, this.now()) : null,
+      ...(lineage.coordinator ? { coordinator: lineage.coordinator } : {}),
     };
     presence.enqueue(snapshot);
   }

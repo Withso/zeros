@@ -1,6 +1,6 @@
 # S2. VM uplink protocol
 
-Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.4.0` (additive;
+Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.5.0` (additive;
 see [Changelog](#changelog)) ·
 Schema: [Draft schema: uplink text frames](#draft-schema-uplink-text-frames)
 
@@ -208,7 +208,7 @@ not survive a reconnect.
 | auth | `auth.health` | C | U | `{ connectionId, syncId, challengeId, authCursor, healthy }` from a fresh shared authority observation | — |
 | auth | `auth.health_lost` | C | U | `{ connectionId, syncId }` on known source failure | — |
 | auth | `auth.capability` | C | U | Engine capability (S1) for `zeros:api`; on every connection after `auth.applied`, then at 60% lifetime | Actor-confirm renewal, `cloud-local-command-queue-boot.ts:380-396` |
-| status | `status.ready` | E | R | `{ ready, phase, reason? }` on change | Ready inference from heartbeat/registration |
+| status | `status.ready` | E | R | `{ ready, phase, reason?, coordinator? }` on change | Ready inference from heartbeat/registration |
 | status | `status.report` | E | R | Coalesced, latest-wins: `observedPorts`, runtime health, engine version | Heartbeat `observedPorts` field |
 | activity | `activity.report` | E | R | Every 60 s and on edge: `{ clients, runningTurns, liveTerminals, lastInputAtMs, windowMs }` | Idle timers (track D input) |
 | cred | `cred.revision` | C | R | `{ kind: "agent-controls" \| "repository", revision }` | 500 ms poll, `cloud-local-command-queue-boot.ts:323-358` |
@@ -350,6 +350,57 @@ expiry, engine/writer/funding authority, signing-key removal and S1 revocations
 still end the work. Context proofs stay independently bounded to 10 s. No
 accepted principal can accept another command, renew a client, mint a generic
 grant or revive closed work; ordinary S1 rules are unchanged.
+
+### Execution coordinator and interactive readiness (`runner.v1`)
+
+The registered engine remains the single execution coordinator: one ledger,
+journal writer, authority cache and uplink. A Host-owned child accepts public
+TCP connections and forwards opaque bytes over private owner sockets. Its
+replacement does not initialize execution state or dispatch work. Frontend
+loss closes interactive clients and service streams; accepted work retains its
+existing, independently checked authority. Actual coordinator exit still
+invokes `exit.report.v1` for the original PID/start token and interrupts work.
+
+An aware supervisor supplies `ZEROS_CLOUD_COORDINATOR_OWNER`, bound to the
+armed exit report for that exact runtime/boot/supervisor episode. Only that
+engine offers `x-zeros-cloud-coordinator: 1` at registration, alongside local
+commands and accepted-work support. CP persists and acknowledges the opt-in
+only with `agent_runners` enabled (requires `detached_turns`). The engine then
+offers `runner.v1`; old supervisors, engines and unacknowledged registrations
+keep their existing transport and readiness behavior. Flags default off.
+
+`status.ready.coordinator` is the same optional snapshot sent in the API
+heartbeat: `{ version: 1, bootId, revision, frontendId, ready, expiresAtMs }`.
+`revision` is a positive safe integer increasing for one immutable registered
+engine/boot. `frontendId` is a fresh UUID per child, or null before launch.
+Ready requires a non-null frontend and a positive safe-integer deadline;
+unavailable requires `expiresAtMs: 0`. The snapshot is closed to extra fields.
+With `runner.v1`, every readiness frame carries it. A foreign boot or a
+top-level `ready: true` with coordinator `ready: false` is invalid. Older or
+equal revisions are acknowledged without changing the stored observation.
+
+The owner challenges the child every 5 s with a fresh nonce and a 10 s
+monotonic window. Positive exit or expired proof withdraws readiness before
+retirement; replacement waits for proof of the original Host scope's retirement
+and a 1 s backoff. The child closes ingress on parent pipe loss or a 15 s parent
+watchdog. These are availability proofs, never actor or execution authority.
+
+CP bounds interactive readiness by the earlier of the owner's `expiresAtMs`
+and receipt time + 90 s. Receipt time is captured before database/lock waits
+and retained across retries and resumes. API and realtime share an exact
+org/workspace/generation/instance/boot revision CAS. API heartbeat attempts at
+least every 60 s provide an independent path when the realtime pool fails;
+transitions also request an immediate beat. Routine child pongs cause no DB
+write. Deadline expiry withdraws catalog/connect/admission readiness, without
+revoking the execution lease or creating a Stop intent. Existing checkpoint,
+credential and accepted-work fences still apply.
+
+Turning `agent_runners` off prevents new coordinator enrollment. Existing
+enrollments continue to report over the API and the additive status field;
+they never transfer a live ledger/writer back into legacy startup. Runtime
+rollback requires a verified drain. Enablement requires qualification of the
+actual supervisor, private socket permissions, frontend replacement and R1
+coordinator-exit drill, with Local controls unchanged.
 
 ### Engine lease (`lease.v1`)
 
@@ -1000,10 +1051,31 @@ review aid until freeze; the frozen source of truth will be Zod in
           "properties": {
             "ready": { "type": "boolean" },
             "phase": { "enum": ["starting", "preparing", "ready", "degraded", "stopping"] },
-            "reason": { "$ref": "#/$defs/code" }
-          }
+            "reason": { "$ref": "#/$defs/code" },
+            "coordinator": { "$ref": "#/$defs/coordinatorStatus" }
+          },
+          "allOf": [{
+            "if": { "properties": { "ready": { "const": true } }, "required": ["ready"] },
+            "then": { "properties": { "coordinator": { "properties": { "ready": { "const": true } } } } }
+          }]
         }
       }
+    },
+    "coordinatorStatus": {
+      "type": "object",
+      "required": ["version", "bootId", "revision", "frontendId", "ready", "expiresAtMs"],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "const": 1 },
+        "bootId": { "type": "string", "format": "uuid" },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "frontendId": { "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+        "ready": { "type": "boolean" },
+        "expiresAtMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      },
+      "if": { "properties": { "ready": { "const": true } }, "required": ["ready"] },
+      "then": { "properties": { "frontendId": { "type": "string", "format": "uuid" }, "expiresAtMs": { "minimum": 1 } } },
+      "else": { "properties": { "expiresAtMs": { "const": 0 } } }
     },
     "status.report": {
       "allOf": [{ "$ref": "#/$defs/reliable" }],
@@ -1189,6 +1261,12 @@ review aid until freeze; the frozen source of truth will be Zod in
 ```
 
 ## Changelog
+
+- **1.5.0** (2026-10-19, additive): add qualified `runner.v1` and the ordered
+  exact-boot `coordinator` readiness snapshot on status/API heartbeats. The
+  registered engine retains single execution ownership through frontend loss;
+  interactive deadlines are independent of its lease. Old runtimes and S1
+  authority rules remain unchanged; `agent_runners` defaults off.
 
 - **1.4.0** (2026-10-18, additive): add qualified `detached.v1`, per-connection
   challenged authority health and optional welcome `connectionId`. Only exact

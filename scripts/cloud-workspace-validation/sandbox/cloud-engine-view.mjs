@@ -237,6 +237,7 @@ export function cloudEngineViewEnvironment(source, operation = "serve", runtime=
       "ZEROS_CLOUD_PORT",
       "ZEROS_CLOUD_RUNTIME_B64",
       "ZEROS_CLOUD_ENGINE_EXIT_REPORT_B64",
+      "ZEROS_CLOUD_COORDINATOR_OWNER",
       "ZEROS_CLOUD_SETUP_BOOT",
       "ZEROS_CLOUD_TOKEN",
       "ZEROS_REQUIRE_ACCOUNT",

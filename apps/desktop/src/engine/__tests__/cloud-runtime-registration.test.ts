@@ -82,6 +82,40 @@ function registrationResponse() {
   };
 }
 
+function coordinatorRuntime() {
+  const config = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+  const report = { version: 1, audience: "zeros-cloud-engine-exit-v1", reason: "unexpected_exit", reportId: ACCOUNT_USER_ID,
+    ...config.execution, engineInstanceId: config.engine.instanceId, runtimeId: V4_ATTESTATION.runtimeId,
+    bootId: V4_ATTESTATION.bootId, supervisorSessionId: V4_ATTESTATION.supervisorSessionId };
+  const env = { [CLOUD_RUNTIME_ENV]: encodedRuntime(), ZEROS_CLOUD_COORDINATOR_OWNER: report.reportId,
+    [CLOUD_ENGINE_EXIT_REPORT_ENV]: Buffer.from(JSON.stringify(report)).toString("base64url") };
+  const runtime = consumeCloudRuntimeEnvironment(env, () => NOW)!;
+  expect(env).toEqual({});
+  return runtime;
+}
+
+describe("coordinator registration", () => {
+  it.each(["accepted", "old-cp", "old-supervisor", "foreign-episode"])("negotiates only exact supervisor and CP support (%s)", async kind => {
+    const runtime = coordinatorRuntime();
+    if (kind === "old-supervisor") delete runtime.coordinatorVersion;
+    if (kind === "foreign-episode") runtime.exitReport!.supervisorSessionId = ACCOUNT_USER_ID;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), { headers: {
+      "x-zeros-cloud-local-commands": "1", "x-zeros-cloud-accepted-work": "1",
+      ...(kind !== "old-cp" ? { "x-zeros-cloud-coordinator": "1" } : {}),
+    } }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      expect(registration.coordinatorNegotiated()).toBe(kind === "accepted");
+      expect(registration.uplinkFeatures().includes("runner.v1")).toBe(kind === "accepted");
+      expect(fetcher.mock.calls[0]![1].headers["x-zeros-cloud-coordinator"])
+        .toBe(["accepted", "old-cp"].includes(kind) ? "1" : undefined);
+    } finally { await registration.stop(); }
+    expect(registration.coordinatorNegotiated()).toBe(false);
+  });
+});
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -1774,10 +1808,10 @@ describe("engine lease over the uplink (lease.v1)", () => {
   /** A cloud engine whose uplink renews its lease. The heartbeat answers like
    * the control plane, `greatest(lease, clock + 90 s)`; the hint wait answers
    * idle once and then holds, unless told otherwise. */
-  function harness(options: { hints?: "healthy" | "absent" | "failing" | "unanswered"; push?: boolean } = {}) {
+  function harness(options: { hints?: "healthy" | "absent" | "failing" | "unanswered"; push?: boolean; coordinator?: boolean } = {}) {
     vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     vi.setSystemTime(NOW);
-    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const runtime = options.coordinator ? coordinatorRuntime() : consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
     const beats: Array<{ at: number; body: Record<string, unknown> }> = [];
     let uplinkLease = 0;
     let answer: (now: number) => number = now => Math.max(uplinkLease, now + 90_000);
@@ -1793,7 +1827,8 @@ describe("engine lease over the uplink (lease.v1)", () => {
     const fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
       const href = String(url);
       if (href === registrationEndpoint)
-        return Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1" } });
+        return Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1",
+          ...(options.coordinator ? { "x-zeros-cloud-accepted-work": "1", "x-zeros-cloud-coordinator": "1" } : {}) } });
       if (href === hintEndpoint) {
         hintCalls += 1;
         if (options.hints === "absent") return Response.json({ error: { code: "not_found" } }, { status: 404 });
@@ -1860,6 +1895,22 @@ describe("engine lease over the uplink (lease.v1)", () => {
     h.renew();
     return h;
   }
+
+  it("runner.v1 uses the 60-second API watchdog even without checkpoint push and publishes withdrawal immediately", async () => {
+    const h = await started({ coordinator: true });
+    let ready = true, revision = 1;
+    h.registration.attachCoordinatorStatus(() => ({ version: 1, bootId: V4_ATTESTATION.bootId, revision,
+      frontendId: ACCOUNT_USER_ID, ready, expiresAtMs: ready ? Date.now() + 90_000 : 0 }));
+    try {
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(h.beats.map(beat => beat.at - NOW)).toEqual([30_000, 90_000, 150_000, 210_000, 270_000]);
+      expect(h.beats.every(beat => (beat.body.coordinator as { ready: boolean }).ready)).toBe(true);
+      ready = false; revision++;
+      h.registration.requestHeartbeatSoon(); await vi.advanceTimersByTimeAsync(0);
+      expect(h.beats.at(-1)!.body.coordinator).toMatchObject({ ready: false, revision: 2, expiresAtMs: 0 });
+      expect(h.lost).not.toHaveBeenCalled();
+    } finally { await h.registration.stop(); }
+  });
 
   it("skips a periodic beat that would carry nothing while the uplink renews the lease, and still syncs the record", async () => {
     const h = await started();

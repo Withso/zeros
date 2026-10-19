@@ -143,7 +143,7 @@ export class DatabaseCloudRuntimeTransitionService {
   async register(input: {
     workspaceId: string; organizationId: string; generation: number; setupRunId: string; executionFence: number;
     engineInstanceId: string; token: string; protocolVersion: number; actorProtocolVersion?: number;
-    agentRuntime?: unknown; agentCustomizationVersion?: number; cloudLocalCommandsVersion?:1; acceptedWorkVersion?:1;
+    agentRuntime?: unknown; agentCustomizationVersion?: number; cloudLocalCommandsVersion?:1; acceptedWorkVersion?:1; coordinatorVersion?:1;
   }) {
     const identity = CloudAgentRuntimeSchema.safeParse(input.agentRuntime);
     const reject = () => new Error("Runtime transition registration rejected");
@@ -178,6 +178,7 @@ export class DatabaseCloudRuntimeTransitionService {
       if (!await this.qualified(tx,enrollment.transition_id,enrollment.direction==='rollback')) throw reject();
       const localCommandsSupported = input.cloudLocalCommandsVersion === 1 && input.agentCustomizationVersion === 3;
       const acceptedWorkSupported = localCommandsSupported && input.acceptedWorkVersion === 1;
+      const coordinatorSupported = acceptedWorkSupported && input.coordinatorVersion === 1;
       const journal = await readCurrentCloudAgentBootBinding(tx, {
         workspaceId: input.workspaceId, organizationId: input.organizationId,
       }).catch(error => {
@@ -193,7 +194,7 @@ export class DatabaseCloudRuntimeTransitionService {
       // writer shape until this exact successor explicitly offers support.
       const updated=(await tx.query<{lease_expires_at: Date}>(`UPDATE cloud_workspace_engine_instances SET state='ready',
         heartbeat_token_hash=$2,registered_at=clock_timestamp(),last_heartbeat_at=clock_timestamp(),
-        lease_expires_at=clock_timestamp()+interval '90 seconds',actor_protocol_version=2,agent_customization_version=$3,cloud_local_commands_version=$4${acceptedWorkSupported?",accepted_work_version=1":""},
+        lease_expires_at=clock_timestamp()+interval '90 seconds',actor_protocol_version=2,agent_customization_version=$3,cloud_local_commands_version=$4${acceptedWorkSupported?",accepted_work_version=1":""}${coordinatorSupported?",coordinator_version=1":""},
         updated_at=clock_timestamp() WHERE id=$1 AND state='starting' RETURNING lease_expires_at`,
       [input.engineInstanceId,hash(heartbeatToken),input.agentCustomizationVersion??null,localCommandsSupported?1:null])).rows[0];
       if (!updated) throw reject();
@@ -204,6 +205,7 @@ export class DatabaseCloudRuntimeTransitionService {
       return {version:1 as const,audience:"zeros-cloud-workspace-engine-registration-v1",engineInstanceId:input.engineInstanceId,
         durableRecordConnected:true as const,...(localCommandsSupported?{cloudLocalCommandsVersion:1 as const,agentJournalMode,
           ...(acceptedWorkSupported?{acceptedWorkVersion:1 as const}:{}),
+          ...(coordinatorSupported?{coordinatorVersion:1 as const}:{}),
           ...(journal.mode==="boot-owner-v1"?{agentSourceWriterEpoch:journal.binding.writerEpoch}:{})}:{}),leaseExpiresAtMs:updated.lease_expires_at.getTime(),
         heartbeat:{endpoint:this.options.heartbeatEndpoint!,token:heartbeatToken,intervalMs:30_000}};
     });

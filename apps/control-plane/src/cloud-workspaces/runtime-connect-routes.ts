@@ -22,6 +22,7 @@ import {
   type IssuedCapability,
 } from "./capability-issuer.js";
 import type { CloudCapabilityService } from "./capability-routes.js";
+import { cloudEngineInteractive } from "./coordinator-readiness.js";
 import { assertCloudEngineAuthorityDeadline, CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { CloudRuntimeBindingSchema, type CloudRuntimeBinding } from "./runtime-connect-contract.js";
 import { publicCloudError } from "./public-contract.js";
@@ -111,7 +112,7 @@ export async function readCloudRuntimeTarget(
      WHERE workspace.id = $1 AND workspace.org_id = $2 AND workspace.current_generation = $4 AND workspace.deleted_at IS NULL
        AND workspace.desired_state = 'running' AND workspace.status IN ('ready', 'busy')
        AND engine.state = 'ready' AND engine.revoked_at IS NULL AND engine.final_checkpoint_at IS NULL
-       AND engine.lease_expires_at > clock_timestamp()
+       AND engine.lease_expires_at > clock_timestamp() AND cloud_workspace_engine_interactive_live(engine)
        AND cloud_workspace_generation_policy_current(workspace.id, engine.generation, workspace.org_id)
        AND cloud_workspace_runtime_authority_live(workspace.id, engine.generation, workspace.owner_user_id, $3)
      LIMIT 2${lock ? " FOR SHARE OF engine" : ""}`,
@@ -140,6 +141,8 @@ export async function issueCloudRuntimeCapabilities(
     { ...scope, engineInstanceId: target.engineInstanceId }, ["zeros:engine", "zeros:realtime"] as const);
   // The engine stopped or the generation moved between the two reads.
   if (issued.generation !== target.generation || issued.engineInstanceId !== target.engineInstanceId || issued.authorityEpoch !== target.authorityEpoch)
+    throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
+  if (!await cloudEngineInteractive(tx, { ...scope, ...target }))
     throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
   const engine = issued.capabilities["zeros:engine"], realtime = issued.capabilities["zeros:realtime"];
   return { ...target, engine, realtime, renewAt: new Date(Math.min(engine.renewAt.getTime(), realtime.renewAt.getTime())) };
@@ -365,6 +368,8 @@ export function createCloudRuntimeConnectRoutes(options: CloudRuntimeConnectOpti
         // Locks preserve identity, not time: waiting for the writer may have
         // crossed the engine lease or runtime authority deadline.
         await assertCloudEngineAuthorityDeadline(tx, current.engineInstanceId, workosEnabled);
+        if (!await cloudEngineInteractive(tx, { ...ids, ...current }))
+          throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
         if (Math.min(issued.engine.expiresAt.getTime(), issued.realtime.expiresAt.getTime()) <= Date.now())
           throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
       });

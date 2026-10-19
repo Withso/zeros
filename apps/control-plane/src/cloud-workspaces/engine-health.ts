@@ -5,6 +5,7 @@ import { tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { recordCloudWorkspaceStopUnsealed } from "./stop-seal.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
+import { expireCloudCoordinatorReadiness } from "./coordinator-readiness.js";
 
 /** Runtime authority already fails closed at lease expiry. Converge the
  * provider's compute too, including BYO. Never restart a dead engine, replay
@@ -29,14 +30,17 @@ export async function stopUnavailableCloudEngine(
       WHERE ($1::text IS NULL OR generation.provider=$1) AND workspace.desired_state='running'
         AND NOT (workspace.id=ANY($2::uuid[])) AND ($3::uuid IS NULL OR workspace.id=$3)
         AND workspace.status IN ('ready','busy') AND workspace.deleted_at IS NULL
-        AND NOT EXISTS (SELECT 1 FROM cloud_workspace_engine_instances engine
+        AND (EXISTS (SELECT 1 FROM cloud_workspace_engine_instances engine
+          WHERE engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id
+            AND engine.generation=workspace.current_generation AND engine.coordinator_version=1
+            AND engine.interactive_ready_until<=clock_timestamp()) OR (NOT EXISTS (SELECT 1 FROM cloud_workspace_engine_instances engine
           WHERE engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id
             AND engine.generation=workspace.current_generation AND engine.state='ready'
             AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp())
         AND NOT EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents intent
           WHERE intent.workspace_id=workspace.id AND intent.org_id=workspace.org_id
             AND (intent.generation=workspace.current_generation OR intent.affects_workspace)
-            AND intent.state IN ('queued','dispatching','observing'))
+            AND intent.state IN ('queued','dispatching','observing'))))
       ORDER BY workspace.updated_at,workspace.id
       FOR UPDATE OF organization SKIP LOCKED LIMIT 1`,
           [provider, skipped, workspaceId],
@@ -56,13 +60,14 @@ export async function stopUnavailableCloudEngine(
         )
       ).rows[0];
       if (!workspace) continue;
+      const frontendExpired = await expireCloudCoordinatorReadiness(tx, candidate.id);
       const live = await tx.query(
         `SELECT 1 FROM cloud_workspace_engine_instances
       WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND state='ready'
         AND revoked_at IS NULL AND lease_expires_at>clock_timestamp() LIMIT 1`,
         [candidate.id, candidate.org_id, workspace.current_generation],
       );
-      if (live.rowCount) continue;
+      if (live.rowCount) { if (frontendExpired) return true; continue; }
       const pending = await tx.query(
         `SELECT 1 FROM cloud_workspace_lifecycle_intents
       WHERE workspace_id=$1 AND org_id=$2 AND (generation=$3 OR affects_workspace)

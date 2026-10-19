@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import { audit } from "../audit.js";
 import type { Tx } from "../db.js";
+import { cloudEngineInteractive } from "./coordinator-readiness.js";
 
 export type CloudWorkspaceGrantPurpose =
   | "engine-connect"
@@ -350,9 +351,10 @@ export async function issueCloudWorkspaceGrant(
   if (engineInstanceId !== null) {
     const engine = await tx.query(
       `SELECT 1
-       FROM cloud_workspace_engine_instances
+       FROM cloud_workspace_engine_instances engine
        WHERE id = $1 AND workspace_id = $2 AND generation = $3 AND org_id = $4
-         AND state = 'ready' AND revoked_at IS NULL AND lease_expires_at > now()`,
+         AND state = 'ready' AND revoked_at IS NULL AND lease_expires_at > now()
+         AND cloud_workspace_engine_interactive_live(engine)`,
       [
         engineInstanceId,
         input.workspaceId,
@@ -428,6 +430,9 @@ export async function issueCloudWorkspaceGrant(
       expiresAt: row.expires_at.toISOString(),
     },
   );
+  if (engineInstanceId !== null && !await cloudEngineInteractive(tx, { ...input, engineInstanceId })) {
+    throw new CloudWorkspaceGrantError("grant_subject_not_authorized", "Current engine is not eligible for this grant");
+  }
   return {
     id: row.id,
     token,

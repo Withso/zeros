@@ -10,6 +10,7 @@ import { DatabaseCloudRuntimeAccessAdmissionService } from "./runtime-access-adm
 import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import {DatabaseCloudWorkspaceCollaborationService} from "./actors.js";
 import {ensureUser} from "../auth.js";
+import { withAuthorityDeadlineBarrier } from "./authority-deadline-test-utils.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 (databaseUrl ? describe : describe.skip)("device-bound native cloud services", () => {
@@ -47,7 +48,21 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
     organizationId: fixture.organizationId, generation: 1, engineInstanceId: fixture.engineInstanceId,
     heartbeatToken: fixture.heartbeatToken, token: document.transport.capability });
 
-  it.each(["device", "epoch", "grant", "expiry", "engine"])("checks idle grant authority without provider I/O and rejects %s retirement", async cause => {
+  it("refuses a native service grant whose interactive deadline expires during its insert", async () => {
+    await pool.query(`UPDATE cloud_workspace_engine_instances SET coordinator_version=1,
+      interactive_frontend_id=$2,interactive_ready_until=clock_timestamp()+interval '1 minute' WHERE id=$1`,
+    [fixture.engineInstanceId, randomUUID()]);
+    const controlled = withAuthorityDeadlineBarrier(pool, /INSERT INTO cloud_workspace_runtime_service_grants/, client =>
+      client.query("UPDATE cloud_workspace_engine_instances SET interactive_ready_until=clock_timestamp()-interval '1 second' WHERE id=$1", [fixture.engineInstanceId]));
+    const waiting = new DatabaseCloudRuntimeServiceAccess({ pool: controlled,
+      providerResolver: { resolve } as unknown as CloudWorkspaceProviderResolver,
+      publicOrigin: "https://api.example.test", enginePort: 39393, workosEnabled: false });
+    const d = await device();
+    await expect(waiting.issue(d.request())).rejects.toBeDefined();
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_runtime_service_grants")).rows[0].n).toBe(0);
+  });
+
+  it.each(["device", "epoch", "grant", "expiry", "engine", "frontend"])("checks idle grant authority without provider I/O and rejects %s retirement", async cause => {
     const d = await device(), doc = await service.issue(d.request({ kind: "tunnel", remotePort: 3000 }));
     const checkedAt = Date.now();
     const expires = await service.check(request(doc));
@@ -60,7 +75,9 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
     if (cause === "grant") await service.revoke({ organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, accountUserId: fixture.userId, grantId: doc.grant.id });
     if (cause === "expiry") await pool.query("UPDATE cloud_workspace_runtime_service_grants SET created_at=now() - interval '1 minute', expires_at=now() - interval '1 second' WHERE id=$1", [doc.grant.id]);
     if (cause === "engine") await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked', revoked_at=now() WHERE id=$1", [fixture.engineInstanceId]);
+    if (cause === "frontend") await pool.query("UPDATE cloud_workspace_engine_instances SET coordinator_version=1 WHERE id=$1", [fixture.engineInstanceId]);
     await expect(service.check(request(doc))).resolves.toBeNull();
+    if (cause === "frontend") await expect(admit(doc)).rejects.toMatchObject({ code: "runtime_access_rejected" });
     expect(resolve).not.toHaveBeenCalled();
   });
 

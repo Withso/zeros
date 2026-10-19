@@ -339,6 +339,7 @@ export type WorkspaceRow = CloudRuntimePinRow & {
   repository_name: string;
   repository_revision: string;
   status: string;
+  interactive_ready?: boolean;
   desired_state: string;
   current_generation: number;
   version: string | number;
@@ -419,6 +420,7 @@ type ForkIntentRow = {
 
 const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
   SELECT ${actorSql} AS actor_role,cw.id, cw.org_id, cw.team_id, cw.created_by, cw.owner_user_id,
+         cloud_workspace_interactive_live(cw.id,cw.org_id,cw.current_generation) AS interactive_ready,
          cw.agent_command_mode,cw.agent_boot_id AS agent_boot_pointer,
          EXISTS(SELECT 1 FROM cloud_workspace_local_command_writers writer
            WHERE writer.workspace_id=cw.id AND writer.org_id=cw.org_id AND writer.state IN ('active','retired')) AS agent_has_activated_writer,
@@ -644,7 +646,7 @@ export function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackend
     capabilities:{canWrite,canEdit,canManage,canStart:reason===null,startUnavailableReason:reason},
     name: row.display_name,
     placement: "cloud" as const,
-    status: row.status,
+    status: row.interactive_ready === false && ["ready", "busy"].includes(row.status) ? "waking" : row.status,
     desiredState: row.desired_state,
     recovery: row.recovery,
     repository: {

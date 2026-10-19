@@ -1,4 +1,5 @@
 import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import { CLOUD_COORDINATOR_HEADER, CLOUD_COORDINATOR_FEATURE, type CloudCoordinatorStatus } from "@zeros/protocol/cloud-coordinator";
 import { CloudEngineExitReportSchema, CLOUD_ENGINE_EXIT_REPORT_ENV, CLOUD_ENGINE_EXIT_REPORT_FEATURE,
   CLOUD_CHECKPOINT_FALLBACK_FEATURE, type CloudEngineExitReport } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { isCloudAgentPreviewTarget } from "@zeros/protocol/containment";
@@ -99,6 +100,7 @@ export type CloudCheckpointDirective = {
 export type CloudRuntimeConfig = {
   /** Local launch metadata, never sent in the registration document. */
   exitReport?: CloudEngineExitReport;
+  coordinatorVersion?: 1;
   version: 1;
   audience: typeof RUNTIME_AUDIENCE;
   execution: {
@@ -441,8 +443,10 @@ export function consumeCloudRuntimeEnvironment(
 ): CloudRuntimeConfig | null {
   const encoded = env[CLOUD_RUNTIME_ENV];
   const exitReport = env[CLOUD_ENGINE_EXIT_REPORT_ENV];
+  const coordinatorOwner = env.ZEROS_CLOUD_COORDINATOR_OWNER;
   delete env[CLOUD_RUNTIME_ENV];
   delete env[CLOUD_ENGINE_EXIT_REPORT_ENV];
+  delete env.ZEROS_CLOUD_COORDINATOR_OWNER;
   if (encoded === undefined) return null;
   if (
     encoded.length < 2 ||
@@ -468,6 +472,7 @@ export function consumeCloudRuntimeEnvironment(
           config.exitReport = report;
       } catch { /* An older/unarmed launcher retains the HTTP lease. */ }
     }
+    if (config.exitReport && coordinatorOwner === config.exitReport.reportId) config.coordinatorVersion = 1;
     return config;
   } catch {
     throw new Error("cloud engine runtime material is invalid");
@@ -600,6 +605,8 @@ export class CloudRuntimeRegistration {
   private checkpointHintsStarted = false;
   private localCommandsAcknowledged = false;
   private acceptedWorkAcknowledged = false;
+  private coordinatorAcknowledged = false;
+  private coordinatorStatus: (() => CloudCoordinatorStatus) | null = null;
   private agentJournalMode: "local" | "legacy" | undefined;
   private sourceWriterEpoch: string | null = null;
   private activatedLocalWriter: Readonly<{ bootId: string; writerEpoch: string }> | null = null;
@@ -678,7 +685,8 @@ export class CloudRuntimeRegistration {
           this.sourceWriterEpoch = acknowledged && journalMode === "local" ? sourceWriterEpoch ?? null : null;
         } } : undefined,
       REQUEST_TIMEOUT_MS,
-      { [ENGINE_UPLINK_OPT_IN_HEADER]: "1", ...(this.negotiateLocalCommands ? { "x-zeros-cloud-accepted-work": "1" } : {}) },
+      { [ENGINE_UPLINK_OPT_IN_HEADER]: "1", ...(this.negotiateLocalCommands ? { "x-zeros-cloud-accepted-work": "1" } : {}),
+        ...(this.coordinatorOffered() ? { [CLOUD_COORDINATOR_HEADER]: "1" } : {}) },
     );
     const document = this.parseRegistration(raw);
     this.document = document;
@@ -703,6 +711,14 @@ export class CloudRuntimeRegistration {
       this.initialRecordConnected && !this.recordHandoffPaused && this.hasControlAuthority(this.document);
   }
   acceptedWorkNegotiated(): boolean { return this.acceptedWorkAcknowledged && this.localCommandsNegotiated(); }
+  coordinatorOffered(): boolean {
+    const report = this.config.exitReport;
+    return this.negotiateLocalCommands && this.config.coordinatorVersion === 1 && !!report &&
+      report.runtimeId === this.agentRuntime.runtimeId && report.bootId === this.agentRuntime.bootId &&
+      report.supervisorSessionId === this.agentRuntime.supervisorSessionId;
+  }
+  coordinatorNegotiated(): boolean { return this.coordinatorAcknowledged && this.acceptedWorkNegotiated(); }
+  attachCoordinatorStatus(read: () => CloudCoordinatorStatus): void { this.coordinatorStatus = read; }
   get runtimeId(): string { return this.agentRuntime.runtimeId; }
   /** A retry may consume only already-confirmed authority. This read neither
    * renews the heartbeat nor relaxes its one-second dispatch safety margin. */
@@ -718,7 +734,8 @@ export class CloudRuntimeRegistration {
     const armed = report && report.runtimeId === this.agentRuntime.runtimeId && report.bootId === this.agentRuntime.bootId &&
       report.supervisorSessionId === this.agentRuntime.supervisorSessionId;
     return ["cred.v1", ...(armed ? ["lease.v1", CLOUD_ENGINE_EXIT_REPORT_FEATURE] : []),
-      "checkpoint.v1", CLOUD_CHECKPOINT_FALLBACK_FEATURE, "idle.v1", "turns.v1", ...(this.acceptedWorkNegotiated() ? ["detached.v1"] : [])];
+      "checkpoint.v1", CLOUD_CHECKPOINT_FALLBACK_FEATURE, "idle.v1", "turns.v1", ...(this.acceptedWorkNegotiated() ? ["detached.v1"] : []),
+      ...(this.coordinatorNegotiated() ? [CLOUD_COORDINATOR_FEATURE] : [])];
   }
   /** Authenticated history provenance, never execution or retirement authority. */
   get agentSourceWriterEpoch(): string | null { return this.sourceWriterEpoch; }
@@ -1263,7 +1280,7 @@ export class CloudRuntimeRegistration {
     if (this.stopped || this.authorityLost) return;
     // A failed attempt stays due, but retains the ordinary retry backoff.
     // Clamping retries to an expired watchdog would create a zero-delay loop.
-    if (!retry && this.checkpointPushActive())
+    if (!retry && (this.checkpointPushActive() || this.coordinatorAcknowledged))
       delayMs = Math.min(delayMs, this.lastHeartbeatStartedAt === null
         ? CHECKPOINT_PUSH_HTTP_MAX_SILENCE_MS : this.checkpointHeartbeatDueIn());
     if (this.timer) clearTimeout(this.timer);
@@ -1322,6 +1339,7 @@ export class CloudRuntimeRegistration {
             ? { repositoryCredentialRefresh: credentialRefresh }
             : {}),
           ...(observedPorts === undefined ? {} : { observedPorts }),
+          ...(this.coordinatorAcknowledged && this.coordinatorStatus ? { coordinator: this.coordinatorStatus() } : {}),
         },
       );
       if (this.document !== document || this.stopped || this.authorityLost) {
@@ -1422,6 +1440,7 @@ export class CloudRuntimeRegistration {
     return this.uplinkLeaseActive?.() === true &&
       (this.checkpointHintsAnswering || this.checkpointPushActive()) &&
       (!this.checkpointPushActive() || this.checkpointHeartbeatDueIn() > 0) &&
+      (!this.coordinatorAcknowledged || this.checkpointHeartbeatDueIn() > 0) &&
       this.heartbeatFailures === 0 &&
       !this.checkpointRedelivered &&
       credentialRefresh === null &&
@@ -1865,6 +1884,8 @@ export class CloudRuntimeRegistration {
       throw new CloudRuntimeRequestError("cloud engine history source response is invalid", true);
     if (extraHeaders?.["x-zeros-cloud-accepted-work"] === "1")
       this.acceptedWorkAcknowledged = acknowledged && response.headers.get("x-zeros-cloud-accepted-work") === "1";
+    if (extraHeaders?.[CLOUD_COORDINATOR_HEADER] === "1")
+      this.coordinatorAcknowledged = this.acceptedWorkAcknowledged && response.headers.get(CLOUD_COORDINATOR_HEADER) === "1";
     negotiation?.acknowledgement(acknowledged,
       journalMode === "local" || journalMode === "legacy" ? journalMode : undefined,
       acknowledged && journalMode === "local" && sourceWriter !== null ? sourceWriter : undefined);

@@ -247,6 +247,7 @@ export async function authorizeReadyCloudWorkspaceAccess(tx:Tx,input:{
       AND connection.provider='boat' AND connection.credential_source='hosted'
       AND binding.provider_resource_id IS NOT NULL AND binding.observed_state='running'
       AND (NOT $5::boolean OR (cw.single_member_mode AND cw.owner_user_id=$3))
+      AND cloud_workspace_interactive_live(cw.id,cw.org_id,cw.current_generation)
       AND (cw.single_member_mode OR EXISTS(SELECT 1 FROM cloud_workspace_engine_instances engine
         WHERE engine.workspace_id=cw.id AND engine.org_id=cw.org_id AND engine.generation=cw.current_generation
           AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>now() AND engine.actor_protocol_version=2))
@@ -1267,6 +1268,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
            AND cw.deleted_at IS NULL AND cw.desired_state = 'running'
            AND access.actor_fingerprint=cloud_workspace_actor_fingerprint(cw.id,access.account_user_id)
            AND cloud_workspace_actor_role(cw.id,access.account_user_id) IN ('developer','manager','owner')
+           AND cloud_workspace_interactive_live(cw.id,cw.org_id,cw.current_generation)
            AND (cw.single_member_mode OR EXISTS(SELECT 1 FROM cloud_workspace_engine_instances engine
              WHERE engine.workspace_id=cw.id AND engine.org_id=cw.org_id AND engine.generation=cw.current_generation
                AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>now() AND engine.actor_protocol_version=2))

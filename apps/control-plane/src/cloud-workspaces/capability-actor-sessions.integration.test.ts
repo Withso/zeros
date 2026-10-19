@@ -135,6 +135,19 @@ d("capability actor sessions with PostgreSQL", () => {
     return { admitted: { ...admitted, actorSessionId: id, capability: { ...admitted.capability, claims } }, capability };
   }
 
+  it("withdraws capability admission and renewal without unbinding tokens or interrupting recorded work", async () => {
+    await pool.query(`UPDATE cloud_workspace_engine_instances SET coordinator_version=1,
+      interactive_frontend_id=$2,interactive_ready_until=clock_timestamp()+interval '1 minute' WHERE id=$1`,
+    [fixture.engineInstanceId, randomUUID()]);
+    const admitted = await admit();
+    await pool.query("UPDATE cloud_workspace_engine_instances SET interactive_ready_until=NULL WHERE id=$1", [fixture.engineInstanceId]);
+    expect(decode(await token()).ein).toBe(fixture.engineInstanceId);
+    expect((await post(ADMIT, await body())).status).toBe(401);
+    expect((await renew(admitted, next(admitted.capability.claims))).status).toBe(401);
+    await expect(recorded(admitted)).resolves.toMatchObject({ actorUserId: user.id });
+    expect((await state(admitted.actorSessionId)).capability_revision).toBe("1");
+  });
+
   it("keeps a capability session current after the legacy 30-second renewal window", async () => {
     const admitted = await admit();
     expect(admitted.mode).toBe("capability-session-v1");

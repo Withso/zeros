@@ -188,7 +188,7 @@ import { reportCloudEngineExit } from "./engine-exit.js";
       expect((await pool.query("SELECT state FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1",[boot.writerEpoch])).rows[0]).toEqual({state:"active"});
       expect((await pool.query("SELECT retired_at FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1",[fixture.engineInstanceId])).rows[0]).toEqual({retired_at:null});
     });
-    it.each(["local","accepted","missing-pointer","unnegotiated"] as const)("preserves or refuses the persisted local journal through successor enrollment (%s)",async kind=>{
+    it.each(["local","accepted","coordinator","missing-pointer","unnegotiated"] as const)("preserves or refuses the persisted local journal through successor enrollment (%s)",async kind=>{
       const boot=await sourceLocalBoot(),f=await prepared();
       await service.authorizeResidentConsumption(f.claim,f);
       const detached={...f.resident,fence:2,engineId:null,generation:null};
@@ -201,8 +201,9 @@ import { reportCloudEngineExit } from "./engine-exit.js";
       const registration=service.register({...f.claim,generation:2,setupRunId:enrollment.id,executionFence:enrollment.executionFence,
         engineInstanceId:enrollment.engineInstanceId,token:enrollment.token,protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
         actorProtocolVersion:2,agentCustomizationVersion:3,...(kind==="unnegotiated"?{}:{cloudLocalCommandsVersion:1 as const}),
-        ...(kind==="accepted"?{acceptedWorkVersion:1 as const}:{}),agentRuntime:{...report(active).runtime as object,profile:"zeros-cloud-worker-v4"}});
-      if(kind!=="local"&&kind!=="accepted"){
+        ...(["accepted","coordinator"].includes(kind)?{acceptedWorkVersion:1 as const}:{}),
+        ...(kind==="coordinator"?{coordinatorVersion:1 as const}:{}),agentRuntime:{...report(active).runtime as object,profile:"zeros-cloud-worker-v4"}});
+      if(kind!=="local"&&kind!=="accepted"&&kind!=="coordinator"){
         await expect(registration).rejects.toThrow("Runtime transition registration rejected");
         expect((await pool.query("SELECT consumed_at FROM cloud_workspace_runtime_enrollments WHERE id=$1",[enrollment.id])).rows[0]).toEqual({consumed_at:null});
         expect((await pool.query("SELECT state,registered_at FROM cloud_workspace_engine_instances WHERE id=$1",[enrollment.engineInstanceId])).rows[0]).toEqual({state:"starting",registered_at:null});
@@ -210,9 +211,11 @@ import { reportCloudEngineExit } from "./engine-exit.js";
       }
       const registered=await registration;
       expect(registered).toMatchObject({cloudLocalCommandsVersion:1,agentJournalMode:"local",agentSourceWriterEpoch:boot.writerEpoch});
-      expect(registered.acceptedWorkVersion).toBe(kind==="accepted"?1:undefined);
+      expect(registered.acceptedWorkVersion).toBe(["accepted","coordinator"].includes(kind)?1:undefined);
+      expect(registered.coordinatorVersion).toBe(kind==="coordinator"?1:undefined);
+      expect((await pool.query("SELECT coordinator_version FROM cloud_workspace_engine_instances WHERE id=$1",[enrollment.engineInstanceId])).rows[0].coordinator_version).toBe(kind==="coordinator"?1:null);
       expect((await pool.query("SELECT accepted_work_version FROM cloud_workspace_engine_instances WHERE id=$1",[enrollment.engineInstanceId])).rows[0])
-        .toEqual({accepted_work_version:kind==="accepted"?1:null});
+        .toEqual({accepted_work_version:["accepted","coordinator"].includes(kind)?1:null});
       expect((await pool.query("SELECT generation FROM cloud_agent_boot_bindings WHERE id=(SELECT agent_boot_id FROM cloud_workspaces WHERE id=$1)",[fixture.workspaceId])).rows[0]).toEqual({generation:1});
     });
     it("never cancels an ambiguous authorized consumption or takes the ordinary activation path", async () => {

@@ -139,7 +139,7 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
         const actor=await authorizeCloudWorkspaceActor(tx,{...input,actorUserId:grant.account_user_id,capability:"edit"});
         if(!grant.actor_fingerprint||actor.fingerprint!==grant.actor_fingerprint)throw new CloudRuntimeAccessAdmissionError();
         const protocol=await tx.query(`SELECT 1 FROM cloud_workspaces workspace JOIN cloud_workspace_engine_instances engine ON engine.id=$2
-          WHERE workspace.id=$1 AND (workspace.single_member_mode OR engine.actor_protocol_version=2)`,[input.workspaceId,input.engineInstanceId]);
+          WHERE workspace.id=$1 AND cloud_workspace_engine_interactive_live(engine) AND (workspace.single_member_mode OR engine.actor_protocol_version=2)`,[input.workspaceId,input.engineInstanceId]);
         if(!protocol.rowCount)throw new CloudRuntimeAccessAdmissionError();
         const leaseDurationMs = Math.min(10_000, grant.expires_at.getTime() - Date.now());
         if (leaseDurationMs <= 0) throw new CloudRuntimeAccessAdmissionError();

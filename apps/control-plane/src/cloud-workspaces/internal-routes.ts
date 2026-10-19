@@ -1,3 +1,4 @@
+import { CLOUD_COORDINATOR_HEADER, CloudCoordinatorStatusSchema } from "./coordinator-contract.js";
 import { Hono, type MiddlewareHandler } from "hono";
 import { createHash } from "node:crypto";
 import {createCloudAgentExecutionRoutes} from "./agent-credential-routes.js";
@@ -172,6 +173,7 @@ const EngineCheckpointHintBody = z
 
 const EngineHeartbeatBody = z
   .object({
+    coordinator: CloudCoordinatorStatusSchema.optional(),
     workspaceId: UUID,
     organizationId: UUID,
     generation: POSITIVE_INTEGER,
@@ -719,7 +721,9 @@ export function createCloudWorkspaceInternalRoutes(
       const localMode=c.req.header("x-zeros-cloud-local-commands")==="1"&&actorProtocolVersion===2&&agentCustomizationVersion===3&&agentRuntime?.profile==="zeros-cloud-worker-v4";
       const registered=await service.registerEngine({ ...binding, token,
         ...(localMode?{cloudLocalCommandsVersion:1 as const,
-          ...(c.req.header("x-zeros-cloud-accepted-work")==="1"?{acceptedWorkVersion:1 as const}:{})}:{}),
+          ...(c.req.header("x-zeros-cloud-accepted-work")==="1"?{acceptedWorkVersion:1 as const}:{}),
+          ...(c.req.header("x-zeros-cloud-accepted-work")==="1" && c.req.header(CLOUD_COORDINATOR_HEADER)==="1" &&
+            options?.engineUplink?.flags.enabled(input.organizationId,"agent_runners") ? {coordinatorVersion:1 as const}:{})}:{}),
         ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion}),
         ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}) });
       const confirmed=z.object({cloudLocalCommandsVersion:z.literal(1),durableRecordConnected:z.literal(true)}).passthrough().safeParse(registered);
@@ -733,10 +737,11 @@ export function createCloudWorkspaceInternalRoutes(
         }
         c.header("x-zeros-cloud-local-commands","1");
         if(confirmed.data.acceptedWorkVersion===1)c.header("x-zeros-cloud-accepted-work","1");
+        if(confirmed.data.coordinatorVersion===1)c.header(CLOUD_COORDINATOR_HEADER,"1");
         c.header("x-zeros-cloud-agent-journal",journal.data);
       }
       const metadata=z.record(z.unknown()).safeParse(registered);
-      if(metadata.success){const {cloudLocalCommandsVersion:_version,acceptedWorkVersion:_accepted,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,acceptedWorkVersion:_accepted,coordinatorVersion:_coordinator,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
         return c.json(withUplinkAdvertisement(legacy,input.organizationId,c.req.header(CLOUD_ENGINE_UPLINK_OPT_IN_HEADER)==="1"));}
       return c.json(registered);
     } catch (error) {
@@ -759,7 +764,9 @@ export function createCloudWorkspaceInternalRoutes(
       const localMode=c.req.header("x-zeros-cloud-local-commands")==="1"&&actorProtocolVersion===2&&agentCustomizationVersion===3&&agentRuntime?.profile==="zeros-cloud-worker-v4";
       const registered=await service.registerTransitionEngine({...binding,token,
         ...(localMode?{cloudLocalCommandsVersion:1 as const,
-          ...(c.req.header("x-zeros-cloud-accepted-work")==="1"?{acceptedWorkVersion:1 as const}:{})}:{}),
+          ...(c.req.header("x-zeros-cloud-accepted-work")==="1"?{acceptedWorkVersion:1 as const}:{}),
+          ...(c.req.header("x-zeros-cloud-accepted-work")==="1" && c.req.header(CLOUD_COORDINATOR_HEADER)==="1" &&
+            options?.engineUplink?.flags.enabled(input.organizationId,"agent_runners") ? {coordinatorVersion:1 as const}:{})}:{}),
         ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}),
         ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion})});
       const confirmed=z.object({cloudLocalCommandsVersion:z.literal(1),durableRecordConnected:z.literal(true)}).passthrough().safeParse(registered);
@@ -773,10 +780,11 @@ export function createCloudWorkspaceInternalRoutes(
         }
         c.header("x-zeros-cloud-local-commands","1");
         if(confirmed.data.acceptedWorkVersion===1)c.header("x-zeros-cloud-accepted-work","1");
+        if(confirmed.data.coordinatorVersion===1)c.header(CLOUD_COORDINATOR_HEADER,"1");
         c.header("x-zeros-cloud-agent-journal",journal.data);
       }
       const metadata=z.record(z.unknown()).safeParse(registered);
-      if(metadata.success){const {cloudLocalCommandsVersion:_version,acceptedWorkVersion:_accepted,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,acceptedWorkVersion:_accepted,coordinatorVersion:_coordinator,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
         return c.json(withUplinkAdvertisement(legacy,input.organizationId,c.req.header(CLOUD_ENGINE_UPLINK_OPT_IN_HEADER)==="1"));}
       return c.json(registered);
     } catch {
@@ -807,11 +815,12 @@ export function createCloudWorkspaceInternalRoutes(
     const input = await strictJson(c.req, EngineHeartbeatBody);
     if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
     try {
-      const { repositoryCredentialRefresh, observedPorts, ...heartbeat } =
+      const { repositoryCredentialRefresh, observedPorts, coordinator, ...heartbeat } =
         input;
       return c.json(
         await service.heartbeat({
           ...heartbeat,
+          ...(coordinator ? { coordinator } : {}),
           token,
           ...(observedPorts === undefined ? {} : { observedPorts }),
           ...(repositoryCredentialRefresh === undefined

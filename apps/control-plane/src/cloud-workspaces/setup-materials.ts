@@ -1,3 +1,4 @@
+import { recordCloudCoordinatorReadiness } from "./coordinator-readiness.js";
 import { reportCloudEngineExit, type CloudEngineExitInput } from "./engine-exit.js";
 import { DatabaseCloudRuntimeTransitionService } from "./runtime-transfer.js";
 import { readCurrentCloudAgentBootBinding } from "./agent-boot-credentials.js";
@@ -172,6 +173,7 @@ export type CloudWorkspaceEngineRegistrationInput = {
   agentCustomizationVersion?: 3;
   cloudLocalCommandsVersion?: 1;
   acceptedWorkVersion?: 1;
+  coordinatorVersion?: 1;
   agentRuntime?: CloudAgentRuntime;
 };
 
@@ -181,6 +183,7 @@ export type CloudWorkspaceEngineHeartbeatInput = {
   organizationId: string;
   generation: number;
   engineInstanceId: string;
+  coordinator?: import("./coordinator-contract.js").CloudCoordinatorStatus;
   observedPorts?: readonly { port: number; protocol: "tcp" }[];
   repositoryCredentialRefresh?: {
     generation: string;
@@ -1487,6 +1490,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         throw materialError("engine_registration_rejected", false);
       }
       const localCommandsSupported = input.cloudLocalCommandsVersion === 1 && input.agentCustomizationVersion === 3;
+      const coordinatorSupported = localCommandsSupported && input.acceptedWorkVersion === 1 && input.coordinatorVersion === 1;
       const journal = await readCurrentCloudAgentBootBinding(tx, {
         workspaceId: input.workspaceId, organizationId: input.organizationId,
       }).catch(error => {
@@ -1503,7 +1507,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
              registered_at = now(), last_heartbeat_at = now(),
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
              updated_at = now(), actor_protocol_version = $4,
-             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7,cloud_local_commands_version=$8,accepted_work_version=$9
+             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7,cloud_local_commands_version=$8,accepted_work_version=$9${coordinatorSupported ? ",coordinator_version=1" : ""}
          WHERE id = $1 AND state = 'starting'
          RETURNING lease_expires_at`,
         [
@@ -1542,6 +1546,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         durableRecordConnected: true as const,
         ...(localCommandsSupported ? { cloudLocalCommandsVersion: 1 as const, agentJournalMode,
           ...(input.acceptedWorkVersion === 1 ? { acceptedWorkVersion: 1 as const } : {}),
+          ...(coordinatorSupported ? { coordinatorVersion: 1 as const } : {}),
           ...(journal.mode === "boot-owner-v1" ? { agentSourceWriterEpoch: journal.binding.writerEpoch } : {}) } : {}),
         leaseExpiresAtMs: updated.rows[0]!.lease_expires_at.getTime(),
         heartbeat: {
@@ -1635,6 +1640,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       if ((renewed.rowCount ?? 0) !== 1) {
         throw materialError("engine_heartbeat_rejected", false);
       }
+      if (input.coordinator) await recordCloudCoordinatorReadiness(tx, input, input.coordinator, requestNow);
       if (observedPorts !== undefined) {
         await tx.query(
           `WITH observed AS (

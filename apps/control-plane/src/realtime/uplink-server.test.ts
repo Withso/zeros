@@ -93,6 +93,7 @@ describe("engine uplink server", () => {
   let checkpointPush: boolean;
   let leaseFlag: boolean;
   let turnJournal: boolean;
+  let coordinatorFlag: boolean;
   let lease: FakeLease;
   let idleFlag: boolean;
   let idle: FakeIdle;
@@ -109,7 +110,8 @@ describe("engine uplink server", () => {
         enabled: (orgId, flag) => orgId === identity.organizationId &&
           (flag === "realtime_uplink" ? enabled : flag === "credential_push" ? credentialPush :
             flag === "engine_lease_over_uplink" ? leaseFlag : flag === "checkpoint_push" ? checkpointPush :
-            flag === "cp_idle_stop" ? idleFlag : flag === "turn_journal" ? turnJournal : false),
+            flag === "cp_idle_stop" ? idleFlag : flag === "turn_journal" ? turnJournal :
+            flag === "agent_runners" ? coordinatorFlag : false),
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       authSource: {
@@ -152,6 +154,7 @@ describe("engine uplink server", () => {
   beforeEach(() => {
     authority = new FakeAuthority(); writes = []; alerts = []; metrics = []; enabled = true; credentialPush = true; authFails = false;
     lease = new FakeLease(); leaseFlag = true; idle = new FakeIdle(); idleFlag = true; checkpointPush = true; turnJournal = true;
+    coordinatorFlag = false;
     capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
     identity = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 3, engineInstanceId: randomUUID(), bootId: randomUUID() };
   });
@@ -646,6 +649,56 @@ describe("engine uplink server", () => {
     expect(writes.map(write => [write.connected, write.ready])).toEqual([[true, false], [true, true], [false, false]]);
     expect(new Set(writes.map(write => write.connectionId)).size).toBe(1);
     expect(writes[2]!.disconnectedAtMs).not.toBeNull();
+  });
+
+  it("runner.v1 fences stale frontend reports and retains the original observation on resume", async () => {
+    let clock = Date.now(); coordinatorFlag = true;
+    await start({ now: () => clock });
+    const { peer, welcome } = await connect({ features: ["runner.v1"] });
+    expect(welcome.d!.features).toContain("runner.v1");
+    const report = { version: 1, bootId: identity.bootId, revision: 2, frontendId: randomUUID(), ready: true, expiresAtMs: clock + 90_000 };
+    const receivedAtMs = clock;
+    peer.send({ t: "status.ready", s: 1, d: { ready: true, phase: "ready", coordinator: report } });
+    await peer.next("sys.ack");
+    await until(() => writes.some(s => s.coordinator?.report.revision === 2));
+    clock += 1_000;
+    peer.send({ t: "status.ready", s: 2, d: { ready: false, phase: "starting",
+      coordinator: { ...report, revision: 1, ready: false, expiresAtMs: 0 } } });
+    await peer.next("sys.ack");
+    expect(uplink.presence(identity.engineInstanceId)).toMatchObject({ ready: true, phase: "ready" });
+    peer.ws.close(); await until(() => uplink.size === 0);
+    clock += 1_000;
+    const resumed = await connect({ features: ["runner.v1"], resume: { token: welcome.d!.resumeToken, lastReceivedSeq: 0 } });
+    expect(resumed.welcome.d).toMatchObject({ resumed: true });
+    await until(() => writes.at(-1)?.connected === true);
+    expect(writes.at(-1)?.coordinator).toEqual({ report, receivedAtMs });
+    resumed.peer.send({ t: "status.ready", s: 3, d: { ready: false, phase: "starting",
+      coordinator: { ...report, ready: false, expiresAtMs: 0 } } });
+    await resumed.peer.next("sys.ack");
+    expect(uplink.presence(identity.engineInstanceId)).toMatchObject({ ready: true, phase: "ready" });
+    expect(writes.at(-1)?.coordinator).toEqual({ report, receivedAtMs });
+  });
+
+  it.each(["missing", "foreign boot", "inconsistent ready"])("runner.v1 rejects a %s snapshot", async kind => {
+    coordinatorFlag = true; await start();
+    const { peer } = await connect({ features: ["runner.v1"] });
+    const report = { version: 1, bootId: kind === "foreign boot" ? randomUUID() : identity.bootId,
+      revision: 1, frontendId: randomUUID(), ready: kind !== "inconsistent ready",
+      expiresAtMs: kind === "inconsistent ready" ? 0 : Date.now() + 90_000 };
+    peer.send({ t: "status.ready", s: 1, d: { ready: true, phase: "ready", ...(kind === "missing" ? {} : { coordinator: report }) } });
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+    expect(writes.some(s => s.ready)).toBe(false);
+  });
+
+  it("keeps an enrolled coordinator's additive status readable after the launch flag is off", async () => {
+    await start();
+    const { peer, welcome } = await connect({ features: ["runner.v1"] });
+    expect(welcome.d!.features).not.toContain("runner.v1");
+    const report = { version: 1, bootId: identity.bootId, revision: 1, frontendId: randomUUID(), ready: true, expiresAtMs: Date.now() + 90_000 };
+    peer.send({ t: "status.ready", s: 1, d: { ready: true, phase: "ready", coordinator: report } });
+    await peer.next("sys.ack");
+    await until(() => writes.some(s => s.coordinator?.report.revision === 1));
+    expect(writes.at(-1)?.coordinator?.report).toEqual(report);
   });
 
   it("re-runs the auth exchange on resume, then retransmits only unacked reliable frames", async () => {

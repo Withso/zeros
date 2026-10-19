@@ -46,6 +46,22 @@ function fixture(options: { fastExit?: boolean; armed?: boolean } = {}) {
 }
 
 describe("supervisor positive engine exit", () => {
+  it("coordinator_exit_still_invokes_r1_and_interrupts_work", async () => {
+    const f = fixture();
+    let running = true;
+    f.retire.mockImplementation(async () => { running = false; });
+    const pid = await f.launch();
+    const report = f.exitReporter.arm.mock.calls[0]![0];
+    const environment = f.spawnProcess.mock.calls[0]![2]!.env!;
+    expect.soft(environment.ZEROS_CLOUD_COORDINATOR_OWNER).toBe(report.reportId);
+    expect(pid).toMatchObject({ pid: f.children[0]!.pid });
+    running = true;
+    f.exit();
+    await f.supervisor.operation;
+    expect(f.exitReporter.exited).toHaveBeenCalledExactlyOnceWith(report.reportId);
+    expect(running).toBe(false);
+    expect(f.spawnProcess).toHaveBeenCalledOnce();
+  });
   it.each([0, 1])("reports unexpected exit code %s once without restarting the engine", async code => {
     const f = fixture();
     await f.launch();
