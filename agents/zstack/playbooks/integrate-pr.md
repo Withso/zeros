@@ -31,7 +31,10 @@ session itself.
    a push with `git ls-remote`, not with a pipeline's exit status.
 7. **Merge** with `pnpm agent:merge <n>`, which arms auto-merge. Only one armed
    PR at a time: queue the rest and arm each one after the previous merges.
-   CI-definition PRs need the owner's merge.
+   CI-definition PRs need the owner's merge. Before arming, wait for the PR's
+   `CodeQL` alert check (separate from the `codeql` job). It is not required,
+   so auto-merge won't wait for it; a new high alert, even in a test, is fixed
+   before merge.
    - **Stacked PRs.** After the base PR squash-merges, the next PR in the stack
      conflicts (add/add) on files the base created and the stack later changed.
      Replay only that PR's own commits onto `main`
