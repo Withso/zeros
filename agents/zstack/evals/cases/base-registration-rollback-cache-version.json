@@ -1,0 +1,9 @@
+{
+  "id": "base-registration-rollback-cache-version",
+  "kind": "replay",
+  "area": "cloud runtime publication",
+  "fixedBy": "pending",
+  "symptom": "The base recipe advertised rollback-cache support accepted by the shared contract, but the control plane rejected that field before registration.",
+  "rule": "Exercise the emitted base contract through the actual registration route, with raw-only and parsed-echo requests, while retaining strict unknown-version and digest-bound identity checks.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/runtime-publication-routes.test.ts"
+}
