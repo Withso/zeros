@@ -4,6 +4,24 @@ import path from "node:path";
 import { buildEngineImage } from "../cloud-workspace-validation/image";
 
 describe("cloud image generated runtime artifacts", () => {
+  it.each(["generated", "dockerfile", "boat"])("installs the immutable build-qualification offer in the %s image layout", recipe => {
+    const name = "build-qualification-support.json", source = `sandbox/${name}`, target = `/opt/zeros-runtime/lib/zeros/${name}`;
+    if (recipe === "generated") {
+      const { dockerfile, contextList } = buildEngineImage();
+      const copies = dockerfile.split("\n").filter(line => line.startsWith("COPY ")).map(line => JSON.parse(line.slice(5)) as string[]);
+      expect(copies).toContainEqual([source, target]);
+      expect(contextList).toContainEqual({ sourcePath: path.resolve("scripts/cloud-workspace-validation", source), archivePath: source });
+      expect(dockerfile).toContain(`chown root:root ${target} && chmod 0444 ${target}`);
+    } else if (recipe === "dockerfile") {
+      const dockerfile = readFileSync("scripts/cloud-workspace-validation/Dockerfile", "utf8");
+      expect(dockerfile).toContain(`COPY ${source} ${target}`);
+      expect(dockerfile).toContain(`chown root:root ${target}`);
+      expect(dockerfile).toContain(`chmod 0444 ${target}`);
+    } else {
+      const script = readFileSync("scripts/cloud-workspace-validation/boat-image/templates/build.sh", "utf8");
+      expect(script).toContain(`install -o root -g root -m 0444 scripts/cloud-workspace-validation/${source} ${target}`);
+    }
+  });
   it.each(["generated", "dockerfile", "boat"])("installs the setup performance import in the %s image layout", recipe => {
     const name = "cloud-setup-performance.mjs";
     const source = `sandbox/${name}`, target = `/opt/zeros-runtime/lib/zeros/${name}`;

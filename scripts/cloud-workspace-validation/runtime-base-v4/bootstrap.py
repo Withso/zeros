@@ -28,10 +28,12 @@ import re
 import selectors
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import tarfile
 import time
+import types
 import urllib.parse
 import uuid
 
@@ -413,7 +415,7 @@ def validate_rollback_scope(value):
     text_match(value["authorityEpoch"], r"[1-9][0-9]{0,18}", "cache_conflict")
 
 
-def validate_input(raw, compat, now):
+def validate_input(raw, compat, now, *, compat_id=None):
     require(len(raw) <= MAX_INPUT, "input_too_large")
     # A transport newline is allowed; embedded whitespace and padding are not.
     raw = raw.removesuffix(b"\n")
@@ -424,7 +426,7 @@ def validate_input(raw, compat, now):
         raise Failure("input_schema") from None
     require(base64.urlsafe_b64encode(decoded).rstrip(b"=") == raw, "input_schema")
     value = strict_json(decoded, "input_schema")
-    shape(value, ("schema", "purpose", "runtime", "artifact"), ("setup",))
+    shape(value, ("schema", "purpose", "runtime", "artifact"), ("setup", "buildQualification"))
     require(value["schema"] == "zeros.runtime-install/v1" and
             value["purpose"] in ("workspace-setup", "build", "qualification"), "input_schema")
     validate_descriptor(value["runtime"])
@@ -434,6 +436,26 @@ def validate_input(raw, compat, now):
         require(len(setup) % 4 != 1, "input_schema")
     else:
         require("setup" not in value, "input_schema")
+    if "buildQualification" in value:
+        require(value["purpose"] == "workspace-setup", "input_schema")
+        selected = value["buildQualification"]
+        require(type(selected) is dict, "input_schema")
+        if selected.get("mode") == "full":
+            shape(selected, ("mode",))
+        else:
+            shape(selected, ("mode", "qualificationId", "evidenceSha256", "evidence", "snapshot"))
+            require(selected["mode"] == "build" and type(compat.get("buildQualificationVersion")) is int and
+                    compat["buildQualificationVersion"] == 1, "base_compatibility")
+            evidence = selected["evidence"]
+            require(type(evidence) is dict and type(evidence.get("base")) is dict and
+                    type(evidence.get("runtime")) is dict, "input_schema")
+            # Match the external compatibility pin before importing any helper
+            # from this base. Full Q1a validation follows in the pinned module.
+            base = evidence["base"]
+            require(type(compat_id) is str and base.get("baseCompatibilityId") == compat_id and
+                    base.get("compatibilitySha256") == compat_id[4:], "base_compatibility")
+            require(all(value["runtime"][key] == evidence["runtime"].get(key) for key in
+                    ("runtimeId", "manifestSha256", "archiveSha256", "engineProtocolVersion")), "input_schema")
     artifact = value["artifact"]
     shape(artifact, ("url", "expiresAt"))
     require(type(artifact["url"]) is str and len(artifact["url"]) <= 8192 and
@@ -952,7 +974,34 @@ class Bootstrap:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise Failure("lock_busy") from None
-                yield
+                def identity(info):
+                    return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink, info.st_size
+
+                original, parent = identity(os.fstat(fd)), os.fstat(directory)
+
+                def current():
+                    # Selected setup borrows this witness, never the ability to
+                    # unlock/reacquire it. fdinfo is this process's kernel lock
+                    # record; no process command lines or arguments are read.
+                    self.check_stat(os.fstat(fd), {"type": "file", "size": 0, "mode": "0600"})
+                    require(identity(os.fstat(fd)) == original and
+                            not {"security.capability", "system.posix_acl_access", "system.posix_acl_default"}.intersection(os.listxattr(fd)),
+                            "lock_busy")
+                    with self.directory("/run/zeros") as named:
+                        info = os.fstat(named)
+                        require((info.st_dev, info.st_ino) == (parent.st_dev, parent.st_ino) and
+                                identity(os.stat(name, dir_fd=named, follow_symlinks=False)) == original and
+                                not {"system.posix_acl_access", "system.posix_acl_default"}.intersection(os.listxattr(named)), "lock_busy")
+                    with open(f"/proc/self/fdinfo/{fd}", "rb") as stream:
+                        raw = stream.read(16_385)
+                    require(len(raw) <= 16_384, "lock_busy")
+                    records = [line.split() for line in raw.splitlines() if line.startswith(b"lock:")]
+                    device = f"{os.major(original[0]):02x}:{os.minor(original[0]):02x}:{original[1]}".encode()
+                    require(len(records) == 1 and len(records[0]) == 9 and
+                            records[0][2:] == [b"FLOCK", b"ADVISORY", b"WRITE", str(os.getpid()).encode(), device, b"0", b"EOF"],
+                            "lock_busy")
+
+                yield current
             finally:
                 os.close(fd)
 
@@ -964,9 +1013,11 @@ class Bootstrap:
         value = strict_json(raw, "base_compatibility")
         shape(value, ("arch", "artifactHostSuffixes", "bootstrapProtocolVersion", "glibc", "os", "protectedFiles",
                       "schema", "supportedManifestSchemas", "systemdMin", "uids"),
-              ("runtimeRollbackCacheVersion",), check="base_compatibility")
+              ("runtimeRollbackCacheVersion", "buildQualificationVersion"), check="base_compatibility")
         if "runtimeRollbackCacheVersion" in value:
             integer(value["runtimeRollbackCacheVersion"], 1, 1, "base_compatibility")
+        if "buildQualificationVersion" in value:
+            integer(value["buildQualificationVersion"], 1, 1, "base_compatibility")
         require(value["schema"] == "zeros.base-compatibility/v1" and value["arch"] == "x64" and
                 value["os"] == {"id": "ubuntu", "versionId": "24.04"} and value["glibc"] == "2.39" and
                 value["uids"] == {"agent": 10001, "capture": 10002, "engine": 10003, "coordinator": 10004} and
@@ -991,6 +1042,9 @@ class Bootstrap:
             require(sha(self.read(target, 2 * 1024 * 1024, mode_number(entry["mode"]))) == entry["sha256"], "base_compatibility")
         require({"/opt/zeros-bootstrap/stock-prerequisites.py", "/opt/zeros-bootstrap/stock-prerequisites.json"} <= seen,
                 "base_compatibility")
+        if value.get("buildQualificationVersion") == 1:
+            require({"/opt/zeros-bootstrap/computer-boot-integrity.py",
+                     "/opt/zeros-bootstrap/computer-build-qualification.py"} <= seen, "base_compatibility")
         stock = strict_json(self.read("/opt/zeros-bootstrap/stock-prerequisites.json", 128 * 1024, 0o444), "base_compatibility")
         shape(stock, ("schema", "packages", "binaries", "libraries", "apparmorCacheMode", "optionalSystemd"), check="base_compatibility")
         require(stock["schema"] == "zeros.stock-prerequisites/v1" and stock["apparmorCacheMode"] == "skip-read-write", "base_compatibility")
@@ -2112,18 +2166,47 @@ class Bootstrap:
         with self.performance.measure("total"):
             return self._install(encoded_input)
 
+    def build_qualification_module(self, expected_compatibility):
+        self.base()
+        require(self.compat_id == expected_compatibility and type(self.compat.get("buildQualificationVersion")) is int and
+                self.compat["buildQualificationVersion"] == 1, "base_compatibility")
+        sources = {}
+        for name in ("computer-boot-integrity.py", "computer-build-qualification.py"):
+            absolute = "/opt/zeros-bootstrap/" + name
+            entries = [entry for entry in self.compat["protectedFiles"] if entry["path"] == absolute]
+            require(len(entries) == 1 and entries[0]["mode"] == "0555", "base_compatibility")
+            raw = self.read(absolute, 2 * 1024 * 1024, 0o555)
+            require(sha(raw) == entries[0]["sha256"], "base_compatibility")
+            sources[name] = raw
+        companion = None
+        for name, raw in sources.items():
+            module = types.ModuleType("zeros_verified_" + name.removesuffix(".py").replace("-", "_"))
+            module.__file__ = str(self.path("/opt/zeros-bootstrap/" + name))
+            if companion is not None: module._verified_integrity = companion
+            exec(compile(raw, module.__file__, "exec"), module.__dict__)
+            companion = module
+        self.base()
+        require(self.compat_id == expected_compatibility, "base_compatibility")
+        return companion
+
     def _install(self, encoded_input):
         self.stage = "validate_input"
         with self.performance.measure("base"):
             self.base()
-            value = validate_input(encoded_input, self.compat, self.now())
+            value = validate_input(encoded_input, self.compat, self.now(), compat_id=self.compat_id)
+            selected, qualification = value.get("buildQualification"), None
+            if selected is not None and selected["mode"] == "build":
+                qualification = self.build_qualification_module(self.compat_id)
+                try: selected = qualification.validate_selection(selected)
+                except qualification.Failure:
+                    raise Failure("input_schema") from None
             self.layout()
         self.stage = "lock"
         # The SSH command owns setup.lock exactly once. This separate lock also
         # serializes boot reconciliation and direct root invocations.
         with contextlib.ExitStack() as locks:
             with self.performance.measure("install_lock"):
-                locks.enter_context(self.lock("runtime-install.lock"))
+                assert_install_current = locks.enter_context(self.lock("runtime-install.lock"))
             with self.performance.measure("persistence"):
                 self.require_persistence()
             if os.path.lexists(self.path(RECEIPTS + "/switch-intent.json")):
@@ -2163,7 +2246,15 @@ class Bootstrap:
                 try:
                     with self.performance.measure("helper"):
                         try:
-                            code, checks = self.host.setup(str(self.path(destination)), value["setup"])
+                            if qualification is None:
+                                code, checks = self.host.setup(str(self.path(destination)), value["setup"])
+                            else:
+                                try:
+                                    session = qualification.BuildVerifierSession(self, selected, descriptor, assert_current=assert_install_current)
+                                except qualification.Failure:
+                                    raise Failure("setup_exit") from None
+                                verifier = InstallerBuildVerifier(qualification, session)
+                                code, checks = self.host.setup(str(self.path(destination)), value["setup"], build_verifier=verifier)
                         finally:
                             self.setup_performance = getattr(self.host, "setup_performance", False) is True
                         if code != 0 or checks:
@@ -2440,10 +2531,29 @@ class SystemHost:
                 time.sleep(0.1)
         raise Failure("host_start")
 
-    def setup(self, root, payload):
+    def setup(self, root, payload, *, build_verifier=None):
         self.setup_performance = False
+        selected = {"build_verifier": build_verifier} if build_verifier is not None else {}
         return run_setup([root + "/bin/node", root + "/lib/zeros/setup-cloud-workspace.mjs", "--stdin"], payload,
-                         on_performance=lambda supported: setattr(self, "setup_performance", supported is True))
+                         on_performance=lambda supported: setattr(self, "setup_performance", supported is True),
+                         **selected)
+
+
+class InstallerBuildVerifier:
+    """Project the fixed helper's refusal into the existing installer result."""
+    def __init__(self, module, session):
+        self.module, self.session = module, session
+
+    def _call(self, method, *args):
+        try:
+            return method(*args)
+        except self.module.Failure as error:
+            timed_out = getattr(error, "timed_out", False) is True
+            raise Failure("setup_exit", code=124 if timed_out else 1, timed_out=timed_out) from None
+
+    def start(self, deadline, wall_deadline): return self._call(self.session.start, deadline, wall_deadline)
+    def verify(self, request): return self._call(self.session.verify, request)
+    def finish(self): return self._call(self.session.finish)
 
 
 def helper_performance_supported(raw, code):
@@ -2473,30 +2583,163 @@ def helper_performance_supported(raw, code):
         return False
 
 
-def run_setup(command, payload, timeout=1100, *, on_performance=None):
+class SelectedSetupSignals:
+    """Keep the original child/custody through repeated cancellation.
+
+    Signals during spawn are delivered after Popen returns its owned child;
+    during retirement they remain pending until descriptors are closed and the
+    child is joined. An unknown kernel wait retains the original ownership.
+    Legacy/full setup keeps its existing signal handling.
+    """
+    def __init__(self):
+        self.saved, self.pending, self.deferred, self.raised = {}, None, False, False
+
+    def interrupted(self, signum, _frame):
+        if self.pending is None:
+            self.pending = Failure("timeout" if signum == signal.SIGALRM else "process_signal",
+                code=124 if signum == signal.SIGALRM else 128 + signum, timed_out=signum == signal.SIGALRM)
+        if not self.deferred and not self.raised:
+            self.raised = True
+            raise self.pending
+
+    def resume(self):
+        self.deferred = False
+        if self.pending is not None:
+            self.raised = True
+            raise self.pending
+
+    def __enter__(self):
+        try:
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGALRM):
+                self.saved[sig] = signal.getsignal(sig)
+                signal.signal(sig, self.interrupted)
+            return self
+        except BaseException:
+            for sig, handler in self.saved.items(): signal.signal(sig, handler)
+            raise
+
+    def __exit__(self, kind, _value, _traceback):
+        self.deferred = True
+        for sig, handler in self.saved.items(): signal.signal(sig, handler)
+        if kind is None and self.pending is not None: raise self.pending
+
+
+def run_setup(command, payload, timeout=1100, *, on_performance=None, build_verifier=None):
+    # Keep preparation, every exchange and post-I/O acceptance within the
+    # original clocks. The private transport is absent for legacy/full setup.
+    deadline, wall_deadline = time.monotonic() + timeout, time.time() + timeout
+
+    def current():
+        if not (time.monotonic() < deadline and time.time() < wall_deadline):
+            raise Failure("timeout", code=124, timed_out=True)
+
+    with contextlib.ExitStack() as resources:
+        signals = resources.enter_context(SelectedSetupSignals()) if build_verifier is not None else None
+        selected_output = bytearray() if build_verifier is not None else None
+        with contextlib.ExitStack() as transport:
+            channel, client, initial = None, None, b""
+            environment, inherited = ENV, {}
+            if build_verifier is not None:
+                current()
+                initial = verifier_packed(build_verifier.start(deadline, wall_deadline)) + b"\n"
+                current()
+                require(len(initial) <= MAX_INPUT, "input_too_large")
+                channel, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+                transport.callback(channel.close)
+                transport.callback(client.close)
+                channel.setblocking(False)
+                environment = {**ENV, "ZEROS_BUILD_VERIFY_FD": str(client.fileno())}
+                inherited = {"pass_fds": (client.fileno(),)}
+            result = _run_setup(command, payload, deadline=deadline, current=current, on_performance=on_performance,
+                              build_verifier=build_verifier, channel=channel, client=client, initial=initial,
+                              environment=environment, inherited=inherited, signals=signals, selected_output=selected_output)
+        if build_verifier is not None and result[0] == 0:
+            # Child/group retirement and every transport close precede this
+            # final full check of the original lock, runtime and selected bytes.
+            # Keep cancellation guarded through verification; never run it while
+            # an earlier failure is unwinding or after pending cancellation.
+            if signals is not None: signals.resume()
+            current()
+            build_verifier.finish()
+            current()
+    if build_verifier is not None:
+        current()
+        if result[0] == 0 and selected_output:
+            sys.stdout.buffer.write(selected_output)
+            if selected_output[-1:] != b"\n": sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+    return result
+
+
+def verifier_packed(value):
+    # Q1a uses canonical UTF-8, including non-ASCII billing scopes. Preserve
+    # the legacy installer's own packed() serialization outside this channel.
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise Failure("input_schema") from None
+
+
+def _run_setup(command, payload, *, deadline, current, on_performance, build_verifier,
+               channel, client, initial, environment, inherited, signals, selected_output):
     """Preserve the legacy helper stdout bytes; its result belongs to the CP.
 
     The verified helper has no new diagnostic obligation. A complete negotiated
     v6 result opts into separate installer timers. Only its exit status affects
     the outer installer diagnostic; stderr is never forwarded.
     """
-    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             env=ENV, start_new_session=True)
+    child = None
     output_bytes, last_byte = 0, b""
     captured = bytearray() if on_performance is not None else None
     remaining = payload.encode("ascii")
-    deadline = time.monotonic() + timeout
+    outgoing, incoming, exchanges, channel_closed = initial, b"", 0, False
     try:
+        if signals is not None: signals.deferred = True
+        child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 env=environment, start_new_session=True, **inherited)
+        if client is not None: client.close()  # Only the child owns this endpoint.
+        if signals is not None: signals.resume()
         with selectors.DefaultSelector() as selector:
             os.set_blocking(child.stdin.fileno(), False)
             os.set_blocking(child.stdout.fileno(), False)
             selector.register(child.stdin, selectors.EVENT_WRITE)
             selector.register(child.stdout, selectors.EVENT_READ)
+            if channel is not None: selector.register(channel, selectors.EVENT_WRITE)
             while selector.get_map():
-                if time.monotonic() >= deadline:
-                    raise Failure("timeout", code=124, timed_out=True)
+                current()
                 for key, _ in selector.select(0.1):
-                    if key.fileobj == child.stdin:
+                    if key.fileobj == channel:
+                        if outgoing:
+                            try: sent = channel.send(outgoing[:8192])
+                            except BlockingIOError: continue
+                            require(sent > 0, "setup_exit")
+                            outgoing = outgoing[sent:]
+                            if not outgoing: selector.modify(channel, selectors.EVENT_READ)
+                        else:
+                            try: part = channel.recv(8192)
+                            except BlockingIOError: continue
+                            if not part:
+                                require(not incoming and exchanges > 0, "setup_exit")
+                                selector.unregister(channel)
+                                channel_closed = True
+                                continue
+                            incoming += part
+                            require(len(incoming) <= MAX_INPUT, "input_too_large")
+                            if b"\n" not in incoming: continue
+                            raw, extra = incoming.split(b"\n", 1)
+                            require(not extra and exchanges < 8, "input_schema")
+                            request = strict_json(raw, "input_schema")
+                            shape(request, ("selection", "runtime"))
+                            require(verifier_packed(request) == raw, "input_schema")
+                            current()
+                            result = build_verifier.verify(request)
+                            current()
+                            outgoing = verifier_packed(result) + b"\n"
+                            require(len(outgoing) <= 16 * 1024, "setup_exit")
+                            incoming = b""
+                            exchanges += 1
+                            selector.modify(channel, selectors.EVENT_WRITE)
+                    elif key.fileobj == child.stdin:
                         try:
                             count = os.write(child.stdin.fileno(), remaining[:8192])
                             remaining = remaining[count:]
@@ -2512,9 +2755,12 @@ def run_setup(command, payload, timeout=1100, *, on_performance=None):
                         if part:
                             if captured is not None:
                                 captured.extend(part)
-                            sys.stdout.buffer.write(part)
-                            sys.stdout.buffer.flush()
-                            last_byte = part[-1:]
+                            if selected_output is not None:
+                                selected_output.extend(part)
+                            else:
+                                sys.stdout.buffer.write(part)
+                                sys.stdout.buffer.flush()
+                                last_byte = part[-1:]
                         if not part:
                             selector.unregister(child.stdout)
                 if child.poll() is not None and child.stdin.closed is False:
@@ -2526,6 +2772,9 @@ def run_setup(command, payload, timeout=1100, *, on_performance=None):
                 raise Failure("timeout", code=124, timed_out=True) from None
         if code < 0:
             return 128 - code, ["process_signal"]
+        if build_verifier is not None:
+            require(code == 0 and exchanges > 0 and channel_closed, "setup_exit")
+            current()
         if captured is not None and helper_performance_supported(captured, code):
             try:
                 on_performance(True)
@@ -2535,15 +2784,17 @@ def run_setup(command, payload, timeout=1100, *, on_performance=None):
                 pass  # An optional observer cannot alter the helper result.
         return code, []
     finally:
+        if signals is not None: signals.deferred = True
         # The setup helper's descendants cannot outlive a failed/cancelled
         # transport. Workload cgroups are retired by the verified helper/host.
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.wait()
-        child.stdin.close()
-        child.stdout.close()
+        if child is not None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+            child.stdin.close()
+            child.stdout.close()
         if last_byte and last_byte != b"\n":
             # The legacy helper does not append a newline. Its exact output is
             # the prefix; this delimiter starts the final installer line.

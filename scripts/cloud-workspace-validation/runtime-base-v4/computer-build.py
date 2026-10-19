@@ -714,7 +714,7 @@ class ComputerBuild:
         snapshot["/usr/local/lib/systemd/system"] = {"qualifiedAbsence": optional_systemd()}
         return snapshot
 
-    def verify_tcb(self, value):
+    def verify_tcb(self, value, *, with_app=False):
         shape(value, ("schema", "buildId", "workerFence", "runtimeId", "baseCompatibilityId", "action"), ("protectedContractDigest",))
         job(value)
         require(value["schema"] == "zeros.computer-tcb-input/v1" and value["action"] in ("baseline", "verify"))
@@ -726,6 +726,9 @@ class ComputerBuild:
         require(type(protected) is list and 1 <= len(protected) <= 128, "tcb_modified")
         require({"/opt/zeros-bootstrap/bootstrap.py", "/opt/zeros-bootstrap/computer-build.py", "/opt/zeros-bootstrap/computer-git-askpass.py"}
                 <= {entry["path"] for entry in protected}, "tcb_modified")
+        if compatibility.get("buildQualificationVersion") == 1:
+            require({"/opt/zeros-bootstrap/computer-build-qualification.py", "/opt/zeros-bootstrap/computer-boot-integrity.py"}
+                    <= {entry["path"] for entry in protected}, "tcb_modified")
         for entry in protected:
             actual = self.snapshot(entry["path"])
             require(actual.get("sha256") == entry["sha256"] and actual["mode"] == int(entry["mode"], 8), "tcb_modified")
@@ -750,8 +753,32 @@ class ComputerBuild:
         digest = sha(packed({"baseCompatibilityId": value["baseCompatibilityId"], "runtimeId": value["runtimeId"],
                              "protected": self.protected_snapshot(value["buildId"], optional_systemd)}))
         if value["action"] == "verify": require(digest == value.get("protectedContractDigest"), "tcb_modified")
-        return {"schema": "zeros.computer-tcb/v1", "buildId": value["buildId"], "runtimeId": value["runtimeId"],
-                "baseCompatibilityId": value["baseCompatibilityId"], "protectedContractDigest": digest}
+        result = {"schema": "zeros.computer-tcb/v1", "buildId": value["buildId"], "runtimeId": value["runtimeId"],
+                  "baseCompatibilityId": value["baseCompatibilityId"], "protectedContractDigest": digest}
+        return (result, app) if with_app else result
+
+    def qualification_module(self, app, expected_compatibility):
+        # Reuse the fixed loader: compile the exact checked bytes of both
+        # helpers, without reopening either pathname for execution.
+        try:
+            return app.build_qualification_module(expected_compatibility)
+        except Failure:
+            raise
+        except Exception:
+            raise Failure("tcb_modified") from None
+
+    def qualify_build(self, value):
+        job(value)
+        checked = {"schema": "zeros.computer-tcb-input/v1", "buildId": value["buildId"], "workerFence": value["workerFence"],
+                   "runtimeId": value["runtime"]["runtimeId"], "baseCompatibilityId": value["base"]["baseCompatibilityId"],
+                   "protectedContractDigest": value["protectedContractSha256"], "action": "verify"}
+        _result, app = self.verify_tcb(checked, with_app=True)
+        require(type(app.compat.get("buildQualificationVersion")) is int and app.compat["buildQualificationVersion"] == 1, "tcb_modified")
+        module = self.qualification_module(app, value["base"]["baseCompatibilityId"])
+        try:
+            return module.produce_build(app, value, verify_tcb=lambda: self.verify_tcb(checked), command=bounded_command)
+        except module.Failure:
+            raise Failure("tcb_modified") from None
 
     def empty_path(self, path, *, kind=None, create=False, mode=0o600, expected=None, keep=()):
         """Persist an empty replacement; deletion may retain ancestor bytes.
@@ -875,37 +902,68 @@ class ComputerBuild:
         self.empty_path("/var/lib/systemd/timesync/clock", kind="file", create=True, mode=0o644)
 
     def sanitize(self, value):
-        shape(value, ("schema", "buildId", "workerFence", "manifest", "manifestSha256"))
+        value = strict_json(packed(value))
+        shape(value, ("schema", "buildId", "workerFence", "manifest", "manifestSha256"), ("qualification",))
         job(value)
         require(value["schema"] == "zeros.computer-sanitation-input/v1")
         manifest = value["manifest"]
         shape(manifest, ("schema", "buildId", "configId", "baseImageId", "runtimeId", "baseCompatibilityId", "repositoryManifest", "protectedContractDigest"))
         require(manifest["schema"] == "zeros.computer-template/v1" and manifest["buildId"] == value["buildId"]
                 and sha(packed(manifest)) == value["manifestSha256"], "sanitation_failed")
-        self.verify_tcb({"schema": "zeros.computer-tcb-input/v1", **{key: value[key] for key in ("buildId", "workerFence")},
+        _result, app = self.verify_tcb({"schema": "zeros.computer-tcb-input/v1", **{key: value[key] for key in ("buildId", "workerFence")},
                          "runtimeId": manifest["runtimeId"], "baseCompatibilityId": manifest["baseCompatibilityId"],
-                         "action": "verify", "protectedContractDigest": manifest["protectedContractDigest"]})
-        require(type(manifest["repositoryManifest"]) is list and len(manifest["repositoryManifest"]) <= 20)
-        if manifest["repositoryManifest"]: self.repository_parent("/srv/zeros/files/repos")
-        for repository in manifest["repositoryManifest"]:
-            shape(repository, ("id", "owner", "name", "sha"))
-            target = self.path(self.repository_identity(repository))
-            self.repository_parent("/srv/zeros/files/repos/" + repository["owner"])
-            require(self.verify_repository(target, repository) == repository, "repository_metadata")
-        self.host.stop_host()
-        self.host.sync_journal()
-        self.empty_private_state()
-        machine = self.path("/etc/machine-id")
-        if machine.exists():
-            require(not machine.is_symlink(), "sanitation_failed")
-            atomic(machine, b"", 0o444)
-        dbus_machine = self.path("/var/lib/dbus/machine-id")
-        if dbus_machine.exists() and not dbus_machine.is_symlink(): atomic(dbus_machine, b"", 0o444)
-        # Runtime receipts and provider-managed OS SSH identity are retained:
-        # bootstrap and Boat own their next-boot validation/regeneration.
-        directory = self.directory("/srv/zeros")
-        atomic(directory / "computer-template.json", packed(manifest), 0o444)
-        os.sync()
+                         "action": "verify", "protectedContractDigest": manifest["protectedContractDigest"]}, with_app=True)
+        compatibility = app.compat
+        qualification = None
+        if compatibility.get("buildQualificationVersion") == 1:
+            qualification = self.qualification_module(app, manifest["baseCompatibilityId"])
+        require(qualification is not None or "qualification" not in value, "sanitation_failed")
+
+        @contextlib.contextmanager
+        def preserved():
+            if qualification is None:
+                yield
+                return
+            try:
+                store = qualification.QualificationStore(self.root, uid=self.uid, gid=self.gid)
+                if "qualification" not in value:
+                    with store.opened(value["buildId"], allow_absent=True) as (directory, _created, _check):
+                        require(directory is None, "sanitation_failed")
+                        yield
+                    return
+                shape(value["qualification"], ("evidenceSha256",))
+                # Retain the original three files and their ancestry across
+                # cleanup, template publication and sync. Equal replacement
+                # bytes are not the original acknowledged evidence.
+                with store.verified(value["buildId"], value["qualification"]["evidenceSha256"]) as values:
+                    qualification.validate_preserved(values, manifest, value["manifestSha256"])
+                    yield
+                    qualification.validate_preserved(values, manifest, value["manifestSha256"])
+            except qualification.Failure:
+                raise Failure("sanitation_failed") from None
+
+        with preserved():
+            require(type(manifest["repositoryManifest"]) is list and len(manifest["repositoryManifest"]) <= 20)
+            if manifest["repositoryManifest"]: self.repository_parent("/srv/zeros/files/repos")
+            for repository in manifest["repositoryManifest"]:
+                shape(repository, ("id", "owner", "name", "sha"))
+                target = self.path(self.repository_identity(repository))
+                self.repository_parent("/srv/zeros/files/repos/" + repository["owner"])
+                require(self.verify_repository(target, repository) == repository, "repository_metadata")
+            self.host.stop_host()
+            self.host.sync_journal()
+            self.empty_private_state()
+            machine = self.path("/etc/machine-id")
+            if machine.exists():
+                require(not machine.is_symlink(), "sanitation_failed")
+                atomic(machine, b"", 0o444)
+            dbus_machine = self.path("/var/lib/dbus/machine-id")
+            if dbus_machine.exists() and not dbus_machine.is_symlink(): atomic(dbus_machine, b"", 0o444)
+            # Runtime receipts and provider-managed OS SSH identity are retained:
+            # bootstrap and Boat own their next-boot validation/regeneration.
+            directory = self.directory("/srv/zeros")
+            atomic(directory / "computer-template.json", packed(manifest), 0o444)
+            os.sync()
         return {"schema": "zeros.computer-sanitation/v1", "buildId": value["buildId"], "clean": True, "manifestSha256": value["manifestSha256"]}
 
 
@@ -917,7 +975,7 @@ def main():
             stage = "install"
             ComputerBuild().install_shell()
             raise Failure("install_exit")
-        stages = {"clone-repos": "repositories", "run-install": "install", "verify-tcb": "integrity", "sanitize": "sanitation"}
+        stages = {"clone-repos": "repositories", "run-install": "install", "verify-tcb": "integrity", "qualify-build": "integrity", "sanitize": "sanitation"}
         require(sys.argv[1] in stages)
         stage = stages[sys.argv[1]]
         os.umask(0o077)

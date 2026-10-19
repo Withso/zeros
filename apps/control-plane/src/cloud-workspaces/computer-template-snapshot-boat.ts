@@ -13,14 +13,20 @@ const snapshotSchema = z.object({
 });
 export type ComputerNamedSnapshot = z.infer<typeof snapshotSchema>;
 export type ComputerSnapshotIdentity = Pick<ComputerNamedSnapshot, "name" | "sourceSandboxId"> & { snapshotId: string };
+const savedQualificationSchema = z.object({
+  buildId: z.string().uuid(), evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  evidenceBytes: z.number().int().positive().max(65_536),
+}).strict();
+export type ComputerSavedQualification = z.infer<typeof savedQualificationSchema>;
 export type ComputerSavedTreeProof = {
   schema: "zeros.computer-saved-tree/v1"; snapshotId: string; sourceSandboxId: string; treeSha256: string; entryCount: number;
+  qualification?: ComputerSavedQualification;
 };
 export interface ComputerTemplateSnapshotProvider {
   assertStopped(sandboxId: string): Promise<void>;
   get(name: string): Promise<ComputerNamedSnapshot | null>;
   save(sandboxId: string, name: string): Promise<void>;
-  prove(snapshot: ComputerSnapshotIdentity): Promise<ComputerSavedTreeProof>;
+  prove(snapshot: ComputerSnapshotIdentity, qualification?: ComputerSavedQualification): Promise<ComputerSavedTreeProof>;
   remove(snapshot: ComputerSnapshotIdentity): Promise<boolean>;
 }
 
@@ -46,12 +52,26 @@ const emptyFiles = ["__system__/srv/zeros/managed-settings/settings.managed.toml
 // Sanitation retains only repos beneath files. Prove both the logical mount
 // and native backing tree, including old private projections beside repos.
 const filesRoots = ["__system__/srv/zeros/files", ".zeros-persist/files"];
+const qualificationsRoot = "__system__/srv/zeros/runtime-installs/build-qualifications";
 const below = (path: string, root: string) => path === root || path.startsWith(`${root}/`);
+function requiredQualification(value: ComputerSavedQualification | undefined): ComputerSavedQualification | undefined {
+  if (value === undefined) return undefined;
+  const parsed = savedQualificationSchema.safeParse(value);
+  if (!parsed.success) templateCaptureInvalid();
+  return parsed.data;
+}
 
 /** Only metadata is read. The closed receipt contains no paths or file bytes.
  * Completeness, normalized paths and directory ancestry prevent an alias from
  * making a credential-bearing saved tree look empty. */
-export function verifyComputerTemplateSavedTree(value: unknown, snapshot: ComputerSnapshotIdentity): ComputerSavedTreeProof {
+export function verifyComputerTemplateSavedTree(value: unknown, snapshot: ComputerSnapshotIdentity,
+  required?: ComputerSavedQualification): ComputerSavedTreeProof {
+  const qualification = requiredQualification(required);
+  const recordRoot = qualification ? `${qualificationsRoot}/${qualification.buildId}` : null;
+  // The private inventory includes the complete Python/system closure; the
+  // public evidence and report retain their separate 64 KiB bounds.
+  const records = new Map(recordRoot ? [[`${recordRoot}/integrity.json`, 8_388_608],
+    [`${recordRoot}/evidence.json`, qualification!.evidenceBytes], [`${recordRoot}/report.json`, 65_536]] : []);
   const parsed = z.object({
     ok: z.literal(true), type: z.literal("snapshot.tree"), snapshotId: z.literal(snapshot.snapshotId),
     sandboxId: z.literal(snapshot.sourceSandboxId), treeAvailable: z.literal(true), truncated: z.literal(false),
@@ -68,7 +88,7 @@ export function verifyComputerTemplateSavedTree(value: unknown, snapshot: Comput
       templateCaptureInvalid();
     entries.set(entry.path, entry);
   }
-  const protectedPaths = [...emptyRoots, ...emptyFiles, ...filesRoots,
+  const protectedPaths = [...emptyRoots, ...emptyFiles, ...filesRoots, qualificationsRoot,
     ...["", "__system__/root/"].flatMap(home => privateHome.map(root => home + root))];
   for (const entry of entries.values()) {
     // An aliased parent can conceal private contents even when the listing
@@ -79,6 +99,15 @@ export function verifyComputerTemplateSavedTree(value: unknown, snapshot: Comput
       parent = parent.slice(0, parent.lastIndexOf("/"));
       const ancestor = entries.get(parent);
       if (ancestor && ancestor.kind !== "dir") templateCaptureInvalid();
+    }
+    if (below(entry.path, qualificationsRoot)) {
+      if (entry.path === qualificationsRoot || entry.path === recordRoot) {
+        if (entry.kind !== "dir") templateCaptureInvalid();
+      } else {
+        const limit = records.get(entry.path);
+        if (!limit || entry.kind !== "file" || !entry.size || entry.size > limit ||
+          (entry.path.endsWith("/evidence.json") && entry.size !== qualification?.evidenceBytes)) templateCaptureInvalid();
+      }
     }
     const privatePath = ["", "__system__/root/"].some(home => {
       const relative = entry.path.startsWith(home) ? entry.path.slice(home.length) : null;
@@ -91,11 +120,15 @@ export function verifyComputerTemplateSavedTree(value: unknown, snapshot: Comput
   }
   const manifest = entries.get("__system__/srv/zeros/computer-template.json");
   if (manifest?.kind !== "file" || !manifest.size) templateCaptureInvalid();
+  if ([...records.keys()].some(path => !entries.has(path))) templateCaptureInvalid();
   const hash = createHash("sha256");
   for (const entry of [...entries.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     hash.update(JSON.stringify([entry.path, entry.kind, entry.size ?? null]) + "\n");
   return { schema: "zeros.computer-saved-tree/v1", snapshotId: snapshot.snapshotId,
-    sourceSandboxId: snapshot.sourceSandboxId, treeSha256: hash.digest("hex"), entryCount: entries.size };
+    sourceSandboxId: snapshot.sourceSandboxId, treeSha256: hash.digest("hex"), entryCount: entries.size,
+    // This echoes the CP requirement after proving presence/kind/size. Tree
+    // metadata cannot measure file hashes; the base verifies all bytes on boot.
+    ...(qualification ? { qualification } : {}) };
 }
 
 export class BoatComputerTemplateSnapshots implements ComputerTemplateSnapshotProvider {
@@ -136,11 +169,12 @@ export class BoatComputerTemplateSnapshots implements ComputerTemplateSnapshotPr
       templateCaptureInvalid();
   }
 
-  async prove(snapshot: ComputerSnapshotIdentity): Promise<ComputerSavedTreeProof> {
+  async prove(snapshot: ComputerSnapshotIdentity, required?: ComputerSavedQualification): Promise<ComputerSavedTreeProof> {
+    const qualification = requiredQualification(required);
     if (!snapshotSchema.safeParse({ ...snapshot, status: "ready" }).success ||
         !isComputerTemplateSnapshotName(snapshot.name, this.channel)) templateCaptureInvalid();
     const tree = await this.client.request(`/snapshots/${snapshot.snapshotId}/tree`, { timeoutMs: 60_000, maxResponseBytes: 64 * 1024 * 1024 });
-    const proof = verifyComputerTemplateSavedTree(tree, snapshot);
+    const proof = verifyComputerTemplateSavedTree(tree, snapshot, qualification);
     // Re-read the name after proof. A switched alias cannot inherit evidence
     // belonging to the snapshot that used to occupy it.
     const current = await this.get(snapshot.name);

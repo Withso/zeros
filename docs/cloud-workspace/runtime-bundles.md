@@ -591,11 +591,15 @@ diagnostic; failure emits only the diagnostic. Raw probe output is never part of
 the report. The report contains fixed results, check names, policy hashes,
 runtime witness and qualification time.
 
-This mode has no production caller yet. It is not a launch proof or registry
-approval and does not skip workspace qualification. Build evidence reuse still
-requires protected base integrity and kernel evidence, a fenced control-plane
-checkpoint, exact successful sanitation and saved-tree binding, and the
-`build_qualification` rollout gate. Default self-test behavior is unchanged.
+The base-owned Computer producer calls this mode only with the
+`build_qualification` organization flag and matching explicit base/runtime
+support. It binds protected base integrity and kernel evidence to the fenced
+control-plane checkpoint, successful sanitation and exact saved-tree proof.
+This is not a launch proof or registry approval; workspace qualification and
+default self-test behavior are unchanged. The separate future boot-reader
+offer `lib/zeros/build-boot-support.json` is not produced by this slice. The
+base's fixed verifier transport is described in the
+[base contract](../../scripts/cloud-workspace-validation/runtime-base-v4/README.md#build-qualification-and-fixed-verifier-transport).
 
 Approval happens only after confirmed VM deletion. Success inserts the five
 credential-kind rows (`claude-setup-token`, `codex-chatgpt`, `cursor-api-key`,

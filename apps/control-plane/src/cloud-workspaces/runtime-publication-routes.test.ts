@@ -415,6 +415,49 @@ describe("runtime publication HTTP boundaries", () => {
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])("accepts an explicit build-qualification base offer (parsed echo: %s)", async echo => {
+    const { app, pool } = harness();
+    const value = { ...compatibility, buildQualificationVersion: 1 };
+    expect(BaseCompatibilitySchema.safeParse(value).success).toBe(true);
+    const raw = Buffer.from(JSON.stringify(value));
+    vi.mocked(pool.connect).mockRejectedValue(new HttpError(503, "database_test_barrier", "Test database boundary"));
+    const response = await post(app, RUNTIME_BASE_REGISTRATION_PATH, {
+      ...baseBody, compatibilityRawB64: raw.toString("base64"),
+      compatibilitySha256: createHash("sha256").update(raw).digest("hex"), ...(echo ? { compatibility: value } : {}),
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: { code: "database_test_barrier" } });
+    expect(pool.connect).toHaveBeenCalledOnce();
+  });
+
+  it.each([0, 2, true, "1", null, {}])("refuses an unsupported build-qualification version before database work: %j", async version => {
+    const { app, pool } = harness();
+    const value = { ...compatibility, buildQualificationVersion: version };
+    expect(BaseCompatibilitySchema.safeParse(value).success).toBe(false);
+    const raw = Buffer.from(JSON.stringify(value));
+    for (const echo of [false, true]) {
+      const response = await post(app, RUNTIME_BASE_REGISTRATION_PATH, {
+        ...baseBody, compatibilityRawB64: raw.toString("base64"),
+        compatibilitySha256: createHash("sha256").update(raw).digest("hex"), ...(echo ? { compatibility: value } : {}),
+      });
+      expect(response.status).toBe(422);
+    }
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it("keeps the build-qualification offer in raw digest and parsed echo identity checks", async () => {
+    const { app, pool } = harness();
+    const raw = Buffer.from(JSON.stringify({ ...compatibility, buildQualificationVersion: 1 }));
+    const body = { ...baseBody, compatibilityRawB64: raw.toString("base64"),
+      compatibilitySha256: createHash("sha256").update(raw).digest("hex") };
+    const mismatch = await post(app, RUNTIME_BASE_REGISTRATION_PATH, { ...body, compatibility });
+    expect(mismatch.status).toBe(409);
+    const wrongDigest = await post(app, RUNTIME_BASE_REGISTRATION_PATH, { ...body, compatibilitySha256: "d".repeat(64) });
+    expect(wrongDigest.status).toBe(422);
+    expect(await wrongDigest.json()).toEqual({ error: { code: "base_compatibility_digest_mismatch" } });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
   it("rejects a parsed compatibility echo that differs from the digest-bound bytes", async () => {
     const { app, pool } = harness();
     const response = await post(app, RUNTIME_BASE_REGISTRATION_PATH, {

@@ -6,7 +6,10 @@ import { lockCloudComputerOrganization } from "./computer-identity.js";
 import { computerTemplateSnapshotName, isComputerTemplateSnapshotName, type ComputerSnapshotChannel } from "./computer-template-name.js";
 import { computerTemplateWorkspaceReferences } from "./computer-template-retention.js";
 import { templateCaptureInvalid, type ComputerNamedSnapshot, type ComputerSnapshotIdentity,
-  type ComputerTemplateSnapshotProvider } from "./computer-template-snapshot-boat.js";
+  type ComputerTemplateSnapshotProvider, type ComputerSavedQualification } from "./computer-template-snapshot-boat.js";
+import { canonicalBuildQualification } from "./computer-build-qualification-contract.js";
+import { readComputerBuildQualificationCheckpoint } from "./computer-build-qualifications.js";
+import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 
 export const COMPUTER_SNAPSHOT_MIGRATION_ACTION = "cloud_computer.named_snapshot_migration_requested";
 export type ComputerSnapshotCapture = {
@@ -25,7 +28,7 @@ type SnapshotRow = {
   tree_sha256: Buffer | null; verified_at: Date | null;
 };
 type Template = {
-  build_id: string; org_id: string; org_slug: string; is_personal: boolean; lifecycle_status: string;
+  build_id: string; config_id: string; org_id: string; org_slug: string; is_personal: boolean; lifecycle_status: string;
   version: string; build_state: string; template_state: string; worker_fence: string;
   cancelled: boolean; deadline_at: Date | null; provider_resource_id: string | null;
   account_scope: string | null; billing_org: string | null; manifest_sha256: Buffer | null; stopped_at: Date | null;
@@ -38,6 +41,9 @@ const receipt = (row: SnapshotRow): ComputerSnapshotReceipt => {
   if (row.state !== "ready" || !row.tree_sha256 || !row.verified_at) templateCaptureInvalid();
   return { ...identity(row), imageRef: row.image_ref, treeSha256: row.tree_sha256.toString("hex") };
 };
+function sameQualification(left?: ComputerSavedQualification, right?: ComputerSavedQualification): boolean {
+  return left?.buildId === right?.buildId && left?.evidenceSha256 === right?.evidenceSha256 && left?.evidenceBytes === right?.evidenceBytes;
+}
 
 /** Provider I/O always occurs outside transactions. Publication, source
  * selection, activation and retirement share the Organization/head lock. */
@@ -46,6 +52,7 @@ export class ComputerTemplateSnapshots implements ComputerTemplateSnapshotLifecy
   private readonly wait: (ms: number) => Promise<void>;
   constructor(private readonly pool: pg.Pool, private readonly options: {
     provider: ComputerTemplateSnapshotProvider; channel: ComputerSnapshotChannel; accountScope: string; billingOrg: string;
+    qualificationMode?: CloudRuntimeQualificationMode;
     pollMs?: number; now?: () => number; wait?: (ms: number) => Promise<void>; logger?: Pick<Console, "warn">;
   }) {
     this.now = options.now ?? Date.now;
@@ -59,7 +66,7 @@ export class ComputerTemplateSnapshots implements ComputerTemplateSnapshotLifecy
     await lockCloudComputerOrganization(tx, scope.org_id);
     await tx.query("SELECT org_id FROM cloud_computer_v2_heads WHERE org_id=$1 FOR UPDATE", [scope.org_id]);
     const template = (await tx.query<Template>(`SELECT template.build_id,template.org_id,org.slug AS org_slug,org.is_personal,org.lifecycle_status,
-      build.version,build.state AS build_state,template.state AS template_state,build.worker_fence,build.deadline_at,
+      build.config_id,build.version,build.state AS build_state,template.state AS template_state,build.worker_fence,build.deadline_at,
       build.cancel_requested_at IS NOT NULL AS cancelled,template.provider_resource_id,template.account_scope,template.billing_org,
       template.manifest_sha256,template.stopped_at FROM cloud_computer_templates template
       JOIN cloud_computer_v2_builds build ON build.id=template.build_id AND build.org_id=template.org_id
@@ -108,12 +115,22 @@ export class ComputerTemplateSnapshots implements ComputerTemplateSnapshotLifecy
     const deadline = Date.parse(input.deadlineAt);
     if (!Number.isFinite(deadline) || deadline <= this.now()) templateCaptureInvalid();
   }
+  private async qualification(tx: Tx, input: ComputerSnapshotCapture, template: Template): Promise<ComputerSavedQualification | undefined> {
+    const saved = await readComputerBuildQualificationCheckpoint(tx, { organizationId: template.org_id, buildId: input.buildId,
+      configId: template.config_id, provider: "boat", channel: this.options.channel, accountScope: this.options.accountScope,
+      billingOrg: this.options.billingOrg, manifestSha256: template.manifest_sha256!.toString("hex"),
+      ...(input.workerFence !== undefined ? { workerFence: input.workerFence } : {}),
+      qualificationMode: this.options.qualificationMode ?? "full" });
+    return saved ? { buildId: input.buildId, evidenceSha256: saved.evidenceSha256,
+      evidenceBytes: Buffer.byteLength(canonicalBuildQualification(saved.evidence)) } : undefined;
+  }
   private async check(input: ComputerSnapshotCapture): Promise<SnapshotRow> {
     this.bound(input);
     await input.guard?.();
     return withSystemTx(this.pool, async tx => {
       const template = await this.locked(tx, input.buildId);
       await this.authority(tx, input, template);
+      await this.qualification(tx, input, template);
       const row = await this.row(tx, input.buildId);
       if (!row || !["prepared", "saving", "ready"].includes(row.state) || row.source_sandbox_id !== template.provider_resource_id ||
           !row.manifest_sha256.equals(template.manifest_sha256!)) templateCaptureInvalid();
@@ -169,15 +186,21 @@ export class ComputerTemplateSnapshots implements ComputerTemplateSnapshotLifecy
         if (saved.snapshotId) row = await this.bind(row, saved);
         if (saved.status === "ready") {
           if (!saved.snapshotId || !saved.sizeBytes) templateCaptureInvalid();
-          const proof = await provider.prove(identity(row));
+          const required = await withSystemTx(this.pool, async tx => {
+            const template = await this.locked(tx, input.buildId);
+            await this.authority(tx, input, template);
+            return this.qualification(tx, input, template);
+          });
+          const proof = required ? await provider.prove(identity(row), required) : await provider.prove(identity(row));
           if (proof.schema !== "zeros.computer-saved-tree/v1" || proof.snapshotId !== row.snapshot_id ||
               proof.sourceSandboxId !== row.source_sandbox_id || !/^[a-f0-9]{64}$/.test(proof.treeSha256) ||
-              !Number.isSafeInteger(proof.entryCount) || proof.entryCount < 1) templateCaptureInvalid();
+              !Number.isSafeInteger(proof.entryCount) || proof.entryCount < 1 || !sameQualification(required, proof.qualification)) templateCaptureInvalid();
           await provider.assertStopped(row.source_sandbox_id);
           await this.check(input);
           return withSystemTx(this.pool, async tx => {
             const template = await this.locked(tx, input.buildId);
             await this.authority(tx, input, template);
+            if (!sameQualification(required, await this.qualification(tx, input, template))) templateCaptureInvalid();
             const current = await this.row(tx, input.buildId);
             if (!current || current.snapshot_id !== proof.snapshotId || !["saving", "ready"].includes(current.state)) templateCaptureInvalid();
             if (current.state === "ready") return receipt(current);

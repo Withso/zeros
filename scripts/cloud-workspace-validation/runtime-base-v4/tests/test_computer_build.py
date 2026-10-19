@@ -88,6 +88,8 @@ mount_spec.loader.exec_module(mounts)
 Failure = source.Failure
 class Bootstrap(source.Bootstrap):
     def base(self):
+        raw = self.read('/opt/zeros-bootstrap/compatibility.json', 262144, 0o444)
+        self.compat, self.compat_id = source.strict_json(raw, 'base_compatibility'), 'bc1-' + source.sha(raw)
         self.mounts = mounts.NativeMounts(self.root)
         stock = source.strict_json(self.read('/opt/zeros-bootstrap/stock-prerequisites.json', 131072, 0o444), 'base_compatibility')
         self.optional_systemd_policy = stock['optionalSystemd']

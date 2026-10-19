@@ -259,6 +259,11 @@ class BootstrapTests(unittest.TestCase):
             (bootstrap / name).write_bytes(raw)
             (bootstrap / name).chmod(0o444)
             compat["protectedFiles"].append({"path": "/opt/zeros-bootstrap/" + name, "mode": "0444", "sha256": digest(raw)})
+        for name in ("computer-boot-integrity.py", "computer-build-qualification.py"):
+            raw = (HERE.parent / name).read_bytes()
+            (bootstrap / name).write_bytes(raw)
+            (bootstrap / name).chmod(0o555)
+            compat["protectedFiles"].append({"path": "/opt/zeros-bootstrap/" + name, "mode": "0555", "sha256": digest(raw)})
         (bootstrap / "compatibility.json").write_bytes(canonical(compat))
         (bootstrap / "compatibility.json").chmod(0o444)
         self.app.boot()
@@ -290,6 +295,45 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual((self.root / "opt/zeros/disk-epoch").read_text(), "1\n")
         self.app.boot()
         self.assertEqual((self.root / "opt/zeros/disk-epoch").read_text(), "1\n")
+
+    def write_compatibility(self, value):
+        target = self.root / "opt/zeros-bootstrap/compatibility.json"
+        target.chmod(0o600)
+        target.write_bytes(canonical(value))
+        target.chmod(0o444)
+
+    def test_build_qualification_base_accepts_only_the_explicit_supported_version(self):
+        value = json.loads((self.root / "opt/zeros-bootstrap/compatibility.json").read_bytes())
+        value["buildQualificationVersion"] = 1
+        self.write_compatibility(value)
+        self.app.base()
+        self.assertEqual(self.app.compat["buildQualificationVersion"], 1)
+        for version in (True, False, 0, 2, "1", None):
+            with self.subTest(version=version):
+                value["buildQualificationVersion"] = version
+                self.write_compatibility(value)
+                with self.assertRaises(b.Failure): self.app.base()
+
+    def test_build_qualification_base_requires_both_helpers_in_the_verified_inventory(self):
+        value = json.loads((self.root / "opt/zeros-bootstrap/compatibility.json").read_bytes())
+        value["buildQualificationVersion"] = 1
+        self.write_compatibility(value)
+        self.app.base()
+        for name in ("computer-boot-integrity.py", "computer-build-qualification.py"):
+            with self.subTest(helper=name):
+                changed = {**value, "protectedFiles": [entry for entry in value["protectedFiles"]
+                    if entry["path"] != "/opt/zeros-bootstrap/" + name]}
+                self.write_compatibility(changed)
+                with self.assertRaises(b.Failure): self.app.base()
+
+    def test_legacy_base_does_not_require_build_qualification_helpers(self):
+        value = json.loads((self.root / "opt/zeros-bootstrap/compatibility.json").read_bytes())
+        value.pop("buildQualificationVersion", None)
+        value["protectedFiles"] = [entry for entry in value["protectedFiles"] if entry["path"] not in {
+            "/opt/zeros-bootstrap/computer-boot-integrity.py", "/opt/zeros-bootstrap/computer-build-qualification.py"}]
+        self.write_compatibility(value)
+        self.app.base()
+        self.assertNotIn("buildQualificationVersion", self.app.compat)
 
     def test_sanitized_empty_markers_boot_once_and_publish_a_fresh_descriptor(self):
         for name in ("/opt/zeros/disk-epoch", "/opt/zeros/sessions/boot.json", b.ACTIVE):

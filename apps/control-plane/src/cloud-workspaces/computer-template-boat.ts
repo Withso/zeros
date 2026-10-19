@@ -85,7 +85,7 @@ export function createComputerTemplateBoatAdapters(input: {
   };
   const snapshots = new ComputerTemplateSnapshots(input.pool, {
     provider: new BoatComputerTemplateSnapshots(input.client, input.billingOrg, input.deploymentChannel), channel: input.deploymentChannel,
-    accountScope: input.accountScope, billingOrg: input.billingOrg,
+    accountScope: input.accountScope, billingOrg: input.billingOrg, qualificationMode: input.qualificationMode,
   });
   return { operations, vms, runtime, snapshots };
 }

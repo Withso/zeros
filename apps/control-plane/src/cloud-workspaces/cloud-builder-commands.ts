@@ -17,11 +17,12 @@ export const COMPUTER_TEMPLATE_FIXED_COMMANDS = {
   "computer:clone-repos": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py clone-repos",
   "computer:run-install": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py run-install",
   "computer:verify-tcb": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py verify-tcb",
+  "computer:qualify-build": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py qualify-build",
   "computer:sanitize": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py sanitize",
 } as const;
 const computerStages = {
   "computer:clone-repos": "repositories", "computer:run-install": "install",
-  "computer:verify-tcb": "integrity", "computer:sanitize": "sanitation",
+  "computer:verify-tcb": "integrity", "computer:qualify-build": "integrity", "computer:sanitize": "sanitation",
 } as const;
 const computerChecks = new Set([
   "input_schema", "input_too_large", "file_metadata", "repository_metadata", "repository_clone_failed",

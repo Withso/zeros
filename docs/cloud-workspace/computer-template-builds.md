@@ -60,12 +60,35 @@ rows. Normal deletion is refused; the existing organization eraser cascades
 through the template only under its exact live purge lease. Historical
 identities remain available for cleanup until that erasure.
 
-This slice has no production writer or selector. Creates and wakes still run
-full qualification, and Local and organization-local workspaces are unchanged.
-Activation requires separately reviewed build production, fresh per-boot
-integrity/identity/custody and single-use proof checks, final admission/revocation
-wiring, and exact runtime/base qualification. It does not enable agent runners
-or detached turns.
+The template worker can produce this evidence only with the organization flag
+enabled and a registered base advertising `buildQualificationVersion:1`. The
+base producer requires the manifest-bound runtime offer
+`lib/zeros/build-qualification-support.json` at version 1. It runs the complete
+build self-test, hashes the fixed protected system/Python dependency closure,
+and measures the running kernel. Every dependency command and acceptance shares
+the original wall and monotonic build deadline. It retains full runtime hashing.
+Absent support selects the ordinary full self-test; malformed present support
+refuses. The worker reads an already acknowledged checkpoint before checking
+flags, so a handoff or rollout change cannot replace recorded evidence with an
+absence or repeat the producer.
+
+Sanitation retains the original three root-owned qualification files through
+private cleanup and sync. The saved-tree proof requires exactly those bounded
+records for the acknowledged build and rejects extra, missing or aliased
+records. `integrity.json` is private and bounded at 8 MiB; evidence and report
+remain bounded at 64 KiB each. The stable inventory has at most 16,384 entries
+and consumes at most 1 GiB of file reads per capture, without truncation. Only
+the exact `/usr/local` and `/usr/local/lib` directory ancestors may use the
+provider pair from the base's sealed stock policy; deeper selected files and
+directories remain root-owned. Fresh ACL, identity and byte checks still apply.
+
+Creates and wakes still run full qualification. The fixed base verifier
+transport is installed for a later reader, but this slice emits no boot-reader
+offer, selects no build mode for workspace setup, and changes no runtime launch
+code. Activation requires fresh per-boot integrity/identity/custody and
+single-use proof checks, final admission/revocation wiring, and exact
+runtime/base qualification. Local and organization-local workspaces, owner
+switching, agent runners and detached turns are unchanged.
 
 ## Worker and durable authority
 
@@ -204,27 +227,33 @@ base contract and does not affect Local or organization-local workspaces.
 
 ## Base-owned helpers
 
-Both Python helpers belong to the approved base, not the replaceable runtime:
+The fixed Python helpers belong to the approved base:
 
 - `runtime-base-v4/computer-build.py`: clone, recipe, integrity and sanitation.
 - `runtime-base-v4/computer-git-askpass.py`: fixed credential socket client.
+- `runtime-base-v4/computer-boot-integrity.py`: bounded protected bytes and
+  running-kernel measurement.
+- `runtime-base-v4/computer-build-qualification.py`: immutable evidence producer,
+  preservation and selected-evidence verification.
 
 B4 must install them root:root, mode 0555 under `/opt/zeros-bootstrap`, and put
 their hashes/modes in the canonical `compatibility.json.protectedFiles` list
-before registering the base. The verifier rejects a base missing either helper.
+before registering the base. The verifier requires both original helpers and,
+when version 1 is advertised, both qualification helpers.
 The base compatibility digest is checked against the registry pin before
 importing `bootstrap.py`; the bootstrap verifies the installed manifest/tree
 and receipt. A manifest rewritten by a recipe does not become its own authority.
 This is the D3 trusted-root-administrator boundary: it catches accidental and
 obvious changes and is not an adversarial-root sandbox.
 
-`COMPUTER_TEMPLATE_FIXED_COMMANDS` supplies B7's four literal allowlist entries:
+`COMPUTER_TEMPLATE_FIXED_COMMANDS` supplies these literal allowlist entries:
 
 | Command                | Input schema                           | Successful result schema         |
 | ---------------------- | -------------------------------------- | -------------------------------- |
 | `computer:clone-repos` | `zeros.computer-repositories-input/v1` | `zeros.computer-repositories/v1` |
 | `computer:run-install` | `zeros.computer-install-input/v1`      | `zeros.computer-install/v1`      |
 | `computer:verify-tcb`  | `zeros.computer-tcb-input/v1`          | `zeros.computer-tcb/v1`          |
+| `computer:qualify-build` | `zeros.computer-build-qualification-input/v1` | `zeros.computer-build-producer/v1` |
 | `computer:sanitize`    | `zeros.computer-sanitation-input/v1`   | `zeros.computer-sanitation/v1`   |
 
 These commands execute isolated Python as root with a fixed subcommand. JSON

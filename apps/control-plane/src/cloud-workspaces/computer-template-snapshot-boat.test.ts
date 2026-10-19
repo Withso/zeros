@@ -27,6 +27,49 @@ const boatTree = () => ({ ...tree([
 ]), generation: 7, fileCount: 3, totalSizeBytes: 384 });
 
 describe("Computer saved-artifact proof", () => {
+  const qualification = { buildId: "11111111-1111-4111-8111-111111111111", evidenceSha256: "a".repeat(64), evidenceBytes: 4096 };
+  const recordRoot = `__system__/srv/zeros/runtime-installs/build-qualifications/${qualification.buildId}`;
+  const records = () => [
+    { path: `${recordRoot}/integrity.json`, kind: "file", size: 8192 },
+    { path: `${recordRoot}/evidence.json`, kind: "file", size: qualification.evidenceBytes },
+    { path: `${recordRoot}/report.json`, kind: "file", size: 2048 },
+  ];
+
+  it("requires all three bounded qualification records when CP recorded the exact build", () => {
+    const proof = verifyComputerTemplateSavedTree(tree(records()), snapshot, qualification);
+    expect(proof.qualification).toEqual(qualification);
+    for (const missing of records()) {
+      expect(() => verifyComputerTemplateSavedTree(tree(records().filter(entry => entry.path !== missing.path)), snapshot, qualification)).toThrow();
+    }
+  });
+
+  it("retains a complete bounded Python closure larger than the public evidence record", () => {
+    const entries = records();
+    entries[0] = { ...entries[0], size: 1_048_576 };
+    expect(verifyComputerTemplateSavedTree(tree(entries), snapshot, qualification).qualification).toEqual(qualification);
+  });
+
+  it("does not accept unacknowledged, extra, empty, aliased or oversized qualification records", () => {
+    expect(() => verifyComputerTemplateSavedTree(tree(records()), snapshot)).toThrow();
+    const originals = records();
+    const wrong = [
+      ...[0, qualification.evidenceBytes - 1, 65_537].map(size => [originals[0], { ...originals[1], size }, originals[2]]),
+      [originals[0], { ...originals[1], kind: "symlink" }, originals[2]],
+      [{ ...originals[0], size: 8_388_609 }, originals[1], originals[2]],
+      [originals[0], originals[1], { ...originals[2], size: 65_537 }],
+      [...originals, { path: `${recordRoot}/private.json`, kind: "file", size: 0 }],
+      [...originals, { path: `${recordRoot}-other/evidence.json`, kind: "file", size: 4096 }],
+      [...originals, { path: "__system__/srv/zeros/runtime-installs", kind: "symlink" }],
+    ];
+    for (const entries of wrong) expect(() => verifyComputerTemplateSavedTree(tree(entries), snapshot, qualification)).toThrow();
+  });
+
+  it("keeps ordinary private-tree refusal when retaining credential-free qualification records", () => {
+    expect(() => verifyComputerTemplateSavedTree(tree([...records(),
+      { path: ".zeros-persist/state/private.json", kind: "file", size: 64 }]), snapshot, qualification)).toThrow();
+    expect(verifyComputerTemplateSavedTree(tree(), snapshot).qualification).toBeUndefined();
+  });
+
   it("binds the complete saved tree to both snapshot and stopped source, without returning paths", () => {
     const proof = verifyComputerTemplateSavedTree(tree(), snapshot);
     expect(proof).toEqual({ schema: "zeros.computer-saved-tree/v1", snapshotId: snapshot.snapshotId,

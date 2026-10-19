@@ -407,6 +407,7 @@ export const BaseCompatibilitySchema = z
       .min(1),
     bootstrapProtocolVersion: z.literal(1),
     runtimeRollbackCacheVersion: z.literal(1).optional(),
+    buildQualificationVersion: z.literal(1).optional(),
     glibc: libcVersion,
     os: z
       .object({
