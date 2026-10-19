@@ -179,7 +179,10 @@ describe("cloud migration regression contracts", () => {
   });
 });
 
-d("migration ladder", () => {
+// Every case resets the schema and replays the whole ladder, which outgrew the
+// default 5 s on loaded CI runners. Give each case the same bounded 30 s budget
+// the intermediate-revision cases already use.
+d("migration ladder", { timeout: 30_000 }, () => {
   let pool: pg.Pool;
 
   beforeAll(() => {
