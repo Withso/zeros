@@ -68,6 +68,7 @@ WORKDIR /opt/zeros
 RUN pnpm install --frozen-lockfile \
  && pnpm build:ripgrep \
  && pnpm build:engine \
+ && node scripts/cloud-workspace-validation/runtime-bundle/qualification.mjs \
  && PLAYWRIGHT_BROWSERS_PATH=/opt/zeros/design-browsers pnpm exec playwright-core install --with-deps chromium \
  && pnpm rebuild better-sqlite3 \
  && chmod -R go-w /opt/zeros \
