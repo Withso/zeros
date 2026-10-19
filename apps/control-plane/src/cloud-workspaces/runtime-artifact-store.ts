@@ -21,7 +21,7 @@ export type RuntimeArtifactStore = {
     objectKey: string,
     bytes: number,
   ): Promise<RuntimeArtifactUpload>;
-  head(objectKey: string): Promise<{ exists: boolean; bytes: number | null }>;
+  head(objectKey: string, signal?: AbortSignal): Promise<{ exists: boolean; bytes: number | null }>;
   presignGet(
     objectKey: string,
     ttlSeconds: number,
@@ -139,13 +139,14 @@ export class S3RuntimeArtifactStore implements RuntimeArtifactStore {
 
   async head(
     objectKey: string,
+    signal?: AbortSignal,
   ): Promise<{ exists: boolean; bytes: number | null }> {
     assertObjectKey(objectKey);
     try {
       const response = await this.client.send(
         new HeadObjectCommand({ Bucket: this.bucket, Key: objectKey }),
         {
-          abortSignal: AbortSignal.timeout(OPERATION_TIMEOUT_MS),
+          abortSignal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OPERATION_TIMEOUT_MS)]) : AbortSignal.timeout(OPERATION_TIMEOUT_MS),
         },
       );
       const bytes = response.ContentLength;

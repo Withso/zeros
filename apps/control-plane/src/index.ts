@@ -23,6 +23,7 @@ import { loadPinnedCloudRuntime } from "./cloud-workspaces/runtime-selection.js"
 import { createRuntimeQualificationWorker } from "./cloud-workspaces/runtime-qualification.js";
 import { createRuntimeImageWorker } from "./cloud-workspaces/runtime-images.js";
 import { createCloudRuntimeStagingWorker } from "./cloud-workspaces/runtime-staging.js";
+import { createCloudRuntimeRollbackCache } from "./cloud-workspaces/runtime-rollback.js";
 import { DatabaseCloudRuntimeTransitionService } from "./cloud-workspaces/runtime-transfer.js";
 import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
 import { DatabaseBuilderVmOperationStore } from "./cloud-workspaces/cloud-builder-vm-store.js";
@@ -717,6 +718,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       provider: workerDeployment!.provider,
       providerResolver: workerProviderResolver!,
       runtimeUpgradeConfig: cloud,
+      runtimeRollbackCache: createCloudRuntimeRollbackCache(workerPool, cloud, runtimeArtifacts),
       ...(cloud.computePolicy?{computePolicy:cloud.computePolicy}:{}),
       workosEnabled: config.auth.provider === "workos",
       ...workerPollingOptions(config.workerPollIntervalsMs, "lifecycle"),

@@ -6,6 +6,7 @@ import { CloudActiveRuntimeSchema, CloudRuntimeWitnessSchema, RuntimeDescriptorS
   RuntimeInstallInputSchema, type CloudActiveRuntime } from "./runtime-contract.js";
 import { CloudResidentWitnessSchema, CloudRuntimeHandoffRequestSchema, CloudRuntimeHandoffReceiptSchema,
   detachedResident, sameHandoff, sameResidentHost, type CloudResidentWitness, type CloudRuntimeHandoffReceipt } from "./runtime-handoff-contract.js";
+import { RuntimeRollbackRestoreSchema } from "./runtime-rollback-contract.js";
 
 const schema = "zeros.runtime-update/v1";
 const MAX_FRAME = 128 * 1024;
@@ -15,7 +16,7 @@ const executionScope = z.object({ workspaceId: z.string().uuid(), organizationId
 }).strict().refine(value => value.candidateGeneration > value.sourceGeneration);
 const scope = { schema: z.literal(schema), transitionId: z.string().uuid(), fence: z.string().uuid(), scope: executionScope };
 const inputFields = { ...scope, expiresAt: z.string().datetime({ offset: true }), source: CloudActiveRuntimeSchema,
-  mode: z.enum(["bootstrap", "engine"]) };
+  mode: z.enum(["bootstrap", "engine"]), restore: RuntimeRollbackRestoreSchema.optional() };
 const Input = z.discriminatedUnion("operation", [
   z.object({ ...inputFields, operation: z.literal("stage"), install: z.string().max(64 * 1024) }).strict(),
   z.object({ ...inputFields, operation: z.literal("activate"), target: RuntimeDescriptorSchema,
@@ -23,7 +24,7 @@ const Input = z.discriminatedUnion("operation", [
 ]);
 export type RuntimeUpdateInput = z.infer<typeof Input>;
 const Frame = z.object({ ...scope,
-  phase: z.enum(["authorize", "authorize_consumption", "cancel_consumption", "consumed", "enroll", "health", "authorize_rollback", "rollback_enroll", "rollback_health"]),
+  phase: z.enum(["authorize_restore", "authorize", "authorize_consumption", "cancel_consumption", "consumed", "enroll", "health", "authorize_rollback", "rollback_enroll", "rollback_health"]),
   active: CloudActiveRuntimeSchema.optional(), controller: CloudActiveRuntimeSchema.optional(),
   resident: CloudResidentWitnessSchema.optional(), handoff: CloudRuntimeHandoffReceiptSchema.optional(),
   report: z.record(z.unknown()).optional(),
@@ -36,6 +37,9 @@ export type RuntimeUpdateResult = z.infer<typeof Result>;
 type Context = { input: RuntimeUpdateInput; controller: CloudActiveRuntime | null; resident?: CloudResidentWitness };
 type Enrollment = Context & { active: CloudActiveRuntime; report: Record<string, unknown>; rollback: boolean };
 export type RuntimeUpdateHandlers = {
+  /** Restore preparation only. Never changes source authority or enrolls a
+   * target; validates the exact durable pin and nonrenewable deadline. */
+  authorizeRestore?(context: Context): Promise<boolean>;
   /** Owns the workspace transition lock, current-mode qualifications, complete
    * quiet reservation and presence gate. True is the activation linearization. */
   authorize(context: Context): Promise<boolean>;
@@ -84,6 +88,9 @@ export function runtimeUpdateCommand(): string {
   return runtimeUpdateProgram().command;
 }
 
+/** Deployment-owned bytes for the same digest-pinned loader. */
+export function runtimeUpdateSource(): string { return runtimeUpdateProgram().source; }
+
 /** Ordered duplex protocol. Callback errors become a closed denial; raw VM
  * bytes and callback exceptions are never included in the returned result. */
 export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handlers: RuntimeUpdateHandlers,
@@ -92,7 +99,11 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
   requireValid(parsed.success);
   const input = parsed.data;
   const fresh = () => { const remaining = Date.parse(input.expiresAt) - now(); requireValid(remaining > 0 && remaining <= 900_000); };
+  const freshRestore = () => { if (input.restore) {
+    const remaining = Date.parse(input.restore.deadline) - now(); requireValid(remaining > 0 && remaining <= 240_000);
+  } };
   fresh();
+  freshRestore();
   if (input.operation === "stage") {
     requireValid(/^[A-Za-z0-9_-]+$/.test(input.install));
     const bytes = Buffer.from(input.install, "base64url");
@@ -117,6 +128,7 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
   let enrollmentAllowed = false;
   let result: RuntimeUpdateResult | undefined;
   let processing = false;
+  let restoreChecks = 0;
   const context = () => ({ input, controller, ...(resident ? { resident } : {}) });
   const sameScope = (value: z.infer<typeof Frame> | RuntimeUpdateResult) =>
     value.transitionId === input.transitionId && value.fence === input.fence &&
@@ -143,6 +155,8 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           requireValid(v.outcome === "recovery_required"
             ? ["consumption_authorized", "activated", "enrolling", "health_failed", "healthy", "rollback", "rollback_enrolling", "rolled_back", "recovery_required"].includes(state)
             : state === expected[v.outcome]);
+          if (input.restore && v.outcome === "staged") { requireValid(restoreChecks >= 2); freshRestore(); }
+          if (input.restore && v.outcome === "healthy") freshRestore();
           if (v.outcome === "healthy" || v.outcome === "rolled_back")
             requireValid(v.active && enrolled && equal(v.active, enrolled));
           else requireValid(!v.active);
@@ -150,9 +164,21 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           return;
         }
         const parsedFrame = Frame.safeParse(value);
-        requireValid(parsedFrame.success && sameScope(parsedFrame.data) && input.operation === "activate");
+        requireValid(parsedFrame.success && sameScope(parsedFrame.data));
         const frame = parsedFrame.data;
         const { phase } = frame;
+        if (phase === "authorize_restore") {
+          requireValid(input.operation === "stage" && input.restore && state === "staging" && restoreChecks < 16 &&
+            !frame.active && !frame.controller && !frame.report && !frame.resident && !frame.handoff);
+          fresh(); freshRestore();
+          const allow = await decide(() => handlers.authorizeRestore?.(context()) ?? Promise.resolve(false));
+          fresh(); freshRestore();
+          if (allow) restoreChecks++; else state = "restore_denied";
+          return JSON.stringify({ ...scopeValue, phase, allow });
+        }
+        requireValid(input.operation === "activate");
+        const restoreBound = ["authorize", "authorize_consumption", "consumed", "enroll", "health"].includes(phase);
+        if (restoreBound) freshRestore();
         let allow = false;
         let environment: Record<string, unknown> | null = null;
         requireValid(phase === "authorize_consumption" || !frame.handoff);
@@ -161,6 +187,7 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           requireValid(state === "offered" && !frame.active && !frame.report);
           requireValid((phase === "authorize_consumption") === !!input.handoff);
           fresh();
+          freshRestore();
           if (input.mode === "engine") {
             requireValid(frame.controller && sameAllocation(frame.controller));
             controller = frame.controller;
@@ -205,6 +232,7 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           requireValid(sameAllocation(active) && active.runtimeId === pin.runtimeId &&
             active.manifestSha256 === pin.manifestSha256 && active.supervisorSessionId !== input.source.supervisorSessionId);
           if (rollback) requireValid(active.installerReceiptSha256 === input.source.installerReceiptSha256);
+          if (!rollback && input.restore) { freshRestore(); requireValid(active.installerReceiptSha256 === input.restore.installerReceiptSha256); }
           if (input.mode === "bootstrap") { requireValid(equal(frame.controller, active)); controller = active; }
           else requireValid(controller && equal(frame.controller, controller));
           if (input.handoff) {
@@ -233,6 +261,7 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           allow = await decide(() => handlers.health({ ...context(), ...(frame.resident ? { resident: frame.resident } : {}), active: frame.active!, rollback }));
           state = rollback ? allow ? "rolled_back" : "recovery_required" : allow ? "healthy" : "health_failed";
         }
+        if (restoreBound) freshRestore();
         const response = JSON.stringify({ ...scopeValue, phase, allow, ...(environment ? { environment } : {}) });
         requireValid(Buffer.byteLength(response) < MAX_FRAME);
         return response;
