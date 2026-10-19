@@ -63,6 +63,11 @@
    Repeat complete handoffs and an interrupted, unsealed handoff on that same
    FULL store. Retain closed checkpoint failure sites through setup and cleanup;
    repeating a claim cannot repair missing lineage or authorize an older writer.
+   For periodic full cuts, hold original support/mount references, join pending
+   freeze before thaw, and join positive thaw before export or network IO.
+   Validate inert record schemas and complete coverage independently of hashes.
+   A local journal, task freezer or interrupted native receipt cannot stand in
+   for Host custody, kernel IO completion or a complete user-data prefix.
    Reproject canonical controls with the predecessor's outbox above the successor's
    cursor. Validate each position in its own writer, retaining native identity and
    refusing uncovered or changed controls without recreating live events.
