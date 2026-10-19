@@ -2,7 +2,7 @@
   "id": "seeded-computer-self-test-fresh-descriptor",
   "kind": "seeded",
   "area": "vm-image-bootstrap",
-  "fixedBy": "pending",
+  "fixedBy": "pr:627",
   "symptom": "A Computer self-test publishes the original boot witness after setup changes the active runtime descriptor because its final read uses a process cache.",
   "rule": "Reopen validated authority descriptors after I/O; a cached selector does not prove current identity. See zstack-review and the installed self-test regression.",
   "check": "pnpm test:git scripts/__tests__/runtime-self-test-fresh-base.test.ts"
