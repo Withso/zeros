@@ -132,7 +132,15 @@ export async function probeSdkRuntime(session: Session, api: ProductApi, run: Ru
       });
       let grant: DeviceSessionGrant;
       try { grant = await broker.openStreamSession(null); }
-      catch (error) { if (probeFromConnectFailure(error) === "legacy") throw new Skip("legacy_discovery"); throw error; }
+      catch (error) {
+        if (probeFromConnectFailure(error) === "legacy") {
+          // Negative discovery belongs to the same file-backed identity and
+          // probe lifetime as a successful session response.
+          await checkDevice(); assert();
+          throw new Skip("legacy_discovery");
+        }
+        throw error;
+      }
       await checkDevice(); assert();
       return { grant, row, fixture, checkDevice, environment };
     });
