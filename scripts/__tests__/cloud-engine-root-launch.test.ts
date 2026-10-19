@@ -86,3 +86,39 @@ it.each([{ ...inner, qualified: true }, { ...inner, engineChecksPassed: false },
   await expect(launchCloudEngine(options)).rejects.toThrow(/qualification/);
   expect(retireRuntime).toHaveBeenCalledOnce(); expect(publish).not.toHaveBeenCalled();
 });
+it("keeps root timing outside the report until whole-tree retirement and output drain", async () => {
+  const performance = {version:1,truncated:false,groups:[{source:"attester_preflight",stages:[
+    {stage:"actor_tools",count:1,totalMs:13,maxMs:13,lastOutcome:"passed"},
+  ]}]};
+  const {options,order,publish,spawnProcess}=fixture("qualify",{...inner,performance});
+  expect(await launchCloudEngine({...options,collectPerformance:true} as any)).toBe(0);
+  expect((spawnProcess.mock.calls[0][2] as any).env.ZEROS_SETUP_PERFORMANCE).toBe("1");
+  const result=publish.mock.calls[0][0];
+  expect(result.performance.groups[0].stages).toEqual(expect.arrayContaining([
+    ...performance.groups[0].stages,
+    expect.objectContaining({stage:"launcher_view"}),expect.objectContaining({stage:"launcher_spawn"}),
+    expect.objectContaining({stage:"launcher_retire"}),expect.objectContaining({stage:"launcher_drain"}),
+  ]));
+  expect(order.indexOf("whole-tree-kill-empty")).toBeGreaterThan(order.indexOf("engine-exit"));
+});
+it("strips unselected metrics and never adopts ambient performance opt-in", async () => {
+  const {options,publish,spawnProcess}=fixture("qualify",{...inner,performance:{untrusted:"body"}});
+  expect(await launchCloudEngine({...options,source:{ZEROS_SETUP_PERFORMANCE:"1"}})).toBe(0);
+  expect(publish.mock.calls[0][0]).not.toHaveProperty("performance");
+  expect((spawnProcess.mock.calls[0][2] as any).env).not.toHaveProperty("ZEROS_SETUP_PERFORMANCE");
+});
+it("does not let inner metrics replace root-owned retirement timing", async () => {
+  const performance={version:1,truncated:false,groups:[{source:"attester_preflight",stages:[
+    {stage:"launcher_retire",count:4096,totalMs:3600000,maxMs:3600000,lastOutcome:"failed"},
+  ]}]};
+  const {options,publish}=fixture("qualify",{...inner,performance});
+  expect(await launchCloudEngine({...options,collectPerformance:true})).toBe(0);
+  expect(publish.mock.calls[0][0].performance.groups[0].stages.filter((metric:any)=>metric.stage==="launcher_retire"))
+    .toEqual([expect.objectContaining({count:1,lastOutcome:"passed"})]);
+});
+it("keeps proof rejection and whole-tree retirement when performance is selected", async () => {
+  const {options,publish,retireRuntime}=fixture("qualify",{...inner,engineChecksPassed:false,performance:{version:1}});
+  await expect(launchCloudEngine({...options,collectPerformance:true})).rejects.toThrow(/qualification/);
+  expect(retireRuntime).toHaveBeenCalledOnce();
+  expect(publish).not.toHaveBeenCalled();
+});

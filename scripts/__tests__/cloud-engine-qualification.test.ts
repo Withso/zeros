@@ -71,3 +71,35 @@ it("refuses the legacy secure result instead of borrowing its retired-sandbox cl
  ports.actor.mockResolvedValue({ secure: true });
  expect((await qualifyCloudEngineRuntime(identity)).engineChecksPassed).toBe(false); expect(ports.capture).not.toHaveBeenCalled();
 });
+
+it("times serial qualification roles and retirement without making an inner proof", async () => {
+ const observed = vi.fn(); let ms = 0;
+ for (const [name, duration] of [["load", 11], ["create", 12], ["actor", 13], ["capture", 14], ["human", 15], ["inspect", 16], ["close", 17], ["unregister", 18]] as const) {
+  const original = ports[name].getMockImplementation();
+  ports[name].mockImplementation((...args: any[]) => { ms += duration; return original?.(...args); });
+ }
+ const report = await (qualify as any)(identity, ports.load, { onPerformance: observed, now: () => ms });
+ expect(report.engineChecksPassed).toBe(true); expect(report.qualified).toBe(false);
+ expect(report).not.toHaveProperty("performance");
+ expect(observed).toHaveBeenCalledOnce();
+ const stages = observed.mock.calls[0][0].groups[0].stages;
+ expect(stages.map((entry: any) => [entry.stage, entry.totalMs])).toEqual([
+  ["module_load", 11], ["context_create", 12], ["actor_tools", 13], ["capture", 14], ["human_services", 15], ["census", 16], ["context_close", 35],
+ ]);
+ expect(ports.capture.mock.invocationCallOrder[0]).toBeGreaterThan(ports.actor.mock.invocationCallOrder[0]!);
+ expect(ports.human.mock.invocationCallOrder[0]).toBeGreaterThan(ports.capture.mock.invocationCallOrder[0]!);
+ expect(ports.close.mock.invocationCallOrder[0]).toBeGreaterThan(ports.inspect.mock.invocationCallOrder[0]!);
+});
+it("retains a closed failed role and cleanup while discarding raw errors", async () => {
+ const observed=vi.fn(); ports.capture.mockRejectedValue(new Error("private probe"));
+ const report=await (qualify as any)(identity,ports.load,{onPerformance:observed});
+ expect(report.engineChecksPassed).toBe(false); expect(ports.human).not.toHaveBeenCalled();
+ expect(observed.mock.calls[0]?.[0].groups[0].stages).toEqual(expect.arrayContaining([
+  expect.objectContaining({stage:"capture",lastOutcome:"failed"}),expect.objectContaining({stage:"context_close",lastOutcome:"passed"}),
+ ]));
+ expect(JSON.stringify(observed.mock.calls)).not.toContain("private probe");
+});
+it("cannot let a diagnostic observer alter qualification or cleanup", async () => {
+ const report=await (qualify as any)(identity,ports.load,{onPerformance:()=>{throw new Error("observer");}});
+ expect(report.engineChecksPassed).toBe(true);expect(ports.close).toHaveBeenCalledOnce();expect(ports.unregister).toHaveBeenCalledOnce();
+});

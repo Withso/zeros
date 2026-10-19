@@ -69,6 +69,19 @@ function rewriteDiagnostic(stdout: string, change: Record<string, unknown>) {
   return `${lines[0]}\n${JSON.stringify({ ...JSON.parse(lines[1]), ...change })}\n`;
 }
 
+function subprobePerformance() {
+  return { version: 1, truncated: false, groups: [{ source: "attester_preflight", stages: [
+    { stage: "actor_tools", count: 1, totalMs: 31, maxMs: 31, lastOutcome: "passed" },
+  ] }] };
+}
+
+function wrapCompletion(stdout: string, performance: unknown = subprobePerformance()) {
+  const lines = stdout.trimEnd().split("\n");
+  lines[lines.length - 1] = JSON.stringify({ schema: "zeros.diagnostic/v2",
+    diagnostic: JSON.parse(lines.at(-1)!), performance });
+  return `${lines.join("\n")}\n`;
+}
+
 async function classifyBoatFailure(diagnostic: unknown) {
   const input: CloudWorkspaceSetupExecution = {
     setupRunId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222",
@@ -96,6 +109,107 @@ async function classifyBoatFailure(diagnostic: unknown) {
 }
 
 describe("v4 attester to setup admission", () => {
+  it("keeps negotiated subprobe measurements outside the exact one-use proof", async () => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    const baseline = attesterOutput(), originalProof = JSON.parse(tree.filesystem.readFileSync("/run/zeros/cloud-worker-admission.json", "utf8"));
+    const performance = { version: 1, truncated: false, groups: [{ source: "attester_preflight", stages: [
+      { stage: "actor_tools", count: 1, totalMs: 31, maxMs: 31, lastOutcome: "passed" },
+    ] }] };
+    Object.assign(tree.qualification, { performance });
+    tree.write("/run/zeros/.test-lock", "e".repeat(64), 0o600);
+    const measured = tree.execute("attest-cloud-worker.mjs", ["--engine-lock-held", "/run/zeros/.test-lock", "--performance"]);
+    expect(measured.exitCode).toBe(0);
+    const lines = measured.stdout.trim().split("\n"), envelope = JSON.parse(lines[1]);
+    expect(lines[0]).toBe(baseline.stdout.split("\n")[0]);
+    expect(JSON.parse(tree.filesystem.readFileSync("/run/zeros/cloud-worker-admission.json", "utf8"))).toEqual(originalProof);
+    expect(envelope.schema).toBe("zeros.diagnostic/v2");
+    expect(envelope.performance).toEqual(performance);
+    expect(envelope.diagnostic).toMatchObject({ schema: "zeros.diagnostic/v1", ok: true });
+    returnOutput({ ...measured, code: measured.exitCode });
+    const recordPerformance = vi.fn();
+    await (attestImage as any)(material(), profile, vi.fn(), vi.fn(), recordPerformance);
+    expect(recordPerformance).toHaveBeenCalledWith(performance);
+    expect(host.spawn).toHaveBeenCalledWith(`${tree.root}/bin/node`, [`${tree.root}/lib/zeros/attest-cloud-worker.mjs`, "--performance"], expect.any(Object));
+  });
+
+  it.each([
+    ["incomplete inventory", "file_inventory", true],
+    ["missing manifest", "root_ownership", true],
+    ["seccomp", "seccomp", false],
+    ["engine spawn EAGAIN", "engine_lifecycle", true],
+    ["setup spawn EAGAIN", "setup_exit", true],
+  ] as const)("preserves the closed %s refusal and retry decision inside a performance envelope", async (fault, check, retryable) => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    if (fault === "incomplete inventory") tree.write(`${tree.root}.incomplete`, "", 0o600);
+    else if (fault === "missing manifest") unlinkSync(tree.physical(`${tree.root}/manifest.json`));
+    else if (fault === "seccomp") tree.qualification.identity.seccompMode = 0;
+    else tree.setSpawn((_file, args) => args[0]?.endsWith(fault === "engine spawn EAGAIN"
+      ? "cloud-engine-launcher.mjs" : "cloud-setup-process.mjs")
+      ? { status: null, signal: null, error: { code: "EAGAIN" }, stdout: "", stderr: "" } : undefined);
+    const result = tree.execute();
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout).failedChecks).toEqual([check]);
+    returnOutput({ ...result, code: result.exitCode });
+    const legacyChecks = vi.fn(), legacyTimings = vi.fn();
+    const legacy = await attestImage(material(), profile, legacyChecks, legacyTimings).catch((error: any) => error);
+
+    returnOutput({ ...result, code: result.exitCode, stdout: wrapCompletion(result.stdout) });
+    const recordChecks = vi.fn(), recordTimings = vi.fn(), recordPerformance = vi.fn();
+    const wrapped = await (attestImage as any)(material(), profile, recordChecks, recordTimings, recordPerformance)
+      .catch((error: any) => error);
+    expect(wrapped).toMatchObject({ code: "image_contract_invalid", diagnostic: legacy.diagnostic });
+    expect(recordChecks.mock.calls).toEqual(legacyChecks.mock.calls);
+    expect(recordTimings.mock.calls).toEqual(legacyTimings.mock.calls);
+    expect(recordPerformance).toHaveBeenCalledWith(subprobePerformance());
+    const diagnostic = { version: 1, phase: "image_preflight", ...wrapped.diagnostic };
+    await expect(classifyBoatFailure(diagnostic)).resolves.toMatchObject({
+      code: "setup_image_contract_invalid", retryable, diagnostic,
+    });
+  });
+
+  it.each([
+    ["extra output", (stdout: string) => `private-canary\n${stdout}`],
+    ["extra envelope field", (stdout: string) => JSON.stringify({ ...JSON.parse(stdout), message: "private-canary" }) + "\n"],
+    ["wrong exit", (stdout: string) => stdout.replace('"exitCode":1', '"exitCode":0')],
+    ["unknown check", (stdout: string) => stdout.replace('"file_inventory"', '"private-canary"')],
+    ["duplicate diagnostic key", (stdout: string) => stdout.replace('"ok":false', '"ok":true,"ok":false')],
+    ["duplicate envelope key", (stdout: string) => stdout.replace('"schema":"zeros.diagnostic/v2"',
+      '"schema":"zeros.diagnostic/v1","schema":"zeros.diagnostic/v2"')],
+  ])("rejects a wrapped failure with %s before projecting diagnostics or measurements", async (_name, corrupt) => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    tree.write(`${tree.root}.incomplete`, "", 0o600);
+    const result = tree.execute(), recordChecks = vi.fn(), recordTimings = vi.fn(), recordPerformance = vi.fn();
+    expect(result.exitCode).toBe(1);
+    returnOutput({ ...result, code: result.exitCode, stdout: corrupt(wrapCompletion(result.stdout)) });
+    const error = await (attestImage as any)(material(), profile, recordChecks, recordTimings, recordPerformance)
+      .catch((failure: any) => failure);
+    expect(error.code).toBe("image_contract_invalid");
+    expect(error.diagnostic.attester).toBeUndefined();
+    expect(recordTimings).not.toHaveBeenCalled();
+    expect(recordPerformance).not.toHaveBeenCalled();
+    expect(JSON.stringify([error, recordChecks.mock.calls])).not.toContain("private-canary");
+  });
+
+  it.each([null, { message: "private-canary" }, { ...subprobePerformance(), truncated: "private-canary" }])(
+    "keeps malformed optional performance outside successful admission: %j", async performance => {
+      const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+      const result = attesterOutput(), recordTimings = vi.fn(), recordPerformance = vi.fn();
+      returnOutput({ ...result, stdout: wrapCompletion(result.stdout, performance) });
+      await expect((attestImage as any)(material(), profile, vi.fn(), recordTimings, recordPerformance))
+        .resolves.toBeUndefined();
+      expect(recordTimings).toHaveBeenCalledWith(JSON.parse(result.stdout.trimEnd().split("\n")[1]).timings);
+      expect(recordPerformance).not.toHaveBeenCalled();
+    });
+
+  it("keeps throwing timing and performance observers outside wrapped admission", async () => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    const result = attesterOutput(), recordPerformance = vi.fn(() => { throw new Error("private-canary"); });
+    returnOutput({ ...result, stdout: wrapCompletion(result.stdout) });
+    await expect((attestImage as any)(material(), profile, vi.fn(),
+      () => { throw new Error("private-canary"); }, recordPerformance)).resolves.toBeUndefined();
+    expect(recordPerformance).toHaveBeenCalledOnce();
+  });
+
   it("returns closed stage clocks after proof publication and carries them through setup", async () => {
     const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
     const result = attesterOutput(), diagnostic = JSON.parse(result.stdout.trim().split("\n").at(-1)!);

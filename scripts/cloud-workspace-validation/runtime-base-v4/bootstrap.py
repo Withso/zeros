@@ -19,6 +19,7 @@ import hashlib
 import http.client
 import io
 import json
+import math
 import os
 import pwd
 from pathlib import Path
@@ -92,6 +93,65 @@ PERMANENT_DISPATCH_CHECKS = frozenset(("base_compatibility", "bootstrap_protocol
 STAGE_CHECK = dict(zip(STAGES, ("input_schema", "lock_busy", "insufficient_space", "cache_conflict",
     "http_status", "archive_digest", "manifest_schema", "archive_paths", "file_inventory",
     "cache_conflict", "pointer_publish", "host_start", "setup_exit", "diagnostic_missing")))
+
+PERFORMANCE_STAGES = frozenset(("base", "install_lock", "persistence", "cache_verify", "download", "archive_verify",
+                              "extract", "switch", "host_stop", "host_start", "helper", "total"))
+
+
+class InstallerPerformance:
+    """Closed per-install observations; never an input to verification or custody."""
+    def __init__(self):
+        self.stages = {}
+        self.truncated = False
+
+    def read(self):
+        try:
+            value = time.monotonic()
+            if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                return value
+        except Failure:
+            raise  # Preserve the installer's signal/deadline handler.
+        except Exception:
+            pass
+        self.truncated = True
+        return None
+
+    def start(self, stage):
+        started, ended = self.read(), False
+        def finish(outcome="passed"):
+            nonlocal ended
+            if ended:
+                return
+            ended = True
+            end = self.read()
+            if started is None or end is None:
+                return
+            if stage not in PERFORMANCE_STAGES or outcome not in ("passed", "failed", "cancelled"):
+                self.truncated = True
+                return
+            seconds = max(0, end - started)
+            ms = 3600001 if seconds > 3600 else int(seconds * 1000 + .5)
+            previous = self.stages.get(stage, {})
+            count, total = previous.get("count", 0) + 1, previous.get("totalMs", 0) + ms
+            self.truncated |= count > 4096 or total > 3600000 or ms > 3600000
+            self.stages[stage] = {"stage": stage, "count": min(4096, count), "totalMs": min(3600000, total),
+                                  "maxMs": min(3600000, max(previous.get("maxMs", 0), ms)), "lastOutcome": outcome}
+        return finish
+
+    @contextlib.contextmanager
+    def measure(self, stage):
+        finish = self.start(stage)
+        try:
+            yield
+        except BaseException as error:
+            finish("cancelled" if isinstance(error, Failure) and "process_signal" in error.checks else "failed")
+            raise
+        else:
+            finish()
+
+    def snapshot(self):
+        return {"version": 1, "truncated": self.truncated,
+                "groups": [{"source": "installer", "stages": [dict(value) for value in self.stages.values()]}] if self.stages else []}
 
 
 def failure_site(frame, line):
@@ -595,6 +655,8 @@ class Bootstrap:
         self.compat_id = None
         self.mounts = BindMounts()
         self.accounts = {"agent": (10001, 10001), "capture": (10002, 10002), "engine": (10003, 10003)}
+        self.performance = InstallerPerformance()
+        self.setup_performance = False
 
     def path(self, absolute):
         require(absolute.startswith("/") and ".." not in absolute.split("/"), "archive_paths")
@@ -1462,18 +1524,29 @@ class Bootstrap:
             self.unlink(marker)
 
     def install(self, encoded_input):
+        self.performance = InstallerPerformance()
+        self.setup_performance = False
+        with self.performance.measure("total"):
+            return self._install(encoded_input)
+
+    def _install(self, encoded_input):
         self.stage = "validate_input"
-        self.base()
-        value = validate_input(encoded_input, self.compat, self.now())
-        self.layout()
+        with self.performance.measure("base"):
+            self.base()
+            value = validate_input(encoded_input, self.compat, self.now())
+            self.layout()
         self.stage = "lock"
         # The SSH command owns setup.lock exactly once. This separate lock also
         # serializes boot reconciliation and direct root invocations.
-        with self.lock("runtime-install.lock"):
-            self.require_persistence()
+        with contextlib.ExitStack() as locks:
+            with self.performance.measure("install_lock"):
+                locks.enter_context(self.lock("runtime-install.lock"))
+            with self.performance.measure("persistence"):
+                self.require_persistence()
             if os.path.lexists(self.path(RECEIPTS + "/switch-intent.json")):
                 self.stage = "switch_pointer"
-                self.host.stop()
+                with self.performance.measure("host_stop"):
+                    self.host.stop()
                 with self.lock("runtime-publication.lock"):
                     self.reconcile()
             self.clean_staging()
@@ -1484,11 +1557,13 @@ class Bootstrap:
             incomplete = self.incomplete_runtimes(descriptor)
             if incomplete:
                 if self.current() in incomplete:
-                    self.host.stop()
+                    with self.performance.measure("host_stop"):
+                        self.host.stop()
                 with self.lock("runtime-publication.lock"):
                     self.clean_incomplete(incomplete)
             if os.path.lexists(self.path(destination)):
-                self.verify_runtime(runtime_id, descriptor=descriptor)
+                with self.performance.measure("cache_verify"):
+                    self.verify_runtime(runtime_id, descriptor=descriptor)
             else:
                 require(not os.path.lexists(self.path(RECEIPTS + "/" + runtime_id + ".json")), "cache_conflict")
                 self.stage = "check_space"
@@ -1500,15 +1575,18 @@ class Bootstrap:
                 try:
                     self.stage = "download"
                     with os.fdopen(fd, "w+b") as stream:
-                        self.downloader(value["artifact"], stream, descriptor)
-                        stream.flush()
+                        with self.performance.measure("download"):
+                            self.downloader(value["artifact"], stream, descriptor)
+                            stream.flush()
                         self.stage = "verify_archive"
-                        require(stream.tell() == descriptor["archiveBytes"], "archive_size")
-                        stream.seek(0)
-                        require(consume(stream, descriptor["archiveBytes"]) == descriptor["archiveSha256"], "archive_digest")
-                        os.fsync(stream.fileno())
+                        with self.performance.measure("archive_verify"):
+                            require(stream.tell() == descriptor["archiveBytes"], "archive_size")
+                            stream.seek(0)
+                            require(consume(stream, descriptor["archiveBytes"]) == descriptor["archiveSha256"], "archive_digest")
+                            os.fsync(stream.fileno())
                     archive = self.path(operation + "/archive.tar.gz")
-                    raw, manifest = self.scan_archive(archive, descriptor)
+                    with self.performance.measure("archive_verify"):
+                        raw, manifest = self.scan_archive(archive, descriptor)
                     self.stage = "extract"
                     with self.lock("runtime-publication.lock"):
                         require(not os.path.lexists(self.path(destination)), "cache_conflict")
@@ -1523,7 +1601,8 @@ class Bootstrap:
                             os.fchmod(directory, 0o755)
                             os.fsync(directory)
                         self.fault("runtime_created")
-                    self.extract(archive, destination, raw, manifest)
+                    with self.performance.measure("extract"):
+                        self.extract(archive, destination, raw, manifest)
                     with self.lock("runtime-publication.lock"):
                         self.publish_receipt(descriptor, manifest)
                         self.unlink(self.incomplete_marker(runtime_id))
@@ -1540,17 +1619,23 @@ class Bootstrap:
                     raise
                 finally:
                     self.clean_staging()
-            self.switch(runtime_id)
+            with self.performance.measure("switch"):
+                self.switch(runtime_id)
             self.stage = "start_host"
-            self.host.start(self, runtime_id)
+            with self.performance.measure("host_start"):
+                self.host.start(self, runtime_id)
             if value["purpose"] == "workspace-setup":
                 self.stage = "run_setup"
                 try:
-                    code, checks = self.host.setup(str(self.path(destination)), value["setup"])
+                    with self.performance.measure("helper"):
+                        try:
+                            code, checks = self.host.setup(str(self.path(destination)), value["setup"])
+                        finally:
+                            self.setup_performance = getattr(self.host, "setup_performance", False) is True
+                        if code != 0 or checks:
+                            raise Failure("setup_exit", code=code or 1, timed_out="timeout" in checks)
                 except Failure as error:
                     raise Failure("setup_exit", code=error.code, timed_out=error.timed_out) from None
-                if code != 0 or checks:
-                    raise Failure("setup_exit", code=code or 1, timed_out="timeout" in checks)
             self.stage = "done"
             return 0
 
@@ -1567,7 +1652,8 @@ class Bootstrap:
         self.stage = "switch_pointer"
         # Stop outside publication.lock: dispatch may be verifying while it
         # holds that lock, and no lifetime engine lock may precede retirement.
-        self.host.stop()
+        with self.performance.measure("host_stop"):
+            self.host.stop()
         with self.lock("runtime-publication.lock"):
             self.unlink(ACTIVE)
             old = self.current()
@@ -1821,18 +1907,49 @@ class SystemHost:
         raise Failure("host_start")
 
     def setup(self, root, payload):
-        return run_setup([root + "/bin/node", root + "/lib/zeros/setup-cloud-workspace.mjs", "--stdin"], payload)
+        self.setup_performance = False
+        return run_setup([root + "/bin/node", root + "/lib/zeros/setup-cloud-workspace.mjs", "--stdin"], payload,
+                         on_performance=lambda supported: setattr(self, "setup_performance", supported is True))
 
 
-def run_setup(command, payload, timeout=1100):
+def helper_performance_supported(raw, code):
+    """A complete v6 result proves only reader negotiation, never readiness.
+
+    The CP validates the unchanged proof and optional telemetry independently.
+    No helper body or field is copied into the installer diagnostic.
+    """
+    try:
+        value = strict_json(raw, "input_schema")
+        if type(value) is not dict or value.get("version") != 6 or value.get("audience") != "zeros-cloud-workspace-setup-result-v1":
+            return False
+        common = {"version", "audience", "outcome", "timings", "observations", "performance"}
+        if code == 0 and value.get("outcome") == "ready":
+            if not common | {"readiness"} <= value.keys() <= common | {"readiness", "logExcerpt"} or type(value["readiness"]) is not dict:
+                return False
+        elif code > 0 and value.get("outcome") == "error":
+            if not common | {"code", "diagnostic"} <= value.keys() <= common | {"code", "diagnostic", "hookLog"} or \
+                    type(value["code"]) is not str or type(value["diagnostic"]) is not dict:
+                return False
+        else:
+            return False
+        return all(type(value[key]) is dict for key in ("timings", "observations", "performance"))
+    except Failure as error:
+        if error.checks != ["input_schema"]:
+            raise
+        return False
+
+
+def run_setup(command, payload, timeout=1100, *, on_performance=None):
     """Preserve the legacy helper stdout bytes; its result belongs to the CP.
 
-    The verified helper has no new diagnostic obligation. Only its exit status
-    affects the outer installer diagnostic; stderr is never forwarded.
+    The verified helper has no new diagnostic obligation. A complete negotiated
+    v6 result opts into separate installer timers. Only its exit status affects
+    the outer installer diagnostic; stderr is never forwarded.
     """
     child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              env=ENV, start_new_session=True)
     output_bytes, last_byte = 0, b""
+    captured = bytearray() if on_performance is not None else None
     remaining = payload.encode("ascii")
     deadline = time.monotonic() + timeout
     try:
@@ -1859,6 +1976,8 @@ def run_setup(command, payload, timeout=1100):
                         output_bytes += len(part)
                         require(output_bytes <= MAX_SETUP_OUTPUT, "setup_exit")
                         if part:
+                            if captured is not None:
+                                captured.extend(part)
                             sys.stdout.buffer.write(part)
                             sys.stdout.buffer.flush()
                             last_byte = part[-1:]
@@ -1873,6 +1992,13 @@ def run_setup(command, payload, timeout=1100):
                 raise Failure("timeout", code=124, timed_out=True) from None
         if code < 0:
             return 128 - code, ["process_signal"]
+        if captured is not None and helper_performance_supported(captured, code):
+            try:
+                on_performance(True)
+            except Failure:
+                raise  # Keep real signal/deadline interruption intact.
+            except Exception:
+                pass  # An optional observer cannot alter the helper result.
         return code, []
     finally:
         # The setup helper's descendants cannot outlive a failed/cancelled
@@ -1891,13 +2017,15 @@ def run_setup(command, payload, timeout=1100):
             sys.stdout.buffer.flush()
 
 
-def diagnostic(component, stage, code, failure=None):
+def diagnostic(component, stage, code, failure=None, *, performance=None):
     checks = failure.checks if failure else []
     if component == "installer" and not set(checks) <= INSTALLER_CHECKS:
         checks = ["diagnostic_missing"]
     value = {"schema": "zeros.diagnostic/v1", "component": component, "stage": stage if stage in STAGES else "validate_input",
              "ok": failure is None, "exitCode": code, "timedOut": bool(failure and failure.timed_out),
              "failedChecks": checks}
+    if component == "installer" and isinstance(performance, InstallerPerformance):
+        value = {"schema": "zeros.diagnostic/v2", "diagnostic": value, "performance": performance.snapshot()}
     print(packed(value).decode(), flush=True)
 
 
@@ -1947,7 +2075,8 @@ def main(argv):
         signal.alarm(0)
     if failure is not None:
         app.log_failure(failure)
-    diagnostic(component, app.stage, code, failure)
+    diagnostic(component, app.stage, code, failure,
+               performance=app.performance if component == "installer" and app.setup_performance else None)
     return code
 
 

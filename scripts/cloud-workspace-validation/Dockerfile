@@ -94,6 +94,9 @@ COPY sandbox/cgroup-resources.mjs /opt/zeros-runtime/lib/zeros/cgroup-resources.
 COPY sandbox/cloud-resource-admission.mjs /opt/zeros-runtime/lib/zeros/cloud-resource-admission.mjs
 COPY sandbox/image-build-contract.mjs /opt/zeros-runtime/lib/zeros/image-build-contract.mjs
 COPY sandbox/cloud-setup-process.mjs /opt/zeros-runtime/lib/zeros/cloud-setup-process.mjs
+COPY sandbox/cloud-setup-performance.mjs /opt/zeros-runtime/lib/zeros/cloud-setup-performance.mjs
+RUN chown root:root /opt/zeros-runtime/lib/zeros/cloud-setup-performance.mjs \
+ && chmod 0444 /opt/zeros-runtime/lib/zeros/cloud-setup-performance.mjs
 COPY sandbox/cloud-computer-checkout.mjs /opt/zeros-runtime/lib/zeros/cloud-computer-checkout.mjs
 COPY sandbox/cloud-runtime-profile.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs
 # The resolver is the same source used by the engine in the pinned checkout.

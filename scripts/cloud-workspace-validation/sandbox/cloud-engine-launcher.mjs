@@ -37,6 +37,7 @@ import { CLOUD_ROOT_CUSTODY_DIRECTORY, cloudRootProcessBirth, readCloudRootContr
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import { CLOUD_ENGINE_MUTABLE_LAYOUT } from "./prepare-cloud-image-files.mjs";
 import { prepareCloudGitExecPath } from "./prepare-cloud-git.mjs";
+import { parseSetupPerformance, selectSetupPerformance, setupPerformance } from "./cloud-setup-performance.mjs";
 
 function rootPath(file, directory = false) {
   if (realpathSync(file) !== file)
@@ -443,7 +444,8 @@ const cloudEngineSignals = process;
  * spawnProcess?: typeof spawnCloudEngine,
  * signals?: import('node:events').EventEmitter,
  * assertOutside?: typeof assertCloudRootOutside,
- * retireRuntime?: () => Promise<unknown>, publish?: (report: unknown) => void}} options */
+ * retireRuntime?: () => Promise<unknown>, publish?: (report: unknown) => void,
+ * collectPerformance?: boolean}} options */
 export async function launchCloudEngine({
   operation = "serve",
   source = process.env,
@@ -455,12 +457,15 @@ export async function launchCloudEngine({
   assertOutside = assertCloudRootOutside,
   retireRuntime = () => new CloudRuntimeCgroup({ runtime }).retire(),
   publish = report => process.stdout.write(JSON.stringify(report) + "\n"),
+  collectPerformance = false,
 } = {}) {
   if (runtime.profile !== "v4") throw new Error("Isolated cloud engine profile required");
   assertOutside(runtime);
   let profile;
   let args, environment;
   let prepared = false;
+  const metrics = operation === "qualify" && collectPerformance ? setupPerformance("attester_preflight") : undefined;
+  const finishView = metrics?.start("launcher_view");
   try {
     if (!scope) {
       let instanceId;
@@ -497,7 +502,12 @@ export async function launchCloudEngine({
     runtime = profile?.runtime ?? runtime;
     args = cloudEngineViewArguments(operation,profile?.version,runtime,profile?.viewDirectory,profile?.primaryRepository,profile?.residentHostId,placement);
     environment = cloudEngineViewEnvironment(source, operation,runtime);
+    // Fixed opt-in after the environment allowlist; workspace input cannot
+    // select telemetry or add arguments to the namespace/placement gate.
+    if (metrics) environment.ZEROS_SETUP_PERFORMANCE = "1";
+    finishView?.();
   } catch (error) {
+    finishView?.("failed");
     try {
       // Only successful original admission grants cleanup custody. A refused
       // or unexpectedly populated scope belongs to no new launch.
@@ -515,6 +525,7 @@ export async function launchCloudEngine({
   let qualificationInvalid = false;
   let qualificationDone;
   let wholeTreeRetired = false;
+  let finishSpawn;
   const cancelled = new Promise((resolve) => {
     settleCancellation = resolve;
   });
@@ -539,6 +550,7 @@ export async function launchCloudEngine({
   signals.once("SIGTERM", term);
   signals.once("SIGINT", interrupt);
   try {
+    finishSpawn = metrics?.start("launcher_spawn");
     child = spawnProcess(
       runtime.engineNamespace,
       ["--await-launch", ...args],
@@ -595,15 +607,21 @@ export async function launchCloudEngine({
       });
     });
     admitted = true;
+    finishSpawn?.();
     const outcome = await Promise.race([exit, cancelled]);
     if (operation === "qualify") {
-      const receipt = await retireRuntime();
-      wholeTreeRetired = true;
-      if (!receipt || receipt.populated !== 0 || receipt.pruned !== true)
-        throw new Error("Cloud qualification whole-tree retirement was unconfirmed");
+      const finishRetire = metrics?.start("launcher_retire");
+      try {
+        const receipt = await retireRuntime();
+        wholeTreeRetired = true;
+        if (!receipt || receipt.populated !== 0 || receipt.pruned !== true)
+          throw new Error("Cloud qualification whole-tree retirement was unconfirmed");
+        finishRetire?.();
+      } catch (error) { finishRetire?.("failed"); throw error; }
       let outputTimer;
+      const finishDrain = metrics?.start("launcher_drain");
       try { await Promise.race([qualificationDone, new Promise(resolve => { outputTimer = setTimeout(() => { qualificationInvalid = true; resolve(); }, 5000); })]); }
-      finally { clearTimeout(outputTimer); }
+      finally { clearTimeout(outputTimer); finishDrain?.(qualificationInvalid ? "failed" : "passed"); }
       let inner;
       try {
         if (qualificationInvalid || !/^\{[^\n]*\}\n?$/.test(qualification)) throw new Error();
@@ -613,12 +631,24 @@ export async function launchCloudEngine({
       } catch { throw new Error("Cloud inner qualification was refused"); }
       const report = { ...inner };
       delete report.engineChecksPassed;
+      delete report.performance;
+      if (metrics) {
+        const childMetrics = selectSetupPerformance(inner.performance, ["attester_preflight"]);
+        const rootMetrics = metrics.snapshot();
+        // The inner process supplies only role timings. Root-owned launch and
+        // retirement observations cannot be overwritten by an inner report.
+        const roles = (childMetrics?.groups[0]?.stages ?? []).filter(metric => !metric.stage.startsWith("launcher_"));
+        const performance = parseSetupPerformance({ version: 1, truncated: rootMetrics.truncated || childMetrics?.truncated === true,
+          groups: [{ source: "attester_preflight", stages: [...roles, ...(rootMetrics.groups[0]?.stages ?? [])] }] });
+        if (performance) report.performance = performance;
+      }
       publish({ ...report, qualified: true, execution: { ...report.execution, vmWorkloadDrain: true } });
       return 0;
     }
     if (outcome.failed || !Number.isInteger(outcome.code)) return 125;
     return outcome.code;
   } finally {
+    finishSpawn?.("failed");
     signals.off("SIGTERM", term);
     signals.off("SIGINT", interrupt);
     clearTimeout(stopTimer);
@@ -641,10 +671,10 @@ export async function launchCloudEngine({
 export function launchCloudEngineEntry(args, {
   launch = launchCloudEngine, enterHost = enterCloudRootHost, resolveRuntime = resolveCloudRuntime,
 } = {}) {
-  if (args.length === 1 && args[0] === "--host-qualify") return (async () => {
+  if (args[0] === "--host-qualify" && (args.length === 1 || (args.length === 2 && args[1] === "--performance"))) return (async () => {
     const runtime = resolveRuntime();
     enterHost(runtime);
-    return launch({ runtime, operation: "qualify" });
+    return launch({ runtime, operation: "qualify", ...(args.length === 2 ? { collectPerformance: true } : {}) });
   })();
   const operation =
     args.length === 0

@@ -4,6 +4,13 @@ import { launchCloudEngineEntry } from "../cloud-workspace-validation/sandbox/cl
 const runtime = { profile: "v4", cgroupRoot: "/sys/fs/cgroup/system.slice/zeros-host.service" };
 
 describe("cloud engine launcher entries", () => {
+  it("selects performance only for the fixed host qualification entry", async () => {
+    const launch=vi.fn(async()=>0), enterHost=vi.fn();
+    await expect(launchCloudEngineEntry(["--host-qualify", "--performance"], { launch, enterHost, resolveRuntime:()=>runtime })).resolves.toBe(0);
+    expect(launch).toHaveBeenCalledWith({ runtime, operation:"qualify", collectPerformance:true });
+    for (const entry of [[],["--resident"],["--probe-cursor"],["--qualify"]])
+      expect(launchCloudEngineEntry([...entry,"--performance"], { launch, enterHost })).toBeNull();
+  });
   it("enters the original host before qualifying through the attester's fixed entry", async () => {
     const order: string[] = [];
     const launch = vi.fn(async (options: { operation: string }) => { order.push(`launch:${options.operation}`); return 0; });

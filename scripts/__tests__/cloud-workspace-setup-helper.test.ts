@@ -43,6 +43,7 @@ import {
   redeemMaterials,
   hasCloudSetupTimingSupport,
   hasCloudSetupObservationSupport,
+  hasCloudSetupPerformanceSupport,
   runProcess,
 } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import {
@@ -216,17 +217,22 @@ describe("cloud setup credential transport", () => {
     try {
       const body = { ...materialDocument(), version: 2, image: { ...materialDocument().image,
         resources: { architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } } };
-      for (const accepted of [undefined, "1", "private"]) for (const observations of [undefined, "1", "private"]) {
+      for (const accepted of [undefined, "1", "private"]) for (const observations of [undefined, "1", "private"])
+        for (const performance of [undefined, "1", "private"]) {
         const headers = { "content-type": "application/json", ...(accepted ? { "x-zeros-setup-timings": accepted } : {}),
-          ...(observations ? { "x-zeros-setup-observations": observations } : {}) };
+          ...(observations ? { "x-zeros-setup-observations": observations } : {}),
+          ...(performance ? { "x-zeros-setup-performance": performance } : {}) };
         const fetch = vi.fn(async () => new Response(JSON.stringify(body), { headers }));
         vi.stubGlobal("fetch", fetch);
         const material = await redeemMaterials(requestDocument());
         expect(hasCloudSetupTimingSupport(material)).toBe(accepted === "1");
         expect(hasCloudSetupObservationSupport(material)).toBe(accepted === "1" && observations === "1");
+        expect(hasCloudSetupPerformanceSupport(material)).toBe(accepted === "1" && observations === "1" && performance === "1");
+        expect(hasCloudSetupPerformanceSupport({ ...material })).toBe(false);
         expect(Object.keys(material).sort()).toEqual(Object.keys(body).sort());
         expect((fetch.mock.calls[0] as any)[1].headers["X-Zeros-Setup-Timings"]).toBe("1");
         expect((fetch.mock.calls[0] as any)[1].headers["X-Zeros-Setup-Observations"]).toBe("1");
+        expect((fetch.mock.calls[0] as any)[1].headers["X-Zeros-Setup-Performance"]).toBe("1");
       }
     } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
   });

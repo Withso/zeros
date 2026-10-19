@@ -507,13 +507,15 @@ describe("pnpm runtime closure", () => {
     ).toBe(true);
   });
 
-  it("stages the runtime-root resolver as a standalone regular file and fails if its source is absent", async () => {
+  it("stages the runtime-root resolver and performance import without depending on the source checkout", async () => {
     const temp = await directory(),
       source = path.join(temp, "source"),
       runtime = path.join(temp, "runtime");
     const resolverSource =
       "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
     const contents = await readFile(resolverSource);
+    const performanceSource = "scripts/cloud-workspace-validation/sandbox/cloud-setup-performance.mjs";
+    const performanceContents = await readFile(performanceSource);
     for (const relative of SOURCE_SLICES)
       await mkdir(path.join(source, relative), { recursive: true });
     for (const relative of [
@@ -533,6 +535,7 @@ describe("pnpm runtime closure", () => {
       recursive: true,
     });
     await writeFile(path.join(source, resolverSource), contents);
+    await writeFile(path.join(source, performanceSource), performanceContents);
     const assetSource = "apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs";
     await writeFile(path.join(source, assetSource), await readFile(assetSource));
     await link(
@@ -544,8 +547,14 @@ describe("pnpm runtime closure", () => {
     );
     await stageSources(source, runtime);
     const resolver = path.join(runtime, "lib/zeros/cloud-runtime-root.mjs");
+    const performance = path.join(runtime, "lib/zeros/cloud-setup-performance.mjs");
     expect(await readFile(resolver)).toEqual(contents);
     expect((await lstat(resolver)).nlink).toBe(1);
+    const performanceFile = await open(performance, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      expect((await performanceFile.stat()).isFile()).toBe(true);
+      expect(await performanceFile.readFile()).toEqual(performanceContents);
+    } finally { await performanceFile.close(); }
     for (const relative of hostSources) {
       const staged = path.join(runtime, "worker", relative);
       const file = await open(staged, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -562,6 +571,9 @@ describe("pnpm runtime closure", () => {
         size: contents.length,
       }),
     );
+    await rm(path.join(source, performanceSource));
+    await expect(stageSources(source, path.join(temp, "missing-performance"))).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(path.join(source, performanceSource), performanceContents);
     await rm(path.join(source, resolverSource));
     await expect(
       stageSources(source, path.join(temp, "missing-resolver")),
@@ -573,12 +585,13 @@ describe("pnpm runtime closure", () => {
         [
           "--input-type=module",
           "--eval",
-          'import { pathToFileURL } from "node:url"; const resolver = await import(pathToFileURL(process.argv[1]).href); process.stdout.write(String(resolver.cloudProfileIdentityMapVersion(4)));',
+          'import { pathToFileURL } from "node:url"; const resolver = await import(pathToFileURL(process.argv[1]).href); const timers = await import(pathToFileURL(process.argv[2]).href); process.stdout.write(String(resolver.cloudProfileIdentityMapVersion(4)) + ":" + typeof timers.setupPerformance);',
           resolver,
+          performance,
         ],
         { cwd: runtime, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8" },
       ),
-    ).toBe("5");
+    ).toBe("5:function");
   });
 
   it("loads the actual staged engine capability and its public channel-policy imports outside src", async () => {

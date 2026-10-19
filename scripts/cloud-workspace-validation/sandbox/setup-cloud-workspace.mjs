@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mergeSetupTimings, parseSetupTimings, parseSetupObservations, setupTimingClock } from "./cloud-setup-timings.mjs";
+import { mergeSetupPerformance, notifySetupPerformance, selectSetupPerformance, setupPerformance, unwrapSetupPerformanceDiagnostic } from "./cloud-setup-performance.mjs";
 import {
   chmodSync,
   chownSync,
@@ -68,6 +69,8 @@ import {
   CLOUD_WORKER_SUPERVISOR_SOCKET,
 } from "./cloud-worker-supervisor.mjs";
 
+// Includes Node/module startup, before the request and materials clocks begin.
+const PROCESS_PRELUDE_MS = process.uptime() * 1000;
 export const CLOUD_WORKSPACE_SETUP_ENV = "ZEROS_CLOUD_WORKSPACE_SETUP_B64";
 export const CLOUD_WORKSPACE_SETUP_AUDIENCE = "zeros-cloud-workspace-setup-v1";
 export const CLOUD_WORKSPACE_SETUP_MATERIALS_AUDIENCE =
@@ -1357,6 +1360,8 @@ const timingNegotiatedMaterials = new WeakSet();
 export const hasCloudSetupTimingSupport = material => timingNegotiatedMaterials.has(material);
 const observationNegotiatedMaterials = new WeakSet();
 export const hasCloudSetupObservationSupport = material => observationNegotiatedMaterials.has(material);
+const performanceNegotiatedMaterials = new WeakSet();
+export const hasCloudSetupPerformanceSupport = material => performanceNegotiatedMaterials.has(material);
 
 export async function redeemMaterials(request) {
   const controller = new AbortController();
@@ -1375,6 +1380,7 @@ export async function redeemMaterials(request) {
         "Content-Type": "application/json",
         "X-Zeros-Setup-Timings": "1",
         "X-Zeros-Setup-Observations": "1",
+        "X-Zeros-Setup-Performance": "1",
         "X-Zeros-Resume-Existing": "1",
       },
       body: JSON.stringify({
@@ -1430,6 +1436,7 @@ export async function redeemMaterials(request) {
     const material = parseCloudWorkspaceSetupMaterials(raw, request);
     if (response.headers.get("x-zeros-setup-timings") === "1") timingNegotiatedMaterials.add(material);
     if (hasCloudSetupTimingSupport(material) && response.headers.get("x-zeros-setup-observations") === "1") observationNegotiatedMaterials.add(material);
+    if (hasCloudSetupObservationSupport(material) && response.headers.get("x-zeros-setup-performance") === "1") performanceNegotiatedMaterials.add(material);
     return material;
   } catch (error) {
     if (error instanceof SetupFailure) throw error;
@@ -2438,16 +2445,18 @@ function installGithubProjection(material, profile, now = Date.now()) {
 
 /** A failure emits one closed diagnostic; success emits a report then a
  * completion. Reject extra, duplicate-key or truncated output in both cases. */
-function readCloudWorkspaceV4Completion(result) {
+function readCloudWorkspaceV4Completion(result, recordPerformance) {
   try {
     if (result.timedOut || result.overflow || result.signal || typeof result.stdout !== "string" ||
       Buffer.byteLength(result.stdout) > MAX_PROCESS_OUTPUT_BYTES) return null;
     const lines = result.stdout.split("\n");
     if (lines.at(-1) === "") lines.pop();
     if (lines.length !== 1 && lines.length !== 2) return null;
-    const diagnostic = parseCloudV4Document(Buffer.from(lines.at(-1)), "diagnostic_missing");
+    const { diagnostic, performance } = unwrapSetupPerformanceDiagnostic(
+      parseCloudV4Document(Buffer.from(lines.at(-1)), "diagnostic_missing"));
     if (!validV4Diagnostic(diagnostic) || diagnostic.exitCode !== result.code ||
       lines.length !== (diagnostic.ok ? 2 : 1) || (diagnostic.ok && diagnostic.stage !== "done")) return null;
+    notifySetupPerformance(recordPerformance, selectSetupPerformance(performance, ["attester_preflight"]));
     return diagnostic;
   } catch {
     return null;
@@ -2597,7 +2606,7 @@ export function cloudWorkspaceImageAdmissionDiagnostic(report) {
   };
 }
 
-export async function attestImage(material, profile, recordChecks, recordTimings = () => {}) {
+export async function attestImage(material, profile, recordChecks, recordTimings = () => {}, recordPerformance = undefined) {
   if (profile.version !== 4) throw failure("cloud_workspace_v2_required");
   if (
     material.repository.credential.expiresAtMs - Date.now() < 5 * 60_000 ||
@@ -2607,12 +2616,12 @@ export async function attestImage(material, profile, recordChecks, recordTimings
   }
   const result = await runProcess(
     RUNTIME.node,
-    [ATTESTER],
+    [ATTESTER, ...(typeof recordPerformance === "function" ? ["--performance"] : [])],
     {
       timeoutMs: 4 * 60_000,
     },
   );
-  const completion = readCloudWorkspaceV4Completion(result);
+  const completion = readCloudWorkspaceV4Completion(result, recordPerformance);
   const timings = parseSetupTimings(completion?.timings);
   try { if (timings) recordTimings(timings); }
   catch { /* Optional telemetry cannot change admission. */ }
@@ -2803,6 +2812,7 @@ export async function prepareAndLaunchCloudWorkspace(material, profile, session,
   prepare = prepareRepositoryAndSettings, project = projectLaunchCredentials,
   start = startEngine, ready = waitForReadiness, saveCompleted = saveCompletedCloudWorkspacePreparation,
   recordAttesterTimings = () => () => {},
+  recordAttesterPerformance,
   recordPreparation = () => {}, recordReadiness = () => {},
 } = {}) {
   let commit = await readCompleted(material, profile, undefined, recordPreparation);
@@ -2811,6 +2821,7 @@ export async function prepareAndLaunchCloudWorkspace(material, profile, session,
     await attest(material, profile, (checks, runtime, digests) =>
       record("image-preflight", checks, runtime, digests),
       recordAttesterTimings("attester_preflight"),
+      recordAttesterPerformance?.("attester_preflight"),
     );
     record("repository");
     commit = await prepare(material, profile);
@@ -2821,6 +2832,7 @@ export async function prepareAndLaunchCloudWorkspace(material, profile, session,
   await attest(material, profile, (checks, runtime, digests) =>
     record("image-launch", checks, runtime, digests),
     recordAttesterTimings("attester_launch"),
+    recordAttesterPerformance?.("attester_launch"),
   );
   record("engine-launch");
   await start(material, session);
@@ -2831,19 +2843,36 @@ export async function prepareAndLaunchCloudWorkspace(material, profile, session,
 }
 
 async function executeSetup(encoded) {
+  const metrics = setupPerformance("helper");
+  metrics.record("process_prelude", PROCESS_PRELUDE_MS);
+  const finishTotal = metrics.start("total"), finishRequest = metrics.start("request_parse");
   let request;
   try {
     request = parseCloudWorkspaceSetupRequest(encoded);
+    finishRequest();
   } catch {
+    finishRequest("failed"); finishTotal("failed");
     throw failure("request_invalid");
   }
-  const material = await redeemMaterials(request);
+  const finishMaterials = metrics.start("materials");
+  let material;
+  try { material = await redeemMaterials(request); finishMaterials(); }
+  catch (error) { finishMaterials("failed"); finishTotal("failed"); throw error; }
   let supervisorPrepared = false;
   let successful = false;
   let profile;
   const timing = RUNTIME.profile === "v4" && hasCloudSetupTimingSupport(material) ? setupTimingClock("setup") : null;
   const observations = { version: 1 };
   const observe = timing && hasCloudSetupObservationSupport(material);
+  const measure = observe && hasCloudSetupPerformanceSupport(material);
+  const childPerformance = [];
+  let measuredResult;
+  const snapshotPerformance = () => mergeSetupPerformance(metrics.snapshot(), ...childPerformance)
+    ?? { version: 1, truncated: true, groups: [] };
+  const recordAttesterPerformance = measure ? source => value => {
+    const parsed = selectSetupPerformance(value, ["attester_preflight"]);
+    if (parsed?.groups.length === 1) childPerformance.push({ ...parsed, groups: [{ ...parsed.groups[0], source }] });
+  } : undefined;
   const childTimings = [];
   let finishStage;
   const snapshotTimings = () => mergeSetupTimings(timing?.snapshot(), ...childTimings);
@@ -2893,13 +2922,15 @@ async function executeSetup(encoded) {
     // Reject an unqualified image or undersized allocation before running any
     // repository setup hook. Reattest below to mint a fresh launch proof after
     // potentially long hooks; that proof is intentionally short-lived.
-    const ready = await prepareAndLaunchCloudWorkspace(material, profile, session, record, { recordAttesterTimings,
+    const ready = await prepareAndLaunchCloudWorkspace(material, profile, session, record, { recordAttesterTimings, recordAttesterPerformance,
       recordPreparation: value => { observations.preparation = value; }, recordReadiness: value => { observations.readiness = value; },
     });
     record("complete");
     successful = true;
-    return timing ? { ...ready, version: observe ? 5 : 4, timings: snapshotTimings(),
+    const result = timing ? { ...ready, version: measure ? 6 : observe ? 5 : 4, timings: snapshotTimings(),
       ...(observe ? { observations: parseSetupObservations(observations) } : {}) } : ready;
+    if (measure) measuredResult = result;
+    return result;
   } catch (error) {
     // Preserve v1 successes. Version 2 errors add only a closed, bounded
     // envelope; older control planes safely treat them as helper failures.
@@ -2907,6 +2938,7 @@ async function executeSetup(encoded) {
     finishStage?.("failed");
     if (timing) normalized.timings = snapshotTimings();
     if (observe) normalized.observations = parseSetupObservations(observations);
+    if (measure) measuredResult = normalized;
     normalized.diagnostic = {
       version: 1, phase: diagnostic.stage.replaceAll("-", "_"),
       ...(normalized.diagnostic?.engineStartup ? { engineStartup: normalized.diagnostic.engineStartup } : {}),
@@ -2952,6 +2984,8 @@ async function executeSetup(encoded) {
       }
     }
     if (material.computer) material.repository.credential.token = "";
+    finishTotal(successful ? "passed" : "failed");
+    if (measuredResult) measuredResult.performance = snapshotPerformance();
   }
 }
 
@@ -3027,7 +3061,7 @@ async function main() {
   } catch (error) {
     exitCode = 1;
     response = {
-      version: error instanceof SetupFailure && error.observations ? 5 : error instanceof SetupFailure && error.timings ? 4 : error instanceof SetupFailure && error.hookLog ? 3 : error instanceof SetupFailure && error.diagnostic ? 2 : 1,
+      version: error instanceof SetupFailure && error.performance ? 6 : error instanceof SetupFailure && error.observations ? 5 : error instanceof SetupFailure && error.timings ? 4 : error instanceof SetupFailure && error.hookLog ? 3 : error instanceof SetupFailure && error.diagnostic ? 2 : 1,
       audience: CLOUD_WORKSPACE_SETUP_RESULT_AUDIENCE,
       outcome: "error",
       code:
@@ -3036,6 +3070,7 @@ async function main() {
       ...(error instanceof SetupFailure && error.hookLog ? { hookLog: error.hookLog } : {}),
       ...(error instanceof SetupFailure && error.timings ? { timings: error.timings } : {}),
       ...(error instanceof SetupFailure && error.observations ? { observations: error.observations } : {}),
+      ...(error instanceof SetupFailure && error.performance ? { performance: error.performance } : {}),
     };
   }
   process.stdout.write(JSON.stringify(response));

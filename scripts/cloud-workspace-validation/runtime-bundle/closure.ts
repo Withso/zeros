@@ -36,6 +36,7 @@ export const RUNTIME_HELPERS = [
     "cloud-engine-cgroup.mjs",
     "cloud-setup-process.mjs",
     "cloud-setup-timings.mjs",
+    "cloud-setup-performance.mjs",
     "cloud-computer-checkout.mjs",
     "prepare-cloud-image-files.mjs",
     "prepare-cloud-git.mjs",
