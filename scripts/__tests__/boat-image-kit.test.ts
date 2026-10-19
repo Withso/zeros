@@ -150,9 +150,11 @@ describe("Boat image kit", () => {
     const computerReport = " cloud-computer-self-test.mjs";
     const checkout = " cloud-computer-checkout.mjs";
     expect(script).toContain(`cloud-setup-process.mjs${timings}${performanceHelper}${computerReport}${checkout} cloud-engine-view.mjs`);
+    const buildSupport = "install -o root -g root -m 0444 scripts/cloud-workspace-validation/sandbox/build-qualification-support.json /opt/zeros-runtime/lib/zeros/build-qualification-support.json\n";
+    expect(script).toContain(buildSupport);
     // Historical recipe compatibility, not qualification of the new image.
     // The new layout/source still requires fresh immutable-image attestation.
-    expect(sha256(script.replace(migration, "").replace(qualification, "").replace(resolver, "").replace(runner, "").replace(timings, "").replace(performanceHelper, "").replace(computerReport, "").replace(checkout, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
+    expect(sha256(script.replace(migration, "").replace(qualification, "").replace(resolver, "").replace(runner, "").replace(timings, "").replace(performanceHelper, "").replace(computerReport, "").replace(checkout, "").replace(buildSupport, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
   });
 
   it("keeps templates and shared image scripts free of build identities and private paths", () => {
