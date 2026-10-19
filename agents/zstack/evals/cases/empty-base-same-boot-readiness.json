@@ -2,7 +2,7 @@
   "id": "empty-base-same-boot-readiness",
   "kind": "replay",
   "area": "vm-image-bootstrap",
-  "fixedBy": "pending",
+  "fixedBy": "pr:628",
   "symptom": "Same-boot base verification and repeated sanitation refused the disk epoch that sanitation had deliberately emptied.",
   "rule": "Run sanitize, verify, sanitize, verify and fresh boot through the real readiness methods. Empty-base verification requires exact absence, original marker metadata and the existing boot, Host and persistence proofs; ordinary and cold admission keep a positive epoch.",
   "check": "python3 -I scripts/cloud-workspace-validation/runtime-base-v4/tests/test_sanitation.py BaseSanitationTests.test_builder_verification_survives_both_same_boot_sanitations BaseSanitationTests.test_ordinary_and_cold_readiness_remain_strict_after_sanitation"
