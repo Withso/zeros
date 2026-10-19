@@ -208,9 +208,10 @@ The Cloud v2 runtime builder also ships Node.js 22.23.1 (MIT and bundled
 third-party terms) from the official linux-x64 archive, verified against the
 release's SHASUMS256.txt. Its complete upstream `LICENSE` and archive provenance
 are preserved in `lib/node/` in each runtime. The same archive includes the
-Playwright Chromium, headless-shell and FFmpeg assets with their upstream
-notices and credits, including `LICENSE.headless_shell` and the browser's
-`ABOUT` and Widevine license files.
+Playwright-pinned Chromium headless-shell and FFmpeg assets with their upstream
+notices and credits, including `LICENSE.headless_shell` and `ABOUT`. Historical
+archives also include headed Chromium and its Widevine license files. New
+archives omit that unused browser; all notices for the selected assets remain.
 
 The Linux archive has a separate, generated `worker/runtime-dependencies.json`
 inventory containing every copied package's actual name, version, license and
