@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ensureUser } from "./auth.js";
 import { seedReadyCloudWorkspace } from "./cloud-workspaces/test-fixtures.js";
+import { commitFinalSaveFixture } from "./cloud-workspaces/final-save-test-fixtures.js";
 import { withSystemTx } from "./db.js";
 import {
   cloudWorkspaceQuotaApprovalText,
@@ -476,7 +477,14 @@ d("owner-managed cloud-workspace quotas", () => {
         pool,
         validateCloudWorkspaceQuotaRequest(input),
       ),
-    ).resolves.toMatchObject({ state: "planned" });
+    ).rejects.toThrow(/below.*current workspace usage/i);
+    expect((await pool.query("SELECT retired_at FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [used.workspaceId])).rows[0].retired_at).toBeNull();
+    await commitFinalSaveFixture(pool, { ...used, generation: 1 }, { intentId: drainIntentId, userId: used.userId, reason: "before_rebuild" });
+    await withSystemTx(pool, async tx => {
+      await tx.query("UPDATE cloud_workspace_generations SET retired_at=now() WHERE workspace_id=$1 AND generation=2", [used.workspaceId]);
+      await tx.query("UPDATE cloud_workspace_generation_transitions SET state='cancelled',completed_at=now(),updated_at=now() WHERE id=$1", [transitionId]);
+    });
+    await expect(manageCloudWorkspaceQuota(pool, validateCloudWorkspaceQuotaRequest(input))).resolves.toMatchObject({ state: "planned" });
   });
 
   it("rejects a quota decrease while retired provider storage awaits verified deletion", async () => {

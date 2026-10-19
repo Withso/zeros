@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { ControlPlaneError } from "../../features/team/control-plane";
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
-const api = vi.hoisted(() => ({ enabled: true, signedIn: true, entitled: true, read: vi.fn(), lifecycle: vi.fn(), connect: vi.fn(), failure: vi.fn(), clear: vi.fn() }));
+const api = vi.hoisted(() => ({ enabled: true, signedIn: true, entitled: true, read: vi.fn(), lifecycle: vi.fn(), restart: vi.fn(), connect: vi.fn(), failure: vi.fn(), clear: vi.fn() }));
 vi.mock("../../features/settings/internal-features", () => ({ isInternalFeatureActive: () => api.enabled }));
 vi.mock("../../features/team/team-store", async original => ({
   ...await original<typeof import("../../features/team/team-store")>(),
@@ -21,6 +22,7 @@ vi.mock("../../platform/cloud-workspaces", async original => ({
   ...await original<typeof import("../../platform/cloud-workspaces")>(),
   getCloudWorkspaceDocument: api.read,
   changeCloudWorkspaceLifecycle: api.lifecycle,
+  restartCloudWorkspaceLifecycle: api.restart,
 }));
 vi.mock("../workbench-availability", () => ({
   reconnectWorkbenchWorkspace: api.connect, recordWorkbenchConnectionFailure: api.failure, clearWorkbenchConnectionFailure: api.clear,
@@ -49,6 +51,92 @@ beforeEach(() => {
   api.lifecycle.mockImplementation(async (_target, operation) => doc(operation === "stop" ? 2 : 4, operation === "stop" ? "stopping" : "waking"));
   api.read.mockResolvedValueOnce(doc(3, "stopped")).mockResolvedValue(doc(5, "ready"));
   api.connect.mockResolvedValue(undefined);
+});
+
+describe("server-owned Restart",()=>{
+  const id="77777777-7777-4777-8777-777777777777";
+  const receipt={version:1 as const,id,kind:"restart" as const,sourceGeneration:7};
+  const saved=(version=2)=>({...doc(version),lifecycleVersion:1 as const,
+    acceptedOperation:{...receipt,phase:"saving" as const,state:"pending" as const}});
+  beforeEach(()=>{
+    acceptCloudWorkspaceDocument({...doc(2),lifecycleVersion:1});
+    api.restart.mockResolvedValue({workspace:saved(3),operation:receipt});
+    api.read.mockReset().mockReturnValue(new Promise(()=>{}));
+  });
+  it("fences older interaction input once, keeps a background Restart silent and never submits local Stop/Wake",async()=>{
+    const before=cloudWorkspaceStopVersion(target);const task=restartCloudWorkspace(target);
+    expect(restartCloudWorkspace(target)).toBe(task);
+    const completed=expect(task).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(60_000);await completed;
+    expect(api.restart).toHaveBeenCalledOnce();expect(api.lifecycle).not.toHaveBeenCalled();
+    expect(cloudWorkspaceStopVersion(target)).toBeGreaterThan(before);
+    expect(api.failure).not.toHaveBeenCalled();expect(api.connect).not.toHaveBeenCalled();
+    expect(cloudWorkspaceRestartPhase(folder)).toBe("stopping");expect(vi.getTimerCount()).toBe(0);
+  });
+  it("observes the persisted operation after reload without another mutation",async()=>{
+    clearCloudWorkspaceCatalog();acceptCloudWorkspaceDocument(saved(3));
+    expect(cloudWorkspaceRestartPhase(folder)).toBe("stopping");
+    const task=restartCloudWorkspace(target);const completed=expect(task).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(60_000);await completed;
+    expect(api.restart).not.toHaveBeenCalled();expect(api.lifecycle).not.toHaveBeenCalled();expect(api.failure).not.toHaveBeenCalled();
+  });
+  it("keeps a failed source's accepted save silent without reconnecting or issuing another lifecycle action", async () => {
+    const source = { ...saved(3), status: "failed", error: { code: "source_failed", message: "Earlier source failure" } };
+    acceptCloudWorkspaceDocument(source);
+    const task = restartCloudWorkspace(target).then(() => ({ completed: true }), error => ({ error }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await task).toEqual({ completed: true });
+    expect(api.failure).not.toHaveBeenCalled();
+    expect(api.connect).not.toHaveBeenCalled();
+    expect(api.restart).not.toHaveBeenCalled();
+    expect(api.lifecycle).not.toHaveBeenCalled();
+    expect(cloudWorkspaceRestartPhase(folder)).toBe("stopping");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("connects only this accepted Restart's completed replacement, including a late older receipt",async()=>{
+    let finish!:(value:unknown)=>void;api.restart.mockReturnValue(new Promise(resolve=>{finish=resolve;}));
+    const task=restartCloudWorkspace(target);const completed=expect(task).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(0);
+    acceptCloudWorkspaceDocument({...saved(5),generation:{...doc(5).generation,number:8},
+      acceptedOperation:{...receipt,state:"completed",phase:"completed"}});
+    finish({workspace:saved(3),operation:receipt});await vi.advanceTimersByTimeAsync(0);await completed;
+    expect(api.connect).toHaveBeenCalledExactlyOnceWith(folder);expect(api.lifecycle).not.toHaveBeenCalled();
+  });
+  it.each(["account","generation","operation"] as const)("silently disposes a held Restart response after %s replacement",async change=>{
+    let finish!:(value:unknown)=>void;api.restart.mockReturnValue(new Promise(resolve=>{finish=resolve;}));
+    const task=restartCloudWorkspace(target);const completed=expect(task).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(0);
+    if(change==="account"){clearCloudWorkspaceCatalog();acceptCloudWorkspaceDocument({...doc(5),lifecycleVersion:1});}
+    if(change==="generation")acceptCloudWorkspaceDocument({...doc(5),lifecycleVersion:1,generation:{...doc(5).generation,number:8}});
+    if(change==="operation")acceptCloudWorkspaceDocument({...saved(5),acceptedOperation:{...saved(5).acceptedOperation,id:crypto.randomUUID()}});
+    finish({workspace:saved(3),operation:receipt});await vi.advanceTimersByTimeAsync(0);await completed;
+    expect(api.connect).not.toHaveBeenCalled();expect(api.failure).not.toHaveBeenCalled();expect(api.lifecycle).not.toHaveBeenCalled();
+  });
+  it("preserves the original v1 key/body after ambiguous sends across a generation and later action", async () => {
+    api.restart.mockRejectedValueOnce(new Error("response lost"))
+      .mockRejectedValueOnce(new ControlPlaneError(404,"not_found","old instance"));
+    await expect(restartCloudWorkspace(target)).rejects.toThrow("response lost");
+    const fence=cloudWorkspaceStopVersion(target);
+    acceptCloudWorkspaceDocument({...doc(5),generation:{...doc(5).generation,number:8},lifecycleVersion:1,
+      acceptedOperation:{...receipt,id:crypto.randomUUID(),sourceGeneration:8,phase:"saving",state:"pending"}});
+    await expect(restartCloudWorkspace(target)).rejects.toThrow("old instance");
+    expect(api.restart.mock.calls[1]).toEqual(api.restart.mock.calls[0]);
+    expect(cloudWorkspaceStopVersion(target)).toBe(fence);
+    expect(api.lifecycle).not.toHaveBeenCalled();
+    api.restart.mockResolvedValueOnce({workspace:saved(3),operation:receipt});
+    await restartCloudWorkspace(target);
+    expect(api.restart.mock.calls[2]).toEqual(api.restart.mock.calls[0]);
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+  it("does not consume same-generation source readiness before this Restart completes", async () => {
+    const task=restartCloudWorkspace(target);
+    const completed=expect(task).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(0);
+    acceptCloudWorkspaceDocument({...saved(4),acceptedOperation:{...receipt,phase:"starting",state:"pending"}});
+    await vi.advanceTimersByTimeAsync(60_000);await completed;
+    expect(api.connect).not.toHaveBeenCalled();expect(api.failure).not.toHaveBeenCalled();
+    expect(cloudWorkspaceRestartPhase(folder)).toBe("waking");
+  });
 });
 afterEach(() => { clearCloudWorkspaceCatalog(); vi.useRealTimers(); });
 

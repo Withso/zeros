@@ -19,6 +19,8 @@ import { CloudProviderError } from "./provider.js";
 import { DatabaseCloudProviderOperationStore } from "./provider-operation-store.js";
 import { requestCloudWorkspaceDeletion } from "./routes.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { commitFinalSaveFixture } from "./final-save-test-fixtures.js";
+import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const RESOURCE = "bx_23456789";
@@ -49,6 +51,17 @@ suite("authenticated compute retirement during storage deletion", () => {
       actorUserId: fixture.userId, idempotencyKey: DELETE_KEY, discardUncheckpointed: true,
     }));
     intentId = accepted.intent.id;
+    // A deletion-retirement receipt starts after an actual final save. The
+    // legacy discard input no longer permits bypassing source durability.
+    await commitFinalSaveFixture(pool, { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+      generation: 1, engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken },
+    { intentId, userId: fixture.userId, reason: "before_delete" });
+    await withSystemTx(pool, async tx => {
+      await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [fixture.workspaceId]);
+      await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+        generation: 1, reason: "workspace_delete_requested" });
+      await tx.query("UPDATE cloud_workspaces SET desired_state='deleted',status='deleting',authority_epoch=authority_epoch+1 WHERE id=$1", [fixture.workspaceId]);
+    });
     requestedAt = (await pool.query("SELECT created_at FROM cloud_workspace_lifecycle_intents WHERE id=$1", [intentId])).rows[0].created_at.toISOString();
     await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='stopped' WHERE workspace_id=$1", [fixture.workspaceId]);
     await pool.query(`INSERT INTO cloud_workspace_provider_operations

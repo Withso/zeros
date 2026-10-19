@@ -1,3 +1,5 @@
+import { CloudWorkspaceCheckpointRequestWorker } from "./checkpoint-requests.js";
+import { requireFinalSaveDispatch } from "./final-save-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { stopUnavailableCloudEngine } from "./engine-health.js";
 import type pg from "pg";
@@ -123,6 +125,7 @@ export type CloudWorkspaceReconcilerOptions = {
   maxManagedResourcesPerSweep?: number;
   workosEnabled?: boolean;
   runtimeUpgradeConfig?: CloudWorkspaceBackendConfig;
+  checkpointRequests?: Pick<CloudWorkspaceCheckpointRequestWorker, "recoverOnce">;
   runtimeRollbackCache?: Pick<CloudRuntimeRollbackCache, "beforeStop"> | null;
   paidAuthorityRecheckIntervalMs?: number;
   workerId?: string;
@@ -326,6 +329,7 @@ function safeFailure(error: unknown): {
 }
 
 export class CloudWorkspaceReconciler {
+  private readonly checkpointRequests: Pick<CloudWorkspaceCheckpointRequestWorker, "recoverOnce">;
   private readonly pool: pg.Pool;
   private readonly provider: CloudWorkspaceProvider;
   private readonly providerResolver: CloudWorkspaceProviderResolver | null;
@@ -359,6 +363,7 @@ export class CloudWorkspaceReconciler {
     this.providerResolver = options.providerResolver ?? null;
     this.runtimeUpgradeConfig = options.runtimeUpgradeConfig ?? null;
     this.runtimeRollbackCache = options.runtimeRollbackCache;
+    this.checkpointRequests = options.checkpointRequests ?? new CloudWorkspaceCheckpointRequestWorker(options.pool, { workosEnabled: options.workosEnabled ?? false });
     this.workosEnabled = options.workosEnabled === true;
     this.computeLeases = new CloudWorkspaceComputeLeaseCoordinator({pool:options.pool,provider:options.provider,
       ...(options.providerResolver?{providerResolver:options.providerResolver}:{}),workosEnabled:options.workosEnabled===true,
@@ -511,6 +516,7 @@ export class CloudWorkspaceReconciler {
       while (live() && processed < MAX_CLAIMS_PER_JOB && await claim()) processed += 1;
     };
     switch (work) {
+      case "finalSave": await drain(async () => (await this.checkpointRequests.recoverOnce(scope)) > 0); break;
       case "paidAuthority": await drain(async () => (await this.paidAuthority.runOnce(scope)) !== null); break;
       case "engineHealth": await drain(() => stopUnavailableCloudEngine(this.pool, provider, scope)); break;
       case "compute": await drain(() => this.computeLeases.runOnce(scope)); break;
@@ -604,11 +610,8 @@ export class CloudWorkspaceReconciler {
                AND active.state = 'dispatching'
                AND active.lease_expires_at > now()
            )
-           AND (
-             checkpoint_request.id IS NULL
-             OR checkpoint_request.state = 'succeeded'
-             OR (checkpoint_request.state = 'cancelled' AND checkpoint_request.error_code = 'stop_unsealed')
-           )
+           AND (i.operation NOT IN ('stop','archive','delete') OR cloud_final_save_proven(i.id)
+             OR NOT EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries recovery WHERE recovery.lifecycle_intent_id=i.id))
            AND (
              i.operation <> 'create'
              OR NOT EXISTS (
@@ -653,10 +656,9 @@ export class CloudWorkspaceReconciler {
       let authorityEpoch = row.authority_epoch;
       if (
         row.affects_workspace &&
-        row.checkpoint_request_id !== null &&
-        ["succeeded", "cancelled"].includes(row.checkpoint_request_state ?? "") &&
+        ["stop", "archive", "delete"].includes(row.operation) &&
         row.current_generation === row.generation &&
-        row.desired_state === "running" &&
+        row.desired_state !== desiredForOperation(row.operation) &&
         ["stop", "archive", "delete"].includes(row.operation)
       ) {
         desiredState = desiredForOperation(row.operation);
@@ -939,6 +941,11 @@ export class CloudWorkspaceReconciler {
     intent: ClaimedIntent,
     current: CloudProviderResource | null,
   ): Promise<CloudProviderResource | null> {
+    const recheckFinalSave = () => requireFinalSaveDispatch(this.pool, {
+      workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation, intentId: intent.id,
+      providerResourceId: current!.resourceId, workerId: this.workerId, attemptCount: intent.attemptCount,
+      authorityEpoch: intent.authorityEpoch,
+    });
     switch (intent.operation) {
       case "create":
       case "wake": {
@@ -980,20 +987,24 @@ export class CloudWorkspaceReconciler {
             !await this.runtimeRollbackCache.beforeStop({ workspaceId: intent.workspaceId, organizationId: intent.orgId,
               generation: intent.generation, providerResourceId: current.resourceId, intentId: intent.id,
               authorityEpoch: intent.authorityEpoch, workerId: this.workerId, sourceBindingId: intent.sourceBindingId })) return current;
+        await recheckFinalSave();
         const next = await provider.stop(current.resourceId);
         assertProviderResourceIdentity(next, intent);
         return next;
       }
       case "archive": {
         if (!current) return null;
+        await recheckFinalSave();
         const next = await provider.archive(current.resourceId);
         assertProviderResourceIdentity(next, intent);
         return next;
       }
       case "delete": {
         if (!current) return null;
-        if(!await this.computeLeases.beforeDelete({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current))
+        if(!await this.computeLeases.beforeDelete({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation,
+          dispatchClaim: { intentId: intent.id, workerId: this.workerId, attemptCount: intent.attemptCount, authorityEpoch: intent.authorityEpoch }},provider,current))
           return (await provider.inspect(current.resourceId))??current;
+        await recheckFinalSave();
         await provider.delete(current.resourceId);
         // A successful dispatch proves only that the provider accepted the
         // request. Inspect independently before publishing durable deletion;
@@ -1052,9 +1063,10 @@ export class CloudWorkspaceReconciler {
         affects_workspace: boolean;
         lease_owner: string | null;
         lease_current: boolean;
+        attempt_count: number;
         dispatched_age_ms: string;
       }>(
-        `SELECT state, affects_workspace, lease_owner, lease_expires_at>clock_timestamp() AS lease_current,
+        `SELECT state, affects_workspace, lease_owner, attempt_count, lease_expires_at>clock_timestamp() AS lease_current,
                 extract(epoch FROM (now() - dispatched_at)) * 1000 AS dispatched_age_ms
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
@@ -1063,7 +1075,7 @@ export class CloudWorkspaceReconciler {
       const row = owned.rows[0];
       if (!row || row.state === "succeeded" || row.state === "superseded")
         return;
-      if (row.lease_owner !== this.workerId) return;
+      if (row.lease_owner !== this.workerId || row.attempt_count !== intent.attemptCount || !row.lease_current) return;
 
       const desired = current.desired_state;
       const generationIsCurrent =
@@ -1123,6 +1135,18 @@ export class CloudWorkspaceReconciler {
              AND candidate_generation = $3 AND state = 'provisioning'`,
           [intent.workspaceId, intent.orgId, intent.generation],
         );
+      }
+      if (resultState === "succeeded" && ["stop", "archive", "delete"].includes(intent.operation)) {
+        // Release only after the exact claim's positive provider observation
+        // has been persisted. A dependent generation transition below may
+        // then replace this source in this same transaction.
+        await tx.query(`UPDATE cloud_workspace_final_save_dispatches dispatch SET settled_at=clock_timestamp()
+          FROM cloud_workspace_provider_bindings binding WHERE dispatch.lifecycle_intent_id=$1 AND dispatch.settled_at IS NULL
+            AND binding.workspace_id=dispatch.workspace_id AND binding.org_id=dispatch.org_id AND binding.generation=dispatch.generation
+            AND binding.provider_resource_id=dispatch.provider_resource_id AND binding.last_observed_at>=dispatch.admitted_at
+            AND (($2='stop' AND (binding.observed_state IN ('stopped','archived','deleted') OR $3::boolean))
+              OR ($2='archive' AND binding.observed_state IN ('archived','deleted'))
+              OR ($2='delete' AND binding.deletion_verified_at>=dispatch.admitted_at))`, [intent.id, intent.operation, resource?.computeStopped === true]);
       }
       if (
         !row.affects_workspace &&
@@ -2036,7 +2060,7 @@ export class CloudWorkspaceReconciler {
         computeStopped: item.computeStopped,
         metadata: resource?.metadata ?? {},
       }) === true;
-    const decision = await withSystemTx(this.pool, async (tx) => {
+    await withSystemTx(this.pool, async (tx) => {
       const binding = await tx.query(
         `SELECT 1
              FROM cloud_workspace_provider_bindings binding
@@ -2219,58 +2243,10 @@ export class CloudWorkspaceReconciler {
         orphan.eligible
       );
     });
-    if (!decision || !identity) return;
+    // Inventory and provider labels cannot prove a final save. Preserve
+    // unbound allocations for the existing operator orphan alert/runbook;
+    // only a guarded, exact lifecycle may authorize destructive I/O.
 
-    try {
-      await scope.provider.delete(item.resourceId);
-      const remaining = await scope.provider.inspect(item.resourceId);
-      if (remaining) assertProviderResourceIdentity(remaining, identity);
-      else await assertProviderAbsence(scope.provider, identity);
-      const deletionVerified =
-        remaining === null || remaining.state === "deleted";
-      await withSystemTx(this.pool, (tx) =>
-        tx.query(
-          `UPDATE cloud_workspace_provider_orphans
-             SET delete_attempted_at = now(),
-                 deletion_verified_at = CASE WHEN $3 THEN now() ELSE NULL END,
-                 last_seen_at = now()
-             WHERE provider = $1 AND provider_resource_id = $2
-               AND org_id IS NOT DISTINCT FROM $4::uuid
-               AND provider_connection_id IS NOT DISTINCT FROM $5::uuid
-               AND provider_connection_version IS NOT DISTINCT FROM $6::bigint`,
-          [
-            scope.provider.name,
-            item.resourceId,
-            deletionVerified,
-            scope.organizationId,
-            scope.connectionId,
-            scope.connectionVersion,
-          ],
-        ),
-      );
-    } catch (error) {
-      const failure = safeFailure(error);
-      this.logger.warn(
-        `[cloud-workspace] orphan cleanup failed (${failure.code})`,
-      );
-      await withSystemTx(this.pool, (tx) =>
-        tx.query(
-          `UPDATE cloud_workspace_provider_orphans
-             SET delete_attempted_at = now()
-             WHERE provider = $1 AND provider_resource_id = $2
-               AND org_id IS NOT DISTINCT FROM $3::uuid
-               AND provider_connection_id IS NOT DISTINCT FROM $4::uuid
-               AND provider_connection_version IS NOT DISTINCT FROM $5::bigint`,
-          [
-            scope.provider.name,
-            item.resourceId,
-            scope.organizationId,
-            scope.connectionId,
-            scope.connectionVersion,
-          ],
-        ),
-      );
-    }
   }
 }
 

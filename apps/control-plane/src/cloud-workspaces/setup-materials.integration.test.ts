@@ -1127,6 +1127,15 @@ d("cloud workspace setup material redemption", () => {
     expect((await pool.query("SELECT cloud_local_commands_version,accepted_work_version FROM cloud_workspace_engine_instances WHERE id=$1",[material.engine.instanceId])).rows[0])
       .toEqual({cloud_local_commands_version:1,accepted_work_version:acceptedWorkVersion??null});
   });
+  it.each([undefined,1] as const)("pins optional final-save support to its qualified local registration (%s)",async finalSaveVersion=>{
+    const material=await service.redeem({...redemptionInput(),materialVersion:2,runtime:runtimeWitness});
+    const registered=await service.registerEngine({token:material.engine.registration.token,...material.execution,
+      engineInstanceId:material.engine.instanceId,protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,actorProtocolVersion:2,
+      agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"},agentCustomizationVersion:3,cloudLocalCommandsVersion:1,finalSaveVersion});
+    expect(registered.finalSaveVersion).toBe(finalSaveVersion);
+    expect((await pool.query("SELECT final_save_version FROM cloud_workspace_engine_instances WHERE id=$1",[material.engine.instanceId])).rows)
+      .toEqual([{final_save_version:finalSaveVersion??null}]);
+  });
   it("pins coordinator ownership at registration and carries frontend observations over the API heartbeat", async () => {
     const material = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
     const registered = await service.registerEngine({ token: material.engine.registration.token, ...material.execution,

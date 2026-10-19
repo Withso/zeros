@@ -1,5 +1,7 @@
 // Test-only compatibility fixture: claimIntent and recordFailure are frozen
-// verbatim from c4895c03 (apart from public visibility and relative imports).
+// from c4895c03 (claim predicates/failure writes are frozen). Scope projection
+// adds authorityEpoch for the current shared provider loop; it grants no new
+// admission and the SQL dispatch trigger still evaluates the old claim.
 // The provider loop is shared with the current reconciler; neither the old
 // claim nor the old failure handler knows about resume_after_intent_id.
 import { randomUUID } from "node:crypto";
@@ -35,6 +37,7 @@ type ClaimedIntent = {
   attemptCount: number;
   affectsWorkspace: boolean;
   generationWasCurrent: boolean;
+  authorityEpoch: string;
   generationTransitionId: string | null;
 };
 
@@ -103,6 +106,7 @@ class PreviousLifecycleWriter {
         operation: LifecycleOperation;
         desired_state: DesiredState;
         current_generation: number;
+        authority_epoch: string;
         generation: number;
         provider: string;
         image_ref: string;
@@ -118,7 +122,7 @@ class PreviousLifecycleWriter {
         checkpoint_request_state: string | null;
       }>(
         `SELECT i.id, i.workspace_id, i.org_id, i.operation,
-                cw.desired_state, cw.current_generation, i.generation,
+                cw.desired_state, cw.current_generation, cw.authority_epoch::text, i.generation,
                 i.affects_workspace, i.generation_transition_id, g.provider,
                 g.image_ref, g.architecture, g.cpu_millicores,
                 g.memory_mib, g.storage_mib, pb.provider_resource_id,
@@ -230,6 +234,7 @@ class PreviousLifecycleWriter {
         attemptCount: row.attempt_count + 1,
         affectsWorkspace: row.affects_workspace,
         generationWasCurrent: row.generation === row.current_generation,
+        authorityEpoch: row.authority_epoch,
         generationTransitionId: row.generation_transition_id,
       };
     });

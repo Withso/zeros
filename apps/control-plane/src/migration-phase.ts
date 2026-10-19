@@ -228,7 +228,7 @@ export function expandMigrationViolations(sql: string): string[] {
   }
   for (const clause of source.matchAll(/\bADD (?:COLUMN )?([^;,]+)/g)) {
     if (
-      /\bNOT NULL\b/.test(clause[1]!) &&
+      /(?<!IS )\bNOT NULL\b/.test(clause[1]!) &&
       !/(?<!SET )\bDEFAULT\b/.test(clause[1]!)
     )
       violations.push("ADD NOT NULL without a compatible DEFAULT");

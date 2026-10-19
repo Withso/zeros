@@ -29,6 +29,7 @@ const referencingOwners = [
   "workspace_record_batches", "cloud_workspace_local_command_history_heads", "cloud_workspace_allocation_transfers",
   "cloud_workspace_generations", "workspace_checkpoint_requests", "workspace_content_heads", "workspace_exports",
   "cloud_workspace_setup_specs",
+  "cloud_workspace_final_save_recoveries",
 ];
 
 suite("workspace deletion dependency graph", () => {

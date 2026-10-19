@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -20,6 +21,7 @@ import { CloudWorkspaceSetupMaterialError } from "./setup-materials.js";
 import { CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH } from "./engine-client-admission.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { runtimeWitness } from "./runtime-test-fixtures.js";
+import { CLOUD_FINAL_SAVE_PATH,CLOUD_FINAL_SAVE_VERSION_HEADER } from "./final-save-contract.js";
 import {
   CLOUD_RUNTIME_ACCESS_ADMISSION_PATH,
   CloudRuntimeAccessAdmissionError,
@@ -59,6 +61,47 @@ function harness(overrides: Partial<CloudWorkspaceInternalSetupService> = {}) {
 }
 
 describe("cloud workspace internal setup routes", () => {
+  it.each(["whitespace","key order"])("hashes the exact checkpoint HTTP body with retained %s",async formatting=>{
+    const commitCheckpoint=vi.fn<NonNullable<CloudWorkspaceInternalSetupService["commitCheckpoint"]>>(async()=>({
+      checkpointId:body.workspaceId,contentRevision:1}));
+    const {app}=harness({commitCheckpoint});
+    const value={workspaceId:body.workspaceId,organizationId:body.organizationId,generation:1,
+      engineInstanceId:body.setupRunId,requestId:body.workspaceId,idempotencyKey:"checkpoint.fixture",contentRevision:1,
+      reason:"before_stop",manifestBlobId:body.setupRunId,artifactBlobId:null,inclusionPolicy:{},fileCount:0,totalBytes:0,integritySha256:"a".repeat(64)};
+    const raw=formatting==="whitespace"?JSON.stringify(value,null,2):JSON.stringify(Object.fromEntries(Object.entries(value).reverse()));
+    const response=await app.request(CLOUD_WORKSPACE_CHECKPOINT_COMMIT_PATH,{method:"POST",headers:{authorization:`Bearer ${HEARTBEAT_TOKEN}`,
+      "content-type":"application/json"},body:raw});
+    expect(response.status).toBe(200);
+    expect(commitCheckpoint.mock.calls[0]![0].serializedBodySha256).toBe(createHash("sha256").update(raw).digest("hex"));
+  });
+  it.each([CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH])("negotiates final-save only on the exact offered v4 local registration (%s)",async route=>{
+    for(const local of [false,true])for(const offered of [false,true])for(const acknowledged of [false,true]){
+      const register=vi.fn<CloudWorkspaceInternalSetupService["registerEngine"]>(async()=>({version:1,durableRecordConnected:true,
+        cloudLocalCommandsVersion:1,agentJournalMode:"legacy",...(acknowledged?{finalSaveVersion:1}:{})}));
+      const {app}=harness({registerEngine:register,registerTransitionEngine:register});
+      const {expected:_expected,...binding}=body;
+      const response=await app.request(route,{method:"POST",headers:{authorization:`Bearer ${SETUP_TOKEN}`,"content-type":"application/json",
+        ...(local?{"x-zeros-cloud-local-commands":"1"}:{}),...(offered?{[CLOUD_FINAL_SAVE_VERSION_HEADER]:"1"}:{})},
+        body:JSON.stringify({...binding,engineInstanceId:body.workspaceId,protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+          actorProtocolVersion:2,agentCustomizationVersion:3,agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"}})});
+      expect(response.status).toBe(200);expect(register.mock.calls[0]![0].finalSaveVersion).toBe(local&&offered?1:undefined);
+      expect(response.headers.get(CLOUD_FINAL_SAVE_VERSION_HEADER)).toBe(local&&offered&&acknowledged?"1":null);
+      expect(await response.json()).toEqual({version:1,durableRecordConnected:true});
+    }
+  });
+  it("keeps the final-save companion absent for old services and rejects body-carried credentials and extra metadata",async()=>{
+    const report={version:1,workspaceId:body.workspaceId,organizationId:body.organizationId,generation:1,engineInstanceId:body.setupRunId,
+      recoveryId:body.workspaceId,requestId:body.setupRunId,attemptOrdinal:0,sourceSha256:"a".repeat(64),custodyId:body.workspaceId,
+      kind:"retry",failure:"capture_failed",commit:null};
+    const post=(app:Hono,value:unknown)=>app.request(CLOUD_FINAL_SAVE_PATH,{method:"POST",headers:{authorization:`Bearer ${HEARTBEAT_TOKEN}`,
+      "content-type":"application/json"},body:JSON.stringify(value)});
+    expect((await post(harness().app,report)).status).toBe(404);
+    const reportFinalSave=vi.fn<NonNullable<CloudWorkspaceInternalSetupService["reportFinalSave"]>>();
+    const {app}=harness({reportFinalSave});
+    for(const extra of [{token:HEARTBEAT_TOKEN},{secret:"never accepted"},{extra:{}}])expect((await post(app,{...report,...extra})).status).toBe(422);
+    expect((await post(app,{...report,extra:"x".repeat(8192)})).status).toBe(413);
+    expect(reportFinalSave).not.toHaveBeenCalled();
+  });
   it("negotiates performance only with all older envelopes after successful v4 redemption", async () => {
     const { app, service } = harness();
     const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json",

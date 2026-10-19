@@ -5,6 +5,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 import { readLifecycleDueInMs } from "./lifecycle-jobs.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { commitFinalSaveFixture } from "./final-save-test-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -91,6 +92,13 @@ d("worker deadline projections", () => {
 
   it("does not run deletion claims before provider proof or while a legal hold remains", async () => {
     const f = await seedReadyCloudWorkspace(pool);
+    const intentId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
+      VALUES($1::uuid,$2,$3,1,$4,'delete',$1::text,digest($1::text,'sha256'))`,
+    [intentId,f.workspaceId,f.organizationId,f.userId]);
+    await commitFinalSaveFixture(pool, { ...f,generation:1 }, { intentId,userId:f.userId,reason:"before_delete" });
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [intentId]);
     await pool.query(`INSERT INTO workspace_retention_policies(workspace_id,org_id,last_applied_at)
       VALUES($1,$2,now())`, [f.workspaceId, f.organizationId]);
     await pool.query("UPDATE cloud_workspaces SET desired_state='deleted',status='deleted',deleted_at=now() WHERE id=$1", [f.workspaceId]);

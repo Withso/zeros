@@ -209,10 +209,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (process.env.GITHUB_STEP_SUMMARY && reports.size) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Control-plane database shards\n\n${shardSummary(reports)}\n`);
   }
-  if (problems.length) process.exit(1);
-  console.log(
-    process.env.DATABASE_SCOPE === "false"
-      ? "Control plane passed; its database inputs did not change."
-      : `Control plane passed across ${reports.size} database shards.`,
-  );
+  // Allow queued pipe writes to finish so every missing-suite diagnostic reaches
+  // the required check, including when the database test inventory grows.
+  if (problems.length) process.exitCode = 1;
+  else {
+    console.log(
+      process.env.DATABASE_SCOPE === "false"
+        ? "Control plane passed; its database inputs did not change."
+        : `Control plane passed across ${reports.size} database shards.`,
+    );
+  }
 }

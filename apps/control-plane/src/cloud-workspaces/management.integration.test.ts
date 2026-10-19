@@ -218,7 +218,9 @@ d("cloud workspace Phase 5 management", () => {
       action:controlled=>new CloudWorkspaceCheckpointRequestWorker(controlled).expireOnce(),
     });
     expect((await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE id=$1",[request.id])).rows[0]).toEqual({state:"expired"});
-    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1",[intentId])).rows[0]).toEqual({state:"failed"});
+    expect((await pool.query("SELECT state,error_code FROM cloud_workspace_lifecycle_intents WHERE id=$1",[intentId])).rows[0]).toEqual({state:"queued",error_code:null});
+    expect((await pool.query("SELECT current_request_id,first_failure FROM cloud_workspace_final_save_recoveries WHERE lifecycle_intent_id=$1",[intentId])).rows[0])
+      .toEqual({current_request_id:request.id,first_failure:"checkpoint_deadline_exceeded"});
   });
 
   it.each(["organizations","cloud_workspaces"])("expires another workspace while %s is locked",async(table)=>{

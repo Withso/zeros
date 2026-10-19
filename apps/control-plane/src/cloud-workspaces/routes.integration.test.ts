@@ -2110,7 +2110,7 @@ d("cloud workspace API contracts", () => {
     expect((await createWorkspace()).response.status).toBe(202);
   });
 
-  it("requires an explicit discard to delete when a final checkpoint cannot complete", async () => {
+  it("keeps final-save recovery even when a legacy client requests discard", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
     await pool.query("UPDATE cloud_workspaces SET status = 'ready' WHERE id = $1", [workspaceId]);
@@ -2123,14 +2123,14 @@ d("cloud workspace API contracts", () => {
     expect(changedSemantics.status).toBe(409);
     const discarded = await request(route, { method: "DELETE", key: randomUUID(), body: { discardUncheckpointed: true } });
     expect(discarded.status).toBe(202);
-    await expect(discarded.json()).resolves.toMatchObject({ workspace: { status: "deleting", desiredState: "deleted" } });
+    await expect(discarded.json()).resolves.toMatchObject({ workspace: { status: "ready", desiredState: "running" } });
     const checkpoints = await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE workspace_id = $1", [workspaceId]);
-    expect(checkpoints.rows).toEqual([{ state: "cancelled" }]);
+    expect(checkpoints.rows).toEqual([{ state: "queued" }, { state: "queued" }]);
     const audit = await pool.query("SELECT subject FROM audit_log WHERE org_id = $1 AND action = 'cloud_workspace.delete_requested' ORDER BY created_at DESC", [orgId]);
     expect(audit.rows[0]?.subject).toMatchObject({ discardUncheckpointed: true });
   });
 
-  it("records lifecycle intent and retires active setup and grants before leaving running", async () => {
+  it("records lifecycle intent without retiring unsaved setup or grants", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
     await withSystemTx(pool, async (tx) => {
@@ -2177,7 +2177,7 @@ d("cloud workspace API contracts", () => {
     );
     expect(stopped.status).toBe(202);
     await expect(stopped.json()).resolves.toMatchObject({
-      workspace: { status: "stopping", desiredState: "stopped" },
+      workspace: { status: "requested", desiredState: "running" },
       intent: { operation: "stop", state: "queued" },
     });
     const retired = await pool.query(
@@ -2192,9 +2192,9 @@ d("cloud workspace API contracts", () => {
       [workspaceId],
     );
     expect(retired.rows[0]).toEqual({
-      all_grants_revoked: true,
-      setup_state: "cancelled",
-      setup_completed: true,
+      all_grants_revoked: false,
+      setup_state: "running",
+      setup_completed: false,
     });
 
     const deleted = await request(
@@ -2203,7 +2203,7 @@ d("cloud workspace API contracts", () => {
     );
     expect(deleted.status).toBe(202);
     await expect(deleted.json()).resolves.toMatchObject({
-      workspace: { status: "deleting", desiredState: "deleted" },
+      workspace: { status: "requested", desiredState: "running" },
       intent: { operation: "delete", state: "queued" },
     });
     const state = await pool.query(
@@ -2222,19 +2222,19 @@ d("cloud workspace API contracts", () => {
         operation: "create",
         state: "superseded",
         deletion_state: "waiting_for_provider",
-        revoked: true,
+        revoked: false,
       },
       {
         operation: "stop",
-        state: "superseded",
+        state: "queued",
         deletion_state: "waiting_for_provider",
-        revoked: true,
+        revoked: false,
       },
       {
         operation: "delete",
         state: "queued",
         deletion_state: "waiting_for_provider",
-        revoked: true,
+        revoked: false,
       },
     ]);
   });
@@ -2942,7 +2942,7 @@ d("cloud workspace API contracts", () => {
       current_generation: 1,
       transition_state: "cancelled",
       transition_completed: true,
-      candidate_retired: true,
+      candidate_retired: false,
       transition_intents: [
         {
           operation: "stop",
@@ -2954,7 +2954,7 @@ d("cloud workspace API contracts", () => {
           operation: "stop",
           generation: 1,
           affectsWorkspace: false,
-          state: "superseded",
+          state: "queued",
         },
         {
           operation: "delete",
@@ -3150,8 +3150,8 @@ d("cloud workspace API contracts", () => {
       reason: "workspace_delete_requested",
     },
   ])(
-    "re-enforces runtime retirement when $operation is already satisfied",
-    async ({ method, suffix, status, desiredState, reason }) => {
+    "refuses runtime retirement without final proof despite a legacy $operation status",
+    async ({ method, suffix, status, desiredState }) => {
       const created = await createWorkspace();
       const workspaceId = created.body.workspace.id;
       await withSystemTx(pool, async (tx) => {
@@ -3198,7 +3198,7 @@ d("cloud workspace API contracts", () => {
       expect(response.status).toBe(202);
       await expect(response.json()).resolves.toMatchObject({
         workspace: { status, desiredState },
-        intent: { state: "succeeded" },
+        intent: { state: "queued" },
       });
       const retired = await pool.query(
         `SELECT sr.state AS setup_state, sr.error_code,
@@ -3211,10 +3211,10 @@ d("cloud workspace API contracts", () => {
         [workspaceId],
       );
       expect(retired.rows[0]).toEqual({
-        setup_state: "cancelled",
-        error_code: reason,
-        setup_completed: true,
-        grant_revoked: true,
+        setup_state: "running",
+        error_code: null,
+        setup_completed: false,
+        grant_revoked: false,
       });
     },
   );

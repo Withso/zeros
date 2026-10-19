@@ -13,6 +13,7 @@ import { CloudWorkspaceCheckpointRequestWorker } from "./checkpoint-requests.js"
 import { createCloudWorkspaceManagementRoutes } from "./management-routes.js";
 import { requestCloudWorkspaceDeletion } from "./routes.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { commitFinalSaveFixture } from "./final-save-test-fixtures.js";
 
 // Ordinary request/expiry/retirement services, synthetic
 // PostgreSQL and provider receipts only. No live fixture or provider calls.
@@ -44,10 +45,22 @@ suite("failed final checkpoint followed by a stopped delete retry", () => {
     await pool.query("UPDATE workspace_checkpoint_requests SET created_at=now()-interval '6 minutes',deadline_at=now()-interval '1 second' WHERE id=$1", [checkpoint[0].id]);
     expect(await new CloudWorkspaceCheckpointRequestWorker(pool).expireOnce()).toBe(1);
     expect((await pool.query("SELECT state,error_code FROM cloud_workspace_lifecycle_intents WHERE id=$1", [firstIntentId])).rows[0])
-      .toEqual({ state: "failed", error_code: "checkpoint_deadline_exceeded" });
+      .toEqual({ state: "queued", error_code: null });
 
-    // A later ordinary stop was observed in the incident. This synthetic
-    // observation supplies that completed-stop state, not a recovery mutation.
+    // Retain the historical failed-key/retry controls, with a genuinely saved
+    // source before the later observed Stop. Today's expiry itself cannot fail
+    // the accepted action or authorize this retirement. Once exact proof is
+    // present, seed the old terminal history these compatibility reads cover.
+    const savedStop = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,org_id,generation,requested_by,
+      operation,idempotency_key,request_sha256) VALUES($1::uuid,$2,$3,1,$4,'stop',$1::text,digest($1::text,'sha256'))`,
+    [savedStop,fixture.workspaceId,fixture.organizationId,fixture.userId]);
+    await commitFinalSaveFixture(pool, { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+      generation: 1, engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken },
+    { intentId: savedStop, userId: fixture.userId, reason: "before_stop" });
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [savedStop]);
+    await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET state='failed',error_code='checkpoint_deadline_exceeded',
+      completed_at=now() WHERE id=$1`, [firstIntentId]);
     await pool.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped',version=version+1 WHERE id=$1", [fixture.workspaceId]);
     await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
     await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='archived' WHERE workspace_id=$1", [fixture.workspaceId]);
@@ -100,7 +113,7 @@ suite("failed final checkpoint followed by a stopped delete retry", () => {
     const result = await requestDelete(FIRST_KEY);
     expect(result.replayed).toBe(true);
     expect(result.intent).toMatchObject({ id: firstIntentId, state: "failed" });
-    expect((await pool.query("SELECT count(*)::int AS count FROM workspace_checkpoint_requests WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].count).toBe(1);
+    expect((await pool.query("SELECT count(*)::int AS count FROM workspace_checkpoint_requests WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].count).toBe(2);
     const response = await read(FIRST_KEY);
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ error: { code: "cloud_workspace_retirement_unconfirmed" } });
@@ -203,11 +216,13 @@ suite("failed final checkpoint followed by a stopped delete retry", () => {
       // The old producer retained the original failed key even after it
       // accepted a successor. Model that persisted shape without rewriting
       // either immutable request or inventing another recovery key.
-      await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET state=$2::cloud_workspace_intent_state,
-        completed_at=CASE WHEN $2::text='succeeded' THEN now() ELSE NULL END WHERE id=$1`, [retry.intent.id, state]);
       await pool.query(`UPDATE workspace_deletion_jobs SET idempotency_key=$2,state='deleting_objects',
         attempt_count=2,lease_owner='synthetic-worker',lease_expires_at=now()+interval '1 minute'
         WHERE workspace_id=$1`, [fixture.workspaceId, `lifecycle.${firstIntentId}`]);
+      // Seed the old persisted job before live dispatch custody. A new erasure
+      // claim while a provider dispatch is held must still be refused.
+      await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET state=$2::cloud_workspace_intent_state,
+        completed_at=CASE WHEN $2::text='succeeded' THEN now() ELSE NULL END WHERE id=$1`, [retry.intent.id, state]);
       const original = (await pool.query("SELECT * FROM cloud_workspace_lifecycle_intents WHERE id=$1", [firstIntentId])).rows[0];
       const before = (await pool.query("SELECT * FROM workspace_deletion_jobs WHERE workspace_id=$1", [fixture.workspaceId])).rows[0];
       const replay = await requestDelete(RETRY_KEY);

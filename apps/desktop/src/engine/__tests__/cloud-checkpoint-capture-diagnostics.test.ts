@@ -67,7 +67,7 @@ async function fixture(intercept: (request: Request) => Response | Promise<Respo
     } else if (route.endsWith("/content/append")) {
       site = "content_append"; reply = () => Response.json({ revision: ++revision });
     } else if (route.endsWith("/checkpoints/commit")) {
-      site = "commit"; reply = () => { commits++; return Response.json({ checkpointId: randomUUID() }); };
+      site = "commit"; reply = () => { commits++; return Response.json({ checkpointId: randomUUID(), contentRevision: revision }); };
     } else throw new Error("unexpected capture route");
     requests.push(site);
     return intercept({ site, init: init!, reply });

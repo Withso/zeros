@@ -92,6 +92,7 @@ vi.mock("../../platform/bridge/active-bridge", async () => {
 });
 vi.mock("../cloud-workspace-catalog", () => ({
   cloudCatalogGeneration: () => fixture.account,
+  getCloudWorkspaceDocuments: () => [...fixture.docs.values()],
   cloudWorkspaceDocument: (target: {
     organizationId: string;
     workspaceId: string;

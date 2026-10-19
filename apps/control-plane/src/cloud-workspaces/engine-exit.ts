@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
 import { withSystemTx } from "../db.js";
+import { ensureFinalSaveRecovery, scheduleFinalSaveRecovery } from "./final-save-recovery.js";
 import { admitUnavailableCloudEngineStopTx } from "./engine-health.js";
 
 // Mirrors packages/protocol's cloud-runtime-lifecycle contract. The CP deploys
@@ -83,36 +84,18 @@ export async function reportCloudEngineExit(pool: pg.Pool, input: CloudEngineExi
       return ack;
     }
 
-    let adopted: { id: string; operation: "stop" | "archive" } | undefined;
-    if (pending?.request_id && (pending.operation === "delete" || uncommittedRebuild)) {
-      // Match the checkpoint deadline worker's pre-dispatch failure. An exit
-      // cannot satisfy deletion/rebuild prerequisites or authorize a purge.
-      await tx.query(`UPDATE workspace_checkpoint_requests SET state='failed',completed_at=now(),error_code='engine_exited'
-        WHERE id=$1 AND state<>'succeeded'`, [pending.request_id]);
-      await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='failed',completed_at=now(),updated_at=now(),
-        error_code='engine_exited',error_message='The engine exited before its final checkpoint completed',
-        lease_owner=NULL,lease_expires_at=NULL WHERE id=$1`, [pending.id]);
-      if (uncommittedRebuild && transition) {
-        await tx.query(`UPDATE cloud_workspace_generation_transitions SET state='cancelled',completed_at=now(),updated_at=now(),
-          error_code='engine_exited',error_message='The engine exited before its final checkpoint completed' WHERE id=$1`, [transition.id]);
-        await tx.query(`UPDATE cloud_workspace_generations SET retired_at=coalesce(retired_at,now())
-          WHERE workspace_id=$1 AND org_id=$2 AND generation=$3`, [report.workspaceId, report.organizationId, transition.candidate_generation]);
-      }
-    } else if (pending && ["stop", "archive"].includes(pending.operation)) {
-      adopted = { id: pending.id, operation: pending.operation as "stop" | "archive" };
-      await tx.query(`UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now(),error_code='stop_unsealed'
-        WHERE id=$1 AND state<>'succeeded'`, [pending.request_id]);
-      await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='queued',next_attempt_at=now(),updated_at=now(),
-        lease_owner=NULL,lease_expires_at=NULL WHERE id=$1`, [pending.id]);
-    } else if (pending) {
-      // Setup/wake and transitions own their failure; never replace them.
+    if (pending && ["stop", "archive", "delete"].includes(pending.operation)) {
+      await ensureFinalSaveRecovery(tx, pending.id);
+      if (pending.request_id) await tx.query(`UPDATE workspace_checkpoint_requests SET state='failed',completed_at=now(),error_code='engine_exited'
+        WHERE id=$1 AND state IN ('queued','delivered','recovery_queued','recovery_delivered')`, [pending.request_id]);
+      await scheduleFinalSaveRecovery(tx, { intentId: pending.id, failure: "source_unavailable", blocked: true });
       await retireExact();
       return ack;
     }
+    if (pending) { await retireExact(); return ack; }
     await admitUnavailableCloudEngineStopTx(tx, {
       workspaceId: report.workspaceId, organizationId: report.organizationId, generation: report.generation,
       reason: "engine_exited", engineInstanceId: report.engineInstanceId,
-      ...(adopted ? { adoptedIntent: adopted, checkpointRequestId: pending!.request_id } : {}),
     });
     return ack;
   });

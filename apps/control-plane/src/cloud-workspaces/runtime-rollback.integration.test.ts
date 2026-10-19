@@ -54,11 +54,18 @@ import type { CloudWorkspaceProvider, CloudProviderResource } from "./provider.j
       gitBaseCommit: "c".repeat(40), gitHeadRef: null, mutations: [{ path: "retained.txt", operation: "upsert",
         entryType: "file", mode: 33188, blobId: file.id, contentSha256: file.plaintextSha256, sizeBytes: file.sizeBytes }] });
     await pool.query("UPDATE cloud_workspace_engine_instances SET created_at=now()-interval '11 minutes' WHERE id=$1", [f.engineInstanceId]);
-    const checkpoint = (await new DatabaseCloudIdleStop(pool, false).request(scope, randomUUID()))!;
     // The native writer's exact seal is independent of the filesystem checkpoint.
     await withSystemTx(pool, async tx => {
       writerEpoch = await reserveLocalCloudCommandWriter(tx, scope, runtimeWitness.bootId, f.userId, 1);
+      const bindingId = randomUUID();
+      await tx.query(`INSERT INTO cloud_agent_boot_bindings
+        (id,workspace_id,org_id,generation,engine_instance_id,boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch,
+         credentials_initialized,initial_adoptions)
+        VALUES($1,$2,$3,1,$4,$5,$6,$7,1,true,
+          '[{"provider":"claude","status":"missing"},{"provider":"codex","status":"missing"},{"provider":"cursor","status":"missing"}]')`,
+      [bindingId,f.workspaceId,f.organizationId,f.engineInstanceId,runtimeWitness.bootId,writerEpoch,f.userId]);
       await activateLocalCloudCommandWriter(tx, scope, { bootId: runtimeWitness.bootId, writerEpoch });
+      await tx.query("UPDATE cloud_workspaces SET agent_command_mode='boot-owner-v1',agent_boot_id=$2 WHERE id=$1", [f.workspaceId,bindingId]);
       const seal = { version: 1, scope: { ...scope, heartbeatToken: undefined, bootId: runtimeWitness.bootId, writerEpoch,
         fundingOwnerUserId: f.userId, fundingOwnerEpoch: 1 }, sealId: randomUUID(), sequence: 0,
         recordSequence: 0, eventSequence: 0, inventorySha256: "a".repeat(64), sha256: "b".repeat(64) };
@@ -66,16 +73,25 @@ import type { CloudWorkspaceProvider, CloudProviderResource } from "./provider.j
       await tx.query(`UPDATE cloud_workspace_local_command_writers SET sealed_sequence=0,seal_record_sequence=0,seal_event_sequence=0,
         seal=$2,seal_ack=$3 WHERE writer_epoch=$1`, [writerEpoch, JSON.stringify(seal), JSON.stringify({ ...ack, writerEpoch })]);
     });
+    // Allocation and boot identity exist before capture. Neither may be
+    // invented or replaced after the saved provider dispatch is held.
+    const fundingIntentId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (id,workspace_id,org_id,generation,requested_by,operation,state,completed_at,idempotency_key,request_sha256)
+      VALUES($1::uuid,$2,$3,1,$4,'create','succeeded',now(),$1::text,digest($1::text,'sha256'))`,
+    [fundingIntentId,f.workspaceId,f.organizationId,f.userId]);
+    await pool.query(`INSERT INTO managed_compute_allocation_leases(id,workspace_id,org_id,generation,billing_epoch,user_id,lifecycle_intent_id,
+      provider,provider_resource_id,policy_id,seconds_per_dollar,weight_numerator,weight_denominator,ttl_seconds,state,funded_until,provider_expires_at)
+      VALUES(gen_random_uuid(),$1,$2,1,1,$3,$4,'boat','bx_rollback','rollback-fixture',3600,1,1,900,'funding',now()+interval '10 minutes',now()+interval '10 minutes')`,
+    [f.workspaceId,f.organizationId,f.userId,fundingIntentId]);
+    const checkpoint = (await new DatabaseCloudIdleStop(pool, false).request(scope, randomUUID()))!;
     await content.commitCheckpoint({ ...scope, requestId: checkpoint.id, idempotencyKey: randomUUID(), contentRevision: appended.revision,
       reason: "before_stop", manifestBlobId: manifest.id, artifactBlobId: null, inclusionPolicy: {}, fileCount: 1,
       totalBytes: file.sizeBytes, integritySha256: manifest.plaintextSha256 });
     const intent = (await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET state='dispatching',lease_owner='rollback-test',
-      lease_expires_at=now()+interval '10 minutes',dispatched_at=now(),attempt_count=1 WHERE workspace_id=$1 RETURNING id`, [f.workspaceId])).rows[0];
+      lease_expires_at=now()+interval '10 minutes',dispatched_at=now(),attempt_count=1
+      WHERE id=(SELECT lifecycle_intent_id FROM workspace_checkpoint_requests WHERE id=$1) RETURNING id`, [checkpoint.id])).rows[0];
     const workspace = (await pool.query(`UPDATE cloud_workspaces SET desired_state='stopped' WHERE id=$1 RETURNING authority_epoch,agent_boot_id`, [f.workspaceId])).rows[0];
-    await pool.query(`INSERT INTO managed_compute_allocation_leases(id,workspace_id,org_id,generation,billing_epoch,user_id,lifecycle_intent_id,
-      provider,provider_resource_id,policy_id,seconds_per_dollar,weight_numerator,weight_denominator,ttl_seconds,state,funded_until,provider_expires_at)
-      VALUES(gen_random_uuid(),$1,$2,1,1,$3,$4,'boat','bx_rollback','rollback-fixture',3600,1,1,900,'funding',now()+interval '10 minutes',now()+interval '10 minutes')`,
-    [f.workspaceId, f.organizationId, f.userId, intent.id]);
     claim = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1, providerResourceId: "bx_rollback",
       authorityEpoch: workspace.authority_epoch, intentId: intent.id, workerId: "rollback-test", sourceBindingId: workspace.agent_boot_id };
     const receipt = Buffer.from(JSON.stringify({ schema: "zeros.runtime-install-receipt/v1", runtimeId: runtime.descriptor.runtimeId,

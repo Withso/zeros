@@ -275,7 +275,7 @@ function entryFor(folder: string): AvailabilityEntry {
   const offCatalog = target
     ? subscribeCloudWorkspaces(() => { catalogChanged(); restartChanged(); })
     : () => {};
-  const offRestart = target ? subscribeCloudWorkspaceRestarts(restartChanged) : () => {};
+  const offRestart = target ? subscribeCloudWorkspaceRestarts(restartChanged, { observeCatalog: false }) : () => {};
   entry.stop = () => {
     clearTimeout(entry.timer);
     offStatus();

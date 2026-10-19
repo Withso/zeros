@@ -1,3 +1,4 @@
+import { requireFinalSaveDispatch } from "./final-save-recovery.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { retryAbortedDatabaseTransaction, withRetryableSystemTx } from "../db-retry.js";
@@ -134,7 +135,7 @@ const pendingStopDeadlineSql = `least(
   (SELECT min(request.deadline_at) FROM workspace_checkpoint_requests request
    WHERE request.lifecycle_intent_id=lease.stop_intent_id AND request.workspace_id=lease.workspace_id AND request.org_id=lease.org_id
      AND request.generation=coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),lease.generation)
-     AND request.state<>'succeeded' AND request.error_code IS DISTINCT FROM 'stop_unsealed'))`;
+     AND NOT cloud_final_save_proven(lease.stop_intent_id)))`;
 // Reserve the full checkpoint deadline plus the existing stop margin. Retry
 // backoff must never sleep past this boundary, even during a lasting outage.
 const PROVIDER_RETRY_SAFETY_MARGIN_MS = MAX_CHECKPOINT_DEADLINE_MS + STOP_MARGIN_MS;
@@ -733,7 +734,8 @@ export class CloudWorkspaceComputeLeaseCoordinator {
    * The normal lifecycle reconciler retries after settlement; timeouts retain
    * customer holds and never masquerade as a verified zero bill. */
   async beforeDelete(
-    input: { workspaceId: string; organizationId: string; generation: number },
+    input: { workspaceId: string; organizationId: string; generation: number;
+      dispatchClaim?: { intentId: string; workerId: string; attemptCount: number; authorityEpoch: string | number } },
     provider: CloudWorkspaceProvider,
     resource: CloudProviderResource,
   ): Promise<boolean> {
@@ -792,6 +794,8 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         "deleting",
       ].includes(resource.state)
     ) {
+      if (!input.dispatchClaim) return false;
+      await requireFinalSaveDispatch(this.options.pool, { ...input, ...input.dispatchClaim, providerResourceId: resource.resourceId });
       const stopped = await provider.stop(resource.resourceId);
       assertProviderResourceIdentity(stopped, input);
     }

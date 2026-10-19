@@ -71,10 +71,10 @@ suite("supervisor engine exit withdrawal", () => {
     });
   }
   async function tick() {
-    await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='engine-exit-fixture',last_observed_at=NULL WHERE workspace_id=$1", [f.workspaceId]);
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=NULL WHERE workspace_id=$1", [f.workspaceId]);
     let state: CloudProviderResource["state"] = "running";
     const resource = (): CloudProviderResource => ({ workspaceId: f.workspaceId, generation: 1,
-      resourceId: "engine-exit-fixture", state, target: null, metadata: {} });
+      resourceId: `sandbox-${f.workspaceId}`, state, target: null, metadata: {} });
     const provider = { name: "boat", inspect: vi.fn(async () => resource()), find: vi.fn(async () => [resource()]),
       stop: vi.fn(async () => { state = "stopped"; return resource(); }), create: vi.fn(), start: vi.fn(), archive: vi.fn(), delete: vi.fn() };
     const reconciler = new CloudWorkspaceReconciler({ pool, provider: provider as unknown as CloudWorkspaceProvider, intervalMs: 1000 });
@@ -134,7 +134,7 @@ suite("supervisor engine exit withdrawal", () => {
     return () => content.commitCheckpoint({ ...scope, requestId, idempotencyKey: randomUUID(), contentRevision: appended.revision,
       reason: "before_stop", manifestBlobId: manifest.id, artifactBlobId: null, inclusionPolicy: {}, fileCount: 1, totalBytes: 9, integritySha256: manifest.plaintextSha256 });
   }
-  it("retires a reported dead engine and admits Stop while its 36-minute lease is live", async () => {
+  it("retires a reported dead engine while holding its unsaved allocation for recovery", async () => {
     const providerBefore = (await pool.query("SELECT * FROM cloud_workspace_provider_bindings WHERE workspace_id=$1", [f.workspaceId])).rows;
     const billingBefore = (await pool.query("SELECT * FROM workspace_billing_epochs WHERE workspace_id=$1", [f.workspaceId])).rows;
     expect(await stopUnavailableCloudEngine(pool, null)).toBe(false);
@@ -146,10 +146,12 @@ suite("supervisor engine exit withdrawal", () => {
     expect((await pool.query("SELECT * FROM workspace_billing_epochs WHERE workspace_id=$1", [f.workspaceId])).rows).toEqual(billingBefore);
     expect((await pool.query("SELECT count(*)::int AS n FROM workspace_deletion_jobs WHERE workspace_id=$1", [f.workspaceId])).rows[0].n).toBe(0);
     const provider = await tick();
-    expect(provider.stop).toHaveBeenCalledOnce();
+    expect(provider.stop).not.toHaveBeenCalled();
     expect(provider.start).not.toHaveBeenCalled();
     expect(provider.delete).not.toHaveBeenCalled();
-    expect(await workspace()).toMatchObject({ status: "stopped", desired_state: "stopped" });
+    expect(await workspace()).toMatchObject({ status: "stopping", desired_state: "stopped" });
+    expect((await pool.query("SELECT state,checkpoint_id FROM cloud_workspace_final_save_recoveries WHERE workspace_id=$1", [f.workspaceId])).rows)
+      .toEqual([{state:"blocked",checkpoint_id:null}]);
   });
   it("a lost exit ACK creates one stop and one authority transition", async () => {
     const before = await workspace();
@@ -173,36 +175,40 @@ suite("supervisor engine exit withdrawal", () => {
     expect((await send({ ...report, stopped: true })).status).toBe(422);
     expect((await engine()).state).toBe("ready");
   });
-  it.each(["stop", "archive"] as const)("closes a waiting %s as unsealed without inventing a checkpoint", async operation => {
+  it.each(["stop", "archive"] as const)("fails only the finite %s attempt after engine exit and retains the accepted action", async operation => {
     const intent = await pending(operation);
     expect((await send()).status).toBe(200);
     expect((await pool.query("SELECT id,state FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1", [f.workspaceId])).rows).toEqual([{ id: intent.id, state: "queued" }]);
     expect((await pool.query("SELECT state,error_code,checkpoint_id FROM workspace_checkpoint_requests WHERE id=$1", [intent.requestId])).rows[0])
-      .toEqual({ state: "cancelled", error_code: "stop_unsealed", checkpoint_id: null });
+      .toEqual({ state: "failed", error_code: "engine_exited", checkpoint_id: null });
     expect((await pool.query("SELECT subject->>'reason' AS reason FROM audit_log WHERE action='cloud_workspace.stop_unsealed' AND org_id=$1", [f.organizationId])).rows)
-      .toEqual([{ reason: "authority_closed" }]);
+      .toEqual([]);
+    expect((await pool.query("SELECT state,checkpoint_id FROM cloud_workspace_final_save_recoveries WHERE lifecycle_intent_id=$1", [intent.id])).rows)
+      .toEqual([{state:"blocked",checkpoint_id:null}]);
   });
-  it("an unsealed delete preserves data and only stops compute", async () => {
+  it("an unsealed delete preserves data and compute for durable recovery", async () => {
     const intent = await pending("delete");
     expect((await send()).status).toBe(200);
     expect((await pool.query("SELECT state,error_code FROM cloud_workspace_lifecycle_intents WHERE id=$1", [intent.id])).rows[0])
-      .toEqual({ state: "failed", error_code: "engine_exited" });
+      .toEqual({ state: "queued", error_code: null });
     const provider = await tick();
-    expect(provider.stop).toHaveBeenCalledOnce();
+    expect(provider.stop).not.toHaveBeenCalled();
     expect(provider.delete).not.toHaveBeenCalled();
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [f.workspaceId])).rows[0].n).toBe(1);
   });
   it("preserves an already dispatched lifecycle operation", async () => {
-    const intent = await pending("delete");
+    const intent = await pending("stop");
+    await (await checkpointCommit(intent.requestId))();
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='dispatching',attempt_count=1,lease_owner='fixture',lease_expires_at=now()+interval '1 minute' WHERE id=$1", [intent.id]);
     const before = await workspace();
     expect((await send()).status).toBe(200);
     expect(await workspace()).toEqual(before);
     expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1", [f.workspaceId])).rows).toEqual([{ state: "dispatching" }]);
   });
-  it("preserves an accepted delete that requires no final capture", async () => {
+  it("preserves an accepted delete and refuses erasure of its unresolved final attempt", async () => {
     const intent = await pending("delete");
     await pool.query("DELETE FROM workspace_checkpoint_requests WHERE id=$1", [intent.requestId]);
+    expect((await pool.query("SELECT id FROM workspace_checkpoint_requests WHERE id=$1", [intent.requestId])).rowCount).toBe(1);
     await pool.query("UPDATE cloud_workspaces SET desired_state='deleted',status='deleting' WHERE id=$1", [f.workspaceId]);
     const before = await workspace();
     expect((await send()).status).toBe(200);
@@ -274,11 +280,11 @@ suite("supervisor engine exit withdrawal", () => {
       expect((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE org_id=$1 AND action='cloud_workspace.stop_unsealed'", [f.organizationId])).rows[0].n).toBe(0);
     } else {
       expect(results[1]).toHaveProperty("error");
-      expect(checkpoint).toEqual({ state: "cancelled", error_code: "stop_unsealed", checkpoint_id: null });
+      expect(checkpoint).toEqual({ state: "failed", error_code: "engine_exited", checkpoint_id: null });
     }
     expect((await pool.query("SELECT id FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1", [f.workspaceId])).rows).toEqual([{ id: intent.id }]);
   });
-  it("an unsealed rebuild fails its original operation and only admits a safe source Stop", async () => {
+  it("an unsealed rebuild retains its original operation and blocks source Stop until recovery", async () => {
     const intent = await pending("stop", "before_rebuild");
     const transitionId = randomUUID();
     await withCloudFixtureOwnerTx(pool, async tx => {
@@ -290,11 +296,11 @@ suite("supervisor engine exit withdrawal", () => {
     });
     expect((await send()).status).toBe(200);
     expect((await pool.query("SELECT state,error_code FROM cloud_workspace_generation_transitions WHERE id=$1", [transitionId])).rows[0])
-      .toEqual({ state: "cancelled", error_code: "engine_exited" });
+      .toEqual({ state: "draining", error_code: null });
     expect((await pool.query("SELECT state,error_code FROM cloud_workspace_lifecycle_intents WHERE id=$1", [intent.id])).rows[0])
-      .toEqual({ state: "failed", error_code: "engine_exited" });
+      .toEqual({ state: "queued", error_code: null });
     const provider = await tick();
-    expect(provider.stop).toHaveBeenCalledOnce();
+    expect(provider.stop).not.toHaveBeenCalled();
     expect(provider.create).not.toHaveBeenCalled();
     expect(provider.delete).not.toHaveBeenCalled();
   });

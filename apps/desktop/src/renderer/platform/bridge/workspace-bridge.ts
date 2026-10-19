@@ -1,4 +1,5 @@
 import type { AttachmentTransferOptions } from "@zeros/protocol/attachment-policy";
+import { isCloudLifecycleDeferred, type CloudLifecycleDeferred } from "../cloud-lifecycle-result";
 import type {
   ChangesHistory,
   TurnHistoryCursor,
@@ -166,7 +167,7 @@ export async function workspaceOp(
     if (tracked) trackGitOp({ op: tracked, outcome: "error", error: err });
     throw err;
   }
-  if (tracked) trackGitOp({ op: tracked, outcome: "ok" });
+  if (tracked && !isCloudLifecycleDeferred(resp.result)) trackGitOp({ op: tracked, outcome: "ok" });
   return resp.result;
 }
 
@@ -2035,12 +2036,13 @@ export async function bridgeWorkspaceCreateFromBranchStatus(
 export async function bridgeWorkspaceDelete(
   bridge: RuntimeClient,
   args: { workspaceId: string; includeBranch: boolean },
-): Promise<void> {
+): Promise<void | CloudLifecycleDeferred> {
   // Delete reaps workspace processes, evicts large ignored directories, and
   // removes the worktree before committing the row deletion. Give it the same
   // lifecycle budget as archive/restore so repository removal does not race
   // ahead merely because the generic 10s bridge timeout elapsed.
-  await workspaceOp(bridge, "workspace.delete", { ...args }, 60_000);
+  const result = await workspaceOp(bridge, "workspace.delete", { ...args }, 60_000);
+  if (isCloudLifecycleDeferred(result)) return result;
 }
 
 export async function bridgeWorkspaceSetStatus(
@@ -2092,7 +2094,7 @@ export async function bridgeWorkspaceArchive(
   archivedAt: number;
   stashRef: string | null;
   workspace?: Workspace;
-}> {
+} | CloudLifecycleDeferred> {
   // Archiving checkpoints the tree, runs the repo's archive script, evicts
   // heavy dirs, and removes the worktree — give it the same 60s budget as create
   // rather than the 10s default so a large worktree doesn't surface a timeout.
@@ -2105,7 +2107,7 @@ export async function bridgeWorkspaceArchive(
     archivedAt: number;
     stashRef: string | null;
     workspace?: Workspace;
-  };
+  } | CloudLifecycleDeferred;
 }
 
 export async function bridgeWorkspaceContinueOnNewBranch(

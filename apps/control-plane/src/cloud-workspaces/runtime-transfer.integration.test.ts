@@ -30,6 +30,7 @@ import { reportCloudEngineExit } from "./engine-exit.js";
 import { confirmWorkspaceDeletion } from "./deletion-test-fixtures.js";
 import { DatabaseCloudWorkspaceBlobService, MemoryCloudWorkspaceObjectStore } from "./object-store.js";
 import { CloudWorkspaceOperationsWorker } from "./operations.js";
+import { commitFinalSaveFixture } from "./final-save-test-fixtures.js";
 
 (process.env.TEST_DATABASE_URL ? describe : describe.skip)("retained cloud runtime transitions", () => {
   let pool: pg.Pool;
@@ -198,6 +199,12 @@ import { CloudWorkspaceOperationsWorker } from "./operations.js";
         (workspace_id,org_id,generation,provider_resource_id,intent_id,runtime_id,base_compatibility_id,proof)
         VALUES($1,$2,1,$3,$4,$5,$6,$7) RETURNING id`, [kept.workspaceId,kept.organizationId,proof.scope.providerResourceId,
         proof.scope.intentId,proof.runtime.runtimeId,proof.baseCompatibilityId,JSON.stringify(proof)])).rows[0]!;
+      const finalIntent=randomUUID();
+      await withSystemTx(pool,tx=>tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
+        (id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
+        VALUES($1::uuid,$2,$3,1,$4,'delete',$1::text,digest($1::text,'sha256'))`,
+      [finalIntent,fixture.workspaceId,fixture.organizationId,fixture.userId]));
+      await commitFinalSaveFixture(pool,{...fixture,generation:1},{intentId:finalIntent,userId:fixture.userId,reason:"before_delete"});
       await confirmWorkspaceDeletion(pool, fixture);
       const objects = new DatabaseCloudWorkspaceBlobService({ pool, objectStore: new MemoryCloudWorkspaceObjectStore(),
         encryptionKeyV1: randomBytes(32).toString("base64url"), workosEnabled: false });

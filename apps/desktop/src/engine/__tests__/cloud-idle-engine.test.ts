@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../cloud-idle-stop", async importOriginal => ({ ...await importOriginal<object>(), hasCloudUserProcesses: vi.fn(async () => false) }));
 vi.mock("../pty/node-pty-spawn", () => ({ createNodePtyShell: vi.fn(), createTerminalMirror: vi.fn(), disposePtyHost: vi.fn() }));
 import { CloudIdleStopScheduler, CLOUD_IDLE_STOP_MS, hasCloudUserProcesses } from "../cloud-idle-stop";
@@ -10,18 +10,26 @@ import { CloudAgentConnection } from "../../renderer/platform/bridge/cloud-agent
 import type { RuntimeClient } from "../../renderer/platform/bridge/ws-client";
 import type { WireRecord } from "../../renderer/platform/bridge/cloud-runtime-wire";
 const directive: CloudCheckpointDirective = { id: "idle-checkpoint", reason: "before_stop", deadlineAtMs: Date.now() + 60_000, idleStop: true };
-const authority = {} as CloudDurabilityAuthority;
+const authority: CloudDurabilityAuthority = {
+  organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222",
+  generation: 1, engineInstanceId: "33333333-3333-4333-8333-333333333333",
+  heartbeatToken: `zwh_${"h".repeat(43)}`, heartbeatEndpoint: "https://control.test/internal/v1/cloud-workspaces/engine/heartbeat",
+};
+const activeStates: { running: boolean; cloudFinalCheckpointReconciliationTimer: ReturnType<typeof setTimeout> | null }[] = [];
 function fixture() {
   const state = {
     cloudWorker: {}, cloudWorkloads: new CloudOwnedWorkloadRegistry(), activePromptContexts: new Map(), promptSessions: new Set(), retiringCloudExecutions: new Set(),
     pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map(), cloudWorkspaceIdleMaintenance: new Set(),
     running: true, cloudRuntimeCheckpointQuiescing: true, cloudRuntimeAuthorityStopping: false,
     cloudIdleReservation: (() => true) as (() => boolean) | null, cloudIdleCheckpoint: null,
-    cloudRuntimeRegistration: { idleStopRequest: vi.fn(async () => directive) },
+    cloudCheckpointProgressUnsupported: true, cloudFinalCheckpointReconciliationTimer: null as ReturnType<typeof setTimeout> | null,
+    cloudRuntimeConfig: { execution: { organizationId: authority.organizationId, workspaceId: authority.workspaceId, generation: authority.generation },
+      engine: { instanceId: authority.engineInstanceId } },
+    cloudRuntimeRegistration: { idleStopRequest: vi.fn(async () => directive), hasRuntimeHandoffAuthority: () => true, supportsFinalSaveRecovery: () => false },
     cloudUserPresence: { active: () => false },
     cloudCommands: { hasActiveWork: () => false, pauseClaims: vi.fn(), resumeClaims: vi.fn() }, cloudGoals: { active: () => false },
     activePrompts: new Set(), sessionLoadResponses: new Map(), sessionAgent: new Map(), pty: { list: () => [], hasRecentInput: () => false },
-    cloudDurabilityRuntime: { checkpoint: vi.fn(async () => undefined) }, cloudRecordRuntime: { synchronize: vi.fn(async () => undefined), flush: vi.fn(async () => undefined) },
+    cloudDurabilityRuntime: { checkpoint: vi.fn(async (_directive: CloudCheckpointDirective, _authority: CloudDurabilityAuthority) => undefined) }, cloudRecordRuntime: { synchronize: vi.fn(async () => undefined), flush: vi.fn(async () => undefined) },
     cloudHumanServices: { pause: vi.fn(async () => undefined), resume: vi.fn(), hasActiveWork: () => false },
     cloudLanguageServices: { pause: vi.fn(async () => undefined), resume: vi.fn(), idleProcessRoots: () => [] },
     cloud: { setHumanServicesPaused: vi.fn() }, cloudCheckpointScheduler: { pause: vi.fn(async () => undefined), resume: vi.fn() },
@@ -29,6 +37,7 @@ function fixture() {
     waitForWorkspaceProcessStartSnapshot: vi.fn(async () => undefined), setup: { stopAllAndProve: vi.fn(async () => undefined), hasRepositoryCodeAuthority: () => false },
     runs: { stopAllAndProve: vi.fn(async () => undefined), hasRepositoryCodeAuthority: () => false }, retireAllCodeAgentSessionsForTerritoryChange: vi.fn(async () => undefined), terminals: { clear: vi.fn(), visibleTo: () => [] },
   };
+  activeStates.push(state);
   Object.setPrototypeOf(state, ZerosEngine.prototype);
   return state as typeof state & {
     handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void>;
@@ -37,6 +46,12 @@ function fixture() {
   };
 }
 beforeEach(() => { vi.mocked(hasCloudUserProcesses).mockReset().mockResolvedValue(false); });
+afterEach(() => {
+  for (const state of activeStates.splice(0)) {
+    state.running = false;
+    if (state.cloudFinalCheckpointReconciliationTimer) clearTimeout(state.cloudFinalCheckpointReconciliationTimer);
+  }
+});
 describe("idle checkpoint execution", () => {
   it("keeps idle terminal registrations usable when presence cancels a capture", async () => {
     const state = fixture();
@@ -188,15 +203,16 @@ describe("idle checkpoint execution", () => {
     expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);
     expect(state.cloudHumanServices.resume).not.toHaveBeenCalled();
   });
-  it("retains an explicit stop fence when its commit response and cancellation acknowledgement are lost", async () => {
+  it("retains an explicit stop fence when its commit response is lost without attempting idle cancellation", async () => {
     const state = fixture(); state.cloudRuntimeCheckpointQuiescing = false; state.cloudIdleReservation = null;
     state.cloudDurabilityRuntime.checkpoint.mockRejectedValue(new Error("lost acknowledgement"));
     state.cloudRuntimeRegistration.idleStopRequest.mockRejectedValue(new Error("already committed"));
     await expect(state.handleCloudCheckpointRequest({ id: "explicit-stop", reason: "before_stop", deadlineAtMs: Date.now() + 60_000 }, authority)).rejects.toThrow("lost acknowledgement");
     expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);
     expect(state.cloudHumanServices.resume).not.toHaveBeenCalled();
+    expect(state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
   });
-  it.each([true, false])("reconciles a lost cancellation acknowledgement on redelivery (idle: %s)", async idleStop => {
+  it.each([true, false])("reconciles idle cancellation or retries the explicit request on redelivery (idle: %s)", async idleStop => {
     const state = fixture();
     if (!idleStop) { state.cloudRuntimeCheckpointQuiescing = false; state.cloudIdleReservation = null; }
     const capture = { ...directive, idleStop: idleStop ? true as const : undefined };
@@ -205,14 +221,15 @@ describe("idle checkpoint execution", () => {
     await expect(state.handleCloudCheckpointRequest(capture, authority)).rejects.toThrow("network outage");
     expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);
     await state.handleCloudCheckpointRequest(capture, authority).catch(() => undefined);
-    expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledTimes(2);
-    expect(state.cloudRuntimeCheckpointQuiescing).toBe(false);
-    expect(state.cloudHumanServices.resume).toHaveBeenCalledTimes(1);
-    expect(state.cloudLanguageServices.resume).toHaveBeenCalledTimes(1);
-    expect(state.cloudCheckpointScheduler.resume).toHaveBeenCalledTimes(1);
-    expect(state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(1);
+    expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledTimes(idleStop ? 2 : 0);
+    expect(state.cloudRuntimeCheckpointQuiescing).toBe(!idleStop);
+    expect(state.cloudHumanServices.resume).toHaveBeenCalledTimes(idleStop ? 1 : 0);
+    expect(state.cloudLanguageServices.resume).toHaveBeenCalledTimes(idleStop ? 1 : 0);
+    expect(state.cloudCheckpointScheduler.resume).toHaveBeenCalledTimes(idleStop ? 1 : 0);
+    expect(state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(idleStop ? 1 : 2);
+    if (!idleStop) expect(state.cloudDurabilityRuntime.checkpoint.mock.calls.map(call => call[0])).toEqual([capture, capture]);
   });
-  it.each([true, false])("retains an unresolved final fence across redelivery if commit won (idle: %s)", async idleStop => {
+  it.each([true, false])("retains the final fence across redelivery after a lost commit response (idle: %s)", async idleStop => {
     const state = fixture();
     if (!idleStop) { state.cloudRuntimeCheckpointQuiescing = false; state.cloudIdleReservation = null; }
     const capture = { ...directive, idleStop: idleStop ? true as const : undefined };
@@ -220,12 +237,12 @@ describe("idle checkpoint execution", () => {
     state.cloudRuntimeRegistration.idleStopRequest.mockRejectedValueOnce(new Error("network outage")).mockRejectedValue(new Error("already committed"));
     await state.handleCloudCheckpointRequest(capture, authority).catch(() => undefined);
     await state.handleCloudCheckpointRequest(capture, authority).catch(() => undefined);
-    expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledTimes(2);
+    expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledTimes(idleStop ? 2 : 0);
     expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);
     expect(state.cloudHumanServices.resume).not.toHaveBeenCalled();
-    expect(state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(1);
+    expect(state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(idleStop ? 1 : 2);
   });
-  it.each([true, false])("reconciles a lost cancel reply even without checkpoint redelivery (idle: %s)", async idleStop => {
+  it.each([true, false])("reconciles idle cancellation or retries explicit capture without redelivery (idle: %s)", async idleStop => {
     vi.useFakeTimers();
     try {
       const state = fixture();
@@ -235,11 +252,17 @@ describe("idle checkpoint execution", () => {
       state.cloudRuntimeRegistration.idleStopRequest.mockRejectedValueOnce(new Error("cancel reply lost")).mockResolvedValue(directive);
       await state.handleCloudCheckpointRequest(capture, authority).catch(() => undefined);
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledTimes(2);
-      expect(state.cloudRuntimeCheckpointQuiescing).toBe(false);
-      expect(state.cloudHumanServices.resume).toHaveBeenCalledTimes(1);
+      expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledTimes(idleStop ? 2 : 0);
+      expect(state.cloudRuntimeCheckpointQuiescing).toBe(!idleStop);
+      expect(state.cloudHumanServices.resume).toHaveBeenCalledTimes(idleStop ? 1 : 0);
+      const captures = state.cloudDurabilityRuntime.checkpoint.mock.calls.length;
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledTimes(2);
+      expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledTimes(idleStop ? 2 : 0);
+      if (!idleStop) {
+        expect(captures).toBeGreaterThan(1);
+        expect(state.cloudDurabilityRuntime.checkpoint.mock.calls.length).toBeLessThanOrEqual(captures + 1);
+        expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);
+      }
     } finally { vi.useRealTimers(); }
   });
   it("keeps committed checkpoints quiesced during bounded retries and stops retrying after shutdown", async () => {

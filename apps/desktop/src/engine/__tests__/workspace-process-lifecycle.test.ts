@@ -1275,6 +1275,12 @@ describe("qualified cloud workspace authority", () => {
     vi.spyOn(state.runs,"stopAllAndProve").mockResolvedValue();
     const checkpoint=vi.fn(async()=>{}),synchronize=vi.fn(async()=>{}),flush=vi.fn(async()=>{});
     state.cloudDurabilityRuntime={checkpoint};state.cloudRecordRuntime={synchronize,flush};
+    // Explicit final capture owns an existing registration for its complete
+    // drain lifetime. This control isolates the process/edit barrier.
+    Object.assign(state, { running: true, cloudCheckpointProgressUnsupported: true,
+      cloudRuntimeRegistration: { hasRuntimeHandoffAuthority: () => true, supportsFinalSaveRecovery: () => false },
+      cloudRuntimeConfig: { execution: { organizationId: "org", workspaceId: "workspace", generation: 1 }, engine: { instanceId: "engine" } },
+    });
     const writing=state.handleWorkspaceMessage({type:"WORKSPACE_REQUEST",id:"edit",source:"browser",timestamp:1,op:"design.frame.create",params:{workspaceId:"local-main"}},client("cloud"));
     const capture=state.handleCloudCheckpointRequest({id:"fixture",reason:"before_stop",deadlineAtMs:Date.now()+30000},{heartbeatEndpoint:"https://example.test/heartbeat",heartbeatToken:"fixture",workspaceId:"workspace",organizationId:"org",generation:1,engineInstanceId:"engine"});
     try{

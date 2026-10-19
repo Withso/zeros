@@ -257,7 +257,7 @@ describe("control-plane results command", () => {
     }
   });
 
-  it("fails the required check when TEST_DATABASE_URL never reached the suites", () => {
+  it.each(["immediate", "deferred"])("fails the required check with complete %s stderr when TEST_DATABASE_URL never reached the suites", stderrMode => {
     const directory = mkdtempSync(path.join(tmpdir(), "control-plane-results-"));
     directories.push(directory);
     // Every real file is reported and green, but each DB-backed test skipped.
@@ -273,11 +273,18 @@ describe("control-plane results command", () => {
     );
     expect(readShardReports(directory).size).toBe(1);
 
-    const result = spawnSync(process.execPath, [RESULTS, directory], {
+    // Piped stderr can queue writes. Reproduce shutdown with pending diagnostics
+    // deterministically, independently of this machine's pipe scheduling.
+    const preload = path.join(directory, "defer-stderr.cjs");
+    writeFileSync(preload, `const write = process.stderr.write.bind(process.stderr);
+process.stderr.write = (...args) => { setImmediate(() => write(...args)); return true; };
+`);
+    const result = spawnSync(process.execPath, [...(stderrMode === "deferred" ? ["--require", preload] : []), RESULTS, directory], {
       encoding: "utf8",
       env: { ...process.env, ...databaseRun, DATABASE_SHARDS: "1", GITHUB_STEP_SUMMARY: "" },
     });
     expect(result.status).toBe(1);
+    expect(result.stdout).not.toContain("Control plane passed");
     expect(result.stderr).toContain(
       '::error::src/migrations.test.ts did not run 1 database-backed test, for example "migration ladder runs" (skipped).',
     );

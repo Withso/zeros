@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CloudLifecycleDeferred } from "../../platform/cloud-lifecycle-result";
 
 import {
   archiveWorkspaceWithFeedback,
@@ -177,6 +178,22 @@ function expectReviewCachesRetained(
 }
 
 describe("confirmed workspace deletion review caches", () => {
+  it.each(["background_pending", "retired"] as const)("keeps cloud rows and caches without notices after %s archive/delete", async kind => {
+    const pending: CloudLifecycleDeferred = kind === "retired" ? { kind } : { kind, operationId: "77777777-7777-4777-8777-777777777777" };
+    const caches = seedReviewCaches(target.path);
+    vi.mocked(workspaceArchive).mockResolvedValueOnce(pending);
+    await archiveWorkspaceWithFeedback(target, dispatch);
+    expect(peekWorkspacesFor(target.repoSlug)?.find(row => row.id === target.id)?.archivedAt).toBeNull();
+    expectReviewCachesRetained([caches]);
+    vi.mocked(workspaceDelete).mockResolvedValueOnce(pending);
+    expect(await deleteWorkspacePermanently(target, dispatch)).toBe("pending");
+    expect(peekWorkspacesFor(target.repoSlug)?.some(row => row.id === target.id)).toBe(true);
+    expectReviewCachesRetained([caches]);
+    expect(usePendingWorkspacesStore.getState().archiveIntents[target.id]).toBeUndefined();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.info).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
   it("retains pending or failed deletion snapshots, then purges owned normalized descendants only", async () => {
     const deleting = {
       ...target,

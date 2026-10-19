@@ -9,6 +9,7 @@ import type { CloudActorEngineScope } from "./actor-sessions.js";
 import { assertCurrentCloudEngineAuthority, assertCloudEngineIdentityForIdempotentReplay } from "./engine-authority.js";
 import { enqueueWorkspaceCheckpointRequest, type WorkspaceCheckpointDirective } from "./checkpoint-requests.js";
 import { cloudWorkspaceHasActiveWork } from "./idle-workloads.js";
+import { ensureFinalSaveRecovery } from "./final-save-recovery.js";
 
 export const CLOUD_IDLE_STOP_PATH = "/internal/v1/cloud-workspaces/engine/idle-stop";
 export class DatabaseCloudIdleStop {
@@ -44,19 +45,23 @@ export class DatabaseCloudIdleStop {
       // The same acknowledged cancellation is usable by an explicit final
       // capture. Authenticate the submitting epoch; an old engine cannot
       // cancel a later engine's unassigned user-requested checkpoint.
-      const request = (await tx.query<{ state: string }>(`SELECT request.state FROM workspace_checkpoint_requests request
+      const request = (await tx.query<{ state: string; lifecycle_intent_id: string | null; idle_engine_instance_id: string | null }>(`SELECT request.state,request.lifecycle_intent_id,request.idle_engine_instance_id FROM workspace_checkpoint_requests request
         WHERE request.id=$1 AND request.workspace_id=$2 AND request.org_id=$3 AND request.generation=$4
           AND (request.idle_engine_instance_id=$5 OR (request.idle_engine_instance_id IS NULL
-            AND request.reason IN ('before_stop','before_archive','before_delete') AND EXISTS (
+            AND request.reason IN ('before_stop','before_archive','before_delete','before_rebuild') AND EXISTS (
               SELECT 1 FROM cloud_workspace_engine_instances engine WHERE engine.id=$5 AND engine.workspace_id=$2
                 AND engine.generation=$4 AND engine.created_at<=request.created_at AND engine.state='ready' AND engine.revoked_at IS NULL)))`,
         [requestId, scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId])).rows[0];
       if (!request || request.state === 'succeeded') throw new Error("Final checkpoint cannot be cancelled");
+      if (request.lifecycle_intent_id && (!request.idle_engine_instance_id || (await tx.query(
+        "SELECT 1 WHERE cloud_workspace_drain_is_mandatory($1)", [request.lifecycle_intent_id])).rowCount))
+        await ensureFinalSaveRecovery(tx, request.lifecycle_intent_id);
       await tx.query(`WITH cancelled AS (UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now(),error_code='workspace_active'
         WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND state IN ('queued','delivered') RETURNING lifecycle_intent_id)
         UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),updated_at=now(),error_code='workspace_active'
         WHERE id IN (SELECT lifecycle_intent_id FROM cancelled) AND state IN ('queued','observing')
-          AND NOT cloud_workspace_drain_is_mandatory(id)`,
+          AND NOT cloud_workspace_drain_is_mandatory(id)
+          AND NOT EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries recovery WHERE recovery.lifecycle_intent_id=cloud_workspace_lifecycle_intents.id)`,
       [requestId, scope.workspaceId, scope.organizationId, scope.generation]);
     });
   }

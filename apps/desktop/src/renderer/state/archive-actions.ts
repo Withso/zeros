@@ -1,3 +1,4 @@
+import { isCloudLifecycleDeferred } from "../platform/cloud-lifecycle-result";
 // Shared archive / unarchive actions. Archive responds immediately and quietly;
 // errors remain actionable and durable state is committed only after success.
 // Centralized so the
@@ -421,7 +422,11 @@ export async function deleteWorkspacePermanently(
   // confirms deletion. A concrete failure then has nothing to visually restore.
   markWorkspaceArchiving(workspace.id);
   try {
-    await workspaceDelete({ workspaceId: workspace.id, includeBranch: false });
+    const result = await workspaceDelete({ workspaceId: workspace.id, includeBranch: false });
+    if (isCloudLifecycleDeferred(result)) {
+      clearWorkspaceArchiving(workspace.id);
+      return "pending";
+    }
   } catch (err) {
     // "Already gone" (row deleted concurrently) is the desired end state → fall
     // through and scrub idempotently. Any other concrete engine error keeps the
@@ -600,6 +605,10 @@ export async function archiveWorkspaceWithFeedback(
       workspaceId: workspace.id,
       stashUncommitted: true,
     });
+    if (isCloudLifecycleDeferred(result)) {
+      clearWorkspaceArchiving(workspace.id);
+      return;
+    }
     const archivedWorkspace: Workspace = result.workspace ?? {
       ...workspace,
       archivedAt: result.archivedAt,

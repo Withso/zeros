@@ -27,6 +27,8 @@ import {
 } from "./agents/containment/cloud-checkpoint-artifacts.mjs";
 import { DESIGN_DIRECTORY_ID_PATTERN, sanitizeDesignDirectoryName } from "./design/directory-path";
 import { CloudFinalCheckpointReceiptSchema, type CloudFinalCheckpointReceipt } from "./cloud-final-completion";
+import type { CloudFinalSaveCommit, CloudFinalSaveDirective, CloudFinalSaveResponse } from "@zeros/protocol/cloud-final-save";
+import { CloudFinalSaveJournal, CloudFinalSaveJournalError, type FinalSaveJournalRecord } from "./cloud-final-save-journal";
 
 const execFileAsync = promisify(execFile);
 const CONTENT_HEAD_PATH = "/internal/v1/cloud-workspaces/engine/content/head";
@@ -65,6 +67,8 @@ export type CloudCheckpointDirective = {
     | "before_rebuild"
     | "manual";
   deadlineAtMs: number;
+  idleStop?: true;
+  finalSave?: CloudFinalSaveDirective;
 };
 
 export type CloudCheckpointCapture = CloudCheckpointDirective | {
@@ -1096,6 +1100,8 @@ export class CloudWorkspaceDurabilityRuntime {
   private lastDurable: DurableCheckpointState | null = null;
   private finalCheckpoint: { scopeKey: string; receipt: CloudFinalCheckpointReceipt } | null = null;
   private readonly responseSignals = new WeakMap<Response, AbortSignal>();
+  private readonly finalSaveJournal: CloudFinalSaveJournal | null;
+  private captureGuard: ((mutation?: boolean) => void) | undefined;
 
   constructor(
     private readonly repositoryRoot: string,
@@ -1103,6 +1109,7 @@ export class CloudWorkspaceDurabilityRuntime {
   ) {
     this.fetch = dependencies.fetch ?? globalThis.fetch;
     this.nativeRoots = { ...dependencies.nativeRoots, repository: repositoryRoot };
+    this.finalSaveJournal = dependencies.nativeRoots?.data ? new CloudFinalSaveJournal(dependencies.nativeRoots.data) : null;
   }
 
   private async readPrivateDesignSelection(deadlineAtMs: number): Promise<{ directory_id?: string; directory?: string } | null> {
@@ -1136,6 +1143,7 @@ export class CloudWorkspaceDurabilityRuntime {
     directive: CloudCheckpointCapture,
     authority: CloudDurabilityAuthority,
     stillIdle?: () => boolean,
+    assertCurrent?: (mutation?: boolean) => void,
   ): Promise<void> {
     if (this.active) {
       return Promise.reject(
@@ -1143,8 +1151,9 @@ export class CloudWorkspaceDurabilityRuntime {
       );
     }
     this.finalCheckpoint = null;
-    const task = this.runCheckpoint({ ...directive }, { ...authority }, stillIdle).finally(() => {
-      if (this.active === task) this.active = null;
+    this.captureGuard = assertCurrent;
+    const task = this.runCheckpoint(structuredClone(directive), { ...authority }, stillIdle).finally(() => {
+      if (this.active === task) { this.active = null; this.captureGuard = undefined; }
     });
     this.active = task;
     return task;
@@ -1155,6 +1164,58 @@ export class CloudWorkspaceDurabilityRuntime {
   readFinalCheckpoint(authority: CloudDurabilityAuthority): CloudFinalCheckpointReceipt | null {
     return !this.active && this.finalCheckpoint?.scopeKey === this.scopeKey(authority)
       ? this.finalCheckpoint.receipt : null;
+  }
+
+  private journalScope(authority: CloudDurabilityAuthority) {
+    return { ...this.scope(authority), origin: new URL(authority.heartbeatEndpoint).origin };
+  }
+  private journalAttempt(directive: CloudCheckpointCapture) {
+    return { id: directive.id, reason: directive.reason, deadlineAtMs: directive.deadlineAtMs };
+  }
+  async readFinalSaveCommit(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<CloudFinalSaveCommit | null> {
+    if (this.active || !this.finalSaveJournal) throw new CloudFinalSaveJournalError();
+    return (await this.finalSaveJournal.read(this.journalScope(authority), this.journalAttempt(directive)))?.commit ?? null;
+  }
+  /** Only the matching post-join reconcile result may resolve this process's
+   * exact journal. A replacement runtime cannot mint completion from metadata. */
+  async consumeFinalSaveResponse(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority,
+    response: CloudFinalSaveResponse, assertCurrent: () => void): Promise<void> {
+    if (this.active || !this.finalSaveJournal || response.requestId !== directive.id) throw new CloudFinalSaveJournalError();
+    assertCurrent();
+    const record = await this.finalSaveJournal.read(this.journalScope(authority), this.journalAttempt(directive));
+    assertCurrent();
+    if (response.state === "committed") {
+      if (!record) throw new CloudFinalSaveJournalError();
+      const body = JSON.parse(record.body);
+      if (response.checkpoint.requestSha256 !== record.commit.requestSha256 || response.checkpoint.contentRevision !== body.contentRevision ||
+        response.checkpoint.manifestSha256 !== body.integritySha256 || response.checkpoint.reason !== body.reason) throw new CloudFinalSaveJournalError();
+      await this.finalSaveJournal.resolve(this.journalScope(authority), this.journalAttempt(directive)); assertCurrent();
+      this.acceptFinalReceipt(directive, authority, response.checkpoint.checkpointId, body);
+    } else if (response.state === "retired") {
+      await this.finalSaveJournal.resolve(this.journalScope(authority), this.journalAttempt(directive)); assertCurrent();
+    }
+  }
+  private acceptFinalReceipt(directive: CloudCheckpointCapture, authority: CloudDurabilityAuthority, checkpointId: string,
+    body: { contentRevision: number; integritySha256: string | null }): void {
+    const receipt = CloudFinalCheckpointReceiptSchema.parse({ scope: this.scope(authority), checkpoint: {
+      requestId: directive.id, checkpointId: checkpointId.toLowerCase(), contentRevision: body.contentRevision,
+      manifestSha256: body.integritySha256, reason: directive.reason,
+    } });
+    Object.freeze(receipt.scope); Object.freeze(receipt.checkpoint); Object.freeze(receipt);
+    this.finalCheckpoint = { scopeKey: this.scopeKey(authority), receipt };
+  }
+  private async sendFinalCommit(directive: CloudCheckpointCapture, authority: CloudDurabilityAuthority, record: FinalSaveJournalRecord): Promise<string> {
+    this.captureGuard?.();
+    const committed = await this.readJson(await this.request(authority, this.endpoint(authority, CHECKPOINT_PATH), {
+      method: "POST", headers: { "content-type": "application/json" }, body: record.body,
+    }, directive.deadlineAtMs, "commit"), directive.deadlineAtMs, "commit_ack");
+    this.captureGuard?.(false);
+    const body = JSON.parse(record.body);
+    if (!isRecord(committed) || typeof committed.checkpointId !== "string" || !UUID_PATTERN.test(committed.checkpointId) ||
+      committed.contentRevision !== body.contentRevision) throw invalidResponse("commit_ack", "cloud checkpoint commit response is invalid");
+    await this.finalSaveJournal!.resolve(this.journalScope(authority), this.journalAttempt(directive)); this.captureGuard?.(false);
+    this.acceptFinalReceipt(directive, authority, committed.checkpointId, body);
+    return committed.checkpointId;
   }
 
   private endpoint(
@@ -1223,6 +1284,7 @@ export class CloudWorkspaceDurabilityRuntime {
     deadlineAtMs: number,
     site: CaptureSite,
   ): Promise<Response> {
+    this.captureGuard?.();
     const remainingMs = deadlineAtMs - Date.now();
     if (remainingMs <= 0) throw atCloudCheckpointCaptureSite(new CloudCheckpointDeadlineError(), site);
     const timeoutMs = Math.min(REQUEST_TIMEOUT_MS, remainingMs);
@@ -1246,6 +1308,8 @@ export class CloudWorkspaceDurabilityRuntime {
       throw atCloudCheckpointCaptureSite(markCloudCheckpointCaptureCause(error, signal.aborted ? "request_timeout" : "transport"), site);
     }
     this.responseSignals.set(response, signal);
+    try { this.captureGuard?.(); }
+    catch (error) { await response.body?.cancel().catch(() => undefined); throw error; }
     if (!response.ok) {
       try {
         // Preserve the existing append-conflict parser's acceptance bound;
@@ -1270,7 +1334,7 @@ export class CloudWorkspaceDurabilityRuntime {
   }
 
   private async readJson(response: Response, deadlineAtMs: number, site: CaptureSite): Promise<unknown> {
-    try { return await boundedJson(response, deadlineAtMs, this.responseSignals.get(response)); }
+    try { const result = await boundedJson(response, deadlineAtMs, this.responseSignals.get(response)); this.captureGuard?.(); return result; }
     catch (error) { throw atCloudCheckpointCaptureSite(error, site, "response_invalid", httpClass(response.status)); }
   }
 
@@ -1599,6 +1663,9 @@ export class CloudWorkspaceDurabilityRuntime {
     let site: CaptureSite = "projection";
     let finalScan: CloudWorkspaceChangeScan | null = null;
     try {
+      const explicitFinal = ["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(directive.reason) &&
+        !("idleStop" in directive && directive.idleStop) && !stillIdle;
+      this.captureGuard?.();
       if (
         !UUID_PATTERN.test(directive.id) ||
         !Number.isSafeInteger(directive.deadlineAtMs) ||
@@ -1613,6 +1680,12 @@ export class CloudWorkspaceDurabilityRuntime {
         throw new Error(
           "privileged cloud checkpoint capture requires Linux descriptor safety",
         );
+      }
+      if (explicitFinal) {
+        if (!this.finalSaveJournal) throw new CloudFinalSaveJournalError();
+        const previous = await this.finalSaveJournal.read(this.journalScope(authority), this.journalAttempt(directive));
+        this.captureGuard?.();
+        if (previous) { await this.sendFinalCommit(directive, authority, previous); return; }
       }
       let projection = await this.loadProjection(
         authority,
@@ -1917,10 +1990,7 @@ export class CloudWorkspaceDurabilityRuntime {
       // received during capture must cancel before the final stop commits.
       if (stillIdle && !stillIdle()) throw new Error("Cloud workspace is no longer idle; final checkpoint cancelled");
       site = "commit";
-      const committed = await this.postJson(
-        authority,
-        CHECKPOINT_PATH,
-        {
+      const commitBody = {
           ...this.scope(authority),
           ...(directive.reason === "periodic" ? {} : { requestId: directive.id }),
           idempotencyKey: `checkpoint.${directive.id}.commit`,
@@ -1943,9 +2013,15 @@ export class CloudWorkspaceDurabilityRuntime {
           fileCount: finalScan.entries.size,
           totalBytes: finalScan.totalBytes,
           integritySha256: manifest.contentSha256,
-        },
-        directive.deadlineAtMs,
-      );
+        };
+      this.captureGuard?.();
+      const committed = explicitFinal
+        ? { checkpointId: await this.sendFinalCommit(directive, authority,
+          await this.finalSaveJournal!.prepare(this.journalScope(authority), this.journalAttempt(directive), JSON.stringify(commitBody))) }
+        : await this.postJson(authority, CHECKPOINT_PATH, commitBody, directive.deadlineAtMs);
+      // An exact ACK may arrive at the original deadline. Consumption checks
+      // this source's lifetime; it does not admit another mutation.
+      this.captureGuard?.(false);
       if (
         !isRecord(committed) ||
         typeof committed.checkpointId !== "string" ||
@@ -1964,12 +2040,7 @@ export class CloudWorkspaceDurabilityRuntime {
         nativeArchive: native,
       };
       if (["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(directive.reason)) {
-        const receipt = CloudFinalCheckpointReceiptSchema.parse({ scope: this.scope(authority), checkpoint: {
-          requestId: directive.id, checkpointId: this.lastDurable.checkpointId,
-          contentRevision: projection.currentRevision, manifestSha256: manifest.contentSha256, reason: directive.reason,
-        } });
-        Object.freeze(receipt.scope); Object.freeze(receipt.checkpoint); Object.freeze(receipt);
-        this.finalCheckpoint = { scopeKey: this.scopeKey(authority), receipt };
+        this.acceptFinalReceipt(directive, authority, this.lastDurable.checkpointId, commitBody);
       }
       await saveCloudNativeCheckpointCache({ roots: this.nativeRoots, deadlineAtMs: directive.deadlineAtMs, archive: native,
         scope: { workspaceId: authority.workspaceId, organizationId: authority.organizationId, checkpointId: this.lastDurable.checkpointId },

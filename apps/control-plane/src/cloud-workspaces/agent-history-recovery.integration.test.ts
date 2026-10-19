@@ -113,7 +113,7 @@ suite("CP-authorized unsealed history recovery", () => {
     expect((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action='cloud_workspace.history_recovered_with_gap'")).rows[0].n).toBe(0);
   });
 
-  it("recovers an unsealed source after archived drift completes its stop prerequisite", async () => {
+  it("preserves an unsealed source after archived drift without authorizing stop or wake", async () => {
     const first = await recover();
     source = await boot(); await activate(source, first.recoveryId);
     const binding = (await pool.query(`UPDATE cloud_workspace_provider_bindings
@@ -129,25 +129,15 @@ suite("CP-authorized unsealed history recovery", () => {
     const worker = new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1_000 });
     expect(await worker.reconcileDriftOnce()).toBe(true);
     expect((await pool.query("SELECT state FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1", [source.writerEpoch])).rows[0].state).toBe("active");
-    expect(await worker.runOnce()).toBe(true);
-    expect(provider.stop).toHaveBeenCalledOnce();
+    expect(await worker.runOnce()).toBe(false);
+    expect(provider.stop).not.toHaveBeenCalled();
     expect(provider.start).not.toHaveBeenCalled();
     expect((await pool.query("SELECT state,seal,seal_ack FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1", [source.writerEpoch])).rows)
-      .toEqual([{ state: "retired", seal: null, seal_ack: null }]);
-    expect(await worker.runOnce()).toBe(true);
-    expect(provider.start).toHaveBeenCalledOnce();
-    const setup = (await pool.query(`UPDATE cloud_workspace_setup_runs SET state='running',claim_count=1,execution_fence=1,
-        lease_owner='fixture',lease_expires_at=now()+interval '10 minutes',last_heartbeat_at=now(),started_at=now()
-      WHERE workspace_id=$1 AND state='queued' RETURNING id,execution_fence::int AS fence`, [fixture.workspaceId])).rows[0];
-    expect(setup).toBeDefined();
-    await freshEngine(setup);
-    const authorization = await recover(), successor = await boot();
-    expect(authorization).toMatchObject({ code: "history_recovered_with_gap", coverage: "unknown",
-      predecessor: { writerEpoch: source.writerEpoch }, checkpoint: { writerEpoch: ancestor.writerEpoch, sha256: ancestorSha256 } });
-    await expect(activate(successor, authorization.recoveryId)).resolves.toMatchObject({ activated: true });
-    expect((await pool.query(`SELECT subject FROM audit_log WHERE action='cloud_workspace.history_recovered_with_gap'
-      AND subject->>'recoveryId'=$1`, [authorization.recoveryId])).rows)
-      .toEqual([{ subject: expect.objectContaining({ coverage: "unknown", writerEpoch: successor.writerEpoch }) }]);
+      .toEqual([{ state: "active", seal: null, seal_ack: null }]);
+    expect(await worker.runOnce()).toBe(false);
+    expect(provider.start).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_final_save_recoveries WHERE workspace_id=$1 AND state NOT IN ('proven','resolved')",[fixture.workspaceId])).rows[0].count).toBeGreaterThan(0);
+    expect((await pool.query("SELECT id FROM cloud_workspace_setup_runs WHERE workspace_id=$1 AND state='queued'",[fixture.workspaceId])).rows).toEqual([]);
     expect(unused).not.toHaveBeenCalled();
   });
 
@@ -293,7 +283,7 @@ suite("CP-authorized unsealed history recovery", () => {
       .rejects.toMatchObject({ code: "23514" });
   });
 
-  it("purges prepared and activated recovery records through D1 while retaining the gap audit and a sibling workspace", async () => {
+  it("retains prepared and activated history when an older unsaved source still blocks D1", async () => {
     const first = await recover(), prepared = await boot();
     await retire(); await freshEngine();
     const next = await recover([{ writerEpoch: prepared.writerEpoch, recoveryId: first.recoveryId }]), bound = await boot();
@@ -310,8 +300,8 @@ suite("CP-authorized unsealed history recovery", () => {
     expect(logger.error).not.toHaveBeenCalled();
     expect((await pool.query(`SELECT job.state,workspace.data_deleted_at IS NOT NULL AS erased
       FROM workspace_deletion_jobs job JOIN cloud_workspaces workspace ON workspace.id=job.workspace_id
-      WHERE workspace.id=$1`, [fixture.workspaceId])).rows).toEqual([{ state: "succeeded", erased: true }]);
-    expect((await rows()).rowCount).toBe(0);
+      WHERE workspace.id=$1`, [fixture.workspaceId])).rows).toEqual([{ state: "waiting_for_provider", erased: false }]);
+    expect((await rows()).rowCount).toBe(2);
     expect((await pool.query("SELECT id,subject FROM audit_log WHERE action='cloud_workspace.history_recovered_with_gap' ORDER BY id")).rows).toEqual(audits);
     expect((await pool.query("SELECT data_deleted_at FROM cloud_workspaces WHERE id=$1", [sibling.workspaceId])).rows).toEqual([{ data_deleted_at: null }]);
     expect((await pool.query("SELECT id FROM cloud_workspace_engine_instances WHERE id=$1", [sibling.engineInstanceId])).rowCount).toBe(1);

@@ -24,6 +24,10 @@ import {
 const execFileAsync = promisify(execFile);
 const LINUX_O_PATH = 0o10000000;
 const roots: string[] = [];
+const privateData = new Map<string, string>();
+function durabilityRuntime(root: string, dependencies: ConstructorParameters<typeof CloudWorkspaceDurabilityRuntime>[1] = {}) {
+  return new CloudWorkspaceDurabilityRuntime(root, { ...dependencies, nativeRoots: { data: privateData.get(root), ...dependencies.nativeRoots } });
+}
 const authority = {
   heartbeatEndpoint: "https://control.example.test/internal/heartbeat",
   heartbeatToken: "heartbeat-token",
@@ -51,6 +55,7 @@ async function git(root: string, ...args: string[]): Promise<void> {
 async function checkpointRepository(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "zeros-cloud-runtime-"));
   roots.push(root);
+  const data = await mkdtemp(path.join(tmpdir(), "zeros-final-private-")); roots.push(data); privateData.set(root, data);
   await git(root, "init", "--quiet");
   await git(root, "config", "user.email", "cloud@example.test");
   await git(root, "config", "user.name", "Cloud Test");
@@ -72,6 +77,43 @@ async function addTrackedNestedFile(root: string): Promise<string> {
 }
 
 describe("cloud checkpoint repository program isolation", () => {
+  checkpointIt("replays the exact final commit after a lost ACK without scanning or uploading again", async () => {
+    const root = await checkpointRepository(), data = await mkdtemp(path.join(tmpdir(), "zeros-final-journal-")); roots.push(data);
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    const bodies: string[] = [];
+    const runtime = durabilityRuntime(root, { nativeRoots: { data }, fetch: (async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/checkpoints/commit")) {
+        bodies.push(String(init?.body));
+        if (bodies.length === 1) throw new Error("commit ACK lost");
+      }
+      return harness.fetch(input, init);
+    }) as typeof fetch });
+    const directive = { id: randomUUID(), reason: "before_stop" as const, deadlineAtMs: Date.now() + 60_000 };
+    await expect(runtime.checkpoint(directive, authority)).rejects.toThrow("commit ACK lost");
+    const reads = harness.getHeadReadCount(), uploads = harness.getUploadCount();
+    // If the implementation recaptures, this mutation would change the body.
+    await writeFile(path.join(root, "README.md"), "changed after ambiguous commit\n");
+    await runtime.checkpoint(directive, authority);
+    expect(bodies).toHaveLength(2); expect(bodies[1]).toBe(bodies[0]);
+    expect(harness.getHeadReadCount()).toBe(reads); expect(harness.getUploadCount()).toBe(uploads);
+    expect(runtime.readFinalCheckpoint(authority)?.checkpoint.requestId).toBe(directive.id);
+  });
+
+  checkpointIt("does not adopt an unresolved commit journal in a replacement runtime", async () => {
+    const root = await checkpointRepository(), data = await mkdtemp(path.join(tmpdir(), "zeros-final-journal-")); roots.push(data);
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    const runtime = durabilityRuntime(root, { nativeRoots: { data }, fetch: (async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/checkpoints/commit")) throw new Error("commit ACK lost");
+      return harness.fetch(input, init);
+    }) as typeof fetch });
+    const directive = { id: randomUUID(), reason: "before_stop" as const, deadlineAtMs: Date.now() + 60_000 };
+    await expect(runtime.checkpoint(directive, authority)).rejects.toThrow("commit ACK lost");
+    const request = vi.fn(harness.fetch);
+    const replacement = durabilityRuntime(root, { nativeRoots: { data }, fetch: request });
+    await expect(replacement.checkpoint(directive, authority)).rejects.toThrow(/journal|custody/i);
+    expect(request).not.toHaveBeenCalled(); expect(replacement.readFinalCheckpoint(authority)).toBeNull();
+  });
+
   checkpointIt("retains a final receipt only after the exact CP commit is acknowledged", async () => {
     const root = await checkpointRepository();
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
@@ -80,7 +122,7 @@ describe("cloud checkpoint repository program isolation", () => {
     let commitEntered!: () => void;
     const entered = new Promise<void>(resolve => { commitEntered = resolve; });
     let submitted: Record<string, unknown> | undefined;
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+    const runtime = durabilityRuntime(root, { fetch: (async (input, init) => {
       if (new URL(String(input)).pathname.endsWith("/checkpoints/commit")) {
         submitted = JSON.parse(String(init?.body));
         commitEntered();
@@ -113,7 +155,7 @@ describe("cloud checkpoint repository program isolation", () => {
     const root = await checkpointRepository();
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
     let lost = false;
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+    const runtime = durabilityRuntime(root, { fetch: (async (input, init) => {
       const response = await harness.fetch(input, init);
       if (lost && new URL(String(input)).pathname.endsWith("/checkpoints/commit")) throw new Error("commit ACK lost");
       return response;
@@ -129,7 +171,7 @@ describe("cloud checkpoint repository program isolation", () => {
   checkpointIt.each(["periodic", "manual", "before_fork"] as const)("never presents a %s capture as final completion", async reason => {
     const root = await checkpointRepository();
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: harness.fetch });
+    const runtime = durabilityRuntime(root, { fetch: harness.fetch });
     await runtime.checkpoint({ id: randomUUID(), reason, deadlineAtMs: Date.now() + 60_000 }, authority);
     expect(runtime.readFinalCheckpoint(authority)).toBeNull();
   });
@@ -139,7 +181,7 @@ describe("cloud checkpoint repository program isolation", () => {
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
     let idle = true;
     const commits = vi.fn();
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+    const runtime = durabilityRuntime(root, { fetch: (async (input, init) => {
       const pathname = new URL(String(input)).pathname;
       if (pathname.endsWith("/blobs/batch") || pathname.endsWith("/blobs")) idle = false;
       if (pathname.endsWith("/checkpoints/commit")) commits();
@@ -153,7 +195,7 @@ describe("cloud checkpoint repository program isolation", () => {
     const root = await checkpointRepository();
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
     let committed: Record<string, unknown> | undefined;
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+    const runtime = durabilityRuntime(root, { fetch: (async (input, init) => {
       if (new URL(String(input)).pathname.endsWith("/checkpoints/commit")) committed = JSON.parse(String(init?.body));
       return harness.fetch(input, init);
     }) as typeof fetch });
@@ -340,7 +382,7 @@ function checkpointFetchHarness(options: {
       return Response.json({ revision });
     }
     if (pathname.endsWith("/checkpoints/commit")) {
-      return Response.json({ checkpointId });
+      return Response.json({ checkpointId, contentRevision: JSON.parse(String(init?.body)).contentRevision, replayed: false });
     }
     throw new Error(`unexpected durability request: ${pathname}`);
   }) as typeof fetch;
@@ -357,7 +399,7 @@ async function expectUnsafeCheckpointWithoutWrites(
   expected: RegExp,
 ): Promise<void> {
   const writes: string[] = [];
-  const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+  const runtime = durabilityRuntime(root, {
     fetch: recordingCheckpointFetch(writes),
   });
 
@@ -897,7 +939,7 @@ describe("cloud durability checkpoint coordination", () => {
     for (let index = 0; index < 129; index += 1) await writeFile(path.join(root, `file-${index}.txt`), `content-${index}`);
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
     let requests = 0, failed = false;
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+    const runtime = durabilityRuntime(root, { fetch: (async (input, init) => {
       if (new URL(String(input)).pathname.endsWith("/blobs/batch")) {
         requests += 1;
         if (requests === 3 && !failed) { failed = true; return Response.json({}, { status: 503 }); }
@@ -920,7 +962,7 @@ describe("cloud durability checkpoint coordination", () => {
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
     const batches: number[] = [];
     let binaryFiles = 0;
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+    const runtime = durabilityRuntime(root, { fetch: (async (input, init) => {
       const pathname = new URL(String(input)).pathname;
       if (pathname.endsWith("/blobs/batch")) {
         const body = JSON.parse(String(init?.body));
@@ -1039,7 +1081,7 @@ describe("cloud durability checkpoint coordination", () => {
           }
         },
       });
-      const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+      const runtime = durabilityRuntime(root, {
         fetch,
       });
 
@@ -1094,7 +1136,7 @@ describe("cloud durability checkpoint coordination", () => {
         firstAppendFailure:
           outcome === "committed" ? "after_commit" : "before_commit",
       });
-      const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+      const runtime = durabilityRuntime(root, {
         fetch,
       });
       const directive = {
@@ -1156,7 +1198,7 @@ describe("cloud durability checkpoint coordination", () => {
         projectionEntries,
         revisionConflicts: 1,
       });
-      const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+      const runtime = durabilityRuntime(root, { fetch });
 
       await expect(
         runtime.checkpoint(
@@ -1206,7 +1248,7 @@ describe("cloud durability checkpoint coordination", () => {
       ],
       revisionConflicts: 3,
     });
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+    const runtime = durabilityRuntime(root, { fetch });
 
     await expect(
       runtime.checkpoint(
@@ -1237,7 +1279,7 @@ describe("cloud durability checkpoint coordination", () => {
         { mode: 0o755 },
       );
       const writes: string[] = [];
-      const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+      const runtime = durabilityRuntime(root, {
         fetch: recordingCheckpointFetch(writes),
       });
       const originalPath = process.env.PATH;
@@ -1293,7 +1335,7 @@ describe("cloud durability checkpoint coordination", () => {
             revisionConflicts: 1,
             afterRevisionConflict: () => vi.setSystemTime(deadlineAtMs),
           });
-        const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+        const runtime = durabilityRuntime(root, { fetch });
 
         await expect(
           runtime.checkpoint(
@@ -1330,7 +1372,7 @@ describe("cloud durability checkpoint coordination", () => {
               if (uploadCount === 2) vi.setSystemTime(deadlineAtMs);
             },
           });
-        const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+        const runtime = durabilityRuntime(root, { fetch });
 
         await expect(
           runtime.checkpoint(
@@ -1366,7 +1408,7 @@ describe("cloud durability checkpoint coordination", () => {
             if (uploadCount === 1) vi.setSystemTime(deadlineAtMs);
           },
         });
-        const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+        const runtime = durabilityRuntime(root, { fetch });
 
         await expect(
           runtime.checkpoint(
@@ -1393,7 +1435,7 @@ describe("cloud durability checkpoint coordination", () => {
       projectionEntries: [],
       rejectedAppendCode: "idempotency_conflict",
     });
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+    const runtime = durabilityRuntime(root, { fetch });
 
     await expect(
       runtime.checkpoint(
@@ -1663,7 +1705,7 @@ describe("cloud durability projection validation", () => {
     const root = await checkpointRepository();
     const blobId = "77777777-7777-4777-8777-777777777777";
     const checkpointId = "88888888-8888-4888-8888-888888888888";
-    const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+    const runtime = durabilityRuntime(root, {
       fetch: (async (input, init) => {
         const pathname = new URL(String(input)).pathname;
         if (pathname.endsWith("/content/head")) {
@@ -1781,7 +1823,7 @@ function durableRecordHarness() {
       checkpointId = randomUUID();
       durableRevision = Number(body.contentRevision);
       commits.push(body);
-      return Response.json({ checkpointId });
+      return Response.json({ checkpointId, contentRevision: JSON.parse(String(init?.body)).contentRevision, replayed: false });
     }
     throw new Error(`unexpected durability request: ${pathname}`);
   }) as typeof fetch;
@@ -1807,7 +1849,7 @@ describe("cloud durability unchanged periodic recovery points", () => {
     const dependencies = { fetch: harness.fetch, nativeRoots: { data: state } };
     const capture = (runtime: CloudWorkspaceDurabilityRuntime, scope = authority) =>
       runtime.checkpoint({ id: randomUUID(), reason: "manual", deadlineAtMs: Date.now() + 60_000 }, scope);
-    await capture(new CloudWorkspaceDurabilityRuntime(root, dependencies));
+    await capture(durabilityRuntime(root, dependencies));
     const native = () => JSON.parse(harness.blobs.get(String(harness.commits.at(-1)!.manifestBlobId))!.toString()).native as {
       chunks: Array<{ blobId: string }>; files: Array<{ scope: string; path: string; segments: Array<{ chunk: number }> }>;
     };
@@ -1819,10 +1861,10 @@ describe("cloud durability unchanged periodic recovery points", () => {
     await git(root, "commit", "--quiet", "-am", "new pushed work");
     await git(root, "-c", `url.file://${upstream}.insteadOf=${remote}`, "push", "--quiet", "origin", "HEAD:refs/heads/main");
     const uploadedBefore = harness.uploadedBlobIds.length;
-    await capture(new CloudWorkspaceDurabilityRuntime(root, dependencies));
+    await capture(durabilityRuntime(root, dependencies));
     expect(native().files.filter(file => file.scope === "git-pack" && file.path !== "objects.pack")).toHaveLength(2);
     for (const id of baseBlobIds) expect(harness.uploadedBlobIds.slice(uploadedBefore)).not.toContain(id);
-    await capture(new CloudWorkspaceDurabilityRuntime(root, dependencies), { ...authority, generation: 2, engineInstanceId: randomUUID() });
+    await capture(durabilityRuntime(root, dependencies), { ...authority, generation: 2, engineInstanceId: randomUUID() });
     expect(native().files.filter(file => file.scope === "git-pack" && file.path !== "objects.pack")).toHaveLength(2);
     for (const id of baseBlobIds) expect(harness.uploadedBlobIds.slice(uploadedBefore)).not.toContain(id);
   });
@@ -1836,7 +1878,7 @@ describe("cloud durability unchanged periodic recovery points", () => {
     await mkdir(agentHome);
     await mkdir(data);
     const harness = durableRecordHarness();
-    let runtime = new CloudWorkspaceDurabilityRuntime(root, {
+    let runtime = durabilityRuntime(root, {
       fetch: harness.fetch,
       nativeRoots: { agentHome, data },
     });
@@ -1859,7 +1901,7 @@ describe("cloud durability unchanged periodic recovery points", () => {
 
     await published();
     await unchanged();
-    runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: harness.fetch, nativeRoots: { agentHome, data } });
+    runtime = durabilityRuntime(root, { fetch: harness.fetch, nativeRoots: { agentHome, data } });
     await unchanged();
     await published("manual");
     await published("before_stop");

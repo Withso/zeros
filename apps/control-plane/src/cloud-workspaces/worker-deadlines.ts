@@ -34,8 +34,10 @@ const deadlines = {
       END) AS due_at
     FROM workspace_fork_intents fork LEFT JOIN workspace_checkpoint_requests request ON request.fork_intent_id=fork.id
     WHERE fork.state NOT IN ('succeeded','failed','cancelled')`,
-  checkpoints: `SELECT deadline_at AS due_at FROM workspace_checkpoint_requests WHERE state IN ('queued','delivered')
-    UNION ALL SELECT deadline_at FROM workspace_checkpoint_requests WHERE state='cancelled' AND error_code='mandatory_capture_cancelled'`,
+  checkpoints: `SELECT deadline_at AS due_at FROM workspace_checkpoint_requests
+      WHERE state IN ('queued','delivered','recovery_queued','recovery_delivered')
+    UNION ALL SELECT deadline_at FROM workspace_checkpoint_requests
+      WHERE state='cancelled' AND error_code='mandatory_capture_cancelled' AND final_save_recovery_id IS NULL`,
   recovery: recoveryWorkDeadlines,
   operations: `SELECT expires_at AS due_at FROM workspace_exports WHERE state='available'
     UNION ALL SELECT expires_at FROM device_request_nonces
@@ -51,6 +53,7 @@ const deadlines = {
       LEFT JOIN workspace_retention_policies policy ON policy.workspace_id=job.workspace_id AND policy.org_id=job.org_id
       WHERE job.state IN ('waiting_for_provider','deleting_objects','deleting_records')
         AND workspace.status='deleted' AND workspace.data_deleted_at IS NULL AND NOT coalesce(policy.legal_hold,false)
+        AND cloud_final_save_deletion_claimable(workspace.id,workspace.org_id)
         AND NOT EXISTS (SELECT 1 FROM workspace_blob_references reference JOIN workspace_blobs blob ON blob.id=reference.blob_id AND blob.org_id=reference.org_id
           WHERE reference.workspace_id=job.workspace_id AND reference.org_id=job.org_id AND blob.legal_hold)
         AND NOT EXISTS (SELECT 1 FROM workspace_checkpoints checkpoint WHERE checkpoint.workspace_id=job.workspace_id AND checkpoint.org_id=job.org_id AND checkpoint.legal_hold)

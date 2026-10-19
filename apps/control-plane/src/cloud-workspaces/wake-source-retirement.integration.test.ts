@@ -13,6 +13,7 @@ import { CloudWorkspaceReconciler } from "./reconciler.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
 import { previousBackendWake } from "./lifecycle-compatibility-fixtures.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { commitFinalSaveFixture, sealFinalSaveFixture } from "./final-save-test-fixtures.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("wake source retirement", () => {
@@ -24,7 +25,7 @@ suite("wake source retirement", () => {
     await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
   });
 
-  async function readySource(state: CloudProviderResource["state"] = "archived") {
+  async function readySource(state: CloudProviderResource["state"] = "archived", saved = state !== "running") {
     const fixture = await seedReadyCloudWorkspace(pool);
     await pool.query(`INSERT INTO cloud_workspace_quotas(org_id,max_workspaces,max_running_workspaces,max_cpu_millicores,max_memory_mib,max_storage_mib)
       VALUES($1,10,10,100000,100000,1000000) ON CONFLICT(org_id) DO NOTHING`, [fixture.organizationId]);
@@ -37,6 +38,16 @@ suite("wake source retirement", () => {
     const boot = CloudAgentBootCredentialResponseSchema.parse(await execution.boot(engine, "bootstrap", { ...scope, version: 1, mode: "boot-owner-v1" }));
     await execution.boot(engine, "activate", { ...scope, version: 1, mode: "boot-owner-v1",
       bootId: boot.bootId, writerEpoch: boot.writerEpoch, expectedCacheRevision: boot.cacheRevision });
+    if (saved) {
+      await sealFinalSaveFixture(pool, engine);
+      const intentId = randomUUID();
+      await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+        (id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
+        VALUES($1::uuid,$2,$3,1,$4,'archive',$1::text,digest($1::text,'sha256'))`,
+      [intentId,fixture.workspaceId,fixture.organizationId,fixture.userId]);
+      await commitFinalSaveFixture(pool, engine, { intentId,userId:fixture.userId,reason:"before_archive" });
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [intentId]);
+    }
     const binding = (await pool.query(`UPDATE cloud_workspace_provider_bindings
       SET last_observed_at=now()-interval '1 hour',next_drift_check_at=now()
       WHERE workspace_id=$1 AND generation=1 RETURNING provider_resource_id`, [fixture.workspaceId])).rows[0];
@@ -105,7 +116,17 @@ suite("wake source retirement", () => {
     expect(f.atStart).toEqual([{ state: "retired", binding_retired: true }]);
     expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [wake.intent.id])).rows[0].state).toBe("succeeded");
     expect((await pool.query("SELECT sealed_sequence,seal,seal_ack FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1", [f.boot.writerEpoch])).rows[0])
-      .toEqual({ sealed_sequence: null, seal: null, seal_ack: null });
+      .toEqual({ sealed_sequence: "0", seal: expect.any(Object), seal_ack: expect.any(Object) });
+  });
+
+  it("retains an unsaved cold source without a controlled stop or restart", async () => {
+    const f = await readySource("archived", false);
+    await f.worker.reconcileDriftOnce();
+    await f.wake(); await f.run();
+    expect(f.stop).not.toHaveBeenCalled(); expect(f.start).not.toHaveBeenCalled();
+    expect(await f.source()).toEqual({ state:"active",binding_retired:false });
+    expect((await pool.query(`SELECT state FROM cloud_workspace_final_save_recoveries
+      WHERE workspace_id=$1`, [f.fixture.workspaceId])).rows).toEqual([{ state:"capturing" }]);
   });
 
   it.each(["stopped", "archived"] as const)("retires a %s source before a direct owner wake without a drift pass", async state => {

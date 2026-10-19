@@ -4,7 +4,9 @@ import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import {
   canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceDocument,
   cloudWorkspaceLifecycleTask, manageCloudWorkspace, waitForCloudWorkspaceLifecycle,
+  cloudWorkspaceOwnerGeneration, manageCloudWorkspaceRestart, hasCloudWorkspaceRestartSubmission,
 } from "./cloud-workspace-catalog";
+import { isCloudLifecycleDeferred } from "../platform/cloud-lifecycle-result";
 import { publishCloudWorkspaceRestartPhase } from "./cloud-workspace-restart-status";
 import { wakeCloudWorkspace } from "./cloud-workspace-wake";
 import { clearWorkbenchConnectionFailure, reconnectWorkbenchWorkspace, recordWorkbenchConnectionFailure } from "./workbench-availability";
@@ -18,8 +20,8 @@ export function cloudWorkspaceRestartVisible(folder: string, workspace: CloudWor
 
 const flights = new Map<string, Promise<void>>();
 
-/** Explicit Stop (final checkpoint), then a fresh explicit wake and normal
- * admission. Reuses catalog idempotency and readiness; never persists intent. */
+/** New CPs own the saved Stop/dependent Wake atomically. Discovery chooses the
+ * legacy chain before dispatch only; uncertain v1 requests keep their identity. */
 export function restartCloudWorkspace(workspace: CloudWorkspaceTarget | string): Promise<void> {
   const folder = typeof workspace === "string" ? workspace : cloudWorkspaceKey(workspace);
   const target = parseCloudWorkspaceKey(folder);
@@ -34,6 +36,33 @@ export function restartCloudWorkspace(workspace: CloudWorkspaceTarget | string):
   const pending = flights.get(key);
   if (pending) return pending;
   if (flights.size >= 128) return Promise.reject(new Error("Too many workspace restarts"));
+  if (initial!.lifecycleVersion === 1 || hasCloudWorkspaceRestartSubmission(target)) {
+    const ownerGeneration = cloudWorkspaceOwnerGeneration(target);
+    const stillOwned = () => account === cloudCatalogGeneration() &&
+      ownerGeneration === cloudWorkspaceOwnerGeneration(target) &&
+      hasCloudWorkspaceAccountAccess(target.organizationId) &&
+      cloudWorkspaceRestartVisible(owner, cloudWorkspaceDocument(target)) &&
+      cloudWorkspaceDocument(target)?.capabilities.canWrite === true;
+    // This call enters the Stop/input fence synchronously, before any await.
+    const observation = manageCloudWorkspaceRestart(target);
+    const task = observation.then(async result => {
+      if (isCloudLifecycleDeferred(result) || !stillOwned()) return;
+      const receipt = result.acceptedOperation;
+      const current = () => cloudWorkspaceDocument(target)?.acceptedOperation;
+      if (!receipt || receipt.kind !== "restart" || receipt.state !== "completed" || current()?.id !== receipt.id) return;
+      publishCloudWorkspaceRestartPhase(owner, account, "connecting");
+      await reconnectWorkbenchWorkspace(owner);
+      if (stillOwned() && current()?.id === receipt.id && current()?.state === "completed") clearWorkbenchConnectionFailure(owner);
+    }).catch(error => {
+      if (stillOwned()) recordWorkbenchConnectionFailure(owner, error, "restart");
+      throw error;
+    }).finally(() => {
+      if (flights.get(key) === task) flights.delete(key);
+      publishCloudWorkspaceRestartPhase(owner, account, null);
+    });
+    flights.set(key, task);
+    return task;
+  }
   let generation = initial!.generation.number;
   const assertCurrent = () => {
     if (account !== cloudCatalogGeneration()) throw new Error("Cloud account changed while restarting");
@@ -54,9 +83,10 @@ export function restartCloudWorkspace(workspace: CloudWorkspaceTarget | string):
       ["waking", "starting", "provisioning", "setting_up"].includes(current.status));
     if (!waking) {
       if (current.status !== "stopped") {
-        await (current.status === "stopping" && !stop
+        const result = await (current.status === "stopping" && !stop
           ? waitForCloudWorkspaceLifecycle(target, "stop", current)
           : manageCloudWorkspace(target, "stop", true));
+        if (isCloudLifecycleDeferred(result)) return;
         current = assertCurrent();
       }
       if (current.status !== "stopped") throw new Error("Cloud workspace has not finished stopping");

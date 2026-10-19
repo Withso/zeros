@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { CLOUD_ENGINE_EXIT_REPORT_ENV } from "@zeros/protocol/cloud-runtime-lifecycle";
+import { CLOUD_FINAL_SAVE_VERSION_HEADER, CLOUD_FINAL_SAVE_PATH, type CloudFinalSaveRequest } from "@zeros/protocol/cloud-final-save";
 
 import {
   CLOUD_RUNTIME_ENV,
@@ -119,6 +120,88 @@ describe("coordinator registration", () => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("final-save registration companion", () => {
+  function deferred<T>() {
+    let resolve!: (value:T) => void;
+    const promise=new Promise<T>(done=>{resolve=done;});
+    return {promise,resolve};
+  }
+  const report = (): CloudFinalSaveRequest => ({version:1,kind:"reconcile",commit:null,
+    workspaceId:"11111111-1111-4111-8111-111111111111",organizationId:"22222222-2222-4222-8222-222222222222",
+    generation:3,engineInstanceId:"44444444-4444-4444-8444-444444444444",
+    recoveryId:ACCOUNT_USER_ID,requestId:"66666666-6666-4666-8666-666666666666",attemptOrdinal:0,
+    sourceSha256:"a".repeat(64),custodyId:"77777777-7777-4777-8777-777777777777"});
+  const reply = () => {
+    const {version,recoveryId,requestId,attemptOrdinal,sourceSha256,custodyId}=report();
+    return {version,recoveryId,requestId,attemptOrdinal,sourceSha256,custodyId,state:"waiting",retryAtMs:NOW+5000};
+  };
+  const headers={"x-zeros-cloud-local-commands":"1",[CLOUD_FINAL_SAVE_VERSION_HEADER]:"1"};
+  it.each(["both","no-local","no-final","unsolicited"])("requires both offered registration acknowledgements (%s)", async kind => {
+    const runtime=consumeCloudRuntimeEnvironment({[CLOUD_RUNTIME_ENV]:encodedRuntime()},()=>NOW)!;
+    const fetcher=vi.fn().mockResolvedValue(Response.json(registrationResponse(), {headers:{
+      ...(kind==="no-local"?{}:{"x-zeros-cloud-local-commands":"1"}),
+      ...(kind==="no-final"?{}:{[CLOUD_FINAL_SAVE_VERSION_HEADER]:"1"}),
+    }}));
+    const sync=deferred<void>();
+    const registration=new CloudRuntimeRegistration(runtime,{agentRuntime:V4_ATTESTATION,fetch:fetcher,now:()=>NOW,
+      negotiateLocalCommands:kind!=="unsolicited"?true:undefined,onAuthorityLost:vi.fn(),onDurableRecordSync:()=>sync.promise});
+    try {
+      const starting=registration.start();
+      await vi.waitFor(()=>expect(fetcher).toHaveBeenCalledOnce());
+      expect(registration.supportsFinalSaveRecovery()).toBe(false);
+      const init=fetcher.mock.calls[0]![1];
+      expect(init.headers[CLOUD_FINAL_SAVE_VERSION_HEADER]).toBe(kind==="unsolicited"?undefined:"1");
+      expect(JSON.parse(init.body)).not.toHaveProperty("finalSaveVersion");
+      sync.resolve();await starting;
+      expect(registration.supportsFinalSaveRecovery()).toBe(kind==="both");
+      await registration.stop();
+      expect(registration.supportsFinalSaveRecovery()).toBe(false);
+      await expect(registration.reportFinalSave(report())).rejects.toThrow();
+      expect(fetcher).toHaveBeenCalledOnce();
+    } finally {sync.resolve();await registration.stop();}
+  });
+
+  it.each(["current","stopped","expired-mutation"])("pins the original report and credential across a held %s response", async lifetime => {
+    let now=NOW;
+    const runtime=consumeCloudRuntimeEnvironment({[CLOUD_RUNTIME_ENV]:encodedRuntime()},()=>now)!;
+    const held=deferred<Response>();
+    const fetcher=vi.fn().mockResolvedValueOnce(Response.json(registrationResponse(),{headers})).mockImplementationOnce(()=>held.promise);
+    const registration=new CloudRuntimeRegistration(runtime,{agentRuntime:V4_ATTESTATION,fetch:fetcher,now:()=>now,
+      negotiateLocalCommands:true,onAuthorityLost:vi.fn(),onDurableRecordSync:completedDurableRecordSync()});
+    try {
+      await registration.start();
+      if(lifetime==="expired-mutation")now+=120_000;
+      const input=report(), pending=registration.reportFinalSave(input);
+      const outcome=pending.then(value=>({value}),error=>({error}));
+      await vi.waitFor(()=>expect(fetcher).toHaveBeenCalledTimes(2));
+      input.custodyId=ACCOUNT_USER_ID;
+      expect(fetcher.mock.calls[1]![0]).toBe(new URL(CLOUD_FINAL_SAVE_PATH,heartbeatEndpoint).href);
+      const init=fetcher.mock.calls[1]![1];
+      expect(init.headers.authorization).toBe(`Bearer ${registrationResponse().heartbeat.token}`);
+      expect(JSON.parse(init.body)).toEqual(report());
+      if(lifetime==="stopped")await registration.stop();
+      held.resolve(Response.json(reply()));
+      if(lifetime==="stopped")expect(await outcome).toMatchObject({error:expect.any(Error)});
+      else expect(await outcome).toEqual({value:reply()});
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally {held.resolve(Response.json(reply()));await registration.stop();}
+  });
+
+  it.each(["foreign-scope","extra-reply","oversized-reply"])("refuses %s without any alternate endpoint or authority", async invalid => {
+    const runtime=consumeCloudRuntimeEnvironment({[CLOUD_RUNTIME_ENV]:encodedRuntime()},()=>NOW)!;
+    const fetcher=vi.fn().mockResolvedValueOnce(Response.json(registrationResponse(),{headers})).mockResolvedValueOnce(
+      Response.json({...reply(),extra:invalid==="oversized-reply"?"x".repeat(8192):true}));
+    const registration=new CloudRuntimeRegistration(runtime,{agentRuntime:V4_ATTESTATION,fetch:fetcher,now:()=>NOW,
+      negotiateLocalCommands:true,onAuthorityLost:vi.fn(),onDurableRecordSync:completedDurableRecordSync()});
+    try {
+      await registration.start();
+      const input=report();if(invalid==="foreign-scope")input.engineInstanceId=ACCOUNT_USER_ID;
+      await expect(registration.reportFinalSave(input)).rejects.toThrow();
+      expect(fetcher).toHaveBeenCalledTimes(invalid==="foreign-scope"?1:2);
+    } finally {await registration.stop();}
+  });
 });
 
 describe("supervisor exit reporting compatibility", () => {

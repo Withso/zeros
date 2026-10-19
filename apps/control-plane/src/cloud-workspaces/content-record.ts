@@ -679,6 +679,7 @@ export class DatabaseCloudWorkspaceContentService {
     engineInstanceId: string;
     heartbeatToken: string;
     requestId?: string;
+    serializedBodySha256?: string;
     idempotencyKey: string;
     contentRevision: number;
     reason:
@@ -705,6 +706,7 @@ export class DatabaseCloudWorkspaceContentService {
     validateJsonDocument(input.inclusionPolicy, { nodes: 0 });
     const canonicalInclusionPolicy = canonicalJson(input.inclusionPolicy);
     if (
+      (input.serializedBodySha256 !== undefined && !SHA256_PATTERN.test(input.serializedBodySha256)) ||
       !IDEMPOTENCY_PATTERN.test(input.idempotencyKey) ||
       (input.requestId !== undefined && !UUID_PATTERN.test(input.requestId)) ||
       !Number.isSafeInteger(input.contentRevision) ||
@@ -758,14 +760,16 @@ export class DatabaseCloudWorkspaceContentService {
           id: string;
           content_revision: string | number;
           request_sha256: Buffer;
+          final_save_body_sha256: Buffer | null;
         }>(
-          `SELECT id, content_revision, request_sha256
+          `SELECT id, content_revision, request_sha256, final_save_body_sha256
            FROM workspace_checkpoints
            WHERE workspace_id = $1 AND idempotency_key = $2`,
           [input.workspaceId, input.idempotencyKey],
         );
         if (prior.rows[0]) {
-          if (!sameHash(prior.rows[0].request_sha256, digest)) {
+          if (!sameHash(prior.rows[0].request_sha256, digest) || (prior.rows[0].final_save_body_sha256 && input.serializedBodySha256 !== undefined &&
+            prior.rows[0].final_save_body_sha256.toString("hex") !== input.serializedBodySha256)) {
             throw new WorkspaceContentError(
               "idempotency_conflict",
               "Checkpoint idempotency key was reused",
@@ -907,10 +911,26 @@ export class DatabaseCloudWorkspaceContentService {
            content_revision, record_revision,
            authority_epoch, generation, reason, git_base_commit, git_head_ref,
            manifest_blob_id, artifact_blob_id, inclusion_policy, file_count,
-           total_bytes, state, integrity_sha256, created_by, durable_at
+           total_bytes, state, integrity_sha256, created_by, durable_at, final_save_body_sha256
          ) VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-           $14::jsonb, $15, $16, 'durable', $17, $18, now()
+           $14::jsonb, $15, $16, 'durable', $17, $18, now(),
+           CASE WHEN EXISTS (
+             SELECT 1 FROM workspace_checkpoint_requests request
+             JOIN cloud_workspace_final_save_recoveries recovery
+               ON recovery.lifecycle_intent_id=request.final_save_recovery_id
+                 AND recovery.workspace_id=request.workspace_id AND recovery.org_id=request.org_id
+                 AND recovery.generation=request.generation
+             JOIN cloud_workspace_engine_instances engine ON engine.id=recovery.engine_instance_id
+               AND engine.workspace_id=recovery.workspace_id AND engine.org_id=recovery.org_id
+               AND engine.generation=recovery.generation
+             WHERE request.id=$20 AND request.workspace_id=$1 AND request.org_id=$2
+               AND request.generation=$8 AND request.reason=$9
+               AND recovery.current_request_id=request.id AND recovery.attempt_ordinal=request.final_save_attempt_ordinal
+               AND engine.id=$21 AND engine.final_save_version=1
+               AND engine.registered_at=recovery.registered_at
+               AND engine.heartbeat_token_hash=recovery.registration_token_sha256
+           ) THEN $19::bytea ELSE NULL END
          )
          RETURNING id`,
         [
@@ -932,6 +952,11 @@ export class DatabaseCloudWorkspaceContentService {
           input.totalBytes,
           Buffer.from(input.integritySha256, "hex"),
           authority.accountUserId,
+          // Exact bytes belong only to the negotiated final-save journal.
+          // Legacy and ordinary commits retain canonical JSON replay.
+          input.serializedBodySha256 ? Buffer.from(input.serializedBodySha256, "hex") : null,
+          input.requestId ?? null,
+          input.engineInstanceId,
         ],
         );
         const checkpointId = checkpoint.rows[0]!.id;
@@ -989,6 +1014,7 @@ export class DatabaseCloudWorkspaceContentService {
             generation: input.generation,
             reason: input.reason,
             checkpointId,
+            engineInstanceId: input.engineInstanceId,
           });
         } catch {
           throw new WorkspaceContentError(

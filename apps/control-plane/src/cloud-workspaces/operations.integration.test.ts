@@ -14,6 +14,7 @@ import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.j
 import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
 import { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
+import { commitFinalSaveFixture } from "./final-save-test-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -45,6 +46,16 @@ d("cloud workspace production operations", () => {
     };
   }
 
+  async function savedDeletion(fixture: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>) {
+    const intentId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
+      VALUES($1::uuid,$2,$3,1,$4,'delete',$1::text,digest($1::text,'sha256'))`,
+    [intentId,fixture.workspaceId,fixture.organizationId,fixture.userId]);
+    await commitFinalSaveFixture(pool, { ...fixture,generation:1 }, { intentId,userId:fixture.userId,reason:"before_delete" });
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [intentId]);
+  }
+
   it.each(["commands", "events", "actions"] as const)(
     "purges %s before retiring engine records, preserving another workspace and the billing tombstone",
     async kind => {
@@ -69,6 +80,7 @@ d("cloud workspace production operations", () => {
               kind: "permission", requestId: randomUUID(), payload: { response: { outcome: "cancelled" } } } });
         }
       }
+      await savedDeletion(fixture);
       await pool.query(`UPDATE cloud_workspaces SET status='deleted', desired_state='deleted', deleted_at=now() WHERE id=$1`, [fixture.workspaceId]);
       await pool.query(`UPDATE cloud_workspace_provider_bindings SET observed_state='deleted', deletion_verified_at=now() WHERE workspace_id=$1`, [fixture.workspaceId]);
       await new CloudWorkspaceOperationsWorker(pool, blobs().service, { workerId: "operations-runtime-history-test" }).runOnce();
@@ -447,6 +459,7 @@ d("cloud workspace production operations", () => {
        ) VALUES ($3, $2, $1, 'transcript_artifact', 'private-transcript')`,
       [fixture.workspaceId, fixture.organizationId, artifact.id],
     );
+    await savedDeletion(fixture);
     await pool.query(
       `UPDATE cloud_workspaces
        SET status = 'deleted', desired_state = 'deleted', deleted_at = now()
