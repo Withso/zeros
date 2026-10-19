@@ -297,12 +297,15 @@ it("routes the actual lifecycle caller through the fixed host entry with only it
     [`${runtime.libRoot}/runtime-self-test.mjs`, "--host-qualify"]]);
 });
 
-it.skipIf(actualPlatform !== "linux").each(["fresh", "foreign-host", "changed-host", "live-setup", "missing-controller"])(
+it.skipIf(actualPlatform !== "linux").each(["fresh", "foreign-host", "changed-host", "live-setup", "missing-controller",
+  "computer-report", "computer-stale-boot", "computer-live-setup"])(
   "runs the whole fixed self-test command with %s VM observations and real inherited setup flock", async condition => {
+    const computer = condition.startsWith("computer-");
     const digest = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
     const manifest = JSON.stringify({ schema: "zeros.runtime-manifest/v1", entrypoints: { selfTest: "lib/zeros/runtime-self-test.mjs" },
       platform: { os: "linux", arch: "x64", node: process.versions.node, nodeModulesAbi: Number(process.versions.modules) },
-      agents: { claude: { cli: "1.2.3" }, codex: { package: "1.2.3" } } });
+      agents: { claude: { cli: "1.2.3" }, codex: { package: "1.2.3" } },
+      ...(computer ? { files: [{ path: "lib/zeros/cloud-resource-admission.mjs", type: "file", sha256: "d".repeat(64) }] } : {}) });
     const manifestSha256 = digest(manifest);
     const runtimeId = `r1-${manifestSha256}`;
     const root = `/opt/zeros-infra/${runtimeId}`;
@@ -353,17 +356,54 @@ it.skipIf(actualPlatform !== "linux").each(["fresh", "foreign-host", "changed-ho
     const owners = path.join(vm.root, "owners.json"), events = path.join(vm.root, "events.jsonl"), config = path.join(vm.root, "command.json");
     actual.writeFileSync(owners, JSON.stringify(Object.fromEntries(vm.owners)));
     actual.writeFileSync(events, "");
-    actual.writeFileSync(config, JSON.stringify({ root: vm.root, runtime: { ...active, node: `${root}/bin/node` }, owners, events, links, condition, readOffsets: {} }));
+    // These command-wiring cases supply role output explicitly; they do not
+    // claim to exercise native qualification, unlike the real launch-boundary
+    // refusal controls above. The actual installed producer and flock run.
+    const { COMPUTER_ROLE_CHECKS } = await import("../cloud-workspace-validation/sandbox/cloud-computer-self-test.mjs");
+    const buildProbe = { version: 2, boundary: "workspace-vm", qualified: true,
+      identity: { qualified: true, hostUid: 10003, namespaceUid: 10003, noNewPrivs: 1, seccompMode: 2,
+        capabilities: { effective: 0, permitted: 0, inheritable: 0, bounding: 0, ambient: 0 },
+        checks: COMPUTER_ROLE_CHECKS.identity.map(name => ({ name, status: "pass" })),
+        resources: { finite: true, cpuMax: "400000 100000", memoryMax: String(7 * 1024 ** 3), pidsMax: "4096",
+          memoryBudget: { nominalMemoryBytes: String(8 * 1024 ** 3), measuredMemoryBytes: String(8 * 1024 ** 3),
+            hostMemoryMax: String(256 * 1024 ** 2), source: "nominal", capped: false },
+          cpuSplit: { engine: { cpuMax: "max 100000", cpuWeight: 100 }, workload: { controllers: ["cpu"], cpuWeight: 100,
+            cap: { kind: "applied", effectiveCpus: 4, cpuMax: "300000 100000" } } } } },
+      execution: { sameEngineIdentity: true, noSandbox: true, ownedProcessGroups: true, originalProcessGroupsRetired: true,
+        timeoutRetired: true, workloadCgroup: true, vmWorkloadDrain: true },
+      actorTools: { sameEngineIdentity: true, noSandbox: true, buildChecks: COMPUTER_ROLE_CHECKS.actorTools },
+      capture: { sameEngineIdentity: true, chromiumSandbox: true },
+      humanServices: { sameEngineIdentity: true, noSandbox: true, buildChecks: COMPUTER_ROLE_CHECKS.humanServices } };
+    actual.writeFileSync(config, JSON.stringify({ root: vm.root, runtime: { ...active, node: `${root}/bin/node` }, owners, events, links,
+      condition, ...(computer ? { buildProbe } : {}), readOffsets: {} }));
     const { builderFixedCommand } = await import("../../apps/control-plane/src/cloud-workspaces/cloud-builder-commands.js");
     const command = builderFixedCommand("runtime-self-test", runtimeId)!;
     expect(command).toBe(`${root}/bin/node ${root}/lib/zeros/runtime-self-test.mjs`);
     const child = await vi.importActual<typeof import("node:child_process")>("node:child_process");
     const result = child.spawnSync(process.execPath,
-      [path.resolve("scripts/__tests__/helpers/runtime-self-test-command-io.cjs"), config, ...command.split(" ").slice(1)],
+      [path.resolve("scripts/__tests__/helpers/runtime-self-test-command-io.cjs"), config, ...command.split(" ").slice(1),
+        ...(computer ? ["--build-qualification"] : [])],
       { env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 });
     expect(result.error).toBeUndefined(); expect(result.signal).toBeNull();
-    expect(result.status, result.stderr).toBe(1);
+    expect(result.status, result.stderr).toBe(condition === "computer-report" ? 0 : 1);
     const observations = actual.readFileSync(events, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    if (computer) {
+      const { parseComputerSelfTestOutput } = await import("../cloud-workspace-validation/sandbox/runtime-self-test.mjs");
+      const parsed = parseComputerSelfTestOutput(result.stdout, result.status);
+      expect(parsed).not.toBeNull();
+      expect(observations.filter(event => event.kind === "role-command").map(event => [event.args, event.lockForwarded])).toEqual(
+        ["--host-probe-cursor", "--host-qualify"].map(role => [[`${root}/lib/zeros/runtime-self-test.mjs`, role], true]));
+      expect(observations.filter(event => event.kind === "setup-command")).toEqual([
+        expect.objectContaining({ args: [`${root}/lib/zeros/cloud-setup-process.mjs`, "--qualify"], lockForwarded: true }),
+      ]);
+      if (condition === "computer-report") {
+        expect(parsed?.report).toMatchObject({ runtime: { runtimeId, bootId: active.bootId }, results: { setupProcess: true, census: true } });
+      } else {
+        expect(parsed?.report).toBeNull();
+        expect(parsed?.diagnostic.failedChecks).toContain(condition === "computer-stale-boot" ? "final_identity" : "final_census");
+      }
+      return;
+    }
     const prepared = observations.filter(event => event.kind === "scope.prepare");
     if (condition === "fresh") {
       expect(prepared, JSON.stringify({ observations, output: result.stdout, stderr: result.stderr })).toEqual(["--host-probe-cursor", "--host-qualify"].map(role =>

@@ -98,7 +98,9 @@ def launches():
     cases.append(("setup-canary-child", startup_options(["python3", *re.findall(r"'([^']+)'", child)]), program))
     launch = re.search(r'command: "exec (python3 .*?) \'(.*?)\'"', source)
     cases.append(("setup-timeout", startup_options(shlex.split(launch[1])), launch[2]))
-    assert len(cases) == 36, "update the guest entry-point inventory when a launcher changes"
+    # Includes both the initial and final fresh supervisor status in the full
+    # Computer self-test; each discovered invocation still gets the cache proof.
+    assert len(cases) == 37, f"update the guest entry-point inventory when a launcher changes (found {len(cases)})"
     return cases
 
 

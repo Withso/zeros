@@ -41,6 +41,11 @@
   `scripts/__tests__/repository-layout.test.ts` explicitly, update the owning
   index and preserve existing entries. Docs lint and an interrupted full-root
   run do not verify that inventory boundary.
+- **Guest launcher inventories:** after adding a Python invocation or rebasing
+  runtime launchers, run `scripts/__tests__/cloud-runtime-bootstrap.test.ts`.
+  Reconcile the exact discovered entry count and retain the actual isolation,
+  bytecode and fresh-cache assertions; an inventory mismatch alone does not
+  establish a production bytecode defect.
 - **Trusted-base gate drift:** when workloads pass but the hourly gate reports
   `hourly_unavailable`, compare the policy checkout SHA with the current main
   workflow's job profiles. If main already contains the compatible reader,

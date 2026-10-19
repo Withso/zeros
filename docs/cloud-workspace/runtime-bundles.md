@@ -554,6 +554,25 @@ No directory is renamed and R is unchanged. Workspace setup's v4
 attester is a separate boundary. The runtime bundle must include this helper and list
 `entrypoints.selfTest`; a bundle built before it was included fails closed.
 
+The explicit `--build-qualification` mode produces credential-free Computer
+build evidence. It reuses the same nine checks and one engine lifecycle exercise,
+requires the complete identity, actor-tool/LSP and human-service check lists,
+and retains runner results only when the exact base offers them. It then runs
+the setup process retirement probe, checks the actual delegated tree is empty,
+and reopens the base-owned runtime descriptor to compare the original runtime,
+manifest, installer receipt, base compatibility, boot and supervisor session.
+The inherited setup lock spans the probes and the final checks. Success emits
+one canonical `zeros.computer-self-test/v1` report followed by its closed final
+diagnostic; failure emits only the diagnostic. Raw probe output is never part of
+the report. The report contains fixed results, check names, policy hashes,
+runtime witness and qualification time.
+
+This mode has no production caller yet. It is not a launch proof or registry
+approval and does not skip workspace qualification. Build evidence reuse still
+requires protected base integrity and kernel evidence, a fenced control-plane
+checkpoint, exact successful sanitation and saved-tree binding, and the
+`build_qualification` rollout gate. Default self-test behavior is unchanged.
+
 Approval happens only after confirmed VM deletion. Success inserts the five
 credential-kind rows (`claude-setup-token`, `codex-chatgpt`, `cursor-api-key`,
 `claude-api-key`, `codex-api-key`) for the runtime/base compatibility and

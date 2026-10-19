@@ -18,7 +18,8 @@ const role = invocation[1] ?? "orchestrator";
 const service = config.runtime.cgroupRoot;
 const host = `${service}/host`;
 const lockPath = "/run/zeros/setup.lock";
-const descriptors = new Map(role === "orchestrator" ? [] : [[3, lockPath]]);
+const inheritedLock = ["--offline-probes", "--offline-build-qualification", "--host-probe-cursor", "--host-qualify"].includes(role);
+const descriptors = new Map(inheritedLock ? [[3, lockPath]] : []);
 let membership = "0::/system.slice/ssh.service\n";
 let changedHost = false;
 const virtual = file => typeof file === "string" && file.startsWith("/") && !file.startsWith(config.root);
@@ -111,7 +112,27 @@ child.spawnSync = (executable, args, options) => {
   }
   if (executable === config.runtime.node && ["/runtime-self-test.mjs", "/cloud-engine-launcher.mjs"].some(name => args[0].endsWith(name))) {
     record({ kind: "role-command", executable, args, membership, lockForwarded: options.stdio.length === 4 });
+    // The Computer cases exercise the installed report producer with explicit
+    // role fixtures. They make no native qualification claim. Legacy cases
+    // below still enter the real launcher and refuse at scope.prepare.
+    if (config.buildProbe && args[1] === "--host-probe-cursor") return ok("cursor_payload_ok");
+    if (config.buildProbe && args[1] === "--host-qualify") return ok(JSON.stringify(config.buildProbe));
     return spawnSync(node, [adapter, configPath, ...args], options);
+  }
+  if (config.buildProbe && executable === config.runtime.node && args[0] === `${config.runtime.root}/lib/zeros/cloud-setup-process.mjs` &&
+      args.length === 2 && args[1] === "--qualify") {
+    record({ kind: "setup-command", executable, args, membership, lockForwarded: options.stdio.length === 4 });
+    if (config.condition === "computer-stale-boot") {
+      const file = physical("/run/zeros/active-runtime.json");
+      const active = JSON.parse(native.readFileSync(file, "utf8"));
+      active.bootId = "32345678-1234-4234-8234-123456789abc";
+      native.writeFileSync(file, JSON.stringify(active));
+    }
+    if (config.condition === "computer-live-setup") {
+      native.mkdirSync(physical(`${service}/setup`), { mode: 0o755 });
+      native.writeFileSync(physical(`${service}/setup/cgroup.events`), "populated 1\nfrozen 0\n", { mode: 0o644 });
+    }
+    return ok(JSON.stringify({ hostUid: 10003, hostGid: 10003, detachedDescendantsRetired: true, timeoutRetired: true }));
   }
   if (executable === "/usr/bin/python3") return ok(args.at(-1) === "status" ? JSON.stringify({
     schema: "zeros.base-status/v1", baseCompatibilityId: config.runtime.baseCompatibilityId,

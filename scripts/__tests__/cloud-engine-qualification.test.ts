@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 const ports=vi.hoisted(()=>({actor:vi.fn(),capture:vi.fn(),human:vi.fn(),runners:vi.fn(),create:vi.fn(),load:vi.fn(),unregister:vi.fn(),live:vi.fn(),inspect:vi.fn(),close:vi.fn()}));
 import { qualifyCloudEngineRuntime as qualify } from "../cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs";
+import { COMPUTER_ROLE_CHECKS } from "../cloud-workspace-validation/sandbox/cloud-computer-self-test.mjs";
 const qualifyCloudEngineRuntime=(value?:Parameters<typeof qualify>[0])=>qualify(value,ports.load,{runnerSupport:()=>false});
 const runners={version:1,managerIdentity:true,privateMaterial:true,stdio:true,originalRetirement:true,descendantsRetired:true,census:true,revocation:true,managerRetired:true};
 const execution={sameEngineIdentity:true,noSandbox:true,ownedProcessGroups:true,originalProcessGroupsRetired:true,timeoutRetired:true,workloadCgroup:true,vmWorkloadDrain:false};
@@ -143,4 +144,23 @@ it("retains a closed failed role and cleanup while discarding raw errors", async
 it.each([false, true])("cannot let a diagnostic observer alter qualification or cleanup (runner support: %s)", async runnerSupport => {
  const report=await qualify(identity,ports.load,{onPerformance:()=>{throw new Error("observer");},runnerSupport:()=>runnerSupport});
  expect(report.engineChecksPassed).toBe(true);expect(ports.close).toHaveBeenCalledOnce();expect(ports.unregister).toHaveBeenCalledOnce();
+});
+
+it("retains the complete observed actor and human checks for the build producer", async () => {
+ ports.actor.mockResolvedValue({execution,actorTools:{sameEngineIdentity:true,noSandbox:true},checks:[...COMPUTER_ROLE_CHECKS.actorTools]});
+ ports.human.mockResolvedValue({sameEngineIdentity:true,noSandbox:true,checks:[...COMPUTER_ROLE_CHECKS.humanServices]});
+ const report = await qualifyCloudEngineRuntime(identity);
+ expect(report.actorTools).toHaveProperty("buildChecks",COMPUTER_ROLE_CHECKS.actorTools);
+ expect(report.humanServices).toHaveProperty("buildChecks",COMPUTER_ROLE_CHECKS.humanServices);
+ expect(ports.actor).toHaveBeenCalledOnce();expect(ports.human).toHaveBeenCalledOnce();
+});
+
+it.each(["partial", "unknown", "duplicate"])("keeps %s role details out of reusable evidence without weakening the legacy gate", async kind => {
+ const checks=[...COMPUTER_ROLE_CHECKS.actorTools];
+ if(kind==="partial")checks.pop();
+ else checks.push(kind==="duplicate"?checks[0]:"synthetic-private-output");
+ ports.actor.mockResolvedValue({execution,actorTools:{sameEngineIdentity:true,noSandbox:true},checks});
+ const report=await qualifyCloudEngineRuntime(identity);
+ expect(report.engineChecksPassed).toBe(true);expect(report.actorTools).not.toHaveProperty("buildChecks");
+ expect(JSON.stringify(report)).not.toContain("synthetic-private-output");
 });

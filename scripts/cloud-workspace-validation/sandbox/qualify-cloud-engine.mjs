@@ -27,6 +27,7 @@ import { cloudEnginePrivilegeStatus } from "./cloud-engine-privilege.mjs";
 import { loadCloudQualificationRoles } from "./cloud-qualification-loader.mjs";
 import { setupPerformance, notifySetupPerformance } from "./cloud-setup-performance.mjs";
 import { cloudRunnerBaseSupported, cloudRunnerQualificationPassed } from "./cloud-runner-base.mjs";
+import { computerRoleChecks } from "./cloud-computer-self-test.mjs";
 
 function optional(file) {
   try {
@@ -258,7 +259,8 @@ export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQ
     if (!execution || fields.some(key => execution[key] !== true) || execution.vmWorkloadDrain !== false ||
         actor.actorTools?.sameEngineIdentity !== true || actor.actorTools.noSandbox !== true) return report;
     report.execution = { ...Object.fromEntries(fields.map(key => [key, true])), vmWorkloadDrain: false };
-    report.actorTools = { sameEngineIdentity: true, noSandbox: true };
+    const actorChecks = computerRoleChecks(actor.checks, "actorTools");
+    report.actorTools = { sameEngineIdentity: true, noSandbox: true, ...(actorChecks ? { buildChecks: actorChecks } : {}) };
     next("capture");
     const capture = await qualifyCloudCapture(context);
     if (capture?.sameEngineIdentity !== true || capture.chromiumSandbox !== true) return report;
@@ -266,7 +268,8 @@ export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQ
     next("human_services");
     const human = await qualifyCloudHumanServices(context);
     if (human?.sameEngineIdentity !== true || human.noSandbox !== true) return report;
-    report.humanServices = { sameEngineIdentity: true, noSandbox: true };
+    const humanChecks = computerRoleChecks(human.checks, "humanServices");
+    report.humanServices = { sameEngineIdentity: true, noSandbox: true, ...(humanChecks ? { buildChecks: humanChecks } : {}) };
     // The deployed timer schema has no runner label. Keep this separate gate
     // from changing the duration or outcome of either neighboring stage.
     finish?.(); finish = undefined;
