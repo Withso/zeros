@@ -25,3 +25,9 @@ projection fixture and legacy image recipes omitted it. Run the projection and
 all cloud script suites before handoff; keep a staged import that succeeds after
 the source checkout is removed. Encoded in the runtime-bundle closure, image
 artifact and Computer projection tests.
+
+A `cloud-*` suite selection excluded the Boat kit's exact recipe assertion.
+Enumerate every recipe/template consumer, including `boat-image-kit.test.ts`,
+instead of treating one filename glob as dependency coverage. When a helper is
+added, require it explicitly in the install list and normalize only that exact
+addition out of the historical recipe digest; retain the original digest.
