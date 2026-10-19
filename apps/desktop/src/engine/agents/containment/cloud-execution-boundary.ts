@@ -27,7 +27,8 @@ export class CloudExecutionBoundary implements ExecutionBoundary {
   readonly backend = "cloud-worker" as const;
   private readonly host: HostExecutionBoundary;
   readonly workloads: CloudOwnedWorkloadRegistry;
-  constructor(options: { projectRoot?: string; configuration: CloudWorkerConfiguration; workloads: CloudOwnedWorkloadRegistry }) {
+  constructor(options: { projectRoot?: string; configuration: CloudWorkerConfiguration; workloads: CloudOwnedWorkloadRegistry;
+    retainSessionDirectories?: boolean }) {
     if (!isCloudWorkerConfiguration(options.configuration) || !isCloudOwnedWorkloadRegistry(options.workloads) ||
       !options.workloads.custody || cloudWorkloadCustodyConfiguration(options.workloads.custody) !== options.configuration ||
       options.configuration.uid !== process.geteuid?.() || options.configuration.gid !== process.getegid?.())
@@ -35,7 +36,7 @@ export class CloudExecutionBoundary implements ExecutionBoundary {
     this.workloads = options.workloads;
     this.host = new HostExecutionBoundary({ projectRoot: options.projectRoot,
       supervisorRuntime: options.configuration.toolchain.node, supervisorScript: options.configuration.toolchain.supervisor,
-      cloudWorkloadCustody: this.workloads.custody! });
+      cloudWorkloadCustody: this.workloads.custody!, retainSessionDirectories: options.retainSessionDirectories });
     originalBoundaries.add(this);
   }
   async probe(request: BoundaryRequest) { return { ...await this.host.probe(request), backend: this.backend }; }

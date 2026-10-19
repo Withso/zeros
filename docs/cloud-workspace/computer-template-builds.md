@@ -287,6 +287,11 @@ Empty cached files do not grant runtime, workspace or account admission.
 A live walk cannot discover arbitrary filenames deleted before sanitation.
 The exact saved-tree proof is therefore still required, independently of the
 helper's clean receipt; any inherited private bytes keep the Computer unready.
+The fixed runtime qualifier retains its ordinary session bookkeeping for that
+walk after proving native retirement. Native launch/recovery records still use
+their normal cleanup, and ordinary Local and cloud sessions still remove their
+directories. Sanitized zero-byte session stubs remain inert; generic session GC
+does not treat malformed or empty metadata as authority to delete a directory.
 Repository normalization remains separate from private-state sanitation.
 Visible ordinary `.git/hooks` files are emptied in place; aliases and special
 files fail sanitation. The normalized local Git config persists
@@ -297,6 +302,10 @@ this setting prevents hook execution, not recovery or erasure of unknown
 inherited repository bytes. An intentional workspace hook installation must
 explicitly replace this local setting. Local checkouts outside Computer builds
 are unaffected.
+
+When a fixed build command fails, its validated closed diagnostic is appended
+to the fenced build log before cleanup. Raw helper output and exceptions are
+excluded, and a reporting failure cannot replace the build error or stop cleanup.
 
 For contracts §23, B10 binds `/srv/zeros/{files,state,home}` from
 `/home/user/.zeros-persist/*` on every boot/restore. C3 continues to address the

@@ -13,7 +13,10 @@ export function createCloudQualificationRuntime() {
   const custody = createCloudWorkloadCustody(configuration);
   custody.assertLive();
   const workloads = new CloudOwnedWorkloadRegistry({ custody });
-  const boundary = new CloudExecutionBoundary({ projectRoot: "/srv/zeros/workspace", configuration, workloads });
+  // Only this fixed credential-free probe selects retention. Deleted children
+  // can survive an incremental snapshot; the later sanitizer needs their paths.
+  const boundary = new CloudExecutionBoundary({ projectRoot: "/srv/zeros/workspace", configuration, workloads,
+    retainSessionDirectories: true });
   // Role probes lazily start the engine's process-global PTY transport. The
   // engine ends it in stop(); this controller ends it after its final census.
   return Object.freeze({ configuration, custody, workloads, boundary, close: () => disposePtyHost() });
