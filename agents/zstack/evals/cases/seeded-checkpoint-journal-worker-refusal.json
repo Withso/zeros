@@ -1,0 +1,9 @@
+{
+  "id": "seeded-checkpoint-journal-worker-refusal",
+  "kind": "seeded",
+  "area": "engineering verification",
+  "fixedBy": "pr:677",
+  "symptom": "A contended checkpoint journal process exits on its bounded unconfirmed refusal, turning a legitimate losing CAS into stdout EOF.",
+  "rule": "CI-red native journal races retain a live worker on the exact closed refusal, one confirmed winner and exact persisted custody; unknown child exceptions must remain failures.",
+  "check": "pnpm test:git apps/desktop/src/engine/__tests__/cloud-complete-checkpoint-journal.test.ts"
+}
