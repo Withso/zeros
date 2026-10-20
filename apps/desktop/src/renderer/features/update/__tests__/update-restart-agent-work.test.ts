@@ -130,3 +130,68 @@ describe.each([
     expect(working()).toBe(true);
   });
 });
+
+describe("update restart agent-work gate (cloud sends)", () => {
+  beforeEach(() => store().clearAll());
+
+  it("counts a send this renderer holds while the workspace wakes or the agent admits", () => {
+    // The queued message lives only in this renderer until dispatch.
+    store().setSession("chat-cloud-wake", {
+      ...BLANK,
+      agentId: "codex",
+      cwd: CLOUD_CWD,
+      status: "idle",
+      cloudSendWait: {
+        state: "waiting",
+        phase: "starting-workspace",
+        turnId: "queued-1",
+        startedAt: 10,
+      },
+    });
+    expect(working()).toBe(true);
+    store().patchSession("chat-cloud-wake", {
+      status: "warming",
+      cloudSendWait: { state: "waiting", turnId: "queued-1", startedAt: 10 },
+    });
+    expect(working()).toBe(true);
+  });
+
+  it("counts a dispatched prompt awaiting the agent's acceptance", () => {
+    store().setSession("chat-cloud-dispatched", {
+      ...BLANK,
+      agentId: "codex",
+      cwd: CLOUD_CWD,
+      status: "streaming",
+      cloudPromptPending: true,
+      activeTurnStartedAt: null,
+    });
+    expect(working()).toBe(true);
+  });
+
+  it("ignores a failed or stopped wait, which waits for the user", () => {
+    store().setSession("chat-cloud-failed", {
+      ...BLANK,
+      agentId: "codex",
+      cwd: CLOUD_CWD,
+      status: "ready",
+      cloudSendWait: {
+        state: "failed",
+        turnId: "queued-2",
+        message: "Stopped before sending. Retry when you're ready.",
+      },
+    });
+    expect(working()).toBe(false);
+  });
+
+  it("selects the wait only for a cloud workspace", () => {
+    // Local sessions never set cloudSendWait; the gate stays at the cloud key.
+    store().setSession("chat-local", {
+      ...BLANK,
+      agentId: "codex",
+      cwd: LOCAL_CWD,
+      status: "ready",
+      cloudSendWait: { state: "waiting", turnId: "queued-3", startedAt: 10 },
+    });
+    expect(working()).toBe(false);
+  });
+});

@@ -11,8 +11,9 @@ until their next use. The toast also ignored `pendingLocalTurns`.
 
 Rule: an app-level "is agent work running?" gate reuses
 `agentSessionHasActiveWork` with `pendingLocalTurns` (now
-`anyAgentHasActiveWork`). An open `streaming` turn still counts. A bare
-admission status does not.
+`anyAgentHasActiveWork`). An open `streaming` turn still counts, and so does a
+cloud send in `cloudSendWait: waiting`, which exists only in the renderer until
+dispatch and sets no pending turn. A bare admission status does not count.
 
 Encoded in `update-restart-agent-work.test.ts`, which drives the real store
 producers for Local and cloud chats, and in eval case

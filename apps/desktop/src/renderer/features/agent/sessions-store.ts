@@ -2159,7 +2159,8 @@ export function useAnyChatAwaitingKind(
 
 /** True if ANY session across the whole app has work an app restart would
  *  interrupt: an open provider turn ("streaming"), a send this renderer still
- *  owns, or the turn, background-task and workflow evidence behind
+ *  owns (including a cloud send waiting for its workspace or agent), or the
+ *  turn, background-task and workflow evidence behind
  *  {@link agentSessionHasActiveWork}. A bare "warming" or "reconnecting" status
  *  is session admission, not work: every opened chat warms before anything is
  *  sent, and idle chats rest in "reconnecting" after an exit or superseded bind
@@ -2171,6 +2172,8 @@ export function anyAgentHasActiveWork(
   for (const [chatId, slot] of Object.entries(state.sessions)) {
     if (
       slot.status === "streaming" ||
+      // Until dispatch, the queued cloud send exists only in this renderer.
+      (slot.cloudSendWait?.state === "waiting" && isCloudWorkspace(slot.cwd)) ||
       agentSessionHasActiveWork(slot, state.pendingLocalTurns[chatId])
     ) {
       return true;
