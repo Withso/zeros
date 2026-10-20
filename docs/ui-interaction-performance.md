@@ -389,6 +389,21 @@ Bridge, native IPC, Git, SQLite, and future cloud/sandbox reads are shared serve
 - Preserve collection references when refreshed values are equal.
 - Bound inactive entries and define invalidation events.
 
+A slow older read may retain its own request, but cannot suspend count or byte
+limits for every newer completed snapshot. Keep at most the cache's ordinary
+entry allowance beyond pending reads, enforce the payload budget during the
+wait, and prune again when ownership ends. Subscribed exact-key content stays
+pinned. Test a held read while many other reads finish; checking only after
+all requests settle misses this growth.
+
+Renderer memory checks must also mount the real surfaces. Use the offline
+`harness-renderer-memory` and its `renderer-memory-profile.mjs` CDP driver for
+eight-chat switching, hidden views, query churn and unmount, with cloud,
+Local Personal and organization-local fixtures. Compare post-GC snapshots
+after repeated rounds, DOM/listener counts and the actual cache payloads.
+Heap snapshots themselves allocate memory; Chromium heap totals are not a
+measurement of Mac/Electron process memory.
+
 `apps/desktop/src/renderer/shared/lib/keyed-async-cache.ts` is the renderer primitive for this pattern. Feature caches choose keys, fetchers, freshness, and invalidation. For a popover/dialog/settings surface, mount a shared cache key with `apps/desktop/src/renderer/state/use-cached-read.ts` against a cache declared in `apps/desktop/src/renderer/state/read-caches.ts` — never the clear-then-fetch shape (`setLoading(true)` + fetch in an on-open effect), which blanks rows the user already saw and refetches data fetched seconds ago.
 
 Two rules that pattern enforces:

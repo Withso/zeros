@@ -1,0 +1,9 @@
+{
+  "id": "renderer-cache-pending-growth",
+  "kind": "seeded",
+  "area": "renderer keyed state",
+  "fixedBy": "pr:661",
+  "symptom": "One older pending renderer read prevents eviction of every newer completed cache entry, bypassing both count and byte limits while other views keep browsing.",
+  "rule": "Bound completed inactive payloads during held I/O, preserve subscribed exact-key snapshots and original request custody, and measure mounted surfaces with post-GC browser snapshots; docs/ui-interaction-performance.md.",
+  "check": "pnpm test:git apps/desktop/src/renderer/state/__tests__/keyed-async-cache-growth.test.ts"
+}
