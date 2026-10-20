@@ -150,6 +150,15 @@ END $$;`],
     "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_owner_discard_recovery_digest(uuid),
   cloud_owner_discard_safety_stop_matches(uuid,uuid,integer,uuid,uuid,uuid,uuid,bytea) FROM PUBLIC;`],
   },
+  "0175_cloud_unstarted_candidate_cleanup.sql": {
+    "widen-check": ["ALTER TABLE cloud_workspace_final_save_recoveries DROP CONSTRAINT cloud_workspace_final_save_recoveries_state_check;"],
+    "new-table-privileges": ["REVOKE UPDATE,DELETE,TRUNCATE ON cloud_workspace_unstarted_candidate_cleanup FROM PUBLIC,zeros_app;"],
+    "truncate-guard": [`CREATE TRIGGER cloud_unstarted_candidate_no_truncate BEFORE TRUNCATE ON cloud_workspace_unstarted_candidate_cleanup
+  FOR EACH STATEMENT EXECUTE FUNCTION guard_cloud_unstarted_candidate_receipt();`],
+    "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_unstarted_candidate_source(uuid),cloud_unstarted_candidate_current(uuid),guard_cloud_unstarted_candidate_receipt(),
+  cloud_unstarted_candidate_hold_capture(),adopt_cloud_unstarted_candidate_cleanup(uuid),cloud_unstarted_candidate_hold_source(),
+  cloud_final_save_dispatchable(uuid),require_cloud_unstarted_candidate_retirement() FROM PUBLIC;`],
+  },
   "0174_cloud_lifecycle_scheduling.sql": {
     "privilege-tightening": [
       "cloud_lifecycle_allocation_wait_status(uuid)",
@@ -212,6 +221,14 @@ const ownerDiscardSafetyDigests: Record<string,string> = {
   "owner-discard-safety-disposition": "59c024f127915c9ec65528fc7bf32bf23c7e4cde107541ef99734269663bf9d5",
   "owner-discard-safety-retirement": "674a58e6886c9341a1d8ddde10eec3dea1da964e08ef70f82faa0a1331b57aff",
   "owner-discard-safety-transition": "6468791de8211c3fdf74a0678d419ca5dc65275f894ea5bd81563e5422a1bb3f",
+};
+
+// These whole statements preserve real save proof and the existing provider
+// retirement/erasure gates, adding only exact never-started candidate custody.
+const unstartedCandidateDigests: Record<string,string> = {
+  "candidate-dispatch": "09044968651f6f51f34f1ab4d59eae410615930dc11f3fa73294cd766dd0801e",
+  "candidate-history": "a35f1bea1be1d8960ab3fec7a5ee23e5e3c81ca78608b18bb33fa16dec8e56a6",
+  "candidate-purge": "cde2e5c569b87bfd6adc2bd373f954db82c661c55df557c336054ef649968f0f",
 };
 
 /** Split only at top-level SQL semicolons. Dollar bodies, nested comments and
@@ -299,7 +316,9 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
       (rule === "owner-discard-purge" && file === "0172_cloud_owner_checkpoint_recovery.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerDiscardPurgeDigest) ||
       (file === "0173_cloud_owner_recovery_safety_stop.sql" &&
-        createHash("sha256").update(statement).digest("hex") === ownerDiscardSafetyDigests[rule]);
+        createHash("sha256").update(statement).digest("hex") === ownerDiscardSafetyDigests[rule]) ||
+      (file === "0175_cloud_unstarted_candidate_cleanup.sql" &&
+        createHash("sha256").update(statement).digest("hex") === unstartedCandidateDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

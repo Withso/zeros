@@ -32,9 +32,14 @@ suite("final-save expansion adopts only exact historical evidence",()=>{
     }} finally {await tx.query("ROLLBACK");tx.release();}
   // Replays the complete pre-expansion ladder for real legacy-row fixtures.
   },30_000);
-  const migrate=async()=>{
+  const migrate=async(currentSchema=false)=>{
     const tx=await pool.connect();
-    try {await tx.query("BEGIN");await tx.query(await readFile(new URL(migration,directory),"utf8"));await tx.query("COMMIT");}
+    const files=currentSchema
+      ? (await readdir(directory)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name>=migration).sort()
+      : [migration];
+    try {for(const name of files){
+      await tx.query("BEGIN");await tx.query(await readFile(new URL(name,directory),"utf8"));await tx.query("COMMIT");
+    }}
     finally {await tx.query("ROLLBACK");tx.release();}
   };
   async function legacy(committed:boolean){
@@ -103,7 +108,7 @@ suite("final-save expansion adopts only exact historical evidence",()=>{
   const deletionClaimable=async(f:Awaited<ReturnType<typeof legacy>>)=>
     (await withSystemTx(pool,tx=>tx.query("SELECT cloud_final_save_deletion_claimable($1,$2) AS allowed",[f.workspaceId,f.organizationId]))).rows[0].allowed as boolean;
 
-  async function deletionWithLegacyHistory(historyCount = 1) {
+  async function deletionWithLegacyHistory(historyCount = 1, currentSchema = false) {
     const f = await legacy(true);
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [f.intentId]);
     for (let index = 1; index < historyCount; index++) {
@@ -127,7 +132,7 @@ suite("final-save expansion adopts only exact historical evidence",()=>{
     const jobId = randomUUID();
     await pool.query(`INSERT INTO workspace_deletion_jobs(id,workspace_id,org_id,requested_by,idempotency_key,next_attempt_at)
       VALUES($1,$2,$3,$4,'pre-expansion-delete',now()-interval '1 hour')`, [jobId,f.workspaceId,f.organizationId,f.userId]);
-    await migrate();
+    await migrate(currentSchema);
     const deleteId = await savedDelete(f, { ...f,...successor });
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='dispatching',dispatched_at=now() WHERE id=$1", [deleteId]);
     await confirmWorkspaceDeletion(pool, f);
@@ -240,7 +245,9 @@ suite("final-save expansion adopts only exact historical evidence",()=>{
   });
 
   it("uses the existing recovery job to finish already-adopted historical custody after retirement settles", async () => {
-    const f = await deletionWithLegacyHistory();
+    // Keep the old receipt producer, then apply every shipped expansion before
+    // starting today's worker, which owns the new cleanup adoption function.
+    const f = await deletionWithLegacyHistory(1, true);
     await pool.query("UPDATE cloud_workspace_final_save_dispatches SET settled_at=NULL WHERE lifecycle_intent_id=$1", [f.deleteId]);
     const objects = { deleteUnreferencedSystem: vi.fn(async () => "already_deleted" as const) };
     const worker = new CloudWorkspaceOperationsWorker(pool, objects, { workerId: "historical-recovery" });

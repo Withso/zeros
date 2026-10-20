@@ -632,7 +632,7 @@ export class CloudWorkspaceReconciler {
                AND active.state = 'dispatching'
                AND active.lease_expires_at > now()
            )
-           AND (i.operation NOT IN ('stop','archive','delete') OR cloud_final_save_proven(i.id)
+           AND (i.operation NOT IN ('stop','archive','delete') OR cloud_final_save_dispatchable(i.id)
              OR NOT EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries recovery WHERE recovery.lifecycle_intent_id=i.id))
            AND (
              i.operation <> 'create'

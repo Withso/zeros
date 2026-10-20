@@ -98,6 +98,36 @@ verify its generation, checkpoint and Computer pins. A candidate failure keeps
 the lost source quarantined and requires operator follow-up; it cannot wake the
 discarded source. Replaying the command does not create another candidate.
 
+After migration `0175_cloud_unstarted_candidate_cleanup.sql`, the existing
+final-save worker can retire an exact failed candidate whose setup stopped at
+`setup_checkpoint_restore_invalid` before any agent boot or writer reservation.
+This requires the original owner receipt and transition, a retained valid source
+checkpoint, the exact revoked engine and allocation, no candidate content writes
+or checkpoints, and no delivered capture or capture custody. Candidate records
+must be absent except for one initial primary metadata upsert, differing from
+the checkpoint's source only in `createdAt`, written by that engine before setup
+failed. Its exact batch ID is retained in the receipt; any other field change,
+identity, tombstone or additional event refuses cleanup. A missing
+ledger, revoked engine, or failed setup alone is insufficient.
+
+The worker appends one immutable cleanup receipt per qualifying candidate Delete
+or compute Stop and marks only its recovery `not_required`, with an infinite
+retry timestamp. It preserves failure reports and original request identities;
+an undelivered queued request is cancelled with its normal retirement receipt.
+The existing reconciler then performs ordinary provider inspection, compute
+settlement and Stop/Delete. No checkpoint is fabricated: `cloud_final_save_proven`
+stays false. Dispatch retains its exact allocation hold until positive provider
+retirement. Late setup, enrollment, boot, writer and capture work is refused.
+There is no new operator execute command or new candidate start in this slice.
+
+After deployment, observe the exact candidate's cleanup receipts, recovery
+states, lifecycle results and provider binding. A receipt is not provider
+deletion verification. `final_save_blocked` can clear at disposition, while
+`lifecycle_stalled` clears only when the queued lifecycle work actually retires.
+An ineligible candidate stays preserved and requires separate investigation.
+The source checkpoint, original discard and failed transition remain intact.
+History restoration and any explicit retry of recovery remain separate work.
+
 The migration supports deployed health and retry readers: the discarded row is
 not blocked/retrying, and its next-attempt timestamp is infinity. Stale workers
 cannot reopen any named intent or create a successor capture. The original failed

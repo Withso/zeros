@@ -14,6 +14,7 @@ export const ownerRecoveryConfig = { provider: "boat", imageRef: "qualified-imag
   boat: { accountScope: computerTestAccount, billingOrg: computerTestWallet } } as CloudWorkspaceBackendConfig;
 
 export async function seedOwnerCheckpointRecovery(pool: pg.Pool, options: {
+  beforeCheckpoint?: (fixture: Awaited<ReturnType<typeof seedFinalSave>>) => Promise<void>;
   beforeLoss?: (fixture: Awaited<ReturnType<typeof seedFinalSave>>) => Promise<void>;
   /** Historical rows exercise freshness without sleeping or rewriting evidence. */
   historicalLoss?: boolean;
@@ -23,6 +24,7 @@ export async function seedOwnerCheckpointRecovery(pool: pg.Pool, options: {
   // not turn exact SQL registration equality into a false scope mismatch.
   const registeredAt=new Date(Date.now()-60_000).toISOString().replace("Z","123Z");
   const f = await seedFinalSave(pool, { providerResourceId: resourceId, sealed: false, registeredAt });
+  await options.beforeCheckpoint?.(f);
   const prepared = await f.prepareCommit();
   const { requestId:_requestId,...periodic } = prepared.body;
   const checkpointId = (await prepared.content.commitCheckpoint({ ...periodic, ...f.scope,

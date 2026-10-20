@@ -13,7 +13,7 @@ export async function ensureFinalSaveRecovery(tx: Tx, intentId: string): Promise
   await tx.query(`UPDATE cloud_workspace_final_save_recoveries recovery SET
     original_request_id=request.id,current_request_id=request.id,next_attempt_at=request.deadline_at
     FROM workspace_checkpoint_requests request WHERE recovery.lifecycle_intent_id=$1
-      AND recovery.original_request_id IS NULL AND request.lifecycle_intent_id=recovery.lifecycle_intent_id
+      AND recovery.original_request_id IS NULL AND recovery.state<>'not_required' AND request.lifecycle_intent_id=recovery.lifecycle_intent_id
       AND request.workspace_id=recovery.workspace_id AND request.org_id=recovery.org_id AND request.generation=recovery.generation`, [intentId]);
   await tx.query(`UPDATE workspace_checkpoint_requests request SET final_save_recovery_id=recovery.lifecycle_intent_id,
     final_save_attempt_ordinal=0 FROM cloud_workspace_final_save_recoveries recovery
@@ -31,12 +31,18 @@ export async function scheduleFinalSaveRecovery(tx: Tx, input: {
     failure_started_at=coalesce(failure_started_at,clock_timestamp()),first_failure=coalesce(first_failure,$3),last_failure=$3,
     next_attempt_at=clock_timestamp()+(ARRAY[5,15,30,60,120,300])[least(retry_count,5)+1]*interval '1 second',
     retry_count=least(retry_count+1,1000000),updated_at=clock_timestamp()
-    WHERE lifecycle_intent_id=$1 AND ($2::uuid IS NULL OR current_request_id=$2) AND state NOT IN ('proven','resolved','discarded')`,
+    WHERE lifecycle_intent_id=$1 AND ($2::uuid IS NULL OR current_request_id=$2) AND state NOT IN ('proven','resolved','discarded','not_required')`,
   [input.intentId, input.requestId ?? null, input.failure, input.blocked ?? false]);
 }
 
 export async function finalSaveProven(tx: Tx, intentId: string): Promise<boolean> {
   return (await tx.query<{ proven: boolean }>("SELECT cloud_final_save_proven($1) AS proven", [intentId])).rows[0]?.proven === true;
+}
+
+/** A never-started rejected candidate has a separate exact cleanup receipt.
+ * It never becomes a successful final checkpoint or Restart prerequisite. */
+export async function finalSaveDispatchable(tx: Tx, intentId: string): Promise<boolean> {
+  return (await tx.query<{ allowed: boolean }>("SELECT cloud_final_save_dispatchable($1) AS allowed", [intentId])).rows[0]?.allowed === true;
 }
 
 /** Last database boundary after every preparatory provider/cache await. The
@@ -55,7 +61,7 @@ export async function requireFinalSaveDispatch(pool: pg.Pool, input: {
       WHERE intent.id=$1 AND intent.workspace_id=$2 AND intent.org_id=$3 AND intent.generation=$4
         AND intent.state='dispatching' AND intent.lease_owner=$5 AND intent.attempt_count=$6
         AND intent.lease_expires_at>clock_timestamp() AND workspace.authority_epoch=$7
-        AND dispatch.provider_resource_id=$8 AND dispatch.settled_at IS NULL AND cloud_final_save_proven(intent.id)
+        AND dispatch.provider_resource_id=$8 AND dispatch.settled_at IS NULL AND cloud_final_save_dispatchable(intent.id)
       FOR UPDATE OF intent`, [input.intentId, input.workspaceId, input.organizationId, input.generation,
       input.workerId, input.attemptCount, input.authorityEpoch, input.providerResourceId])).rowCount === 1;
   });

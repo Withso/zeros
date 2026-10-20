@@ -29,7 +29,7 @@ export function lifecycleWorkForJob(kind: string): LifecycleWork | null { return
 // are the running and settled-stopped drift intervals in ms.
 const DUE: Record<LifecycleWork, string> = {
   finalSave: `SELECT workspace_id,org_id,next_attempt_at AS due_at FROM cloud_workspace_final_save_recoveries
-    WHERE ($scope::uuid IS NULL OR workspace_id=$scope) AND state NOT IN ('proven','resolved','discarded')`,
+    WHERE ($scope::uuid IS NULL OR workspace_id=$scope) AND state NOT IN ('proven','resolved','discarded','not_required')`,
   lifecycle: `
     SELECT i.workspace_id, i.org_id, greatest(CASE WHEN allocation_wait.lifecycle_intent_id IS NOT NULL
         AND (allocation_wait.state='pending' OR cloud_lifecycle_allocation_wait_status(i.id)='invalid') THEN now()
@@ -48,7 +48,7 @@ const DUE: Record<LifecycleWork, string> = {
       AND (allocation_wait.lifecycle_intent_id IS NULL OR cloud_lifecycle_allocation_wait_status(i.id)<>'pending')
       AND (allocation_wait.lifecycle_intent_id IS NOT NULL OR i.resume_after_intent_id IS NULL OR EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents prerequisite
         WHERE prerequisite.id=i.resume_after_intent_id AND prerequisite.state='succeeded'))
-      AND (i.operation NOT IN ('stop','archive','delete') OR cloud_final_save_proven(i.id)
+      AND (i.operation NOT IN ('stop','archive','delete') OR cloud_final_save_dispatchable(i.id)
         OR NOT EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries recovery WHERE recovery.lifecycle_intent_id=i.id))
       AND (i.operation<>'create' OR NOT EXISTS (SELECT 1 FROM workspace_fork_intents fork
         WHERE fork.target_cloud_workspace_id=i.workspace_id AND fork.org_id=i.org_id AND fork.operation='local_to_cloud' AND fork.state<>'succeeded'))`,
