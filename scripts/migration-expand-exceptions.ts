@@ -149,6 +149,7 @@ END $$;`],
   "0173_cloud_owner_recovery_safety_stop.sql": {
     "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_owner_discard_recovery_digest(uuid),
   cloud_owner_discard_safety_stop_matches(uuid,uuid,integer,uuid,uuid,uuid,uuid,bytea) FROM PUBLIC;`],
+  },
   "0174_cloud_lifecycle_scheduling.sql": {
     "privilege-tightening": [
       "cloud_lifecycle_allocation_wait_status(uuid)",
