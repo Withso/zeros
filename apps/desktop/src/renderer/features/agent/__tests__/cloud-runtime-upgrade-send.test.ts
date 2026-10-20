@@ -83,7 +83,7 @@ function expectOneAdmissionBanner() {
   const session = useSessionsStore.getState().sessions.chat;
   const { queuedMessages, visibleMessages } = queuedTranscriptPresentation(session.messages, session);
   const context: Record<string, unknown> = { React, TurnFailureCard, QueuedMessagesCard, isCloudWorkspace, session,
-    chatThread: { folder: session.cwd }, visibleMessages, queuedMessages, readOnly: false, interactive: true, sendNowQueued: vi.fn(),
+    chatThread: { folder: session.cwd }, visibleMessages, queuedMessages, readOnly: false, interactive: true, surfaceActive: true, sendNowQueued: vi.fn(),
     queueSelectedId: null, editingQueuedId: null, queueCollapsed: false, setQueueCollapsed: vi.fn(), setQueueSelectedId: vi.fn(),
     startQueuedEdit: vi.fn(), saveQueuedEdit: vi.fn(), queuedEditHasContent: true, deleteQueued: vi.fn(),
     steeringSupported: true, composerStreaming: false, steeringAgentName: "Codex", openCloudAdmissionSettings: vi.fn() };

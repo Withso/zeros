@@ -1443,6 +1443,8 @@ export function AgentSessionsProvider({
       prepared?: boolean;
       cloudQueue?: CloudQueuedPrompt;
       waitStartedAt?: number;
+      /** Display only; the monotonic waitStartedAt owns the deadline. */
+      waitDisplayStartedAt?: number;
       waitBudget?: CloudSendWaitBudget;
       failureLogId?: string;
       waitStopVersion?: number;
@@ -1479,7 +1481,7 @@ export function AgentSessionsProvider({
     folder: string | null | undefined) => {
     if (!entry.cloud || account !== cloudCatalogGeneration() || getStore().sessions[chatId]?.cwd !== folder ||
         !sendQueueRef.current.get(chatId)?.includes(entry)) return;
-    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; queued.failureLogId = undefined; }
+    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitDisplayStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; queued.failureLogId = undefined; }
     resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
   }, [getStore, resumeQueue]);
   const markQueuedDelivery = useCallback(
@@ -2518,7 +2520,7 @@ export function AgentSessionsProvider({
           ...(segments?.length ? { segments } : {}), ...(autoAction ? { autoAction } : {}),
         };
         const q = sendQueueRef.current.get(chatId) ?? [];
-        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; entry.wakeIntent = undefined; entry.failureLogId = undefined; }
+        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitDisplayStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; entry.wakeIntent = undefined; entry.failureLogId = undefined; }
         q.push({ cloud: true, bubbleId, queueEntryId: bubbleId, cloudQueue, wakeIntent, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
         sendQueueRef.current.set(chatId, q);
         getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded),
@@ -4306,6 +4308,7 @@ export function AgentSessionsProvider({
     const first = sendQueueRef.current.get(chatId)?.[0];
     if (!slot || !target || !first?.cloud) return;
     const startedAt = first.waitStartedAt ??= performance.now();
+    const displayStartedAt = first.waitDisplayStartedAt ??= Date.now();
     first.failureLogId ??= crypto.randomUUID();
     const stopVersion = first.waitStopVersion ??= cloudWorkspaceStopVersion(target);
     const folder = slot.cwd, account = cloudCatalogGeneration();
@@ -4332,8 +4335,9 @@ export function AgentSessionsProvider({
       // An admitted follow-up still crosses the same admission/checkpoint
       // guards, but it is not a first-session readiness wait.
       const waitPhase = ready ? "sending" : "starting-workspace";
-      if (fresh?.cloudSendWait?.state !== "waiting" || fresh.cloudSendWait.phase !== waitPhase)
-        getStore().patchSession(chatId, { cloudSendWait: { state: "waiting", phase: waitPhase, turnId: first.bubbleId } });
+      if (fresh?.cloudSendWait?.state !== "waiting" || fresh.cloudSendWait.phase !== waitPhase ||
+          fresh.cloudSendWait.turnId !== first.bubbleId || fresh.cloudSendWait.startedAt !== displayStartedAt)
+        getStore().patchSession(chatId, { cloudSendWait: { state: "waiting", phase: waitPhase, turnId: first.bubbleId, startedAt: displayStartedAt } });
       return ready;
     };
     cloudSendWaitRef.current.start(chatId, {
@@ -4345,7 +4349,7 @@ export function AgentSessionsProvider({
       timeoutError: () => phase === "history"
         ? new CloudSendWaitError("Couldn't load chat history. Retry to send your message.", "history_unavailable")
         : new CloudSendWaitError("The agent didn't accept your message in time. Retry to send it.", "queued_timeout"),
-      safetyTimeoutMs: 45_000 - (performance.now() - startedAt),
+      safetyTimeoutMs: 180_000 - (performance.now() - startedAt),
       safetyTimeoutError: () => new CloudSendWaitError("The workspace is still starting. Retry when it is ready.", "workspace_start_timeout"),
       attempt: async signal => {
         readiness();
@@ -5267,7 +5271,7 @@ export function AgentSessionsProvider({
       let slot = getStore().sessions[chatId];
       if (entry.cloud && slot?.cloudSendWait) {
         if (slot.cloudSendWait.state === "failed") {
-          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; queued.failureLogId = undefined; }
+          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitDisplayStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; queued.failureLogId = undefined; }
           resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
         }
         return true;

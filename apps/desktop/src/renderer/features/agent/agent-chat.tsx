@@ -5265,6 +5265,9 @@ function AgentChatBody({
             statusMessage={isCloudWorkspace(session.cwd) ? session.cloudSendWait?.state === "failed"
               ? session.cloudSendWait.message ?? (queuedMessages.some(message => message.id === session.cloudAdmissionFailure?.turnId) ? session.cloudAdmissionFailure?.message : undefined)
               : session.cloudSendWait?.phase === "starting-workspace" ? "Starting workspace…" : undefined : undefined}
+            statusStartedAt={isCloudWorkspace(session.cwd) && session.cloudSendWait?.state === "waiting" && session.cloudSendWait.phase === "starting-workspace"
+              ? session.cloudSendWait.startedAt : undefined}
+            active={surfaceActive}
             onStop={interactive && !readOnly && isCloudWorkspace(session.cwd) &&
                 (session.cloudSendWait?.state === "waiting" || session.cloudPromptPending || queuedMessages.some(message => message.queuedDelivery === "sending"))
               ? () => { void session.cancel(); } : undefined}

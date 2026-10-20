@@ -42,7 +42,9 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { formatElapsed } from "@/renderer/shared/ui/loading/live-duration";
 import { Button, Tooltip, TooltipProvider } from "@/renderer/shared/ui/primitives";
+import { useVisibleClock } from "../../state/use-visible-clock";
 import type { AgentTextMessage } from "./use-agent-session";
 
 export interface QueuedMessagesCardProps {
@@ -74,6 +76,9 @@ export interface QueuedMessagesCardProps {
   /** The queue owns the single persistent reason and explicit Retry action. */
   notSent?: boolean;
   statusMessage?: string;
+  /** Workspace-start display origin, separate from an accepted turn's clock. */
+  statusStartedAt?: number;
+  active?: boolean;
   onStop?: () => void;
   onReconnect?: () => void;
   /** Name for a provider without mid-turn steering. */
@@ -98,6 +103,8 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   waiting = false,
   notSent = false,
   statusMessage,
+  statusStartedAt,
+  active = true,
   onStop,
   onReconnect,
   agentName,
@@ -137,7 +144,10 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
           {onStop && <Button variant="ghost" size="compact" onClick={onStop}>Stop</Button>}
           {onReconnect && <Button variant="ghost" size="compact" onClick={onReconnect}>Reconnect</Button>}
         </div>
-        {statusMessage && <div role="status" className="text-fg3 px-3.5 pb-2 text-xs">{statusMessage}</div>}
+        {statusMessage && <div role="status" className="text-fg3 px-3.5 pb-2 text-xs">
+          {statusMessage}
+          {statusStartedAt !== undefined && <> · <QueueWaitElapsed startedAt={statusStartedAt} active={active} /></>}
+        </div>}
         {!collapsed && messages.length > 0 && (
           <>
             <div className="border-border1 flex flex-col gap-0.5 border-t px-1.5 py-1.5">
@@ -263,6 +273,11 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
       </div>
     </TooltipProvider>
   );
+});
+
+const QueueWaitElapsed = memo(function QueueWaitElapsed({ startedAt, active }: { startedAt: number; active: boolean }) {
+  const now = useVisibleClock(active);
+  return <span aria-live="off" className="tabular-nums">{formatElapsed(Math.max(0, now - startedAt))}</span>;
 });
 
 /** 24px icon button with a Radix tooltip. Disabled buttons keep pointer

@@ -96,7 +96,8 @@ An uncertain response retries the same idempotency ID and initiating reason;
 a definitive refusal needs a new explicit attempt. Stop, account replacement,
 owner deletion and the original attempt deadline retire old work. Cloud prompt
 preparation spends at most ten seconds while the workspace is ready, and at
-most 45 seconds including a wake. Serial history-conflict retries share an
+most 180 seconds including a wake, with elapsed time beside Starting workspace.
+CP failed/error statuses end the wait immediately. Serial history-conflict retries share an
 eight-second bound and never retry a mutation or an uncertain dispatch.
 Explicit Retry renews the intent; reconnect, catalog, history, hover and selection
 restore never do. This identity stays in renderer memory, outside persisted

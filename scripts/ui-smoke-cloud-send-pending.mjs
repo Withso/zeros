@@ -11,7 +11,7 @@ export async function checkCloudSendPending({ page, check, screenshotDir }) {
     const store = useSessionsStore.getState();
     store.setPendingLocalTurn("composer-chat-0", null);
     store.patchSession("composer-chat-0", { status: "warming", activeTurnStartedAt: null, cloudPromptPending: false,
-      cloudSendWait: { state: "waiting", phase: "sending", turnId: "pending" },
+      cloudSendWait: { state: "waiting", phase: "sending", turnId: "pending", startedAt: Date.now() },
       messages: [{ id: "pending", kind: "text", role: "user", text: "Deliver this prompt", createdAt: Date.now(),
         queued: true, queuedPresentation: "active-turn" }] });
   });
@@ -25,18 +25,31 @@ export async function checkCloudSendPending({ page, check, screenshotDir }) {
   await expect(working).toHaveCount(0);
   await page.evaluate(async () => {
     const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
-    useSessionsStore.getState().patchSession("composer-chat-0", {
-      cloudSendWait: { state: "waiting", phase: "starting-workspace", turnId: "pending" },
+    const store = useSessionsStore.getState();
+    store.patchSession("composer-chat-0", {
+      cloudSendWait: { ...store.sessions["composer-chat-0"].cloudSendWait, phase: "starting-workspace" },
     });
   });
-  await expect(status).toContainText("Starting workspace…");
+  await expect(status).toContainText("Starting workspace… · 20s");
+  await page.clock.runFor(60_000);
+  await expect(status).toContainText("Starting workspace… · 1m 20s");
+  await page.clock.runFor(70_000);
+  await expect(status).toContainText("Starting workspace… · 2m 30s");
   await expect(working).toHaveCount(0);
+  if (screenshotDir) for (const theme of ["dark", "light"]) {
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.screenshot({ path: `${screenshotDir}/cloud-starting-workspace-${theme}.png`, animations: "disabled" });
+  }
   for (const placement of ["Local", "Organization local"]) {
     await page.getByRole("button", { name: placement, exact: true }).click();
     await expect(status).toHaveCount(0);
+    await page.clock.runFor(5_000);
+    await expect(page.locator("[data-queued-messages]").filter({ hasText: "Starting workspace…" })).toContainText("2m 30s");
   }
   await page.getByRole("button", { name: "Cloud", exact: true }).click();
-  await expect(status).toContainText("Starting workspace…");
+  await expect(status).toContainText("Starting workspace… · 2m 40s");
+  await page.getByRole("button", { name: "Remount chat", exact: true }).click();
+  await expect(status).toContainText("Starting workspace… · 2m 40s");
   await expect(transcript.getByText("Deliver this prompt", { exact: true })).toHaveCount(0);
   await expect(status).toContainText("Deliver this prompt");
   await page.evaluate(async () => {
@@ -46,6 +59,8 @@ export async function checkCloudSendPending({ page, check, screenshotDir }) {
     });
   });
   await expect(status).toContainText("Not sent");
+  await expect(status).not.toContainText("Starting workspace");
+  await expect(status).not.toContainText("2m 40s");
   await expect(status).toContainText("Couldn't load chat history");
   await expect(status.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
   await expect(status.getByRole("button", { name: "Remove", exact: true })).toBeVisible();

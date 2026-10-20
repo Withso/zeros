@@ -24,3 +24,10 @@ Use actual API-reader tests as well as injected row arrays: an incomplete CP
 head can intentionally withhold every row. A partial mock that imports its
 original module can bind a circular dependency before the mock is installed;
 mock the owned request boundary without loading that cycle.
+
+Choose the wake bound from measured lifecycle time: an 80-second wake and a
+150-second restart must retain the undispatched prompt. Keep the original
+180-second monotonic deadline separate from the ten-second ready budget and
+immediate CP failure. A display-only elapsed origin follows the queued attempt
+through phase changes and remounts; hidden surfaces unsubscribe from the shared
+clock. Only an explicit retry resets that origin and the attempt deadline.

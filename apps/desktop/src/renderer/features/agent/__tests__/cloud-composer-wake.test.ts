@@ -95,7 +95,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
       store.sessions.chat.messages = store.sessions.chat.messages.map((m: any) => m.id === id ? { ...m, queued: false } : m);
     } },
     chatComposerEnv: () => undefined, chatEnvDriftKey: () => "", CloudSendWaitError, CloudWorkspaceWakeEndedError, isRecoverable,
-    ControlPlaneError: class extends Error {}, classifyCloudAdmissionFailure, cloudAdmissionFailureCode, performance,
+    ControlPlaneError: class extends Error {}, classifyCloudAdmissionFailure, cloudAdmissionFailureCode, performance, Date,
     notifyAgentSendFailure: failureNotice,
     reportCloudAgentRuntimeUpgrade: vi.fn(), invalidateCloudAgentRegistry: vi.fn(),
     redactLogSecrets: (s: string) => s, crypto: { randomUUID: () => `message-${++sequence}` },
@@ -222,14 +222,38 @@ describe("cloud composer readiness queue", () => {
     expect(h.delivered).not.toHaveBeenCalled();
   });
 
-  it("bounds workspace wake at thirty seconds plus fifteen seconds margin", async () => {
+  it("bounds workspace wake at 180 seconds without dispatching a late preparation", async () => {
     const h = harness(); await h.send();
     expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", phase: "starting-workspace" });
-    await vi.advanceTimersByTimeAsync(45_000);
+    await vi.advanceTimersByTimeAsync(179_999);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    expect(h.failureNotice).not.toHaveBeenCalled();
+    expect(h.store.sessions.chat.activeTurnStartedAt ?? null).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
     expect(h.store.sessions.chat.cloudSendWait.state).toBe("failed");
     expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_start_timeout" }));
+    expect(h.queue.get("chat")).toHaveLength(1);
     h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.delivered).not.toHaveBeenCalled();
+  });
+
+  it("retains the original wake deadline and display origin through readiness re-entry", async () => {
+    const h = harness(); await h.send();
+    const startedAt = h.store.sessions.chat.cloudSendWait.startedAt;
+    expect(startedAt).toBe(Date.now());
+    await vi.advanceTimersByTimeAsync(80_000);
+    h.provider.cloudSendWaitRef.current.cancel("chat");
+    h.provider.actions.beginCloudSendWait("chat");
+    expect(h.store.sessions.chat.cloudSendWait.startedAt).toBe(startedAt);
+    await vi.advanceTimersByTimeAsync(99_999);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_start_timeout" }));
+    h.failureNotice.mock.calls[0][0].onRetry();
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", startedAt: Date.now() });
+    expect(h.store.sessions.chat.cloudSendWait.startedAt).not.toBe(startedAt);
+    h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledOnce();
   });
 
   it("saves an empty queued editor when its existing frozen additional payload survives, without using a new canvas selection", async () => {
@@ -610,7 +634,7 @@ describe("cloud composer readiness queue", () => {
     retry(); h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.prepare).toHaveBeenCalledTimes(calls); expect(h.delivered).not.toHaveBeenCalled();
   });
-  it.each([30_000, 42_000])("delivers once after a %i ms wake/replacement inside the bounded start window", async duration => {
+  it.each([30_000, 42_000, 80_000, 150_000])("delivers once after a %i ms wake/replacement inside the bounded start window", async duration => {
     const h = harness(); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
     const doc = h.provider.cloudWorkspaceDocument(); doc.status = "stopping";
     await vi.advanceTimersByTimeAsync(duration / 3);
@@ -621,11 +645,33 @@ describe("cloud composer readiness queue", () => {
     h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.delivered).toHaveBeenCalledExactlyOnceWith(id, expect.anything()); expect(h.failureNotice).not.toHaveBeenCalled();
   });
-  it("reports a terminal document error while a wake preparation is still hung", async () => {
-    const h = harness(); await h.send();
-    const doc = h.provider.cloudWorkspaceDocument(); doc.status = "setting_up"; doc.error = { message: "Setup failed" };
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_unavailable", error: expect.objectContaining({ message: "Setup failed" }) }));
+  it("still allows only ten ready seconds after a 150-second wake", async () => {
+    const h = harness(); let changed!: () => void;
+    h.provider.subscribeCloudWorkspaces = (listener: () => void) => { changed = listener; return () => {}; };
+    h.prepare.mockResolvedValue(undefined);
+    await h.send();
+    const startedAt = h.store.sessions.chat.cloudSendWait.startedAt;
+    await vi.advanceTimersByTimeAsync(150_000);
+    h.provider.cloudWorkspaceDocument().status = "ready"; changed();
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", phase: "sending", startedAt });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "queued_timeout" }));
+    h.ready(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).not.toHaveBeenCalled();
+  });
+  it.each([
+    { status: "failed", error: null },
+    { status: "error", error: null },
+    { status: "setting_up", error: { message: "Setup failed" } },
+  ])("reports a terminal CP $status/error immediately while wake preparation is still hung", async update => {
+    const h = harness(); let changed!: () => void;
+    h.provider.subscribeCloudWorkspaces = (listener: () => void) => { changed = listener; return () => {}; };
+    await h.send(); await vi.advanceTimersByTimeAsync(5_000);
+    Object.assign(h.provider.cloudWorkspaceDocument(), update); changed();
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("failed");
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_unavailable",
+      error: expect.objectContaining({ message: update.error?.message ?? expect.stringContaining(update.status) }) }));
     h.ready(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).not.toHaveBeenCalled();
   });
   it("ends an undispatched send immediately when explicit workspace Stop supersedes pending agent admission", async () => {
