@@ -15,8 +15,13 @@ export async function checkOptimisticSendPresentation({ page, check, screenshotD
         ...(index === 0 ? { cloudSendWait: { state: "waiting" } } : {}) });
       store.setPendingLocalTurn(chatId, "opening");
     }, index);
-    await expect(transcript.getByText("Start this task now", { exact: true })).toBeVisible();
-    await expect(page.locator("[data-queued-id]:visible")).toHaveCount(0);
+    if (index === 0) {
+      await expect(transcript.getByText("Start this task now", { exact: true })).toHaveCount(0);
+      await expect(page.locator('[data-queued-id="opening"]:visible')).toContainText("Start this task now");
+    } else {
+      await expect(transcript.getByText("Start this task now", { exact: true })).toBeVisible();
+      await expect(page.locator("[data-queued-id]:visible")).toHaveCount(0);
+    }
 
     await page.evaluate(async index => {
       const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
@@ -28,10 +33,12 @@ export async function checkOptimisticSendPresentation({ page, check, screenshotD
         { id: "queued", kind: "text", role: "user", text: "Deliberately saved for later", createdAt: now + 2, queued: true },
       ] });
     }, index);
-    await expect(transcript.getByText("Use the smaller change", { exact: true })).toBeVisible();
-    await expect(page.locator("[data-queued-id]:visible")).toHaveCount(1);
-    await expect(page.locator("[data-queued-id]:visible")).toContainText("Deliberately saved for later");
-    await expect(page.getByRole("button", { name: "Waiting for agent", exact: true })).toHaveCount(0);
+    if (index === 0) {
+      await expect(transcript.getByText("Use the smaller change", { exact: true })).toHaveCount(0);
+      await expect(page.locator('[data-queued-id="steering"]:visible')).toContainText("Use the smaller change");
+    } else await expect(transcript.getByText("Use the smaller change", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-queued-id]:visible")).toHaveCount(index === 0 ? 2 : 1);
+    await expect(page.locator('[data-queued-id="queued"]:visible')).toContainText("Deliberately saved for later");
     await page.evaluate(() => { window.optimisticBubbleNode = document.querySelector('[data-checkpoint-id="steering"] .zeros-agent-turn-prompt'); });
     await page.evaluate(async index => {
       const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
@@ -40,9 +47,10 @@ export async function checkOptimisticSendPresentation({ page, check, screenshotD
         ? { ...message, queued: false, queuedDelivery: undefined } : message) });
     }, index);
     await expect(transcript.getByText("Use the smaller change", { exact: true })).toBeVisible();
-    expect(await page.evaluate(() => window.optimisticBubbleNode != null &&
+    if (index !== 0) expect(await page.evaluate(() => window.optimisticBubbleNode != null &&
       window.optimisticBubbleNode === document.querySelector('[data-checkpoint-id="steering"] .zeros-agent-turn-prompt'))).toBe(true);
     if (screenshotDir && index === 0) await page.screenshot({ path: `${screenshotDir}/optimistic-cloud-steering.png`, animations: "disabled" });
-    check(`${placement}: opening and steering bubbles paint before consumption; ACK retains the bubble and explicit Queue stays separate`, true);
+    check(index === 0 ? "Cloud: opening and steering messages stay queued until acceptance; confirmed messages then enter the transcript" :
+      `${placement}: opening and steering bubbles paint before consumption; ACK retains the bubble and explicit Queue stays separate`, true);
   }
 }

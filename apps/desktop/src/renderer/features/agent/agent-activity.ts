@@ -1,5 +1,6 @@
 import type { AgentSessionState } from "./use-agent-session";
 import { agentFamily } from "./model-catalog";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 export type AgentActivity = "running" | "waiting" | null;
 
@@ -18,6 +19,7 @@ export function chatAgentActivity(
   slot: AgentSessionState | undefined,
   pendingLocalTurnId?: string | null,
 ): AgentActivity {
+  if (slot?.cloudPromptPending && isCloudWorkspace(slot.cwd)) return null;
   if (pendingLocalTurnId) return "running";
   return agentFamily(slot?.agentId ?? null) === "claude"
     ? agentActivity(slot, pendingLocalTurnId)
@@ -32,6 +34,7 @@ export function agentActivity(
   slot: AgentSessionState | undefined,
   pendingLocalTurnId?: string | null,
 ): AgentActivity {
+  if (slot?.cloudPromptPending && isCloudWorkspace(slot.cwd)) return null;
   if (pendingLocalTurnId) return "running";
   if (!slot) return null;
   const claude = agentFamily(slot.agentId) === "claude";

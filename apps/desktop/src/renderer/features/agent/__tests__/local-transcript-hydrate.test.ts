@@ -13,6 +13,7 @@ import { canApplyTranscriptRead, isCurrentTranscriptRequest, releaseTranscriptRe
 import type { AgentMessage, AgentTextMessage } from "../use-agent-session";
 import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch } from "../../../platform/cloud-transcript-cache-contract";
 import { isLocalTranscriptChat, localTranscriptCache } from "../../../state/local-transcript-cache";
+import { consumeFreshCloudChat } from "../fresh-cloud-chats";
 import { markFreshLocalChat, paintLocalTranscriptFromMemory, presentCachedLocalTranscript, presentKnownEmptyLocalTranscript, rememberLocalTranscript, takeFreshLocalChat } from "../local-transcript-presentation";
 import { forgetEmptyLocalChat, isKnownEmptyLocalChat, rememberEmptyLocalChat } from "../fresh-local-chats";
 import { groupMessagesIntoTurns } from "../turn-grouping";
@@ -54,7 +55,7 @@ function harness(connected = true) {
     cloudHasNativeTranscript: () => false, hydrateCloudSendRef: { current: vi.fn() }, reconcileChatMessagesRef: { current: vi.fn() },
     nativeTranscriptSnapshotsRef: { current: new NativeTranscriptSnapshots() }, hydrateInFlightRef: { current: requests },
     pendingHydratesRef: { current: pendingHydrates }, localTranscriptCache, presentCachedLocalTranscript, takeFreshLocalChat,
-    presentKnownEmptyLocalTranscript,
+    presentKnownEmptyLocalTranscript, consumeFreshCloudChat,
   };
   vm.runInNewContext(code, context);
   Object.assign(context, {

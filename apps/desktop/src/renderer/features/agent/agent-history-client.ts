@@ -42,6 +42,7 @@ import {
   bridgeChatBulkUpsert,
   bridgeMessageWindow,
   bridgeMessageWindowSnapshot,
+  bridgeCloudCopyWindow,
   bridgeMessageWindowOlder,
   bridgeMessageClear,
   bridgeMessageTruncateFrom,
@@ -245,6 +246,9 @@ export interface LoadedTranscript {
   /** False when a bound stopped the walk before the start of history, so the
    *  caller can say the copy is partial instead of reporting it complete. */
   complete: boolean;
+  /** Explicit copy fallback; never used as hydration/attachment authority. */
+  partialCloudHistory?: boolean;
+  isCurrent?: () => boolean;
 }
 
 /** A chat's persisted transcript, oldest-first — for "copy transcript", which
@@ -264,10 +268,17 @@ export interface LoadedTranscript {
  *     would silently cap every copy in the app. Costs one extra round trip. */
 export async function loadFullTranscript(
   chatId: string,
+  options: { allowPartialCloudCopy?: boolean } = {},
 ): Promise<LoadedTranscript> {
   const bridge = requireBridge("copy the chat transcript");
   const pages: PersistedMessageWire[][] = [];
-  let page = await bridgeMessageWindow(
+  const copyPage = options.allowPartialCloudCopy && parseCloudScopedId(chatId) && bridge instanceof WorkspaceRuntimeClient
+    ? await bridgeCloudCopyWindow(bridge, chatId, TRANSCRIPT_PAGE) : undefined;
+  // A partial projection is a bounded copy of the rows actually available,
+  // never proof that an empty result means this conversation has no history.
+  if (copyPage?.partial) return { complete: false, partialCloudHistory: true, isCurrent: copyPage.isCurrent,
+    messages: copyPage.messages.map(fromPersistedMessage).filter((m): m is AgentMessage => m !== null) };
+  let page = copyPage?.messages ?? await bridgeMessageWindow(
     bridge,
     chatId,
     TRANSCRIPT_PAGE,
@@ -314,6 +325,7 @@ export async function loadFullTranscript(
       .map(fromPersistedMessage)
       .filter((m): m is AgentMessage => m !== null),
     complete,
+    ...(copyPage ? { isCurrent: copyPage.isCurrent } : {}),
   };
 }
 

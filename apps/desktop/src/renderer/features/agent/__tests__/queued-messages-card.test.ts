@@ -33,7 +33,7 @@ describe("cloud readiness in the existing queued card", () => {
     expect(html).toContain("Not sent"); expect(html).toContain('data-queued-id="queued"');
     expect(html).toMatch(/aria-label="Edit"(?![^>]*disabled)/);
     expect(html).toMatch(/aria-label="Remove"(?![^>]*disabled)/);
-    expect(html).toMatch(/aria-label="Retry"(?![^>]*disabled)/);
+    expect(html).toMatch(/<button(?![^>]* disabled=)[^>]*>Retry<\/button>/);
     expect(html).not.toContain('role="alert"'); expect(html).not.toContain("text-red-fg");
     expect(html).not.toContain("AGENT STOPPED");
   });
@@ -42,7 +42,7 @@ describe("cloud readiness in the existing queued card", () => {
   });
   it("keeps every message editable and individually retryable/removable after a shared readiness timeout", () => {
     const html = render({ notSent: true, messages: [...props.messages, { ...props.messages[0], id: "second", text: "Second" }] });
-    expect(html.match(/aria-label="Retry"/g)).toHaveLength(2);
+    expect(html.match(/<button(?![^>]* disabled=)[^>]*>Retry<\/button>/g)).toHaveLength(2);
     expect(html.match(/aria-label="Remove"/g)).toHaveLength(2);
     expect(html.match(/aria-label="Edit"/g)).toHaveLength(2);
     expect(html).not.toContain('role="alert"');

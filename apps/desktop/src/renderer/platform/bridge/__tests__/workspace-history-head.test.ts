@@ -124,7 +124,7 @@ describe("live cloud search result ownership", () => {
       const result = await client.request({ type: "WORKSPACE_REQUEST", op: "messages.search", params });
       expect(result).toMatchObject({ result: { hits: [{ ...rawHit, chatId: cloudScopedId(target,"chat") }], projection, historyHeads: [head] } });
       expect(peer.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "messages.search", params: byChat
-        ? { chatId: "chat", query: "old", limit: 20 } : { folder: "/workspace/repo", query: "old", limit: 20 } });
+        ? { chatId: "chat", query: "old", limit: 20 } : { folder: "/workspace/repo", query: "old", limit: 20 } }, { timeoutMs: 5000 });
       expect(rawHit).toEqual({ chatId: "chat", msgId: row.msgId, payload: row.payload, createdAt: row.createdAt });
     } finally { client.dispose(); }
   });

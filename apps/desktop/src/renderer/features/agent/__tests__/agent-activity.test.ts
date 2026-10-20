@@ -22,6 +22,18 @@ const waiting = {
 };
 
 describe("shared transcript and tab activity", () => {
+  it.each(["codex", "claude", "cursor"])("does not call an unaccepted cloud %s send a running turn", agentId => {
+    const pending = { ...BLANK, agentId, status: "streaming" as const, cloudPromptPending: true,
+      cwd: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222" };
+    expect(agentActivity(pending, "submitted")).toBeNull();
+    expect(chatAgentActivity(pending, "submitted")).toBeNull();
+    expect(workingActivity(pending, "submitted")).toBeNull();
+    expect(chatWorkingActivity(pending, "submitted")).toBeNull();
+    expect(agentActivity({ ...pending, cloudPromptPending: false }, "submitted")).toBe("running");
+    for (const cwd of ["/personal/project", "/organization/project"])
+      expect(chatWorkingActivity({ ...pending, cwd }, "submitted")).toBe("running");
+  });
+
   it("shows Claude waiting at every effort and resumes on parent work even after the task set clears", () => {
     expect(agentActivity(waiting)).toBe("waiting");
     expect(

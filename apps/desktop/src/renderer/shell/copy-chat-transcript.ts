@@ -2,9 +2,10 @@
 // copy-chat-transcript — the chat tab's "Copy … transcript" actions
 // ──────────────────────────────────────────────────────────
 //
-// Reads the chat's COMPLETE persisted transcript from the engine (not the
-// renderer's windowed slot — see loadFullTranscript), formats it as Markdown,
-// and puts it on the clipboard.
+// Reads the chat's persisted transcript from the engine (not the renderer's
+// windowed slot — see loadFullTranscript), formats it as Markdown, and puts it
+// on the clipboard. Explicit cloud copy can use available projection rows with
+// a partial warning when the current native history is unavailable.
 //
 // Toast-reports every DISTINCT outcome so a failed pick is never a dead end:
 // the engine read failing, an empty chat, and a rejected clipboard write are
@@ -61,10 +62,10 @@ export async function copyChatTranscript(
   try {
     let loaded;
     try {
-      loaded = await loadFullTranscript(chatId);
+      loaded = await loadFullTranscript(chatId, { allowPartialCloudCopy: true });
     } catch (err) {
       if ((err as { code?: unknown } | null)?.code === "cloud_history_incomplete") {
-        toast.info("This conversation is catching up. Try copying it again in a moment.");
+        toast.info("This conversation is still syncing.", { action: { label: "Retry", onClick: () => { void copyChatTranscript(chatId, mode, meta); } } });
         return;
       }
       // Don't surface err.message: past the not-connected case these are
@@ -75,8 +76,13 @@ export async function copyChatTranscript(
       return;
     }
     const { messages, complete } = loaded;
+    if (loaded.isCurrent?.() === false) {
+      toast.info("This conversation changed while copying. Try again.", { action: { label: "Retry", onClick: () => { void copyChatTranscript(chatId, mode, meta); } } });
+      return;
+    }
     if (messages.length === 0) {
-      toast.info("This chat has no messages yet.");
+      if (complete) toast.info("This chat has no messages yet.");
+      else toast.info("This conversation is still syncing.", { action: { label: "Retry", onClick: () => { void copyChatTranscript(chatId, mode, meta); } } });
       return;
     }
 
@@ -104,7 +110,9 @@ export async function copyChatTranscript(
     // stopped before the start of history. Either way the user holds a partial
     // record and must not be told otherwise.
     if (truncated || !complete) {
-      toast.warning(`${LABEL[mode]} copied — most recent ${detail}.`);
+      toast.warning(loaded.partialCloudHistory
+        ? `${LABEL[mode]} copied — partial history · ${detail}.`
+        : `${LABEL[mode]} copied — most recent ${detail}.`);
     } else {
       toast.success(`${LABEL[mode]} copied — ${detail}.`);
     }
