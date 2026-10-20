@@ -2,7 +2,7 @@
   "id": "owner-discard-exact-checkpoint-recovery",
   "kind": "replay",
   "area": "cloud-workspaces",
-  "fixedBy": "pending",
+  "fixedBy": "pr:654",
   "symptom": "A positively retired failed final save kept an owner-acknowledged restore blocked and held release health degraded after provider loss.",
   "rule": "Owner loss acknowledgement is an exact immutable disposition, never save proof. Retain capture custody, retire only the named restart pair, pin the durable checkpoint and current Computer, and verify old health predicates plus the real operator CLI and replay.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/manage-cloud-owner-checkpoint-recovery.integration.test.ts"
