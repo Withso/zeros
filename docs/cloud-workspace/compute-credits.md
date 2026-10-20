@@ -169,8 +169,11 @@ active allocation is still re-checked before its checkpoint and stop margin.
 The internal `lifecycle_allocation_waits` organization flag enables a scheduling
 edge only after the ordinary allocator refuses an exact previous allocation.
 A funded running allocation can still satisfy a warm wake before that refusal.
-Incomplete blocker identity keeps the ordinary retry. The flag does not grant
-compute authority or change a client/engine contract.
+Incomplete blocker identity keeps the ordinary retry. Both the current provider
+binding and the refused lease must already name a resource in the original
+attempt. Independent settlement may fill a missing identity before publication;
+that attempt still retries and never adopts the later binding into an edge.
+The flag does not grant compute authority or change a client/engine contract.
 
 Migration `0172_cloud_lifecycle_scheduling.sql` stores one immutable edge per
 lifecycle intent. It freezes the organization/workspace/generation, original

@@ -152,7 +152,11 @@
    frozen scope at final result publication as well as before provider I/O.
    A current-allocation stop proof cannot be reused as a historical proof after
    a legitimate new allocation: retain its exact receipt and test saved source
-   retirement together with settlement. Assert fixture mutations themselves
+   retirement together with settlement. Freeze only complete original resource
+   identities: test normal first binding before and after publication, including
+   a nullable allocation result. Incomplete proof keeps ordinary retry before
+   scope comparison; never weaken immutable equality to adopt a later binding.
+   Assert fixture mutations themselves
    succeed in the production system role before counting an outcome as red;
    a caught fixture SQL error can otherwise look like a product retry.
    For renewal telemetry, test real success, refusal, concurrency and retirement

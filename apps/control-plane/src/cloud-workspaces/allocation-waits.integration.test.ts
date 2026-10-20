@@ -795,4 +795,87 @@ database("T6 exact allocation dependency waits", () => {
       expect(provider.startWithComputeLease).not.toHaveBeenCalled();
     } finally { await reconciler.stop(); }
   });
+  it.each([
+    { missing: "lease", settleBeforePublication: false },
+    { missing: "both", settleBeforePublication: false },
+    { missing: "binding", settleBeforePublication: true },
+    { missing: "lease", settleBeforePublication: true },
+    { missing: "both", settleBeforePublication: true },
+  ])("keeps incomplete $missing identity on ordinary retry across settlement/publication ($settleBeforePublication)", async ({ missing, settleBeforePublication }) => {
+    await withSystemTx(pool, async tx => {
+      if (missing !== "lease") expect((await tx.query(`UPDATE cloud_workspace_provider_bindings
+        SET provider_resource_id=NULL WHERE workspace_id=$1 RETURNING workspace_id`, [fixture.workspaceId])).rowCount).toBe(1);
+      // A lost allocation-result publication leaves the funded lease in
+      // authorized state; an active lease is required to have a resource.
+      if (missing !== "binding") expect((await tx.query(`UPDATE managed_compute_allocation_leases
+        SET state='authorized',provider_resource_id=NULL,provider_expires_at=NULL
+        WHERE id=$1 RETURNING id`, [prior.intentId])).rowCount).toBe(1);
+    });
+    const id = await wake();
+    const original = await intent(id);
+    let refused = false, settlements = 0, settlementError: unknown;
+    const observed = lifecycleDatabaseCost(pool, async sql => {
+      if (!settleBeforePublication || settlements > 0) return;
+      if (sql.includes("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()")) refused = true;
+      else if (refused && sql === "COMMIT") {
+        refused = false; settlements++;
+        try { await settlePrevious(); } catch (error) { settlementError = error; throw error; }
+      }
+    });
+    const reconciler = worker(observed.pool);
+    try {
+      expect(await reconciler.runOnce(fixture.workspaceId)).toBe(true);
+      expect(settlements).toBe(settleBeforePublication ? 1 : 0);
+      expect(settlementError).toBeUndefined();
+      expect.soft(await edge(id)).toBeUndefined();
+      const retry = await intent(id);
+      expect.soft(retry).toMatchObject({ state: "observing", error_code: "compute_previous_lease_pending",
+        attempt_count: 1, lease_owner: null, lease_expires_at: null, created_at: original.created_at });
+      expect.soft(retry.next_attempt_at.getTime() - retry.updated_at.getTime()).toBe(1_000);
+      expect(provider.startWithComputeLease).not.toHaveBeenCalled();
+      if (!settleBeforePublication) await settlePrevious();
+      expect((await pool.query(`SELECT binding.provider_resource_id AS binding_resource_id,
+        lease.provider_resource_id AS allocation_resource_id FROM cloud_workspace_provider_bindings binding
+        JOIN managed_compute_allocation_leases lease ON lease.workspace_id=binding.workspace_id
+        WHERE binding.workspace_id=$1 AND lease.id=$2`, [fixture.workspaceId, prior.intentId])).rows[0])
+        .toEqual({ binding_resource_id: resource.resourceId, allocation_resource_id: resource.resourceId });
+      // A settlement before failure publication cannot nudge its later retry.
+      // Drive that persisted timer without sleeping or changing authority.
+      await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=clock_timestamp()
+        WHERE id=$1 AND state='observing'`, [id]);
+      expect(await reconciler.runOnce(fixture.workspaceId)).toBe(true);
+      expect(await intent(id)).toMatchObject({ state: "succeeded", error_code: null, created_at: original.created_at });
+      expect(provider.startWithComputeLease).toHaveBeenCalledOnce();
+      expect(await edge(id)).toBeUndefined();
+    } finally { await reconciler.stop(); }
+  });
+
+  it.each([
+    {unbound:false,enabled:true},
+    {unbound:true,enabled:true},
+    {unbound:true,enabled:false},
+  ])("W2 F1 retains incomplete-binding retry and resumes after independent settlement ($unbound/$enabled)", async ({unbound,enabled}) => {
+    if(unbound) {
+      const changed=await withSystemTx(pool,tx=>tx.query(
+        "UPDATE cloud_workspace_provider_bindings SET provider_resource_id=NULL WHERE workspace_id=$1 RETURNING workspace_id",[fixture.workspaceId]));
+      expect(changed.rowCount).toBe(1);
+    }
+    const id=await wake(),reconciler=worker(pool,enabled);
+    try {
+      expect(await reconciler.runOnce(fixture.workspaceId)).toBe(true);
+      const wait=await edge(id);
+      if(unbound||!enabled) {
+        expect.soft(wait).toBeUndefined();
+        expect.soft(await intent(id)).toMatchObject({state:"observing",error_code:"compute_previous_lease_pending",attempt_count:1});
+      } else expect(wait).toMatchObject({state:"pending",provider_resource_id:resource.resourceId});
+      await settlePrevious();
+      expect((await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].provider_resource_id).toBe(resource.resourceId);
+      console.info("[w2-f1-binding]",JSON.stringify({unbound,enabled,edgeWritten:wait!==undefined,
+        dependencyAfterSettlement:wait===undefined?"absent":await status(id)}));
+      expect(await reconciler.runOnce(fixture.workspaceId)).toBe(true);
+      expect(await intent(id)).toMatchObject({state:"succeeded",error_code:null});
+      expect(provider.startWithComputeLease).toHaveBeenCalledOnce();
+    } finally {await reconciler.stop();}
+  });
+
 });

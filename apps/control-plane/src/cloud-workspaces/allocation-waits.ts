@@ -64,6 +64,10 @@ export const allocationWaitContinuationLiveSql = `NOT EXISTS (
 export async function parkCloudAllocationWait(
   tx: Tx, intent: AllocationWaitScope, workerId: string, blocker: ComputeAllocationBlocker,
 ): Promise<boolean> {
+  // Independent settlement may fill either missing resource identity. Keep
+  // that refused attempt on the ordinary retry before comparing its scope;
+  // a later first binding must neither supersede it nor complete its proof.
+  if (intent.providerResourceId === null || blocker.providerResourceId === null) return false;
   await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
   await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [intent.workspaceId, intent.orgId]);
   const row = (await tx.query<{ scope_live: boolean; has_wait: boolean }>(`SELECT
