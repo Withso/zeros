@@ -11,6 +11,8 @@ import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
 import { captureCloudLocalCommandCheckpoint, verifyCloudLocalCommandCheckpoint, restoreCloudLocalCommandCheckpointLedger } from "../cloud-local-command-queue-checkpoint";
 import { openSqlite } from "../db/sqlite";
+import { canonicalCloudLocalCommandHistoryJson } from "@zeros/protocol/cloud-local-mirror";
+import { checkpointReadClock } from "./cloud-checkpoint-inventory-clock";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -22,7 +24,7 @@ afterEach(async () => {
   vi.mocked(fs.rename).mockImplementation((await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")).rename);
   for (const close of cleanup.splice(0).reverse()) await close();
 });
-async function fixture(acknowledge = true) {
+async function fixture(acknowledge = true, conversations = 0) {
   const directory = mkdtempSync(path.join(tmpdir(), "zeros-sealed-checkpoint-")); cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   const scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID(), bootId: randomUUID(),
     writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 1 };
@@ -33,6 +35,18 @@ async function fixture(acknowledge = true) {
   const file = path.join(directory, "queue.sqlite"), queue = new CloudLocalCommandQueue({ file, scope, actors: registry,
     engineLive: () => true, ready: () => true, history: () => ({ recordSequence: 7, eventSequence: 0 }) }); cleanup.push(() => queue.close());
   const events = new CloudLocalCommandEventStore({ file, queue, engineLive: () => true }); cleanup.push(() => events.close());
+  if (conversations) {
+    const db = openSqlite(file);
+    try {
+      const head = canonicalCloudLocalCommandHistoryJson({ originWriterEpoch: scope.writerEpoch,
+        source: { kind: "mutation", mutationId: randomUUID(), operation: "prune" }, deleted: false,
+        history: { restoreRevision: 1, recordSequence: 7, eventSequence: 0, incompleteReason: "capture_unavailable" } });
+      db.transaction(() => {
+        for (let index = 0; index < conversations; index++)
+          db.prepare("INSERT INTO local_command_history_heads VALUES(?,1,?)").run(`chat-${index}`, head);
+      })();
+    } finally { db.close(); }
+  }
   const lifecycle = new CloudLocalCommandWriterLifecycle({ file, queue, normalDb: () => normal, assertQuiescent: () => {},
     heads: (source = normal) => ({ recordSequence: (source.prepare("SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0").get() as { rev: number }).rev, eventSequence: events.head }) });
   cleanup.push(() => lifecycle.close());
@@ -41,6 +55,53 @@ async function fixture(acknowledge = true) {
   return { directory, scope, queue, normal, lifecycle, root: path.join(directory, "checkpoint") };
 }
 describe("sealed FULL/NORMAL checkpoint custody", () => {
+  it("restores the original populated seal when valid disk reads take more than 100 ms", async () => {
+    const f = await fixture(true, 129), manifest = await f.lifecycle.captureCheckpoint(f.root);
+    const clock = checkpointReadClock(sql => /FROM local_command_history_heads ORDER BY/.test(sql) ? 50 : 0);
+    try {
+      const verified = await restoreCloudLocalCommandCheckpointLedger({ root: f.root,
+        file: path.join(f.directory, "restored.sqlite"), scope: f.scope, expectedWriterEpoch: f.scope.writerEpoch });
+      cleanup.push(verified.cleanup);
+      expect(clock.elapsed()).toBeGreaterThan(100);
+      expect(verified.manifest).toEqual(manifest);
+      const db = openSqlite(verified.ledgerFile, { readonly: true });
+      try { expect(db.prepare("SELECT count(*) n FROM local_command_history_heads").get()).toEqual({ n: 129 }); }
+      finally { db.close(); }
+    } finally { clock.restore(); }
+  });
+
+  it.each(["populated", "empty", "final-page"] as const)("rejects a %s inventory read that exhausts the bounded proof budget", async kind => {
+    const f = await fixture(true, kind === "empty" ? 0 : 1), manifest = await f.lifecycle.captureCheckpoint(f.root);
+    const file = path.join(f.directory, "not-installed.sqlite");
+    const clock = checkpointReadClock((sql, rows) =>
+      /FROM local_command_history_heads ORDER BY/.test(sql) && (kind !== "final-page" || rows.length === 0) ? 5_001 : 0);
+    try {
+      await expect(restoreCloudLocalCommandCheckpointLedger({ root: f.root, file, scope: f.scope,
+        expectedWriterEpoch: f.scope.writerEpoch })).rejects.toMatchObject({ code: "checkpoint_inventory_timeout" });
+      await expect(fs.lstat(file)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await fs.readdir(f.root)).not.toEqual(expect.arrayContaining([expect.stringMatching(/^\.verified-/)]));
+      expect(JSON.parse(await readFile(path.join(f.root, "manifest.json"), "utf8"))).toEqual(manifest);
+    } finally { clock.restore(); }
+  });
+
+  it("checks the original proof deadline after the final NORMAL head read", async () => {
+    const f = await fixture(true, 1), manifest = await f.lifecycle.captureCheckpoint(f.root);
+    const file = path.join(f.directory, "not-installed.sqlite");
+    let finalReads = 0;
+    const clock = checkpointReadClock((sql, _rows, read) => {
+      if (read.method !== "get" || sql !== "SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0") return 0;
+      finalReads++; return 5_001;
+    });
+    try {
+      await expect(restoreCloudLocalCommandCheckpointLedger({ root: f.root, file, scope: f.scope,
+        expectedWriterEpoch: f.scope.writerEpoch })).rejects.toMatchObject({ code: "checkpoint_inventory_timeout" });
+      expect(finalReads).toBe(1);
+      await expect(fs.lstat(file)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await fs.readdir(f.root)).not.toEqual(expect.arrayContaining([expect.stringMatching(/^\.verified-/)]));
+      expect(JSON.parse(await readFile(path.join(f.root, "manifest.json"), "utf8"))).toEqual(manifest);
+    } finally { clock.restore(); }
+  });
+
   it("keeps legacy absent/empty recovery inventories equal and binds every nonempty recovery row", async () => {
     const f = await fixture(), ledger = openSqlite(path.join(f.directory, "queue.sqlite"));
     const { cloudLocalCommandSealInventory } = await import("../cloud-local-command-queue-checkpoint");

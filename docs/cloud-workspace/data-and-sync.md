@@ -205,7 +205,14 @@ row in their inventory, preserving legacy hashes for absent/empty tables. This
 lets later clean restores retain original edit/delete provenance without
 inventing a seal for an unsealed writer. Missing, changed, foreign or cyclic
 lineage refuses before history projection; verification remains bounded to
-4,096 records and the existing inventory time budget.
+4,096 lineage records. Each synchronous checkpoint proof has a five-second
+monotonic inventory budget, shared by its nested scans. Check the deadline
+after reads and before accepting a completed inventory, including an empty
+final page. These checks refuse late completion; they cannot interrupt a native
+SQLite call in progress. A whole retained ledger can exceed a 100 ms budget
+on cold storage without being corrupt. Timing never changes the canonical
+inventory digest or permits an older checkpoint, partial proof, or unretired
+source. A timeout leaves the original FULL ledger and checkpoint intact.
 The optional workspace `historyRecovery` field is separate from file-checkpoint
 `recovery`. It exposes only a committed receipt and survives later successful
 boots so the user can still see it. Workspace purge cascades both prepared and

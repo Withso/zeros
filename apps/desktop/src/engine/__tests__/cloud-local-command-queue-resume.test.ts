@@ -12,6 +12,7 @@ import { restoreCloudLocalCommandCheckpointLedger, verifiedCloudLocalCommandPred
   type CloudLocalCommandPredecessor } from "../cloud-local-command-queue-checkpoint";
 import { CloudCredentialStartFences, type CloudAgentCredentialControlRequest } from "../cloud-local-command-queue-start-fences";
 import { openSqlite } from "../db/sqlite";
+import { checkpointReadClock } from "./cloud-checkpoint-inventory-clock";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -126,6 +127,49 @@ describe("credential-control custody across verified writer replacement", () => 
       predecessorRetiredAt: new Date().toISOString(), checkpoint: { writerEpoch: prior.writerEpoch, sha256: manifest.seal.sha256 }, mirroredSequence: batch.through };
     return { ...f, unsealed, target, authorization, commandId, userMessageId, retained: inventory(f.file) };
   }
+
+  it("recovers an authorized unsealed writer after a valid slow inventory read, retaining FULL bytes and ACKs", async () => {
+    const f = await interruptedWriter(), bytes = readFileSync(f.file);
+    const { recoverCloudLocalCommandCheckpointLedger } = await import("../cloud-local-command-queue-checkpoint");
+    let delayed = false;
+    const clock = checkpointReadClock(sql => {
+      if (delayed || !/SELECT id,conversation_id,writer_epoch.*FROM local_commands/.test(sql)) return 0;
+      delayed = true; return 250;
+    });
+    try {
+      const recovered = await recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+        scope: f.target, expectedWriterEpoch: f.unsealed.writerEpoch, authorization: f.authorization });
+      cleanup.push(recovered.cleanup);
+      expect(delayed).toBe(true); expect(clock.elapsed()).toBe(250);
+      expect(readFileSync(f.file)).toEqual(bytes); expect(inventory(f.file)).toEqual(f.retained);
+      const db = openSqlite(f.file, { readonly: true });
+      try { expect(verifiedCloudLocalCommandPredecessor(recovered.predecessor, f.file, db, f.target)).toEqual(f.unsealed); }
+      finally { db.close(); }
+    } finally { clock.restore(); }
+  });
+
+  it("shares the proof deadline across nested recovery inventories without changing the original ledger", async () => {
+    const f = await interruptedWriter(), bytes = readFileSync(f.file);
+    const { recoverCloudLocalCommandCheckpointLedger } = await import("../cloud-local-command-queue-checkpoint");
+    const stages: string[] = [];
+    const clock = checkpointReadClock((sql, _rows, read) => {
+      if (read.method !== "all") return 0;
+      const stage = read.file === f.file && sql.startsWith("SELECT id,conversation_id,writer_epoch,generation,user_message_id,agent_id,created_at,mirror_history_head FROM local_commands ORDER BY")
+        ? "retained fingerprint"
+        : read.file !== f.file && sql.startsWith("SELECT id,conversation_id,writer_epoch,generation,user_message_id,agent_id,created_at FROM local_commands ORDER BY")
+          ? "sealed baseline" : null;
+      if (!stage || stages.includes(stage)) return 0;
+      stages.push(stage); return 3_000;
+    });
+    try {
+      await expect(recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+        scope: f.target, expectedWriterEpoch: f.unsealed.writerEpoch, authorization: f.authorization }))
+        .rejects.toMatchObject({ code: "checkpoint_inventory_timeout" });
+      expect(stages).toEqual(["retained fingerprint", "sealed baseline"]);
+      expect(clock.elapsed()).toBe(6_000);
+      expect(readFileSync(f.file)).toEqual(bytes); expect(inventory(f.file)).toEqual(f.retained);
+    } finally { clock.restore(); }
+  });
 
   it("recovers an authorized unsealed fifth writer without replacing FULL bytes, ACKs, floors or accepted request IDs", async () => {
     const f = await interruptedWriter(), bytes = readFileSync(f.file);

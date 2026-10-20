@@ -19,6 +19,15 @@ import { CloudLocalCommandHistoryHeadSchema } from "@zeros/protocol/cloud-local-
 const PART_BYTES = 16 * 1024 * 1024;
 const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 256 * 1024;
+// A complete retained ledger is disk I/O, not an interactive 100 ms read.
+// Admit each synchronous proof only within this finite monotonic budget;
+// nested inventories share its deadline instead of restarting the clock.
+// Checks surround native reads; they cannot interrupt a SQLite call in flight.
+const INVENTORY_BUDGET_MS = 5_000;
+function inventoryDeadline(): number { return performance.now() + INVENTORY_BUDGET_MS; }
+function checkInventoryDeadline(deadline: number): void {
+  if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
+}
 /** Closed failure sites, mirrored by the standalone setup producer and CP
  * parser. No path, SQL, artifact content or provider output is diagnostic. */
 export const CLOUD_LOCAL_COMMAND_CHECKPOINT_CODES = [
@@ -317,35 +326,33 @@ async function publishCheckpoint(root: string, staging: string, manifest: CloudL
  * reconstructs the native scope or proves predecessor retirement. */
 export function cloudLocalCommandSealInventory(db: Sqlite.Database, seal: Pick<CloudLocalCommandWriterSeal,
   "scope" | "sequence" | "recordSequence" | "eventSequence">): string {
+  return sealInventory(db, seal, inventoryDeadline());
+}
+function sealInventory(db: Sqlite.Database, seal: Pick<CloudLocalCommandWriterSeal,
+  "scope" | "sequence" | "recordSequence" | "eventSequence">, deadline: number): string {
   const digest = createHash("sha256");
   digest.update(canonicalCloudLocalCommandHistoryJson(seal));
-  const deadline = performance.now() + 100;
   for (const [table, order] of [["local_command_history_heads", "conversation_id"], ["local_commands", "id"],
-    ["local_command_actions", "operation_id"], ["local_command_history_mutations", "mutation_id"]]) {
+    ["local_command_actions", "operation_id"], ["local_command_history_mutations", "mutation_id"]] as const) {
+    checkInventoryDeadline(deadline);
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table)) continue;
-    for (let offset = 0;; offset += 64) {
-      const rows = db.prepare(`SELECT * FROM ${table} ORDER BY ${order} LIMIT 64 OFFSET ?`).all(offset);
-      if (!rows.length) break;
-      for (const row of rows) {
-        if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
-        digest.update(canonicalCloudLocalCommandHistoryJson(row));
-      }
-    }
+    for (const row of recoveryRows(db, table, order, deadline)) digest.update(canonicalCloudLocalCommandHistoryJson(row));
   }
   // Preserve every legacy hash when the table is absent or empty. A tagged,
   // ordered nonempty section binds all recovery records into subsequent seals.
   if (hasTable(db, "local_command_history_recovery_prepares")) {
     let started = false;
-    for (const row of recoveryRows(db, "local_command_history_recovery_prepares", "writer_epoch")) {
-      if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
+    for (const row of recoveryRows(db, "local_command_history_recovery_prepares", "writer_epoch", deadline)) {
       if (!started) { digest.update("\0local_command_history_recovery_prepares:v1\0"); started = true; }
       digest.update(canonicalCloudLocalCommandHistoryJson(row));
     }
   }
+  checkInventoryDeadline(deadline);
   return digest.digest("hex");
 }
 
-function verifyLedger(db: Sqlite.Database, seal: CloudLocalCommandWriterSeal): void {
+function verifyLedger(db: Sqlite.Database, seal: CloudLocalCommandWriterSeal, deadline = inventoryDeadline()): void {
+  checkInventoryDeadline(deadline);
   const metadata = (key: string) => (db.prepare("SELECT value FROM local_command_metadata WHERE key=?").get(key) as
     { value: string } | undefined)?.value;
   const stored = db.prepare("SELECT document,ack FROM local_command_writer_seals WHERE writer_epoch=?").get(seal.scope.writerEpoch) as
@@ -358,8 +365,8 @@ function verifyLedger(db: Sqlite.Database, seal: CloudLocalCommandWriterSeal): v
   if (metadata("sealedWriter") !== seal.scope.writerEpoch) invalid("checkpoint_writer_unsealed");
   if (Number(metadata("journalHead") ?? "0") !== seal.sequence) invalid("checkpoint_journal_head");
   if (Number(metadata("mirrorHead") ?? "0") !== seal.sequence) invalid("checkpoint_mirror_head");
-  if (cloudLocalCommandSealInventory(db, { scope: seal.scope, sequence: seal.sequence,
-    recordSequence: seal.recordSequence, eventSequence: seal.eventSequence }) !== seal.inventorySha256) invalid("checkpoint_inventory_hash");
+  if (sealInventory(db, { scope: seal.scope, sequence: seal.sequence,
+    recordSequence: seal.recordSequence, eventSequence: seal.eventSequence }, deadline) !== seal.inventorySha256) invalid("checkpoint_inventory_hash");
   const stream = db.prepare("SELECT head FROM local_command_streams WHERE stream_id=? AND writer_epoch=?").get(
     seal.scope.engineInstanceId, seal.scope.writerEpoch) as { head: number } | undefined;
   if (!stream || stream.head !== seal.eventSequence) invalid("checkpoint_stream_head");
@@ -373,18 +380,22 @@ function verifyLedger(db: Sqlite.Database, seal: CloudLocalCommandWriterSeal): v
       pending("local_command_control_owners", "settled=0 AND command_id IN (SELECT id FROM local_commands WHERE writer_epoch=?)", seal.scope.writerEpoch) ||
       pending("local_command_journal", "writer_epoch=?", seal.scope.writerEpoch) ||
       pending("local_command_mirror_batches", "writer_epoch=?", seal.scope.writerEpoch) || pending("local_command_outbox_jobs", "1=1")) invalid("checkpoint_pending_work");
+  checkInventoryDeadline(deadline);
 }
 function verifyPair(ledgerFile: string, normalFile: string, seal: CloudLocalCommandWriterSeal): void {
+  const deadline = inventoryDeadline();
   const ledger = openSqlite(ledgerFile, { readonly: true, fileMustExist: true });
   try {
-    ledger.pragma("busy_timeout = 25"); verifyLedger(ledger, seal);
+    ledger.pragma("busy_timeout = 25"); verifyLedger(ledger, seal, deadline);
     const normal = openSqlite(normalFile, { readonly: true, fileMustExist: true });
     try {
       normal.pragma("busy_timeout = 25");
       const head = normal.prepare("SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0").get() as { rev: number } | undefined;
       if (head?.rev !== seal.recordSequence) invalid("checkpoint_normal_head");
+      checkInventoryDeadline(deadline);
     } finally { normal.close(); }
   } finally { ledger.close(); }
+  checkInventoryDeadline(deadline);
 }
 
 export function cloudLocalCommandCheckpointRoot(data: string, repository: string): string {
@@ -582,37 +593,33 @@ const recoveryTables = [
 function hasTable(db: Sqlite.Database, table: string): boolean {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
 }
-function* recoveryRows(db: Sqlite.Database, table: string, order: string): Generator<Record<string, unknown>> {
-  const deadline = performance.now() + 100;
+function* recoveryRows(db: Sqlite.Database, table: string, order: string, deadline: number): Generator<Record<string, unknown>> {
   for (let offset = 0;; offset += 64) {
+    checkInventoryDeadline(deadline);
     const rows = db.prepare(`SELECT * FROM ${table} ORDER BY ${order} LIMIT 64 OFFSET ?`).all(offset) as Record<string, unknown>[];
+    checkInventoryDeadline(deadline);
     if (!rows.length) return;
     for (const row of rows) {
-      if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
+      checkInventoryDeadline(deadline);
       yield row;
     }
   }
 }
-function recoveryInventory(db: Sqlite.Database): string {
-  const digest = createHash("sha256"), deadline = performance.now() + 100;
+function recoveryInventory(db: Sqlite.Database, deadline = inventoryDeadline()): string {
+  const digest = createHash("sha256");
   for (const [table, order] of recoveryTables) {
+    checkInventoryDeadline(deadline);
     digest.update(table);
     if (!hasTable(db, table)) { digest.update("absent"); continue; }
-    for (let offset = 0;; offset += 64) {
-      const rows = db.prepare(`SELECT * FROM ${table} ORDER BY ${order} LIMIT 64 OFFSET ?`).all(offset);
-      if (!rows.length) break;
-      for (const row of rows) {
-        if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
-        digest.update(canonicalCloudLocalCommandHistoryJson(row));
-      }
-    }
+    for (const row of recoveryRows(db, table, order, deadline)) digest.update(canonicalCloudLocalCommandHistoryJson(row));
   }
+  checkInventoryDeadline(deadline);
   return digest.digest("hex");
 }
 
 /** The older sealed file proves a floor. It must not replace newer FULL
  * identities, accepted ACKs, delete/edit heads or credential tombstones. */
-function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Database): void {
+function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Database, deadline: number): void {
   const stableRows = [
     ["local_commands", "id", "id,conversation_id,writer_epoch,generation,user_message_id,agent_id,created_at"],
     ["local_command_operations", "id", "*"],
@@ -622,15 +629,17 @@ function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Databa
     ["local_credential_retirement_floors", "mutation_id,provider,credential_id", "*"],
     ["local_command_history_recovery_prepares", "writer_epoch", "*"],
   ] as const;
-  const deadline = performance.now() + 100;
   for (const [table, keys, columns] of stableRows) {
+    checkInventoryDeadline(deadline);
     if (!hasTable(baseline, table)) continue;
     if (!hasTable(ledger, table)) invalid("checkpoint_inventory_hash");
     for (let offset = 0;; offset += 64) {
+      checkInventoryDeadline(deadline);
       const old = baseline.prepare(`SELECT ${columns} FROM ${table} ORDER BY ${keys} LIMIT 64 OFFSET ?`).all(offset) as Record<string, unknown>[];
+      checkInventoryDeadline(deadline);
       if (!old.length) break;
       for (const row of old) {
-        if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
+        checkInventoryDeadline(deadline);
         const key = keys.split(","), current = ledger.prepare(`SELECT ${columns} FROM ${table} WHERE ${key.map(name => `${name}=?`).join(" AND ")}`)
           .get(...key.map(name => row[name])) as Record<string, unknown> | undefined;
         if (!current) invalid("checkpoint_inventory_hash");
@@ -642,23 +651,23 @@ function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Databa
       }
     }
   }
-  for (const raw of recoveryRows(baseline, "local_command_history_heads", "conversation_id")) {
+  for (const raw of recoveryRows(baseline, "local_command_history_heads", "conversation_id", deadline)) {
     const row = raw as { conversation_id: string; restore_revision: number; document: string };
-    if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
+    checkInventoryDeadline(deadline);
     const current = ledger.prepare("SELECT restore_revision,document FROM local_command_history_heads WHERE conversation_id=?")
       .get(row.conversation_id) as { restore_revision: number; document: string } | undefined;
     if (!current || current.restore_revision < row.restore_revision || current.restore_revision === row.restore_revision && current.document !== row.document)
       invalid("checkpoint_inventory_hash");
   }
+  checkInventoryDeadline(deadline);
 }
 
 /** A prepared queue may advance a head to recovery_uncertain while parking
  * inherited work. It may never roll it behind an immutable edit/delete or
  * terminal-command receipt, even if NORMAL restore fences were lost. */
-function verifyRecoveryHistoryFences(db: Sqlite.Database): void {
-  const deadline = performance.now() + 100;
+function verifyRecoveryHistoryFences(db: Sqlite.Database, deadline: number): void {
   const fence = (conversationId: unknown, document: unknown) => {
-    if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
+    checkInventoryDeadline(deadline);
     if (typeof conversationId !== "string" || typeof document !== "string" || Buffer.byteLength(document) > 64 * 1024)
       invalid("checkpoint_inventory_hash");
     const parsed = CloudLocalCommandHistoryHeadSchema.safeParse(json(document, "checkpoint_inventory_hash"));
@@ -669,9 +678,10 @@ function verifyRecoveryHistoryFences(db: Sqlite.Database): void {
         current.restore_revision === parsed.data.history.restoreRevision && current.document !== document)
       invalid("checkpoint_inventory_hash");
   };
-  for (const row of recoveryRows(db, "local_command_history_mutations", "mutation_id")) fence(row.conversation_id, row.history_head);
-  for (const row of recoveryRows(db, "local_commands", "id"))
+  for (const row of recoveryRows(db, "local_command_history_mutations", "mutation_id", deadline)) fence(row.conversation_id, row.history_head);
+  for (const row of recoveryRows(db, "local_commands", "id", deadline))
     if (row.mirror_history_head !== null && row.mirror_history_head !== undefined) fence(row.conversation_id, row.mirror_history_head);
+  checkInventoryDeadline(deadline);
 }
 
 function recoveryScope(db: Sqlite.Database, table: "local_command_metadata" | "local_credential_control_metadata", key: string): CloudAgentBootScope {
@@ -703,7 +713,7 @@ function recoveryHistoryChain(db: Sqlite.Database, target: CloudAgentBootScope,
   origins: Map<string, HistoryOrigin>): void {
   const seen = new Set<string>();
   for (let count = 0;; count++) {
-    if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
+    checkInventoryDeadline(deadline);
     if (count >= 4096 || seen.has(target.writerEpoch)) invalid("checkpoint_writer_scope");
     seen.add(target.writerEpoch);
     const record = storedRecoveryPrepare(db, target.writerEpoch);
@@ -715,6 +725,7 @@ function recoveryHistoryChain(db: Sqlite.Database, target: CloudAgentBootScope,
     if (previous && !isDeepStrictEqual(previous, origin)) invalid("checkpoint_inventory_hash");
     origins.set(origin.scope.writerEpoch, origin);
     if (origins.size > 4096) invalid("checkpoint_writer_scope");
+    checkInventoryDeadline(deadline);
     if (!record.predecessorRecovery) return;
     target = record.predecessor; anchor = record.predecessorRecovery;
   }
@@ -726,12 +737,18 @@ function recoveryHistoryChain(db: Sqlite.Database, target: CloudAgentBootScope,
  * that CP explicitly committed on an earlier activated recovery. */
 export function verifiedCloudLocalCommandSealedHistoryOrigins(db: Sqlite.Database,
   seal: CloudLocalCommandWriterSeal): readonly HistoryOrigin[] {
-  if (!hasTable(db, "local_command_history_recovery_prepares") ||
-      !db.prepare("SELECT 1 FROM local_command_history_recovery_prepares LIMIT 1").get()) return [];
-  verifyLedger(db, seal);
-  const deadline = performance.now() + 100, origins = new Map<string, HistoryOrigin>();
+  return sealedHistoryOrigins(db, seal, inventoryDeadline());
+}
+function sealedHistoryOrigins(db: Sqlite.Database, seal: CloudLocalCommandWriterSeal, deadline: number): readonly HistoryOrigin[] {
+  checkInventoryDeadline(deadline);
+  const present = hasTable(db, "local_command_history_recovery_prepares") &&
+    !!db.prepare("SELECT 1 FROM local_command_history_recovery_prepares LIMIT 1").get();
+  checkInventoryDeadline(deadline);
+  if (!present) return [];
+  verifyLedger(db, seal, deadline);
+  const origins = new Map<string, HistoryOrigin>();
   let count = 0;
-  for (const row of recoveryRows(db, "local_command_history_recovery_prepares", "writer_epoch")) {
+  for (const row of recoveryRows(db, "local_command_history_recovery_prepares", "writer_epoch", deadline)) {
     if (++count > 4096 || typeof row.writer_epoch !== "string") invalid("checkpoint_writer_scope");
     const record = storedRecoveryPrepare(db, row.writer_epoch);
     const stored = db.prepare("SELECT document,ack FROM local_command_writer_seals WHERE writer_epoch=?").get(row.writer_epoch) as
@@ -746,6 +763,7 @@ export function verifiedCloudLocalCommandSealedHistoryOrigins(db: Sqlite.Databas
     recoveryHistoryChain(db, record.scope, { recoveryId: record.recoveryId,
       custodySha256: hash(canonicalCloudLocalCommandHistoryJson(record)) }, deadline, origins);
   }
+  checkInventoryDeadline(deadline);
   return Object.freeze([...origins.values()]);
 }
 
@@ -777,8 +795,8 @@ export async function cloudLocalCommandHistoryRecoveryCustody(file: string, expe
 /** These bytes may not change during a prepared, never-activated cutover.
  * Namespace retirement and queued -> uncertain are allowed; accepted IDs,
  * credential ACKs/floors, mutation fences, source journal and content stay. */
-function retainedRecoveryFingerprint(db: Sqlite.Database, sourceWriter: string): string {
-  const digest = createHash("sha256"), deadline = performance.now() + 100;
+function retainedRecoveryFingerprint(db: Sqlite.Database, sourceWriter: string, deadline: number): string {
+  const digest = createHash("sha256");
   const selections = [
     ["local_commands", "id", "id,conversation_id,writer_epoch,generation,user_message_id,agent_id,created_at,mirror_history_head"],
     ["local_command_operations", "id", "*"], ["local_command_writer_seals", "writer_epoch", "*"],
@@ -790,19 +808,23 @@ function retainedRecoveryFingerprint(db: Sqlite.Database, sourceWriter: string):
     ["local_command_journal", "writer_epoch,sequence", "*"], ["local_command_mirror_batches", "writer_epoch", "*"],
   ] as const;
   for (const [table, order, columns] of selections) {
+    checkInventoryDeadline(deadline);
     digest.update(table);
     if (!hasTable(db, table)) { digest.update("absent"); continue; }
     const journal = table === "local_command_journal" || table === "local_command_mirror_batches";
     for (let offset = 0;; offset += 64) {
+      checkInventoryDeadline(deadline);
       const rows = db.prepare(`SELECT ${columns} FROM ${table} ${journal ? "WHERE writer_epoch=?" : ""} ORDER BY ${order} LIMIT 64 OFFSET ?`)
         .all(...(journal ? [sourceWriter, offset] : [offset]));
+      checkInventoryDeadline(deadline);
       if (!rows.length) break;
       for (const row of rows) {
-        if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
+        checkInventoryDeadline(deadline);
         digest.update(canonicalCloudLocalCommandHistoryJson(row));
       }
     }
   }
+  checkInventoryDeadline(deadline);
   return digest.digest("hex");
 }
 
@@ -852,6 +874,7 @@ export async function recoverCloudLocalCommandCheckpointLedger(input: {
     if (verified.manifest.seal.sha256 !== authorization.checkpoint.sha256) invalid("checkpoint_seal_document");
     const { handle, before } = await readHandle(file, MAX_BYTES);
     try {
+      const deadline = inventoryDeadline();
       const ledger = openSqlite(file, { readonly: true, fileMustExist: true });
       const baseline = openSqlite(verified.ledgerFile, { readonly: true, fileMustExist: true });
       try {
@@ -859,7 +882,7 @@ export async function recoverCloudLocalCommandCheckpointLedger(input: {
           const metadata = (key: string) => (ledger.prepare("SELECT value FROM local_command_metadata WHERE key=?").get(key) as { value: string } | undefined)?.value;
           const writer = recoveryScope(ledger, "local_command_metadata", "writer");
           const credentialScope = recoveryScope(ledger, "local_credential_control_metadata", "scope");
-          const retainedSha256 = retainedRecoveryFingerprint(ledger, authorization.predecessor.writerEpoch);
+          const retainedSha256 = retainedRecoveryFingerprint(ledger, authorization.predecessor.writerEpoch, deadline);
           const commandCustody = verifyPreparedRecoveryCustody(ledger, authorization, writer, retainedSha256);
           const credentialCustody = verifyPreparedRecoveryCustody(ledger, authorization, credentialScope, retainedSha256);
           const observed = new Set([writer.writerEpoch, credentialScope.writerEpoch]); observed.delete(authorization.predecessor.writerEpoch);
@@ -881,26 +904,27 @@ export async function recoverCloudLocalCommandCheckpointLedger(input: {
           const seal = ledger.prepare("SELECT ack FROM local_command_writer_seals WHERE writer_epoch=?")
             .get(authorization.predecessor.writerEpoch) as { ack: string | null } | undefined;
           if (seal?.ack) invalid("checkpoint_seal_ack");
-          verifyRecoveryBaseline(ledger, baseline);
-          verifyRecoveryHistoryFences(ledger);
-          const origins = new Map(verifiedCloudLocalCommandSealedHistoryOrigins(baseline, verified.manifest.seal)
+          verifyRecoveryBaseline(ledger, baseline, deadline);
+          verifyRecoveryHistoryFences(ledger, deadline);
+          const origins = new Map(sealedHistoryOrigins(baseline, verified.manifest.seal, deadline)
             .map(origin => [origin.scope.writerEpoch, origin]));
           if (authorization.predecessorRecovery) recoveryHistoryChain(ledger, authorization.predecessor,
-            authorization.predecessorRecovery, performance.now() + 100, origins);
+            authorization.predecessorRecovery, deadline, origins);
           else if (hasTable(ledger, "local_command_history_recovery_prepares") &&
               ledger.prepare("SELECT 1 FROM local_command_history_recovery_prepares WHERE writer_epoch=?").get(authorization.predecessor.writerEpoch))
             invalid("checkpoint_writer_scope");
           let recordSequence = verified.manifest.seal.recordSequence, eventSequence = verified.manifest.seal.eventSequence;
-          for (const row of recoveryRows(ledger, "local_command_history_heads", "conversation_id")) {
+          for (const row of recoveryRows(ledger, "local_command_history_heads", "conversation_id", deadline)) {
             const head = CloudLocalCommandHistoryHeadSchema.parse(json(String(row.document), "checkpoint_inventory_hash"));
             recordSequence = Math.max(recordSequence, head.history.recordSequence ?? 0);
             eventSequence = Math.max(eventSequence, head.history.eventSequence ?? 0);
           }
-          return { inventory: recoveryInventory(ledger), custody, credentialScope: Object.freeze(credentialScope),
+          return { inventory: recoveryInventory(ledger, deadline), custody, credentialScope: Object.freeze(credentialScope),
             history: Object.freeze({ scope: Object.freeze({ ...authorization.predecessor }), recordSequence, eventSequence,
               origins: Object.freeze([...origins.values()]) }) };
         })();
         if (!stable(before, await handle.stat()) || !stable(before, await fs.lstat(file))) invalid("checkpoint_restore_identity");
+        checkInventoryDeadline(deadline);
         const predecessor = Object.freeze({ scope: state.history.scope });
         recoveredPredecessors.set(predecessor, { file, dev: before.dev, ino: before.ino, authorization, ...state });
         return { ...verified, ledgerFile: file, predecessor };

@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/cloud-local-command-queue-checkpoint.ts",
+  "before": "const INVENTORY_BUDGET_MS = 5_000;",
+  "after": "const INVENTORY_BUDGET_MS = 100;"
+}
