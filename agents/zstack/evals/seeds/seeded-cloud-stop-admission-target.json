@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/cloud-command-runtime.ts",
+  "before": "    return (!commandId && !allowPausedGoal && this.controls.get(conversationId)?.paused === true) ||",
+  "after": "    return (!allowPausedGoal && this.controls.get(conversationId)?.paused === true) ||"
+}

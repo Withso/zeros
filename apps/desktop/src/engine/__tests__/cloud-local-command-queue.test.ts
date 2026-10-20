@@ -924,6 +924,70 @@ describe("engine-local cloud command ledger", () => {
     expect(f.snapshot("other").paused).toBe(false);
   });
 
+  it("keeps future claims paused after stopping a queued command without cancelling current preparation", async () => {
+    const f = fixture();
+    let release!: () => void, execution: string | null = null;
+    const preparation = new Promise<void>(resolve => { release = resolve; });
+    const prepare = vi.fn(async (claim: { executionId: string }) => { execution = claim.executionId; await preparation; });
+    const dispatch = vi.fn(async () => ({ state: "succeeded" as const, resultCode: null }));
+    const runtime = new CloudCommandRuntime({ request: async () => { throw new Error("Unexpected CP request"); },
+      validate: () => {}, execution: () => execution, prepare, dispatch, retire: async () => {}, cancel: vi.fn(), changed: () => {} });
+    try {
+      runtime.installLocalQueue(f.queue);
+      const first = f.enqueue();
+      await runtime.handle({ kind: "mutate", mutation: first.mutation }, actorSessionId);
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+      const second = f.enqueue();
+      await runtime.handle({ kind: "mutate", mutation: second.mutation }, actorSessionId);
+      await runtime.handle({ kind: "stop", conversationId: "chat", operationId: randomUUID(),
+        commandId: second.mutation.action.commandId }, actorSessionId);
+      await runtime.handle({ kind: "mutate", mutation: { conversationId: "chat", operationId: randomUUID(),
+        expectedRevision: f.snapshot().revision, action: { kind: "remove", commandId: second.mutation.action.commandId } } }, actorSessionId);
+      const third = f.enqueue();
+      await runtime.handle({ kind: "mutate", mutation: third.mutation }, actorSessionId);
+      release();
+      await vi.waitFor(() => expect(f.snapshot().receipts.some(row => row.commandId === first.mutation.action.commandId)).toBe(true));
+      expect(f.snapshot()).toMatchObject({ paused: true, pending: [{ commandId: third.mutation.action.commandId, state: "queued" }] });
+      expect(f.snapshot().receipts.find(row => row.commandId === first.mutation.action.commandId)?.state).toBe("succeeded");
+      expect(prepare).toHaveBeenCalledOnce();
+      await runtime.handle({ kind: "mutate", mutation: { conversationId: "chat", operationId: randomUUID(),
+        expectedRevision: f.snapshot().revision, action: { kind: "resume" } } }, actorSessionId);
+      await vi.waitFor(() => expect(f.snapshot().receipts.find(row => row.commandId === third.mutation.action.commandId)?.state).toBe("succeeded"));
+      expect(dispatch).toHaveBeenCalledTimes(2);
+    } finally { release(); runtime.close(); }
+  });
+
+  it.each(["exact", "legacy"] as const)("cancels the original lost claim after a %s Stop", async target => {
+    const f = fixture();
+    let lost = false;
+    const original = f.queue.handle.bind(f.queue);
+    const requests: CloudBootCommandEngineRequest[] = [];
+    vi.spyOn(f.queue, "handle").mockImplementation((input, context) => {
+      const result = original(input, context);
+      if ((input as CloudBootCommandEngineRequest).kind === "claim") {
+        requests.push(input as CloudBootCommandEngineRequest);
+        if (!lost && result) { lost = true; throw new Error("Synthetic lost claim reply"); }
+      }
+      return result;
+    });
+    const prepare = vi.fn(async () => {}), dispatch = vi.fn(async () => ({ state: "succeeded" as const, resultCode: null }));
+    const runtime = new CloudCommandRuntime({ request: async () => { throw new Error("Unexpected CP request"); },
+      validate: () => {}, execution: () => null, prepare, dispatch, retire: async () => {}, cancel: vi.fn(), changed: () => {} });
+    try {
+      runtime.installLocalQueue(f.queue);
+      const first = f.enqueue();
+      await runtime.handle({ kind: "mutate", mutation: first.mutation }, actorSessionId);
+      await vi.waitFor(() => expect(lost).toBe(true));
+      await runtime.handle({ kind: "stop", conversationId: "chat", operationId: randomUUID(),
+        ...(target === "exact" ? { commandId: first.mutation.action.commandId } : {}) }, actorSessionId);
+      await vi.waitFor(() => expect(f.snapshot().receipts.find(row => row.commandId === first.mutation.action.commandId)?.state).toBe("cancelled"), { timeout: 2500 });
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(prepare).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally { runtime.close(); }
+  });
+
   it("does not let an old targeted Stop cancel a successor crossing native preparation", async () => {
     const f = fixture(), first = f.enqueue(); f.request(first);
     const old = f.claim()!;

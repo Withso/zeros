@@ -45,7 +45,7 @@ export class CloudCommandRuntime {
   private readonly unacknowledgedTargetStops = new Map<string, Set<string>>();
   private readonly active = new Map<string, string>();
   private readonly claiming = new Set<string>();
-  private readonly pendingClaims = new Map<string, { claimId: string; executionId: string }>();
+  private readonly pendingClaims = new Map<string, { claimId: string; executionId: string; cancelled?: boolean }>();
   private readonly cancelledClaims = new Set<string>();
   /** Only failed native cancellation needs a legacy retry witness. It never
    * retargets to whichever command happens to be active on replay. */
@@ -225,6 +225,12 @@ export class CloudCommandRuntime {
     if (request.kind === "stop" && (stopTarget || !snapshot.replayed ||
         failedStop?.conversationId === request.conversationId && snapshot.paused)) {
       const target = stopTarget ?? (snapshot.replayed ? failedStop?.commandId : undefined);
+      if (!target && !snapshot.replayed) {
+        // A legacy Stop also owns an unresolved claim, even when its snapshot
+        // cannot name the command. Retain that fence on this claim identity.
+        const pending = this.pendingClaims.get(request.conversationId);
+        if (pending) pending.cancelled = true;
+      }
       const dispatched = snapshot.pending.find(command => command.state === "dispatching" && (!target || command.commandId === target));
       if (dispatched) {
         if (this.active.get(request.conversationId) === dispatched.commandId && (!snapshot.replayed || snapshot.paused)) {
@@ -236,7 +242,7 @@ export class CloudCommandRuntime {
             throw error;
           }
         }
-        else if (snapshot.paused && this.claiming.has(request.conversationId)) this.cancelledClaims.add(dispatched.commandId);
+        else if (snapshot.paused && this.pendingClaims.has(request.conversationId)) this.cancelledClaims.add(dispatched.commandId);
       }
       else if (!target && !snapshot.replayed) await this.dependencies.cancel(request.conversationId);
     }
@@ -318,7 +324,7 @@ export class CloudCommandRuntime {
       this.pendingClaims.set(conversationId, intent);
       let raw: unknown;
       this.claiming.add(conversationId);
-      try { raw = await this.request({ kind: "claim", conversationId, ...intent }); }
+      try { raw = await this.request({ kind: "claim", conversationId, claimId: intent.claimId, executionId: intent.executionId }); }
       finally { this.claiming.delete(conversationId); }
       if (raw === null) { this.dependencies.releaseRetainedExecution?.(executionId);this.pendingClaims.delete(conversationId); this.clearReceiptRetry(conversationId); return; }
       const claim = (this.localQueue ? CloudBootCommandClaimSchema : CloudCommandClaimSchema).parse(raw);
@@ -327,6 +333,7 @@ export class CloudCommandRuntime {
       // Only the original engine-owned FULL ledger may choose a warm native
       // ID from the exact actor and intent; remote legacy identity is strict.
       executionId = claim.executionId;
+      const cancelledPendingClaim = this.pendingClaims.get(conversationId)?.cancelled === true;
       this.pendingClaims.delete(conversationId);
       this.clearReceiptRetry(conversationId);
       this.dependencies.changed(conversationId);
@@ -335,7 +342,7 @@ export class CloudCommandRuntime {
         this.unacknowledgedStop.add(conversationId);
       }
       let result: Pick<CloudCommandResult, "state" | "resultCode" | "result">;
-      const cancelledClaim = this.cancelledClaims.delete(claim.commandId);
+      const cancelledClaim = this.cancelledClaims.delete(claim.commandId) || cancelledPendingClaim;
       const goalOperation=claim.payload.operation?.kind==="goal";
       let retired = false;
       if (claim.dispatchAllowed===false) result={state:"cancelled",resultCode:"actor_authority_revoked"};
@@ -431,7 +438,10 @@ export class CloudCommandRuntime {
     // Pause a new claim while any Stop is in flight. Once a claim is known,
     // only its own Stop (or a legacy conversation Stop) may cancel admission.
     const stoppingCommand = stopping && [...stopping.values()].some(target => !commandId || !target || target === commandId);
-    return (!allowPausedGoal && this.controls.get(conversationId)?.paused === true) || !!stoppingCommand || this.unacknowledgedStop.has(conversationId);
+    // The shared pause parks future claims. It is not evidence that a Stop
+    // targeted this already-claimed command, which may still be preparing.
+    return (!commandId && !allowPausedGoal && this.controls.get(conversationId)?.paused === true) ||
+      !!stoppingCommand || this.unacknowledgedStop.has(conversationId);
   }
   private removeStopIntent(conversationId: string, intent: symbol): void {
     this.stopping.get(conversationId)?.delete(intent);
