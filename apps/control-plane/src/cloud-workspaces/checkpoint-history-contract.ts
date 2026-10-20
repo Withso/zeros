@@ -1,7 +1,7 @@
 // Standalone Zod 3 mirror; checkpoint-history-contract.test.ts verifies protocol parity.
 import { z } from "zod";
 import { CloudAgentBootScopeSchema, CloudActorProvenanceSchema, CloudAgentCredentialRunInfoSchema } from "./agent-boot-contract.js";
-import { CloudBootCommandEntrySchema } from "./commands.js";
+import { CloudBootCommandEntrySchema } from "./command-entry-contract.js";
 import { CloudMirroredHistoryHeadSchema as CloudLocalCommandHistoryHeadSchema, CloudLocalHistoryWatermarkSchema as CloudLocalCommandHistorySchema } from "./history-local-contract.js";
 
 export const CLOUD_CHECKPOINT_HISTORY_MAX_BYTES = 16 * 1024 * 1024;

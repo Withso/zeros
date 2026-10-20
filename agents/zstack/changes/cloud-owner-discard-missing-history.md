@@ -27,3 +27,10 @@ changed local file would approve the change. Six deletion regressions plus
 unchanged crash-replay, changed-ACK and prepared-digest controls enforce this.
 The protocol file is also an explicit control-plane CI input, covered by the
 existing import-closure test.
+
+The CI shard that loaded the command service first exposed a contract importing
+that same service before its schema initialized. Importing the contract first
+in parity tests had masked the cycle. Receipt schemas now live in a Zod-only
+module, with the old service exports retained. A fresh module registry tests
+seven actual service/contract entry orders and verifies closed receipt parsing;
+the original command-permission and seal-route suites remain adjacent gates.
