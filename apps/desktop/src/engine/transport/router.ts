@@ -25,9 +25,25 @@ export class MessageRouter {
   private readonly clients = new Map<string, TransportClient>();
   private readonly sessionOwner = new Map<string, string>(); // sessionId → clientId
   private capture: ((message: EngineMessage) => EngineMessage) | null = null;
+  private captureRetired = false;
 
   /** A cloud workspace owns one journal, independent of its subscriber count. */
   setCapture(capture: (message: EngineMessage) => EngineMessage): void { this.capture = capture; }
+
+  /** A retired journal cannot capture or fan out late producer notifications.
+   * Routers without a journal retain their normal Local routing. */
+  retireCapture(): void { if (this.capture) this.captureRetired = true; }
+
+  private captureMessage(message: EngineMessage): EngineMessage | null {
+    if (this.captureRetired) return null;
+    try { return this.capture?.(message) ?? message; }
+    catch (error) {
+      // A synchronous journal failure can initiate terminal engine shutdown.
+      // Its producer must not escape after that shutdown already fenced us.
+      if (this.captureRetired) return null;
+      throw error;
+    }
+  }
 
   register(client: TransportClient): void {
     this.clients.set(client.id, client);
@@ -74,14 +90,18 @@ export class MessageRouter {
   }
 
   broadcast(msg: EngineMessage): void {
-    msg = this.capture?.(msg) ?? msg;
+    const captured = this.captureMessage(msg);
+    if (!captured) return;
+    msg = captured;
     for (const client of this.clients.values()) client.send(msg);
   }
 
   /** Broadcast to every client EXCEPT the originator — used for DB_CHANGED, where
    *  the client that made the write already has the change locally. */
   broadcastExcept(exceptClientId: string, msg: EngineMessage): void {
-    msg = this.capture?.(msg) ?? msg;
+    const captured = this.captureMessage(msg);
+    if (!captured) return;
+    msg = captured;
     for (const client of this.clients.values()) {
       if (client.id !== exceptClientId) client.send(msg);
     }

@@ -217,6 +217,7 @@ describe("control-plane database scope decision", () => {
     "apps/control-plane/migrations/0105_example.sql",
     "apps/control-plane/pnpm-lock.yaml",
     "apps/desktop/src/engine/cloud-runtime-registration.ts",
+    "apps/desktop/src/engine/cloud-runtime-retirement.ts",
     "packages/protocol/src/cloud-actors.ts",
     "pnpm-lock.yaml",
     "patches/ssh2@1.17.0.patch",

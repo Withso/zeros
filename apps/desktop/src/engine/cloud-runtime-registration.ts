@@ -1,3 +1,4 @@
+import { cloudRuntimeRetirementDiagnostic, type CloudRuntimeRetirementDiagnostic, type CloudRuntimeRetirementSite } from "./cloud-runtime-retirement";
 import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
 import { CLOUD_FINAL_SAVE_VERSION_HEADER, CLOUD_FINAL_SAVE_PATH, CLOUD_FINAL_SAVE_MAX_BYTES, CloudFinalSaveDirectiveSchema,
   CloudFinalSaveRequestSchema, CloudFinalSaveResponseSchema, type CloudFinalSaveDirective, type CloudFinalSaveRequest } from "@zeros/protocol/cloud-final-save";
@@ -183,7 +184,7 @@ export type CloudRuntimeRegistrationDependencies = {
   checkpointHints?: true;
   fetch?: FetchLike;
   now?: () => number;
-  onAuthorityLost: () => void;
+  onAuthorityLost: (diagnostic: CloudRuntimeRetirementDiagnostic) => void;
   onDurableRecordSync: (
     authority: CloudRuntimeAuthority,
     context: CloudDurableRecordSyncContext,
@@ -542,7 +543,7 @@ export class CloudRuntimeRegistration {
   private readonly renewalTimings = new CloudRuntimeRenewalTimings();
   private readonly fetch: FetchLike;
   private readonly now: () => number;
-  private readonly onAuthorityLost: () => void;
+  private readonly onAuthorityLost: (diagnostic: CloudRuntimeRetirementDiagnostic) => void;
   private readonly onDurableRecordSync: CloudRuntimeRegistrationDependencies["onDurableRecordSync"];
   private readonly onDurableRecordConnected: CloudRuntimeRegistrationDependencies["onDurableRecordConnected"];
   private readonly readRepositoryCredentialRefresh:
@@ -1321,7 +1322,7 @@ export class CloudRuntimeRegistration {
       // final boundary also contains host authority-cleanup failures.
       void this.runHeartbeat().catch(() => {
         try {
-          this.loseAuthority();
+          this.loseAuthority("heartbeat-timer", "heartbeat_task_failed");
         } catch {
           // The timer boundary is terminal; never surface a host callback as
           // an unhandled rejection from the engine event loop.
@@ -1340,6 +1341,7 @@ export class CloudRuntimeRegistration {
     this.heartbeatInFlight = true;
     this.heartbeatAgain = false;
     let finish: ((outcome: RenewalOutcome) => void) | undefined;
+    let failureSite: CloudRuntimeRetirementSite = "heartbeat-preflight";
     try {
       const credentialRefresh = this.readCredentialRefresh();
       const observedPorts = await this.heartbeatObservedPorts();
@@ -1357,6 +1359,7 @@ export class CloudRuntimeRegistration {
       finish = this.renewalTimings.begin("engine-heartbeat");
       const sentAt = this.now();
       const startedAt = performance.now();
+      failureSite = "heartbeat-request";
       const raw = await this.post(
         document.heartbeat.endpoint,
         document.heartbeat.token,
@@ -1377,6 +1380,7 @@ export class CloudRuntimeRegistration {
         finish("failed");
         return;
       }
+      failureSite = "heartbeat-response";
       const now = this.now();
       const responseKeys = [
         "accepted",
@@ -1409,14 +1413,17 @@ export class CloudRuntimeRegistration {
           true,
         );
       }
+      failureSite = "heartbeat-credential";
       this.applyCredentialRefreshResponse(
         credentialRefresh,
         raw.repositoryCredential,
       );
+      failureSite = "heartbeat-checkpoint";
       const checkpointRequest = this.parseCheckpointRequest(
         raw.checkpointRequest,
         now,
       );
+      failureSite = "heartbeat-work";
       // No later than one uplink renewal at the request's send time reaches.
       document.leaseExpiresAtMs = Math.min(Number(raw.leaseExpiresAtMs), sentAt + UPLINK_ENGINE_LEASE_MS);
       if (observedPorts !== undefined) this.reportedPorts = JSON.stringify(observedPorts);
@@ -1442,7 +1449,10 @@ export class CloudRuntimeRegistration {
       const terminal =
         error instanceof CloudRuntimeRequestError && error.terminal;
       if (terminal || this.now() >= document.leaseExpiresAtMs - 1_000) {
-        this.loseAuthority();
+        const code = !terminal ? "engine_lease_expired" : error.status === 401 ? "authority_http_401"
+          : error.status === 403 ? "authority_http_403" : error.status !== undefined && error.status >= 400 && error.status < 500
+            ? "authority_http_4xx" : "authority_response_invalid";
+        this.loseAuthority(failureSite, code);
         return;
       }
       this.heartbeatFailures += 1;
@@ -1797,7 +1807,7 @@ export class CloudRuntimeRegistration {
     }
   }
 
-  private loseAuthority(): void {
+  private loseAuthority(site: CloudRuntimeRetirementSite, error: unknown): void {
     if (this.authorityLost || this.stopped) return;
     this.authorityLost = true;
     this.durableRecordConnected = false;
@@ -1805,7 +1815,7 @@ export class CloudRuntimeRegistration {
     this.timer = null;
     this.document = null;
     this.renewalTimings.close();
-    this.onAuthorityLost();
+    this.onAuthorityLost(cloudRuntimeRetirementDiagnostic(site, error));
   }
 
   /** Durability lag pauses new dispatch; it must not masquerade as account or

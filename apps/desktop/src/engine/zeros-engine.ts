@@ -1,3 +1,4 @@
+import { logCloudRuntimeRetirement, type CloudRuntimeRetirementSite } from "./cloud-runtime-retirement";
 import { getWorkspace as getGithubWriteWorkspace } from "./git/worktree";
 import { githubWritePublication } from "./git/github-write-publication";
 import { configureNativeGithubDesktop, acceptNativeGithubDesktop } from "./git/github-native-desktop";
@@ -1318,6 +1319,7 @@ export class ZerosEngine {
    * their wire order across asynchronous fork cancellation/session rotation. */
   private cloudReplicaSessionChain: Promise<void> = Promise.resolve();
   private cloudRuntimeAuthorityStopping = false;
+  private cloudRuntimeShutdownReported = false;
   private cloudRuntimeCheckpointQuiescing = false;
   private cloudRuntimeHandoffFenced = false;
   private cloudHandoffRequests = 0;
@@ -2220,7 +2222,7 @@ export class ZerosEngine {
           agentRuntime: readCloudAgentRuntimeAttestation(this.cloudWorker),
           negotiateLocalCommands: true,
           checkpointHints: true,
-          onAuthorityLost: () => this.handleCloudRuntimeAuthorityLoss(),
+          onAuthorityLost: diagnostic => this.handleCloudRuntimeAuthorityLoss(diagnostic.site, diagnostic.code),
           onDurableRecordSync: (authority, context) => {
             this.cloudIdleStop.recordSync("pending");
             this.cloudIdleStop.observe(authority);
@@ -2263,7 +2265,7 @@ export class ZerosEngine {
     if (this.cloudWorker) configureNativeGithubDesktop(() => this.router.remoteClients());
     this.cloudEvents = this.cloudRuntimeRegistration && this.cloudRuntimeConfig ? new CloudEventRuntime(this.cloudRuntimeConfig.engine.instanceId, {
       request: (request) => this.cloudRuntimeRegistration!.eventRequest(request),
-      onFailure: () => this.handleCloudRuntimeAuthorityLoss(),
+      onFailure: code => this.handleCloudRuntimeAuthorityLoss("event-journal", code),
     }) : null;
     if (this.cloudEvents) this.router.setCapture(message => this.cloudEvents!.capture(message));
     this.cloudActions = this.cloudRuntimeRegistration ? new CloudActionRuntime({
@@ -2310,11 +2312,11 @@ export class ZerosEngine {
     if (cloudPort !== null) {
       const servicePorts = [cloudPort, ...Array.from({ length: this.portSpan }, (_, index) => this.portStart + index)];
       const humanServices = cloudWorker
-        ? new CloudRuntimeHumanServices(cloudWorker, () => servicePorts, undefined, this.cloudExecutionBoundary!, () => this.handleCloudRuntimeAuthorityLoss())
+        ? new CloudRuntimeHumanServices(cloudWorker, () => servicePorts, undefined, this.cloudExecutionBoundary!, () => this.handleCloudRuntimeAuthorityLoss("human-services"))
         : null;
       this.cloudHumanServices = humanServices;
       this.cloudLanguageServices = cloudWorker
-        ? new CloudRuntimeLanguageServices(cloudWorker,()=>this.handleCloudRuntimeAuthorityLoss(),this.cloudExecutionBoundary!) : null;
+        ? new CloudRuntimeLanguageServices(cloudWorker,()=>this.handleCloudRuntimeAuthorityLoss("language-services"),this.cloudExecutionBoundary!) : null;
       this.cloud = new CloudTransport({
         port: cloudPort,
         token: process.env.ZEROS_CLOUD_TOKEN?.trim() || "",
@@ -2363,7 +2365,7 @@ export class ZerosEngine {
     // Credentials never cross this boundary; the agent owns its own auth.
     this.cloudAgentLegacyFactory = this.cloudRuntimeRegistration ? createCloudAgentExecutionFactory({
       request: (request, signal) => this.cloudRuntimeRegistration!.agentExecutionRequest(request, signal),
-      supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
+      supervisor: { onRetirementFailure: error => this.handleCloudRuntimeAuthorityLoss("legacy-agent", error) },
       onRepositoryMcpNotice: context => this.publishCloudRepositoryMcpNotice(context),
     }) : null;
     this.localOrchestration = this.cloudWorker ? null : this.createLocalOrchestration();
@@ -2531,7 +2533,7 @@ export class ZerosEngine {
           };
           if(notification.update.sessionUpdate==="goal_update"){
             const claim=this.cloudGoalClaim(executionId);
-            if(claim)void this.cloudGoals.observe(claim,notification.update.goal).catch(()=>this.handleCloudRuntimeAuthorityLoss());
+            if(claim)void this.cloudGoals.observe(claim,notification.update.goal).catch(error=>this.handleCloudRuntimeAuthorityLoss("goal-observation",error));
           }
           if(notification.update.sessionUpdate==="provider_binding_update"&&this.isCloudTranscriptFork(this.sessionChat.get(executionId)))return;
           if (notification.update.sessionUpdate === "turn_usage_update") {
@@ -3745,6 +3747,7 @@ export class ZerosEngine {
     const checkpointStopped = this.cloudCheckpointScheduler?.close();
     this.cloudActions?.close();
     this.cloudCommands?.close();
+    if (this.cloudEvents) this.router?.retireCapture();
     this.cloudEvents?.close();
     if (this.cloudLocalMirrorTimer) clearTimeout(this.cloudLocalMirrorTimer); this.cloudLocalMirrorTimer = null;
     this.cloudLocalMirror?.close();
@@ -3763,7 +3766,10 @@ export class ZerosEngine {
       await settle(() => this.cloudLocalActions?.close());
       await settle(() => this.cloudLocalWriterLifecycle?.close());
       await settle(() => checkpointStopped); await settle(() => idleStopped);
-      if (failures.length) throw new AggregateError(failures, "Zeros engine teardown failed");
+      if (failures.length) {
+        this.reportCloudRuntimeShutdownFailure(failures[0]);
+        throw new AggregateError(failures, "Zeros engine teardown failed");
+      }
       return;
     }
     this.running = false;
@@ -3912,6 +3918,7 @@ export class ZerosEngine {
     await settle(() => this.slowWorkspaceOperations?.flush());
     console.log("[Zeros] Engine stopped");
     if (failures.length > 0) {
+      this.reportCloudRuntimeShutdownFailure(failures[0]);
       throw new AggregateError(failures, "Zeros engine teardown failed");
     }
   }
@@ -4038,19 +4045,26 @@ export class ZerosEngine {
     });
   }
 
-  private handleCloudRuntimeAuthorityLoss(): void {
+  private reportCloudRuntimeShutdownFailure(error: unknown): void {
+    if (!this.cloudWorker || this.cloudRuntimeShutdownReported) return;
+    this.cloudRuntimeShutdownReported = true;
+    logCloudRuntimeRetirement("shutdown", "engine-shutdown", error);
+  }
+
+  private handleCloudRuntimeAuthorityLoss(site: CloudRuntimeRetirementSite, error?: unknown): void {
     if (this.cloudRuntimeAuthorityStopping) return;
     this.cloudRuntimeAuthorityStopping = true;
+    logCloudRuntimeRetirement("authority", site, error);
+    this.router?.retireCapture();
     this.cloudCheckpointProgress?.reporter.dispose();
     this.cloudAgentTurnTimings?.retire();
     void this.cloudCheckpointScheduler?.close();
     this.cloudCommands?.close();
-    console.error("[Zeros cloud] durable engine authority was retired");
     // Process supervisors bind to this exact parent. Exit even if an SDK or
     // transport refuses shutdown; an unproven worker must not remain usable.
     const deadline=setTimeout(()=>process.exit(1),10_000);deadline.unref();
     void this.stop()
-      .catch(() => undefined)
+      .catch(error => this.reportCloudRuntimeShutdownFailure(error))
       .finally(() => {
         clearTimeout(deadline);process.exit(1);
       });
@@ -4522,7 +4536,7 @@ export class ZerosEngine {
             explicit.assert();
           } else await Promise.all([this.cloudHumanServices?.pause(),this.cloudLanguageServices?.pause()]);
         }
-        catch (error) { progress?.fail(error); if (!explicit) this.handleCloudRuntimeAuthorityLoss(); throw error; }
+        catch (error) { progress?.fail(error); if (!explicit) this.handleCloudRuntimeAuthorityLoss("checkpoint-quiescence", error); throw error; }
         await joined(Promise.resolve(this.cloudCheckpointScheduler?.pause()));
         progress?.stage("process_starts");
         await joined(this.waitForWorkspaceProcessStartSnapshot(
@@ -4923,7 +4937,7 @@ export class ZerosEngine {
       },
       scope: { organizationId: config.execution.organizationId, workspaceId: config.execution.workspaceId,
         generation: config.execution.generation, engineInstanceId: config.engine.instanceId },
-      supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
+      supervisor: { onRetirementFailure: error => this.handleCloudRuntimeAuthorityLoss("agent-boot", error) },
       engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,
       // While the uplink's gate is open, cred.revision pushes carry control
       // changes and the poll drops to a 30 s safety net; any uplink loss
@@ -4973,7 +4987,7 @@ export class ZerosEngine {
               if (!this.running || this.engineStopping || this.cloudRuntimeAuthorityStopping || this.cloudRuntimeHandoffFenced ||
                 this.cloudRuntimeCheckpointQuiescing || this.cloudRuntimeRegistration !== registration || !registration.coordinatorNegotiated())
                 throw new CloudCommandRuntimeError("engine_authority_rejected");
-            }, failed: () => this.handleCloudRuntimeAuthorityLoss() });
+            }, failed: () => this.handleCloudRuntimeAuthorityLoss("runner-retirement") });
         }
         await this.cloudRecordRuntime!.installLocalQueue(queue);
         this.cloudLocalEvents ??= new CloudLocalCommandEventStore({ file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
@@ -5007,7 +5021,7 @@ export class ZerosEngine {
           unbindAdmission: receiver => this.cloudCommandAdmissions.delete(receiver),
           clearExecution: id => this.clearAgentExecutionRoute(id),
           invalidateBind: id => this.invalidateConversationBind(id),
-          onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss(),
+          onRetirementFailure: error => this.handleCloudRuntimeAuthorityLoss("native-pump", error),
         });
         this.cloudCommands!.installLocalQueue(queue);
         this.cloudLocalMirror ??= new CloudLocalCommandMirrorDriver({ scope: queue.scope,queue,
@@ -5204,7 +5218,7 @@ export class ZerosEngine {
     } catch (error) {
       // NORMAL already committed. Refuse the acknowledgement/exposure if its
       // authoritative FULL fence cannot be persisted; never retain old paint.
-      this.handleCloudRuntimeAuthorityLoss(); throw error;
+      this.handleCloudRuntimeAuthorityLoss("history-publication", error); throw error;
     }
   }
 
@@ -5731,7 +5745,7 @@ export class ZerosEngine {
           return;
         }
         try{await this.agents.endSession(this.sessionAgent.get(previous)??claim.payload.agentId,previous,{failClosed:true});}
-        catch(error){this.handleCloudRuntimeAuthorityLoss();throw error;}
+        catch(error){this.handleCloudRuntimeAuthorityLoss("command-prepare",error);throw error;}
         this.clearAgentExecutionRoute(previous);
       }
       record.ownsExecution=true;
@@ -5789,7 +5803,7 @@ export class ZerosEngine {
           async()=>{
             this.retiringCloudExecutions.add(claim.executionId);
             try{await this.agents.endSession(claim.payload.agentId,claim.executionId,{failClosed:true});this.clearAgentExecutionRoute(claim.executionId);}
-            catch(error){this.handleCloudRuntimeAuthorityLoss();throw error;}
+            catch(error){this.handleCloudRuntimeAuthorityLoss("command-finish",error);throw error;}
             finally{this.retiringCloudExecutions.delete(claim.executionId);}
           });
         if(!retained){
@@ -5799,7 +5813,7 @@ export class ZerosEngine {
       }
       await this.cloudGoals.flush(claim);
       if(record){this.cloudCommandAdmissions.delete(record.receiver);this.cloudCommandSessions.delete(claim.commandId);}
-    }catch(error){this.handleCloudRuntimeAuthorityLoss();throw error;}
+    }catch(error){this.handleCloudRuntimeAuthorityLoss("command-settlement",error);throw error;}
     finally{if(record.ownsExecution===true)this.retiringCloudExecutions.delete(claim.executionId);}
   }
 
@@ -5823,7 +5837,7 @@ export class ZerosEngine {
         }));
         const failed=settled.find(result=>result.status==="rejected");
         if(failed?.status==="rejected")throw failed.reason;
-      }catch(error){retainFence=true;this.handleCloudRuntimeAuthorityLoss();throw error;}
+      }catch(error){retainFence=true;this.handleCloudRuntimeAuthorityLoss("conversation-delete",error);throw error;}
       await deleteCloudNativeHistory({root:CLOUD_NATIVE_HISTORY_ROOT,conversationId:id,dataRoot:zerosDataDir()});
       return await remove();
     }finally{if(!retainFence&&!this.cloudRuntimeAuthorityStopping)this.cloudConversationDeletions.delete(id);}
@@ -5844,7 +5858,7 @@ export class ZerosEngine {
           finally{await this.agents.endSession(agentId,retained,{failClosed:true});}
           this.clearAgentExecutionRoute(retained);
         }
-        catch(error){this.handleCloudRuntimeAuthorityLoss();throw error;}
+        catch(error){this.handleCloudRuntimeAuthorityLoss("conversation-cancel",error);throw error;}
         finally{this.retiringCloudExecutions.delete(retained);}
       }
     }
@@ -5863,7 +5877,7 @@ export class ZerosEngine {
       }finally{this.retiringCloudExecutions.delete(executionId);}
     }));
     const failed=settled.find(result=>result.status==="rejected");
-    if(failed?.status==="rejected"){this.handleCloudRuntimeAuthorityLoss();throw failed.reason;}
+    if(failed?.status==="rejected"){this.handleCloudRuntimeAuthorityLoss("idle-retirement",failed.reason);throw failed.reason;}
   }
 
   private cloudGoalClaim(executionId:string):CloudCommandClaim|undefined{
@@ -13289,7 +13303,7 @@ export class ZerosEngine {
     const retireTerminal=()=>{
       if(!terminalBoundary)return;
       const original=terminalBoundary;
-      void original.stopAndProve().then(()=>{if(this.cloudHumanPtyScopes.get(msg.sessionId)===original)this.cloudHumanPtyScopes.delete(msg.sessionId);},()=>this.handleCloudRuntimeAuthorityLoss());
+      void original.stopAndProve().then(()=>{if(this.cloudHumanPtyScopes.get(msg.sessionId)===original)this.cloudHumanPtyScopes.delete(msg.sessionId);},error=>this.handleCloudRuntimeAuthorityLoss("terminal-retirement",error));
     };
     if (environmentOwner) this.cloudEnvironmentTerminals.set(msg.sessionId, environmentOwner);
     let info: ReturnType<PtyService["create"]>;
@@ -13326,10 +13340,10 @@ export class ZerosEngine {
           return {...terminalLaunch,stdio:'inherit' as const};
         },
         onSpawned:(pid:number,leaderExited:()=>boolean)=>{
-          try{terminalBoundary!.trackProcessGroup(pid,{leaderExited});}catch{this.handleCloudRuntimeAuthorityLoss();retireTerminal();}
+          try{terminalBoundary!.trackProcessGroup(pid,{leaderExited});}catch(error){this.handleCloudRuntimeAuthorityLoss("terminal-track",error);retireTerminal();}
         },
         onSpawnFailed:()=>{
-          try{if(terminalLaunch)terminalBoundary!.cancelUnstartedLaunch?.(terminalLaunch);}catch{this.handleCloudRuntimeAuthorityLoss();}
+          try{if(terminalLaunch)terminalBoundary!.cancelUnstartedLaunch?.(terminalLaunch);}catch(error){this.handleCloudRuntimeAuthorityLoss("terminal-launch",error);}
         },
         onExit:retireTerminal,
       }:{}),
@@ -13419,7 +13433,7 @@ export class ZerosEngine {
       this.cloudAgentBoot?.releaseActor(client.cloudActor.sessionId, client.id);
     this.residentReplay.release(client);
     if (this.cloudWorker) this.cloudUserPresence.release(client);
-    void this.cloudLanguageServices?.release(client.id).catch(()=>this.handleCloudRuntimeAuthorityLoss());
+    void this.cloudLanguageServices?.release(client.id).catch(error=>this.handleCloudRuntimeAuthorityLoss("language-release",error));
     const owned = this.router.sessionsOwnedBy(client.id);
     const hostRelay = this.isHostRelayClient(client);
     // A remote client that drops must not leave its agent sessions running —

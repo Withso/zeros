@@ -29,6 +29,11 @@
   When the implementation belongs to engine boot, keep the shared dependency
   type-only and inject it there; test absent and rejecting implementations.
   Do not widen the CI input list merely to hide an unintended dependency.
+- **Lifecycle fixture drift:** a test calling a class lifecycle method on a
+  partial object must retain the real prototype helpers. Keep injected service
+  failures and every cleanup assertion; new diagnostics must not replace the
+  original aggregate error. Run the failed-cleanup suite alongside retirement
+  tests, including Local and cloud logging behavior.
 - **PR CI:** rerunning only the failed jobs is fine for a flake or infra
   failure. Record that it was a rerun.
 - **Read-only corruption fixtures:** temporarily permit fixture writes, restore

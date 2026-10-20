@@ -1136,6 +1136,34 @@ describe("cloud runtime registration", () => {
     await registration.stop();
   });
 
+  it.each([
+    { kind: "HTTP refusal", site: "heartbeat-request", code: "authority_http_403", elapsed: 30_000 },
+    { kind: "invalid response", site: "heartbeat-response", code: "authority_response_invalid", elapsed: 30_000 },
+    { kind: "invalid checkpoint", site: "heartbeat-checkpoint", code: "authority_response_invalid", elapsed: 30_000 },
+    { kind: "lease expiry", site: "heartbeat-request", code: "engine_lease_expired", elapsed: 90_000 },
+  ])("retains a closed first cause for $kind without response payloads", async ({ kind, site, code, elapsed }) => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const fetcher = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(Response.json(registrationResponse()));
+    const heartbeat = { version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+      engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: NOW + 120_000 };
+    if (kind === "HTTP refusal") fetcher.mockImplementation(async () => Response.json({ private: "not-for-logs" }, { status: 403 }));
+    else if (kind === "invalid response") fetcher.mockImplementation(async () => Response.json({ ...heartbeat, private: "not-for-logs" }));
+    else if (kind === "invalid checkpoint") fetcher.mockImplementation(async () => Response.json({ ...heartbeat,
+      checkpointRequest: { private: "not-for-logs" } }));
+    else fetcher.mockRejectedValue(new Error("private network detail"));
+    const lost = vi.fn();
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: Date.now, onAuthorityLost: lost, onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start(); await vi.advanceTimersByTimeAsync(elapsed);
+      expect(lost).toHaveBeenCalledExactlyOnceWith({ site, code });
+      expect(registration.readiness()).toBeNull();
+      expect(JSON.stringify(lost.mock.calls)).not.toContain("private");
+      await vi.advanceTimersByTimeAsync(30_000); expect(lost).toHaveBeenCalledOnce();
+    } finally { await registration.stop(); }
+  });
+
   it("contains a rejected heartbeat timer task when authority cleanup throws", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
