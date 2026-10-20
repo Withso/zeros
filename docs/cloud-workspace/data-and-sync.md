@@ -134,6 +134,15 @@ Missing seal, lineage or bytes refuses restore. Replacement is transactional
 and idempotent; it never recreates a native session, command claim or permission
 resolver.
 
+Retained command and mutation event cursors belong to their originating writer.
+An idle successor may seal its own stream at zero while retaining older history
+with a higher cursor. Rebuild validates the acknowledged origin seal and its
+scope and cursor bounds; a malformed or unacknowledged origin cannot fall back
+to another writer's seal. Legacy command artifacts without a separate origin
+seal retain their existing actor-provenance and envelope checks. This changes
+native restore only; a control-plane update cannot repair an older pinned
+runtime, which must be upgraded through the normal qualified-runtime path.
+
 A new writer also republishes inherited terminal receipts and exact latest heads
 into its own CP projection. Command prerequisites are ordered before heads;
 immutable artifacts already acknowledged by a sealed predecessor need no new

@@ -92,9 +92,13 @@ function document(ledger: Sqlite.Database, sha256: string, kind: "manifest" | "r
   return { parsed, bytes: metadata.bytes };
 }
 function storedSeal(ledger: Sqlite.Database, writerEpoch: string): CloudLocalCommandWriterSeal {
+  return findStoredSeal(ledger, writerEpoch) ?? refuse();
+}
+function findStoredSeal(ledger: Sqlite.Database, writerEpoch: string): CloudLocalCommandWriterSeal | undefined {
   const row = ledger.prepare("SELECT document,ack FROM local_command_writer_seals WHERE writer_epoch=?")
     .get(writerEpoch) as { document: string; ack: string | null } | undefined;
-  if (!row || row.ack === null || Buffer.byteLength(row.document) > 64 * 1024 || Buffer.byteLength(row.ack) > 64 * 1024) refuse();
+  if (!row) return undefined;
+  if (row.ack === null || Buffer.byteLength(row.document) > 64 * 1024 || Buffer.byteLength(row.ack) > 64 * 1024) refuse();
   const seal = CloudLocalCommandWriterSealSchema.parse(JSON.parse(row.document));
   const ack = CloudLocalCommandWriterSealAckSchema.parse(JSON.parse(row.ack));
   if (seal.scope.writerEpoch !== writerEpoch || canonical(seal) !== row.document || canonical(ack) !== row.ack ||
@@ -106,7 +110,7 @@ type HistorySource = HistoryOrigin & { origins?: readonly HistoryOrigin[] };
 function source(ledger: Sqlite.Database, conversationId: string, head: CloudLocalCommandHistoryHead, seal: HistorySource): CloudAgentBootScope {
   const origin = head.originWriterEpoch === seal.scope.writerEpoch ? seal :
     seal.origins?.find(value => value.scope.writerEpoch === head.originWriterEpoch) ??
-      (head.source.kind === "command" ? undefined : storedSeal(ledger,head.originWriterEpoch));
+      (head.source.kind === "command" ? findStoredSeal(ledger,head.originWriterEpoch) : storedSeal(ledger,head.originWriterEpoch));
   // Records retain their workspace revision. Events belong to the original
   // writer's stream, so a successor starting at zero cannot bound an older
   // conversation. The authenticated origin still bounds that exact stream.
@@ -115,8 +119,10 @@ function source(ledger: Sqlite.Database, conversationId: string, head: CloudLoca
       head.history.recordSequence !== null && head.history.recordSequence > origin.recordSequence ||
       head.history.eventSequence !== null && head.history.eventSequence > origin.eventSequence)) refuse();
   if (head.source.kind !== "command") return origin!.scope;
-  // Older acknowledged artifacts retain a command's own actor provenance
-  // without a separate origin seal. Keep their existing envelope unchanged.
+  // An older command may retain its own acknowledged origin seal across an
+  // idle successor. Validate that exact stream and actor scope when present;
+  // a broken seal cannot fall back to the legacy actor-only envelope below.
+  // Older artifacts without a separate origin seal keep their existing bound.
   if (!origin && head.history.eventSequence !== null && head.history.eventSequence > seal.eventSequence) refuse();
   const row = ledger.prepare(`SELECT conversation_id,writer_epoch,generation,user_message_id,agent_id,execution_id,result,actor,state
     FROM local_commands WHERE id=?`).get(head.source.commandId) as {
