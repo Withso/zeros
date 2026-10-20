@@ -2,7 +2,7 @@
   "id": "retired-compute-stop-erasure",
   "kind": "seeded",
   "area": "cloud-workspaces",
-  "fixedBy": "pending",
+  "fixedBy": "pr:674",
   "symptom": "Erasure adopted an abandoned legacy compute Stop after a later saved Delete, leaving a deleted workspace blocked on impossible historical custody.",
   "rule": "Replay pre-recovery schema with delivered cancellation and a distinct later engine. Enrollment, adoption and erasure claimability must share one narrow retired-Stop classification; keep already enrolled loss separate.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/final-save-retired-history.integration.test.ts"
