@@ -17,7 +17,7 @@ import { runFinalSaveRecovery } from "./cloud-workspaces/final-save-service.js";
 import { readLifecycleDueInMs } from "./cloud-workspaces/lifecycle-jobs.js";
 import { DatabaseCloudWorkspaceHealthService } from "./cloud-workspaces/health.js";
 import { seedFinalSave, seedFinalSaveEngine, commitFinalSaveFixture } from "./cloud-workspaces/final-save-test-fixtures.js";
-import type { CloudOwnerCheckpointRecoveryRequest } from "./cloud-owner-checkpoint-recovery-contract.js";
+import { ownerRecoveryTarget, type CloudOwnerCheckpointRecoveryRequest } from "./cloud-owner-checkpoint-recovery-contract.js";
 import { loadConfig } from "./config.js";
 import { DatabaseCloudWorkspaceContentService } from "./cloud-workspaces/content-record.js";
 
@@ -89,11 +89,35 @@ suite("owner-attested checkpoint recovery", () => {
   });
 
   it.each(["reason","ownerApprovalReference","operationId","target"])("refuses execution after the approved %s changes", async key => {
-    const plan=await manageCloudOwnerCheckpointRecovery(pool,f.requestInput,options());
+    const original=options();
+    const plan=await manageCloudOwnerCheckpointRecovery(pool,f.requestInput,original);
     const changed:CloudOwnerCheckpointRecoveryRequest={...f.requestInput,...(key==="reason" ? {reason:"A changed reason cannot borrow the previous approval"} :
       key==="ownerApprovalReference" ? {ownerApprovalReference:"A different owner acknowledgement is not approved"} : key==="operationId" ? {operationId:randomUUID()} : {})};
-    const config={...options(),execute:true,approval:plan.approval,...(key==="target" ? {databaseUrl:options().databaseUrl.replace("127.0.0.1","localhost")} : {})};
+    const target=new URL(original.databaseUrl);
+    // CI starts with localhost; replacing an assumed IP could leave the target unchanged.
+    target.hostname=target.hostname==="localhost" ? "127.0.0.1" : "localhost";
+    const config={...original,execute:true,approval:plan.approval,...(key==="target" ? {databaseUrl:target.toString()} : {})};
+    if (key==="target") {
+      expect(config.databaseUrl!==original.databaseUrl).toBe(true);
+      expect(ownerRecoveryTarget(config.databaseUrl,f.requestInput.channel))
+        .not.toBe(ownerRecoveryTarget(original.databaseUrl,f.requestInput.channel));
+    }
     await expect(manageCloudOwnerCheckpointRecovery(pool,changed,config)).rejects.toMatchObject({code:"owner_recovery_approval_mismatch"});
+    expect(await recoveryCount()).toBe(0);
+  });
+
+  it.each(["port","database","login"])("refuses approval after the database %s changes", async key => {
+    const original=options();
+    const plan=await manageCloudOwnerCheckpointRecovery(pool,f.requestInput,original);
+    const target=new URL(original.databaseUrl);
+    if (key==="port") target.port=target.port==="5433" ? "5434" : "5433";
+    else if (key==="database") target.pathname+="_changed";
+    else target.username+="_changed";
+    expect(ownerRecoveryTarget(target.toString(),f.requestInput.channel))
+      .not.toBe(ownerRecoveryTarget(original.databaseUrl,f.requestInput.channel));
+    await expect(manageCloudOwnerCheckpointRecovery(pool,f.requestInput,
+      {...original,databaseUrl:target.toString(),execute:true,approval:plan.approval}))
+      .rejects.toMatchObject({code:"owner_recovery_approval_mismatch"});
     expect(await recoveryCount()).toBe(0);
   });
 
@@ -205,17 +229,23 @@ suite("owner-attested checkpoint recovery", () => {
     const directory=await mkdtemp(path.join(tmpdir(),"owner-recovery-cli-"));
     const suffix=randomUUID().replaceAll("-","");
     const ownerRole=`w3_owner_${suffix}`,loginRole=`w3_login_${suffix}`;
+    const loginPassword=randomUUID();
     const principal=(await pool.query("SELECT current_user AS name")).rows[0].name as string;
-    await pool.query(`CREATE ROLE ${ownerRole} NOLOGIN; CREATE ROLE ${loginRole} LOGIN NOINHERIT;
+    await pool.query(`CREATE ROLE ${ownerRole} NOLOGIN;
+      CREATE ROLE ${loginRole} LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS PASSWORD ${pg.escapeLiteral(loginPassword)};
       GRANT ${ownerRole} TO ${loginRole}; GRANT USAGE ON SCHEMA public TO ${ownerRole};
       GRANT ALL ON ALL TABLES IN SCHEMA public TO ${ownerRole};
       GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ${ownerRole};
       GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO ${ownerRole};
       ALTER TABLE cloud_workspace_owner_discard_receipts OWNER TO ${ownerRole}`);
     try {
+      expect((await pool.query(`SELECT rolcanlogin,rolinherit,rolsuper,rolbypassrls,
+        rolpassword IS NOT NULL AS has_password FROM pg_authid WHERE rolname=$1`,[loginRole])).rows[0])
+        .toEqual({rolcanlogin:true,rolinherit:false,rolsuper:false,rolbypassrls:false,has_password:true});
       const filename=path.join(directory,"request.json");
       await writeFile(filename,JSON.stringify({...f.requestInput,channel:"development"}),{mode:0o600});
-      const databaseUrl=new URL(process.env.TEST_DATABASE_URL!);databaseUrl.username=loginRole;
+      const databaseUrl=new URL(process.env.TEST_DATABASE_URL!);
+      databaseUrl.username=loginRole;databaseUrl.password=loginPassword;
       const env:NodeJS.ProcessEnv={PATH:process.env.PATH,NODE_ENV:"test",DATABASE_URL:databaseUrl.toString(),
         DATABASE_MIGRATION_ROLE:ownerRole,AUTH0_DOMAIN:"tenant.example.test",AUTH_AUDIENCE:"https://api.example.test",
         GITHUB_APP_ID:"123",GITHUB_APP_CLIENT_ID:"fixture-client",GITHUB_APP_CLIENT_SECRET:"fixture-secret",

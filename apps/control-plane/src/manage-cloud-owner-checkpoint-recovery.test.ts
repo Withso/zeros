@@ -64,10 +64,17 @@ describe("private owner checkpoint recovery input", () => {
     await expect(readOwnerCheckpointRecoveryRequest(filename)).rejects.toMatchObject({ code: "owner_recovery_request_file_invalid" });
   }, 2000);
 
-  it("binds approval to the database target and channel without retaining passwords", () => {
-    const target = ownerRecoveryTarget("postgresql://fixture@localhost:5432/fixture", "alpha");
+  it.each(["localhost", "127.0.0.1", "[::1]"])("binds approval to the %s database target and channel without retaining passwords", host => {
+    const url = new URL(`postgresql://fixture@${host}:5432/fixture`);
+    const target = ownerRecoveryTarget(url.toString(), "alpha");
     expect(target).toMatch(/^[a-f0-9]{64}$/);
-    expect(ownerRecoveryTarget("postgresql://fixture@localhost:5432/other", "alpha")).not.toBe(target);
-    expect(ownerRecoveryTarget("postgresql://fixture@localhost:5432/fixture", "development")).not.toBe(target);
+    expect(ownerRecoveryTarget(url.toString(), "development")).not.toBe(target);
+    url.password = randomUUID();
+    expect(ownerRecoveryTarget(url.toString(), "alpha")).toBe(target);
+    url.hostname = host === "localhost" ? "127.0.0.1" : "localhost";
+    expect(ownerRecoveryTarget(url.toString(), "alpha")).not.toBe(target);
+    url.hostname = host;
+    url.pathname = "/other";
+    expect(ownerRecoveryTarget(url.toString(), "alpha")).not.toBe(target);
   });
 });
