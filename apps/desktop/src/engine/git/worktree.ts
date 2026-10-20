@@ -2074,6 +2074,33 @@ export async function pruneOrphanArchiveSnapshots(): Promise<number> {
   const pending = new Map(
     lifecycles.map((entry) => [entry.workspaceId, entry]),
   );
+  // Every workspace ever archived keeps its snapshot, and this runs before the
+  // engine is ready: list each repository's pins once instead of starting one
+  // Git process per saved snapshot. An unreadable repository retries next boot.
+  const pins = new Map<string, Set<string> | null>();
+  const savedIn = workspaces.filter(
+    (workspace) =>
+      pending.get(workspace.id)?.archiveSnapshot ?? workspace.archiveSnapshot,
+  );
+  for (const repoRoot of new Set(savedIn.map((ws) => ws.repoRoot))) {
+    pins.set(
+      repoRoot,
+      await runGit(
+        repoRoot,
+        ["for-each-ref", "--format=%(refname)", "refs/zeros/archive/"],
+        { readOnly: true },
+      ).then(
+        ({ stdout }) =>
+          new Set(
+            stdout
+              .split("\n")
+              .map((ref) => ref.trim())
+              .filter(Boolean),
+          ),
+        () => null,
+      ),
+    );
+  }
   for (const workspace of workspaces) {
     if (
       workspaceLifecycleFlights.has(workspace.id) ||
@@ -2084,6 +2111,8 @@ export async function pruneOrphanArchiveSnapshots(): Promise<number> {
     if (journal?.operation === "delete") continue;
     const snapshot = journal?.archiveSnapshot ?? workspace.archiveSnapshot;
     if (!snapshot) continue;
+    const pinned = pins.get(workspace.repoRoot);
+    if (!pinned || pinned.has(archiveSnapshotRef(workspace.id))) continue;
     // compare-and-create: an existing pin always wins over a stale DB read.
     const pin = runGit(workspace.repoRoot, [
       "update-ref",
@@ -3637,10 +3666,13 @@ async function recoverFromLatestTurnSnapshot(
 export function restoreWorkspace(workspaceId: string): Promise<RestoreResult> {
   return withWorkspaceLifecycleFlight(workspaceId, "restore", async () => {
     const startedAt = Date.now();
-    const result = await restoreWorkspaceInner(workspaceId);
+    const timings: RestoreTimings = {};
+    const result = await restoreWorkspaceInner(workspaceId, false, timings);
     console.log(
       `[worktree] restored ${workspaceId} in ${Date.now() - startedAt}ms ` +
-        `(conflicts=${result.conflicts.length}, adaptations=${result.adaptations.length})`,
+        `(check=${timings.check ?? 0}ms, add=${timings.add ?? 0}ms, ` +
+        `apply=${timings.apply ?? 0}ms, finish=${timings.finish ?? 0}ms, ` +
+        `conflicts=${result.conflicts.length}, adaptations=${result.adaptations.length})`,
     );
     return result;
   });
@@ -3992,10 +4024,22 @@ export function recoverMissingWorkspace(
   );
 }
 
+/** Milliseconds per restore phase, for the restore log line. */
+type RestoreTimings = Partial<
+  Record<"check" | "add" | "apply" | "finish", number>
+>;
+
 async function restoreWorkspaceInner(
   workspaceId: string,
   recoverMissing = false,
+  timings: RestoreTimings = {},
 ): Promise<RestoreResult> {
+  let phaseStartedAt = Date.now();
+  const endPhase = (phase: keyof RestoreTimings) => {
+    const now = Date.now();
+    timings[phase] = now - phaseStartedAt;
+    phaseStartedAt = now;
+  };
   const ws = getWorkspace(workspaceId);
   let journal = getWorkspaceLifecycle(workspaceId);
   recoverMissing ||= journal?.payload.recoverMissing === true;
@@ -4116,6 +4160,7 @@ async function restoreWorkspaceInner(
     }
   }
 
+  endPhase("check");
   if (journal.phase === "prepared") {
     const registrations = await listWorktreeRegistrations(ws.repoRoot);
     let targetKey = normalizePathForCompare(targetPath);
@@ -4308,6 +4353,7 @@ async function restoreWorkspaceInner(
     journal = { ...journal, phase: "worktree-created", adaptations };
   }
 
+  endPhase("add");
   // 4. Bring back the uncommitted + untracked work the archive captured.
   let conflicts: string[] = Array.isArray(journal.payload.conflicts)
     ? journal.payload.conflicts.filter(
@@ -4397,6 +4443,7 @@ async function restoreWorkspaceInner(
     };
   }
 
+  endPhase("apply");
   // 5. Persist the (possibly adapted) state and refresh the recovery seed.
   restoreWorkspaceSettings(workspaceId, targetPath);
   const restoredAt = Date.now();
@@ -4470,6 +4517,7 @@ async function restoreWorkspaceInner(
   // Re-write the recovery seed (app-data; the worktree is fresh after `worktree add`).
   const refreshed = getWorkspace(workspaceId);
   writeWorktreeSeed(refreshed);
+  endPhase("finish");
   return {
     restoredAt,
     conflicts,

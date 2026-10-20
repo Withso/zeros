@@ -18,6 +18,9 @@ import { updateWorkspace } from "./state";
 import type { Branch } from "./types";
 import { refExists } from "./default-branch";
 import { prepareDesignSafeIntegration } from "./design-draft-guard";
+import { repoPathOverlapsDesignRoot } from "../design/path-authority";
+import { withStashLock } from "./stash-lock";
+import { SNAPSHOT_ENV } from "./turns-git";
 
 // isomorphic-git fs handle. Same recipe as diff.ts — pass the main
 // repo's .git directly so the shared ref store resolves cleanly.
@@ -339,15 +342,177 @@ export interface ContinueOnNewBranchOptions {
   mergedSha?: string;
 }
 
+export interface ContinueOnNewBranchResult {
+  branch: string;
+  /** Paths whose carried edits overlap the target; left unmerged to resolve. */
+  conflicts: string[];
+}
+
+function nulPaths(stdout: string): string[] {
+  return stdout.split("\0").filter(Boolean);
+}
+
+async function unmergedPaths(cwd: string): Promise<string[]> {
+  const { stdout } = await runGit(
+    cwd,
+    ["diff", "--name-only", "--diff-filter=U", "-z"],
+    { readOnly: true },
+  );
+  return [...new Set(nulPaths(stdout))];
+}
+
+/** Files on disk at paths `target` adds. Git refuses to overwrite untracked
+ * files in a full checkout, but a sparse checkout (Working folders) overwrites
+ * them silently. Ignored files keep Git's overwrite behaviour; the Design guard
+ * protects ignored drafts. */
+async function filesInTheWay(cwd: string, target: string): Promise<string[]> {
+  const { stdout } = await runGit(
+    cwd,
+    ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", "HEAD", target],
+    { readOnly: true },
+  );
+  const present: string[] = [];
+  for (const added of nulPaths(stdout)) {
+    try {
+      await fs.promises.lstat(path.join(cwd, ...added.split("/")));
+      present.push(added);
+    } catch (error) {
+      // A file where the target needs a directory is in the way as well.
+      if ((error as NodeJS.ErrnoException).code === "ENOTDIR") present.push(added);
+    }
+  }
+  if (present.length === 0) return [];
+  const ignored = await runGit(cwd, ["check-ignore", "-z", "--stdin"], {
+    input: present.join("\0"),
+    readOnly: true,
+  }).then(
+    ({ stdout: out }) => new Set(nulPaths(out)),
+    // Exit 1 means none is ignored; an unknown answer keeps every path.
+    () => new Set<string>(),
+  );
+  return present.filter((candidate) => !ignored.has(candidate));
+}
+
+/** True when a staged or unstaged tracked edit touches a path the switch to
+ * `target` changes, which is what makes a plain `checkout -b` refuse. */
+async function trackedEditsOverlap(
+  cwd: string,
+  target: string,
+): Promise<boolean> {
+  const [{ stdout: staged }, { stdout: unstaged }, { stdout: changed }] =
+    await Promise.all([
+      runGit(cwd, ["diff", "--cached", "--name-only", "-z", "--no-renames"], {
+        readOnly: true,
+      }),
+      runGit(cwd, ["diff", "--name-only", "-z", "--no-renames"], {
+        readOnly: true,
+      }),
+      runGit(
+        cwd,
+        ["diff", "--name-only", "-z", "--no-renames", "HEAD", target],
+        { readOnly: true },
+      ),
+    ]);
+  const edited = [...nulPaths(staged), ...nulPaths(unstaged)];
+  return nulPaths(changed).some((candidate) =>
+    edited.some((edit) => repoPathOverlapsDesignRoot(candidate, edit)),
+  );
+}
+
+/** Switch to `branch` at `target`, merging the tracked edits that overlap the
+ * target three-way (Git's `checkout -m`); genuine overlaps stay unmerged.
+ * Untracked files are left in place, and Git refuses before touching the
+ * checkout when one is in the way. Edits arrive unstaged. Whenever the switch
+ * leaves conflicts or stops partway, the prior edits stay in the stash list. */
+async function carryEditsOntoNewBranch(
+  ws: { path: string; repoRoot: string },
+  branch: string,
+  target: string,
+): Promise<string[]> {
+  const cwd = ws.path;
+  const keep = (saved: string) =>
+    withStashLock(ws.repoRoot, () =>
+      runGit(
+        cwd,
+        [
+          "stash",
+          "store",
+          "-m",
+          `Zeros: changes before continuing on ${branch}`,
+          saved,
+        ],
+        { env: SNAPSHOT_ENV },
+      ),
+    ).then(
+      () => true,
+      () => false,
+    );
+  const head = async () =>
+    (
+      await runGit(cwd, ["rev-parse", "--verify", "HEAD^{commit}"], {
+        readOnly: true,
+      })
+    ).stdout.trim();
+  const before = await head();
+  // Index + tracked working files, recorded without changing either.
+  const saved = (
+    await runGit(cwd, ["stash", "create"], { env: SNAPSHOT_ENV })
+  ).stdout.trim();
+  if (!/^[0-9a-f]{40,64}$/.test(saved)) {
+    throw new GitError({
+      code: "GIT_COMMAND_FAILED",
+      message: "Could not record the uncommitted changes to carry.",
+      remediation: "Retry Continue on a new branch.",
+    });
+  }
+  // Current Git refuses `checkout -m` with staged entries and older Git drops
+  // them; unstage first so every version carries the same edits.
+  await runGit(cwd, ["reset", "-q"]);
+  try {
+    await runGit(cwd, ["checkout", "-m", "-b", branch, target]);
+  } catch (error) {
+    // Git normally refuses before touching the checkout: put the staging back
+    // exactly. A path-limited reset keeps sparse skip-worktree entries, which
+    // `read-tree` would turn into apparent deletions.
+    await runGit(cwd, ["reset", "-q", `${saved}^2`, "--", "."]).catch(
+      () => undefined,
+    );
+    const untouched =
+      (await head().catch(() => null)) === before &&
+      (await runGit(cwd, ["diff", "--quiet", saved, "--"], {
+        readOnly: true,
+      }).then(
+        () => true,
+        () => false,
+      ));
+    if (untouched) throw error;
+    const stored = await keep(saved);
+    throw new GitError({
+      code: "GIT_COMMAND_FAILED",
+      message: "Continue on a new branch stopped partway through.",
+      remediation: stored
+        ? `Your uncommitted changes were saved to the Git stash list as commit ${saved}.`
+        : `Your uncommitted changes are saved as commit ${saved}; apply it with git stash apply ${saved}.`,
+      context: { saved, target },
+      cause: error,
+    });
+  }
+  const conflicts = await unmergedPaths(cwd);
+  // A conflicted binary file keeps only the target's bytes on disk.
+  if (conflicts.length > 0) await keep(saved);
+  return conflicts;
+}
+
 /** "Continue" after a merged PR (2026-07-19, PR-island): start the NEXT unit
  *  of work in the SAME worktree. Creates + checks out a fresh generated branch
- *  from the latest target branch, keeps chats and compatible uncommitted work,
- *  and resets the workspace row to a PR-less, in-progress state — the PR row then
- *  renders in Create-PR mode again. The old branch ref is left in place (its
- *  PR history stays reachable). */
+ *  from the latest target branch, keeps chats and uncommitted work, and resets
+ *  the workspace row to a PR-less, in-progress state — the PR row then renders
+ *  in Create-PR mode again. Edits the target also changed are merged
+ *  three-way; overlaps are returned as conflicts. The old branch ref is left
+ *  in place (its PR history stays reachable). */
 export async function continueOnNewBranch(
   opts: ContinueOnNewBranchOptions,
-): Promise<{ branch: string }> {
+): Promise<ContinueOnNewBranchResult> {
   const ws = getWorkspace(opts.workspaceId);
   const { remote } = resolveRepoGit(ws.repoRoot);
   const baseBranch = opts.baseBranch ?? ws.baseBranch;
@@ -414,7 +579,25 @@ export async function continueOnNewBranch(
     target: startRef,
     operation: "Continue on a new branch",
     comparison: "tree-transition",
+    carryDirtyDesign: true,
   });
+  if ((await unmergedPaths(ws.path)).length > 0) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "This workspace has unresolved conflicts.",
+      remediation:
+        "Resolve the conflicted files, then continue on a new branch.",
+    });
+  }
+  const inTheWay = await filesInTheWay(ws.path, startCommit);
+  if (inTheWay.length > 0) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `Continue on a new branch would overwrite ${inTheWay.length} uncommitted file(s) that the target branch adds.`,
+      remediation: `Move, rename or delete them, then retry: ${inTheWay.slice(0, 5).join(", ")}${inTheWay.length > 5 ? ", …" : ""}`,
+      context: { paths: inTheWay.slice(0, 20), target: startCommit },
+    });
+  }
 
   // Allocated against the repo's used-set, not generated blind. Until
   // 2026-07-29 this called generateBranchName() and leaned entirely on the
@@ -425,9 +608,16 @@ export async function continueOnNewBranch(
   // `checkout -b` (not -B): never reset an existing branch. The allocator can
   // still lose a race with a concurrent create, and -b makes git refuse rather
   // than silently move someone else's ref. Git carries compatible index/
-  // worktree changes across the switch and aborts before switching if target
-  // changes would overwrite them.
-  await runGit(ws.path, ["checkout", "-b", branch, startCommit]);
+  // worktree changes across the switch (staging intact) and aborts before
+  // switching if target changes would overwrite them; only then are the
+  // overlapping edits merged onto the target instead.
+  let conflicts: string[] = [];
+  try {
+    await runGit(ws.path, ["checkout", "-b", branch, startCommit]);
+  } catch (error) {
+    if (!(await trackedEditsOverlap(ws.path, startCommit))) throw error;
+    conflicts = await carryEditsOntoNewBranch(ws, branch, startCommit);
+  }
   updateWorkspace(opts.workspaceId, {
     branch,
     prNumber: null,
@@ -438,7 +628,7 @@ export async function continueOnNewBranch(
     // guard would preserve.
     status: "in-progress",
   });
-  return { branch };
+  return { branch, conflicts };
 }
 
 export interface DeleteBranchOptions {

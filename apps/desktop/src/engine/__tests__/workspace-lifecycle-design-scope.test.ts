@@ -18,7 +18,9 @@ type WorkspaceRequest = Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>;
 type Targets = readonly { workspaceId: string; designDirectory: string }[];
 interface Internals {
   cloudWorker: unknown;
-  workspace: { handle(op: string): Promise<unknown> };
+  workspace: {
+    handle(op: string, params?: Record<string, unknown>): Promise<unknown>;
+  };
   agents: {
     suspendSessionTools(workspaceId?: string): () => void;
     suspendPooledUtilityWorkspaceTerritory(workspaceRoot: string): void;
@@ -50,6 +52,12 @@ const managed = {
   archivedAt: null,
   placement: "local",
 };
+// Another managed worktree of the same repository.
+const sibling = {
+  ...managed,
+  id: "ws_sibling-owner",
+  path: "/tmp/zeros-lifecycle-design-scope/sibling",
+};
 
 function engine(port: number): Internals {
   const state = new ZerosEngine({
@@ -58,7 +66,7 @@ function engine(port: number): Internals {
   }) as unknown as Internals;
   vi.spyOn(gitState, "getWorkspaceById").mockImplementation(
     (id: string) =>
-      (id === managed.id ? managed : null) as ReturnType<
+      ([managed, sibling].find((owner) => owner.id === id) ?? null) as ReturnType<
         typeof gitState.getWorkspaceById
       >,
   );
@@ -79,6 +87,39 @@ function request(op: string, workspaceId: string): WorkspaceRequest {
 
 function client(): TransportClient {
   return { id: "desktop", kind: "local", send: vi.fn(), close: vi.fn() };
+}
+
+/** Hold the first archive in the service; record every op that reaches it. */
+function holdArchive(state: Internals) {
+  const handled: string[] = [];
+  let finishArchive: (() => void) | undefined;
+  vi.mocked(state.workspace.handle).mockImplementation(
+    async (op: string, params?: Record<string, unknown>) => {
+      handled.push(`${op}:${String(params?.workspaceId)}`);
+      if (op === "workspace.archive")
+        await new Promise<void>((resolve) => {
+          finishArchive = resolve;
+        });
+      return { ok: true };
+    },
+  );
+  return {
+    handled,
+    started: () => vi.waitFor(() => expect(finishArchive).toBeTypeOf("function")),
+    finish: () => finishArchive!(),
+  };
+}
+
+function stubCloudTerritoryRetirement(state: Internals) {
+  vi.spyOn(state.agents, "suspendPooledUtilityWorkspaceTerritory").mockReturnValue();
+  vi.spyOn(state.agents, "retirePooledUtilityWorkspaceTerritory").mockResolvedValue();
+  vi.spyOn(state.agents, "resumePooledUtilityWorkspaceTerritory").mockReturnValue();
+  vi.spyOn(state.agents, "assertWorkspaceDesignAuthorityRetirementsProven").mockReturnValue();
+  vi.spyOn(state.setup, "stopForWorkspaceTerritoryAndProve").mockResolvedValue();
+  vi.spyOn(state.runs, "stopForWorkspaceTerritoryAndProve").mockResolvedValue();
+  return vi
+    .spyOn(state, "retireCodeAgentSessionsForTerritoryChange")
+    .mockResolvedValue();
 }
 
 describe("workspace lifecycle Design scope (Local)", () => {
@@ -144,6 +185,64 @@ describe("workspace lifecycle Design scope (Local)", () => {
       expect.objectContaining({ type: "WORKSPACE_ERROR" }),
     );
     expect(scopes).toEqual([managed.id, managed.id]);
+  });
+
+  it("does not queue one workspace's lifecycle behind another's", async () => {
+    const state = engine(29_977);
+    vi.spyOn(state.agents, "suspendSessionTools").mockReturnValue(() => {});
+    const held = holdArchive(state);
+    const receiver = client();
+
+    const archive = state.handleWorkspaceMessage(
+      request("workspace.archive", managed.id),
+      receiver,
+    );
+    await held.started();
+    // Restoring several archived workspaces at once used to run strictly one
+    // after another, so later restores waited for every earlier one.
+    const restore = state.handleWorkspaceMessage(
+      request("workspace.restore", sibling.id),
+      receiver,
+    );
+    await vi.waitFor(() =>
+      expect(held.handled).toContain(`workspace.restore:${sibling.id}`),
+    );
+    held.finish();
+    await Promise.all([archive, restore]);
+    expect(receiver.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "WORKSPACE_ERROR" }),
+    );
+  });
+
+  it("keeps owner lifecycles ordered around an app-wide Design owner change", async () => {
+    const state = engine(29_978);
+    vi.spyOn(state.agents, "suspendSessionTools").mockReturnValue(() => {});
+    const held = holdArchive(state);
+    const receiver = client();
+
+    const archive = state.handleWorkspaceMessage(
+      request("workspace.archive", managed.id),
+      receiver,
+    );
+    await held.started();
+    const global = state.withGlobalDesignTerritoryTransition(async () => {
+      held.handled.push("global");
+    });
+    const restore = state.handleWorkspaceMessage(
+      request("workspace.restore", sibling.id),
+      receiver,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The app-wide change waits for the running lifecycle; a lifecycle that
+    // arrived after it waits for the app-wide change.
+    expect(held.handled).toEqual([`workspace.archive:${managed.id}`]);
+    held.finish();
+    await Promise.all([archive, global, restore]);
+    expect(held.handled).toEqual([
+      `workspace.archive:${managed.id}`,
+      "global",
+      `workspace.restore:${sibling.id}`,
+    ]);
   });
 
   it("keeps the app-wide gate for a lifecycle request without a managed owner", async () => {
@@ -254,6 +353,34 @@ describe("workspace lifecycle Design scope (cloud worker)", () => {
     expect(
       retired.mock.calls.every(([workspaceId]) => workspaceId === managed.id),
     ).toBe(true);
+  });
+
+  it("does not queue one workspace's cloud lifecycle behind another's", async () => {
+    const state = engine(29_979);
+    state.cloudWorker = { version: 1 };
+    stubCloudTerritoryRetirement(state);
+    const held = holdArchive(state);
+    const receiver = client();
+
+    const archive = state.handleWorkspaceMessage(
+      request("workspace.archive", managed.id),
+      receiver,
+      true,
+    );
+    await held.started();
+    const restore = state.handleWorkspaceMessage(
+      request("workspace.restore", sibling.id),
+      receiver,
+      true,
+    );
+    await vi.waitFor(() =>
+      expect(held.handled).toContain(`workspace.restore:${sibling.id}`),
+    );
+    held.finish();
+    await Promise.all([archive, restore]);
+    expect(receiver.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "WORKSPACE_ERROR" }),
+    );
   });
 
   it("keeps the primary checkout's lifecycle request on its existing gate", async () => {

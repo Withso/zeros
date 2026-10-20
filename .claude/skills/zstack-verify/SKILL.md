@@ -152,6 +152,11 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   test cannot signal or inspect the server's processes. Reproduce connection
   races at the protocol layer, for example an in-test TCP relay that holds
   client bytes, and assert that the race window was actually open.
+- In a sparse checkout (Working folders), `git checkout -b` and `checkout -m`
+  overwrite an untracked file at a path the target adds and only warn, and
+  `git read-tree <tree>` clears skip-worktree bits so excluded folders look
+  deleted. Test branch switches in a sparse checkout too, and restore an index
+  with `git reset -q <tree> -- .`.
 - Adding or renaming a file under an audited directory such as `docs/` also
   needs the expected list in `scripts/__tests__/repository-layout.test.ts`.
   `pnpm ci:plan` only selects the lane, so run that test before pushing. When

@@ -199,6 +199,11 @@ export async function prepareDesignSafeIntegration(opts: {
   /** Git's built-in autostash and hard reset can remove a Design draft even
    * when the target commit itself has no Design delta. */
   rejectAnyDirtyDesign?: boolean;
+  /** The caller switches with Git's own overwrite checks and merges
+   * overlapping tracked edits three-way, so a tracked or untracked draft is
+   * carried rather than rewritten. Ignored drafts remain protected because
+   * checkout silently overwrites ignored files. */
+  carryDirtyDesign?: boolean;
 }): Promise<string> {
   const { stdout: targetOut } = await runGit(
     opts.path,
@@ -272,6 +277,36 @@ export async function prepareDesignSafeIntegration(opts: {
     }
   }
   if (records.length === privateSettings.length) return target;
+
+  if (opts.carryDirtyDesign) {
+    const settingsRecords = new Set<string>(privateSettings);
+    const ignored = records
+      .filter(
+        (record) => record.startsWith("!! ") && !settingsRecords.has(record),
+      )
+      .map((record) => record.slice(3));
+    if (ignored.length === 0) return target;
+    changedPaths ??= await changedPathsForIntegration(
+      opts.path,
+      target,
+      opts.comparison ?? "merge-side",
+    );
+    const overwritten = changedPaths.filter((candidate) =>
+      ignored.some((draft) => repoPathOverlapsDesignRoot(candidate, draft)),
+    );
+    if (overwritten.length === 0) return target;
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `${opts.operation} would overwrite an ignored Design draft.`,
+      remediation:
+        "Move those ignored Design files out of the checkout or stop ignoring and commit them, then retry.",
+      context: {
+        workspaceId: opts.workspaceId,
+        designPaths: overwritten.slice(0, 20),
+        target,
+      },
+    });
+  }
 
   if (opts.rejectAnyDirtyDesign) {
     throw new GitError({

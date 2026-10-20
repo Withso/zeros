@@ -1157,6 +1157,11 @@ export class ZerosEngine {
   private globalDesignTerritoryTransitionCount = 0;
   private globalDesignTerritoryTransitionTail: Promise<void> =
     Promise.resolve();
+  /** In-flight transitions of single managed owners. Different owners run
+   * concurrently; an app-wide transition waits for every one of them. */
+  private readonly ownerDesignTerritoryTransitionTurns = new Set<
+    Promise<void>
+  >();
   /** Agent sessionId → the running coalesced message list — the accumulator the
    *  shared applyUpdate folds chunks into, so the engine upserts only the rows
    *  that changed on each chunk. */
@@ -6090,8 +6095,7 @@ export class ZerosEngine {
       const turn = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const previous = this.globalDesignTerritoryTransitionTail;
-      this.globalDesignTerritoryTransitionTail = previous.then(() => turn);
+      const previous = this.enqueueGlobalDesignTerritoryTransition(turn);
       this.globalDesignTerritoryTransitionCount += 1;
       try {
         await previous;
@@ -6119,8 +6123,7 @@ export class ZerosEngine {
     const turn = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const previous = this.globalDesignTerritoryTransitionTail;
-    this.globalDesignTerritoryTransitionTail = previous.then(() => turn);
+    const previous = this.enqueueGlobalDesignTerritoryTransition(turn);
     this.globalDesignTerritoryTransitionCount += 1;
     const admittedStarts = [
       ...new Set([
@@ -6184,8 +6187,7 @@ export class ZerosEngine {
       const turn = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const previous = this.globalDesignTerritoryTransitionTail;
-      this.globalDesignTerritoryTransitionTail = previous.then(() => turn);
+      const previous = this.enqueueOwnerDesignTerritoryTransition(turn);
       try {
         for (const target of ordered) {
           const workspace = getWorkspaceById(target.workspaceId);
@@ -6221,6 +6223,7 @@ export class ZerosEngine {
         const resumeTools = ordered.map((target) => this.agents.suspendSessionTools(target.workspaceId));
         try { return await mutation(); } finally { resumeTools.forEach((resume) => resume()); }
       } finally {
+        this.ownerDesignTerritoryTransitionTurns.delete(turn);
         release();
         this.releaseDesignTerritoryOwners(validated);
       }
@@ -6280,8 +6283,7 @@ export class ZerosEngine {
       const turn = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const previous = this.globalDesignTerritoryTransitionTail;
-      this.globalDesignTerritoryTransitionTail = previous.then(() => turn);
+      const previous = this.enqueueOwnerDesignTerritoryTransition(turn);
       const admittedStarts = [
         ...new Set([
           ...ordered.flatMap((target) => [
@@ -6341,6 +6343,7 @@ export class ZerosEngine {
         }
         return await mutation();
       } finally {
+        this.ownerDesignTerritoryTransitionTurns.delete(turn);
         release();
       }
     } finally {
@@ -6349,6 +6352,28 @@ export class ZerosEngine {
       }
       this.releaseDesignTerritoryOwners(validated);
     }
+  }
+
+  /** Queue an app-wide transition behind every earlier transition. */
+  private enqueueGlobalDesignTerritoryTransition(
+    turn: Promise<void>,
+  ): Promise<void> {
+    const previous = Promise.all([
+      this.globalDesignTerritoryTransitionTail,
+      ...this.ownerDesignTerritoryTransitionTurns,
+    ]).then(() => undefined);
+    this.globalDesignTerritoryTransitionTail = previous.then(() => turn);
+    return previous;
+  }
+
+  /** A single owner's transition waits only for earlier app-wide ones, so
+   * restoring or archiving several workspaces does not run them one by one.
+   * Same-owner requests stay serialized by designTerritoryTransitions. */
+  private enqueueOwnerDesignTerritoryTransition(
+    turn: Promise<void>,
+  ): Promise<void> {
+    this.ownerDesignTerritoryTransitionTurns.add(turn);
+    return this.globalDesignTerritoryTransitionTail;
   }
 
   private designTerritoryOwnerReleased(): Promise<void> {

@@ -1,10 +1,32 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+const gitFault = vi.hoisted(() => ({
+  checkoutMerge: null as
+    | null
+    | ((cwd: string, target: string) => Promise<void>),
+}));
+vi.mock("../git-exec", async (original) => {
+  const actual = await original<typeof import("../git-exec")>();
+  return {
+    ...actual,
+    runGit: async (...call: Parameters<typeof actual.runGit>) => {
+      const [cwd, args] = call;
+      const fault = gitFault.checkoutMerge;
+      if (fault && args[0] === "checkout" && args[1] === "-m") {
+        gitFault.checkoutMerge = null;
+        await fault(cwd, args[args.length - 1]!);
+      }
+      return actual.runGit(...call);
+    },
+  };
+});
+
+import { GitError } from "../errors";
 import {
   checkoutBranch,
   closeState,
@@ -59,6 +81,7 @@ describe("branch ops", () => {
   });
 
   afterEach(async () => {
+    gitFault.checkoutMerge = null;
     closeState();
     setStateRootForTesting(null);
     try {
@@ -552,5 +575,318 @@ describe("branch ops", () => {
     );
     expect(status).toContain("M  README.md");
     expect(status).toContain("wip.txt");
+  });
+
+  describe("continueOnNewBranch with an uncommitted Design draft", () => {
+    const DESIGN = "Zeros - Design";
+    const designToml =
+      'format = "zeros-design"\nversion = 3\nid = "design_0123456789abcdef0123456789abcdef"\ncanvas = "canvas.json"\n';
+    // One page per line, with a block of unchanged lines between `pages` and
+    // `foundation`, so separate edits to each merge cleanly.
+    const canvas = (opts: { page2?: boolean; theme?: string } = {}) =>
+      [
+        "{",
+        '  "version": 2,',
+        '  "id": "main",',
+        '  "title": "Design",',
+        '  "pages": [',
+        opts.page2
+          ? '    { "id": "page_1", "title": "Page 1", "frames": ["frame_1"], "folder": "page-1" },\n    { "id": "page_2", "title": "Page 2", "frames": ["frame_2"], "folder": "page-2" }'
+          : '    { "id": "page_1", "title": "Page 1", "frames": ["frame_1"], "folder": "page-1" }',
+        "  ],",
+        '  "frames": {',
+        '    "frame_1": { "kind": "html", "source": "page-1/frame.html" }',
+        "  },",
+        '  "foundation": {',
+        `    "theme": "${opts.theme ?? "light"}"`,
+        "  }",
+        "}",
+        "",
+      ].join("\n");
+    const git = async (cwd: string, ...args: string[]) =>
+      (await execFileAsync("git", args, { cwd })).stdout;
+    async function writeDesign(root: string, files: Record<string, string>) {
+      for (const [relative, body] of Object.entries(files)) {
+        const file = path.join(root, DESIGN, ...relative.split("/"));
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(file, body);
+      }
+    }
+    const readDesign = (root: string, relative: string) =>
+      readFile(path.join(root, DESIGN, ...relative.split("/")), "utf8");
+
+    /** A squash-merged Design PR, then a teammate's newer Design commit on
+     *  main, then local Design work started after the merge. */
+    async function mergedDesignWorkspace(mainChange: Record<string, string>) {
+      const ws = getWorkspace(workspaceId);
+      const feature = {
+        "meta/design.toml": designToml,
+        "meta/canvas.json": canvas(),
+        "page-1/frame.html": "<main>page 1</main>\n",
+      };
+      await writeDesign(ws.path, feature);
+      await git(ws.path, "add", DESIGN);
+      await git(ws.path, "commit", "-q", "-m", "design feature");
+      await writeDesign(repoRoot, feature);
+      await git(repoRoot, "add", DESIGN);
+      await git(repoRoot, "commit", "-q", "-m", "squash merge");
+      await writeDesign(repoRoot, mainChange);
+      await git(repoRoot, "add", DESIGN);
+      await git(repoRoot, "commit", "-q", "-m", "teammate design change");
+      await git(repoRoot, "push", "-q", "origin", "main");
+      const mergedHead = (await git(repoRoot, "rev-parse", "HEAD")).trim();
+      updateWorkspace(workspaceId, {
+        prNumber: 7,
+        prState: "merged",
+        prUrl: "https://example.com/x/y/pull/7",
+        status: "done",
+      });
+      return { ws, mergedHead };
+    }
+
+    it("carries the draft when main changed other Design files", async () => {
+      const { ws, mergedHead } = await mergedDesignWorkspace({
+        "page-1/frame.html": "<main>page 1, revised on main</main>\n",
+      });
+      await writeDesign(ws.path, {
+        "meta/canvas.json": canvas({ page2: true }),
+        "page-2/frame.html": "<main>page 2 draft</main>\n",
+      });
+
+      const result = await continueOnNewBranch({ workspaceId });
+
+      expect(result.conflicts).toEqual([]);
+      expect((await git(ws.path, "rev-parse", "HEAD")).trim()).toBe(mergedHead);
+      expect(getWorkspace(workspaceId)).toMatchObject({
+        branch: result.branch,
+        prNumber: null,
+        status: "in-progress",
+      });
+      expect(await readDesign(ws.path, "meta/canvas.json")).toBe(
+        canvas({ page2: true }),
+      );
+      expect(await readDesign(ws.path, "page-2/frame.html")).toBe(
+        "<main>page 2 draft</main>\n",
+      );
+      expect(await readDesign(ws.path, "page-1/frame.html")).toBe(
+        "<main>page 1, revised on main</main>\n",
+      );
+    });
+
+    it("merges a draft edit with main's change to the same canvas", async () => {
+      const { ws, mergedHead } = await mergedDesignWorkspace({
+        "meta/canvas.json": canvas({ theme: "dark" }),
+      });
+      await writeDesign(ws.path, {
+        "meta/canvas.json": canvas({ page2: true }),
+        "page-2/frame.html": "<main>page 2 draft</main>\n",
+      });
+      // Staged edits are carried too (as unstaged changes).
+      await git(ws.path, "add", `${DESIGN}/meta/canvas.json`);
+
+      const result = await continueOnNewBranch({ workspaceId });
+
+      expect(result.conflicts).toEqual([]);
+      expect((await git(ws.path, "rev-parse", "HEAD")).trim()).toBe(mergedHead);
+      expect(
+        (await git(ws.path, "rev-parse", "--abbrev-ref", "HEAD")).trim(),
+      ).toBe(result.branch);
+      expect(await readDesign(ws.path, "meta/canvas.json")).toBe(
+        canvas({ page2: true, theme: "dark" }),
+      );
+      expect(await readDesign(ws.path, "page-2/frame.html")).toBe(
+        "<main>page 2 draft</main>\n",
+      );
+      expect(await git(ws.path, "status", "--porcelain=v1")).toContain(
+        ` M "${DESIGN}/meta/canvas.json"`,
+      );
+      expect(await git(ws.path, "stash", "list")).toBe("");
+    });
+
+    it("leaves a genuine overlap as a conflict instead of refusing", async () => {
+      const { ws, mergedHead } = await mergedDesignWorkspace({
+        "meta/canvas.json": canvas({ theme: "dark" }),
+      });
+      await writeDesign(ws.path, {
+        "meta/canvas.json": canvas({ theme: "sepia" }),
+      });
+
+      const result = await continueOnNewBranch({ workspaceId });
+
+      expect(result.conflicts).toEqual([`${DESIGN}/meta/canvas.json`]);
+      expect((await git(ws.path, "rev-parse", "HEAD")).trim()).toBe(mergedHead);
+      expect(getWorkspace(workspaceId).branch).toBe(result.branch);
+      const merged = await readDesign(ws.path, "meta/canvas.json");
+      expect(merged).toContain('"theme": "dark"');
+      expect(merged).toContain('"theme": "sepia"');
+      // Both sides stay in the index for the normal conflict resolution flow.
+      expect(
+        await git(ws.path, "ls-files", "-u", "--", `${DESIGN}/meta/canvas.json`),
+      ).not.toBe("");
+      // The exact pre-Continue edits remain recoverable as well.
+      const [saved] = (
+        await git(ws.path, "stash", "list", "--format=%H %gs")
+      ).split("\n");
+      expect(saved).toContain(
+        `Zeros: changes before continuing on ${result.branch}`,
+      );
+      expect(
+        await git(ws.path, "show", `${saved!.split(" ")[0]}:${DESIGN}/meta/canvas.json`),
+      ).toBe(canvas({ theme: "sepia" }));
+    });
+
+    it("refuses without changing anything when an untracked file is in the way", async () => {
+      const { ws } = await mergedDesignWorkspace({
+        "meta/canvas.json": canvas({ theme: "dark" }),
+        "page-2/frame.html": "<main>page 2 from main</main>\n",
+      });
+      const before = getWorkspace(workspaceId);
+      await writeDesign(ws.path, {
+        "meta/canvas.json": canvas({ page2: true }),
+        "page-2/frame.html": "<main>page 2 draft</main>\n",
+      });
+      await git(ws.path, "add", `${DESIGN}/meta/canvas.json`);
+      const headBefore = (await git(ws.path, "rev-parse", "HEAD")).trim();
+
+      await expect(continueOnNewBranch({ workspaceId })).rejects.toThrow();
+
+      expect((await git(ws.path, "rev-parse", "HEAD")).trim()).toBe(headBefore);
+      expect(getWorkspace(workspaceId)).toMatchObject({
+        branch: before.branch,
+        prNumber: 7,
+        status: "done",
+      });
+      expect(await readDesign(ws.path, "meta/canvas.json")).toBe(
+        canvas({ page2: true }),
+      );
+      expect(await readDesign(ws.path, "page-2/frame.html")).toBe(
+        "<main>page 2 draft</main>\n",
+      );
+      // The staged edit is still staged; nothing was left in the stash list.
+      expect(await git(ws.path, "status", "--porcelain=v1")).toContain(
+        `M  "${DESIGN}/meta/canvas.json"`,
+      );
+      expect(await git(ws.path, "stash", "list")).toBe("");
+    });
+
+    /** Working folders: a sparse checkout holding only the Design folder,
+     *  with `other/` excluded. */
+    async function sparseDesignWorkspace(mainChange: Record<string, string>) {
+      const ws = getWorkspace(workspaceId);
+      for (const root of [ws.path, repoRoot]) {
+        await mkdir(path.join(root, "other"), { recursive: true });
+        await writeFile(path.join(root, "other", "keep.txt"), "outside\n");
+        await git(root, "add", "other");
+        await git(root, "commit", "-q", "-m", "other folder");
+      }
+      const merged = await mergedDesignWorkspace(mainChange);
+      await git(ws.path, "sparse-checkout", "set", "--cone", DESIGN);
+      return merged;
+    }
+
+    it("protects an untracked file in a sparse checkout, where Git would overwrite it", async () => {
+      const { ws } = await sparseDesignWorkspace({
+        "page-2/frame.html": "<main>page 2 from main</main>\n",
+      });
+      await writeDesign(ws.path, {
+        "page-2/frame.html": "<main>page 2 draft</main>\n",
+      });
+
+      await expect(continueOnNewBranch({ workspaceId })).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        context: { paths: [`${DESIGN}/page-2/frame.html`] },
+      });
+      expect(await readDesign(ws.path, "page-2/frame.html")).toBe(
+        "<main>page 2 draft</main>\n",
+      );
+    });
+
+    it("restores staging exactly, sparse entries included, when Git refuses the merge", async () => {
+      const { ws } = await sparseDesignWorkspace({
+        "meta/canvas.json": canvas({ theme: "dark" }),
+      });
+      await writeDesign(ws.path, { "meta/canvas.json": canvas({ page2: true }) });
+      await git(ws.path, "add", `${DESIGN}/meta/canvas.json`);
+      const headBefore = (await git(ws.path, "rev-parse", "HEAD")).trim();
+      // Git refuses before touching anything (for example, a lost branch race).
+      gitFault.checkoutMerge = async () => {
+        throw new GitError({
+          code: "GIT_COMMAND_FAILED",
+          message: "fatal: a branch with that name already exists",
+        });
+      };
+
+      await expect(continueOnNewBranch({ workspaceId })).rejects.toMatchObject({
+        message: "fatal: a branch with that name already exists",
+      });
+
+      expect((await git(ws.path, "rev-parse", "HEAD")).trim()).toBe(headBefore);
+      expect(await git(ws.path, "ls-files", "-t", "--", "other/keep.txt")).toBe(
+        "S other/keep.txt\n",
+      );
+      const status = await git(ws.path, "status", "--porcelain=v1");
+      expect(status).not.toContain("other/keep.txt");
+      expect(status).toContain(`M  "${DESIGN}/meta/canvas.json"`);
+      expect(await readDesign(ws.path, "meta/canvas.json")).toBe(
+        canvas({ page2: true }),
+      );
+      expect(await git(ws.path, "stash", "list")).toBe("");
+    });
+
+    it("keeps the draft in the stash list if Git stops partway through the merge", async () => {
+      const { ws } = await mergedDesignWorkspace({
+        "meta/canvas.json": canvas({ theme: "dark" }),
+      });
+      await writeDesign(ws.path, {
+        "meta/canvas.json": canvas({ theme: "sepia" }),
+      });
+      const before = getWorkspace(workspaceId);
+      // Git resets the files to the target before its three-way merge; an
+      // internal merge error then exits 128 with the edits off disk.
+      gitFault.checkoutMerge = async (cwd, target) => {
+        await git(cwd, "read-tree", "-u", "--reset", target);
+        throw new GitError({
+          code: "GIT_COMMAND_FAILED",
+          message: "fatal: simulated merge failure",
+        });
+      };
+
+      await expect(continueOnNewBranch({ workspaceId })).rejects.toMatchObject({
+        message: "Continue on a new branch stopped partway through.",
+      });
+      expect(getWorkspace(workspaceId)).toMatchObject({
+        branch: before.branch,
+        prNumber: 7,
+      });
+
+      const [stash] = (
+        await git(ws.path, "stash", "list", "--format=%H %gs")
+      ).split("\n");
+      expect(stash).toContain("Zeros: changes before continuing on");
+      const saved = stash!.split(" ")[0]!;
+      expect(await git(ws.path, "show", `${saved}:${DESIGN}/meta/canvas.json`)).toBe(
+        canvas({ theme: "sepia" }),
+      );
+    });
+
+    it("still refuses to overwrite an ignored Design draft", async () => {
+      const { ws } = await mergedDesignWorkspace({
+        "page-2/frame.html": "<main>page 2 from main</main>\n",
+      });
+      await writeFile(
+        path.join(ws.path, ".gitignore"),
+        `${DESIGN}/page-2/\n`,
+      );
+      await writeDesign(ws.path, {
+        "page-2/frame.html": "<main>ignored page 2 draft</main>\n",
+      });
+
+      await expect(continueOnNewBranch({ workspaceId })).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+      });
+      expect(await readDesign(ws.path, "page-2/frame.html")).toBe(
+        "<main>ignored page 2 draft</main>\n",
+      );
+    });
   });
 });

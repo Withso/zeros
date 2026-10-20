@@ -1,0 +1,9 @@
+{
+  "id": "continue-carries-uncommitted-design-draft",
+  "kind": "replay",
+  "area": "engine-git",
+  "fixedBy": "pr:659",
+  "symptom": "Continue after a merged PR failed with \"Continue on a new branch changes Design territory while this workspace has a live uncommitted Design draft\" whenever main had changed any Design file, even ones the draft did not touch.",
+  "rule": "Carry uncommitted work through Git's own per-path checks plus a three-way merge of overlapping tracked edits; guard only ignored drafts and files at paths the target adds, and test the switch in a sparse checkout too (zstack-verify gotchas).",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/git/__tests__/branch.test.ts"
+}

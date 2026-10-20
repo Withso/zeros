@@ -634,7 +634,16 @@ export function PrStatusIsland({
               mergedSha: data?.pr?.mergeCommitSha ?? undefined,
             });
             notifyWorkspacesChanged(workspace.repoSlug);
-            toast.success(`Continuing on ${res.branch}`);
+            // Uncommitted edits are carried; ones the target also changed
+            // can come back as conflicts (older engines omit the list).
+            const conflicts = res.conflicts ?? [];
+            if (conflicts.length > 0) {
+              toast.warning(`Continuing on ${res.branch} with conflicts`, {
+                description: `${conflicts.length} file(s) have conflict markers — resolve them in the worktree. Your previous edits are also in the Git stash list.`,
+              });
+            } else {
+              toast.success(`Continuing on ${res.branch}`);
+            }
             break;
           }
         }

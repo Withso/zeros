@@ -2123,15 +2123,16 @@ export async function bridgeWorkspaceArchive(
 export async function bridgeWorkspaceContinueOnNewBranch(
   bridge: RuntimeClient,
   args: { workspaceId: string; baseBranch?: string; mergedSha?: string },
-): Promise<{ branch: string }> {
+): Promise<{ branch: string; conflicts?: string[] }> {
   // Fetching the target is bounded engine-side but can outlive the default
   // request budget on a slow remote, so use the create-class timeout.
+  // `conflicts` lists carried edits left unmerged; older engines omit it.
   return (await workspaceOp(
     bridge,
     "workspace.continueOnNewBranch",
     { ...args },
     60_000,
-  )) as { branch: string };
+  )) as { branch: string; conflicts?: string[] };
 }
 
 export async function bridgeWorkspaceRestore(
