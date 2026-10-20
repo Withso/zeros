@@ -4,7 +4,7 @@ import { WORKSPACE_RESOURCE_USAGE_CAPABILITY } from "@zeros/protocol/workspace-r
 import { isCloudGithubWriteOperation } from "@zeros/protocol/github-auth";
 import { RuntimeClient, type ConnectionStatus } from "./ws-client";
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
-import { retryableCloudStopError, type CloudAgentConnection, type CloudConversationAttachment, type CloudCommandStop } from "./cloud-agent-connection";
+import { retryableCloudStopError, type CloudAgentConnection, type CloudConversationAttachment, type CloudCommandStop, type CloudCommandObservation } from "./cloud-agent-connection";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { CloudHistoryRestoreTracker, type CloudHistoryRestoreTicket } from "../../state/cloud-transcript-cache";
 import { CloudHistoryRestoreMetadataSchema, type CloudHistoryRestoreMetadata, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
@@ -136,6 +136,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private readonly refusedAdmissions = new Map<string, RefusedAdmission>();
   private readonly commandStops = new WeakMap<CloudCommandStop, Promise<BridgeMessage>>();
   private readonly stoppingCommands = new Set<AbortController>();
+  private readonly commandPrompts = new WeakMap<CloudCommandObservation, Promise<BridgeMessage>>();
+  private readonly observingCommands = new Set<AbortController>();
   private readonly speculative = new Map<string, ReturnType<typeof setTimeout>>();
   private ongoingOpens = 0;
   private readonly historyIntents = new Map<string, number>();
@@ -1248,6 +1250,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     this.claimPeer(cloudWorkspaceKey(target));
     if (message.type === "AGENT_CANCEL") return this.observeCloudStop(target, message, options);
+    if (message.type === "AGENT_PROMPT") return this.observeCloudPrompt(target, message, options);
     const entry = await this.peer(target);
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed before dispatch");
@@ -1280,6 +1283,115 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"].includes(String(incoming.type)) && typeof incoming.chatId === "string")
       this.checkpointCloudTranscript(incoming.chatId);
     return incoming as unknown as BridgeMessage;
+  }
+
+  /** Explicit Retry first recovers an unconfirmed original command. A retained
+   * terminal receipt permits a separate user attempt; missing ownership never
+   * permits an implicit send, grant, Resume or wake. */
+  async recoverCloudPrompt(chatId: string, turnId: string, agentId: string): Promise<BridgeMessage | null> {
+    const target = parseCloudScopedId(chatId);
+    if (!target) throw new Error("Cloud command owner is unavailable");
+    const message = { type: "AGENT_PROMPT" as const, chatId, userMessageId: turnId, agentId, prompt: [] };
+    let knownTerminal = false;
+    const response = await this.observeCloudPrompt(target, message, { timeoutMs: 0 }, true,
+      command => { knownTerminal = command.terminal === "failed" || command.terminal === "cancelled"; });
+    // A successful result only reconciles stale UI. Even a known failed or
+    // cancelled result must be read under current custody before a separate
+    // explicit attempt is allowed. The initial connection shares the bound.
+    return knownTerminal && (response.type === "AGENT_PROMPT_FAILED" ||
+      response.type === "AGENT_PROMPT_COMPLETE" && response.stopReason === "cancelled") ? null : response;
+  }
+
+  private observeCloudPrompt(target: CloudWorkspaceTarget, message: Message,
+    options: number | RequestOptions, recoveryOnly = false,
+    retained?: (command: CloudCommandObservation) => void): Promise<BridgeMessage> {
+    const signal = typeof options === "object" ? options.signal : undefined;
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const first = this.peers.get(cloudWorkspaceKey(target));
+    let command = first && !first.retired
+      ? first.agents?.preparePrompt(cloudOutgoing(first.scope, message as WireRecord), recoveryOnly) : undefined;
+    if (command) retained?.(command);
+    const existing = command && this.commandPrompts.get(command);
+    if (existing) return existing;
+    const epoch = this.accountEpoch, identity = this.identity(target), controller = new AbortController();
+    const current = () => !this.closed && epoch === this.accountEpoch && identity === this.identity(target) &&
+      this.routing.canAccess?.(target) !== false && !controller.signal.aborted;
+    const abort = () => controller.abort(signal?.reason ?? new Error("Cloud command observation ended"));
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    // Bound silence, not the lifetime of healthy accepted work. Each exact
+    // authenticated receipt resets this budget, including a queued receipt.
+    let timer: ReturnType<typeof setTimeout> | undefined, finished = false;
+    const observed = () => {
+      if (finished || !current()) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(Object.assign(
+        new Error("The cloud command outcome is unknown. Reconnect to check its original result."),
+        { code: "cloud_command_uncertain" })), 60_000);
+    };
+    observed();
+    let rejectAborted!: (error: unknown) => void;
+    const aborted = new Promise<never>((_, reject) => { rejectAborted = reject; });
+    void aborted.catch(() => {});
+    const abortedNow = () => rejectAborted(controller.signal.reason);
+    controller.signal.addEventListener("abort", abortedNow, { once: true });
+    if (controller.signal.aborted) abortedNow();
+    this.observingCommands.add(controller);
+    let flight!: Promise<BridgeMessage>;
+    flight = (async (): Promise<BridgeMessage> => {
+      let entry = first;
+      for (;;) {
+        controller.signal.throwIfAborted();
+        if (!current()) throw new Error("Cloud account or workspace changed before command recovery");
+        try {
+          entry = await Promise.race([this.peer(target), aborted]);
+          if (!current()) throw new Error("Cloud account or workspace changed before command recovery");
+          this.assertCurrent(entry);
+          const native = cloudOutgoing(entry.scope, message as WireRecord);
+          if (!command) {
+            command = entry.agents?.preparePrompt(native, recoveryOnly);
+            if (command) {
+              retained?.(command);
+              const pending = this.commandPrompts.get(command);
+              if (pending && pending !== flight) return await Promise.race([pending, aborted]);
+              this.commandPrompts.set(command, flight);
+            }
+          }
+          if (recoveryOnly && !command) throw new Error("Reopen this cloud chat to check its original command");
+          const response = await Promise.race([command && entry.agents
+            ? entry.agents.continuePrompt(command, native, controller.signal, observed)
+            : (async () => {
+              const requestOptions = { ...(typeof options === "object" ? options : { timeoutMs: options }), signal: controller.signal };
+              return await entry!.agents?.request(native, requestOptions) ?? await entry!.client.request(native as Message, requestOptions);
+            })(), aborted]);
+          if (!current()) throw new Error("Cloud account or workspace changed before command recovery");
+          this.assertCurrent(entry);
+          const mapped = entry.agents ? entry.agents.incoming(response as unknown as WireRecord) : response as unknown as WireRecord;
+          if (!mapped) throw new Error("Cloud execution changed before the response arrived");
+          const incoming = cloudIncoming(entry.scope, mapped);
+          if (typeof incoming.chatId === "string") this.checkpointCloudTranscript(incoming.chatId);
+          return incoming as unknown as BridgeMessage;
+        } catch (error) {
+          if (!current() || !command?.submitted || !(retryableCloudStopError(error) ||
+              error instanceof Error && error.message === "command_not_found" ||
+              error instanceof CloudRuntimeAccessError && error.category === "transient")) throw error;
+          if (entry && entry.client.status !== "connected") this.retirePeer(entry);
+        }
+        await new Promise<void>(resolve => {
+          const done = () => { clearTimeout(delay); controller.signal.removeEventListener("abort", done); resolve(); };
+          const delay = setTimeout(done, 1000);
+          controller.signal.addEventListener("abort", done, { once: true });
+          if (controller.signal.aborted) done();
+        });
+      }
+    })().finally(() => {
+      finished = true; clearTimeout(timer); signal?.removeEventListener("abort", abort);
+      controller.signal.removeEventListener("abort", abortedNow);
+      this.observingCommands.delete(controller);
+      if (command && this.commandPrompts.get(command) === flight) this.commandPrompts.delete(command);
+    });
+    if (command) this.commandPrompts.set(command, flight);
+    return flight;
   }
 
   private observeCloudStop(target: CloudWorkspaceTarget, message: Message,
@@ -1521,6 +1633,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   clearCloudConnections(): void {
     this.accountEpoch++;
+    for (const controller of this.observingCommands) controller.abort(new Error("Cloud account changed before command recovery"));
     for (const controller of this.stoppingCommands) controller.abort(new Error("Cloud account changed before Stop confirmation"));
     this.historyRestore.setAccount(String(this.accountEpoch));
     this.nativeHistoryRestore.setAccount(String(this.accountEpoch));

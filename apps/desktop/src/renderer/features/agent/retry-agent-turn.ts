@@ -70,6 +70,7 @@ interface RetryDependencies {
     | "prepareForSend"
     | "ensureSession"
     | "sendPrompt"
+    | "recoverCloudPrompt"
   >;
   getChat(id: string): ChatThread | undefined;
   /** Publish route and destination in the same synchronous store transition. */
@@ -111,6 +112,12 @@ export async function retryAgentTurn(
   if (request.newChat && sourceSession.agentRole === "design") return;
   pending.add(chatId);
   try {
+    if (isCloudWorkspace(source.folder)) {
+      // Unknown acceptance is still the original command. Observe it before
+      // preparing a destination, encoding attachments or publishing a fork.
+      if (await deps.sessions.recoverCloudPrompt(chatId, prompt.id)) return;
+      if (!ownsSource()) return;
+    }
     const destination = request.newChat ? createForkedChat(source) : source;
     const transcript = request.newChat
       ? readRetryTranscript(source, prompt, request.events)

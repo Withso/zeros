@@ -1410,8 +1410,8 @@ function AgentChatBody({
         (currentSlot?.messages.length ?? 0) === 0 &&
         chatThread.title === "Untitled";
       if (pristine) {
-        agentSessions.closeSession(chatId);
-        updateChatSettings({
+        const { navigationVersion, activeChatId } = useWorkspaceStore.getState();
+        const apply = () => updateChatSettings({
           agentId: sel.agentId,
           agentName: sel.agentName || null,
           model: sel.model,
@@ -1422,6 +1422,15 @@ function AgentChatBody({
           prePlanModeId: undefined,
           sessionId: undefined,
         });
+        const closing = agentSessions.closeSession(chatId);
+        if (closing) {
+          void closing.then((confirmed) => {
+            const state = useWorkspaceStore.getState(), current = state.chats.find((row) => row.id === chatId);
+            if (confirmed && current?.folder === chatThread.folder && current.agentId === chatThread.agentId &&
+                current.updatedAt === chatThread.updatedAt && state.navigationVersion === navigationVersion &&
+                state.activeChatId === activeChatId) apply();
+          }).catch(() => {});
+        } else apply();
         return;
       }
       const fresh: ChatThread = {
@@ -1743,16 +1752,20 @@ function AgentChatBody({
             createdAt: Date.now(),
             updatedAt: Date.now(),
           };
+          const { navigationVersion, activeChatId } = useWorkspaceStore.getState();
           // ADD_CHAT also sets the new chat active → navigation. Archiving the
           // old chat AFTERWARD leaves it non-active, so focus stays on the new
           // one (no replacement-neighbor selection like the tab-close path).
-          dispatch({
-            type: "ADD_CHAT",
-            chat: fresh,
-            recordWorkspaceActivity: true,
-          });
-          agentSessions.closeSession(chatId);
-          dispatch({ type: "ARCHIVE_CHAT", id: chatId });
+          const finish = (deferred = false) => {
+            const state = useWorkspaceStore.getState(), current = state.chats.find((row) => row.id === chatId);
+            if (!current || current.archived || current.folder !== chatThread.folder || current.agentId !== chatThread.agentId) return;
+            if (!deferred || state.navigationVersion === navigationVersion && state.activeChatId === activeChatId)
+              dispatch({ type: "ADD_CHAT", chat: fresh, recordWorkspaceActivity: true });
+            dispatch({ type: "ARCHIVE_CHAT", id: chatId });
+          };
+          const closing = agentSessions.closeSession(chatId);
+          if (closing) void closing.then((confirmed) => { if (confirmed) finish(true); }).catch(() => {});
+          else finish();
           return true;
         }
         default:

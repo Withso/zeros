@@ -108,6 +108,14 @@ admission and snapshot reads restore controls. A missing attachment rejects a pr
 can fall through to the native session protocol; account reset and access
 revocation discard the retained selections.
 
+Prompt observation stays above replacement transports. Reconnect and Retry of
+an unconfirmed send read the original command under its retained custody; they
+do not obtain another grant, resume the queue or enqueue another body. Exact
+authenticated receipts reset a 60-second silence bound, so a healthy long turn
+can continue. A successful original result only reconciles its transcript.
+A separate explicit attempt requires a freshly confirmed failed/cancelled
+terminal receipt; changed identity or uncertainty cannot authorize another send.
+
 An explicit cloud Stop retains one operation ID and the original command until
 its exact receipt is succeeded, failed or cancelled. A paused queue ACK, an
 unknown outcome, a provider terminal event or a replacement socket cannot clear
@@ -133,6 +141,13 @@ one Stop and be observed to completion; a lost reply requires visible recovery
 instead of a potentially unsafe conversation-wide replay. Local Personal and
 organization-local cancellation are unchanged. Navigation, app shutdown and
 transport disposal never synthesize a Stop.
+
+Explicit cloud tab close joins that same Stop for active or unconfirmed work,
+then validates the conversation's close ACK before detaching and archiving.
+Missing execution routes still require an exact conversation ACK. Failure keeps
+the tab and queued payloads available. The final archive rechecks owner,
+navigation and surviving pane neighbors; a late reply cannot select a removed
+tab or override later navigation. Local close keeps its synchronous behavior.
 
 Organization provider settings select a cloud workspace and use the worker's
 agent registry plus the credential API. Saving a cloud API key or Claude setup

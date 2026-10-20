@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/platform/bridge/cloud-agent-connection.ts",
+  "before": "        type: \"AGENT_SESSION_CLOSED\",\n        agentId: owner.agentId,\n        chatId: owner.id,",
+  "after": "        type: \"AGENT_SESSION_CLOSED\",\n        agentId: owner.agentId,"
+}

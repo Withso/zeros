@@ -3,11 +3,15 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { cloudScopedId, parseCloudScopedId, parseCloudWorkspaceKey, isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { hasBackgroundAgentWork, loadedBackgroundTaskState } from "../background-task-state";
 import * as lifecycle from "../session-reload-lifecycle";
+import { closeActivityForSession, closeRouteForSession } from "../session-close-lifecycle";
+import { invalidateTranscriptRequest } from "../transcript-retention";
 import { agentSessionHasActiveWork, BLANK, useSessionsStore } from "../sessions-store";
 import type { AgentSessionState } from "../use-agent-session";
+import { lastUserPrompt } from "../auth-prompt-recovery";
+import { classifyRpcError } from "../../../platform/bridge/failure";
 
 const CHAT = "11111111-1111-4111-8111-111111111111";
 const CLOUD = "cloud://22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333";
@@ -20,16 +24,25 @@ const REVOKED = { version: 1, actor: "agent-code", backend: "cloud-worker", stat
 const file = new URL("../sessions-provider.tsx", import.meta.url);
 const ast = ts.createSourceFile(file.pathname, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let cancelSource = "";
+let closeSource = "", disposeSource = "", recoverSource = "", failureSource = "";
 function visit(node: ts.Node) {
+  if (ts.isFunctionDeclaration(node) && node.name?.getText(ast) === "failureFromAgentError") failureSource = node.getText(ast);
   if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "cancel" &&
       node.initializer && ts.isCallExpression(node.initializer)) {
     cancelSource = node.initializer.arguments[0].getText(ast);
+  }
+  if (ts.isVariableDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer)) {
+    if (node.name.getText(ast) === "closeSession") closeSource = node.initializer.arguments[0].getText(ast);
+    if (node.name.getText(ast) === "disposeAll") disposeSource = node.initializer.arguments[0].getText(ast);
+    if (node.name.getText(ast) === "recoverCloudPrompt") recoverSource = node.initializer.arguments[0].getText(ast);
   }
   ts.forEachChild(node, visit);
 }
 visit(ast);
 expect(cancelSource).not.toBe("");
-const code = ts.transpileModule(`globalThis.cancel = ${cancelSource};`, {
+expect(closeSource).not.toBe(""); expect(disposeSource).not.toBe("");
+expect(recoverSource).not.toBe("");
+const code = ts.transpileModule(`${failureSource}; globalThis.cancel = ${cancelSource}; globalThis.closeSession = ${closeSource}; globalThis.disposeAll = ${disposeSource}; globalThis.recoverCloudPrompt = ${recoverSource};`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const chatFile = new URL("../agent-chat.tsx", import.meta.url);
@@ -55,42 +68,232 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function harness(cwd = CLOUD) {
+function harness(cwd = CLOUD, chat = CHAT) {
   const slot: AgentSessionState = {
     ...BLANK, cwd, agentId: "codex", status: "streaming", sessionId: "execution-1", executionId: "execution-1",
     foregroundTurnId: "turn-1", activeTurnStartedAt: 42, messages: [],
   };
-  useSessionsStore.setState({ sessions: { [CHAT]: slot }, executionToChatId: { "execution-1": CHAT },
+  useSessionsStore.setState({ sessions: { [chat]: slot }, executionToChatId: { "execution-1": chat },
     pendingLocalTurns: {}, cancellingChats: new Set() });
   const gate = deferred();
-  const bridge = { request: vi.fn(() => gate.promise), send: vi.fn() };
+  class RecoveryBridge {
+    request = vi.fn(() => gate.promise);
+    send = vi.fn();
+    recoverCloudPrompt = vi.fn(() => gate.promise);
+  }
+  const bridge = new RecoveryBridge(), reconcile = vi.fn(async () => {});
   const followUp = { bubbleId: "follow-up", prompt: [{ type: "text", text: "retained follow-up" }] };
-  const sendQueueRef = { current: new Map([[CHAT, [followUp]]]) };
+  const sendQueueRef = { current: new Map([[chat, [followUp]]]) };
+  const mapRef = () => ({ current: new Map() });
+  const account = { value: 1 };
   const context = vm.createContext({
-    ...lifecycle, isCloudWorkspace, hasBackgroundAgentWork, loadedBackgroundTaskState,
+    ...lifecycle, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey, cloudScopedId, hasBackgroundAgentWork, loadedBackgroundTaskState, agentSessionHasActiveWork,
+    WorkspaceRuntimeClient: RecoveryBridge, lastUserPrompt, classifyRpcError, Error,
+    reconcileChatMessagesRef: { current: reconcile },
+    closeActivityForSession, closeRouteForSession, invalidateTranscriptRequest,
     crypto: { randomUUID }, bridge, getStore: useSessionsStore.getState,
     cancelGenerationsRef: { current: new Map() },
     flushLocalNotificationsRef: { current: vi.fn() },
-    cloudSendPreparationRef: { current: { cancel: vi.fn() } },
-    cloudSendWaitRef: { current: { cancel: vi.fn() } },
+    cloudSendPreparationRef: { current: { cancel: vi.fn(), clear: vi.fn(), has: () => false } },
+    cloudSendWaitRef: { current: { cancel: vi.fn(), clear: vi.fn() } },
     sendingChatsRef: { current: new Set() }, sendQueueRef,
     ensureInFlightRef: { current: new Map() }, loadFlightKeysRef: { current: new Map() },
     loadFlightAdoptOnlyRef: { current: new Map() },
     cloudStopsRef: { current: new Map() },
-    pauseQueue: () => useSessionsStore.getState().patchSession(CHAT, { queuePaused: true }),
+    cloudClosesRef: mapRef(), cloudCatalogGeneration: () => account.value,
+    prebindDirtySessionsRef: mapRef(), prebindGoalSnapshotsRef: mapRef(),
+    prebindBackgroundTasksRef: { current: { clearChat: vi.fn(), clear: vi.fn() } },
+    pendingHydratesRef: { current: new Set() }, hydrateInFlightRef: mapRef(), reconcileInFlightRef: mapRef(),
+    nativeTranscriptSnapshotsRef: mapRef(), cloudFlushRef: mapRef(), queueHeldRef: mapRef(), flushBubbleRef: mapRef(),
+    authPromptsRef: mapRef(), turnProducedOutputRef: mapRef(), announcedDirsRef: mapRef(), promptActivityRef: mapRef(),
+    capabilityRefreshInFlightRef: mapRef(),
+    useWorkspaceStore: { getState: () => ({ chats: [{ id: chat, folder: cwd, agentId: "codex" }] }) },
+    pauseQueue: () => useSessionsStore.getState().patchSession(chat, { queuePaused: true }),
     evictUnretainedTranscripts: vi.fn(), cancelStalledAdmission: vi.fn(), notifyAgentSendFailure: vi.fn(),
   });
   vm.runInContext(code, context);
   return {
-    bridge, gate, followUp, sendQueueRef,
-    cancel: () => (context.cancel as (id: string) => Promise<void>)(CHAT),
-    slot: () => useSessionsStore.getState().sessions[CHAT],
+    bridge, gate, followUp, sendQueueRef, account, context, reconcile,
+    cancel: () => (context.cancel as (id: string) => Promise<void>)(chat),
+    close: () => (context.closeSession as (id: string) => void | Promise<boolean>)(chat),
+    dispose: () => (context.disposeAll as () => void)(),
+    recover: () => (context.recoverCloudPrompt as (chat: string, turn: string) => Promise<boolean>)(chat, "turn-1"),
+    slot: () => useSessionsStore.getState().sessions[chat],
   };
 }
 
 afterEach(() => {
   useSessionsStore.setState({ sessions: {}, executionToChatId: {}, pendingLocalTurns: {}, cancellingChats: new Set() });
   vi.restoreAllMocks();
+});
+
+describe("cloud Retry renderer reconciliation", () => {
+  const completed = { type: "AGENT_PROMPT_COMPLETE", chatId: CHAT, agentId: "codex", turnId: "turn-1", stopReason: "end_turn" };
+  function failedChat(cwd = CLOUD) {
+    const h = harness(cwd);
+    useSessionsStore.getState().patchSession(CHAT, { status: "failed", error: "Connection closed", cloudPromptPending: false,
+      messages: [{ id: "turn-1", kind: "text", role: "user", text: "Original request", createdAt: 42 }] });
+    return h;
+  }
+
+  it("reconciles the original command's transcript before clearing its failed presentation", async () => {
+    const h = failedChat(), history = deferred(); h.reconcile.mockReturnValueOnce(history.promise as Promise<void>);
+    const pending = h.recover(); expect(h.bridge.recoverCloudPrompt).toHaveBeenCalledExactlyOnceWith(CHAT, "turn-1", "codex");
+    h.gate.resolve(completed); await vi.waitFor(() => expect(h.reconcile).toHaveBeenCalledExactlyOnceWith(CHAT));
+    expect(h.slot().status).toBe("failed"); history.resolve(); expect(await pending).toBe(true);
+    expect(h.slot()).toMatchObject({ status: "ready", error: null, activeTurnStartedAt: null });
+    expect(h.bridge.request).not.toHaveBeenCalled(); expect(h.bridge.send).not.toHaveBeenCalled();
+  });
+
+  it("allows a new attempt only when the bridge confirms a prior failed terminal", async () => {
+    const h = failedChat(), pending = h.recover(); h.gate.resolve(null);
+    expect(await pending).toBe(false); expect(h.reconcile).not.toHaveBeenCalled(); expect(h.slot().status).toBe("failed");
+  });
+
+  it("does not clear a newer turn or a pending Stop when an old recovery completes", async () => {
+    const h = failedChat(), pending = h.recover();
+    useSessionsStore.getState().patchSession(CHAT, { foregroundTurnId: "turn-2", status: "streaming", activeTurnStartedAt: 84,
+      cloudStop: { turnId: "turn-2", operationId: "new-stop", state: "pending" } });
+    h.gate.resolve(completed); expect(await pending).toBe(true);
+    expect(h.slot()).toMatchObject({ foregroundTurnId: "turn-2", status: "streaming", cloudStop: { operationId: "new-stop" } });
+    expect(h.reconcile).not.toHaveBeenCalled();
+  });
+
+  it("fences an account change and return while original history is being reconciled", async () => {
+    const h = failedChat(), history = deferred(); h.reconcile.mockReturnValueOnce(history.promise as Promise<void>);
+    const pending = h.recover(); h.gate.resolve(completed); await vi.waitFor(() => expect(h.reconcile).toHaveBeenCalledOnce());
+    h.account.value += 2; history.resolve(); expect(await pending).toBe(true); expect(h.slot().status).toBe("failed");
+  });
+
+  it("keeps an unavailable original receipt visible without a new prompt", async () => {
+    const h = failedChat(), pending = h.recover(); h.gate.reject(new Error("command_not_found"));
+    await expect(pending).rejects.toThrow("command_not_found"); expect(h.slot().status).toBe("failed");
+    expect(h.bridge.request).not.toHaveBeenCalled(); expect(h.bridge.send).not.toHaveBeenCalled();
+  });
+
+  it.each(["/personal/project", "/organization/project"])("leaves %s Retry on the existing Local path", async cwd => {
+    const h = failedChat(cwd); expect(await h.recover()).toBe(false);
+    expect(h.bridge.recoverCloudPrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe("explicit cloud close renderer lifetime", () => {
+  const terminal = { type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT,
+    commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } };
+  const closed = { type: "AGENT_SESSION_CLOSED", agentId: "codex", chatId: CHAT, sessionId: "execution-1", executionId: "execution-1" };
+  const calls = (h: ReturnType<typeof harness>) => h.bridge.request.mock.calls as unknown as Array<[Record<string, unknown>]>;
+
+  it("waits for exact Stop retirement and close acknowledgement before detaching", async () => {
+    const h = harness(), closeAck = deferred();
+    h.bridge.request.mockReturnValueOnce(h.gate.promise).mockReturnValueOnce(closeAck.promise);
+    const pending = h.close();
+    expect(calls(h).map(([message]) => message.type)).toEqual(["AGENT_CANCEL"]);
+    expect(h.slot()?.activeTurnStartedAt).toBe(42);
+    expect(h.sendQueueRef.current.get(CHAT)).toEqual([h.followUp]);
+    h.gate.resolve(terminal); await vi.waitFor(() => expect(h.bridge.request).toHaveBeenCalledTimes(2));
+    expect(calls(h)[1]![0]).toMatchObject({ type: "AGENT_CLOSE_SESSION", chatId: CHAT });
+    expect(h.slot()).toBeDefined();
+    closeAck.resolve(closed); expect(await pending).toBe(true);
+    expect(h.slot()).toBeUndefined(); expect(h.sendQueueRef.current.has(CHAT)).toBe(false);
+  });
+
+  it("joins duplicate close clicks to one Stop and one close", async () => {
+    const h = harness(); h.bridge.request.mockReturnValueOnce(h.gate.promise).mockResolvedValueOnce(closed);
+    const first = h.close(), duplicate = h.close();
+    expect(h.bridge.request).toHaveBeenCalledOnce();
+    h.gate.resolve(terminal);
+    expect(await Promise.all([first, duplicate])).toEqual([true, true]);
+    expect(calls(h).map(([message]) => message.type)).toEqual(["AGENT_CANCEL", "AGENT_CLOSE_SESSION"]);
+  });
+
+  it("keeps the chat and queued payloads after an unconfirmed Stop, then retries its exact operation", async () => {
+    const h = harness(), first = h.close();
+    h.gate.reject(new Error("transport lost")); expect(await first).toBe(false);
+    expect(h.slot()?.cloudStop?.state).toBe("unconfirmed");
+    expect(h.sendQueueRef.current.get(CHAT)).toEqual([h.followUp]);
+    const operation = calls(h)[0]![0].id;
+    h.bridge.request.mockResolvedValueOnce(terminal).mockResolvedValueOnce(closed);
+    expect(await h.close()).toBe(true);
+    expect(calls(h).map(([message]) => message.type)).toEqual(["AGENT_CANCEL", "AGENT_CANCEL", "AGENT_CLOSE_SESSION"]);
+    expect(calls(h)[1]![0].id).toBe(operation);
+  });
+
+  it("does not close a successor when an older Stop confirms", async () => {
+    const h = harness(), pending = h.close();
+    useSessionsStore.getState().patchSession(CHAT, { foregroundTurnId: "turn-2", activeTurnStartedAt: 84,
+      sessionId: "execution-2", executionId: "execution-2", status: "streaming" });
+    h.gate.resolve(terminal); expect(await pending).toBe(false);
+    expect(h.slot()).toMatchObject({ foregroundTurnId: "turn-2", activeTurnStartedAt: 84 });
+    expect(calls(h).map(([message]) => message.type)).toEqual(["AGENT_CANCEL"]);
+  });
+
+  it("does not detach after an account change and return during Stop", async () => {
+    const h = harness(), pending = h.close(); h.account.value += 2;
+    h.gate.resolve(terminal); expect(await pending).toBe(false);
+    expect(h.slot()).toBeDefined();
+    expect(h.slot()).toMatchObject({ activeTurnStartedAt: 42, cloudStop: { state: "pending" } });
+    expect(calls(h).map(([message]) => message.type)).toEqual(["AGENT_CANCEL"]);
+  });
+
+  it("keeps a stopped chat visible if its close acknowledgement is lost", async () => {
+    const h = harness(); h.bridge.request.mockReturnValueOnce(h.gate.promise).mockRejectedValueOnce(new Error("connection closed"));
+    const pending = h.close(); h.gate.resolve(terminal);
+    expect(await pending).toBe(false);
+    expect(h.slot()).toBeDefined(); expect(h.sendQueueRef.current.get(CHAT)).toEqual([h.followUp]);
+    expect(h.slot()?.error).toEqual(expect.stringMatching(/close.*confirmed/i));
+  });
+
+  it("Stops the retained cloud turn even when reconnect has cleared its native route", async () => {
+    const id = cloudScopedId(parseCloudWorkspaceKey(CLOUD)!, CHAT), h = harness(CLOUD, id);
+    useSessionsStore.getState().patchSession(id, { sessionId: null, executionId: null, status: "reconnecting" });
+    h.bridge.request.mockReturnValueOnce(h.gate.promise).mockResolvedValueOnce({ ...closed, chatId: id });
+    const pending = h.close();
+    expect(calls(h).map(([message]) => message.type)).toEqual(["AGENT_CANCEL"]);
+    expect(calls(h)[0]![0]).toMatchObject({ chatId: id, sessionId: cloudScopedId(parseCloudWorkspaceKey(CLOUD)!, `conversation:${CHAT}`) });
+    h.gate.resolve({ ...terminal, result: { ...terminal.result, conversationId: id } });
+    expect(await pending).toBe(true); expect(h.slot()).toBeUndefined();
+  });
+
+  it("refuses a close acknowledgement that identifies another execution", async () => {
+    const h = harness(); h.bridge.request.mockReturnValueOnce(h.gate.promise).mockResolvedValueOnce({
+      type: "AGENT_SESSION_CLOSED", agentId: "codex", sessionId: "other-execution", executionId: "other-execution",
+    });
+    const pending = h.close(); h.gate.resolve(terminal);
+    expect(await pending).toBe(false); expect(h.slot()).toBeDefined();
+  });
+
+  it("keeps a successor attached if it appears while the close acknowledgement waits", async () => {
+    const h = harness(), closeAck = deferred();
+    useSessionsStore.getState().patchSession(CHAT, { status: "ready", foregroundTurnId: null, activeTurnStartedAt: null });
+    h.bridge.request.mockReturnValueOnce(closeAck.promise);
+    const pending = h.close();
+    useSessionsStore.getState().patchSession(CHAT, { executionId: "execution-2", sessionId: "execution-2" });
+    closeAck.resolve(closed); expect(await pending).toBe(false); expect(h.slot()?.executionId).toBe("execution-2");
+  });
+
+  it("keeps a never-dispatched cold cloud close bounded by its acknowledgement", async () => {
+    const h = harness();
+    useSessionsStore.getState().patchSession(CHAT, { status: "idle", foregroundTurnId: null, activeTurnStartedAt: null,
+      sessionId: null, executionId: null });
+    h.bridge.request.mockReturnValueOnce(h.gate.promise);
+    const pending = h.close(); expect(h.slot()).toBeDefined();
+    expect(calls(h).map(([message]) => message.type)).toEqual(["AGENT_CLOSE_SESSION"]);
+    h.gate.resolve({ type: "AGENT_SESSION_CLOSED", agentId: "codex", chatId: CHAT });
+    expect(await pending).toBe(true); expect(h.slot()).toBeUndefined();
+  });
+
+  it("app disposal does not synthesize Stop or close", () => {
+    const h = harness(); h.dispose();
+    expect(h.bridge.request).not.toHaveBeenCalled(); expect(h.bridge.send).not.toHaveBeenCalled();
+  });
+
+  it.each(["/personal/project", "/organization/project"])("keeps %s close synchronous and on its original route", cwd => {
+    const h = harness(cwd); h.bridge.request.mockResolvedValueOnce(closed);
+    expect(h.close()).toBeUndefined();
+    expect(h.slot()).toBeUndefined();
+    expect(calls(h).map(([message]) => message.type)).toEqual(["AGENT_CLOSE_SESSION"]);
+    expect(h.bridge.send).not.toHaveBeenCalled();
+  });
 });
 
 describe("cloud Stop renderer lifetime", () => {

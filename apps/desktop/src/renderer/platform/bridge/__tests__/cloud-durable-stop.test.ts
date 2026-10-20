@@ -22,7 +22,7 @@ afterEach(async () => { for (const dispose of disposals.splice(0)) dispose(); aw
 
 /** Both production adapters are used; only the native authenticated transport
  * is replaced. A replacement peer reads the same durable queue. */
-async function harness(options: { exactStop?: boolean; target?: typeof target; attach?: boolean } = {}) {
+async function harness(options: { exactStop?: boolean; boot?: boolean; target?: typeof target; attach?: boolean } = {}) {
   vi.useFakeTimers();
   const scope = options.target ?? target;
   const route = cloudScopedId(scope, `conversation:${chat}`), chatId = cloudScopedId(scope, chat);
@@ -30,15 +30,17 @@ async function harness(options: { exactStop?: boolean; target?: typeof target; a
   let command: WireRecord | undefined, paused = false, revision = 0;
   let disconnected = false, loseEnqueue = false, lostStops = 0, terminalGeneration = 1;
   let hiddenReads = 0, lostRemovals = 0, claimOnRemoval = false, execution: string | null = "native-execution";
+  let hideSnapshot = false;
   let nextBinding: Partial<typeof binding> = {};
+  let receiptOverride: WireRecord = {};
   const readGate: { wait?: Promise<void> } = {};
   const state = { value: "dispatching" };
-  const requests: WireRecord[] = [], grants = vi.fn(async () => "fixture-grant");
+  const requests: WireRecord[] = [], grants = vi.fn(async () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
   const peers: Array<{ peer: CloudPeer; client: { status: string; executionIdentity: typeof binding & { kind: "cloud" }; send: ReturnType<typeof vi.fn> }; binding: typeof binding }> = [];
   const receipt = () => ({ conversationId: chat, commandId: command?.commandId, position: 1, state: state.value,
     payload: ["queued", "dispatching"].includes(state.value) ? command?.payload : null,
     executionId: state.value === "queued" ? null : execution, generation: terminalGeneration, resultCode: null,
-    createdAt: "2026-10-20T00:00:00Z", updatedAt: "2026-10-20T00:00:01Z" });
+    createdAt: "2026-10-20T00:00:00Z", updatedAt: "2026-10-20T00:00:01Z", ...receiptOverride });
   const snapshotEntry = () => { const { conversationId: _chat, ...entry } = receipt(); return entry; };
   const snapshot = () => ({ version: 1, conversationId: chat, revision, paused,
     pending: command && ["queued", "dispatching"].includes(state.value) ? [snapshotEntry()] : [],
@@ -46,7 +48,8 @@ async function harness(options: { exactStop?: boolean; target?: typeof target; a
   const makePeer = () => {
     const currentBinding = { ...binding, ...scope, ...nextBinding };
     const client = { status: "connected", executionIdentity: { kind: "cloud" as const, ...currentBinding }, send: vi.fn(),
-      supportsEngineCapability: (capability: string) => capability !== "cloud.commandStop.v1" || options.exactStop !== false,
+      supportsEngineCapability: (capability: string) => (capability !== "cloud.commandStop.v1" || options.exactStop !== false) &&
+        (capability !== "cloud.localCommands.v1" || options.boot !== false),
       on: () => () => {}, onStatusChange: () => () => {},
       request: vi.fn(async (message: WireRecord) => {
         requests.push(message);
@@ -55,13 +58,13 @@ async function harness(options: { exactStop?: boolean; target?: typeof target; a
         if (message.op === "chats.list") result = { chats: [], chatDeletions: [] };
         if (["cloudCommands.conversation", "cloudCommands.createConversation"].includes(String(message.op)))
           result = { conversationId: chat, modeRevision: 0, nativeCommandsVersion: 1, permissionModeVersion: 1,
-            cloudTurnProtocolVersion: 1, cloudLocalCommands: currentBinding };
+            cloudTurnProtocolVersion: 1, ...(options.boot !== false ? { cloudLocalCommands: currentBinding } : {}) };
         if (message.op === "cloudEvents.request") result = { snapshot: { conversationId: chat,
           executionId: command && state.value !== "queued" ? "native-execution" : undefined,
           activeTurn: command && state.value === "dispatching" ? { turnId: (command.payload as WireRecord)?.userMessageId, startedAt: 42 } : null,
           messages: [], permissions: [], questions: [] } };
         if (message.op === "cloudCommands.request") {
-          if (input?.kind === "snapshot") result = snapshot();
+          if (input?.kind === "snapshot") result = hideSnapshot ? { ...snapshot(), pending: [], receipts: [] } : snapshot();
           if (input?.kind === "mutate") {
             const mutation = input.mutation as WireRecord, action = mutation.action as WireRecord;
             if (action.kind === "enqueue") {
@@ -115,12 +118,196 @@ async function harness(options: { exactStop?: boolean; target?: typeof target; a
     loseStops: (n: number) => { lostStops = n; }, generation: (n: number) => { terminalGeneration = n; },
     replaceBinding: (patch: Partial<typeof binding>) => { nextBinding = patch; },
     hideReads: (n: number) => { hiddenReads = n; }, loseRemovals: (n: number) => { lostRemovals = n; },
+    hideSnapshot: () => { hideSnapshot = true; paused = true; },
+    overrideReceipt: (patch: WireRecord) => { receiptOverride = patch; },
     claimOnRemoval: () => { claimOnRemoval = true; }, execution: (id: string | null) => { execution = id; }, readGate,
     remoteTurn: (commandId: string, turnId: string) => {
       command = { ...command, commandId, payload: { ...(command?.payload as WireRecord), userMessageId: turnId } }; state.value = "dispatching";
     },
     prompt: scopedPrompt, stop: { ...stop, sessionId: route, executionId: route, chatId }, makePeer };
 }
+
+describe("exact cloud command recovery", () => {
+  it.each(["payload", "position", "createdAt", "generation", "executionId"])("refuses a changed original receipt %s", async field => {
+    const h = await harness(), first = await h.start();
+    const values: WireRecord = { payload: { ...(h.command!.payload as WireRecord), userMessageId: "foreign-turn" },
+      position: 2, createdAt: "2026-10-20T00:00:02Z", generation: 2, executionId: "other-execution" };
+    h.overrideReceipt({ [field]: values[field] }); await h.tick();
+    expect(first.outcome.error).toMatchObject({ code: "cloud_command_target_changed" });
+    expect(first.outcome.result).toBeUndefined(); expect(h.calls("mutate")).toHaveLength(1);
+  });
+
+  it("does not turn a previously failed receipt into permission after it becomes uncertain", async () => {
+    const h = await harness(), first = await h.start(); h.state.value = "failed";
+    await h.tick(); await first.pending; h.state.value = "uncertain";
+    const outcome: { result?: unknown; error?: unknown } = {};
+    const recovery = h.bridge.recoverCloudPrompt(chatId, prompt.userMessageId, "codex")
+      .then(result => { outcome.result = result; }, error => { outcome.error = error; });
+    await h.tick(); await recovery;
+    expect(outcome.error).toMatchObject({ code: "cloud_command_target_changed" }); expect(outcome.result).toBeUndefined();
+    expect(h.calls("mutate")).toHaveLength(1);
+  });
+
+  it("recovers a legacy accepted command without minting another grant", async () => {
+    const h = await harness({ boot: false }), first = await h.start();
+    expect(h.grants).toHaveBeenCalledOnce();
+    h.disconnect(); await h.tick(4000);
+    const duplicate = h.request(prompt); h.state.value = "succeeded"; await h.tick();
+    await Promise.all([first.pending, duplicate.pending]);
+    expect(first.outcome.result).toEqual(duplicate.outcome.result);
+    expect(first.outcome.result).toMatchObject({ type: "AGENT_PROMPT_COMPLETE" });
+    expect(h.grants).toHaveBeenCalledOnce(); expect(h.calls("mutate")).toHaveLength(1);
+    expect(h.calls("read").every(message => !("cloudLocalCommandsVersion" in (message.params as WireRecord)))).toBe(true);
+  });
+
+  it("isolates original-command Retry through A to B to A with equal native IDs", async () => {
+    const a = await harness(), other = { ...target, organizationId: "99999999-9999-4999-8999-999999999999" };
+    const b = await harness({ target: other, attach: false });
+    a.open.mockImplementationOnce(async requested => { expect(requested).toMatchObject(other); return b.makePeer(); });
+    const first = await a.start();
+    await a.bridge.request({ type: "AGENT_NEW_SESSION", chatId: b.prompt.chatId, agentId: "codex", cwd: cloudWorkspaceKey(other), env: { OPENAI_MODEL: "test-model" } });
+    const bRun = a.request(b.prompt); await vi.waitFor(() => expect(b.command).toBeDefined());
+    expect(a.command?.commandId).toBe(b.command?.commandId);
+    b.state.value = "succeeded"; await a.tick(); await bRun.pending;
+    expect(first.outcome).toEqual({});
+    const recovered = a.bridge.recoverCloudPrompt(chatId, prompt.userMessageId, "codex");
+    a.state.value = "succeeded"; await a.tick(); await first.pending;
+    expect(await recovered).toEqual(first.outcome.result);
+    expect(a.calls("mutate")).toHaveLength(1); expect(b.calls("mutate")).toHaveLength(1);
+    expect(a.calls("stop")).toHaveLength(0); expect(b.calls("stop")).toHaveLength(0);
+  });
+
+  it("reconciles a successful cached receipt instead of permitting another send", async () => {
+    const h = await harness(), first = await h.start(); h.state.value = "succeeded";
+    await h.tick(); await first.pending;
+    const recovered = h.bridge.recoverCloudPrompt(chatId, prompt.userMessageId, "codex");
+    await h.tick();
+    expect(await recovered).toMatchObject({ type: "AGENT_PROMPT_COMPLETE" });
+    expect(h.calls("mutate")).toHaveLength(1); expect(h.grants).not.toHaveBeenCalled();
+  });
+
+  it.each(["failed", "cancelled"])("checks fresh custody before allowing a separate explicit attempt after %s", async state => {
+    const h = await harness(), first = await h.start(); h.state.value = state;
+    await h.tick(); await first.pending;
+    const reads = h.calls("read").length;
+    const recovered = h.bridge.recoverCloudPrompt(chatId, prompt.userMessageId, "codex");
+    await h.tick(); expect(await recovered).toBeNull();
+    expect(h.calls("read").length).toBeGreaterThan(reads);
+    expect(h.calls("mutate")).toHaveLength(1);
+  });
+
+  it("refuses a cached retry permission after the replacement writer changes", async () => {
+    const h = await harness(), first = await h.start(); h.state.value = "failed";
+    await h.tick(); await first.pending;
+    h.replaceBinding({ writerEpoch: "99999999-9999-4999-8999-999999999999" });
+    h.peers[0]!.client.status = "disconnected";
+    const outcome: { error?: unknown; result?: unknown } = {};
+    const recovered = h.bridge.recoverCloudPrompt(chatId, prompt.userMessageId, "codex")
+      .then(result => { outcome.result = result; }, error => { outcome.error = error; });
+    await h.tick(); await recovered;
+    expect(outcome.error).toMatchObject({ code: "cloud_command_target_changed" });
+    expect(outcome.result).toBeUndefined(); expect(h.calls("mutate")).toHaveLength(1);
+  });
+
+  it("bounds the first passive connection of an explicit Retry", async () => {
+    const h = await harness(), first = await h.start(); h.disconnect(); h.peers[0]!.client.status = "disconnected";
+    let rejectOpen!: (error: Error) => void;
+    h.open.mockImplementationOnce(() => new Promise((_, reject) => { rejectOpen = reject; }));
+    const outcome: { error?: unknown; result?: unknown } = {};
+    const recovered = h.bridge.recoverCloudPrompt(chatId, prompt.userMessageId, "codex")
+      .then(result => { outcome.result = result; }, error => { outcome.error = error; });
+    try {
+      await h.tick(61_000);
+      expect(outcome.error).toMatchObject({ code: "cloud_command_uncertain" }); expect(outcome.result).toBeUndefined();
+    } finally { rejectOpen(new Error("Fixture connection closed")); h.bridge.dispose(); await Promise.all([first.pending, recovered]); }
+  });
+
+  it("reattaches an accepted command after transport replacement using only reads", async () => {
+    const h = await harness();
+    const first = await h.start();
+    const original = h.command?.commandId;
+    h.disconnect(); await h.tick(6000);
+    expect(first.outcome).toEqual({});
+    expect(h.open).toHaveBeenCalledTimes(2);
+    h.state.value = "succeeded"; await h.tick(); await first.pending;
+    expect(first.outcome.result).toMatchObject({ type: "AGENT_PROMPT_COMPLETE" });
+    expect(h.calls("mutate")).toHaveLength(1);
+    expect(h.calls("read").every(message => (message.params as { request: WireRecord }).request.commandId === original)).toBe(true);
+    expect(h.grants).not.toHaveBeenCalled();
+    expect(h.open.mock.calls.every(([, options]) => !options?.wake)).toBe(true);
+  });
+
+  it("joins Retry after an ambiguous enqueue without a new payload, grant or command", async () => {
+    const h = await harness(); h.loseEnqueue();
+    const first = await h.start();
+    const duplicate = h.request({ ...prompt, prompt: [{ type: "text", text: "changed draft must not resend" }] });
+    await h.tick();
+    expect(first.outcome).toEqual({}); expect(duplicate.outcome).toEqual({});
+    expect(h.calls("mutate")).toHaveLength(1);
+    h.state.value = "succeeded"; await h.tick(); await Promise.all([first.pending, duplicate.pending]);
+    expect(first.outcome.result).toEqual(duplicate.outcome.result);
+    expect(h.calls("mutate")).toHaveLength(1);
+  });
+
+  it("does not resume or enqueue a retained command missing from a paused snapshot", async () => {
+    const h = await harness(); h.loseEnqueue();
+    const first = await h.start(); h.hideSnapshot();
+    const duplicate = h.request({ ...prompt, prompt: [{ type: "text", text: "replacement draft" }] });
+    await h.tick(3000);
+    expect(h.calls("mutate")).toHaveLength(1);
+    expect(h.grants).not.toHaveBeenCalled();
+    h.state.value = "succeeded"; await h.tick(); await Promise.all([first.pending, duplicate.pending]);
+    expect(first.outcome.result).toEqual(duplicate.outcome.result);
+    expect(first.outcome.result).toMatchObject({ type: "AGENT_PROMPT_COMPLETE" });
+  });
+
+  it.each(["generation", "bootId", "writerEpoch", "engineInstanceId", "authorityEpoch"] as const)("refuses observation through a replacement with changed %s", async field => {
+    const h = await harness(), first = await h.start();
+    h.replaceBinding({ [field]: field === "generation" || field === "authorityEpoch" ? 2 : "99999999-9999-4999-8999-999999999999" });
+    h.disconnect(); await h.tick(4000);
+    expect(first.outcome.error).toMatchObject({ code: "cloud_command_target_changed" });
+    expect(first.outcome.result).toBeUndefined();
+    expect(h.calls("mutate")).toHaveLength(1); expect(h.grants).not.toHaveBeenCalled();
+  });
+
+  it("ends missing-receipt recovery within a minute without replaying the command", async () => {
+    const h = await harness(); h.loseEnqueue(); h.hideReads(1000);
+    const first = await h.start(); await h.tick(55_000);
+    expect(first.outcome).toEqual({});
+    await h.tick(6000); await first.pending;
+    expect(first.outcome.error).toMatchObject({ code: "cloud_command_uncertain" });
+    expect(h.calls("mutate")).toHaveLength(1); expect(h.calls("stop")).toHaveLength(0);
+  });
+
+  it("keeps observing a healthy long-running command beyond the recovery budget", async () => {
+    const h = await harness(), first = await h.start(); await h.tick(125_000);
+    expect(first.outcome).toEqual({});
+    h.state.value = "succeeded"; await h.tick(); await first.pending;
+    expect(first.outcome.result).toMatchObject({ type: "AGENT_PROMPT_COMPLETE" });
+    expect(h.calls("mutate")).toHaveLength(1);
+  });
+
+  it("joins Retry while Stop retains the original command through replacement", async () => {
+    const h = await harness(), first = await h.start(), stopping = h.request(stop);
+    await h.tick(); h.disconnect(); await h.tick(4000);
+    const duplicate = h.request(prompt); await h.tick();
+    expect(stopping.outcome).toEqual({}); expect(duplicate.outcome).toEqual({});
+    expect(h.calls("mutate")).toHaveLength(1); expect(h.calls("stop")).toHaveLength(1);
+    h.state.value = "cancelled"; await h.tick(); await Promise.all([first.pending, duplicate.pending, stopping.pending]);
+    expect(first.outcome.result).toEqual(duplicate.outcome.result);
+    expect(first.outcome.result).toMatchObject({ type: "AGENT_PROMPT_COMPLETE", stopReason: "cancelled" });
+  });
+
+  it("fences an old observation after account replacement while its receipt read is held", async () => {
+    const h = await harness(), first = await h.start();
+    let release!: () => void;
+    h.readGate.wait = new Promise<void>(resolve => { release = resolve; });
+    await h.tick(); h.bridge.clearCloudConnections(); h.state.value = "succeeded"; release();
+    await h.tick(); await first.pending;
+    expect(first.outcome.result).toBeUndefined(); expect(first.outcome.error).toBeDefined();
+    expect(h.open).toHaveBeenCalledTimes(1); expect(h.calls("mutate")).toHaveLength(1);
+  });
+});
 
 describe("durable cloud Stop", () => {
   it.each(["dispatching", "uncertain"])("does not retire Stop on a paused ACK while the exact command is %s", async state => {

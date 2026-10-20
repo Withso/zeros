@@ -58,6 +58,7 @@ function harness(initial: Partial<AgentSessionState> = {}) {
     prepareForSend: vi.fn<() => Promise<void> | null>(() => null),
     ensureSession: vi.fn(async () => {}),
     sendPrompt: vi.fn(async () => {}),
+    recoverCloudPrompt: vi.fn(async () => false),
   };
   const dependencies = {
     sessions: sessions as unknown as SessionsActions,
@@ -96,6 +97,30 @@ beforeEach(() => {
 });
 
 describe("explicit failed-turn recovery", () => {
+  it.each([false, true])("observes an unconfirmed cloud command before Retry can prepare or fork (new chat: %s)", async newChat => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const h = harness({ cwd: folder, status: "failed" }); h.chats.set(source.id, { ...source, folder });
+    let confirm!: (handled: boolean) => void;
+    h.sessions.recoverCloudPrompt.mockReturnValueOnce(new Promise(resolve => { confirm = resolve; }));
+    const request = { chatId: source.id, prompt, events: [output], newChat };
+    const first = retryAgentTurn(request, h.dependencies), duplicate = retryAgentTurn(request, h.dependencies);
+    try {
+      expect(h.sessions.recoverCloudPrompt).toHaveBeenCalledExactlyOnceWith(source.id, prompt.id);
+      expect(h.sessions.prepareForSend).not.toHaveBeenCalled(); expect(h.sessions.ensureSession).not.toHaveBeenCalled();
+      expect(h.sessions.sendPrompt).not.toHaveBeenCalled(); expect(h.dependencies.publishChat).not.toHaveBeenCalled();
+    } finally { confirm(true); await Promise.all([first, duplicate]); }
+    expect(h.sessions.sendPrompt).not.toHaveBeenCalled(); expect(encode).not.toHaveBeenCalled();
+  });
+
+  it("never falls through to a fresh send when the original cloud receipt is unavailable", async () => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const h = harness({ cwd: folder, status: "failed" }); h.chats.set(source.id, { ...source, folder });
+    h.sessions.recoverCloudPrompt.mockRejectedValueOnce(new Error("original command unavailable"));
+    await expect(retryAgentTurn({ chatId: source.id, prompt, events: [output], newChat: false }, h.dependencies))
+      .rejects.toThrow("original command unavailable");
+    expect(h.sessions.prepareForSend).not.toHaveBeenCalled(); expect(h.sessions.sendPrompt).not.toHaveBeenCalled();
+  });
+
   describe.each([
     { owner: "Local", folder: "/repo", offWindow: true },
     { owner: "organization-local", folder: "/organization/repo", offWindow: true },
