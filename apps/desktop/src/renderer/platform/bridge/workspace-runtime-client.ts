@@ -120,6 +120,11 @@ interface OpeningPeer {
   consumers: number;
   owner?: WakeOwner;
 }
+interface RefusedAdmission {
+  target: CloudWorkspaceTarget;
+  identity: string;
+  error: CloudRuntimeAccessError;
+}
 
 /** One renderer protocol boundary, multiple independently owned connections.
  * Unscoped host operations remain local. Every cloud operation carries its
@@ -128,6 +133,7 @@ interface OpeningPeer {
 export class WorkspaceRuntimeClient extends RuntimeClient {
   private readonly peers = new Map<string, PeerEntry>();
   private readonly opening = new Map<string, OpeningPeer>();
+  private readonly refusedAdmissions = new Map<string, RefusedAdmission>();
   private readonly speculative = new Map<string, ReturnType<typeof setTimeout>>();
   private ongoingOpens = 0;
   private readonly historyIntents = new Map<string, number>();
@@ -1009,6 +1015,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       return Promise.resolve(existing);
     if (this.closed)
       return Promise.reject(new Error("Workspace connections are closed"));
+    // A new passive consumer is not new authority. Retain typed terminal
+    // admission refusals across mirror/snapshot polls; explicit work may obtain
+    // fresh authority, and account/owner/generation changes retire the refusal.
+    const refused = this.refusedAdmissions.get(key);
+    if (refused?.identity !== identity) this.refusedAdmissions.delete(key);
+    else if (!wake) return Promise.reject(refused.error);
     // Bound sockets and their replay buffers; never evict a potentially live
     // conversation merely because another workspace gained focus.
     if (this.ongoingOpens >= 16 || (!existing && this.peers.size + this.ongoingOpens >= 16))
@@ -1025,6 +1037,15 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (existing && !reusable) this.retirePeer(existing);
     const epoch = this.accountEpoch;
     const controller = new AbortController();
+    const rememberRefusal = (error: unknown) => {
+      if (!(error instanceof CloudRuntimeAccessError) || error.category === "transient" ||
+          epoch !== this.accountEpoch || identity !== this.identity(target) || controller.signal.aborted ||
+          this.closed || this.routing.canAccess?.(target) === false) return;
+      this.refusedAdmissions.delete(key);
+      this.refusedAdmissions.set(key, { target, identity, error });
+      while (this.refusedAdmissions.size > 128)
+        this.refusedAdmissions.delete(this.refusedAdmissions.keys().next().value!);
+    };
     // Publish durable history independently, including while admission/connect
     // is slow. Keep this exact read for initial hydration even after its TTL.
     const history = this.routing.readHistory ? this.warmHistorySnapshot(target) : undefined;
@@ -1045,8 +1066,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           })
         : this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true, wakeIntent, ...(reason ? { reason } : {}) } : {}) });
     }
-    catch (error) { this.ongoingOpens--; return Promise.reject(error); }
+    catch (error) { this.ongoingOpens--; rememberRefusal(error); return Promise.reject(error); }
     const flight = opening
+      .catch(error => {
+        if (this.opening.get(key)?.promise === flight) rememberRefusal(error);
+        throw error;
+      })
       .then(async (opened) => {
         if (owner && opened.generation !== undefined && opened.generation !== this.routing.wakeOwner?.(target)?.generation) {
           if (opened === reusable) this.retirePeer(reusable); else opened.release();
@@ -1063,7 +1088,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           if (opened !== reusable) opened.release();
           throw new Error("Cloud account changed while connecting");
         }
-        if (opened === reusable) { this.assertCurrent(reusable); return reusable; }
+        if (opened === reusable) { this.assertCurrent(reusable); this.refusedAdmissions.delete(key); return reusable; }
         if (cloudWorkspaceKey(opened.scope) !== key) {
           opened.release();
           throw new Error("Cloud connection returned a different workspace");
@@ -1107,6 +1132,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         }
         if (epoch !== this.accountEpoch)
           throw new Error("Cloud account changed while connecting");
+        this.refusedAdmissions.delete(key);
         this.changed(key);
         this.workspaceStatusChanged(key);
         void entry.agents?.refreshAttachments();
@@ -1423,6 +1449,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     this.speculative.clear();
     for (const [key, entry] of this.peers) this.removePeer(key, entry);
     this.opening.clear();
+    this.refusedAdmissions.clear();
     this.historyWarmups.clear();
     this.historyIntents.clear();
     this.projectionCheckpoints.clear();
@@ -1431,6 +1458,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   }
 
   pruneCloudConnections(): void {
+    for (const [key, refused] of this.refusedAdmissions)
+      if (refused.identity !== this.identity(refused.target) || this.routing.canAccess?.(refused.target) === false)
+        this.refusedAdmissions.delete(key);
     for (const [key, pending] of this.opening) {
       if ((pending.owner ? this.continuesWake(pending.target, pending.owner) : pending.identity === this.identity(pending.target)) &&
           (!this.routing.canAccess || this.routing.canAccess(pending.target))) continue;

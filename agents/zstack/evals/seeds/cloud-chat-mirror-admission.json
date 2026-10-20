@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/platform/bridge/workspace-runtime-client.ts",
+  "before": "else if (!wake) return Promise.reject(refused.error);",
+  "after": "else if (!wake) this.refusedAdmissions.delete(key);"
+}
