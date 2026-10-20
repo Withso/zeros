@@ -80,7 +80,7 @@ import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
 import type { CloudConversationSnapshot } from "@zeros/protocol/cloud-events";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, cloudHistoryPresentationContinues,
+import { CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, cachedTranscriptPresentationContinues,
   type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 
 const MAX_STDERR_LINES = 200;
@@ -1431,7 +1431,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const presentation = slot.transcriptPresentation;
       if (!slot.transcriptDirty && slot.status !== "streaming" && presentation?.restoreHead &&
           (authenticated || cloudHistoryFencesMatch(presentation.restoreHead, fence)) &&
-          cloudHistoryPresentationContinues(presentation.restoreHead, fence)) {
+          cachedTranscriptPresentationContinues(presentation, fence)) {
         if (unchanged && cloudHistoryFencesMatch(presentation.restoreHead, fence)) return state;
         return { cloudHistoryRestoreHeads: heads, sessions: { ...state.sessions, [chatId]: { ...slot,
           transcriptState: "loading", transcriptPresentation: { ...presentation, restoreHead: fence },

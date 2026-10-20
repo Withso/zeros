@@ -107,6 +107,22 @@ export function captureCloudTranscriptConfirmation(chatId: string): ((window: Ca
   const confirm = owner ? cloudTranscriptCache.captureConfirmation(owner) : null;
   return confirm ? window => { void confirm(window).catch(() => {}); } : null;
 }
+/** Called only by the reader that verified this native response. The original
+ * receipt, including its peer/account/head, is rechecked after optional disk I/O.
+ * No CP completeness, server revision, or authority is inferred from these rows. */
+export function cacheNativeCloudTranscriptWindow(chatId: string,
+  input: { projection?: unknown; historyHeads?: unknown; messages?: unknown }, isCurrent: () => boolean): void {
+  const owner = ownerForChat(chatId);
+  if (!owner || !isCurrent()) return;
+  try {
+    const metadata = CloudHistoryRestoreMetadataSchema.parse({ projection: input.projection, historyHeads: input.historyHeads });
+    const head = metadata.historyHeads.find(value => value.conversationId === owner.chatId);
+    if (!head || head.deleted || !Array.isArray(input.messages) || input.messages.length === 0) return;
+    const restoreHead = { projection: metadata.projection, conversationId: owner.chatId, head };
+    const confirmed = cloudTranscriptCache.captureConfirmation(owner, isCurrent);
+    void confirmed?.({ recordEpoch: null, revision: 0, cursor: null, messages: input.messages, restoreHead, nativeObservation: true }).catch(() => {});
+  } catch { /* Missing legacy metadata or optional caching cannot break a read. */ }
+}
 export function forgetCloudTranscriptChat(chatId: string): void {
   const owner = ownerForChat(chatId);
   if (owner) void cloudTranscriptCache.prune(owner);
@@ -139,6 +155,7 @@ export async function readCloudTranscriptWithCachedPaint<T>(
   chatId: string,
   authoritative: () => Promise<T>,
   onCached?: (window: CachedTranscriptWindow) => void,
+  isIncomplete?: (page: T) => boolean,
 ): Promise<T> {
   let settled = false;
   let painted: CachedTranscriptWindow | null = null;
@@ -170,7 +187,24 @@ export async function readCloudTranscriptWithCachedPaint<T>(
       ? Promise.resolve().then(() => paint(remembered, "memory"))
       : readCachedCloudTranscriptWindow(chatId).then(window => paint(window, "disk"));
   }
-  try { return await authoritative(); }
+  const finishCachedPaint = async () => {
+    if (!cachedPaint) return;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        cachedPaint.catch(() => {}),
+        new Promise<void>(resolve => { deadline = setTimeout(resolve, 250); }),
+      ]);
+      // Installing the same authenticated head can retire the original disk
+      // read while retaining its exact native presentation on the new token.
+      if (!painted) paint(peekCloudTranscriptWindow(chatId), "memory");
+    } finally { if (deadline !== undefined) clearTimeout(deadline); }
+  };
+  try {
+    const page = await authoritative();
+    if (isIncomplete?.(page)) await finishCachedPaint();
+    return page;
+  }
   catch (error) {
     const status = (error as { status?: unknown } | null)?.status;
     // A newly created conversation may not have reached the passive projection
@@ -190,15 +224,7 @@ export async function readCloudTranscriptWithCachedPaint<T>(
       // already-started exact-owner read a short chance to paint before
       // hydration releases its request identity. A hung native read must not
       // hold the original error indefinitely; finally fences any late paint.
-      if (cachedPaint) {
-        let deadline: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([
-            cachedPaint.catch(() => {}),
-            new Promise<void>(resolve => { deadline = setTimeout(resolve, 250); }),
-          ]);
-        } finally { if (deadline !== undefined) clearTimeout(deadline); }
-      }
+      await finishCachedPaint();
     }
     throw error;
   }

@@ -8,7 +8,7 @@ import type { CloudAgentConnection, CloudConversationAttachment } from "./cloud-
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { CloudHistoryRestoreTracker, type CloudHistoryRestoreTicket } from "../../state/cloud-transcript-cache";
 import { CloudHistoryRestoreMetadataSchema, type CloudHistoryRestoreMetadata, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
-import { installCloudHistoryRestoreMetadata, captureCloudHistoryRestoreRead, assertCloudHistoryRestoreResult } from "../cloud-transcript-cache";
+import { installCloudHistoryRestoreMetadata, captureCloudHistoryRestoreRead, assertCloudHistoryRestoreResult, cacheNativeCloudTranscriptWindow } from "../cloud-transcript-cache";
 import type { CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
 import { relativeWorkspaceFilePath } from "../workspace-file-path";
 import {
@@ -673,7 +673,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       this.historyWorkspaces.set(key, target);
       while (this.historyWorkspaces.size > 32) this.historyWorkspaces.delete(this.historyWorkspaces.keys().next().value!);
     }
-    this.historyReadReceipts.set(snapshot, { source: peer ? "native" : "control-plane", isCurrent: () => {
+    const receipt: CloudHistoryReadReceipt = { source: peer ? "native" : "control-plane", isCurrent: () => {
       try {
         assertAccess();
         const metadata = this.historyMetadata(snapshot), conversations = this.historyConversations(op, params, snapshot);
@@ -689,7 +689,11 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         }
         return true;
       } catch { return false; }
-    } });
+    } };
+    this.historyReadReceipts.set(snapshot, receipt);
+    if (receipt.source === "native" && op === "messages.window" && params.before === undefined && params.limit === 200 && typeof params.chatId === "string")
+      cacheNativeCloudTranscriptWindow(params.chatId, snapshot,
+        () => receipt.isCurrent() && this.history.peekSnapshot(cacheKey).data === snapshot);
     return snapshot;
   }
 

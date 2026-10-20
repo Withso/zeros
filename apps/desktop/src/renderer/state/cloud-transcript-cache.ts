@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { CloudTranscriptOwnerSchema, CloudTranscriptPruneSchema, CachedTranscriptWindowSchema, prepareCachedTranscriptWindow,
   transcriptCacheKey, type CachedTranscriptWindow, type CloudTranscriptOwner, type CloudTranscriptPrune,
-  CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch,
+  CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFencesMatch, cachedTranscriptHasPresentation,
   CloudHistoryRestoreMetadataSchema, cloudHistoryBindingKey,
   continueCachedTranscriptPresentation,
   type CloudHistoryRestoreFence, type CloudHistoryRestoreMetadata,
@@ -68,12 +68,16 @@ export class CloudTranscriptCache {
     return entry.window;
   }
   private acceptsWindow(token: Token, window: CachedTranscriptWindow): boolean {
-    return token.restoreHead ? !!window.restoreHead && cloudHistoryFenceHasTranscript(token.restoreHead) &&
-      cloudHistoryFencesMatch(token.restoreHead, window.restoreHead) : !window.restoreHead;
+    return cachedTranscriptHasPresentation(window) && (token.restoreHead ? !!window.restoreHead &&
+      cloudHistoryFencesMatch(token.restoreHead, window.restoreHead) : !window.restoreHead);
   }
-  private remember(token: Token, window: CachedTranscriptWindow): CachedTranscriptWindow {
+  private remember(token: Token, window: CachedTranscriptWindow, nativeConfirmation = false): CachedTranscriptWindow {
     const key = transcriptCacheKey(token.owner), previous = this.windows.get(key);
-    if (previous && previous.window.recordEpoch === window.recordEpoch && previous.window.revision >= window.revision) return previous.window;
+    // Native rows have no CP revision. Do not compare them with one, let a late
+    // disk/CP receipt overwrite them, or relabel a native read as a checkpoint.
+    if (previous && (previous.window.nativeObservation && !nativeConfirmation ||
+        nativeConfirmation && JSON.stringify(previous.window) === JSON.stringify(window) ||
+        !nativeConfirmation && previous.window.recordEpoch === window.recordEpoch && previous.window.revision >= window.revision)) return previous.window;
     this.windows.delete(key); this.windows.set(key, { window, bytes: new TextEncoder().encode(JSON.stringify(window)).byteLength });
     let bytes = [...this.windows.values()].reduce((total, entry) => total + entry.bytes, 0);
     while (this.windows.size > this.maxEntries || bytes > 24 * 1024 * 1024) {
@@ -173,18 +177,24 @@ export class CloudTranscriptCache {
   }
   /** Capture before a server read. A retired token cannot allocate a fresh
    * owner when that read later completes, including after a chat tombstone. */
-  captureConfirmation(owner: CloudTranscriptOwner): ((input: CachedTranscriptWindow) => Promise<void>) | null {
+  captureConfirmation(owner: CloudTranscriptOwner, isCurrent?: () => boolean): ((input: CachedTranscriptWindow) => Promise<void>) | null {
     const token = this.capture(owner);
-    return token ? input => this.confirmCaptured(token, input) : null;
+    return token ? input => this.confirmCaptured(token, input, isCurrent) : null;
   }
-  private async confirmCaptured(token: Token, input: CachedTranscriptWindow): Promise<void> {
-    if (!this.current(token)) return;
+  private async confirmCaptured(token: Token, input: CachedTranscriptWindow, isCurrent?: () => boolean): Promise<void> {
+    if (!this.current(token) || isCurrent?.() === false || input.nativeObservation && !isCurrent) return;
     const window = prepareCachedTranscriptWindow(input), previous = this.peek(token.owner);
     if (!this.acceptsWindow(token, window)) return;
-    if (previous && previous.recordEpoch === window.recordEpoch && previous.revision > window.revision) return;
-    const remembered = this.remember(token, window);
+    if (previous && !window.nativeObservation && (previous.nativeObservation || previous.recordEpoch === window.recordEpoch && previous.revision > window.revision)) return;
+    const remembered = this.remember(token, window, window.nativeObservation);
+    if (window.nativeObservation && remembered === previous) return;
+    // A live read publishes its head synchronously but must not wait for disk.
+    // Join that existing fence here before consuming its new durable nonce.
+    const pendingFence = this.fenceFlights.get(transcriptCacheKey(token.owner));
+    if (pendingFence) await pendingFence;
+    if (!this.current(token) || isCurrent?.() === false) return;
     if (!token.cacheEpoch || token.restoreHead && !token.historyEpoch) await this.receipt(token);
-    if (!this.current(token) || !token.cacheEpoch || this.peek(token.owner) !== remembered) return;
+    if (!this.current(token) || isCurrent?.() === false || !token.cacheEpoch || this.peek(token.owner) !== remembered) return;
     if (token.restoreHead && !token.historyEpoch) return;
     try {
       if (token.historyEpoch) await this.dependencies.write(token.owner, remembered, token.cacheEpoch, token.historyEpoch);

@@ -73,7 +73,7 @@ import { NativeTranscriptSnapshots } from "./transcript-retention";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudReplyOwnership } from "../../platform/bridge/cloud-runtime-wire";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
-import { cloudHistoryRestoreHead, onCloudHistoryRestoreHead, type CloudHistoryRestoreOrigin } from "../../platform/cloud-transcript-cache";
+import { cloudHistoryRestoreHead, onCloudHistoryRestoreHead, readCachedCloudTranscriptWindow, peekCloudTranscriptWindow, type CloudHistoryRestoreOrigin } from "../../platform/cloud-transcript-cache";
 import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, canReadCloudWorkspace, isCloudWorkspaceLifecyclePending, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
@@ -108,6 +108,8 @@ import {
   clearChat as persistClearChat,
   windowMessages as persistWindowMessages,
   windowMessagesSnapshot as persistMessageWindow,
+  fromPersistedMessage,
+  type AgentMessageWindow,
   persistAuthenticationPrompt,
 } from "./agent-history-client";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
@@ -5781,6 +5783,29 @@ export function AgentSessionsProvider({
               presentCachedLocalTranscript(chatId, cached);
           });
         }
+        const paintCached = (cached: AgentMessageWindow) => {
+          if (!isCurrentTranscriptRequest(hydrateInFlightRef.current, chatId, request) &&
+              !(!bridge && pendingHydratesRef.current.has(chatId))) return;
+          const head = cloudHistoryRestoreHead(chatId);
+          if (cached.messages.length && head && (!cloudHistoryFenceHasTranscript(head) && !(cached.nativeObservation && head.head && !head.head.deleted) ||
+              !cached.restoreHead || !cloudHistoryFencesMatch(cached.restoreHead, head))) return;
+          const fresh = getStore().sessions[chatId];
+          if (!fresh || fresh.transcriptState !== "loading" || fresh.status === "streaming" || fresh.transcriptDirty) return;
+          // A cache may paint a cold slot, but cannot replace a confirmed
+          // or already painted exact-chat snapshot during revalidation.
+          if (fresh.messages.some(message => message.kind !== "text" || !message.queued)) return;
+          const deduped = reconcileHistoryMessages(cached.messages);
+          const next = [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))];
+          getStore().patchSession(chatId, {
+            // Provisional data never satisfies admission/send/completion.
+            // Queued bubbles remain owned by the existing send path.
+            messages: messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next,
+            transcriptState: "loading",
+            transcriptPresentation: deduped.length ? { source: "cache", restoreHead: cached.restoreHead, nativeObservation: cached.nativeObservation } : null,
+            transcriptDirty: false,
+            hasTranscript: head && !cloudHistoryFenceHasTranscript(head) ? head.head?.deleted !== true : deduped.length > 0,
+          });
+        };
         // The slot is cold, so this read DECIDES what the user sees. An empty
         // result is only trustworthy on a connected bridge — transport absence
         // and mid-respawn requests reject. Park the chat and let the
@@ -5788,32 +5813,16 @@ export function AgentSessionsProvider({
         // of committing a blank transcript that nothing ever repairs.
         if (!bridge || (!parseCloudScopedId(chatId) && bridge.status !== "connected")) {
           pendingHydratesRef.current.add(chatId);
+          if (parseCloudScopedId(chatId)) void readCachedCloudTranscriptWindow(chatId).then(window => {
+            if (window && peekCloudTranscriptWindow(chatId) === window) paintCached({ source: "cache", restoreHead: window.restoreHead,
+              nativeObservation: window.nativeObservation,
+              messages: window.messages.map(fromPersistedMessage).filter((message): message is AgentMessage => message !== null) });
+          });
           return;
         }
         try {
           const page = await persistMessageWindow(chatId, HYDRATE_WINDOW, undefined,
-            parseCloudScopedId(chatId) ? cached => {
-              if (!isCurrentTranscriptRequest(hydrateInFlightRef.current, chatId, request)) return;
-              const head = cloudHistoryRestoreHead(chatId);
-              if (cached.messages.length && head && (!cloudHistoryFenceHasTranscript(head) ||
-                  !cached.restoreHead || !cloudHistoryFencesMatch(cached.restoreHead, head))) return;
-              const fresh = getStore().sessions[chatId];
-              if (!fresh || fresh.transcriptState !== "loading" || fresh.status === "streaming" || fresh.transcriptDirty) return;
-              // A cache may paint a cold slot, but cannot replace a confirmed
-              // or already painted exact-chat snapshot during revalidation.
-              if (fresh.messages.some(message => message.kind !== "text" || !message.queued)) return;
-              const deduped = reconcileHistoryMessages(cached.messages);
-              const next = [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))];
-              getStore().patchSession(chatId, {
-                // Provisional data never satisfies admission/send/completion.
-                // Queued bubbles remain owned by the existing send path.
-                messages: messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next,
-                transcriptState: "loading",
-                transcriptPresentation: deduped.length ? { source: "cache", restoreHead: cached.restoreHead } : null,
-                transcriptDirty: false,
-                hasTranscript: head && !cloudHistoryFenceHasTranscript(head) ? head.head?.deleted !== true : deduped.length > 0,
-              });
-            } : undefined);
+            parseCloudScopedId(chatId) ? paintCached : undefined);
           if (
             !isCurrentTranscriptRequest(
               hydrateInFlightRef.current,
@@ -5877,7 +5886,7 @@ export function AgentSessionsProvider({
             : deduped;
           // A Local cached paint keeps every row the engine confirms unchanged,
           // so validation re-renders only what actually differs.
-          const confirmed = localChat && fresh.transcriptPresentation
+          const confirmed = fresh.transcriptPresentation
             ? retainMessageReferences(fresh.messages, next)
             : messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next;
           getStore().setSession(chatId, {

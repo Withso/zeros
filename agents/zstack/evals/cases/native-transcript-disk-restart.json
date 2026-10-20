@@ -1,0 +1,9 @@
+{
+  "id": "native-transcript-disk-restart",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pending",
+  "symptom": "A cloud transcript read from the live engine was not persisted to disk, so restart showed empty history until remote revalidation, especially when CP capture was incomplete.",
+  "rule": "Reopen a real native disk cache through production hydration; retain exact-owner native presentation without promoting incomplete heads or borrowing replacement peer authority (zstack-review).",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/__tests__/cloud-transcript-cache-native.test.ts"
+}
