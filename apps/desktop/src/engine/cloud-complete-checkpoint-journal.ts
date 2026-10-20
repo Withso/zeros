@@ -67,9 +67,17 @@ function createOriginalJournal(file: string): number {
   try {
     const creator = fs.openSync(staging, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW
       | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
-    try { original = fs.fstatSync(creator); privateMetadata(original, false); }
+    try {
+      original = fs.fstatSync(creator); privateMetadata(original, false);
+      // Derive the path-only reference from the held no-follow creator, not
+      // by reopening its checked staging name. The proc alias intentionally
+      // follows this exact live FD; O_NOFOLLOW here would pin the alias itself.
+      reference = fs.openSync(`/proc/self/fd/${creator}`, O_PATH);
+      const pinned = fs.fstatSync(reference); privateMetadata(pinned, false);
+      if (!identity(original, pinned) || descriptorMount(reference) !== descriptorMount(creator)
+        || (descriptorFlags(reference) & O_PATH) !== O_PATH) refuse();
+    }
     finally { fs.closeSync(creator); }
-    reference = fs.openSync(staging, O_PATH | fs.constants.O_NOFOLLOW);
     const held = fs.fstatSync(reference); privateMetadata(held, false);
     if (!identity(original, held) || !identity(held, fs.lstatSync(staging))
       || (descriptorFlags(reference) & O_PATH) !== O_PATH) refuse();

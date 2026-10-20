@@ -38,8 +38,10 @@ when another SQLite connection still reports an active transaction. The adapter
 therefore syncs the positively witnessed native SQLite FD and lets SQLite
 manage its own data-FD lifetime. Both refusal and successful close preserve
 peer read/write locks, as verified by kernel evidence and a separate SQLite
-process. Initial creation closes its unpublished creator before linking the
-canonical name without replacement; later cleanup owns only the path reference.
+process. Initial creation derives its path-only reference through the held
+no-follow creator and validates both descriptors before closing the creator.
+It then links the canonical name without replacement; later cleanup owns only
+the path reference, with no gap between original references.
 The original and native descriptor identities are rechecked for subsequent
 operations. A pathname, `database_list` or `/proc/self/fd` alias by
 itself is insufficient. This driver/kernel boundary needs native runtime

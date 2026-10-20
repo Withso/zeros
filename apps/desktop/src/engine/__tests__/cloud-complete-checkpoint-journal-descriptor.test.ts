@@ -33,6 +33,14 @@ function descriptors(file: string) {
   }
   return result;
 }
+function observeFile(file: string) {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = fs.fstatSync(fd);
+    expect(stat.isFile()).toBe(true);
+    return { stat, bytes: fs.readFileSync(fd) };
+  } finally { fs.closeSync(fd); }
+}
 afterEach(() => {
   vi.restoreAllMocks();
   for (const handle of handles.splice(0).reverse()) handle.close();
@@ -116,9 +124,10 @@ describe("native journal descriptor witness", () => {
     await expect(journal.read(new AbortController().signal)).rejects.toThrow("unconfirmed");
     await expect(journal.write(1, { ...state, pending: null })).rejects.toThrow("unconfirmed");
     journal.close();
+    const after = observeFile(other);
     expect(descriptors(file)).toHaveLength(0);
     expect(descriptors(other)).toHaveLength(0);
-    expect(fs.readFileSync(other, "utf8")).toBe("untouched");
+    expect(after.bytes.toString("utf8")).toBe("untouched");
     vi.restoreAllMocks();
     expect(await open(root, "open").read(new AbortController().signal)).toEqual({ revision: 1, state });
   });
@@ -140,7 +149,7 @@ describe("native journal descriptor witness", () => {
   it("rolls back and releases the native probe after a kernel witness read fails", async () => {
     const root = directory(), state = pending(), original = open(root, "create");
     await original.write(0, state); original.close();
-    const file = path.join(root, "journal.sqlite"), before = fs.readFileSync(file);
+    const file = path.join(root, "journal.sqlite"), before = observeFile(file);
     const nativeOpen = sqlite.openSqlite, nativeRead = fs.readSync;
     let inside = false, rollbacks = 0, reads = 0;
     vi.spyOn(sqlite, "openSqlite").mockImplementation((selected, options) => {
@@ -158,8 +167,10 @@ describe("native journal descriptor witness", () => {
     });
     expect(() => open(root, "open")).toThrow("unconfirmed");
     expect(reads).toBe(1); expect(rollbacks).toBe(1);
+    const after = observeFile(file);
     expect(descriptors(file)).toHaveLength(0);
-    expect(fs.readFileSync(file)).toEqual(before);
+    expect(after.stat).toMatchObject({ dev: before.stat.dev, ino: before.stat.ino, mode: before.stat.mode });
+    expect(after.bytes).toEqual(before.bytes);
     vi.restoreAllMocks();
     expect(await open(root, "open").read(new AbortController().signal)).toEqual({ revision: 1, state });
   });

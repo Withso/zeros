@@ -72,6 +72,49 @@ afterEach(() => {
 });
 
 describe("journal cleanup preserves native lock custody", () => {
+  it("keeps the creator open until its path-only original reference is pinned", () => {
+    const root = directory(), nativeOpen = fs.openSync;
+    let creator = -1;
+    const observed: { creatorOpen: boolean; descriptorBound: boolean; sameInode: boolean }[] = [];
+    vi.spyOn(fs, "openSync").mockImplementation((selected, flags, mode) => {
+      if (typeof flags === "number" && (flags & 0o10000000) !== 0) {
+        let held: fs.Stats | undefined;
+        try { held = fs.fstatSync(creator); } catch { /* Record the actual lifetime gap. */ }
+        const reference = nativeOpen(selected, flags, mode), pinned = fs.fstatSync(reference);
+        observed.push({ creatorOpen: held !== undefined, descriptorBound: String(selected) === `/proc/self/fd/${creator}`,
+          sameInode: held !== undefined && held.dev === pinned.dev && held.ino === pinned.ino });
+        return reference;
+      }
+      const fd = nativeOpen(selected, flags, mode);
+      if (String(selected).endsWith(".new") && typeof flags === "number" && (flags & fs.constants.O_CREAT) !== 0) creator = fd;
+      return fd;
+    });
+    const journal = open(root, "create"); journal.close();
+    expect(observed).toEqual([{ creatorOpen: true, descriptorBound: true, sameInode: true }]);
+  });
+
+  it.each(["open", "validation"] as const)("releases creator and path reference after reference %s fails", failure => {
+    const root = directory(), nativeOpen = fs.openSync, nativeStat = fs.fstatSync;
+    let reference = -1, exercised = 0;
+    vi.spyOn(fs, "openSync").mockImplementation((selected, flags, mode) => {
+      if (typeof flags === "number" && (flags & 0o10000000) !== 0) {
+        if (failure === "open") { exercised++; throw Object.assign(new Error("fixture reference open"), { code: "EIO" }); }
+        reference = nativeOpen(selected, flags, mode); return reference;
+      }
+      return nativeOpen(selected, flags, mode);
+    });
+    vi.spyOn(fs, "fstatSync").mockImplementation(((fd: number, options?: fs.StatOptions) => {
+      if (fd === reference && exercised++ === 0) throw Object.assign(new Error("fixture reference metadata"), { code: "EIO" });
+      return nativeStat(fd, options);
+    }) as typeof fs.fstatSync);
+    expect(() => open(root, "create")).toThrow("unconfirmed");
+    vi.restoreAllMocks(); expect(exercised).toBe(1);
+    const retained = fs.readdirSync("/proc/self/fd").filter(fd => {
+      try { return fs.readlinkSync(`/proc/self/fd/${fd}`).startsWith(root); } catch { return false; }
+    });
+    expect(retained).toEqual([]); expect(fs.readdirSync(root)).toEqual([]);
+  });
+
   it.each(["read", "write"] as const)("preserves a later same-inode %s lock when an accepted handle closes", async kind => {
     const { root, file, state } = await prepare(), journal = open(root, "open");
     const { writer, before } = locked(file, kind);

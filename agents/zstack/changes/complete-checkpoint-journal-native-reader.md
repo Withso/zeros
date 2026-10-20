@@ -25,3 +25,11 @@ The lock and lock-boundary suites retain real kernel evidence and a separate
 SQLite process across failure, successful close, late read/write reservations,
 creation publication and cleanup. The review rule now requires that evidence
 instead of relying on the native connection's transaction flag.
+
+CodeQL also caught a pathname reopen after the creator's metadata check. Derive
+the O_PATH reference through the still-open no-follow creator and validate both
+descriptors before releasing it; the creator still closes before canonical
+publication. The real-FD lifetime regression and reference-open/validation
+cleanup controls retain that ordering. Tests observe file bytes and metadata
+through one no-follow handle too; a private fixture directory does not waive a
+file-system-race finding. The native SQLite reservation witness is unchanged.

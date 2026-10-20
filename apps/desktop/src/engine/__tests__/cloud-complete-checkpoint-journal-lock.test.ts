@@ -70,7 +70,7 @@ describe('W2 journal native lock custody', () => {
     const root = directory(), state = await prepare(root);
     const other = relation === 'same' ? root : directory();
     if (other !== root) await prepare(other);
-    const file = path.join(root, 'journal.sqlite'), heldFile = path.join(other, 'journal.sqlite');
+    const heldFile = path.join(other, 'journal.sqlite');
     const writer = openSqlite(heldFile);
     let opened: CompleteCheckpointJournal | undefined;
     let refused = false;
