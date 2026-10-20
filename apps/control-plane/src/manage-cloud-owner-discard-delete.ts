@@ -7,7 +7,6 @@ import { audit } from "./audit.js";
 import { loadConfig } from "./config.js";
 import { createMigrationPool } from "./db.js";
 import { authorizeCloudWorkspaceCleanup } from "./cloud-workspaces/actors.js";
-import { ensureFinalSaveRecovery } from "./cloud-workspaces/final-save-recovery.js";
 import { requestCloudWorkspaceDeletion } from "./cloud-workspaces/routes.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./cloud-workspaces/runtime-access.js";
 import { CloudOwnerDiscardDeleteError, CloudOwnerDiscardDeleteSchema, ownerDeleteDigest,
@@ -105,7 +104,10 @@ export async function manageCloudOwnerDiscardDelete(pool: pg.Pool, supplied: Clo
       idempotencyKey: key, requestSha256: requestDigest, discardUncheckpointed: true });
     check(!deletion.replayed, "owner_delete_unexpected_existing_delete");
     const ids = [...source.history.map(intent => intent.id), deletion.intent.id];
-    for (const id of ids) await ensureFinalSaveRecovery(client, id);
+    // Enroll missing recoveries for the exact loss dispositions without
+    // adopting legacy captures: adoption rewrites the receipt's frozen facts,
+    // including a generated retirement ID for terminal attempts.
+    for (const id of ids) await client.query("SELECT ensure_cloud_final_save_recovery($1)", [id]);
     await client.query(`INSERT INTO cloud_workspace_owner_delete_dispositions
       (lifecycle_intent_id,receipt_id,workspace_id,org_id,generation,operation,intent_sha256,source_sha256,original_state)
       SELECT intent.id,$1,intent.workspace_id,intent.org_id,intent.generation,intent.operation::text,intent.request_sha256,

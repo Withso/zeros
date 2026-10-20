@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/manage-cloud-owner-discard-delete.ts",
+  "before": "for (const id of ids) await client.query(\"SELECT ensure_cloud_final_save_recovery($1)\", [id]);",
+  "after": "for (const id of ids) await (await import(\"./cloud-workspaces/final-save-recovery.js\")).ensureFinalSaveRecovery(client, id);"
+}
