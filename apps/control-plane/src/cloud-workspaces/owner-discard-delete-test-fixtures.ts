@@ -8,10 +8,12 @@ import { requestManagedComputeStop } from "./compute-credit-stop.js";
 import { CloudWorkspaceCheckpointRequestWorker, deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { DatabaseCloudFinalSaveService, runFinalSaveRecovery } from "./final-save-service.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
+import { stopUnavailableCloudEngine } from "./engine-health.js";
 import type { CloudOwnerDiscardDeleteRequest } from "../cloud-owner-discard-delete-contract.js";
 const resourceId = "bx_zst7k2m4", account = "fixture-owner-delete-account";
 
-export async function seedOwnerDiscardDelete(pool: pg.Pool, options: { crashedReady?: boolean } = {}) {
+export async function seedOwnerDiscardDelete(pool: pg.Pool, options: { crashedReady?: boolean; engineFailureStop?: boolean } = {}) {
+    const crashedReady = options.crashedReady || options.engineFailureStop;
     const f = await seedReadyCloudWorkspace(pool);
     const scope = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1 };
     const store = new MemoryCloudWorkspaceObjectStore();
@@ -49,7 +51,7 @@ export async function seedOwnerDiscardDelete(pool: pg.Pool, options: { crashedRe
     // lease-after-registration/heartbeat invariant.
     await pool.query(`UPDATE cloud_workspace_engine_instances SET registered_at=clock_timestamp()-interval '10 minutes',
       last_heartbeat_at=clock_timestamp()-interval '2 minutes' WHERE id=$1`, [current.engineInstanceId]);
-    const writerEpoch = options.crashedReady ? randomUUID() : null;
+    const writerEpoch = crashedReady ? randomUUID() : null;
     if (writerEpoch) {
       const bootId = (await pool.query("SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [current.engineInstanceId])).rows[0].runtime_boot_id;
       const bindingId = randomUUID();
@@ -66,18 +68,18 @@ export async function seedOwnerDiscardDelete(pool: pg.Pool, options: { crashedRe
     }
     await pool.query(`UPDATE cloud_workspace_setup_runs SET state=$2,error_code=$3,
       completed_at=clock_timestamp(),lease_owner=NULL,lease_expires_at=NULL WHERE workspace_id=$1 AND attempt=2`,
-    [f.workspaceId, options.crashedReady ? "succeeded" : "failed", options.crashedReady ? null : "setup_checkpoint_restore_unavailable"]);
+    [f.workspaceId, crashedReady ? "succeeded" : "failed", crashedReady ? null : "setup_checkpoint_restore_unavailable"]);
     // The real failed-setup path retires the consumed endpoint grants as well
     // as the engine. A failed setup fixture must retain that authority fence.
     const retire = async () => {
       await withSystemTx(pool, async tx => {
         await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [f.organizationId]);
         await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [f.workspaceId]);
-        await retireCloudWorkspaceRuntimeAccess(tx, { ...scope, reason: options.crashedReady ? "engine_unavailable" : "setup_failed" });
+        await retireCloudWorkspaceRuntimeAccess(tx, { ...scope, reason: crashedReady ? "engine_unavailable" : "setup_failed" });
       });
       await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()-interval '30 seconds' WHERE id=$1", [current.engineInstanceId]);
     };
-    if (!options.crashedReady) await retire();
+    if (!crashedReady) await retire();
     await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,org_id,generation,requested_by,operation,
       state,completed_at,idempotency_key,request_sha256) VALUES($1::uuid,$2,$3,1,$4,'wake','succeeded',now(),$1::text,digest($1::text,'sha256'))`,
     [wakeId, f.workspaceId, f.organizationId, f.userId]);
@@ -88,9 +90,16 @@ export async function seedOwnerDiscardDelete(pool: pg.Pool, options: { crashedRe
     await pool.query(`INSERT INTO cloud_workspace_provider_operations(provider,account_scope,workspace_id,generation,org_id,
       idempotency_key,request_sha256,create_attempts_tracked,resource_id) VALUES('boat',$1,$2,1,$3,$4,$5,true,$6)`,
     [account, f.workspaceId, f.organizationId, randomUUID(), "a".repeat(64), resourceId]);
+    if (options.engineFailureStop) {
+      await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()-interval '30 seconds' WHERE id=$1", [current.engineInstanceId]);
+      await pool.query("UPDATE cloud_workspaces SET status='ready',desired_state='running' WHERE id=$1", [f.workspaceId]);
+      if (!await stopUnavailableCloudEngine(pool, "boat", f.workspaceId)) throw new Error("Fixture requires the real unavailable-engine Stop");
+    }
+    // The compute worker adopts the engine-health producer's exact Stop and
+    // binds the allocation; it must not replace it with a compute-stop key.
     await requestManagedComputeStop(pool, { leaseId: wakeId, reason: "engine_unavailable" });
     const capture = (await pool.query("SELECT id,lifecycle_intent_id FROM workspace_checkpoint_requests WHERE workspace_id=$1", [f.workspaceId])).rows[0];
-    if (options.crashedReady) {
+    if (crashedReady && !options.engineFailureStop) {
       const directive = await withSystemTx(pool, tx => deliverWorkspaceCheckpointRequest(tx, { ...current, finalSaveVersion: 1 }));
       if (!directive?.finalSave) throw new Error("Fixture requires the real negotiated delivered capture");
       await new DatabaseCloudFinalSaveService(pool, false).report({ version: 1, kind: "retry", ...scope,

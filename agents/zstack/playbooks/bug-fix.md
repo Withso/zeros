@@ -239,6 +239,10 @@
    transport body. A failed candidate needs explicit retry after exact cleanup;
    test the real restricted CLI, plan drift, rollback, and original-receipt
    replay separately from the new candidate's eventual readiness.
+   For owner-discard Delete, drive the actual initiating Stop producer and
+   allocation adoption. An engine-failure reason on a compute-produced Stop
+   does not cover an engine-health Stop key. Keep expired undelivered capture,
+   undispatched intent, exact allocation and live-engine refusal controls.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

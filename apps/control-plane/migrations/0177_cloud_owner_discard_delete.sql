@@ -102,7 +102,10 @@ LANGUAGE sql STABLE SET search_path=pg_catalog,public,pg_temp AS $$
   WHERE i.id=target_stop_id AND i.generation=w.current_generation AND i.operation='stop' AND i.requested_by IS NULL
     AND i.state IN ('queued','observing') AND i.attempt_count=0 AND i.dispatched_at IS NULL AND i.lease_owner IS NULL
     AND i.generation_transition_id IS NULL AND i.resume_after_intent_id IS NULL
-    AND i.idempotency_key LIKE 'system:compute-stop:%' AND l.stop_intent_id=i.id
+    AND (i.idempotency_key LIKE 'system:compute-stop:%'
+      OR (i.idempotency_key LIKE 'system:engine-stop:%'
+        AND q.state='expired' AND q.delivery_count=0 AND q.last_delivered_at IS NULL))
+    AND l.stop_intent_id=i.id
     AND w.status IN ('stopping','stopped','failed','archived') AND w.desired_state IN ('stopped','archived')
     AND w.deleted_at IS NULL AND w.data_deleted_at IS NULL
     AND r.state IN ('capturing','retrying','reconciling','blocked') AND r.checkpoint_id IS NULL AND r.proven_request_id IS NULL

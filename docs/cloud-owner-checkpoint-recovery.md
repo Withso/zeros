@@ -209,7 +209,11 @@ Migration `0177_cloud_owner_discard_delete.sql` adds an Alpha/development
 operator for an owner who explicitly accepts loss of **all** workspace data and
 requests permanent deletion. It supports an undispatched system compute Stop
 blocked on final save after a never-ready wake or a crashed previously-ready
-engine, including delivered captures and an unsealed writer. The existing
+engine, including delivered captures and an unsealed writer. It also supports
+the engine-health producer's `system:engine-stop:` intent when its current
+capture expired without delivery. Both require attempt zero, no dispatch and
+the exact allocation's `stop_intent_id`; live authority and competing work
+remain refused. Other system Stop families are not admitted. The existing
 checkpoint-restore operator above has different authority and cannot substitute
 for this complete-loss acknowledgement.
 

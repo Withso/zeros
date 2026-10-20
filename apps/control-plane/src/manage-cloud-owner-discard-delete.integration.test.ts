@@ -17,8 +17,8 @@ suite("owner-approved complete loss and ordinary Delete", () => {
   afterAll(async () => pool.end());
   beforeEach(async () => resetMigratedTestDatabase(pool));
   const options = () => ({ databaseUrl: process.env.TEST_DATABASE_URL! });
-  async function fixture(crashedReady = false) {
-    const f = await seedOwnerDiscardDelete(pool, { crashedReady });
+  async function fixture(crashedReady = false, engineFailureStop = false) {
+    const f = await seedOwnerDiscardDelete(pool, { crashedReady, engineFailureStop });
     const slug = (await pool.query("SELECT slug FROM organizations WHERE id=$1", [f.organizationId])).rows[0].slug as string;
     const request: CloudOwnerDiscardDeleteRequest = { version: 1, channel: "development", operationId: randomUUID(),
       organizationId: f.organizationId, expectedOrganizationSlug: slug, workspaceId: f.workspaceId,
@@ -66,8 +66,8 @@ suite("owner-approved complete loss and ordinary Delete", () => {
       .toEqual({ ...accepted, state: "unchanged" });
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='delete'", [f.workspaceId])).rows[0].n).toBe(1);
   });
-  it("uses the real provider reconciler and erasure worker; receipt alone is not completion", async () => {
-    const f = await fixture();
+  it.each([false, true])("uses the real provider reconciler and erasure worker; receipt alone is not completion (engine failure: %s)", async engineFailureStop => {
+    const f = await fixture(false, engineFailureStop);
     const accepted = await execute(f);
     let resource: CloudProviderResource | null = { resourceId: f.resourceId, workspaceId: f.workspaceId, organizationId: f.organizationId,
       generation: 1, state: "archived", target: "test-region", metadata: {} };
