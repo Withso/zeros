@@ -53,10 +53,30 @@ committed requests against their original operation.
 
 An elapsed publication moves to cancellation, issues its existing release
 controls and re-reads the durable row before deciding whether closure is
-complete. Every affected boot still needs its exact release acknowledgement or
-positive retirement proof. Silence, an empty mirror or an expired deadline is
-not retirement. Original operation IDs, deadlines, control bodies and receipts
-are not renewed or replaced.
+complete. Every boot that received the provider still needs its exact release
+acknowledgement or positive retirement proof. Silence, an empty mirror or an
+expired deadline is not retirement. Original operation IDs, deadlines, control
+bodies and receipts are not renewed or replaced.
+
+Connection publication can also include an initialized boot to enable a provider
+it has never received. A permanently revoked exact engine cannot acknowledge
+that control or receive a first delivery. This specific control no longer holds
+publication when its original binding survives, its immutable source-delivery
+journal has no delivery for that provider, and neither its initial adoption nor
+its saved material contradicts that fact. The check runs under the owner lock
+shared with first delivery. A missing binding, lease expiry alone, any historical
+delivery, or a changed boot identity still requires positive closure. This is
+not a retirement receipt: other providers, native acknowledgements, explicit key
+replacement and destructive removal retain their existing rules and evidence.
+
+The authorized organization Settings read progresses at most 16 elapsed
+connection publications under that same owner lock, across providers. This
+closes abandoned preparing/cancelling rows using their original release or
+retirement evidence, including retained proof after a binding was deleted.
+It never selects an account, creates a successor, contacts a provider or wakes a
+workspace. Reads without expired publications add a bounded indexed lookup;
+there is no background polling loop. Membership and consent checks still precede
+closure, and an unproved boot remains pending.
 
 A later authenticated selection can create a successor only after the elapsed
 attempts for the same owner, organization and provider have closed. Each request

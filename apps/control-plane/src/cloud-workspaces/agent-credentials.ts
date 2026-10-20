@@ -17,7 +17,7 @@ import {cloudRuntimeQualificationMode} from "./runtime-config.js";
 import {runtimeCredentialQualificationJoin,runtimeNativeCapabilities} from "./runtime-selection.js";
 import { prepareCloudAgentCredentialRemoval, readCloudAgentCredentialRemoval, decideCloudAgentCredentialRemoval,
   assertLegacyCloudAgentCredentialMutationAllowed, prepareCloudAgentCredentialPublication,
-  prepareCloudAgentConnectionPublication,
+  prepareCloudAgentConnectionPublication, progressExpiredCloudAgentConnectionPublications,
   commitCloudAgentCredentialPublication, serializeCloudAgentCredentialSourceMutation,
   pendingCloudAgentCredentialRemoteRemoval,acknowledgeCloudAgentCredentialRemoteRemoval,
   type CloudAgentCredentialRemovalOutcome } from "./agent-credential-mutations.js";
@@ -150,7 +150,9 @@ export class DatabaseCloudAgentCredentialService {
   async organizationConnections(ownerUserId:string,organizationId:string){
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId);
+      await serializeCloudAgentCredentialSourceMutation(tx,ownerUserId);
       const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
+      await progressExpiredCloudAgentConnectionPublications(tx,ownerUserId,organizationId);
       await this.reconcileLegacyOrganizations(tx,ownerUserId,organizationId);
       const credentials=(await tx.query<Credential>(`SELECT credential.*
         FROM cloud_agent_credential_organizations association

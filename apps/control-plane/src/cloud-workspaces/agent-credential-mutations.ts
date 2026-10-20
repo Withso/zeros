@@ -168,7 +168,8 @@ type Mutation = {
   decision: "remove" | "cancel" | "expire" | "publish" | null; decision_revision: string | null; expires_at: Date;
 };
 type Control = { id: string; binding_id: string; operation: CloudAgentCredentialControlRequest["operation"];
-  request: unknown; acknowledgement: unknown; control_revision: string; attempt: number; source_retirement?: unknown };
+  request: unknown; acknowledgement: unknown; control_revision: string; attempt: number; source_retirement?: unknown;
+  publication_unserved?: boolean };
 const sourceRetirementSchema=z.object({kind:z.enum(["provider-lifecycle","resident-consumed"]),proofId:uuid,
   retiredAt:z.string().datetime({offset:true})}).strict();
 function sourceRetired(control:Control):boolean {
@@ -176,11 +177,11 @@ function sourceRetired(control:Control):boolean {
   checked(sourceRetirementSchema,control.source_retirement);return true;
 }
 function completedControl(control:Control,phase:CloudAgentCredentialControlAcknowledgement["phase"]):boolean {
-  return sourceRetired(control) || control.acknowledgement!==null &&
+  return sourceRetired(control) || phase!=="retired" && control.publication_unserved===true || control.acknowledgement!==null &&
     checked(CloudAgentCredentialControlAcknowledgementSchema,control.acknowledgement).phase===phase;
 }
 function fencedControl(control:Control):boolean {
-  if(sourceRetired(control))return true;
+  if(sourceRetired(control) || control.publication_unserved===true)return true;
   if(control.acknowledgement===null)return false;
   const ack=checked(CloudAgentCredentialControlAcknowledgementSchema,control.acknowledgement);
   return ack.phase==="fenced" && ack.activity.complete;
@@ -276,14 +277,47 @@ function outcome(row: Mutation): CloudAgentCredentialRemovalOutcome {
 async function controlsFor(tx: Tx, operationId: string): Promise<Control[]> {
   const rows = (await tx.query<Control>(`SELECT DISTINCT ON(control.binding_id,control.operation) control.*,
     CASE WHEN proof.control_id IS NOT NULL THEN jsonb_build_object('kind',proof.proof_kind,'proofId',proof.proof_id,
-      'retiredAt',proof.retired_at) ELSE NULL END AS source_retirement
+      'retiredAt',proof.retired_at) ELSE NULL END AS source_retirement,
+    (publication.target->>'kind'='publish-connection' AND binding.funding_owner_user_id=publication.owner_user_id
+      AND binding.org_id::text=publication.target->>'organizationId'
+      AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(control.request->'selectors') selector
+        WHERE selector->>'provider' IS DISTINCT FROM publication.target->>'provider')
+      AND ${unservedRevokedBootSql("publication.target->>'provider'")}) AS publication_unserved
     FROM cloud_agent_credential_controls control LEFT JOIN cloud_agent_credential_source_retirements proof ON proof.control_id=control.id
+    JOIN cloud_agent_credential_mutations publication ON publication.id=control.mutation_id
+    LEFT JOIN cloud_agent_boot_bindings binding ON binding.id=control.binding_id
+      AND control.request @> jsonb_build_object('organizationId',binding.org_id,'workspaceId',binding.workspace_id,
+        'generation',binding.generation,'engineInstanceId',binding.engine_instance_id,'bootId',binding.boot_id,
+        'writerEpoch',binding.writer_epoch,'fundingOwnerUserId',binding.funding_owner_user_id,'fundingOwnerEpoch',binding.funding_owner_epoch)
     WHERE control.mutation_id=$1 ORDER BY control.binding_id,control.operation,control.attempt DESC`, [operationId])).rows;
   if (rows.length > 1024) busy();
   for (const row of rows) { checked(CloudAgentCredentialControlRequestSchema, row.request);
     if (row.acknowledgement !== null) checked(CloudAgentCredentialControlAcknowledgementSchema, row.acknowledgement);
     sourceRetired(row); }
   return rows;
+}
+
+/** Publication may include an initialized boot just to enable a previously
+ * unavailable provider. Its durable delivery journal precedes every material
+ * response and cannot be erased while the binding survives. Under the owner
+ * serialization lock, a revoked exact engine cannot receive a first delivery.
+ * This narrowly proves an unserved connection control, not source retirement:
+ * any historical delivery, missing binding or contradictory ready slot refuses
+ * it. Other providers and destructive/explicit credential mutations retain
+ * their original positive retirement requirements. SQL inputs are fixed code.
+ */
+function unservedRevokedBootSql(providerSql:string):string {
+  return `(binding.id IS NOT NULL AND binding.credentials_initialized
+    AND EXISTS(SELECT 1 FROM cloud_workspace_engine_instances engine WHERE engine.id=binding.engine_instance_id
+      AND engine.workspace_id=binding.workspace_id AND engine.org_id=binding.org_id AND engine.generation=binding.generation
+      AND engine.runtime_boot_id=binding.boot_id AND engine.state='revoked' AND engine.revoked_at IS NOT NULL)
+    AND NOT EXISTS(SELECT 1 FROM cloud_agent_boot_source_deliveries delivery
+      WHERE delivery.binding_id=binding.id AND delivery.provider=${providerSql})
+    AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(binding.initial_adoptions) adoption
+      WHERE adoption->>'provider'=${providerSql} AND adoption->>'status'='known')
+    AND NOT EXISTS(SELECT 1 FROM cloud_agent_boot_credentials slot WHERE slot.binding_id=binding.id AND slot.provider=${providerSql}
+      AND (slot.metadata->>'status' IS DISTINCT FROM 'unavailable' OR slot.key_version IS NOT NULL
+        OR slot.nonce IS NOT NULL OR slot.ciphertext IS NOT NULL OR slot.auth_tag IS NOT NULL)))`;
 }
 async function nextControls(tx: Tx, row: Mutation, operation: "retire" | "release") {
   const previous = (await controlsFor(tx, row.id)).filter(value => value.operation === "pause-starts");
@@ -646,9 +680,11 @@ export async function prepareCloudAgentCredentialPublication(tx:Tx,userId:string
     FROM cloud_agent_boot_bindings binding WHERE binding.funding_owner_user_id=$1 AND ($4::uuid IS NULL OR binding.org_id=$4)
       AND (EXISTS(SELECT 1 FROM cloud_agent_boot_source_deliveries delivery WHERE delivery.binding_id=binding.id AND delivery.provider=$2
         AND delivery.retired_proof_id IS NULL AND ($3::uuid IS NULL OR delivery.credential_id=$3))
-        OR (binding.retired_at IS NULL AND binding.credentials_initialized AND ($3::uuid IS NULL OR EXISTS(
+        OR (binding.retired_at IS NULL AND binding.credentials_initialized
+          AND NOT ($5::boolean AND ${unservedRevokedBootSql("$2")}) AND ($3::uuid IS NULL OR EXISTS(
           SELECT 1 FROM cloud_agent_organization_connections connection WHERE connection.org_id=binding.org_id AND connection.owner_user_id=$1 AND connection.credential_id=$3))))
-    ORDER BY binding.id LIMIT 257`,[userId,provider,target.kind==="publish-credential"?credentialId:null,target.kind==="publish-connection"?target.organizationId:null])).rows;
+    ORDER BY binding.id LIMIT 257`,[userId,provider,target.kind==="publish-credential"?credentialId:null,
+      target.kind==="publish-connection"?target.organizationId:null,target.kind==="publish-connection"])).rows;
   if(!candidates.length)return "legacy"; if(candidates.length>256)busy();
   const selectors=new Map<string,z.infer<typeof CloudAgentCredentialControlSelectorSchema>>();
   for(const candidate of candidates) for(const selector of checked(z.array(CloudAgentCredentialControlSelectorSchema).max(32),candidate.selectors)) selectors.set(selector.credentialId,selector);
@@ -670,6 +706,26 @@ export async function prepareCloudAgentCredentialPublication(tx:Tx,userId:string
   return controlsCreated?"pending":"fenced";
 }
 
+/** Caller has authorized the organization and holds the same owner lock used
+ * by first delivery and source writers. Settings already reconciles metadata;
+ * this bounded pass only closes elapsed attempts and never selects a source.
+ */
+export async function progressExpiredCloudAgentConnectionPublications(tx:Tx,userId:string,organizationId:string,
+  provider?:z.infer<typeof CloudAgentProviderSchema>):Promise<boolean> {
+  const elapsed=(await tx.query<Mutation>(`SELECT * FROM cloud_agent_credential_mutations
+    WHERE owner_user_id=$1 AND target->>'kind'='publish-connection' AND target->>'organizationId'=$2
+      AND ($3::text IS NULL OR target->>'provider'=$3)
+      AND state IN ('preparing','cancelling') AND expires_at<=clock_timestamp()
+    ORDER BY fence_epoch LIMIT 17 FOR UPDATE`,[userId,organizationId,provider??null])).rows;
+  let pending=elapsed.length>16;
+  for(const row of elapsed.slice(0,16)) {
+    await progressRemoval(tx,row);
+    const current=await mutation(tx,userId,row.id);
+    if(current.state!=="expired"&&current.state!=="cancelled")pending=true;
+  }
+  return pending;
+}
+
 /** The released selection API has no client operation ID. Only a new
  * authenticated selection may open a successor, after all elapsed attempts
  * for this connection have positively released their original start fences.
@@ -689,17 +745,7 @@ export async function prepareCloudAgentConnectionPublication(tx:Tx,userId:string
   // The source-write transaction still verifies the current request/revision.
   if(previous?.state==="publishing"||previous?.state==="published")
     return {operationId:previous.id,state:await prepareCloudAgentCredentialPublication(tx,userId,previous.id,target)};
-  const elapsed=(await tx.query<Mutation>(`SELECT * FROM cloud_agent_credential_mutations
-    WHERE owner_user_id=$1 AND target->>'kind'='publish-connection'
-      AND target->>'organizationId'=$2 AND target->>'provider'=$3
-      AND state IN ('preparing','cancelling') AND expires_at<=clock_timestamp()
-    ORDER BY fence_epoch LIMIT 17 FOR UPDATE`,[userId,target.organizationId,target.provider])).rows;
-  let pending=elapsed.length>16;
-  for(const row of elapsed.slice(0,16)) {
-    await progressRemoval(tx,row);
-    const current=await mutation(tx,userId,row.id);
-    if(current.state!=="expired"&&current.state!=="cancelled")pending=true;
-  }
+  const pending=await progressExpiredCloudAgentConnectionPublications(tx,userId,target.organizationId,target.provider);
   if(pending)return {operationId:initialOperationId,state:"pending" as const};
   const current=previous?await mutation(tx,userId,previous.id):null;
   const operationId=current
@@ -736,6 +782,9 @@ export async function commitCloudAgentCredentialPublication(tx:Tx,userId:string,
   }
   await setState(tx,row,"publishing","publish");
   for(const control of pauses) {
+    // It never held this provider and cannot receive it now. Preserve every
+    // unrelated slot and the original control; do not manufacture a native ACK.
+    if(control.publication_unserved===true)continue;
     const changed=(await tx.query<{desired_cache_revision:string}>(`UPDATE cloud_agent_boot_bindings SET desired_cache_revision=desired_cache_revision+1
       WHERE id=$1 AND desired_cache_revision<9007199254740991 RETURNING desired_cache_revision`,[control.binding_id])).rows[0];
     if(!changed)conflict();
@@ -748,7 +797,8 @@ export async function commitCloudAgentCredentialPublication(tx:Tx,userId:string,
       SELECT $1,proof_kind,proof_id,retired_at FROM cloud_agent_credential_source_retirements WHERE control_id=$2
       ON CONFLICT(control_id) DO NOTHING`,[request.controlRequestId,control.id]);
   }
-  // Every old host is independently proven dead; no native cache can adopt
-  // old bytes. A successor will bootstrap the new source normally.
-  if(pauses.every(sourceRetired))await setState(tx,await mutation(tx,userId,operationId),"published");
+  // Each source is positively retired or never received this provider under
+  // an irreversibly revoked engine. A successor boot selects normally.
+  if(pauses.every(control=>sourceRetired(control)||control.publication_unserved===true))
+    await setState(tx,await mutation(tx,userId,operationId),"published");
 }
