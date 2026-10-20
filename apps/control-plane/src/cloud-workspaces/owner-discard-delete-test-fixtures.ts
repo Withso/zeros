@@ -12,9 +12,10 @@ import { stopUnavailableCloudEngine } from "./engine-health.js";
 import type { CloudOwnerDiscardDeleteRequest } from "../cloud-owner-discard-delete-contract.js";
 const resourceId = "bx_zst7k2m4", account = "fixture-owner-delete-account";
 
-export async function seedOwnerDiscardDelete(pool: pg.Pool, options: { crashedReady?: boolean; engineFailureStop?: boolean } = {}) {
+export async function seedOwnerDiscardDelete(pool: pg.Pool, options: { crashedReady?: boolean; engineFailureStop?: boolean;
+  readyFixture?: Awaited<ReturnType<typeof seedReadyCloudWorkspace>> } = {}) {
     const crashedReady = options.crashedReady || options.engineFailureStop;
-    const f = await seedReadyCloudWorkspace(pool);
+    const f = options.readyFixture ?? await seedReadyCloudWorkspace(pool);
     const scope = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1 };
     const store = new MemoryCloudWorkspaceObjectStore();
     const blobs = new DatabaseCloudWorkspaceBlobService({ pool, objectStore: store,
@@ -98,7 +99,9 @@ export async function seedOwnerDiscardDelete(pool: pg.Pool, options: { crashedRe
     // The compute worker adopts the engine-health producer's exact Stop and
     // binds the allocation; it must not replace it with a compute-stop key.
     await requestManagedComputeStop(pool, { leaseId: wakeId, reason: "engine_unavailable" });
-    const capture = (await pool.query("SELECT id,lifecycle_intent_id FROM workspace_checkpoint_requests WHERE workspace_id=$1", [f.workspaceId])).rows[0];
+    const capture = (await pool.query(`SELECT request.id,request.lifecycle_intent_id FROM workspace_checkpoint_requests request
+      JOIN managed_compute_allocation_leases lease ON lease.stop_intent_id=request.lifecycle_intent_id
+      WHERE request.workspace_id=$1 AND lease.id=$2`, [f.workspaceId,wakeId])).rows[0];
     if (crashedReady && !options.engineFailureStop) {
       const directive = await withSystemTx(pool, tx => deliverWorkspaceCheckpointRequest(tx, { ...current, finalSaveVersion: 1 }));
       if (!directive?.finalSave) throw new Error("Fixture requires the real negotiated delivered capture");
