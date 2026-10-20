@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { nativeInvoke } from "../../platform/runtime";
 import type { UpdaterStatus } from "../../platform/updater";
 import {
-  agentSessionHasActiveWork,
+  anyAgentHasActiveWork,
   useSessionsStore,
 } from "../agent/sessions-store";
 import {
@@ -26,18 +26,6 @@ import {
 import { useNativeSurfaceOverlayIntent } from "../../shared/ui/native-surface-overlay";
 import { claimShortcutPriority } from "../agent/shortcut-priority";
 
-function agentsAreWorking(state = useSessionsStore.getState()): boolean {
-  return (
-    Object.entries(state.sessions).some(
-      ([chatId, slot]) =>
-        slot.status === "warming" ||
-        slot.status === "streaming" ||
-        slot.status === "reconnecting" ||
-        agentSessionHasActiveWork(slot, state.pendingLocalTurns[chatId]),
-    ) || Object.values(state.pendingLocalTurns).some(Boolean)
-  );
-}
-
 export function RequiredUpdateScreen({
   required,
   status,
@@ -47,7 +35,7 @@ export function RequiredUpdateScreen({
   status: UpdaterStatus;
   install: (options?: { requireReady: boolean }) => Promise<void>;
 }) {
-  const anyAgentRunning = useSessionsStore(agentsAreWorking);
+  const anyAgentRunning = useSessionsStore(anyAgentHasActiveWork);
   const publishOverlay = useNativeSurfaceOverlayIntent();
   useLayoutEffect(() => {
     const releaseKeyboard = claimShortcutPriority();
@@ -89,7 +77,7 @@ export function RequiredUpdateScreen({
   useEffect(() => {
     if (!ready || anyAgentRunning) return;
     return scheduleRequiredUpdateRestart(
-      () => !agentsAreWorking(),
+      () => !anyAgentHasActiveWork(useSessionsStore.getState()),
       () => {
         void install({ requireReady: true });
       },

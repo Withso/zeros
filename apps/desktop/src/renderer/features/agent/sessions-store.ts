@@ -2157,26 +2157,34 @@ export function useAnyChatAwaitingKind(
   });
 }
 
-/** True if ANY session across the whole app is actively working — status
- *  "warming" (spinning up), "streaming" (turn in flight), or "reconnecting"
- *  (engine respawn reviving it). Read by app-level chrome (the auto-update
- *  toast) to decide whether to offer "Restart when idle" and to defer the
- *  restart until no agent is mid-turn, so an update never kills in-progress
- *  work. Returns a primitive boolean so the subscription stays stable across
+/** True if ANY session across the whole app has work an app restart would
+ *  interrupt: an open provider turn ("streaming"), a send this renderer still
+ *  owns (including a cloud send waiting for its workspace or agent), or the
+ *  turn, background-task and workflow evidence behind
+ *  {@link agentSessionHasActiveWork}. A bare "warming" or "reconnecting" status
+ *  is session admission, not work: every opened chat warms before anything is
+ *  sent, and idle chats rest in "reconnecting" after an exit or superseded bind
+ *  until their next use. Read by both update surfaces to decide whether to
+ *  offer "Restart when idle" and when a deferred restart may fire. */
+export function anyAgentHasActiveWork(
+  state: Pick<SessionsStoreState, "sessions" | "pendingLocalTurns">,
+): boolean {
+  for (const [chatId, slot] of Object.entries(state.sessions)) {
+    if (
+      slot.status === "streaming" ||
+      // Until dispatch, the queued cloud send exists only in this renderer.
+      (slot.cloudSendWait?.state === "waiting" && isCloudWorkspace(slot.cwd)) ||
+      agentSessionHasActiveWork(slot, state.pendingLocalTurns[chatId])
+    ) {
+      return true;
+    }
+  }
+  // A mid-send rebuild re-seeds the slot, but the send is still in flight.
+  return Object.values(state.pendingLocalTurns).some(Boolean);
+}
+
+/** {@link anyAgentHasActiveWork} as a primitive subscription, stable across
  *  token-chunk churn. */
 export function useAnyAgentRunning(): boolean {
-  return useSessionsStore((s) => {
-    for (const slot of Object.values(s.sessions)) {
-      const status = slot.status;
-      if (
-        status === "warming" ||
-        status === "streaming" ||
-        status === "reconnecting" ||
-        agentSessionHasActiveWork(slot, null)
-      ) {
-        return true;
-      }
-    }
-    return false;
-  });
+  return useSessionsStore(anyAgentHasActiveWork);
 }

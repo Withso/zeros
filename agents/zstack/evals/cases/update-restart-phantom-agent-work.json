@@ -1,0 +1,9 @@
+{
+  "id": "update-restart-phantom-agent-work",
+  "kind": "replay",
+  "area": "1: renderer state and interaction",
+  "fixedBy": "pr:665",
+  "symptom": "The update toast offered \"Restart when idle\" with no agent running, and an armed deferred restart never fired, because a chat warming its session or resting in reconnecting counted as a running agent.",
+  "rule": "App-level gates that ask whether agent work is running reuse agentSessionHasActiveWork with pendingLocalTurns; a bare warming or reconnecting status is session admission, not work.",
+  "check": "pnpm test:git apps/desktop/src/renderer/features/update/__tests__/update-restart-agent-work.test.ts"
+}
