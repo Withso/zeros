@@ -34,6 +34,10 @@ export const CloudOwnerCheckpointRecoverySchema = z.object({
   safetyStop: z.object({ intentId: uuid, requestId: uuid }).strict().optional(),
   /** Reobserve the same lost allocation; never renew the original attestation. */
   lossRecheck: z.object({ providerAccount: z.string().min(1).max(256) }).strict().optional(),
+  /** A separate, explicit attempt after the first candidate never started and
+   * its exact cleanup completed. Replaying the original request never retries. */
+  retry: z.object({ ownerDiscardReceiptId: uuid, failedTransitionId: uuid,
+    failedCandidateGeneration: revision, cleanupStopIntentId: uuid, cleanupDeleteIntentId: uuid }).strict().optional(),
   checkpointId: uuid,
   checkpointSha256: sha256,
   checkpointContentRevision: revision,
@@ -48,7 +52,11 @@ export const CloudOwnerCheckpointRecoverySchema = z.object({
 }).strict().refine(value => value.stopIntentId === value.recoveryId && value.stopIntentId !== value.wakeIntentId,
   { message: "The exact Stop recovery and dependent Wake are required" })
   .refine(value => !value.safetyStop || (![value.stopIntentId,value.wakeIntentId].includes(value.safetyStop.intentId) &&
-    value.safetyStop.requestId !== value.requestId), { message: "The safety Stop and request must be distinct" });
+    value.safetyStop.requestId !== value.requestId), { message: "The safety Stop and request must be distinct" })
+  .refine(value => !value.retry || value.retry.ownerDiscardReceiptId !== value.operationId &&
+    value.retry.failedCandidateGeneration > value.sourceGeneration &&
+    new Set([value.stopIntentId,value.wakeIntentId,value.retry.cleanupStopIntentId,value.retry.cleanupDeleteIntentId]).size === 4,
+  { message: "Retry requires a distinct operation and exact failed candidate cleanup" });
 
 export type CloudOwnerCheckpointRecoveryRequest = z.infer<typeof CloudOwnerCheckpointRecoverySchema>;
 

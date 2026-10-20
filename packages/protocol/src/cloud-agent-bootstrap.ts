@@ -126,6 +126,8 @@ export const CloudAgentHistoryRecoveryCommittedCustodySchema = z.object({
   recoveryId: z.string().uuid(), custodySha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 export const CloudAgentHistoryRecoveryRequestSchema = CloudAgentBootCredentialRequestSchema.extend({
+  // Only an absent live ledger may request the owner-discard CP projection.
+  checkpointOnly: z.literal(true).optional(),
   // These are exact local namespace observations, never source selectors.
   preparedCustody: z.array(CloudAgentHistoryRecoveryCustodyHintSchema).max(2)
     .refine(values => new Set(values.map(value => value.writerEpoch)).size === values.length).optional(),
@@ -136,6 +138,9 @@ export const CloudAgentHistoryRecoveryResponseSchema = CloudAgentBootCredentialR
   recoveryId: z.string().uuid(), code: z.literal("history_recovered_with_gap"), coverage: z.literal("unknown"),
   predecessor: CloudAgentBootScopeSchema, predecessorRetiredAt: z.string().datetime(),
   checkpoint: z.object({ writerEpoch: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  checkpointOnly: z.object({ ownerDiscardReceiptId: z.string().uuid(), checkpointId: z.string().uuid(),
+    document: z.string().min(1).max(16 * 1024 * 1024), sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict().optional(),
   mirroredSequence: z.number().int().nonnegative().safe(),
   predecessorRecovery: CloudAgentHistoryRecoveryCommittedCustodySchema.optional(),
   preparedCustody: z.array(CloudAgentHistoryRecoveryPreparedCustodySchema).max(2)

@@ -126,7 +126,69 @@ deletion verification. `final_save_blocked` can clear at disposition, while
 `lifecycle_stalled` clears only when the queued lifecycle work actually retires.
 An ineligible candidate stays preserved and requires separate investigation.
 The source checkpoint, original discard and failed transition remain intact.
-History restoration and any explicit retry of recovery remain separate work.
+Cleanup itself never starts another candidate.
+
+## Explicit retry after a never-started candidate
+
+Migration `0176_cloud_checkpoint_history_recovery.sql` adds one narrow retry
+of the original failed candidate. Deploy its CP code first, then publish and
+qualify the corrected runtime and build the selected Computer from it. A
+restart of the old runtime does not acquire this fix. The retry must select a
+different runtime from the failed candidate; the operator verifies that its
+source contains the history correction before approving the plan.
+
+Create a new private request with a new `operationId`, owner approval reference
+and reason. Retain every original source, capture, discard, provider-loss and
+checkpoint field, update the exact qualified Computer/build/runtime fields, and
+add this strict companion:
+
+```json
+{
+  "retry": {
+    "ownerDiscardReceiptId": "<original-discard-receipt-uuid>",
+    "failedTransitionId": "<original-failed-transition-uuid>",
+    "failedCandidateGeneration": 2,
+    "cleanupStopIntentId": "<candidate-system-stop-uuid>",
+    "cleanupDeleteIntentId": "<candidate-delete-uuid>"
+  }
+}
+```
+
+The generation shown is illustrative; use the original receipt's exact failed
+candidate. The source must still be stopped, positively lost and explicitly
+discarded. Both exact never-started cleanup receipts must remain valid, both
+intents must have succeeded, the allocation lease must be settled, and the
+candidate binding must have verified deletion. The original transition must be
+`rollback_failed` with `setup_checkpoint_restore_invalid`; the retained
+checkpoint, owner/funding incarnation and absence of newer work are rechecked.
+This does not cover an archived VM, a candidate that ran work, or another
+failure reason.
+
+Use the same CLI plan and execute commands. A plan rolls back all writes. Its
+approval binds the new request, effective database target, current authority
+and selected qualified Computer. Drift refuses before commit. Execute atomically
+inserts an immutable operator retry receipt and one new provisioning candidate.
+It does not spend another discard, reuse the original Stop as a drain, or
+rewrite the original failed transition. The original immutable positive loss
+fact suffices here because the discard already committed; this retry neither
+refreshes that attestation nor makes provider calls. Original uncommitted
+discard requests still require the fresh evidence described above.
+
+Replay the same new request and approval after an uncertain CLI result. It
+returns the same new transition, even after settlement. Replaying the original
+request continues to return the original failed transition. A second new
+operation for the same failed candidate refuses. Follow the new transition to
+readiness and verify the pinned checkpoint, runtime and Computer before
+declaring recovery successful.
+
+If a fresh allocation lacks the original live FULL history ledger, the
+corrected engine can explicitly request the CP's owner-discard history
+projection. It validates the retained ACKed ancestor and imports only immutable
+CP-mirrored history, accepted command IDs and current edit/delete fences.
+Coverage stays unknown, gaps remain visible, and inherited pending commands
+become uncertain without replay. Missing or corrupt surviving custody still
+refuses. This path cannot invent a final-save proof or reconstruct unmirrored
+work. See [history recovery](cloud-workspace/data-and-sync.md#recovery-after-an-unsealed-stop).
 
 The migration supports deployed health and retry readers: the discarded row is
 not blocked/retrying, and its next-attempt timestamp is infinity. Stale workers
@@ -136,6 +198,6 @@ requires the new generation's final proof, settled dispatch, deletion-job
 custody, legal-hold checks and physical object/record retirement. Only the exact
 receipt-backed historical recovery is excluded from unresolved history.
 
-Local Personal and organization-local workspaces are unaffected. The tool is a
-control-plane-only, exact organization/workspace operation, with no renderer or
-engine wire change.
+Local Personal and organization-local workspaces are unaffected. The tool is an
+exact organization/workspace operator; its optional history recovery uses the
+private authenticated cloud boot wire. There is no renderer mutation surface.

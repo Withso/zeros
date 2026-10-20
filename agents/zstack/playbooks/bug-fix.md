@@ -226,6 +226,15 @@
    after expiry, require positive release or retirement, and commit bounded
    closure progress. Preserve explicit IDs and committed lost-ACK replay; only
    a later explicit request may start a separately fenced successor.
+   For owner-discard restore, exercise a fresh allocation with only an older
+   ACKed checkpoint and no live FULL ledger. Missing custody is a distinct
+   authenticated request mode, never permission to borrow stale history.
+   Retain CP command IDs, edit/delete fences and unknown coverage without
+   inventing native ACKs or replaying prompts. Include next-seal lineage and
+   stream-local bounds, shared inventory deadlines, and a maximally escaped
+   transport body. A failed candidate needs explicit retry after exact cleanup;
+   test the real restricted CLI, plan drift, rollback, and original-receipt
+   replay separately from the new candidate's eventual readiness.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

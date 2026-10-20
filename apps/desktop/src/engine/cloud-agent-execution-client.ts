@@ -22,6 +22,7 @@ import {
 } from "@zeros/protocol/cloud-agent-bootstrap";
 import { isDeepStrictEqual } from "node:util";
 import { cloudMcpDigest } from "./agents/cloud-mcp";
+import { CLOUD_CHECKPOINT_HISTORY_ENVELOPE_MAX_BYTES } from "@zeros/protocol/cloud-checkpoint-history";
 
 export class CloudAgentExecutionError extends Error{
   readonly code: string;
@@ -117,7 +118,8 @@ export async function requestCloudAgentBoot<Operation extends CloudAgentBootOper
   const httpCategory = (): CloudCommandFailureCause["category"] => response.status === 429 ? "rate_limited" :
     response.status >= 500 ? "authority_http_5xx" : response.status >= 400 ? "authority_http_4xx" : "authority_unavailable";
   const invalidResponse = () => failure(response.ok ? "authority_response_invalid" : httpCategory());
-  const limit = response.ok ? contract.limit : 1024;
+  const checkpointOnly = operation === "recover-history" && "checkpointOnly" in parsedRequest.data && parsedRequest.data.checkpointOnly === true;
+  const limit = response.ok ? checkpointOnly ? CLOUD_CHECKPOINT_HISTORY_ENVELOPE_MAX_BYTES : contract.limit : 1024;
   if (!response.body || Number(response.headers.get("content-length")) > limit) {
     await response.body?.cancel().catch(() => {}); throw invalidResponse();
   }

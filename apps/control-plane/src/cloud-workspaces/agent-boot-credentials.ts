@@ -512,9 +512,20 @@ function deliveredBootMetadata(raw:unknown):unknown {
  * are capability fences and never substitute for this proof. Caller retains
  * the existing workspace/lifecycle locks through this same transaction. */
 export async function retireCloudAgentBootSources(tx:Tx,scope:{organizationId:string;workspaceId:string;generation:number},
-  proof:{kind:"provider-lifecycle";intentId:string}|{kind:"resident-consumed";transitionId:string;engineInstanceId:string}):Promise<void>{
-  const proofId=proof.kind==="provider-lifecycle"?proof.intentId:proof.transitionId;
-  const confirmed=proof.kind==="provider-lifecycle"?
+  proof:{kind:"provider-lifecycle";intentId:string}|{kind:"resident-consumed";transitionId:string;engineInstanceId:string}|{kind:"owner-discard";receiptId:string;engineInstanceId:string}):Promise<void>{
+  const proofId=proof.kind==="provider-lifecycle"?proof.intentId:proof.kind==="owner-discard"?proof.receiptId:proof.transitionId;
+  const confirmed=proof.kind==="owner-discard"?
+    await tx.query(`SELECT 1 FROM cloud_workspace_owner_discard_receipts receipt
+      JOIN cloud_workspace_final_save_recoveries recovery ON recovery.lifecycle_intent_id=receipt.stop_intent_id
+      JOIN cloud_workspace_engine_instances engine ON engine.id=recovery.engine_instance_id
+      WHERE receipt.id=$1 AND receipt.workspace_id=$2 AND receipt.org_id=$3 AND receipt.source_generation=$4
+        AND recovery.state='discarded' AND engine.id=$5 AND engine.workspace_id=receipt.workspace_id AND engine.org_id=receipt.org_id
+        AND engine.generation=receipt.source_generation AND engine.state='revoked' AND engine.revoked_at IS NOT NULL
+        AND engine.lease_expires_at<=clock_timestamp() AND engine.registered_at=recovery.registered_at
+        AND engine.heartbeat_token_hash=recovery.registration_token_sha256 AND engine.runtime_boot_id=recovery.boot_id
+        AND cloud_provider_allocation_lost(receipt.workspace_id,receipt.source_generation,receipt.org_id,receipt.provider_resource_id)`,
+      [proofId,scope.workspaceId,scope.organizationId,scope.generation,proof.engineInstanceId]):
+    proof.kind==="provider-lifecycle"?
     await tx.query(`SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4
       AND state='succeeded' AND operation IN ('stop','archive','delete')`,[proofId,scope.workspaceId,scope.organizationId,scope.generation]):
     await tx.query(`SELECT 1 FROM cloud_workspace_runtime_handoffs handoff JOIN cloud_workspace_runtime_transitions runtime USING(transition_id)
@@ -526,7 +537,7 @@ export async function retireCloudAgentBootSources(tx:Tx,scope:{organizationId:st
   if(confirmed.rowCount!==1)rejected();
   const bindings=(await tx.query<BootRow>(`SELECT * FROM cloud_agent_boot_bindings
     WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND ($4::uuid IS NULL OR engine_instance_id=$4) FOR UPDATE`,
-    [scope.workspaceId,scope.organizationId,scope.generation,proof.kind==="resident-consumed"?proof.engineInstanceId:null])).rows;
+    [scope.workspaceId,scope.organizationId,scope.generation,proof.kind!=="provider-lifecycle"?proof.engineInstanceId:null])).rows;
   for(const binding of bindings){
     // The optional committed seal is preserved. Forced/unsealed retirement
     // records only source death; it cannot invent complete replay coverage.
@@ -624,7 +635,8 @@ export class DatabaseCloudAgentBootService {
     for(const field of ["organizationId","workspaceId","generation","engineInstanceId"] as const)
       if(engine[field]!==request.data[field])rejected();
     if(operation==="recover-history")return authorizeCloudAgentHistoryRecovery(this.pool,engine,this.workosEnabled,
-      CloudAgentHistoryRecoveryRequestSchema.parse(request.data).preparedCustody);
+      CloudAgentHistoryRecoveryRequestSchema.parse(request.data).preparedCustody,
+      CloudAgentHistoryRecoveryRequestSchema.parse(request.data).checkpointOnly===true);
     if(operation==="refresh")return this.refresh(engine,CloudAgentBootRefreshRequestSchema.parse(request.data));
     if(operation==="actor-confirm"||operation==="warm-context")return this.withReadBinding(engine,operation,request.data,async(tx,row,identity,deadline)=>{
       const scope=bootScope(row);

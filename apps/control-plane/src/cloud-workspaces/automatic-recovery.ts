@@ -201,14 +201,20 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   /** Private database-owner operator only. A receipt is an explicit discard,
    * never a successful Stop or final-save proof. No HTTP route supplies it. */
   ownerDiscardReceiptId?: string;
+  ownerRecoveryRetryId?: string;
 }) {
   const {workspace,authorization,point}=await requireCloudRecoveryAdmission(tx,input);
   const discarded = input.ownerDiscardReceiptId ? (await tx.query<{
     transition_id:string;candidate_generation:number;computer_build_id:string;computer_config_id:string;runtime_id:string;
-  }>(`SELECT * FROM cloud_workspace_owner_discard_receipts WHERE id=$1 AND workspace_id=$2 AND org_id=$3
-    AND source_generation=$4 AND checkpoint_id=$5 AND stop_intent_id=$6`,
-  [input.ownerDiscardReceiptId,input.workspaceId,input.organizationId,input.sourceGeneration,input.checkpointId,input.drainIntentId])).rows[0] : null;
-  if (input.ownerDiscardReceiptId && !discarded) throw new HttpError(409,"owner_recovery_receipt_mismatch","Recovery requires its exact owner discard receipt");
+  }>(`SELECT transition_id,candidate_generation,computer_build_id,computer_config_id,runtime_id
+    FROM cloud_workspace_owner_discard_receipts WHERE id=$1 AND workspace_id=$2 AND org_id=$3
+      AND source_generation=$4 AND checkpoint_id=$5 AND stop_intent_id=$6 AND $7::uuid IS NULL
+    UNION ALL SELECT retry.transition_id,retry.candidate_generation,retry.computer_build_id,retry.computer_config_id,retry.runtime_id
+    FROM cloud_workspace_owner_recovery_retries retry JOIN cloud_workspace_owner_discard_receipts owner ON owner.id=retry.owner_discard_receipt_id
+    WHERE retry.id=$7 AND owner.id=$1 AND retry.workspace_id=$2 AND retry.org_id=$3 AND retry.source_generation=$4 AND retry.checkpoint_id=$5`,
+  [input.ownerDiscardReceiptId,input.workspaceId,input.organizationId,input.sourceGeneration,input.checkpointId,input.drainIntentId??null,
+    input.ownerRecoveryRetryId??null])).rows[0] : null;
+  if ((input.ownerDiscardReceiptId || input.ownerRecoveryRetryId) && !discarded) throw new HttpError(409,"owner_recovery_receipt_mismatch","Recovery requires its exact owner discard receipt");
   const source=(await tx.query<{provider:string;spec_version:number;repository_forge:string;repository_owner:string;repository_name:string;repository_revision:string;github_installation_id:string|null}>(
     `SELECT g.provider,ss.spec_version,ss.repository_forge,ss.repository_owner,ss.repository_name,ss.repository_revision,ss.github_installation_id
      FROM cloud_workspace_generations g JOIN cloud_workspace_setup_specs ss USING(workspace_id,generation,org_id)
@@ -250,12 +256,23 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   await retireCloudWorkspaceRuntimeAccess(tx,{...input,generation:input.sourceGeneration,reason:"generation_replacement_requested"});
   await tx.query(`UPDATE cloud_workspaces SET desired_state='running',status='stopping',authority_epoch=authority_epoch+1,version=version+1,updated_at=now(),
     last_error_code='recovery_restoring',last_error_message='Restoring workspace from saved checkpoint' WHERE id=$1 AND org_id=$2`,[input.workspaceId,input.organizationId]);
-  const intent=input.drainIntentId ? (await tx.query(`SELECT * FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4
+  // An explicit retry has already retired the never-started candidate. Its
+  // parent Stop stays discarded and attached to the original transition. The
+  // SQL receipt requires this exact create/transition pair in the same commit.
+  if(input.ownerRecoveryRetryId) await tx.query(`UPDATE cloud_workspaces SET current_generation=$2,status='provisioning',
+    authority_epoch=authority_epoch+1,version=version+1,last_error_code=NULL,last_error_message=NULL WHERE id=$1 AND org_id=$3`,
+  [input.workspaceId,generation,input.organizationId]);
+  const intent=input.ownerRecoveryRetryId ? (await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
+    (id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace)
+    VALUES($1,$2,$3,$4,NULL,'create',$5,$6,true) RETURNING *`,
+  [intentId,input.workspaceId,generation,input.organizationId,input.idempotencyKey,digest])).rows[0]! : input.drainIntentId ? (await tx.query(`SELECT * FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4
     AND operation='stop' AND NOT affects_workspace AND (state='succeeded' OR ($5::boolean AND state='superseded' AND error_code='owner_discarded'))`,
   [input.drainIntentId,input.workspaceId,input.organizationId,input.sourceGeneration,!!discarded])).rows[0] : (await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace)
     VALUES($1,$2,$3,$4,$5,'stop',$6,$7,false) RETURNING *`,[intentId,input.workspaceId,input.sourceGeneration,input.organizationId,input.actorUserId,input.idempotencyKey,digest])).rows[0]!;
-  const transition=(await tx.query(`INSERT INTO cloud_workspace_generation_transitions(id,workspace_id,org_id,requested_by,operation,source_generation,template_generation,candidate_generation,state,drain_intent_id)
-    VALUES($1,$2,$3,$4,'recover',$5,$5,$6,'draining',$7) RETURNING *`,[transitionId,input.workspaceId,input.organizationId,input.actorUserId,input.sourceGeneration,generation,intentId])).rows[0]!;
+  const transition=(await tx.query(`INSERT INTO cloud_workspace_generation_transitions(id,workspace_id,org_id,requested_by,operation,source_generation,template_generation,candidate_generation,state,drain_intent_id,provision_intent_id)
+    VALUES($1,$2,$3,$4,'recover',$5,$5,$6,$7,$8,$9) RETURNING *`,[transitionId,input.workspaceId,input.organizationId,input.actorUserId,
+      input.sourceGeneration,generation,input.ownerRecoveryRetryId?"provisioning":"draining",input.ownerRecoveryRetryId?null:intentId,
+      input.ownerRecoveryRetryId?intentId:null])).rows[0]!;
   await tx.query("UPDATE cloud_workspace_lifecycle_intents SET generation_transition_id=$2 WHERE id=$1",[intentId,transitionId]);
   if(input.drainIntentId){
     if(!intent)throw new HttpError(409,"recovery_drain_unconfirmed","Source stop is not confirmed");

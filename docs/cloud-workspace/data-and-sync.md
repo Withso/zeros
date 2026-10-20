@@ -180,8 +180,37 @@ ACKs and tombstones, or edit/delete/incomplete history heads. The verifier check
 the ancestor, exact file identity, immutable inventory, source journal and CP
 mirror floor. History heads must also be at least as new as retained immutable
 mutation and terminal-command receipts. Missing or corrupt custody still refuses
-restore. This recovery cannot reconstruct a missing FULL ledger or claim that
-unmirrored work was preserved.
+restore. Ordinary recovery cannot reconstruct a missing FULL ledger or claim
+that unmirrored work was preserved.
+
+The explicit owner-discard operator has a separate missing-ledger mode after
+migration `0176_cloud_checkpoint_history_recovery.sql`. It requires the exact
+committed discard, positive provider-loss proof, original source incarnation,
+retained checkpoint and current authorized candidate. A revoked or expired
+engine alone is insufficient. The CP positively retires the original boot and
+writer with an `owner-discard` source proof, then freezes one immutable canonical
+snapshot before a successor can activate. It includes accepted command IDs and
+receipts, latest edit/delete heads, their exact origin scopes and reachable
+canonical history documents. Prompt payloads, native claims and execution
+authority are absent. The snapshot is bounded to 16 MiB, 4,096 origins, 10,000
+conversations, 100,000 accepted receipts and 65,536 documents; limits refuse
+recovery rather than truncate its proof. Sealed origin bounds are immutable;
+one stream's event head cannot authorize another stream's rows.
+
+Only a genuinely absent live FULL file, or the exact installed snapshot marker
+after a crash, requests this mode. Fresh CP authorization is required on every
+retry. Native validates the ACKed ancestor and the snapshot's hash, scopes,
+heads and documents, stages and fsyncs a copy, then publishes it without
+replacing an existing file. Its nested marker and inventory reads use the
+original five-second monotonic proof deadline and retain the original authority
+check after I/O. NORMAL is rebuilt from the CP facts, never from the older
+ancestor transcript. Latest incomplete heads remain gaps and deleted chats
+stay deleted. Accepted pending IDs become uncertain in the real queue and
+cannot replay; credential ACKs, retirement floors and retained mutation IDs
+remain fenced. Both the snapshot and its mutation fences are included in the
+next seal's inventory, retaining legacy digests when these tables are absent.
+Complete mirrored bundles preserve only their own known rows: workspace
+coverage and the committed recovery notice remain `unknown`.
 
 Boot rebuilds NORMAL from the latest verified FULL heads, then commits the
 credential namespace and its prepare record together, then opens the queue,

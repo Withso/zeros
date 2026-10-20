@@ -19,6 +19,7 @@ import { BOAT_RESOURCE_ID_PATTERN, BoatApiClient } from "./cloud-workspaces/boat
 import { assertInventoryAccount, assertInventoryComplete, databaseClock, inventoryDigest, readBoatInventory,
   type ProviderInventory } from "./cloud-provider-evidence.js";
 import { lookupBoatResource, type ProviderLookup } from "./manage-cloud-provider-loss.js";
+import { manageCloudOwnerCheckpointRetry } from "./cloud-workspaces/owner-checkpoint-retry.js";
 
 export type CloudOwnerCheckpointRecoveryResult = {
   state: "planned" | "restoring" | "unchanged";
@@ -30,8 +31,9 @@ export type CloudOwnerCheckpointRecoveryResult = {
 };
 
 export type OwnerRecoveryLossEvidence = { inventory: ProviderInventory; lookup: ProviderLookup };
-type Options = { databaseUrl:string; config:CloudWorkspaceBackendConfig; workosEnabled:boolean; execute?:boolean;
+export type OwnerCheckpointRecoveryOptions = { databaseUrl:string; config:CloudWorkspaceBackendConfig; workosEnabled:boolean; execute?:boolean;
   approval?:string|undefined; lossEvidence?:OwnerRecoveryLossEvidence };
+type Options = OwnerCheckpointRecoveryOptions;
 
 async function readPlan(tx: Tx, request: CloudOwnerCheckpointRecoveryRequest, options: Options) {
   const workspace = (await tx.query(`SELECT * FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE`,
@@ -202,6 +204,7 @@ export async function manageCloudOwnerCheckpointRecovery(
     check((await client.query("SELECT 1 FROM organizations WHERE id=$1 AND lower(slug::text)=$2 FOR UPDATE",
       [request.organizationId,request.expectedOrganizationSlug])).rowCount===1,"owner_recovery_organization_changed");
     await client.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",[request.workspaceId,request.organizationId]);
+    if (request.retry) return await manageCloudOwnerCheckpointRetry(client,request,options,target,requestDigest);
     const previous = (await client.query(`SELECT receipt.*,transition.state AS transition_state FROM cloud_workspace_owner_discard_receipts receipt
       LEFT JOIN cloud_workspace_generation_transitions transition ON transition.id=receipt.transition_id
       WHERE receipt.id=$1 OR (receipt.workspace_id=$2 AND receipt.org_id=$3 AND receipt.source_generation=$4)`,

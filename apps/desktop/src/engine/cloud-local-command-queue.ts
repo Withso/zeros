@@ -759,7 +759,8 @@ export class CloudLocalCommandQueue {
     const mirrorHead = row?.mirror_history_head ? CloudLocalCommandHistoryHeadSchema.parse(JSON.parse(row.mirror_history_head)) : null;
     const separateHead = mirrorHead && row?.history && canonicalCloudLocalCommandHistoryJson(mirrorHead.history) !== row.history;
     const change: CloudLocalCommandChange = { sequence: next, conversationId, revision: control.revision, paused: Boolean(control.paused),
-      ...(row ? { originWriterEpoch: row.writer_epoch, entry: this.entry(row), actor: JSON.parse(row.actor),
+      ...(row ? { originWriterEpoch: row.writer_epoch, entry: this.entry(row),
+        ...(JSON.parse(row.actor) === null ? {} : { actor: JSON.parse(row.actor) }),
         intent: { userMessageId: row.user_message_id, agentId: row.agent_id },
         ...(this.goal(row) ? { nativeGoal: this.goal(row) } : {}), ...(row.history ? { history: CloudLocalCommandHistorySchema.parse(JSON.parse(row.history)) } : {}),
         ...(separateHead ? {} : mirrorHead ? { historyHead: mirrorHead } :
@@ -826,6 +827,9 @@ export class CloudLocalCommandQueue {
     if (!parsed.success) throw new CloudCommandRuntimeError("invalid_command");
     const input = parsed.data, requestSha256 = hash(input);
     return this.transaction(() => {
+      if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_command_recovered_history_mutations'").get() &&
+          this.db.prepare("SELECT 1 FROM local_command_recovered_history_mutations WHERE mutation_id=?").get(input.mutationId))
+        throw new CloudCommandRuntimeError("command_conflict");
       const previous = this.db.prepare("SELECT * FROM local_command_history_mutations WHERE mutation_id=?").get(input.mutationId) as
         { writer_epoch: string; conversation_id: string; request_sha256: string; history_head: string } | undefined;
       if (previous) {

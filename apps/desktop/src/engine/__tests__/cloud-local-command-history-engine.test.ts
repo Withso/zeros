@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, lstat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -11,6 +11,9 @@ import { openSqlite } from "../db/sqlite";
 import { closeZerosDb, setZerosDbPathForTesting } from "../db";
 import { headRev } from "../db/sync";
 import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
+import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
+import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
+import { engineRuntimeDir } from "../db/paths";
 import { CloudCommandRuntimeError } from "../cloud-command-client";
 import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
 import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
@@ -36,11 +39,51 @@ const methods = ZerosEngine.prototype as unknown as {
 };
 let directory: string | undefined;
 const mutationQueues: CloudLocalCommandQueue[] = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const queue of mutationQueues.splice(0)) queue.close();
+afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const queue of mutationQueues.splice(0)) queue.close();
   closeState(); setStateRootForTesting(null); closeZerosDb(); setZerosDbPathForTesting(null);
   if (directory) await rm(directory, { recursive: true, force: true }); directory = undefined; });
 
 describe("current local-writer history exposure", () => {
+  it("asks CP for exact recovery authority when a fresh replacement has only an older sealed checkpoint", async () => {
+    directory = await mkdtemp(path.join(os.tmpdir(), "zeros-history-lost-full-"));
+    const data = path.join(directory, "data"), root = path.join(directory, "workspace");
+    await mkdir(root); vi.stubEnv("ZEROS_DATA_DIR", data);
+    setZerosDbPathForTesting(path.join(directory, "target-normal.sqlite"));
+    const ancestor = { ...scope, generation: 1, writerEpoch: randomUUID(), engineInstanceId: randomUUID(), bootId: randomUUID() };
+    const actors = new CloudActorAuthorityRegistry({ scope: ancestor, engineLive: () => true });
+    const file = path.join(directory, "ancestor.sqlite"), normal = openSqlite(path.join(directory, "ancestor-normal.sqlite"));
+    normal.pragma("journal_mode = WAL"); normal.pragma("synchronous = NORMAL");
+    normal.exec("CREATE TABLE sync_meta(id INTEGER PRIMARY KEY,next_rev INTEGER NOT NULL); INSERT INTO sync_meta VALUES(0,8)");
+    const queue = new CloudLocalCommandQueue({ file, scope: ancestor, actors, engineLive: () => true, ready: () => true,
+      history: () => ({ recordSequence: 7, eventSequence: 0 }) });
+    const events = new CloudLocalCommandEventStore({ file, queue, engineLive: () => true });
+    const lifecycle = new CloudLocalCommandWriterLifecycle({ file, queue, normalDb: () => normal, assertQuiescent: () => {},
+      heads: () => ({ recordSequence: 7, eventSequence: events.head }) });
+    try {
+      await lifecycle.drainAndSeal({ mirror: { flush: async () => {} }, retireNative: async () => {}, waitForWork: async () => {},
+        freezeNormal: () => normal.close(), request: async seal => {
+          const { scope: _scope, ...body } = seal; return { ...body, writerEpoch: ancestor.writerEpoch };
+        } });
+      await lifecycle.captureCheckpoint(checkpoint.cloudLocalCommandCheckpointRoot(data, root));
+    } finally { lifecycle.close(); events.close(); queue.close(); if (normal.open) normal.close(); actors.dispose(); }
+    const target = { ...scope, generation: 3, engineInstanceId: randomUUID(), bootId: randomUUID() };
+    const refusal = new CloudCommandRuntimeError("engine_authority_rejected");
+    const registration = { agentSourceWriterEpoch: scope.writerEpoch, runtimeBootId: target.bootId,
+      agentBootAuthorityRemainingMs: () => 30_000, localCommandsNegotiated: () => true,
+      agentBootRequest: vi.fn(async () => { throw refusal; }) };
+    const state = { root, cloudLocalHistoryRestored: false, cloudLocalHistoryRestoreHeads: new Map(), cloudLocalCommandPredecessor: null,
+      cloudRecordRuntime: { usesLocalAgentJournal: true }, cloudWorker: {},
+      cloudRuntimeConfig: { execution: target, engine: { instanceId: target.engineInstanceId } }, cloudRuntimeRegistration: registration };
+    const liveLedger = path.join(engineRuntimeDir(root), "cloud-local-commands.sqlite");
+    await expect(lstat(liveLedger)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(methods.restoreCloudLocalHistory.call(state)).rejects.toBe(refusal);
+    expect(registration.agentBootRequest).toHaveBeenCalledExactlyOnceWith("recover-history", {
+      version: 1, mode: "boot-owner-v1", organizationId: scope.organizationId, workspaceId: scope.workspaceId,
+      generation: 3, engineInstanceId: target.engineInstanceId, checkpointOnly: true,
+    }, expect.any(AbortSignal));
+    await expect(lstat(liveLedger)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(state.cloudLocalHistoryRestored).toBe(false); expect(state.cloudLocalHistoryRestoreHeads.size).toBe(0);
+  });
   it.each(["current", "replaced", "custody-replaced"])("uses only exact CP gap custody for a %s registration, before exposing restored heads", async mode => {
     directory = await mkdtemp(path.join(os.tmpdir(), "zeros-history-gap-engine-"));
     setZerosDbPathForTesting(path.join(directory, "normal.sqlite"));

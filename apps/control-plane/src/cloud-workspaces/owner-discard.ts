@@ -5,8 +5,6 @@ import type { Tx } from "../db.js";
 export async function ownerDiscardedTransition(tx: Tx, input: {
   workspaceId: string; organizationId: string; transitionId: string; sourceGeneration: number;
 }): Promise<string | null> {
-  return (await tx.query<{ id:string }>(`SELECT receipt.id FROM cloud_workspace_owner_discard_receipts receipt
-    WHERE receipt.transition_id=$1 AND receipt.workspace_id=$2 AND receipt.org_id=$3 AND receipt.source_generation=$4
-      AND cloud_provider_allocation_lost(receipt.workspace_id,receipt.source_generation,receipt.org_id,receipt.provider_resource_id)`,
+  return (await tx.query<{ id:string|null }>(`SELECT cloud_owner_discard_transition_receipt($1,$2,$3,$4) AS id`,
   [input.transitionId,input.workspaceId,input.organizationId,input.sourceGeneration])).rows[0]?.id ?? null;
 }

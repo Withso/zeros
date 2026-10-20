@@ -19,6 +19,7 @@
     "./cloud-execution-authority": "./src/cloud-execution-authority.ts",
     "./cloud-accepted-work-client": "./src/cloud-accepted-work-client.ts",
     "./cloud-local-mirror": "./src/cloud-local-mirror.ts",
+    "./cloud-checkpoint-history": "./src/cloud-checkpoint-history.ts",
     "./cloud-customization": "./src/cloud-customization.ts",
     "./cloud-actors": "./src/cloud-actors.ts",
     "./cloud-capability-sessions": "./src/cloud-capability-sessions.ts",

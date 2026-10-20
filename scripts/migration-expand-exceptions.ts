@@ -178,6 +178,35 @@ BEGIN
   RETURN NEW;
 END $$;`],
   },
+  "0176_cloud_checkpoint_history_recovery.sql": {
+    "widen-check": ["ALTER TABLE cloud_agent_credential_source_retirements DROP CONSTRAINT cloud_agent_credential_source_retirements_proof_kind_check;"],
+    "new-table-privileges": [
+      "REVOKE ALL ON cloud_workspace_owner_recovery_retries FROM PUBLIC,zeros_app;",
+      "REVOKE UPDATE,TRUNCATE ON cloud_agent_checkpoint_history_snapshots FROM PUBLIC,zeros_app;",
+    ],
+    "truncate-guard": [
+      `CREATE TRIGGER cloud_owner_recovery_retry_no_truncate BEFORE TRUNCATE ON cloud_workspace_owner_recovery_retries
+  FOR EACH STATEMENT EXECUTE FUNCTION preserve_cloud_owner_recovery_retry();`,
+      `CREATE TRIGGER cloud_checkpoint_history_snapshot_no_truncate BEFORE TRUNCATE ON cloud_agent_checkpoint_history_snapshots
+  FOR EACH STATEMENT EXECUTE FUNCTION preserve_cloud_checkpoint_history_snapshot();`,
+    ],
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION cloud_owner_discard_history_receipt(uuid),preserve_cloud_checkpoint_history_snapshot() FROM PUBLIC;",
+      `REVOKE ALL ON FUNCTION cloud_owner_recovery_retry_ready(uuid,uuid,uuid,uuid),preserve_cloud_owner_recovery_retry(),
+  require_cloud_owner_recovery_retry_transition(),cloud_owner_discard_transition_receipt(uuid,uuid,uuid,integer) FROM PUBLIC;`,
+    ],
+    // N-1 cleanup writers may skip only the original positively lost source
+    // through an immutable operator retry of its exact discard transition.
+    "owner-retry-lost-cleanup": [`CREATE OR REPLACE FUNCTION cloud_owner_discard_skip_lost_cleanup() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+  IF NEW.operation IN ('stop','delete') AND NEW.requested_by IS NULL AND NOT NEW.affects_workspace
+    AND cloud_owner_discard_transition_receipt(NEW.generation_transition_id,NEW.workspace_id,NEW.org_id,NEW.generation) IS NOT NULL THEN
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END $$;`],
+  },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-owner-discard-missing-history",
+  "kind": "seeded",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pending",
+  "symptom": "An owner-approved checkpoint restore installed files on a fresh allocation but failed before asking for history authority because the latest live FULL ledger had been discarded and the retained checkpoint belonged to an older sealed writer.",
+  "rule": "The bug-fix playbook requires a fresh-allocation missing-FULL regression, explicit authenticated recovery mode, immutable CP history with visible gaps and no replay, and a separately approved retry after exact candidate cleanup.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-history-engine.test.ts"
+}

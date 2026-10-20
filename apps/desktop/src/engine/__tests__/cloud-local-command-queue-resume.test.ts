@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,10 +9,15 @@ import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
 import { restoreCloudLocalCommandCheckpointLedger, verifiedCloudLocalCommandPredecessor, verifyAndPrepareCloudLocalCommandPredecessor,
-  type CloudLocalCommandPredecessor } from "../cloud-local-command-queue-checkpoint";
+  cloudLocalCommandHistoryRecoveryCustody, type CloudLocalCommandPredecessor } from "../cloud-local-command-queue-checkpoint";
 import { CloudCredentialStartFences, type CloudAgentCredentialControlRequest } from "../cloud-local-command-queue-start-fences";
 import { openSqlite } from "../db/sqlite";
 import { checkpointReadClock } from "./cloud-checkpoint-inventory-clock";
+import { canonicalCloudLocalCommandHistoryJson as canonical } from "@zeros/protocol/cloud-local-mirror";
+import type { CloudCheckpointHistorySnapshot } from "@zeros/protocol/cloud-checkpoint-history";
+import { captureCloudLocalCommandHistory } from "../cloud-local-command-queue-history";
+import { rebuildCloudLocalCommandHistory } from "../cloud-local-command-queue-history-rebuild";
+import { runMigrations } from "../db/migrations";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -91,6 +96,242 @@ async function fixture(legacy = false) {
 }
 
 describe("credential-control custody across verified writer replacement", () => {
+  async function lostWriter() {
+    const f=await fixture(), unsealed={...successor(f.scope),generation:f.scope.generation+1},
+      target={...successor(f.scope),generation:f.scope.generation+2};
+    const normal=openSqlite(":memory:"); runMigrations(normal); cleanup.push(()=>{normal.close();});
+    normal.prepare("INSERT INTO chats(id,folder,agent_id,title,created_at,updated_at,rev) VALUES('mirror',?,'claude','Mirrored history',1,2,8)")
+      .run(f.directory);
+    normal.prepare("INSERT INTO chat_messages(chat_id,msg_id,ord,kind,payload,created_at,rev) VALUES('mirror','known',0,'text','{\"role\":\"user\",\"text\":\"CP copy\"}',1,8)").run();
+    normal.prepare("UPDATE sync_meta SET next_rev=9 WHERE id=0").run();
+    const captured=captureCloudLocalCommandHistory({db:normal,repositoryRoot:f.directory,scope:unsealed,conversationId:"mirror",
+      source:{kind:"mutation",mutationId:randomUUID(),operation:"repair"},nativeResult:null,restoreRevision:1,eventSequence:5,
+      controls:[],redactDocument:value=>value});
+    expect(captured.manifest).toBeDefined();
+    const pendingId=randomUUID(), cancelledId=randomUUID();
+    const actor={scope:unsealed,actorSessionId:randomUUID(),authorityEpoch:1,confirmedUntilMs:Date.now()+9_000,
+      actor:{userId:unsealed.fundingOwnerUserId,deviceId:randomUUID(),deviceKeyVersion:1,role:"owner" as const,fingerprint:"a".repeat(64)},
+      fundingConsentVersion:1 as const,fundingGrant:{kind:"owner" as const}};
+    const incomplete={restoreRevision:1,recordSequence:8,eventSequence:5,incompleteReason:"capture_unavailable" as const};
+    const commands:CloudCheckpointHistorySnapshot["commands"]=[{conversationId:"pending",originWriterEpoch:unsealed.writerEpoch,
+      entry:{commandId:pendingId,position:1,state:"queued",generation:unsealed.generation,executionId:null,resultCode:null,
+        result:null,createdAt:new Date(1).toISOString(),updatedAt:new Date(2).toISOString()},
+      intent:{userMessageId:"pending-message",agentId:"claude"},actor,credentialRun:null,history:null},
+      {conversationId:"cancelled",originWriterEpoch:unsealed.writerEpoch,
+        entry:{commandId:cancelledId,position:1,state:"cancelled",generation:unsealed.generation,executionId:null,resultCode:null,
+          result:null,createdAt:new Date(1).toISOString(),updatedAt:new Date(2).toISOString()},
+        intent:{userMessageId:"cancelled-message",agentId:"claude"},actor:null,credentialRun:null,history:incomplete}];
+    const snapshot:CloudCheckpointHistorySnapshot={version:1,scope:unsealed,
+      origins:[{scope:f.scope,recordSequence:7,eventSequence:0},{scope:unsealed,recordSequence:8,eventSequence:5}],
+      controls:["mirror","deleted","edited","pending","cancelled"].map(conversationId=>({conversationId,revision:1,paused:false})),commands,
+      heads:[{conversationId:"mirror",head:captured.historyHead},
+        ...["deleted","edited"].map(conversationId=>({conversationId,head:{originWriterEpoch:unsealed.writerEpoch,
+          source:{kind:"mutation" as const,mutationId:randomUUID(),operation:conversationId==="deleted"?"delete" as const:"edit" as const},
+          deleted:conversationId==="deleted",history:incomplete}})),
+        {conversationId:"cancelled",head:{originWriterEpoch:unsealed.writerEpoch,source:{kind:"command",commandId:cancelledId,
+          intent:commands[1]!.intent,executionId:null,nativeResultSha256:null},deleted:false,history:incomplete}}],
+      documents:captured.documents.map(item=>({sha256:item.sha256,kind:item.kind,document:item.canonicalDocument}))};
+    const {writerEpoch:_writer,...scope}=target, document=canonical(snapshot);
+    const manifest=JSON.parse(readFileSync(path.join(f.root,"manifest.json"),"utf8"));
+    const authorization:CloudAgentHistoryRecoveryResponse={...scope,version:1,mode:"boot-owner-v1",recoveryId:randomUUID(),
+      code:"history_recovered_with_gap",coverage:"unknown",predecessor:unsealed,predecessorRetiredAt:new Date().toISOString(),
+      checkpoint:{writerEpoch:f.scope.writerEpoch,sha256:manifest.seal.sha256},mirroredSequence:9,preparedCustody:[],
+      checkpointOnly:{ownerDiscardReceiptId:randomUUID(),checkpointId:randomUUID(),document,sha256:createHash("sha256").update(document).digest("hex")}};
+    const file=path.join(f.directory,"fresh.sqlite"), targetNormal=openSqlite(":memory:"); runMigrations(targetNormal); cleanup.push(()=>{targetNormal.close();});
+    for(const id of ["deleted","edited","local"]) {
+      targetNormal.prepare("INSERT INTO chats(id,folder,title,created_at,updated_at,rev) VALUES(?,?,?,1,1,1)")
+        .run(id,id==="local"?"/unrelated-local":f.directory,id);
+      targetNormal.prepare("INSERT INTO chat_messages(chat_id,msg_id,ord,kind,payload,created_at,rev) VALUES(?,'stale',0,'text','{\"text\":\"stale\"}',1,1)").run(id);
+    }
+    const recover=async(assertCurrent=()=>{})=>{
+      const {recoverCloudLocalCommandCheckpointLedger}=await import("../cloud-local-command-queue-checkpoint");
+      const recovered=await recoverCloudLocalCommandCheckpointLedger({root:f.root,file,scope:target,
+        expectedWriterEpoch:unsealed.writerEpoch,authorization,assertCurrent}); cleanup.push(recovered.cleanup); return recovered;
+    };
+    return {...f,file,target,unsealed,authorization,snapshot,pendingId,cancelledId,targetNormal,recover};
+  }
+
+  it("restores only CP history after owner discard, retaining deletes, gaps, null-actor receipts and accepted IDs",async()=>{
+    const f=await lostWriter(), recovered=await f.recover(), db=openSqlite(f.file,{readonly:true});
+    try {
+      expect(inventory(f.file)).toEqual(f.before);
+      expect(db.prepare("SELECT writer_epoch FROM local_command_writer_seals").all()).toEqual([{writer_epoch:f.scope.writerEpoch}]);
+      for(const item of f.snapshot.heads) rebuildCloudLocalCommandHistory({db:f.targetNormal,ledger:db,repositoryRoot:f.directory,
+        scope:f.unsealed,sourceRecovery:recovered.predecessor,conversationId:item.conversationId});
+      expect(f.targetNormal.prepare("SELECT id FROM chats WHERE id='deleted'").get()).toBeUndefined();
+      expect(f.targetNormal.prepare("SELECT msg_id FROM chat_messages WHERE chat_id='edited'").all()).toEqual([]);
+      expect(f.targetNormal.prepare("SELECT payload FROM chat_messages WHERE chat_id='mirror'").all()).toEqual([{payload:'{"role":"user","text":"CP copy"}'}]);
+      expect(f.targetNormal.prepare("SELECT msg_id FROM chat_messages WHERE chat_id='local'").all()).toEqual([{msg_id:"stale"}]);
+    } finally {db.close();}
+    controls(f.file,f.target,recovered.predecessor,undefined,{},(receipt,file,db)=>verifyAndPrepareCloudLocalCommandPredecessor(receipt,file,db,f.target)).close();
+    const actors=new CloudActorAuthorityRegistry({scope:f.target,engineLive:()=>true}); cleanup.push(()=>actors.dispose());
+    const queue=new CloudLocalCommandQueue({file:f.file,scope:f.target,actors,engineLive:()=>true,ready:()=>true,history:()=>({recordSequence:8,eventSequence:0})});
+    cleanup.push(()=>queue.close());
+    const deleted=f.snapshot.heads.find(item=>item.conversationId==="deleted")!.head;
+    expect(deleted.source.kind).toBe("mutation");
+    expect(()=>queue.publishHistoryMutation({conversationId:"deleted",mutationId:deleted.source.kind==="mutation"?deleted.source.mutationId:"",
+      operation:"delete",deleted:true,recordSequence:8,eventSequence:0})).toThrowError(expect.objectContaining({code:"command_conflict"}));
+    expect(queue.handle({kind:"claim",conversationId:"pending",executionId:"new-execution"},{writerEpoch:f.target.writerEpoch})).toBeNull();
+    const stored=openSqlite(f.file,{readonly:true});
+    try {
+      expect(stored.prepare("SELECT state,payload,result_code FROM local_commands WHERE id=?").get(f.pendingId))
+        .toEqual({state:"uncertain",payload:null,result_code:"queue_recovery_required"});
+      expect(stored.prepare("SELECT state FROM local_commands WHERE id=?").get(f.cancelledId)).toEqual({state:"cancelled"});
+    } finally {stored.close();}
+    expect(queue.peekMirrorBatch()!.changes.some(item=>item.entry?.commandId===f.cancelledId && item.actor===undefined)).toBe(true);
+    const actorSessionId=randomUUID();
+    actors.confirm({...f.snapshot.commands[0]!.actor!,scope:f.target,actorSessionId});
+    const observed=queue.handle({kind:"snapshot",conversationId:"pending"},{writerEpoch:f.target.writerEpoch,actorSessionId}) as {revision:number};
+    expect(()=>queue.handle({kind:"mutate",mutation:{conversationId:"pending",operationId:randomUUID(),expectedRevision:observed.revision,
+      action:{kind:"enqueue",commandId:f.pendingId,payload:{agentId:"claude",userMessageId:"pending-message",modeRevision:0,
+        model:"claude-sonnet-4-6",prompt:[{type:"text",text:"Do not replay"}]}}},admissionError:null},
+      {writerEpoch:f.target.writerEpoch,actorSessionId})).toThrow();
+  });
+
+  it("reauthorizes an exact installed snapshot across a pre-activation crash without recopying FULL",async()=>{
+    const f=await lostWriter(), first=await f.recover(), before=readFileSync(f.file);
+    const again=await f.recover(); expect(readFileSync(f.file)).toEqual(before);
+    const {cloudLocalCommandHistoryRecoveryCustodySha256,cloudLocalCommandHistoryRecoveryCustody}=await import("../cloud-local-command-queue-checkpoint");
+    const originalHash=cloudLocalCommandHistoryRecoveryCustodySha256(first.predecessor,f.target);
+    expect(cloudLocalCommandHistoryRecoveryCustodySha256(again.predecessor,f.target)).toBe(originalHash);
+    controls(f.file,f.target,again.predecessor,undefined,{},(receipt,file,db)=>verifyAndPrepareCloudLocalCommandPredecessor(receipt,file,db,f.target)).close();
+    expect(await cloudLocalCommandHistoryRecoveryCustody(f.file,f.unsealed.writerEpoch)).toBeNull();
+    const afterPrepare=await f.recover();
+    expect(cloudLocalCommandHistoryRecoveryCustodySha256(afterPrepare.predecessor,f.target)).toBe(originalHash);
+  });
+
+  it("refuses a missing terminal result on exact installed-snapshot replay",async()=>{
+    const f=await lostWriter(), cancelled=f.snapshot.commands.find(item=>item.entry.commandId===f.cancelledId)!;
+    cancelled.entry.result={version:1,model:"fixture"};
+    const head=f.snapshot.heads.find(item=>item.conversationId==="cancelled")!.head;
+    if(head.source.kind!=="command")throw new Error("fixture command head");
+    head.source.nativeResultSha256=createHash("sha256").update(canonical(cancelled.entry.result)).digest("hex");
+    f.authorization.checkpointOnly!.document=canonical(f.snapshot);
+    f.authorization.checkpointOnly!.sha256=createHash("sha256").update(f.authorization.checkpointOnly!.document).digest("hex");
+    await f.recover();
+    const db=openSqlite(f.file);try{db.prepare("UPDATE local_commands SET result=NULL WHERE id=?").run(f.cancelledId);}finally{db.close();}
+    await expect(f.recover()).rejects.toMatchObject({name:"CloudCommandRuntimeError"});
+  });
+
+  it.each(["hash","scope","checkpoint","sidecar","existing"])("refuses %s drift without publishing a checkpoint-only ledger",async kind=>{
+    const f=await lostWriter();
+    if(kind==="hash")f.authorization.checkpointOnly!.sha256="f".repeat(64);
+    if(kind==="scope")f.authorization.predecessor.workspaceId=randomUUID();
+    if(kind==="checkpoint")f.authorization.checkpoint.sha256="f".repeat(64);
+    if(kind==="sidecar")writeFileSync(f.file+"-wal","unrelated WAL");
+    if(kind==="existing")writeFileSync(f.file,"corrupt existing FULL");
+    const before=existsSync(f.file)?readFileSync(f.file):null;
+    await expect(f.recover()).rejects.toMatchObject({name:"CloudCommandRuntimeError"});
+    expect(existsSync(f.file)?readFileSync(f.file):null).toEqual(before);
+  });
+
+  it("checks original authority after file I/O and leaves no publishable predecessor on revocation",async()=>{
+    const f=await lostWriter(); let calls=0;
+    await expect(f.recover(()=>{if(++calls===8)throw new Error("retired during copy");})).rejects.toMatchObject({name:"CloudCommandRuntimeError"});
+    expect(calls).toBe(8); expect(existsSync(f.file)).toBe(false);
+    await expect(f.recover()).resolves.toHaveProperty("predecessor");
+  });
+
+  it.each(["origin-bound","missing-document","foreign-actor"] as const)("refuses authenticated %s snapshot inconsistency before publication",async kind=>{
+    const f=await lostWriter();
+    if(kind==="origin-bound")f.snapshot.origins.find(item=>item.scope.writerEpoch===f.unsealed.writerEpoch)!.eventSequence=4;
+    if(kind==="missing-document")f.snapshot.documents=f.snapshot.documents.filter(item=>item.kind!=="record");
+    if(kind==="foreign-actor")f.snapshot.commands[0]!.actor!.scope.organizationId=randomUUID();
+    const document=canonical(f.snapshot); f.authorization.checkpointOnly!.document=document;
+    f.authorization.checkpointOnly!.sha256=createHash("sha256").update(document).digest("hex");
+    await expect(f.recover()).rejects.toMatchObject({name:"CloudCommandRuntimeError"});
+    expect(existsSync(f.file)).toBe(false);
+  });
+
+  it.each([false,true])("verifies the actual staged SQLite custody before CP import (changed credential rows=%s)",async changed=>{
+    const f=await lostWriter(), sqlite=await import("../db/sqlite"), open=sqlite.openSqlite;
+    let reached=0;
+    const spy=vi.spyOn(sqlite,"openSqlite").mockImplementation((file,options)=>{
+      const db=open(file,options);
+      if(path.basename(file).startsWith(".checkpoint-history-") && !options?.readonly) {
+        reached++;
+        if(changed)expect(db.prepare("DELETE FROM local_credential_control_operations").run().changes).toBeGreaterThan(0);
+      }
+      return db;
+    });
+    try {
+      if(changed)await expect(f.recover()).rejects.toMatchObject({code:"checkpoint_inventory_hash"});
+      else await expect(f.recover()).resolves.toHaveProperty("predecessor");
+      expect(reached).toBe(1); expect(existsSync(f.file)).toBe(!changed);
+    } finally {spy.mockRestore();}
+  });
+
+  it.each(["single", "nested"] as const)("bounds %s retained checkpoint snapshot reads by one original inventory deadline",async kind=>{
+    const f=await lostWriter(); await f.recover();
+    const bytes=readFileSync(f.file), stages:string[]=[];
+    const clock=checkpointReadClock(sql=>{
+      const stage=sql.startsWith("SELECT recovery_id,length(CAST(document AS BLOB))")?"metadata":
+        sql.startsWith("SELECT document FROM local_command_checkpoint_history WHERE")?"body":null;
+      if(!stage || stages.includes(stage) || kind==="single" && stage==="metadata")return 0;
+      stages.push(stage); return kind==="single"?5_001:3_000;
+    });
+    try {
+      await expect(cloudLocalCommandHistoryRecoveryCustody(f.file,f.unsealed.writerEpoch))
+        .rejects.toMatchObject({code:"checkpoint_inventory_timeout"});
+      expect(stages).toEqual(kind==="single"?["body"]:["metadata","body"]);
+      expect(clock.elapsed()).toBe(kind==="single"?5_001:6_000);
+      expect(readFileSync(f.file)).toEqual(bytes);
+    } finally {clock.restore();}
+    expect(await cloudLocalCommandHistoryRecoveryCustody(f.file,f.unsealed.writerEpoch)).toBeNull();
+  });
+
+  it.each([false,true])("retains CP origin custody through the next acknowledged checkpoint with a smaller new event stream (lost mutation fence=%s)",async lostFence=>{
+    const f=await lostWriter(), recovered=await f.recover();
+    const db=openSqlite(f.file,{readonly:true});
+    try {for(const item of f.snapshot.heads) rebuildCloudLocalCommandHistory({db:f.targetNormal,ledger:db,repositoryRoot:f.directory,
+      scope:f.unsealed,sourceRecovery:recovered.predecessor,conversationId:item.conversationId});} finally {db.close();}
+    controls(f.file,f.target,recovered.predecessor,undefined,{},(receipt,file,db)=>verifyAndPrepareCloudLocalCommandPredecessor(receipt,file,db,f.target)).close();
+    const actors=new CloudActorAuthorityRegistry({scope:f.target,engineLive:()=>true}); cleanup.push(()=>actors.dispose());
+    const queue=new CloudLocalCommandQueue({file:f.file,scope:f.target,actors,engineLive:()=>true,ready:()=>true,
+      history:()=>({recordSequence:8,eventSequence:0})}); cleanup.push(()=>queue.close());
+    const flush=async()=>{let batch;while((batch=queue.peekMirrorBatch()))queue.acknowledgeMirror({version:1,writerEpoch:f.target.writerEpoch,batchId:batch.batchId,through:batch.through});};
+    await flush();
+    const events=new CloudLocalCommandEventStore({file:f.file,queue,engineLive:()=>true}); cleanup.push(()=>events.close());
+    const normalFile=path.join(f.directory,"after-normal.sqlite"); f.targetNormal.prepare("VACUUM INTO ?").run(normalFile);
+    const normal=openSqlite(normalFile); normal.pragma("journal_mode=WAL"); normal.pragma("synchronous=NORMAL");
+    const lifecycle=new CloudLocalCommandWriterLifecycle({file:f.file,queue,normalDb:()=>normal,assertQuiescent:()=>{},
+      heads:()=>({recordSequence:8,eventSequence:events.head})}); cleanup.push(()=>lifecycle.close());
+    await lifecycle.drainAndSeal({mirror:{flush},retireNative:async()=>{},waitForWork:async()=>{},freezeNormal:()=>normal.close(),
+      request:async seal=>{expect(seal.eventSequence).toBe(0);const {scope:_scope,...body}=seal;return {...body,writerEpoch:seal.scope.writerEpoch};}});
+    const checkpoint=path.join(f.directory,"next-checkpoint"); await lifecycle.captureCheckpoint(checkpoint);
+    lifecycle.close(); events.close(); queue.close();
+    const nextFile=path.join(f.directory,"next.sqlite");
+    const restored=await restoreCloudLocalCommandCheckpointLedger({root:checkpoint,file:nextFile,scope:f.target,expectedWriterEpoch:f.target.writerEpoch});
+    cleanup.push(restored.cleanup);
+    const next=openSqlite(restored.ledgerFile,{readonly:true}), target=openSqlite(":memory:"); runMigrations(target);
+    try {
+      expect(rebuildCloudLocalCommandHistory({db:target,ledger:next,repositoryRoot:f.directory,scope:f.target,
+        sourceSeal:restored.manifest.seal,sealedCheckpoint:restored,conversationId:"mirror"}).restored).toBe(true);
+      expect(target.prepare("SELECT msg_id FROM chat_messages WHERE chat_id='mirror'").all()).toEqual([{msg_id:"known"}]);
+    } finally {next.close();target.close();}
+    const unsealed=successor(f.target), successorScope=successor(unsealed);
+    controls(nextFile,unsealed,restored.predecessor).close();
+    const nextActors=new CloudActorAuthorityRegistry({scope:unsealed,engineLive:()=>true});cleanup.push(()=>nextActors.dispose());
+    const pending=new CloudLocalCommandQueue({file:nextFile,scope:unsealed,actors:nextActors,engineLive:()=>true,ready:()=>true,
+      history:()=>({recordSequence:8,eventSequence:0})});
+    let batch;while((batch=pending.peekMirrorBatch()))pending.acknowledgeMirror({version:1,writerEpoch:unsealed.writerEpoch,batchId:batch.batchId,through:batch.through});
+    pending.close();
+    const ledger=openSqlite(nextFile);let mirroredSequence:number;
+    try {
+      mirroredSequence=Number((ledger.prepare("SELECT value FROM local_command_metadata WHERE key='mirrorHead'").get() as {value:string}).value);
+      if(lostFence)expect(ledger.prepare("DELETE FROM local_command_recovered_history_mutations WHERE conversation_id='deleted'").run().changes).toBe(1);
+    } finally {ledger.close();}
+    const {writerEpoch:_next,...scope}=successorScope;
+    const authorization:CloudAgentHistoryRecoveryResponse={...scope,version:1,mode:"boot-owner-v1",recoveryId:randomUUID(),
+      code:"history_recovered_with_gap",coverage:"unknown",predecessor:unsealed,predecessorRetiredAt:new Date().toISOString(),mirroredSequence,
+      checkpoint:{writerEpoch:f.target.writerEpoch,sha256:restored.manifest.seal.sha256}};
+    const {recoverCloudLocalCommandCheckpointLedger}=await import("../cloud-local-command-queue-checkpoint");
+    const recovery=recoverCloudLocalCommandCheckpointLedger({root:checkpoint,file:nextFile,scope:successorScope,
+      expectedWriterEpoch:unsealed.writerEpoch,authorization});
+    if(lostFence)await expect(recovery).rejects.toMatchObject({code:"checkpoint_inventory_hash"});
+    else cleanup.push((await recovery).cleanup);
+  });
+
   async function interruptedWriter() {
     const f = await fixture();
     let prior: CloudAgentBootScope = f.scope;
@@ -227,7 +468,7 @@ describe("credential-control custody across verified writer replacement", () => 
       target = successor(target);
       const { writerEpoch: _writer, ...identity } = target;
       authorization = { ...f.authorization, ...identity, recoveryId: randomUUID(),
-        preparedCustody: hints.map(hint => prepared.find(item => item.scope.writerEpoch === hint.writerEpoch)!) };
+        preparedCustody: hints!.map(hint => prepared.find(item => item.scope.writerEpoch === hint.writerEpoch)!) };
     }
   });
 
