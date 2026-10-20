@@ -828,6 +828,7 @@ describe("repository layout contracts", () => {
       "contracts",
       "data-and-sync.md",
       "database-qualification.md",
+      "desktop-diagnostics.md",
       "engineering-reference.md",
       "enterprise-and-self-hosting.md",
       "infrastructure-and-operations.md",
