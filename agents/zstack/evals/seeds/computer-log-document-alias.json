@@ -1,0 +1,5 @@
+{
+  "file": "scripts/cloud-workspace-validation/runtime-base-v4/computer-build.py",
+  "before": "if path == '/var/log': self.sanitize_system_log_document()",
+  "after": "if path == '/var/log': pass"
+}

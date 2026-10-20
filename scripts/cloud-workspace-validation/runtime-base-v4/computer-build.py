@@ -10,6 +10,7 @@ sys.dont_write_bytecode = True
 
 import codecs
 import contextlib
+import ctypes
 import datetime
 import fcntl
 import hashlib
@@ -48,6 +49,16 @@ class Failure(Exception):
 
 def require(condition, check="input_schema"):
     if not condition: raise Failure(check)
+
+
+def exchange_log_alias(source, source_name, destination, destination_name):
+    # Keep a raced replacement in private custody; never fall back to unlink.
+    libc = ctypes.CDLL(None, use_errno=True)
+    exchange = libc.renameat2
+    exchange.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    exchange.restype = ctypes.c_int
+    if exchange(source, os.fsencode(source_name), destination, os.fsencode(destination_name), 2) != 0:
+        raise OSError(ctypes.get_errno(), 'log_alias_exchange')
 
 
 def sha(value): return hashlib.sha256(value).hexdigest()
@@ -876,6 +887,140 @@ class ComputerBuild:
     def clear_directory(self, path, keep=()):
         self.empty_path(path, kind="directory", keep=keep)
 
+    def sanitize_system_log_document(self):
+        """Clear the one stock systemd document alias, then materialize emptiness.
+
+        Never resolve an input link. Pin its exact literal and independently
+        open the fixed target beneath the original root. This constant-size
+        path adds one regular leaf, not another recursive traversal. Retain
+        every reference through target sync and checked alias replacement.
+        """
+        watches, target_cleared = [], False
+
+        def identity(info):
+            return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+        def validate():
+            for row in watches:
+                parent, name, fd, original, policy = row
+                info = os.fstat(fd)
+                require(identity(info) == original == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
+                        'sanitation_failed')
+                if policy == 'link':
+                    require(stat.S_ISLNK(info.st_mode) and info.st_nlink == 1 and info.st_size == 39 and
+                            (info.st_uid, info.st_gid) == (self.uid, self.gid), 'sanitation_failed')
+                elif policy in ('document', 'empty'):
+                    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                            (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) ==
+                            (self.uid, self.gid, 0o644 if policy == 'document' else 0o600), 'sanitation_failed')
+                    require(not os.listxattr(fd), 'sanitation_failed')
+                    if policy == 'empty' or target_cleared:
+                        require(info.st_size == 0, 'sanitation_failed')
+                elif policy == 'document_parent':
+                    require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (self.uid, self.gid, 0o755) and
+                            not os.listxattr(fd), 'sanitation_failed')
+                elif policy == 'retained_custody':
+                    require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (self.uid, self.gid, 0o700) and
+                            not os.listxattr(fd) and os.listdir(fd) == ['entry'], 'sanitation_failed')
+
+        try:
+            with contextlib.ExitStack() as stack:
+                def pin(parent, name, flags, policy='ancestor', mode=0o600):
+                    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode, dir_fd=parent)
+                    stack.callback(os.close, fd)
+                    info = os.fstat(fd)
+                    row = [parent, name, fd, identity(info), policy]
+                    watches.append(row)
+                    return row
+
+                root = pin(None, self.root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    var = pin(root[2], 'var', os.O_RDONLY | os.O_DIRECTORY)
+                    log = pin(var[2], 'log', os.O_RDONLY | os.O_DIRECTORY)
+                except FileNotFoundError:
+                    validate()
+                    return
+                # An interrupted exchange can retain an unexpected object.
+                # Only the completed, empty custody shape may reach the
+                # ordinary recursive scrub on this or any later attempt.
+                names = os.listdir(log[2])
+                require(len(names) <= 262_144, 'sanitation_failed')
+                for name in names:
+                    if name.startswith('.zeros-log-document-'):
+                        require(re.fullmatch(r'\.zeros-log-document-[a-f0-9]{32}', name), 'sanitation_failed')
+                        retained_directory = pin(log[2], name, os.O_RDONLY | os.O_DIRECTORY, 'retained_custody')
+                        validate()
+                        pin(retained_directory[2], 'entry', os.O_RDONLY, 'empty')
+                        validate()
+                try:
+                    alias = pin(log[2], 'README', os.O_PATH)
+                except FileNotFoundError:
+                    validate()
+                    return
+                if not stat.S_ISLNK(os.fstat(alias[2]).st_mode):
+                    validate()
+                    return  # The unchanged ordinary traversal validates it.
+                alias[4] = 'link'
+                validate()
+                require(os.readlink('', dir_fd=alias[2]) == '../../usr/share/doc/systemd/README.logs', 'sanitation_failed')
+                parent = root[2]
+                for part in ('usr', 'share', 'doc', 'systemd'):
+                    parent = pin(parent, part, os.O_RDONLY | os.O_DIRECTORY, 'document_parent')[2]
+                    validate()
+                original = pin(parent, 'README.logs', os.O_PATH)
+                info = os.fstat(original[2])
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                        (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (self.uid, self.gid, 0o644), 'sanitation_failed')
+                # Linux's held O_PATH reference selects the original inode,
+                # including across a pathname exchange. Never reopen its name.
+                writer = os.open('/proc/self/fd/' + str(original[2]), os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                stack.callback(os.close, writer)
+                require(identity(os.fstat(writer)) == original[3], 'sanitation_failed')
+                document = [parent, 'README.logs', writer, original[3], 'document']
+                watches.append(document)
+                validate()
+                os.ftruncate(writer, 0)
+                target_cleared = True
+                os.fsync(writer)
+                os.fsync(parent)
+                validate()
+
+                # A saved-tree receipt cannot prove an alias target. Retain the
+                # existing strict gate by publishing an empty regular leaf.
+                custody_name = '.zeros-log-document-' + uuid.uuid4().hex
+                log_info = os.fstat(log[2])
+                os.mkdir(custody_name, 0o700, dir_fd=log[2])
+                custody = pin(log[2], custody_name, os.O_RDONLY | os.O_DIRECTORY)
+                info = os.fstat(custody[2])
+                require(info.st_uid == self.uid and stat.S_IMODE(info.st_mode) in (0o700, 0o2700) and
+                        info.st_gid == (log_info.st_gid if log_info.st_mode & stat.S_ISGID else self.gid) and
+                        not os.listxattr(custody[2]) and not os.listdir(custody[2]), 'sanitation_failed')
+                validate()
+                os.fchown(custody[2], self.uid, self.gid)
+                os.fchmod(custody[2], 0o700)
+                custody[3] = identity(os.fstat(custody[2]))
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                replacement = pin(custody[2], 'entry', flags, 'empty')
+                retained = pin(custody[2], 'empty', flags, 'empty')
+                os.fsync(replacement[2])
+                os.fsync(retained[2])
+                os.fsync(custody[2])
+                os.fsync(log[2])
+                validate()
+                exchange_log_alias(custody[2], 'entry', log[2], 'README')
+                alias[:2], replacement[:2] = [custody[2], 'entry'], [log[2], 'README']
+                # If a different object was displaced, leave it in custody and
+                # fail; neither its bytes nor its target may be touched.
+                validate()
+                os.replace('empty', 'entry', src_dir_fd=custody[2], dst_dir_fd=custody[2])
+                watches.remove(alias)
+                retained[1] = 'entry'
+                os.fsync(custody[2])
+                os.fsync(log[2])
+                validate()
+        except (OSError, AttributeError):
+            raise Failure('sanitation_failed') from None
+
     def empty_private_state(self):
         # Check generated-file metadata before the general session-tree walk
         # can touch those same bytes. Missing names still need replacements.
@@ -890,6 +1035,7 @@ class ComputerBuild:
         for path in ("/srv/zeros/managed-settings", "/srv/zeros/setup",
                      "/srv/zeros/state/workspaces", "/srv/zeros/home/agent", "/srv/zeros/home/capture",
                      "/srv/zeros/log", "/var/log", "/run/log/journal"):
+            if path == '/var/log': self.sanitize_system_log_document()
             self.clear_directory(path)
         self.clear_directory("/srv/zeros/files", ("repos",))
         for home in ("/root", "/home/user"):

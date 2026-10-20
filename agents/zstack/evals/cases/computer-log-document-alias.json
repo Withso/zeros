@@ -1,0 +1,9 @@
+{
+  "id": "computer-log-document-alias",
+  "kind": "seeded",
+  "area": "vm-image-bootstrap",
+  "fixedBy": "pr:676",
+  "symptom": "Computer-template sanitation refuses the stock systemd README log alias before clearing its fixed regular document target.",
+  "rule": "Validate the exact literal and independently pin the original target and ancestry; retain all other alias refusals and require an empty saved-tree shape. See agents/zstack/changes/computer-log-document-alias.md.",
+  "check": "pnpm test:git scripts/__tests__/cloud-computer-template-helpers.test.ts"
+}

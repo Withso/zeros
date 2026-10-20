@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -633,6 +634,290 @@ ENDFONT
             with self.assertRaises(build.Failure) as caught: self.app.sanitize(self.sanitation_request())
             self.assertEqual(caught.exception.check, 'sanitation_failed')
             self.assertTrue(stat.S_ISSOCK(target.lstat().st_mode))
+
+    def system_log_document(self):
+        document = self.write('/usr/share/doc/systemd/README.logs', 'synthetic document bytes', 0o644)
+        link = self.app.path('/var/log/README')
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to('../../usr/share/doc/systemd/README.logs')
+        return link, document
+
+    def test_sanitize_clears_only_the_exact_system_log_alias_and_original_target(self):
+        link, document = self.system_log_document()
+        unrelated = self.write('/usr/share/doc/systemd/OTHER', 'unrelated document bytes')
+        log = self.write('/var/log/fixture.log', 'synthetic private log')
+        original = document.stat()
+        request = self.sanitation_request()
+        refusal = None
+        try:
+            result = self.app.sanitize(request)
+        except build.Failure as error:
+            refusal = error.check
+        self.assertIsNone(refusal, 'the exact stock systemd alias must be sanitized')
+        self.assertTrue(result['clean'])
+        self.assertEqual(document.read_bytes(), b'')
+        self.assertEqual((document.stat().st_dev, document.stat().st_ino, document.stat().st_mode),
+                         (original.st_dev, original.st_ino, original.st_mode))
+        self.assertEqual(unrelated.read_text(), 'unrelated document bytes')
+        self.assertEqual(log.read_bytes(), b'')
+        # The unchanged saved-tree verifier accepts only empty regular leaves
+        # beneath /var/log. Leaving the original alias would fail capture next.
+        self.assertTrue(stat.S_ISREG(link.lstat().st_mode))
+        self.assertEqual(link.read_bytes(), b'')
+        self.assertEqual(link.stat().st_nlink, 1)
+        replacement = link.stat().st_ino
+        self.assertTrue(self.app.sanitize(request)['clean'])
+        self.assertEqual(link.stat().st_ino, replacement)
+
+    def test_sanitize_does_not_expand_the_system_log_alias_allowlist(self):
+        link, document = self.system_log_document()
+        victim = self.write('/outside/private', 'unrelated private bytes')
+        cases = (('/var/log/README', '/usr/share/doc/systemd/README.logs'),
+                 ('/var/log/README', '../../outside/private'),
+                 ('/var/log/other', '../../usr/share/doc/systemd/README.logs'),
+                 ('/var/log/nested/README', '../../../usr/share/doc/systemd/README.logs'))
+        link.unlink()
+        for name, target in cases:
+            with self.subTest(name=name, target=target):
+                alias = self.app.path(name)
+                alias.parent.mkdir(parents=True, exist_ok=True)
+                alias.symlink_to(target)
+                try:
+                    with self.assertRaises(build.Failure): self.app.empty_private_state()
+                    self.assertTrue(alias.is_symlink())
+                    self.assertEqual(document.read_text(), 'synthetic document bytes')
+                    self.assertEqual(victim.read_text(), 'unrelated private bytes')
+                finally:
+                    alias.unlink()
+
+    def test_sanitize_refuses_an_aliased_or_hardlinked_system_log_target(self):
+        link, document = self.system_log_document()
+        victim = self.write('/outside/private', 'unrelated private bytes')
+        document.unlink()
+        for kind in ('symlink', 'hardlink', 'fifo', 'directory'):
+            with self.subTest(kind=kind):
+                if kind == 'symlink': document.symlink_to(victim)
+                elif kind == 'hardlink': os.link(victim, document)
+                elif kind == 'fifo': os.mkfifo(document)
+                else: document.mkdir()
+                try:
+                    with self.assertRaises(build.Failure): self.app.empty_private_state()
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(victim.read_text(), 'unrelated private bytes')
+                finally:
+                    if kind == 'directory': document.rmdir()
+                    else: document.unlink()
+
+    def test_sanitize_retains_an_unexpected_exchanged_log_object_across_retry(self):
+        link, document = self.system_log_document()
+        foreign = self.write('/outside/private', 'retain unexpected displaced bytes')
+        original = foreign.stat()
+        exchange = build.exchange_log_alias
+        displaced = []
+
+        def race(source, source_name, destination, destination_name):
+            os.replace(foreign, link)
+            exchange(source, source_name, destination, destination_name)
+            displaced.append(Path(os.readlink('/proc/self/fd/' + str(source))) / source_name)
+
+        with patch.object(build, 'exchange_log_alias', side_effect=race):
+            with self.assertRaises(build.Failure) as caught:
+                self.app.empty_private_state()
+        self.assertEqual(caught.exception.check, 'sanitation_failed')
+        self.assertEqual(len(displaced), 1)
+        retained = displaced[0]
+        self.assertEqual((retained.stat().st_dev, retained.stat().st_ino),
+                         (original.st_dev, original.st_ino))
+        self.assertEqual(retained.read_text(), 'retain unexpected displaced bytes')
+        self.assertEqual(document.read_bytes(), b'')
+        self.assertTrue(stat.S_ISREG(link.lstat().st_mode))
+        refusal = None
+        try:
+            self.app.empty_private_state()
+        except build.Failure as error:
+            refusal = error.check
+        self.assertEqual(retained.read_text(), 'retain unexpected displaced bytes',
+                         'a retry must not clear an object rejected during alias exchange')
+        self.assertEqual(refusal, 'sanitation_failed')
+
+    def test_sanitize_refuses_a_missing_system_log_target_without_removing_the_alias(self):
+        link, document = self.system_log_document()
+        document.unlink()
+        with self.assertRaises(build.Failure) as caught:
+            self.app.empty_private_state()
+        self.assertEqual(caught.exception.check, 'sanitation_failed')
+        self.assertEqual(os.readlink(link), '../../usr/share/doc/systemd/README.logs')
+        self.assertFalse(document.exists())
+
+    def test_sanitize_system_log_target_requires_original_regular_ancestry(self):
+        link, document = self.system_log_document()
+        for name in ('/usr', '/usr/share', '/usr/share/doc', '/usr/share/doc/systemd'):
+            with self.subTest(parent=name):
+                parent = self.app.path(name)
+                relative = document.relative_to(parent)
+                moved = self.root / 'detached-document-parent'
+                parent.rename(moved)
+                parent.symlink_to(moved, target_is_directory=True)
+                try:
+                    with self.assertRaises(build.Failure): self.app.empty_private_state()
+                    self.assertEqual((moved / relative).read_text(), 'synthetic document bytes')
+                    self.assertTrue(link.is_symlink())
+                finally:
+                    parent.unlink()
+                    moved.rename(parent)
+
+    def test_sanitize_system_log_target_refuses_writable_modes_and_native_acls(self):
+        link, document = self.system_log_document()
+        for path in (self.app.path('/usr'), document.parent.parent.parent,
+                     document.parent.parent, document.parent, document):
+            with self.subTest(path=str(path.relative_to(self.root))):
+                mode = stat.S_IMODE(path.stat().st_mode)
+                path.chmod(mode | 0o022)
+                try:
+                    with self.assertRaises(build.Failure): self.app.empty_private_state()
+                    self.assertEqual(document.read_text(), 'synthetic document bytes')
+                    self.assertTrue(link.is_symlink())
+                finally:
+                    path.chmod(mode)
+                # A named-user ACL keeps the ordinary mode bits unchanged.
+                entries = ((1, 7 if path.is_dir() else 6, 0xffffffff),
+                           (2, 4, 10003), (4, 5 if path.is_dir() else 4, 0xffffffff),
+                           (16, 5 if path.is_dir() else 4, 0xffffffff),
+                           (32, 5 if path.is_dir() else 4, 0xffffffff))
+                acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in entries)
+                os.setxattr(path, 'system.posix_acl_access', acl)
+                try:
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+                    with self.assertRaises(build.Failure): self.app.empty_private_state()
+                    self.assertEqual(document.read_text(), 'synthetic document bytes')
+                    self.assertTrue(link.is_symlink())
+                finally:
+                    os.removexattr(path, 'system.posix_acl_access')
+
+    def test_sanitize_system_log_target_refuses_foreign_ownership(self):
+        link, document = self.system_log_document()
+        original_stat, original_fstat = os.stat, os.fstat
+        for target in (document.parent, document):
+            for field in ('st_uid', 'st_gid'):
+                with self.subTest(target=str(target.relative_to(self.root)), field=field):
+                    def metadata(info, path):
+                        if path != target: return info
+                        fields = {key: getattr(info, key) for key in dir(info) if key.startswith('st_')}
+                        fields[field] = 10003
+                        return types.SimpleNamespace(**fields)
+
+                    def named(path, *args, **kwargs):
+                        absolute = Path(path)
+                        if kwargs.get('dir_fd') is not None:
+                            absolute = Path(os.readlink('/proc/self/fd/' + str(kwargs['dir_fd']))) / absolute
+                        return metadata(original_stat(path, *args, **kwargs), absolute)
+
+                    def opened(fd):
+                        return metadata(original_fstat(fd), Path(os.readlink('/proc/self/fd/' + str(fd))))
+
+                    with patch.object(os, 'stat', side_effect=named), patch.object(os, 'fstat', side_effect=opened):
+                        with self.assertRaises(build.Failure): self.app.empty_private_state()
+                    self.assertEqual(document.read_text(), 'synthetic document bytes')
+                    self.assertTrue(link.is_symlink())
+
+    def test_sanitize_never_reopens_a_replaced_system_log_target_by_name(self):
+        link, document = self.system_log_document()
+        original = document.with_name('original-document')
+        real_open, raced = os.open, False
+
+        def opened(path, flags, *args, **kwargs):
+            nonlocal raced
+            if str(path).startswith('/proc/self/fd/') and flags & os.O_WRONLY and not raced:
+                raced = True
+                self.assertFalse(flags & os.O_TRUNC)
+                document.rename(original)
+                document.write_text('replacement must stay untouched')
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch.object(os, 'open', side_effect=opened):
+            with self.assertRaises(build.Failure): self.app.empty_private_state()
+        self.assertTrue(raced)
+        self.assertEqual(original.read_text(), 'synthetic document bytes')
+        self.assertEqual(document.read_text(), 'replacement must stay untouched')
+        self.assertTrue(link.is_symlink())
+
+    def test_sanitize_keeps_original_system_log_parent_during_target_open(self):
+        link, document = self.system_log_document()
+        detached = document.parent.with_name('detached-systemd')
+        real_open, raced = os.open, False
+
+        def opened(path, flags, *args, **kwargs):
+            nonlocal raced
+            fd = real_open(path, flags, *args, **kwargs)
+            if str(path) == 'README.logs' and flags & os.O_PATH and not raced:
+                raced = True
+                document.parent.rename(detached)
+                document.parent.mkdir()
+                document.write_text('replacement parent must stay untouched')
+            return fd
+
+        with patch.object(os, 'open', side_effect=opened):
+            with self.assertRaises(build.Failure): self.app.empty_private_state()
+        self.assertTrue(raced)
+        self.assertEqual((detached / 'README.logs').read_text(), 'synthetic document bytes')
+        self.assertEqual(document.read_text(), 'replacement parent must stay untouched')
+        self.assertTrue(link.is_symlink())
+
+    def test_sanitize_system_log_sync_failure_refuses_and_closes_every_descriptor(self):
+        link, document = self.system_log_document()
+        before = len(os.listdir('/proc/self/fd'))
+        fsync, failed = os.fsync, False
+
+        def sync(fd):
+            nonlocal failed
+            if Path(os.readlink('/proc/self/fd/' + str(fd))) == document:
+                failed = True
+                raise OSError(5, 'synthetic sync failure')
+            return fsync(fd)
+
+        with patch.object(os, 'fsync', side_effect=sync):
+            with self.assertRaises(build.Failure) as caught:
+                self.app.empty_private_state()
+        self.assertEqual(caught.exception.check, 'sanitation_failed')
+        self.assertTrue(failed)
+        self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+        self.assertEqual(document.read_bytes(), b'')
+        self.assertTrue(link.is_symlink())
+        self.app.empty_private_state()
+        self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+        self.assertTrue(stat.S_ISREG(link.lstat().st_mode))
+
+    def test_sanitize_system_log_exchange_failure_keeps_alias_and_closes_descriptors(self):
+        link, document = self.system_log_document()
+        before = len(os.listdir('/proc/self/fd'))
+        with patch.object(build, 'exchange_log_alias', side_effect=OSError(38, 'synthetic unsupported exchange')):
+            with self.assertRaises(build.Failure): self.app.empty_private_state()
+        self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(document.read_bytes(), b'')
+        with self.assertRaises(build.Failure): self.app.empty_private_state()
+        self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+        self.assertTrue(link.is_symlink())
+
+    def test_sanitize_checks_completed_log_custody_before_an_absent_alias(self):
+        link, _document = self.system_log_document()
+        self.app.empty_private_state()
+        directories = list(link.parent.glob('.zeros-log-document-*'))
+        self.assertEqual(len(directories), 1)
+        retained = directories[0] / 'entry'
+        retained.write_text('retain new private bytes')
+        link.unlink()
+        with self.assertRaises(build.Failure): self.app.empty_private_state()
+        self.assertEqual(retained.read_text(), 'retain new private bytes')
+
+    def test_sanitize_regular_log_readme_keeps_unaliased_system_documents(self):
+        link, document = self.system_log_document()
+        link.unlink()
+        link.write_text('private log bytes')
+        self.app.empty_private_state()
+        self.assertEqual(link.read_bytes(), b'')
+        self.assertEqual(document.read_text(), 'synthetic document bytes')
+        self.assertEqual(list(link.parent.glob('.zeros-log-document-*')), [])
 
     def test_sanitize_checks_opened_file_before_truncating_a_raced_hardlink(self):
         victim = self.write("/outside/private", "unrelated bytes")
