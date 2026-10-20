@@ -135,8 +135,8 @@ authority supplies keys, epochs and engine tokens
   (`auth_sync_too_large` or `outbound_frame_too_large`), counts it under
   `counters.closed` and logs one `[realtime]` line with the frame type and
   size only. The engine answers `1011` with its full-jitter backoff (30 s
-  cap) instead of a tight `4400` loop, and stays on the 500 ms credential
-  poll.
+  cap) instead of a tight `4400` loop, and stays on the 5 s empty credential-control
+  poll. Pending acknowledgements retain their 500 ms handshake cadence.
 - **Teardown.** Authority is re-read every 60 s and at once on a
   `zeros_cloud_engine_uplink_authority` notification (engine state,
   revocation, credential or final checkpoint changes; workspace generation,
@@ -181,7 +181,7 @@ authority supplies keys, epochs and engine tokens
   organization's audit log and logs a `[security]` line for paging. These
   are operator events, not the client-delivered `security_events` outbox.
 - **Credential push.** The `cred.v1` extension (`uplink-cred.ts`) replaces
-  the engine's 500 ms credential-control poll while the uplink is up
+  the engine's 5 s empty credential-control poll while the uplink is up
   (P0.10 C01). At the gate it pushes the boot binding's current desired
   revision (the contract's resync rule), and a trigger on
   `cloud_agent_boot_bindings.desired_cache_revision` (migration 0153)
@@ -200,7 +200,7 @@ authority supplies keys, epochs and engine tokens
   organization's `credential_push` flag is on; a flip closes the affected
   uplinks with `1001 features_changed`, and the re-dial (resuming the
   lineage) renegotiates, so turning the flag off returns those engines to
-  the 500 ms poll without parking them. Only `agent-controls` has a
+  the 5 s empty poll without parking them. Only `agent-controls` has a
   revision source today: the CP has no `repository` revision, so it never
   pushes that kind, and repository credentials keep arriving on the HTTP
   heartbeat response (`repositoryCredential`) unchanged. The engine acks any
@@ -533,9 +533,11 @@ registration there is no uplink client at all.
 - **Credential push.** The engine offers `cred.v1`; a pushed `cred.revision`
   runs the same credential-controls exchange the poll runs (coalesced to
   the latest revision per kind while one is in flight) and is answered with
-  `cred.ack`. The poll stays as the fallback: 500 ms while the uplink's
-  gate is closed, a 30 s safety cadence once it is open
-  (`controlsPollIntervalMs` in `cloud-local-command-queue-boot.ts`).
+  `cred.ack`. Empty exchanges poll every 5 s while the uplink's gate is
+  closed and every 30 s once it is open. An outstanding acknowledgement
+  retains its 500 ms handshake cadence (`controlsPollIntervalMs` in
+  `cloud-local-command-queue-boot.ts`). Pushes still trigger an immediate
+  exchange; none of these cadences extend authority or revocation deadlines.
 - **Lease (`lease.v1`).** Registration offers `lease.v1` with
   `exit.report.v1` only when its actual supervisor armed this exact launch.
   A new engine under an old supervisor omits both and keeps HTTP renewal.

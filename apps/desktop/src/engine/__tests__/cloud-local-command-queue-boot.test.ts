@@ -101,6 +101,115 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
     unnegotiate: () => { negotiated = false; }, retire: () => { live = false; } };
 }
 
+describe("cloud idle observation load", () => {
+  it("does not keep renewing eight observed chats while their actor stays connected", async () => {
+    vi.useFakeTimers();
+    const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!;
+    const ids = new Map<string, ReturnType<typeof randomUUID>>();
+    f.f.contextRequest.mockImplementation(async input => {
+      if (!ids.has(input.conversationId)) ids.set(input.conversationId, randomUUID());
+      return { ...await original(input), contextId: ids.get(input.conversationId)!,
+        actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } };
+    });
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "idle-client");
+    for (let index = 0; index < 8; index++) await f.boot.observeConversation(f.admission.actor.sessionId, `idle-${index}`);
+    f.request.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const renewals = f.request.mock.calls.filter(([operation]) => operation === "warm-context").length;
+    console.info("cloud idle minute", JSON.stringify({ chats: 8, warmContext: renewals,
+      actorConfirm: f.request.mock.calls.filter(([operation]) => operation === "actor-confirm").length }));
+    expect(renewals).toBe(0);
+    f.boot.releaseActor(f.admission.actor.sessionId, "idle-client");
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(10_000);
+    expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it("bounds empty credential-control fallback to twelve polls per minute without push", async () => {
+    vi.useFakeTimers(); const f = await fixture(); await f.boot.initialize();
+    f.controls.mockClear(); await vi.advanceTimersByTimeAsync(60_000);
+    console.info("cloud controls minute", JSON.stringify({ polls: f.controls.mock.calls.length }));
+    expect(f.controls.mock.calls.length).toBeLessThanOrEqual(12);
+    expect(f.controls.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  it("renews just the original native-work context among eight chats, then stops after retirement", async () => {
+    vi.useFakeTimers();
+    const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!;
+    const ids = new Map<string, ReturnType<typeof randomUUID>>();
+    f.f.contextRequest.mockImplementation(async input => {
+      if (!ids.has(input.conversationId)) ids.set(input.conversationId, randomUUID());
+      return { ...await original(input), contextId: ids.get(input.conversationId)!,
+        actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } };
+    });
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "running-client");
+    const conversationId = f.f.input.conversationId;
+    for (const id of [conversationId, ...Array.from({ length: 7 }, (_, index) => `idle-${index}`)])
+      await f.boot.observeConversation(f.admission.actor.sessionId, id);
+    const commandId = randomUUID();
+    f.boot.queue.handle({ kind: "mutate", mutation: { conversationId, operationId: commandId, expectedRevision: 0,
+      action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.f.input.model, modeRevision: 0,
+        userMessageId: randomUUID(), prompt: [{ type: "text", text: "Synthetic work" }] } } }, admissionError: null },
+    { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+    const claim = f.boot.queue.handle({ kind: "claim", conversationId, executionId: randomUUID(), claimId: randomUUID() },
+      { writerEpoch: f.f.scope.writerEpoch });
+    const selection = f.boot.selectClaim(claim);
+    f.request.mockClear(); f.controls.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const warmed = f.request.mock.calls.filter(([operation]) => operation === "warm-context");
+    console.info("cloud running minute", JSON.stringify({ chats: 8, warmContext: warmed.length,
+      controls: f.controls.mock.calls.length, actorConfirm: f.request.mock.calls.filter(([operation]) => operation === "actor-confirm").length }));
+    expect(warmed).toHaveLength(15);
+    expect(warmed.every(([, input]) => (input as { conversationId: string }).conversationId === conversationId)).toBe(true);
+    expect(cloudBootNativeAuthority(selection).lifetime.signal.aborted).toBe(false);
+    await cloudBootNativeAuthority(selection).lifetime.close();
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(20_000);
+    expect(f.request.mock.calls.filter(([operation]) => operation === "warm-context")).toHaveLength(0);
+  });
+
+  it("releases expired idle interests so visiting more chats cannot exhaust the active-context bound", async () => {
+    vi.useFakeTimers(); const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!;
+    f.f.contextRequest.mockImplementation(async input => ({ ...await original(input),
+      actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } }));
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "browsing-client");
+    for (let index = 0; index < 32; index++) await f.boot.observeConversation(f.admission.actor.sessionId, `before-${index}`);
+    await vi.advanceTimersByTimeAsync(9_000);
+    for (let index = 0; index < 32; index++) await f.boot.observeConversation(f.admission.actor.sessionId, `after-${index}`);
+    f.boot.releaseActor(f.admission.actor.sessionId, "browsing-client");
+    await f.boot.dispose(); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not postpone a running context's renewal when other selections start and retire", async () => {
+    vi.useFakeTimers();
+    const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!, contextId = randomUUID();
+    f.f.contextRequest.mockImplementation(async input => ({ ...await original(input),
+      contextId,
+      actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } }));
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "running-client");
+    const conversationId = f.f.input.conversationId;
+    await f.boot.observeConversation(f.admission.actor.sessionId, conversationId);
+    const commandId = randomUUID();
+    f.boot.queue.handle({ kind: "mutate", mutation: { conversationId, operationId: commandId, expectedRevision: 0,
+      action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.f.input.model, modeRevision: 0,
+        userMessageId: randomUUID(), prompt: [{ type: "text", text: "Synthetic work" }] } } }, admissionError: null },
+    { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+    const claim = f.boot.queue.handle({ kind: "claim", conversationId, executionId: randomUUID(), claimId: randomUUID() },
+      { writerEpoch: f.f.scope.writerEpoch });
+    const selection = f.boot.selectClaim(claim);
+    f.request.mockClear();
+    for (let index = 0; index < 45; index++) {
+      await vi.advanceTimersByTimeAsync(100);
+      const transient = f.boot.executionFactory.selectBoot({ ...selection, executionId: randomUUID() });
+      await cloudBootNativeAuthority(transient).lifetime.close();
+    }
+    expect(f.request.mock.calls.filter(([operation]) => operation === "warm-context")).toHaveLength(1);
+    expect(cloudBootNativeAuthority(selection).lifetime.signal.aborted).toBe(false);
+  });
+});
+
 function actorSockets(f: Awaited<ReturnType<typeof fixture>>, catalog = new DesignCatalogReader()) {
   const engine = { root: f.f.input.cwd, cloudWorker: { version: 4 }, cloudAgentBoot: f.boot, cloudRuntimeAuthorityStopping: false,
     workspace: { retireDesignCatalog: vi.fn((id: string) => catalog.retire(id)) },
@@ -1219,7 +1328,7 @@ describe("engine boot-mode orchestration", () => {
     expect(f.request.mock.calls.map(([operation]) => operation)).toEqual(["bootstrap", "activate"]);
     expect(f.controls).not.toHaveBeenCalled(); expect(f.boot.active).toBe(false);
     release(); await starting;
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(f.controls).toHaveBeenCalled();
   });
   it("backs the credential-control poll off to the wired fallback cadence and back", async () => {
@@ -1512,7 +1621,7 @@ describe("engine boot-mode orchestration", () => {
     await f.boot.initialize(); await vi.advanceTimersByTimeAsync(6_000);
     expect(f.request.mock.calls.filter(([operation]) => operation === "refresh")).toHaveLength(1);
     expect(f.boot.metadata.cacheRevision).toBe(2);
-    expect(f.controls.mock.calls.length).toBeGreaterThanOrEqual(10);
+    expect(f.controls).toHaveBeenCalledOnce();
     await f.boot.dispose(); const calls = f.controls.mock.calls.length;
     await vi.advanceTimersByTimeAsync(2_000); expect(f.controls).toHaveBeenCalledTimes(calls);
   });
@@ -1751,6 +1860,9 @@ describe("engine boot-mode orchestration", () => {
       executionId: randomUUID(), claimId: randomUUID() });
     expect(queue.handle(claimRequest(), { writerEpoch: f.f.scope.writerEpoch })).toBeNull();
     await vi.advanceTimersByTimeAsync(100); await warming;
+    // A reserved native launch owns renewal; discovery alone does not.
+    const claim = queue.handle(claimRequest(), { writerEpoch: f.f.scope.writerEpoch });
+    expect(claim).toMatchObject({ commandId });
     f.request.mockClear(); await vi.advanceTimersByTimeAsync(4_000);
     // Repository MCP reads precede the HTTP boundary even under fake timers.
     await vi.waitFor(() => expect(f.request.mock.calls.filter(([operation]) => operation === "warm-context")).toHaveLength(1),
@@ -1758,8 +1870,6 @@ describe("engine boot-mode orchestration", () => {
     let renewed = false;
     const renewal = f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId).then(() => { renewed = true; });
     const count = f.request.mock.calls.length;
-    const claim = queue.handle(claimRequest(), { writerEpoch: f.f.scope.writerEpoch });
-    expect(claim).toMatchObject({ commandId });
     const selection = f.boot.selectClaim(claim);
     expect(isCloudBootAgentSelection(selection)).toBe(true); expect(renewed).toBe(false);
     expect(f.request).toHaveBeenCalledTimes(count);
@@ -1816,6 +1926,14 @@ describe("engine boot-mode orchestration", () => {
     });
     await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
     await f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId);
+    const commandId = randomUUID();
+    f.boot.queue.handle({ kind: "mutate", mutation: { conversationId: f.f.input.conversationId, operationId: commandId,
+      expectedRevision: 0, action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.f.input.model,
+        modeRevision: 0, userMessageId: randomUUID(), prompt: [{ type: "text", text: "Synthetic" }] } } }, admissionError: null },
+      { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+    const claim = f.boot.queue.handle({ kind: "claim", conversationId: f.f.input.conversationId,
+      executionId: randomUUID(), claimId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch });
+    expect(claim).toMatchObject({ commandId });
     f.request.mockClear(); await vi.advanceTimersByTimeAsync(600);
     // Repository configuration uses real asynchronous file reads even under
     // fake timers; let the scheduled renewal reach its request boundary.

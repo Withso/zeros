@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/cloud-workspaces/github-read-proxy.ts",
+  "before": "let flight = this.reads.get(key);",
+  "after": "let flight: ReadFlight | undefined;"
+}

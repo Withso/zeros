@@ -64,7 +64,9 @@ d("control-plane database load simulator", () => {
     expect(result.failures).toEqual({});
     const known = new Set<string>([...Object.keys(STEADY_STATE_CADENCES), "client.auth"]);
     expect(result.operations.map(row => row.operation).filter(name => !known.has(name))).toEqual([]);
-    expect(result.operations.find(row => row.operation === "engine.credentialControls")?.requestsPerSecond).toBeGreaterThan(1);
+    const controlRate = result.operations.find(row => row.operation === "engine.credentialControls")?.requestsPerSecond ?? 0;
+    expect(controlRate).toBeGreaterThan(0);
+    expect(controlRate).toBeLessThanOrEqual(0.5);
     // Cadences are minimum periods: each loop fires at most once per period,
     // plus one request already in flight when the window opens.
     const ceiling = Object.entries(STEADY_STATE_CADENCES).reduce((total, [name, cadence]) => {

@@ -1,0 +1,9 @@
+{
+  "id": "seeded-cloud-github-avatar-read-scope",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pending",
+  "symptom": "Cloud repository avatars called a global user endpoint outside repository read policy, and transport errors became synthetic server errors.",
+  "rule": "Read cloud owner metadata through the authorized repository and retain closed transport error statuses; keep Local on its own path. See changes/cloud-observation-db-budget.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/git/__tests__/github-cloud-read.test.ts apps/desktop/src/engine/__tests__/cloud-github-read-client.test.ts"
+}

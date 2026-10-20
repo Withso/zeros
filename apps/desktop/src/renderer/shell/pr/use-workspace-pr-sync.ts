@@ -31,9 +31,10 @@ import { documentIsForeground, pollWhileForeground } from "../../shared/lib/elem
 
 /** Last probe per workspace id. Switching INTO a PR-less worktree re-runs the
  *  effect with an unchanged refresh generation — pure navigation, so a recent
- *  identical probe already answered it. A refresh-key bump (turn end / git
- *  write, i.e. the moments a PR could actually appear) always probes. */
-const lastProbe = new Map<string, { refreshKey: number; at: number }>();
+ *  identical probe already answered it. Local refresh-key changes probe
+ *  immediately; cloud broadcasts still obey the observation/backoff bound. */
+type Probe = { refreshKey: number; at: number; failures?: number; retryAt?: number };
+const lastProbe = new Map<string, Probe>();
 const PROBE_FRESH_MS = 60_000;
 const RESUME_PROBE_FRESH_MS = 2_000;
 const MAX_PR_PROBE_WORKSPACES = 128;
@@ -67,7 +68,7 @@ export function shouldProbeWorkspacePr(
 
 function recordProbe(
   workspaceId: string,
-  probe: { refreshKey: number; at: number },
+  probe: Probe,
 ): void {
   lastProbe.delete(workspaceId);
   lastProbe.set(workspaceId, probe);
@@ -114,22 +115,32 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
       // Only DETECT while unrecorded — once the row has a prNumber, Review's
       // live store owns freshness. Local-main has no PR branch.
       if (!eligible || !id || !repoSlug) return;
-      if (local && !documentIsForeground()) return;
+      if (!documentIsForeground()) return;
       if (inflightProbes.has(id)) return;
       const now = Date.now();
-      if (!shouldProbeWorkspacePr(lastProbe.get(id), refreshKey, now, reason)) {
+      const previous = lastProbe.get(id);
+      // Cloud Git/DB broadcasts can arrive for every agent write. Discovery
+      // is observation, so those broadcasts cannot bypass its error backoff
+      // or issue a fresh database-backed probe on every edit.
+      if (!local && previous && (now < (previous.retryAt ?? 0) || now - previous.at < 30_000)) return;
+      if (!shouldProbeWorkspacePr(previous, refreshKey, now, reason)) {
         return;
       }
-      recordProbe(id, { refreshKey, at: now });
+      const probe: Probe = { refreshKey, at: now, failures: previous?.failures ?? 0 };
+      recordProbe(id, probe);
       const request = ghPrSync(id)
         .then((pr) => {
+          if (lastProbe.get(id) === probe) probe.failures = 0;
           if (!pr || pr.number <= 0) return;
           // The engine stamped the row — refresh the workspace-list consumers
           // so Create PR atomically gives way to PR status + Review.
           notifyWorkspacesChanged(repoSlug);
         })
         .catch(() => {
-          /* best-effort — no PR yet, not authed, or temporarily offline */
+          if (!local && lastProbe.get(id) === probe) {
+            probe.failures = Math.min(4, (probe.failures ?? 0) + 1);
+            probe.retryAt = Date.now() + Math.min(300_000, 60_000 * 2 ** (probe.failures - 1));
+          }
         })
         .finally(() => {
           if (inflightProbes.get(id) === request) inflightProbes.delete(id);
@@ -148,21 +159,8 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
   // active workspace remains visible, bounded to one call per minute.
   useEffect(() => {
     if (!eligible || !id || !repoSlug) return;
-    // Local discovery has no work while the window is away. The existing
+    // Discovery has no work while the window is away. The existing
     // exact-workspace age and in-flight guards coalesce return events.
-    if (local) return pollWhileForeground(() => probe("resume"), PROBE_FRESH_MS);
-    const onResume = () => {
-      if (document.visibilityState === "visible") probe("resume");
-    };
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") probe("poll");
-    }, PROBE_FRESH_MS);
-    document.addEventListener("visibilitychange", onResume);
-    window.addEventListener("focus", onResume);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onResume);
-      window.removeEventListener("focus", onResume);
-    };
+    return pollWhileForeground(() => probe("resume"), PROBE_FRESH_MS);
   }, [eligible, id, repoSlug, probe, local]);
 }

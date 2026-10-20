@@ -1,6 +1,12 @@
 import type { CloudRuntimeAuthority } from "./cloud-runtime-registration";
 
-const unavailable = () => new Error("GitHub read authorization is unavailable. Reconnect the workspace and try again.");
+type ClosedStatus = 401 | 403 | 404 | 422 | 429 | 502 | 503 | 504;
+class CloudGithubReadError extends Error {
+  constructor(readonly status: ClosedStatus) {
+    super("GitHub read authorization is unavailable. Reconnect the workspace and try again.");
+  }
+}
+const unavailable = (status: ClosedStatus = 502) => new CloudGithubReadError(status);
 const MAX_BYTES = 8 * 1024 * 1024;
 
 /** Octokit fetch transport: only read shapes and actor identity cross this
@@ -24,7 +30,9 @@ export async function requestCloudGithubRead(authority: CloudRuntimeAuthority, a
       headers: { "content-type": "application/json", authorization: `Bearer ${heartbeatToken}` },
       body: JSON.stringify({ ...scope, actorSessionId, request }) });
     if (!response.ok || !response.body || Number(response.headers.get("content-length")) > MAX_BYTES) {
-      await response.body?.cancel().catch(() => undefined); throw unavailable();
+      await response.body?.cancel().catch(() => undefined);
+      const status = [401, 403, 404, 422, 429, 502, 503, 504].includes(response.status) ? response.status as ClosedStatus : 502;
+      throw unavailable(status);
     }
     const reader = response.body.getReader(), chunks: Uint8Array[] = [];
     let size = 0;
@@ -39,5 +47,5 @@ export async function requestCloudGithubRead(authority: CloudRuntimeAuthority, a
       } });
     } catch { await reader.cancel().catch(() => undefined); throw unavailable(); }
     finally { reader.releaseLock(); }
-  } catch { throw unavailable(); }
+  } catch (error) { throw error instanceof CloudGithubReadError ? error : unavailable(); }
 }

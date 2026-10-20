@@ -545,6 +545,9 @@ export interface CloudBootAgentExecutionFactory extends CloudAgentExecutionFacto
   bootScopeActivity(selectors:readonly CloudBootCredentialSelector[]):CloudBootScopeActivity;
   /** Includes unproved native work after its foreground command settles. */
   hasActorWork(actorSessionId:string):boolean;
+  /** Exact context with reserved, foreground or unproved background work.
+   * Observing a chat and retaining an idle host are not renewal interests. */
+  hasContextWork(context:CloudAuthorizedAgentContext):boolean;
   retireBootCredentials(selectors:readonly CloudBootCredentialSelector[]):Promise<void>;
   disposeBoot():Promise<void>;
 }
@@ -767,7 +770,7 @@ export function createCloudBootAgentExecutionFactory(options:{
         closed:false,cause:null,closing:null,proved:false,detach};
       bootSelections.set(selection,record);bootAuthorities.set(authority,record);active.add(record);seen.add(input.executionId);
       raw.signal.addEventListener("abort",ended,{once:true});input.context.signal.addEventListener("abort",ended,{once:true});
-      assertRecord(record);return selection;
+      assertRecord(record);options.actorWorkChanged?.();return selection;
     },
     assertBootStart(selection){
       const record=original(selection);assertRecord(record);
@@ -943,7 +946,11 @@ export function createCloudBootAgentExecutionFactory(options:{
     },
     hasActorWork(actorSessionId){
       return [...active].some(record=>!record.proved&&!isCloudAcceptedWork(record.selection.actor)&&record.selection.actor.provenance.actorSessionId===actorSessionId&&
-        (record.phase!=="idle"||record.reservation!==null));
+        (!record.turnUsed||record.phase!=="idle"||record.reservation!==null));
+    },
+    hasContextWork(context){
+      return [...active].some(record=>!record.proved&&record.selection.context===context&&
+        (!record.turnUsed||record.phase!=="idle"||record.reservation!==null));
     },
     bootScopeActivity(selectors){
       if(!validSelectors(selectors))return {complete:false,foreground:0,reservedLaunches:0,background:0,idleHosts:0,scopes:[]};

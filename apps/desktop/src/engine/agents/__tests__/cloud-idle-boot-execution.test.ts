@@ -35,6 +35,8 @@ async function settleFirstTurn(value: Fixture) {
 describe("original idle boot host retirement", () => {
   it("keeps a prepared cold host reserved until its first native turn settles", async () => {
     const f = await fixture();
+    expect(f.factory.hasContextWork(f.input.context)).toBe(true);
+    expect(f.factory.hasActorWork(f.input.actor.provenance.actorSessionId)).toBe(true);
     expect(f.factory.idleBootExecutions()).toEqual([]);
     await expect(f.factory.retireIdleBootExecution(f.execution)).resolves.toBe(false);
     expect(f.execution.lifetime.signal.aborted).toBe(false);
@@ -43,6 +45,7 @@ describe("original idle boot host retirement", () => {
   });
   it("positively retires the exact idle original without any authority fetch", async () => {
     const f = await fixture(); await settleFirstTurn(f);
+    expect(f.factory.hasContextWork(f.input.context)).toBe(false);
     f.request.bootstrap.mockClear(); f.request.sync.mockClear();
     const idle = f.factory.idleBootExecutions();
     expect(idle).toEqual([f.execution]); expect(idle[0]).toBe(f.execution);
@@ -63,17 +66,20 @@ describe("original idle boot host retirement", () => {
   it("preserves reserved and entered follow-up turns on that warm host", async () => {
     const f = await fixture(); await settleFirstTurn(f);
     const next = f.factory.selectBoot(f.input), token = f.factory.reserveBootTurn(f.execution, next);
+    expect(f.factory.hasContextWork(f.input.context)).toBe(true);
     await expect(f.factory.retireIdleBootExecution(f.execution)).resolves.toBe(false);
     f.factory.markNativeHandoff(f.execution, token);
     expect(f.factory.idleBootExecutions()).toEqual([]);
     await expect(f.factory.retireIdleBootExecution(f.execution)).resolves.toBe(false);
     await f.factory.settleBootTurn(f.execution, token);
+    expect(f.factory.hasContextWork(f.input.context)).toBe(false);
     await expect(f.factory.retireIdleBootExecution(f.execution)).resolves.toBe(true);
   });
   it("retains background descendants and their authority after foreground settlement", async () => {
     const f = await fixture();
     vi.spyOn(f.execution.coordinator, "hasBackgroundServers").mockResolvedValue(true);
     await settleFirstTurn(f);
+    expect(f.factory.hasContextWork(f.input.context)).toBe(true);
     expect(f.factory.bootScopeActivity([]).background).toBe(1);
     expect(f.factory.idleBootExecutions()).toEqual([]);
     await expect(f.factory.retireIdleBootExecution(f.execution)).resolves.toBe(false);

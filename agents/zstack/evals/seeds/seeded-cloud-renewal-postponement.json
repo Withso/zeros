@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/cloud-local-command-queue-boot.ts",
+  "before": "if (interest.timer) return;\n    // The queue warms",
+  "after": "if (interest.timer) clearTimeout(interest.timer);\n    // The queue warms"
+}

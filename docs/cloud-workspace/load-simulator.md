@@ -86,7 +86,7 @@ Per active workspace, one running engine and one connected desktop:
 
 | Operation | Role | Interval | Source |
 | --- | --- | --- | --- |
-| `engine.credentialControls` | engine | 500 ms after completion | `apps/desktop/src/engine/cloud-local-command-queue-boot.ts` |
+| `engine.credentialControls` | engine | 5 s after an empty exchange (30 s with push; pending ACK 500 ms) | `apps/desktop/src/engine/cloud-local-command-queue-boot.ts` |
 | `engine.heartbeat` | engine | 60 s while checkpoint push is active | `CHECKPOINT_PUSH_HTTP_MAX_SILENCE_MS` in cloud runtime registration (S2 `checkpoint.fallback.v1`) |
 | `engine.uplinkLeaseRenewal` | engine | 300 s | `UPLINK_WATERMARK_INTERVAL_MS` in `apps/control-plane/src/realtime/uplink-protocol.ts` (S2 `lease.v1`) |
 | `engine.uplinkCheckpointSweep` | engine | 30 s (one read per uplink, an upper bound: one statement serves up to 500) | `SWEEP_TICKS` in `apps/control-plane/src/realtime/uplink-checkpoint.ts` (S2 `checkpoint.v1`) |
@@ -284,9 +284,13 @@ upper bound. In real time, 10 active workspaces ran at 27.7 tx/s (2.77 per
 active workspace) with no failures. The steady-state budgets moved to
 3.09 tx/s per active workspace and 2.36 tx/s per running engine.
 
-### Findings
+### Historical findings
 
-1. `engine.credentialControls` polls every 500 ms: 2.0 tx/s per running engine,
+The measurements below used the original 500 ms empty poll. The current
+simulator models the 5 s empty fallback above; these historical timing and
+transaction totals are not a measurement of the current engine.
+
+1. `engine.credentialControls` polled every 500 ms: 2.0 tx/s per running engine,
    about 67% of all transactions.
 2. The authority check `SELECT` in `assertCurrentCloudEngineAuthority` runs on
    every engine request and takes about 57% of server execution time at 50

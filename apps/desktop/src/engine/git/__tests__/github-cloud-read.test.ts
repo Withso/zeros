@@ -1,10 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getPr, listRepositoryBranches, setOctokitFactoryForTesting, setTokenStore } from "../github";
+import { getPr, getRepositoryOwnerAvatar, listRepositoryBranches, setOctokitFactoryForTesting, setTokenStore } from "../github";
 import { githubReadTransport, runWithGithubReadTransport } from "../github-read-context";
 import { runWithGithubWriteCredential } from "../github-write-context";
 
 afterEach(() => setOctokitFactoryForTesting(null));
 describe("cloud GitHub reads without a VM token", () => {
+  it("reads the owner avatar through the authorized repository without a user-profile request", async () => {
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      if (new URL(String(input)).pathname === "/repos/org/repo") return Response.json({
+        owner: { login: "org", type: "Organization", avatar_url: "https://avatars.githubusercontent.com/u/1" },
+      });
+      return Response.json({ message: "Not authorized" }, { status: 403 });
+    });
+    const result = await runWithGithubReadTransport(fetcher, () => true,
+      () => getRepositoryOwnerAvatar("https://github.com/org/repo.git"));
+    expect(result).toEqual({ login: "org", type: "org", avatarUrl: "https://avatars.githubusercontent.com/u/1" });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(String(fetcher.mock.calls[0]![0])).toBe("https://api.github.com/repos/org/repo");
+  });
   it("rejects a response when its actor disconnects during the read", async () => {
     let authorized = true;
     const read = vi.fn(async () => { authorized = false; return Response.json({ private: "data" }); });

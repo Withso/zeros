@@ -70,6 +70,42 @@ TLS connection setup and relayed workspace data are distinct contributors.
 Keep channel scope exact. A local synthetic sample cannot qualify hosted p99,
 an idle egress budget or the direct connection success rate.
 
+## Recurring observation budget
+
+Opening a cloud chat warms its context on demand. Periodic context renewal
+belongs only to its original launch preparation, reserved/foreground turn or
+unproved background descendants. An idle retained host does not own renewal;
+a new queue head warms on demand. Other launches and retirements cannot delay
+an already scheduled renewal. Actor, credential and context deadlines retain
+their original bounds, including refusal after expiry and post-I/O checks.
+
+Empty credential-control exchanges use a 5-second fallback and a 30-second
+push safety poll; a pending acknowledgement retains the 500 ms handshake.
+Cloud PR discovery/status runs only in the foreground. Git changes still
+refresh local status immediately, while remote PR observations have a
+30-second minimum and failed reads back off from 60 seconds to five minutes.
+One cached PR observation attempts durable reconciliation once. These are
+observation bounds, not cached authority or permission to dispatch work.
+Local Personal and organization-local polling and GitHub transports are unchanged.
+
+The GitHub proxy shares only overlapping exact organization, workspace,
+generation, engine, token, actor and request identities. Each admitted caller
+consumes its normal rate budget. The shared flight authorizes before the read
+and again after I/O, and shutdown joins it. Completed results never cache
+caller authority. Passive boot-source reads combine selection, parent and
+qualification into one statement while keeping the original refusal codes;
+credential delivery keeps its existing lock order. Exact runtime qualification
+lookups stay parameterized by the selected runtime and credential, with a
+large historical registry included in the query-plan regression.
+
+Measure a one-engine/eight-chat minute using real producer counts and
+PostgreSQL transaction timings, and list which routes are covered. Report
+request reduction, query/scan reduction and per-call elapsed time separately:
+fewer statements do not establish lower latency. Local timings do not prove
+hosted CPU, p99 or the entire database's work. Cloud engine changes require a
+new runtime, renderer polling changes require an app update, and SQL/proxy
+changes require a control-plane deployment.
+
 ## Environment boundaries
 
 - Keep Alpha, Beta and Production on separate clusters with separate credentials,
