@@ -101,11 +101,38 @@ Cancellation or denied authorization cannot enqueue work. Ordered event replay r
 snapshot attachment restores pending permission/question controls and confirmed
 agent capabilities into the same session store, without starting provider work.
 Replacing a transport retains bounded conversation selections for that exact
-workspace and signed-in account. It does not retain execution IDs, credentials,
-pending command promises or permission authority. Fresh admission and snapshot
-reads restore those controls. A missing attachment rejects a prompt before it
+workspace and signed-in account, plus command and Stop receipt identities.
+Those receipt pins are comparisons, not execution or permission authority;
+prompt payloads, grants and pending prompt promises do not transfer. Fresh
+admission and snapshot reads restore controls. A missing attachment rejects a prompt before it
 can fall through to the native session protocol; account reset and access
 revocation discard the retained selections.
+
+An explicit cloud Stop retains one operation ID and the original command until
+its exact receipt is succeeded, failed or cancelled. A paused queue ACK, an
+unknown outcome, a provider terminal event or a replacement socket cannot clear
+the pending Stop control or clock. The observer passively reconnects within one
+60-second budget, including its initial open, and verifies the account,
+organization, workspace, generation, engine, authority epoch, boot and writer
+before every mutation or completion. It never enqueues, grants, resumes or wakes
+work during recovery. A missing receipt may be awaited only for an already
+submitted command, within that same budget; exhaustion keeps a visible
+unconfirmed Stop that the user can retry. Repeated clicks join the original
+operation. Session reattachment preserves it; an authoritative successor cannot
+inherit it.
+
+Workers advertise `cloud.commandStop.v1` with the boot queue. Only those workers
+receive the optional `commandId` on Stop; legacy CP and worker requests retain
+their strict conversation-only envelope. The engine persists the target with
+the operation, cancels only its own claim/admission, and joins native retirement
+before publishing terminal state. A delayed Stop for a terminal command cannot
+pause or cancel its successor. Removing an unclaimed stopped command retains
+one removal ID, body and expected revision through an ambiguous reply. Follow-up
+prompts stay queued until a later explicit Send. Older workers can still receive
+one Stop and be observed to completion; a lost reply requires visible recovery
+instead of a potentially unsafe conversation-wide replay. Local Personal and
+organization-local cancellation are unchanged. Navigation, app shutdown and
+transport disposal never synthesize a Stop.
 
 Organization provider settings select a cloud workspace and use the worker's
 agent registry plus the credential API. Saving a cloud API key or Claude setup

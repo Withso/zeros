@@ -19,6 +19,7 @@ export function chatAgentActivity(
   slot: AgentSessionState | undefined,
   pendingLocalTurnId?: string | null,
 ): AgentActivity {
+  if (slot?.cloudStop && isCloudWorkspace(slot.cwd)) return "running";
   if (slot?.cloudPromptPending && isCloudWorkspace(slot.cwd)) return null;
   if (pendingLocalTurnId) return "running";
   return agentFamily(slot?.agentId ?? null) === "claude"
@@ -34,6 +35,7 @@ export function agentActivity(
   slot: AgentSessionState | undefined,
   pendingLocalTurnId?: string | null,
 ): AgentActivity {
+  if (slot?.cloudStop && isCloudWorkspace(slot.cwd)) return "running";
   if (slot?.cloudPromptPending && isCloudWorkspace(slot.cwd)) return null;
   if (pendingLocalTurnId) return "running";
   if (!slot) return null;

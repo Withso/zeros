@@ -1294,15 +1294,12 @@ describe("cloud agent command adapter", () => {
       chatId: chat,
       request: { sessionId: `conversation:${chat}` },
     });
-    expect(
+    expect(() =>
       f.connection.outgoing({
         type: "AGENT_CANCEL",
         sessionId: `conversation:${chat}`,
       }),
-    ).toMatchObject({
-      op: "cloudCommands.request",
-      params: { request: { kind: "stop", conversationId: chat } },
-    });
+    ).toThrow(/acknowledged/);
     expect(
       f.connection.outgoing({
         type: "AGENT_PERMISSION_RESPONSE",

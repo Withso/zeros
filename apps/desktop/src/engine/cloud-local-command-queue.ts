@@ -355,7 +355,7 @@ export class CloudLocalCommandQueue {
     }
     const actor = this.actor(context.actorSessionId,request.kind === "mutate" && request.mutation.action.kind === "edit" ? "edit" : "run");
     if (request.kind === "stop") {
-      const result = this.stop(request.conversationId,request.operationId,actor);
+      const result = this.stop(request.conversationId,request.operationId,actor,request.commandId);
       this.options.pendingActorsChanged?.(result);
       return result;
     }
@@ -513,14 +513,26 @@ export class CloudLocalCommandQueue {
       this.journal(row.conversation_id, this.row(row.id)!, true);
     });
   }
-  private stop(conversationId: string, operationId: string, actor: ActorProvenance): CloudBootCommandSnapshot {
-    const content = { kind: "stop", conversationId };
+  private stop(conversationId: string, operationId: string, actor: ActorProvenance, commandId?: string): CloudBootCommandSnapshot {
+    const content = { kind: "stop", conversationId, ...(commandId ? { commandId } : {}) };
     return this.transaction(() => {
       const replay = this.replay(operationId,conversationId,content,actor);
       if (replay) return replay;
-      this.acceptedWork.closeConversation(conversationId);
-      const control = this.control(conversationId);
+      const target = commandId ? this.row(commandId) : undefined;
+      if (commandId && (!target || target.conversation_id !== conversationId || target.generation !== this.scope.generation ||
+          target.writer_epoch !== this.scope.writerEpoch)) throw new CloudCommandRuntimeError("command_not_found");
       const capacity = this.count("local_command_operations") < this.limits.operations;
+      if (target && !["queued", "dispatching"].includes(target.state)) {
+        // A delayed first delivery is also stale, even when there is no Stop
+        // receipt to replay yet. Record its identity without pausing a successor.
+        if (!capacity) throw new CloudCommandRuntimeError("command_limit");
+        this.remember(operationId,conversationId,content,actor);
+        this.journal(conversationId,undefined,true);
+        return { ...this.snapshot(conversationId), replayed: true };
+      }
+      if (commandId) this.acceptedWork.close(commandId);
+      else this.acceptedWork.closeConversation(conversationId);
+      const control = this.control(conversationId);
       // Receipt exhaustion is permanent for new mutations. Repeated unrecorded
       // Stops are monotonic: they never unpause or cause unbounded row growth.
       if (capacity || !control.paused) {

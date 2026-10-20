@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/platform/bridge/cloud-agent-connection.ts",
+  "before": "    if ([\"succeeded\", \"failed\", \"cancelled\"].includes(entry.state))\n      return complete({ conversationId: entry.conversationId, commandId, state: entry.state });",
+  "after": "    if ([\"succeeded\", \"failed\", \"cancelled\", \"dispatching\"].includes(entry.state))\n      return complete({ conversationId: entry.conversationId, commandId, state: entry.state });"
+}

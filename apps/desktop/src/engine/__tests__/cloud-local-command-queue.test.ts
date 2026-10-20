@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudCommandSnapshotSchema, CloudBootCommandClaimSchema, CloudBootCommandSnapshotSchema,
-  type CloudCommandEngineRequest, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
+  type CloudCommandEngineRequest, type CloudBootCommandEngineRequest, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
 import { CloudActorAuthorityRegistry } from "../agents/cloud-agent-lease";
 import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import { openSqlite } from "../db/sqlite";
@@ -40,7 +40,7 @@ function fixture(options: { file?: string; writer?: typeof scope; limits?: Const
     ...(options.captureHistory ? { captureHistory: options.captureHistory } : {}),
     ...(options.turnJournalChanged ? { turnJournalChanged: options.turnJournalChanged } : {}) });
   handles.push(queue);
-  const request = (input: CloudCommandEngineRequest, epoch = writer.writerEpoch, session = actorSessionId) =>
+  const request = (input: CloudCommandEngineRequest | CloudBootCommandEngineRequest, epoch = writer.writerEpoch, session = actorSessionId) =>
     queue.handle(input, { writerEpoch: epoch, actorSessionId: session });
   const snapshot = (conversationId = "chat") => CloudCommandSnapshotSchema.parse(request({ kind: "snapshot", conversationId }));
   const payload = (userMessageId = randomUUID()): CloudQueuedPrompt => ({ agentId: "claude", userMessageId, modeRevision: 0,
@@ -890,6 +890,116 @@ describe("engine-local cloud command ledger", () => {
     expect(f.claim()).toBeNull();
     expect(() => f.request(f.enqueue())).toThrow("command_limit");
     expect(f.snapshot().pending).toHaveLength(1);
+  });
+
+  it("binds a delayed Stop to its original command without pausing a successor", () => {
+    const f = fixture(), first = f.enqueue(); f.request(first);
+    const claim = f.claim()!;
+    f.request({ kind: "settle", result: { commandId: claim.commandId, claimId: claim.claimId, state: "succeeded", resultCode: null } });
+    const successor = f.enqueue(); f.request(successor);
+    const before = f.snapshot();
+    const stop = { kind: "stop" as const, conversationId: "chat", operationId: randomUUID(), commandId: claim.commandId };
+    expect(f.request(stop)).toMatchObject({ paused: false, pending: before.pending, receipts: before.receipts });
+    expect(f.request(stop)).toMatchObject({ paused: false, replayed: true });
+    expect(f.claim()?.commandId).toBe(successor.mutation.action.commandId);
+    expect(() => f.request({ ...stop, commandId: successor.mutation.action.commandId })).toThrow("command_conflict");
+  });
+
+  it("keeps an exact Stop's queued follow-ups and refuses another conversation's target", () => {
+    const f = fixture(), first = f.enqueue(); f.request(first);
+    const claim = f.claim()!, next = f.enqueue(); f.request(next);
+    const stop = { kind: "stop" as const, conversationId: "chat", operationId: randomUUID(), commandId: claim.commandId };
+    expect(f.request(stop)).toMatchObject({ paused: true });
+    expect(f.snapshot().pending.map(row => row.commandId)).toEqual([claim.commandId, next.mutation.action.commandId]);
+    const reconnected = randomUUID();
+    f.actors.confirm({ scope: f.writer, actor, actorSessionId: reconnected, authorityEpoch: 1,
+      confirmedUntilMs: now + 9_000, fundingConsentVersion: 1, fundingGrant: { kind: "owner" } });
+    expect(f.request(stop, f.writer.writerEpoch, reconnected)).toMatchObject({ paused: true, replayed: true });
+    const otherDevice = randomUUID();
+    f.actors.confirm({ scope: f.writer, actor: { ...actor, deviceId: randomUUID(), fingerprint: "b".repeat(64) },
+      actorSessionId: otherDevice, authorityEpoch: 1, confirmedUntilMs: now + 9_000,
+      fundingConsentVersion: 1, fundingGrant: { kind: "owner" } });
+    expect(() => f.request(stop, f.writer.writerEpoch, otherDevice)).toThrow("command_conflict");
+    expect(() => f.request({ ...stop, operationId: randomUUID(), conversationId: "other" })).toThrow("command_not_found");
+    expect(f.snapshot("other").paused).toBe(false);
+  });
+
+  it("does not let an old targeted Stop cancel a successor crossing native preparation", async () => {
+    const f = fixture(), first = f.enqueue(); f.request(first);
+    const old = f.claim()!;
+    f.request({ kind: "settle", result: { commandId: old.commandId, claimId: old.claimId, state: "succeeded", resultCode: null } });
+    let execution: string | null = null, release!: () => void;
+    const preparation = new Promise<void>(resolve => { release = resolve; });
+    const prepare = vi.fn((claim: { executionId: string }) => { execution = claim.executionId; return preparation; });
+    const dispatch = vi.fn(async () => ({ state: "succeeded" as const, resultCode: null }));
+    const runtime = new CloudCommandRuntime({ request: async () => { throw new Error("Unexpected CP request"); },
+      validate: () => {}, execution: () => execution, prepare, dispatch, retire: async () => {}, cancel: vi.fn(), changed: () => {} });
+    const handle = f.queue.handle.bind(f.queue);
+    vi.spyOn(f.queue, "handle").mockImplementation((input, context) => {
+      const response = handle(input, context);
+      if ((input as { kind: string }).kind === "stop") release();
+      return response;
+    });
+    try {
+      runtime.installLocalQueue(f.queue); const successor = f.enqueue();
+      await runtime.handle({ kind: "mutate", mutation: successor.mutation }, actorSessionId);
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+      await runtime.handle({ kind: "stop", conversationId: "chat", operationId: randomUUID(), commandId: old.commandId }, actorSessionId);
+      await vi.waitFor(() => expect(f.snapshot().receipts.some(row => row.commandId === successor.mutation.action.commandId)).toBe(true));
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(f.snapshot().receipts.find(row => row.commandId === successor.mutation.action.commandId)?.state).toBe("succeeded");
+    } finally { release(); runtime.close(); }
+  });
+
+  it("does not cancel a successor when an old targeted Stop fails to persist", async () => {
+    const f = fixture(), first = f.enqueue(); f.request(first);
+    const old = f.claim()!;
+    f.request({ kind: "settle", result: { commandId: old.commandId, claimId: old.claimId, state: "succeeded", resultCode: null } });
+    let execution: string | null = null, release!: () => void;
+    const preparation = new Promise<void>(resolve => { release = resolve; });
+    const prepare = vi.fn((claim: { executionId: string }) => { execution = claim.executionId; return preparation; });
+    const dispatch = vi.fn(async () => ({ state: "succeeded" as const, resultCode: null })), cancel = vi.fn();
+    const runtime = new CloudCommandRuntime({ request: async () => { throw new Error("Unexpected CP request"); },
+      validate: () => {}, execution: () => execution, prepare, dispatch, retire: async () => {}, cancel, changed: () => {} });
+    const db = openSqlite(f.file);
+    try {
+      runtime.installLocalQueue(f.queue); const successor = f.enqueue();
+      await runtime.handle({ kind: "mutate", mutation: successor.mutation }, actorSessionId);
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+      db.exec("CREATE TRIGGER fail_stop BEFORE INSERT ON local_command_operations BEGIN SELECT RAISE(ABORT,'synthetic Stop storage failure'); END");
+      await expect(runtime.handle({ kind: "stop", conversationId: "chat", operationId: randomUUID(), commandId: old.commandId }, actorSessionId))
+        .rejects.toThrow("command_storage_unavailable");
+      db.exec("DROP TRIGGER fail_stop"); release();
+      await vi.waitFor(() => expect(f.snapshot().receipts.some(row => row.commandId === successor.mutation.action.commandId)).toBe(true));
+      expect(dispatch).toHaveBeenCalledOnce(); expect(cancel).not.toHaveBeenCalled();
+      expect(f.snapshot().receipts.find(row => row.commandId === successor.mutation.action.commandId)?.state).toBe("succeeded");
+    } finally { db.exec("DROP TRIGGER IF EXISTS fail_stop"); db.close(); release(); runtime.close(); }
+  });
+
+  it("still fences a queued target and its follow-ups after an exact Stop storage failure", async () => {
+    const f = fixture(), dispatch = vi.fn(async () => ({ state: "succeeded" as const, resultCode: null }));
+    let execution: string | null = null;
+    const runtime = new CloudCommandRuntime({ request: async () => { throw new Error("Unexpected CP request"); },
+      validate: () => {}, execution: () => execution, prepare: async claim => { execution = claim.executionId; },
+      retire: async () => {}, dispatch, cancel: vi.fn(), changed: () => {} });
+    const db = openSqlite(f.file);
+    try {
+      runtime.installLocalQueue(f.queue); runtime.pauseClaims();
+      const first = f.enqueue(), followUp = f.enqueue();
+      await runtime.handle({ kind: "mutate", mutation: first.mutation }, actorSessionId);
+      followUp.mutation.expectedRevision = f.snapshot().revision;
+      await runtime.handle({ kind: "mutate", mutation: followUp.mutation }, actorSessionId);
+      db.exec("CREATE TRIGGER fail_stop BEFORE INSERT ON local_command_operations BEGIN SELECT RAISE(ABORT,'synthetic Stop storage failure'); END");
+      await expect(runtime.handle({ kind: "stop", conversationId: "chat", operationId: randomUUID(), commandId: first.mutation.action.commandId }, actorSessionId))
+        .rejects.toThrow("command_storage_unavailable");
+      db.exec("DROP TRIGGER fail_stop"); runtime.resumeClaims();
+      await vi.waitFor(() => expect(f.snapshot().receipts.some(row => row.commandId === first.mutation.action.commandId && row.state === "cancelled")).toBe(true));
+      expect(f.snapshot().pending).toMatchObject([{ commandId: followUp.mutation.action.commandId, state: "queued" }]);
+      expect(dispatch).not.toHaveBeenCalled();
+      await runtime.handle({ kind: "mutate", mutation: { conversationId: "chat", operationId: randomUUID(), expectedRevision: f.snapshot().revision,
+        action: { kind: "resume" } } }, actorSessionId);
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    } finally { db.exec("DROP TRIGGER IF EXISTS fail_stop"); db.close(); runtime.close(); }
   });
 
   it("allows queued edits/removal but forbids changing user-message identity or editing a dispatched command", () => {

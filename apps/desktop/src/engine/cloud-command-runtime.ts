@@ -40,12 +40,16 @@ export class CloudCommandRuntime {
   private readonly controls = new Map<string, { revision: number; paused: boolean }>();
   private readonly pendingConversations = new Set<string>();
   private readonly pendingGoals = new Set<string>();
-  private readonly stopping = new Map<string, Set<symbol>>();
+  private readonly stopping = new Map<string, Map<symbol, string | undefined>>();
   private readonly unacknowledgedStop = new Set<string>();
+  private readonly unacknowledgedTargetStops = new Map<string, Set<string>>();
   private readonly active = new Map<string, string>();
   private readonly claiming = new Set<string>();
   private readonly pendingClaims = new Map<string, { claimId: string; executionId: string }>();
   private readonly cancelledClaims = new Set<string>();
+  /** Only failed native cancellation needs a legacy retry witness. It never
+   * retargets to whichever command happens to be active on replay. */
+  private readonly failedStopCancellations = new Map<string, { conversationId: string; commandId: string }>();
   private readonly unsettled = new Map<string, CloudCommandResult>();
   private readonly settlementObservations = new Map<string, { intent: CloudCommandSettlementObservation; result: CloudCommandResult }>();
   private readonly receiptRetries = new Map<string, ReturnType<typeof setTimeout>>();
@@ -72,7 +76,7 @@ export class CloudCommandRuntime {
     queue.durability();
     if (this.localQueue === queue) return;
     if (this.serviceRequests || this.pumping.size || this.claiming.size || this.pendingClaims.size ||
-        this.active.size || this.unsettled.size || this.stopping.size || this.unacknowledgedStop.size || this.pendingConversations.size)
+        this.active.size || this.unsettled.size || this.stopping.size || this.unacknowledgedStop.size || this.unacknowledgedTargetStops.size || this.pendingConversations.size)
       throw new CloudCommandRuntimeError("command_conflict");
     this.localQueue = queue;
     this.controls.clear();
@@ -99,12 +103,12 @@ export class CloudCommandRuntime {
   handoffDrained(): boolean {
     return this.claimsPaused && !this.closed && this.serviceRequests === 0 && this.pumping.size === 0 &&
       this.claiming.size === 0 && this.pendingClaims.size === 0 && this.active.size === 0 &&
-      this.unsettled.size === 0 && this.stopping.size === 0 && this.unacknowledgedStop.size === 0;
+      this.unsettled.size === 0 && this.stopping.size === 0 && this.unacknowledgedStop.size === 0 && this.unacknowledgedTargetStops.size === 0;
   }
   lifecycleDrained(): boolean {
     return this.claimsPaused && this.serviceRequests === 0 && this.pumping.size === 0 &&
       this.claiming.size === 0 && this.pendingClaims.size === 0 && this.active.size === 0 &&
-      this.unsettled.size === 0 && this.stopping.size === 0 && this.unacknowledgedStop.size === 0;
+      this.unsettled.size === 0 && this.stopping.size === 0 && this.unacknowledgedStop.size === 0 && this.unacknowledgedTargetStops.size === 0;
   }
 
   private async request(...args: Parameters<Dependencies["request"]>): Promise<unknown> {
@@ -158,10 +162,11 @@ export class CloudCommandRuntime {
     }
     // Block the local claim→dispatch gap immediately, before the Stop roundtrip.
     const stopIntent = request.kind === "stop" ? Symbol() : null;
-    const stopCommand = conversationId ? this.active.get(conversationId) : undefined;
+    const stopTarget = request.kind === "stop" && "commandId" in request ? request.commandId : undefined;
+    const stopCommand = stopTarget ?? (conversationId ? this.active.get(conversationId) : undefined);
     if (request.kind === "stop" && stopIntent) {
-      const intents = this.stopping.get(request.conversationId) ?? new Set<symbol>();
-      intents.add(stopIntent); this.stopping.set(request.conversationId, intents);
+      const intents = this.stopping.get(request.conversationId) ?? new Map<symbol, string | undefined>();
+      intents.set(stopIntent, stopTarget); this.stopping.set(request.conversationId, intents);
     }
     let raw: unknown;
     try {
@@ -179,8 +184,16 @@ export class CloudCommandRuntime {
         this.removeStopIntent(request.conversationId, stopIntent);
         // A definite rejection is not an unacknowledged Stop. A stale actor
         // cannot cancel another member's turn through the local fallback.
-        if (error instanceof CloudCommandRuntimeError && ["cloud_actor_authority_rejected","invalid_command","engine_authority_rejected"].includes(error.code)) throw error;
-        this.unacknowledgedStop.add(request.conversationId);
+        if (error instanceof CloudCommandRuntimeError && (["cloud_actor_authority_rejected","invalid_command","engine_authority_rejected"].includes(error.code) ||
+            stopTarget && ["command_conflict", "command_not_found", "command_limit"].includes(error.code))) throw error;
+        if (stopTarget) {
+          const targets = this.unacknowledgedTargetStops.get(request.conversationId) ?? new Set<string>();
+          targets.add(stopTarget); this.unacknowledgedTargetStops.set(request.conversationId, targets);
+        }
+        // A stale target cannot pause or cancel a successor when storage fails.
+        // A claim still in flight is fenced once its exact command is known.
+        if (!stopTarget || this.active.get(request.conversationId) === stopTarget)
+          this.unacknowledgedStop.add(request.conversationId);
         if (stopCommand && this.active.get(request.conversationId) === stopCommand) {
           this.cancelledClaims.add(stopCommand);
           await this.dependencies.cancel(request.conversationId);
@@ -193,6 +206,7 @@ export class CloudCommandRuntime {
         .extend({ conversationId: CloudCommandSnapshotSchema.shape.conversationId }).parse(raw);
       if (entry.commandId !== request.commandId) throw new CloudCommandRuntimeError("command_response_invalid");
       this.dependencies.validate(entry.conversationId);
+      if (["succeeded", "failed", "cancelled"].includes(entry.state)) this.forgetUnacknowledgedTarget(entry.conversationId, entry.commandId);
       return entry;
     }
     const snapshot = this.parseSnapshot(raw);
@@ -203,17 +217,28 @@ export class CloudCommandRuntime {
     }
     // An explicit successful Resume resolves a previously unacknowledged Stop.
     if (request.kind === "mutate" && request.mutation.action.kind === "resume" && !snapshot.paused &&
-      this.controls.get(snapshot.conversationId)?.revision === snapshot.revision) this.unacknowledgedStop.delete(snapshot.conversationId);
-    if (request.kind === "stop" && !snapshot.replayed) {
-      const dispatched = snapshot.pending.find(command => command.state === "dispatching");
+      this.controls.get(snapshot.conversationId)?.revision === snapshot.revision) {
+      this.unacknowledgedStop.delete(snapshot.conversationId);
+      this.unacknowledgedTargetStops.delete(snapshot.conversationId);
+    }
+    const failedStop = request.kind === "stop" ? this.failedStopCancellations.get(request.operationId) : undefined;
+    if (request.kind === "stop" && (stopTarget || !snapshot.replayed ||
+        failedStop?.conversationId === request.conversationId && snapshot.paused)) {
+      const target = stopTarget ?? (snapshot.replayed ? failedStop?.commandId : undefined);
+      const dispatched = snapshot.pending.find(command => command.state === "dispatching" && (!target || command.commandId === target));
       if (dispatched) {
-        if (this.active.get(request.conversationId) === dispatched.commandId) {
+        if (this.active.get(request.conversationId) === dispatched.commandId && (!snapshot.replayed || snapshot.paused)) {
           this.cancelledClaims.add(dispatched.commandId);
-          await this.dependencies.cancel(request.conversationId);
+          try { await this.dependencies.cancel(request.conversationId); this.failedStopCancellations.delete(request.operationId); }
+          catch (error) {
+            this.failedStopCancellations.set(request.operationId, { conversationId: request.conversationId, commandId: dispatched.commandId });
+            while (this.failedStopCancellations.size > 256) this.failedStopCancellations.delete(this.failedStopCancellations.keys().next().value!);
+            throw error;
+          }
         }
-        else if (this.claiming.has(request.conversationId)) this.cancelledClaims.add(dispatched.commandId);
+        else if (snapshot.paused && this.claiming.has(request.conversationId)) this.cancelledClaims.add(dispatched.commandId);
       }
-      else await this.dependencies.cancel(request.conversationId);
+      else if (!target && !snapshot.replayed) await this.dependencies.cancel(request.conversationId);
     }
     this.dependencies.changed(snapshot.conversationId);
     this.kick(snapshot.conversationId);
@@ -264,6 +289,8 @@ export class CloudCommandRuntime {
       this.recoveredInterruptions.add(receipt.commandId);
       if (this.recoveredInterruptions.size > 256) this.recoveredInterruptions.delete(this.recoveredInterruptions.values().next().value!);
     }
+    for (const receipt of snapshot.receipts)
+      if (["succeeded", "failed", "cancelled"].includes(receipt.state)) this.forgetUnacknowledgedTarget(snapshot.conversationId, receipt.commandId);
     this.controls.set(snapshot.conversationId, { revision: snapshot.revision, paused: snapshot.paused });
     if (snapshot.pending.length) this.pendingConversations.add(snapshot.conversationId);
     else this.pendingConversations.delete(snapshot.conversationId);
@@ -303,12 +330,16 @@ export class CloudCommandRuntime {
       this.pendingClaims.delete(conversationId);
       this.clearReceiptRetry(conversationId);
       this.dependencies.changed(conversationId);
+      if (this.unacknowledgedTargetStops.get(conversationId)?.has(claim.commandId)) {
+        this.forgetUnacknowledgedTarget(conversationId, claim.commandId);
+        this.unacknowledgedStop.add(conversationId);
+      }
       let result: Pick<CloudCommandResult, "state" | "resultCode" | "result">;
       const cancelledClaim = this.cancelledClaims.delete(claim.commandId);
       const goalOperation=claim.payload.operation?.kind==="goal";
       let retired = false;
       if (claim.dispatchAllowed===false) result={state:"cancelled",resultCode:"actor_authority_revoked"};
-      else if (this.closed || this.blocked(conversationId,goalOperation) || cancelledClaim) result = { state: "cancelled", resultCode: "stopped_before_dispatch" };
+      else if (this.closed || this.blocked(conversationId,goalOperation,claim.commandId) || cancelledClaim) result = { state: "cancelled", resultCode: "stopped_before_dispatch" };
       else {
         let failureStage: CloudCommandFailureCause["stage"] = "validation";
         let failurePublishingError: unknown;
@@ -318,7 +349,7 @@ export class CloudCommandRuntime {
           this.active.set(conversationId, claim.commandId);
           failureStage = "admission";
           await this.dependencies.prepare?.(claim);
-          if(this.closed||this.blocked(conversationId,goalOperation)||this.cancelledClaims.delete(claim.commandId))result={state:"cancelled",resultCode:"stopped_before_dispatch"};
+          if(this.closed||this.blocked(conversationId,goalOperation,claim.commandId)||this.cancelledClaims.delete(claim.commandId))result={state:"cancelled",resultCode:"stopped_before_dispatch"};
           else {
             failureStage = "validation";
             this.dependencies.validate(conversationId,claim.payload);
@@ -329,26 +360,37 @@ export class CloudCommandRuntime {
             result = await this.dependencies.dispatch(claim);
           }
         } catch (error) {
-          const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-          const resultCode = isCloudAgentAdmissionCode(code) ? code : cloudCommandFailureCode(error, failureStage);
-          result = { state: "failed", resultCode };
-          try {
-            const published = this.dependencies.failed?.(claim, resultCode, error);
-            if (published) {
-              const terminal = CloudTurnOutcomeSchema.parse(published);
-              if (terminal.commandId !== claim.commandId || terminal.conversationId !== claim.conversationId || terminal.executionId !== claim.executionId ||
-                  terminal.turnId !== claim.payload.userMessageId || terminal.agentId !== claim.payload.agentId || terminal.status !== "failed")
-                throw new CloudCommandRuntimeError("command_response_invalid");
-              result.result = { version: 1, terminal };
+          if (this.cancelledClaims.delete(claim.commandId)) {
+            // Native admission may reject its awaited lease as Stop fences it.
+            // Keep that explicit command cancellation distinct from revocation
+            // or provider failure; retirement still has to prove the scope empty.
+            result = { state: "cancelled", resultCode: failureStage === "provider_prompt" ? "stopped_by_user" : "stopped_before_dispatch" };
+          } else {
+            const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+            const resultCode = isCloudAgentAdmissionCode(code) ? code : cloudCommandFailureCode(error, failureStage);
+            result = { state: "failed", resultCode };
+            try {
+              const published = this.dependencies.failed?.(claim, resultCode, error);
+              if (published) {
+                const terminal = CloudTurnOutcomeSchema.parse(published);
+                if (terminal.commandId !== claim.commandId || terminal.conversationId !== claim.conversationId || terminal.executionId !== claim.executionId ||
+                    terminal.turnId !== claim.payload.userMessageId || terminal.agentId !== claim.payload.agentId || terminal.status !== "failed")
+                  throw new CloudCommandRuntimeError("command_response_invalid");
+                result.result = { version: 1, terminal };
+              }
             }
+            catch (error) { failurePublishingError = error; }
           }
-          catch (error) { failurePublishingError = error; }
         }
         // Dispatch is caught above, so retirement always runs. Its failure
         // closes the pump before a terminal receipt can be published.
         try { await this.dependencies.retire?.(claim,result); retired = true; }
         catch(error) { this.close(); throw error; }
-        finally { this.active.delete(conversationId); this.cancelledClaims.delete(claim.commandId); }
+        finally {
+          this.active.delete(conversationId); this.cancelledClaims.delete(claim.commandId);
+          for (const [operationId, stop] of this.failedStopCancellations)
+            if (stop.commandId === claim.commandId) this.failedStopCancellations.delete(operationId);
+        }
         if (failurePublishingError) { this.close(); throw failurePublishingError; }
       }
       // A local preclaim already owns an immutable source capture. Stop or
@@ -384,12 +426,21 @@ export class CloudCommandRuntime {
     catch { /* Inspection never changes terminal durability or dispatch. */ }
   }
 
-  private blocked(conversationId: string, allowPausedGoal=false): boolean {
-    return (!allowPausedGoal && this.controls.get(conversationId)?.paused === true) || this.stopping.has(conversationId) || this.unacknowledgedStop.has(conversationId);
+  private blocked(conversationId: string, allowPausedGoal=false, commandId?: string): boolean {
+    const stopping = this.stopping.get(conversationId);
+    // Pause a new claim while any Stop is in flight. Once a claim is known,
+    // only its own Stop (or a legacy conversation Stop) may cancel admission.
+    const stoppingCommand = stopping && [...stopping.values()].some(target => !commandId || !target || target === commandId);
+    return (!allowPausedGoal && this.controls.get(conversationId)?.paused === true) || !!stoppingCommand || this.unacknowledgedStop.has(conversationId);
   }
   private removeStopIntent(conversationId: string, intent: symbol): void {
     this.stopping.get(conversationId)?.delete(intent);
     if (this.stopping.get(conversationId)?.size === 0) this.stopping.delete(conversationId);
+  }
+  private forgetUnacknowledgedTarget(conversationId: string, commandId: string): void {
+    const targets = this.unacknowledgedTargetStops.get(conversationId);
+    targets?.delete(commandId);
+    if (targets?.size === 0) this.unacknowledgedTargetStops.delete(conversationId);
   }
   private clearReceiptRetry(conversationId: string): void {
     const timer = this.receiptRetries.get(conversationId); if (timer) clearTimeout(timer);
@@ -402,5 +453,7 @@ export class CloudCommandRuntime {
     for (const timer of this.receiptRetries.values()) clearTimeout(timer);
     this.receiptRetries.clear(); this.retryDelays.clear();
     this.settlementObservations.clear();
+    this.failedStopCancellations.clear();
+    this.unacknowledgedTargetStops.clear();
   }
 }

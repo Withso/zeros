@@ -292,11 +292,14 @@ export const CloudBootCommandMutationSchema = z.object({
     context.addIssue({ code: "custom", message: "Forks require the fork action" });
 });
 export type CloudBootCommandMutation = z.infer<typeof CloudBootCommandMutationSchema>;
+/** Negotiate before sending the additive exact-command Stop target. Legacy
+ * workers retain their strict conversation-only request contract. */
+export const CLOUD_COMMAND_STOP_CAPABILITY = "cloud.commandStop.v1";
 export const CloudBootCommandClientRequestSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("snapshot"), conversationId: identity }).strict(),
   z.object({ kind: z.literal("read"), commandId: z.uuid() }).strict(),
   z.object({ kind: z.literal("mutate"), mutation: CloudBootCommandMutationSchema }).strict(),
-  z.object({ kind: z.literal("stop"), conversationId: identity, operationId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("stop"), conversationId: identity, operationId: z.uuid(), commandId: z.uuid().optional() }).strict(),
 ]);
 export type CloudBootCommandClientRequest = z.infer<typeof CloudBootCommandClientRequestSchema>;
 export const CloudBootCommandEntrySchema = CloudCommandEntrySchema.extend({ payload: CloudBootCommandPayloadSchema.nullable() });
@@ -312,7 +315,7 @@ export type CloudBootCommandClaim = z.infer<typeof CloudBootCommandClaimSchema>;
 export const CloudBootCommandEngineRequestSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("snapshot"), conversationId: identity }).strict(),
   z.object({ kind: z.literal("read"), commandId: z.uuid() }).strict(),
-  z.object({ kind: z.literal("stop"), conversationId: identity, operationId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("stop"), conversationId: identity, operationId: z.uuid(), commandId: z.uuid().optional() }).strict(),
   z.object({ kind: z.literal("mutate"), mutation: CloudBootCommandMutationSchema,
     admissionError: z.enum(["command_context_changed", "command_not_found"]).nullable() }).strict(),
   z.object({ kind: z.literal("claim"), conversationId: identity, executionId: identity, claimId: z.uuid().optional() }).strict(),

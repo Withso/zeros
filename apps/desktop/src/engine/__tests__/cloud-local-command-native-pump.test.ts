@@ -582,6 +582,81 @@ describe("VM-local native command pump", () => {
     await runtime.handle({ kind: "stop", conversationId, operationId: randomUUID() }, actorSessionId);
     expect(f.routes.has(conversationId)).toBe(false);
   });
+
+  it("holds an exact durable Stop and terminal receipt until the native scope is proved retired", async () => {
+    const f = await fixture(), entered = deferred(), retirement = deferred(), finished = deferred();
+    let active!: CloudBootCommandClaim;
+    const dispatch = vi.fn(async claim => {
+      active = claim; f.pump.assertDispatch(claim);
+      const execution = f.executions.get(claim.executionId)!;
+      f.factory.markNativeHandoff(execution, cloudBootTurnReservation(execution)!);
+      f.stops.get(claim.executionId)!.mockImplementation(async () => retirement.promise);
+      entered.resolve(); await finished.promise;
+      return { state: "cancelled" as const, resultCode: "stopped_by_user" };
+    });
+    const runtime = new CloudCommandRuntime({ request: async () => { throw new Error("Unexpected legacy CP request"); },
+      validate: () => {}, execution: id => f.routes.get(id) ?? null, prepare: claim => f.pump.prepare(claim),
+      retire: (claim, result) => f.pump.retire(claim, result), cancel: id => f.pump.cancel(id), changed: () => {}, dispatch });
+    runtime.installLocalQueue(f.boot.queue); cleanups.push(() => runtime.close());
+    const conversationId = f.f.input.conversationId, actorSessionId = f.f.provenance.actorSessionId;
+    const enqueue = async (revision: number, commandId: string) => runtime.handle({ kind: "mutate", mutation: {
+      conversationId, expectedRevision: revision, operationId: randomUUID(), action: { kind: "enqueue", commandId,
+        payload: { agentId: "cursor", model: f.f.input.model, permissionMode: "plan", modeRevision: 0,
+          userMessageId: randomUUID(), prompt: [{ type: "text", text: "Retained fixture prompt" }] } } } }, actorSessionId);
+    const snapshot = () => CloudBootCommandSnapshotSchema.parse(f.boot.queue.handle({ kind: "snapshot", conversationId },
+      { writerEpoch: f.f.scope.writerEpoch, actorSessionId }));
+    try {
+      const commandId = randomUUID(); await enqueue(0, commandId); await entered.promise;
+      const successorId = randomUUID(); await enqueue(snapshot().revision, successorId);
+      const queued = snapshot().pending.find(row => row.commandId === successorId)!;
+      const stop = { kind: "stop", conversationId, operationId: randomUUID(), commandId };
+      let acknowledged = false;
+      const stopping = runtime.handle(stop, actorSessionId).then(() => { acknowledged = true; });
+      await vi.waitFor(() => expect(f.pump.record(active)?.controller.signal.aborted).toBe(true));
+      finished.resolve(); await new Promise<void>(resolve => setImmediate(resolve));
+      expect(acknowledged).toBe(false);
+      expect(snapshot()).toMatchObject({ paused: true, receipts: [], pending: [{ commandId, state: "dispatching" }, queued] });
+      expect(f.routes.get(conversationId)).toBe(active.executionId);
+      retirement.resolve(); await stopping;
+      await vi.waitFor(() => expect(snapshot().receipts.find(row => row.commandId === commandId)?.state).toBe("cancelled"));
+      expect(snapshot().pending).toEqual([queued]); expect(snapshot().paused).toBe(true);
+      expect(f.routes.has(conversationId)).toBe(false); expect(f.factory.bootScopeActivity([]).scopes).toHaveLength(0);
+      await runtime.handle(stop, actorSessionId);
+      expect(dispatch).toHaveBeenCalledOnce(); expect(f.gateway.endSession).toHaveBeenCalledOnce();
+    } finally { retirement.resolve(); finished.resolve(); }
+  });
+
+  it("keeps exact Stop pending through a late execution-owned enrollment and never launches it", async () => {
+    const f = await fixture("cursor", false, true), entered = deferred(), release = deferred();
+    const enroll = f.execution.enroll.getMockImplementation()!;
+    f.execution.enroll.mockImplementationOnce(async (...args) => {
+      const receipt = await enroll(...args); entered.resolve(); await release.promise; return receipt;
+    });
+    const dispatch = vi.fn(async () => ({ state: "succeeded" as const, resultCode: null }));
+    const runtime = new CloudCommandRuntime({ request: async () => { throw new Error("Unexpected legacy CP request"); },
+      validate: () => {}, execution: id => f.routes.get(id) ?? null, prepare: claim => f.pump.prepare(claim),
+      retire: (claim, result) => f.pump.retire(claim, result), cancel: id => f.pump.cancel(id), changed: () => {}, dispatch });
+    runtime.installLocalQueue(f.boot.queue); cleanups.push(() => runtime.close());
+    const conversationId = f.f.input.conversationId, commandId = randomUUID(), actorSessionId = f.f.provenance.actorSessionId;
+    const snapshot = () => CloudBootCommandSnapshotSchema.parse(f.boot.queue.handle({ kind: "snapshot", conversationId },
+      { writerEpoch: f.f.scope.writerEpoch, actorSessionId }));
+    try {
+      await runtime.handle({ kind: "mutate", mutation: { conversationId, expectedRevision: 0, operationId: randomUUID(),
+        action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.f.input.model, permissionMode: "plan",
+          modeRevision: 0, userMessageId: randomUUID(), prompt: [{ type: "text", text: "Fixture enrollment" }] } } } }, actorSessionId);
+      await entered.promise;
+      let acknowledged = false;
+      const stopping = runtime.handle({ kind: "stop", conversationId, operationId: randomUUID(), commandId }, actorSessionId)
+        .then(() => { acknowledged = true; });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(acknowledged).toBe(false); expect(snapshot().receipts).toEqual([]);
+      release.resolve(); await stopping;
+      await vi.waitFor(() => expect(snapshot().receipts.find(row => row.commandId === commandId)?.state).toBe("cancelled"));
+      expect(dispatch).not.toHaveBeenCalled(); expect(native.prepare).not.toHaveBeenCalled();
+      expect(f.execution.close).toHaveBeenCalledOnce(); expect(f.factory.bootScopeActivity([]).scopes).toHaveLength(0);
+    } finally { release.resolve(); }
+  });
+
   it("settles a known validation failure before native prepare without closing the queue pump or replaying", async () => {
     const f = await fixture(); let claimed = false;
     const handle = f.boot.queue.handle.bind(f.boot.queue);

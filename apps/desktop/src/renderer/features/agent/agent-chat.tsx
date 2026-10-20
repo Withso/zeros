@@ -3394,7 +3394,7 @@ function AgentChatBody({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
+  const composerStreaming = Boolean(isCloudWorkspace(session.cwd) && session.cloudStop) || !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
     status: backgroundContinuationActive ? "streaming" : session.status,
     hasPendingLocalTurn: pendingLocalTurnId !== null,
     planReview: Boolean(planReview),

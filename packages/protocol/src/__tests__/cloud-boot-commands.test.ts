@@ -12,6 +12,18 @@ function fixture() {
 }
 
 describe("negotiated boot-mode command contracts", () => {
+  it("adds an exact Stop target only to the negotiated boot wire while retaining legacy requests", () => {
+    const legacy = { kind: "stop", conversationId: "destination", operationId: randomUUID() };
+    const exact = { ...legacy, commandId: randomUUID() };
+    for (const schema of [commands.CloudBootCommandClientRequestSchema, commands.CloudBootCommandEngineRequestSchema]) {
+      expect(schema.parse(legacy)).toEqual(legacy); expect(schema.parse(exact)).toEqual(exact);
+      expect(schema.safeParse({ ...exact, commandId: "foreign" }).success).toBe(false);
+      expect(schema.safeParse({ ...exact, executionId: "untrusted" }).success).toBe(false);
+    }
+    expect(commands.CloudCommandClientRequestSchema.parse(legacy)).toEqual(legacy);
+    expect(commands.CloudCommandClientRequestSchema.safeParse(exact).success).toBe(false);
+  });
+
   it("parses a genuine grant-free claim while keeping the actor dispatch pairing", () => {
     const f = fixture(), actor = { userId: randomUUID(), deviceId: randomUUID(), deviceKeyVersion: 2,
       role: "owner", fingerprint: "a".repeat(64) };

@@ -1176,14 +1176,15 @@ describe("workspace runtime routing", () => {
       cloudScopedId(a, "run"),
       cloudScopedId(b, "run"),
     ]);
-    client.send({
+    await client.request({
       type: "AGENT_CANCEL",
       agentId: "codex",
       sessionId: cloudScopedId(a, "run"),
     });
-    expect(pa.send).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: "run" }),
+    expect(pa.request).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "run" }), expect.objectContaining({ timeoutMs: expect.any(Number), signal: expect.any(AbortSignal) }),
     );
+    expect(pa.send).not.toHaveBeenCalled();
     expect(pb.send).not.toHaveBeenCalled();
     off();
     client.dispose();

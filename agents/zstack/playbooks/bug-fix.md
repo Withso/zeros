@@ -47,6 +47,11 @@
    payload JSON before filtering; arbitrary tool data gets no key-name exemption.
    A suspension holds prompt preparation until it resumes; Stop still ends the
    wait.
+   For durable Stop, hold native retirement after a paused ACK, replace the
+   transport, and retain the exact operation and command above it. A late Stop
+   must not cancel a successor crossing preparation. Cover late enrollment,
+   receipt visibility, the initial connection deadline, and renderer reattachment;
+   provider terminal events alone cannot settle the pending Stop.
    For warm provider reuse, complete a real first turn and prepare the next
    through the production configuration port and adapter. Preserve the admitted
    cloud model when a composer snapshot omits it; keep Local snapshot semantics
