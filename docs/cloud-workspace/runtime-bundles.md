@@ -530,19 +530,32 @@ startup does not depend on workspace setup being enabled. Qualification mode
 remains a separate admission setting: Alpha must select `smoke` to admit smoke
 evidence. The default `full` admits none of these smoke approvals.
 
-Publication completion and staff retries enqueue durable runs. When no run is
-queued, a 30-second tick discovers candidates only among the newest two
-confirmed, unrevoked Alpha releases on the current engine protocol, ordered by
-`release_order`. This window is chosen before excluding qualified or completed
-runtimes, so a new base cannot trigger a sweep of release history. A recorded
-failure of the newest eligible release on that base compatibility blocks
-automatic fallback to older releases. A later release advances the window;
-existing queued runs and explicit staff requalification retain their dispatch
-and cleanup rules.
+Publication completion and staff retries enqueue durable runs with a chosen
+base image and compatibility. With `CLOUD_RUNTIME_BASE_ROLLOUT_JSON`,
+qualification covers the approved, unrevoked default and the candidate when it
+has assigned organizations. Unassigned bases and candidates with an empty
+organization list do not trigger qualification. Without a policy, new runs use
+the newest approved, unrevoked Boat base. Existing qualification evidence remains
+keyed by compatibility; bases sharing a compatibility reuse that evidence.
+
+When no run is queued, a 30-second tick discovers candidates only among the
+newest two confirmed, unrevoked Alpha releases on the current engine protocol,
+ordered by `release_order`. This window is chosen before excluding qualified or
+completed runtimes and applies independently to each target compatibility, so
+two distinct targets need at most four automatic runs for a fixed release
+window. Targets rotate by their last recorded attempt, starting with the default.
+A recorded failure of the newest eligible release blocks automatic fallback
+only on that compatibility. A later release advances the window; old history
+does not refill it. Existing queued runs and explicit staff requalification
+retain their dispatch and cleanup rules. A publication replay reports qualified
+only when all currently available, assignable targets already have proof.
 
 The database permits one running smoke globally, including runs awaiting
-cleanup. Each claim selects the newest approved, unrevoked Boat base and records
-a 25-minute deadline. A failed run is not retried automatically for the same
+cleanup. Each claim revalidates its recorded base and records a 25-minute
+deadline. It refuses a revoked or no-longer-assigned target without switching
+the run to another base. Legacy queued rows without a base acquire one once at
+claim; a new newest base does not change an already pinned no-policy run.
+A failed run is not retried automatically for the same
 runtime/base compatibility; staff may retry explicitly. The claim transaction
 also prepares the builder allocation intent, so an expired claim cannot be
 marked cleaned while a suspended worker can still dispatch an unjournalled
@@ -802,7 +815,7 @@ V4 admission supports only the current tested engine protocol. An incompatible
 allocation. The removed staff rollout selector grants no execution fallback;
 current organization/member/admin roles, funding and qualification still apply.
 
-To isolate a base rollout, configure all Computer and runtime-image workers
+To isolate a base rollout, configure all Computer, qualification and runtime-image workers
 with the same server-only policy:
 
 ```json
@@ -827,12 +840,15 @@ back to another base. Registration, qualification and observation cannot promote
 the candidate. Global `newestApprovedBase` release metadata still describes the
 registry, not an organization's effective selection.
 
-Qualification continues to discover the newest approved base independently.
+Qualification covers the exact default and any candidate with assigned
+organizations, within the bounded release window described above. This policy
+isolates base assignment; it does not isolate a new runtime release from the
+default's organizations, because that runtime can qualify on both bases.
 The image producer considers both exact targets fairly within its existing
 single production slot, keeping one ready image per base while both are
 configured. A candidate failure does not prevent eligible default production.
 Before registering a candidate, drain old worker versions and confirm this
-policy on every worker that can claim Computer or image work; disabling workspace
+policy on every worker that can claim Computer, qualification or image work; disabling workspace
 setup alone does not stop Computer builds. Promote by changing the explicit
 default. Roll back by naming the retained previous default and removing the
 candidate, rather than unsetting the policy or revoking saved pins. Claimed
