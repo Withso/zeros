@@ -17,6 +17,9 @@ Revalidate a cached terminal Stop after transport replacement, and target storag
 failure fallbacks as strictly as successful writes. Passive snapshots must retain
 an unconfirmed Stop's error; a queued follow-up must not consume its Retry action.
 Retain a turn's real failure or completion when Stop loses the race.
+Native exit and boundary revocation can precede the paired command receipt.
+Retain a pending Stop's logical cloud conversation route and error through those
+events; only exact retirement or a successor releases its owner.
 
 Encoded in the bridge and renderer Stop regressions, real SQLite queue and native
 pump retirement/enrollment controls, negotiated protocol tests, the client runtime

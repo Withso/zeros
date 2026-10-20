@@ -11,6 +11,9 @@ import type { AgentSessionState } from "../use-agent-session";
 
 const CHAT = "11111111-1111-4111-8111-111111111111";
 const CLOUD = "cloud://22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333";
+const REVOKED = { version: 1, actor: "agent-code", backend: "cloud-worker", state: "revoked",
+  designProtection: { required: false, enforced: false, protectedDirectoryCount: 0 },
+  parity: { level: "full", restrictions: [] } } as const;
 
 // Run the actual renderer callback with the real session store. Bridge I/O is
 // held at its asynchronous boundary; no copy of the cancellation logic is used.
@@ -218,6 +221,50 @@ describe("cloud Stop renderer lifetime", () => {
     expect(h.slot().cloudStop).toBe(original); expect(h.slot().foregroundTurnId).toBe("turn-1");
     expect(h.slot().activeTurnStartedAt).toBe(42);
     h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } }); await pending;
+    expect(h.slot().cloudStop).toBeUndefined();
+  });
+
+  it.each(["boundary revocation", "provider exit"])("retains the Stop owner through %s before retirement", async event => {
+    const h = harness(), pending = h.cancel(), store = useSessionsStore.getState(), original = h.slot().cloudStop;
+    store.applyBridgeUpdate({ sessionId: "execution-1", update: {
+      sessionUpdate: "turn_state", turnId: "turn-1", state: "cancelled", startedAt: 42,
+    } });
+    if (event === "boundary revocation") store.applyBridgeBoundaryStatus("codex", "execution-1", { ...REVOKED, parity: { level: "full", restrictions: [] } });
+    else store.applyBridgeAgentExit("codex", "execution-1");
+    try {
+      expect(h.slot().cloudStop).toBe(original);
+      expect(h.slot().foregroundTurnId).toBe("turn-1");
+      expect(h.slot().executionId).toBe("execution-1");
+      expect(h.slot().activeTurnStartedAt).toBe(42);
+      expect(showsStop(h.slot())).toBe(true);
+    } finally {
+      h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } });
+      await pending;
+    }
+    expect(h.slot().cloudStop).toBeUndefined();
+  });
+
+  it.each(["boundary revocation", "provider exit"])("can retry the original unconfirmed Stop after %s", async event => {
+    const h = harness(), pending = h.cancel();
+    h.gate.reject(new Error("transport lost")); await pending;
+    const original = h.slot().cloudStop, error = h.slot().error, store = useSessionsStore.getState();
+    store.applyBridgeUpdate({ sessionId: "execution-1", update: {
+      sessionUpdate: "turn_state", turnId: "turn-1", state: "cancelled", startedAt: 42,
+    } });
+    if (event === "boundary revocation") store.applyBridgeBoundaryStatus("codex", "execution-1", { ...REVOKED, parity: { level: "full", restrictions: [] } });
+    else store.applyBridgeAgentExit("codex", "execution-1");
+    expect(h.slot().error).toBe(error);
+    expect(h.slot().cloudStop).toBe(original);
+    const reply = deferred(); h.bridge.request.mockReturnValueOnce(reply.promise);
+    const retried = h.cancel();
+    try {
+      expect(h.bridge.request).toHaveBeenCalledTimes(2);
+      const messages = h.bridge.request.mock.calls as unknown as Array<[Record<string, unknown>]>;
+      expect(messages[1]![0].id).toBe(original?.operationId);
+    } finally {
+      reply.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } });
+      await retried;
+    }
     expect(h.slot().cloudStop).toBeUndefined();
   });
 

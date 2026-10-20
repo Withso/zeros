@@ -1824,6 +1824,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       // next AGENT_PROMPT target an execution the engine has already removed.
       // Keep transcript, cwd, usage and providerBinding/providerMetadata — they
       // are conversation state and are exactly what silent re-adoption needs.
+      // A cloud route names the conversation, not the native execution.
+      // Its retained Stop still needs that route and turn until the command
+      // observer proves retirement; revocation alone cannot settle it.
+      const stoppingCloud = isCloudWorkspace(slot.cwd) && !!slot.cloudStop;
       const terminal =
         slot.status === "failed" || slot.status === "auth-required";
       const sessions = {
@@ -1831,15 +1835,15 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         [chatId]: {
           ...slot,
           status: terminal ? slot.status : ("reconnecting" as SessionStatus),
-          error: terminal ? slot.error : null,
-          failure: terminal ? slot.failure : null,
-          executionId: null,
-          sessionId: null,
-          session: null,
+          error: terminal || stoppingCloud ? slot.error : null,
+          failure: terminal || stoppingCloud ? slot.failure : null,
+          executionId: stoppingCloud ? slot.executionId : null,
+          sessionId: stoppingCloud ? slot.sessionId : null,
+          session: stoppingCloud ? slot.session : null,
           boundary: null,
           boundaryPorts: null,
-          foregroundTurnId: null,
-          activeTurnStartedAt: null,
+          foregroundTurnId: stoppingCloud ? slot.foregroundTurnId : null,
+          activeTurnStartedAt: stoppingCloud ? slot.activeTurnStartedAt : null,
           pendingPermission: null,
           pendingPermissions: [],
           pendingQuestions: [],
@@ -1850,7 +1854,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           backgroundTasksWaitingSince: null,
         },
       };
-      const cancellingChats = state.cancellingChats.has(chatId)
+      const cancellingChats = !stoppingCloud && state.cancellingChats.has(chatId)
         ? new Set(
             [...state.cancellingChats].filter(
               (candidate) => candidate !== chatId,
@@ -1952,7 +1956,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         const activelyDriven =
           !!sessionId &&
           (cur.status === "streaming" || cur.status === "warming");
-        if (terminal || activelyDriven) {
+        // Native exit can follow turn_state before the paired command
+        // retirement. Keep the logical cloud route available for Stop retry.
+        const stoppingCloud = isCloudWorkspace(cur.cwd) && !!cur.cloudStop;
+        if (terminal || activelyDriven || stoppingCloud) {
           next[chatId] = cur;
           continue;
         }
