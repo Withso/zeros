@@ -12,8 +12,9 @@ import { CloudBootCommandClaimSchema, CloudBootCommandClientRequestSchema, cloud
 import { CloudAcceptedWorkClientProofSchema } from "@zeros/protocol/cloud-accepted-work-client";
 import type { CloudAcceptedWorkEnrollRequest, CloudAcceptedWorkContextRequest, CloudAcceptedWorkCloseRequest } from "@zeros/protocol/cloud-accepted-work";
 import { CloudActorAuthorityRegistry, type CloudAgentLeaseSupervisor } from "./agents/cloud-agent-lease";
-import { CloudAcceptedWorkAuthority, type CloudAcceptedWork, type AcceptedWorkPushHealth } from "./agents/cloud-accepted-work-authority";
+import { CloudAcceptedWorkAuthority, isCloudAcceptedWork, type CloudAcceptedWork, type AcceptedWorkPushHealth } from "./agents/cloud-accepted-work-authority";
 import type { CloudExecutionPrincipal } from "./agents/cloud-execution-principal";
+import { CloudExecutionAuthority, type CloudExecutionAuthorityOptions } from "./agents/cloud-execution-authority";
 import type { EngineCapabilityAuth, CapabilityRoute } from "./cloud-capability-auth";
 import { CloudAgentCredentialCache } from "./agents/cloud-agent-credential-cache";
 import { CloudAgentContextCache, createCloudBootAgentExecutionFactory, cloudBootNativeAuthority, type CloudAgentExecutionFactory,
@@ -52,6 +53,7 @@ type FailedSelection = { commandId: string; conversationId: string; executionId:
 type Actor = { admission: CloudRuntimeClientAdmission; confirmedUntilMs: number; timer: ReturnType<typeof setTimeout> | null;
   sockets: Set<string>; pendingAdmissions: number; controller: AbortController; confirmations: Map<string, Promise<void>> };
 type Options = {
+  execution?: Omit<CloudExecutionAuthorityOptions, "engineLive">;
   file: string; scope: Reference; runtimeBootId: string;
   predecessor?: CloudLocalCommandPredecessor | null;
   registration: Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootAuthorityRemainingMs" | "agentBootRequest" | "credentialControlsRequest">;
@@ -119,6 +121,7 @@ export class CloudLocalAgentBootRuntime {
   private readonly contextWaits = new Map<string, ContextWait>();
   private readonly failedSelections = new Map<string, FailedSelection>();
   private acceptedAuthority: CloudAcceptedWorkAuthority | null = null;
+  private executionAuthority: CloudExecutionAuthority | null = null;
   private readonly acceptedInterests = new Map<string, AcceptedInterest>();
   private readonly flights = new Set<Promise<unknown>>();
   private cacheTimer: ReturnType<typeof setTimeout> | null = null;
@@ -321,7 +324,10 @@ export class CloudLocalAgentBootRuntime {
         retire: selectors => this.factory ? this.factory.retireBootCredentials(selectors) : Promise.reject(new CloudCommandRuntimeError("engine_authority_rejected")),
         markDesired: revision => this.credentials!.markDesired(revision), readyRevision: () => this.credentials!.metadata.cacheRevision,
         synchronize: () => this.credentials!.synchronize(this.controller.signal) });
+      if (this.options.execution) this.executionAuthority = new CloudExecutionAuthority({ ...this.options.execution,
+        engineLive: () => this.authorityActive });
       this.factory = createCloudBootAgentExecutionFactory({ legacy: this.options.legacy, registry: this.registry,
+        ...(this.executionAuthority ? { executionAuthority: this.executionAuthority } : {}),
         credentials: this.credentials, contexts: this.contexts, engineLive: () => this.live(), supervisor: this.options.supervisor,
         actorWorkChanged: () => { this.releaseUnusedActors(); this.scheduleInterests(); },
         canStart: run => !this.sealing && (this.options.startsAllowed?.() ?? true) && this.fencesValue!.canStart(run) });
@@ -359,7 +365,8 @@ export class CloudLocalAgentBootRuntime {
             conversationId: input.conversationId, cwd: conversation.cwd });
           const selectionInput = { actor: input.actor, context, provider: input.payload.agentId, model: input.payload.model,
             conversationId: input.conversationId, cwd: conversation.cwd, candidateExecutionId: input.candidateExecutionId };
-          const executionId = this.options.executionFor?.(selectionInput) ?? input.candidateExecutionId;
+          const executionId = this.executionAuthority ? input.candidateExecutionId
+            : this.options.executionFor?.(selectionInput) ?? input.candidateExecutionId;
           const selection = this.factory!.selectBoot({ ...selectionInput, executionId });
           const lifetime = cloudBootNativeAuthority(selection).lifetime;
           try { this.factory!.assertBootStart(selection); }
@@ -795,6 +802,16 @@ export class CloudLocalAgentBootRuntime {
     if (!record.consumed) await record.lifetime.close();
     this.selections.delete(claim.claimId);
   }
+  async acceptClaim(value: CloudBootCommandClaim, selection: CloudBootAgentSelection, signal: AbortSignal): Promise<void> {
+    if (!this.executionAuthority || !this.options.execution || isCloudAcceptedWork(selection.actor)) return;
+    const claim = CloudBootCommandClaimSchema.parse(value), record = this.selections.get(claim.claimId);
+    if (!record || record.selection !== selection || !record.consumed || record.commandId !== claim.commandId ||
+      this.queue.authorizeClaim(claim) !== selection.actor) throw new CloudCommandRuntimeError("command_conflict");
+    await this.factory!.acceptBootExecution(selection, { version: 1, scope: this.scope, runtimeId: this.options.execution.runtimeId,
+      actorSessionId: selection.actor.provenance.actorSessionId, contextId: selection.context.contextId,
+      contextRevision: selection.context.contextRevision, claimId: claim.claimId,
+      command: this.queue.executionCommand(claim, selection.cwd) }, signal);
+  }
   private assertFailedSelection(claim: CloudBootCommandClaim, failed: FailedSelection): void {
     if (failed.commandId !== claim.commandId || failed.conversationId !== claim.conversationId ||
       failed.executionId !== claim.executionId || !isDeepStrictEqual(failed.payload, claim.payload))
@@ -844,6 +861,7 @@ export class CloudLocalAgentBootRuntime {
     for (const record of [...this.actors.values(), ...this.interests.values()]) if (record.timer) clearTimeout(record.timer);
     await Promise.allSettled([...this.flights]);
     await this.factory?.disposeBoot(); // Failed positive retirement must propagate.
+    await this.executionAuthority?.dispose();
     this.contexts?.dispose(); this.credentials?.dispose(); this.registry?.dispose();
     this.fencesValue?.close(); this.queueValue?.close();
   }

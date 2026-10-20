@@ -197,7 +197,11 @@ export class CloudNativeBoundary implements PreparedBoundary {
       const githubDirectory = await mkdtemp("/tmp/zeros-native-github-");
       const github = await createNativeGithubBroker({ directory: githubDirectory, visibleDirectory: githubDirectory,
         cwd: admitted.cwd, path: env.PATH!, node: configuration.toolchain.node, identity: configuration,
-        source: isCloudBootNativeAuthority(authority) ? {kind:"boot-agent",contextId:authority.contextId} : {kind:"agent",leaseId:authority.leaseId}, signal: lease.signal,
+        source: isCloudBootNativeAuthority(authority) ? authority.executionWork ? {
+          kind:"boot-execution",contextId:authority.contextId,acceptedWorkId:authority.executionWork.receipt.acceptedWorkId,
+          commandId:authority.executionWork.receipt.command.commandId,claimId:authority.executionWork.receipt.claimId,
+          executionId:authority.executionWork.receipt.command.executionId,
+        } : {kind:"boot-agent",contextId:authority.contextId} : {kind:"agent",leaseId:authority.leaseId}, signal: lease.signal,
         authorized: () => { try { assertLive(); return true; } catch { return false; } } });
       lease.attach(github); Object.assign(env, github.env);
       assertLive();

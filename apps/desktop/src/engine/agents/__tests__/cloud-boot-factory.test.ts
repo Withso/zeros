@@ -7,6 +7,8 @@ import type { CloudAgentBootCredentialResponse, CloudAgentBootProviderReady, Clo
 import type { PreparedBoundary } from "../containment/types";
 import { CloudActorAuthorityRegistry } from "../cloud-actor-authority";
 import { CloudAgentCredentialCache } from "../cloud-agent-credential-cache";
+import { CloudExecutionAuthority } from "../cloud-execution-authority";
+import type { CloudExecutionEnrollRequest } from "@zeros/protocol/cloud-execution-authority";
 import * as executionModule from "../cloud-provider-execution";
 import { readCloudRepositoryMcp } from "../cloud-mcp";
 import { isCloudNativeHome } from "../containment/cloud-native-home";
@@ -46,13 +48,13 @@ function deferred<T>() {
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
 }
-async function workload(executionId: string = randomUUID(), conversationId = "conversation"): Promise<PreparedBoundary> {
-  const physical = await prepareClaudeCloudWorkload({ executionId, conversationId, provider: "claude", cwd: "/srv/zeros/workspace", dataRoot });
+async function workload(executionId: string = randomUUID(), conversationId = "conversation", cwd = "/srv/zeros/workspace"): Promise<PreparedBoundary> {
+  const physical = await prepareClaudeCloudWorkload({ executionId, conversationId, provider: "claude", cwd, dataRoot });
   cleanups.push(physical.dispose);
   nativeHomes.set(physical.workload, physical.nativeHome);
   return physical.workload;
 }
-async function fixture(initialize = true) {
+async function fixture(initialize = true, executionOwned = false, cwd = "/srv/zeros/workspace") {
   let live = true, wall = 1_791_468_000_000, monotonic = 1000;
   const scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 7,
     engineInstanceId: randomUUID(), bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 2 };
@@ -85,13 +87,23 @@ async function fixture(initialize = true) {
     environment: { version: 1, revision: "d".repeat(64), values: { ACTOR_PRIVATE: "synthetic-sender-only-value" }, history },
   } satisfies CloudAgentWarmActorResponse));
   const contexts = new executionModule.CloudAgentContextCache({ scope, registry, time, engineLive,
-    isAdmittedCwd: cwd => cwd === "/srv/zeros/workspace", request: contextRequest }); cleanups.push(() => contexts.dispose());
-  const base = { actor, provider: "claude" as const, conversationId: "conversation", model: "qualified-model", cwd: "/srv/zeros/workspace" };
+    isAdmittedCwd: value => value === cwd, request: contextRequest }); cleanups.push(() => contexts.dispose());
+  const base = { actor, provider: "claude" as const, conversationId: "conversation", model: "qualified-model", cwd };
   const context = await contexts.warm(base);
   const input = { ...base, context, executionId: randomUUID() };
   const canStart = vi.fn(() => true), supervisor = { onRetirementFailure: vi.fn() };
   const legacy = { prepare: vi.fn(async () => { throw new Error("Legacy was not selected"); }) };
-  const options = { legacy, credentials, contexts, registry, engineLive, canStart, supervisor, maxScopes: 32 };
+  const runtimeId = `r1-${"f".repeat(64)}`;
+  const enrollment = vi.fn(async (request: CloudExecutionEnrollRequest): Promise<unknown> => ({ ...request,
+    mode: "boot-execution-v1", acceptedWorkId: randomUUID(), revision: 1, actor: provenance.actor,
+    fundingGrant: provenance.fundingGrant, sourceSessionId: randomUUID(), epochs: { wa: 3, wr: 1, me: 1, ac: 1, dk: 2 },
+    credentialId: provider.credentialId, credentialRevision: provider.credentialRevision,
+    acceptedAtMs: wall, admissionExpiresAtMs: wall + 8000, providerExpiresAtMs: wall + 60_000, providerProofVersion: 1 }));
+  const check = vi.fn(async (request: { acceptedWorkId: string }) => ({ version: 1, acceptedWorkId: request.acceptedWorkId, state: "current" }));
+  const close = vi.fn(async () => ({ closed: true }));
+  const executionAuthority = executionOwned ? new CloudExecutionAuthority({ runtimeId, engineLive, enroll: enrollment, check, close, time }) : undefined;
+  if (executionAuthority) cleanups.push(() => executionAuthority.dispose());
+  const options = { legacy, credentials, contexts, registry, engineLive, canStart, supervisor, maxScopes: 32, executionAuthority };
   const create = () => executionModule.createCloudBootAgentExecutionFactory(options);
   native.prepareBoot.mockImplementation(async (authority: executionModule.CloudBootNativeAuthority, domain: PreparedBoundary) => {
     authority.lifetime.assertLive();
@@ -105,7 +117,11 @@ async function fixture(initialize = true) {
   });
   const register = (factory: ReturnType<typeof create>) => { cleanups.push(() => factory.disposeBoot()); return factory; };
   const prepare = async (factory: ReturnType<typeof create>, selection = factory.selectBoot(input)) => {
-    const domain = await workload(selection.executionId, selection.conversationId);
+    if (executionAuthority) await factory.acceptBootExecution(selection, { version: 1, scope, runtimeId,
+      actorSessionId: provenance.actorSessionId, contextId: selection.context.contextId, contextRevision: selection.context.contextRevision,
+      claimId: randomUUID(), command: { commandId: randomUUID(), conversationId: selection.conversationId, executionId: selection.executionId,
+        turnId: randomUUID(), payloadSha256: "1".repeat(64), provider: selection.provider, model: selection.model, cwd: selection.cwd } }, new AbortController().signal);
+    const domain = await workload(selection.executionId, selection.conversationId, selection.cwd);
     await factory.launchBootSelection(selection, async () => domain);
     const result = await factory.prepareBoot({ selection, workload: domain, signal: new AbortController().signal });
     const execution = executionModule.cloudProviderExecution(result.boundary)!;
@@ -118,11 +134,69 @@ async function fixture(initialize = true) {
     await credentials.synchronize();
   };
   return { scope, registry, actor, provenance, credentials, contexts, provider, response, request, contextRequest, input,
-    options, create, register, prepare, publish, canStart, legacy, supervisor,
+    options, create, register, prepare, publish, canStart, legacy, supervisor, enrollment, check, close,
     loseEngine: () => { live = false; }, advance: (ms: number) => { wall += ms; monotonic += ms; } };
 }
 
 describe("genuine boot execution factory", () => {
+  it.each(["context", "actor"] as const)("an entered ordinary turn survives %s observation expiry", async loss => {
+    const f = await fixture(true, true), factory = f.register(f.create()), prepared = await f.prepare(factory);
+    const reservation = factory.reserveBootTurn(prepared.execution, prepared.selection);
+    factory.markNativeHandoff(prepared.execution, reservation);
+    const process = { stopAndProve: vi.fn(async () => {}) };
+    prepared.execution.lifetime.attach(process);
+    f.advance(7_000);
+    if (loss === "context") f.registry.confirm({ ...f.provenance, confirmedUntilMs: f.provenance.confirmedUntilMs + 7_000 });
+    f.advance(1_001);
+    // An expired observation still refuses new selections. The already
+    // admitted instruction is owned by the execution, including its process.
+    expect(() => f.input.context.assertLive()).toThrow();
+    expect(() => factory.selectBoot({ ...f.input, executionId: randomUUID() })).toThrow();
+    await Promise.resolve(); await Promise.resolve();
+    expect(prepared.execution.lifetime.signal.aborted).toBe(false);
+    expect(() => executionModule.assertCloudBootNativeContinuation(prepared.execution, reservation)).not.toThrow();
+    expect(process.stopAndProve).not.toHaveBeenCalled();
+  });
+
+  it.each(["context", "actor", "provider", "engine", "deadline"] as const)("accepted ordinary work still stops on %s after observation expiry", async reason => {
+    const f = await fixture(true, true), factory = f.register(f.create()), prepared = await f.prepare(factory);
+    const reservation = factory.reserveBootTurn(prepared.execution, prepared.selection);
+    factory.markNativeHandoff(prepared.execution, reservation);
+    const process = { stopAndProve: vi.fn(async () => {}) }; prepared.execution.lifetime.attach(process);
+    f.advance(8_001); expect(() => f.input.context.assertLive()).toThrow();
+    prepared.execution.lifetime.assertLive();
+    if (reason === "context") f.contexts.revokeContext(f.input.context.contextId);
+    if (reason === "actor") f.registry.revoke(f.provenance.actorSessionId);
+    if (reason === "provider") f.credentials.retireAssociation("claude", f.provider.credentialId);
+    if (reason === "engine") f.loseEngine();
+    if (reason === "deadline") f.advance(52_000);
+    expect(() => prepared.execution.lifetime.assertLive()).toThrow();
+    await prepared.execution.lifetime.close();
+    expect(process.stopAndProve).toHaveBeenCalledOnce();
+    expect(f.close).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a real owned child alive across observation loss and joins it on explicit Stop", async () => {
+    const f = await fixture(true, true, dataRoot), factory = f.register(f.create()), prepared = await f.prepare(factory);
+    const reservation = factory.reserveBootTurn(prepared.execution, prepared.selection);
+    factory.markNativeHandoff(prepared.execution, reservation);
+    const child = await prepared.execution.lifetime.launch(() => prepared.domain.spawn({ command: process.execPath,
+      args: ["-e", "process.stdin.setEncoding('utf8');process.stdin.on('data',s=>process.stdout.write(s));process.stdout.write('ready\\n')"],
+      cwd: dataRoot, env: { PATH: process.env.PATH ?? "" }, stdio: "pipe" }));
+    const next = () => new Promise<string>(resolve => child.stdout!.once("data", data => resolve(String(data))));
+    try {
+      expect(await next()).toBe("ready\n");
+      f.advance(10_001); expect(() => f.input.context.assertLive()).toThrow();
+      executionModule.assertCloudBootNativeContinuation(prepared.execution, reservation);
+      const response = next(); child.stdin!.write("still-running\n");
+      expect(await response).toBe("still-running\n");
+      expect(prepared.execution.lifetime.signal.aborted).toBe(false);
+      await prepared.execution.lifetime.close();
+      expect(await child.wait()).toMatchObject({ signal: "SIGTERM" });
+      expect(f.close).toHaveBeenCalledOnce();
+    } finally { await prepared.execution.lifetime.close(); }
+  });
+
   it("reuses immutable context payload across exact proof renewals without extending a revoked context", async () => {
     const f = await fixture(), factory = f.register(f.create()), first = factory.selectBoot(f.input);
     const response = await f.contextRequest.mock.results[0]!.value as CloudAgentWarmActorResponse;

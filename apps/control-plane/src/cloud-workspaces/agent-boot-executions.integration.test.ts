@@ -436,6 +436,7 @@ suite("genuine private boot credential execution",()=>{
   it("never revives a previous context that expires during customization capture",async()=>{
     const bound=await boot(),sender=await actor(),input={...request(),bootId:bound.bootId,writerEpoch:bound.writerEpoch,actorSessionId:sender.actorSessionId,
       provider:"cursor",model:"grok-4.6",conversationId:randomUUID(),cwd:"/srv/zeros/workspace",repositoryServers:[]};
+    await service.boot(engine(),"activate",syncRequest(bound));
     const first=await service.boot(engine(),"warm-context",input) as {contextId:string};
     let expired=false;
     const controlled=withAuthorityDeadlineBarrier(pool,/SELECT \* FROM cloud_customization WHERE/,async client=>{
@@ -443,7 +444,10 @@ suite("genuine private boot credential execution",()=>{
     });
     const second=await new DatabaseCloudAgentExecutionService(controlled,keys,false).boot(engine(),"warm-context",input) as {contextId:string};
     expect(expired).toBe(true);expect(second.contextId).not.toBe(first.contextId);
-    expect((await pool.query("SELECT retired_at IS NOT NULL AS retired FROM cloud_agent_boot_contexts WHERE context_id=$1",[first.contextId])).rows[0]).toEqual({retired:true});
+    expect((await pool.query("SELECT retired_at IS NOT NULL AS retired,expires_at<=clock_timestamp() AS expired FROM cloud_agent_boot_contexts WHERE context_id=$1",[first.contextId])).rows[0]).toEqual({retired:false,expired:true});
+    const source=(contextId:string)=>cloudGithubNativeSourceSchema.parse({kind:"boot-agent",contextId});
+    await expect(withSystemTx(pool,tx=>assertNativeGithubActor(tx,engine(),source(first.contextId),false))).rejects.toMatchObject({status:403});
+    await expect(withSystemTx(pool,tx=>assertNativeGithubActor(tx,engine(),source(second.contextId),false))).resolves.toMatchObject({actorUserId:sender.user.id});
   });
   it("does not deliver a context after actor authority expires while reading Git attribution",async()=>{
     const bound=await boot(),sender=await actor(),input={...request(),bootId:bound.bootId,writerEpoch:bound.writerEpoch,actorSessionId:sender.actorSessionId,

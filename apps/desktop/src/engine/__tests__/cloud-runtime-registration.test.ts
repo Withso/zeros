@@ -522,6 +522,44 @@ describe("cloud runtime registration", () => {
     expect(registration.acceptedWorkNegotiated()).toBe(false);
   });
 
+  it("requires activated local writer authority for execution checks without enabling signed detached enrollment", async () => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const scope = { organizationId: runtime.execution.organizationId, workspaceId: runtime.execution.workspaceId,
+      generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId, bootId: V4_ATTESTATION.bootId,
+      writerEpoch: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", fundingOwnerUserId: ACCOUNT_USER_ID, fundingOwnerEpoch: 1 };
+    const operation = { version: 1 as const, scope, acceptedWorkId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      commandId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", claimId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", executionId: "execution:one" };
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/register")) return Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1" } });
+      if (url.pathname.endsWith("/activate")) return Response.json({ result: { ...scope, version: 1, mode: "boot-owner-v1",
+        fundingScope: "workspace-roles-v1", authorityEpoch: 1, cacheRevision: 1, activated: true } });
+      return Response.json({ version: 1, acceptedWorkId: operation.acceptedWorkId, state: "current" });
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher, now: () => NOW,
+      negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start(); expect(registration.acceptedWorkNegotiated()).toBe(false);
+      await expect(registration.acceptedWorkRequest("execution-check", operation, new AbortController().signal)).rejects.toThrow();
+      expect(fetcher).toHaveBeenCalledOnce();
+      const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = scope;
+      await registration.agentBootRequest("activate", { ...reference, version: 1, mode: "boot-owner-v1", expectedCacheRevision: 1 }, new AbortController().signal);
+      expect(await registration.acceptedWorkRequest("execution-check", operation, new AbortController().signal)).toMatchObject({ state: "current" });
+      await expect(registration.acceptedWorkRequest("close", { version: 1, scope, acceptedWorkId: operation.acceptedWorkId,
+        commandId: operation.commandId }, new AbortController().signal)).rejects.toThrow();
+      await expect(registration.acceptedWorkRequest("execution-check", { ...operation, scope: { ...scope, writerEpoch: operation.claimId } },
+        new AbortController().signal)).rejects.toThrow();
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      let release!: (value: Response) => void;
+      fetcher.mockImplementationOnce(() => new Promise<Response>(resolve => { release = resolve; }));
+      const pending = registration.acceptedWorkRequest("execution-check", operation, new AbortController().signal);
+      void pending.catch(() => {});
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      await registration.stop(); release(Response.json({ version: 1, acceptedWorkId: operation.acceptedWorkId, state: "current" }));
+      await expect(pending).rejects.toThrow();
+    } finally { await registration.stop(); }
+  });
+
   it("bounds the boot budget by the existing authority margin and fences handoff without renewing", async () => {
     let now = NOW;
     const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => now)!;

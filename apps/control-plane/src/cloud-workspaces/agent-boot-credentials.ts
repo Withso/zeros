@@ -859,7 +859,10 @@ export class DatabaseCloudAgentBootService {
     finally{revisionRoot.fill(0);revisionKey.fill(0);}
     const previousLive=async()=>previous&&(await tx.query("SELECT 1 FROM cloud_agent_boot_contexts WHERE context_id=$1 AND retired_at IS NULL AND expires_at>clock_timestamp()",[previous.context_id])).rowCount===1;
     if(previous&&(previous.context_revision!==contextRevision||!await previousLive())){
-      await tx.query("UPDATE cloud_agent_boot_contexts SET retired_at=clock_timestamp() WHERE context_id=$1",[previous.context_id]);
+      // Expiry ends observation and requires a new context. It is not a
+      // policy revocation of work already admitted from the original one.
+      if(previous.context_revision!==contextRevision)
+        await tx.query("UPDATE cloud_agent_boot_contexts SET retired_at=clock_timestamp() WHERE context_id=$1",[previous.context_id]);
       contextId=randomUUID();customization=await capture();
     }
     if(contextId!==previous?.context_id){

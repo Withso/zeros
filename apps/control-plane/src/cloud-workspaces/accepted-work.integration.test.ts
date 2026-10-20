@@ -1,7 +1,6 @@
 import { createHash, randomBytes, randomUUID, sign } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ensureUser } from "../auth.js";
 import { AuthSessionProofService } from "../auth-session-proof.js";
 import { withSystemTx, withUserTx } from "../db.js";
 import { flagEffective, type RolloutFlagName } from "../rollout-flags.js";
@@ -18,10 +17,15 @@ import type { CapabilitySigningKeyStore } from "./capability-keys.js";
 import { ServiceCapabilityVerifier, ENGINE_CLIENT_CAPABILITY_PIN } from "./capability-service-verifier.js";
 import { capabilityProofMessage } from "./capability-verifier.js";
 import { signTestCapability, testEd25519Key, testSigningJwk, testEngineClaims } from "./capability-verifier-test-utils.js";
-import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { seedReadyCloudWorkspace, withCloudFixtureOwnerTx, ensureCloudPilotUser } from "./test-fixtures.js";
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
 import { assertNativeGithubActor } from "./github-native-grants.js";
 import { createCloudWorkspaceInternalRoutes, type CloudWorkspaceInternalSetupService } from "./internal-routes.js";
+import { CloudExecutionAuthorityReceiptSchema } from "./execution-authority-contract.js";
+import * as gitAuthor from "../github-git-author.js";
+import { recordCloudAgentFundingConsents } from "./agent-funding-consent.js";
+import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
+import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 
 const ISSUER = "https://cp.example.test", KID = "cap-2026-10-accepted";
 const issuerKey = testEd25519Key(KID), deviceKey = testEd25519Key("accepted-work-device");
@@ -42,7 +46,7 @@ suite("exact accepted-work enrollment", () => {
   beforeEach(async () => { await resetMigratedTestDatabase(pool); });
   afterEach(() => { for (const proof of proofs.splice(0)) proof.dispose(); installCapabilityActorSessionFlags(); });
 
-  async function fixture(withCredential = false) {
+  async function fixture(withCredential = false, role: "owner" | "developer" | "prompter" = "owner", actorMode: "capability" | "legacy" = "capability") {
     const f = await seedReadyCloudWorkspace(pool);
     await pool.query("UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1,accepted_work_version=1 WHERE id=$1", [f.engineInstanceId]);
     const engine = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1,
@@ -63,10 +67,20 @@ suite("exact accepted-work enrollment", () => {
     const scope = CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.keys(CloudAgentBootScopeSchema.shape)
       .map(key => [key, boot[key as keyof typeof boot]])));
     const runtimeId = (await pool.query<{ runtime_id: string }>("SELECT runtime_id FROM cloud_workspace_engine_instances WHERE id=$1", [f.engineInstanceId])).rows[0]!.runtime_id;
-    const user = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${f.userId}`,
-      email: `accepted-${f.userId}@example.test`, displayName: "Owner",
+    const actorKey = role === "owner" ? f.userId : randomUUID();
+    const user = await ensureCloudPilotUser(pool, { provider: "workos", providerSubject: `workos|${actorKey}`,
+      email: `accepted-${actorKey}@example.test`, displayName: "Actor",
       session: { id: `session_${randomUUID()}`, clientKind: "desktop", authTime: Math.floor(Date.now() / 1000),
         tokenExpiresAt: Math.floor(Date.now() / 1000) + 3600 } });
+    if (role !== "owner") await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({ workspaceId: f.workspaceId,
+      organizationId: f.organizationId, actorUserId: f.userId, sharingMode: "organization", expectedRevision: 1 });
+    if (role !== "owner") await withCloudFixtureOwnerTx(pool, async tx => {
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [f.organizationId, user.id]);
+      await tx.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')", [f.organizationId, user.id]);
+      await tx.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')", [user.id]);
+      await tx.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,$4)", [f.workspaceId, f.organizationId, user.id, role]);
+      await recordCloudAgentFundingConsents(tx, { workspaceId: f.workspaceId, organizationId: f.organizationId, issuerUserId: f.userId });
+    });
     const sourceId = (await pool.query<{ id: string }>(`INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at)
       VALUES($1,$2,$3,'desktop',now()+interval '1 hour') RETURNING id`, [user.authentication.sessionId, user.identity.subject, user.id])).rows[0]!.id;
     const publicKey = Buffer.from(deviceKey.x, "base64url");
@@ -78,7 +92,13 @@ suite("exact accepted-work enrollment", () => {
       { workspaceId: f.workspaceId, organizationId: f.organizationId, actorUserId: user.id, deviceId, sessionId: sourceId }, ["zeros:engine"]))).capabilities["zeros:engine"].token;
     const claims = JSON.parse(Buffer.from(capability.split(".")[1]!, "base64url").toString("utf8"));
     const actors = new DatabaseCloudWorkspaceActorSessionService({ pool, enginePort: 39393, bridgeUrl: "wss://cp.example.test/bridge", workosEnabled: false });
-    const admission = await actors.admitCapability({ ...engine, claims });
+    const admission = actorMode === "legacy" ? await (async () => {
+      const fields = { deviceId, keyVersion: 1, timestampMs: Date.now(), nonce: randomBytes(24).toString("base64url") };
+      const proof = { ...fields, signature: sign(null, cloudWorkspaceDeviceProofMessage({ ...fields, accountUserId: user.id,
+        action: "engine.connect", payload: { organizationId: f.organizationId, workspaceId: f.workspaceId } }), deviceKey.privateKey).toString("base64url") };
+      const grant = await actors.issue({ ...engine, actorUserId: user.id, authenticatedUser: user, proof });
+      return actors.consume({ ...engine, token: grant.grantToken });
+    })() : await actors.admitCapability({ ...engine, claims });
     let clockOffset = 0;
     const clock = () => Date.now() + clockOffset;
     const verifier = new ServiceCapabilityVerifier({ pin: ENGINE_CLIENT_CAPABILITY_PIN, issuer: ISSUER, keys: () => publicKeys,
@@ -114,6 +134,243 @@ suite("exact accepted-work enrollment", () => {
     return { ...f, engine, scope, runtimeId, sourceId, user, deviceId, admission, claims, capability, verifier, freshProof, request, command, bootService,
       proof, list, make, on, count, clock, advance: (ms: number) => { clockOffset += ms; }, setClock: (ms: number) => { clockOffset = ms - Date.now(); } };
   }
+
+  async function ordinary(role: "owner" | "developer" | "prompter" = "owner", actorMode: "capability" | "legacy" = "capability") {
+    const f = await fixture(true, role, actorMode), service = f.make();
+    const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = f.scope;
+    const warm = await f.bootService.boot(f.engine, "warm-context", { ...reference, version: 1, mode: "boot-owner-v1",
+      actorSessionId: f.admission.actorSessionId, provider: f.command.provider, model: f.command.model,
+      conversationId: f.command.conversationId, cwd: f.command.cwd, repositoryServers: [] }) as { contextId: string; contextRevision: string };
+    const app = createCloudWorkspaceInternalRoutes({ agentExecutions: f.bootService } as CloudWorkspaceInternalSetupService, { acceptedWork: service });
+    const post = (operation: string, body: unknown) => app.request(`/internal/v2/cloud-workspaces/engine/execution-authority/${operation}`, {
+      method: "POST", headers: { authorization: `Bearer ${f.heartbeatToken}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+    const request = { version: 1 as const, scope: f.scope, runtimeId: f.runtimeId, actorSessionId: f.admission.actorSessionId,
+      contextId: warm.contextId, contextRevision: warm.contextRevision, command: f.command, claimId: randomUUID() };
+    const accept = async () => {
+      const receipt = CloudExecutionAuthorityReceiptSchema.parse(await service.execution.enroll(f.engine, request));
+      return { receipt, operation: { version: 1 as const, scope: f.scope, acceptedWorkId: receipt.acceptedWorkId,
+        commandId: f.command.commandId, claimId: request.claimId, executionId: f.command.executionId } };
+    };
+    return { f, service, request, warm, post, accept };
+  }
+
+  it("enrolls an ordinary boot execution before client expiry and keeps only that execution after disconnect", async () => {
+    const { f, service, request, warm, post } = await ordinary();
+    const accepted = await post("enroll", request);
+    expect(accepted.status).toBe(200);
+    const receipt = await accepted.json();
+    expect(receipt).toMatchObject({ mode: "boot-execution-v1", command: f.command, contextId: warm.contextId });
+    const operation = { version: 1, scope: f.scope, acceptedWorkId: receipt.acceptedWorkId, commandId: f.command.commandId,
+      claimId: request.claimId, executionId: f.command.executionId };
+    await pool.query("UPDATE cloud_workspace_actor_sessions SET revoked_at=clock_timestamp() WHERE id=$1", [f.admission.actorSessionId]);
+    await pool.query("UPDATE auth_sessions SET last_token_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [f.sourceId]);
+    await pool.query("UPDATE cloud_agent_boot_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE context_id=$1", [warm.contextId]);
+    const checked = await post("check", operation);
+    expect(checked.status).toBe(200);
+    expect(await checked.json()).toMatchObject({ state: "current", acceptedWorkId: receipt.acceptedWorkId });
+    const native = { kind: "boot-execution" as const, contextId: warm.contextId, acceptedWorkId: receipt.acceptedWorkId,
+      commandId: f.command.commandId, claimId: request.claimId, executionId: f.command.executionId };
+    expect(await withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, native, false))).toMatchObject({ actorUserId: f.user.id });
+    await expect(withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, { ...native, claimId: randomUUID() }, false))).rejects.toThrow();
+    await expect(withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, { kind: "boot-agent", contextId: warm.contextId }, false))).rejects.toThrow();
+    expect((await post("check", { ...operation, executionId: randomUUID() })).status).toBe(403);
+    expect((await post("enroll", { ...request, command: { ...f.command, commandId: randomUUID() } })).status).toBe(401);
+    await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE id=$1", [f.sourceId]);
+    expect(await (await post("check", operation)).json()).toMatchObject({ state: "revoked", acceptedWorkId: receipt.acceptedWorkId });
+  });
+
+  it("ordinary replay keeps the original receipt and source deadline, and signed v1 cannot read it", async () => {
+    const { f, service, request, accept } = await ordinary(), { receipt, operation } = await accept();
+    expect(await service.execution.enroll(f.engine, request)).toEqual(receipt);
+    expect(f.list).toHaveBeenCalledOnce(); expect(await f.count()).toBe(1);
+    expect(CloudAcceptedWorkReceiptSchema.safeParse(receipt).success).toBe(false);
+    await expect(withSystemTx(pool, tx => service.authorizeInTx(tx, f.engine, { version: 1, scope: f.scope,
+      runtimeId: f.runtimeId, acceptedWorkId: receipt.acceptedWorkId, command: f.command, operation: "context" }))).rejects.toThrow();
+    for (const changed of [{ ...request, claimId: randomUUID() }, { ...request, contextId: randomUUID() },
+      { ...request, command: { ...request.command, payloadSha256: "0".repeat(64) } }])
+      await expect(service.execution.enroll(f.engine, changed)).rejects.toThrow();
+    await service.execution.close(f.engine, operation);
+    await expect(service.execution.enroll(f.engine, request)).rejects.toThrow();
+    expect(await service.execution.check(f.engine, operation)).toMatchObject({ state: "revoked" });
+  });
+
+  it("a close committed while the execution check waits on workspace authority cannot return current", async () => {
+    const { f, service, accept } = await ordinary(), { receipt, operation } = await accept();
+    const blocker = await pool.connect(); let checking: ReturnType<typeof service.execution.check> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      const pid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0]!.pid);
+      await blocker.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [f.workspaceId]);
+      checking = service.execution.check(f.engine, operation); void checking.catch(() => {});
+      await vi.waitFor(async () => expect((await pool.query(`SELECT 1 FROM pg_stat_activity
+        WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))`, [pid])).rowCount).toBeGreaterThan(0), { timeout: 5000 });
+      await blocker.query("UPDATE cloud_accepted_work_enrollments SET closed_at=clock_timestamp() WHERE id=$1", [receipt.acceptedWorkId]);
+      await blocker.query("COMMIT");
+      expect(await checking).toMatchObject({ state: "revoked" });
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); await checking?.catch(() => {}); }
+  });
+
+  it("a close committed while enrollment replay waits on workspace authority cannot re-admit the receipt", async () => {
+    const { f, service, request, accept } = await ordinary(), { receipt } = await accept();
+    const blocker = await pool.connect(); let replaying: ReturnType<typeof service.execution.enroll> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      const pid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0]!.pid);
+      await blocker.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [f.workspaceId]);
+      replaying = service.execution.enroll(f.engine, request); void replaying.catch(() => {});
+      await vi.waitFor(async () => expect((await pool.query(`SELECT 1 FROM pg_stat_activity
+        WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))`, [pid])).rowCount).toBeGreaterThan(0), { timeout: 5000 });
+      await blocker.query("UPDATE cloud_accepted_work_enrollments SET closed_at=clock_timestamp() WHERE id=$1", [receipt.acceptedWorkId]);
+      await blocker.query("COMMIT");
+      await expect(replaying).rejects.toMatchObject({ status: 403, code: "execution_authority_rejected" });
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); await replaying?.catch(() => {}); }
+  });
+
+  it("enrolls from a real consumed legacy actor without requiring signed-client feature enrollment", async () => {
+    const { f, service, accept } = await ordinary("owner", "legacy"), { operation } = await accept();
+    expect((await pool.query("SELECT session_kind FROM cloud_workspace_actor_sessions WHERE id=$1", [f.admission.actorSessionId])).rows[0])
+      .toEqual({ session_kind: "legacy" });
+    await pool.query("UPDATE auth_sessions SET last_token_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [f.sourceId]);
+    await pool.query("UPDATE cloud_workspace_actor_sessions SET revoked_at=clock_timestamp() WHERE id=$1", [f.admission.actorSessionId]);
+    expect(await service.execution.check(f.engine, operation)).toMatchObject({ state: "current" });
+    await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE id=$1", [f.sourceId]);
+    expect(await service.execution.check(f.engine, operation)).toMatchObject({ state: "revoked" });
+  });
+
+  it.each(["prompter", "developer"] as const)("keeps exact %s funding authority without broadening Git permission", async role => {
+    const { f, service, warm, accept } = await ordinary(role), { receipt, operation } = await accept();
+    expect(receipt.actor.userId).not.toBe(receipt.scope.fundingOwnerUserId);
+    expect(receipt.fundingGrant.kind).toBe("share");
+    const source = { kind: "boot-execution" as const, contextId: warm.contextId, acceptedWorkId: receipt.acceptedWorkId,
+      commandId: f.command.commandId, claimId: operation.claimId, executionId: f.command.executionId };
+    const native = withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, source, false));
+    if (role === "prompter") await expect(native).rejects.toThrow();
+    else expect(await native).toMatchObject({ actorUserId: f.user.id, role });
+    expect(await service.execution.check(f.engine, operation)).toMatchObject({ state: "current" });
+    if (receipt.fundingGrant.kind === "owner") throw new Error("Missing shared grant");
+    await pool.query("UPDATE cloud_agent_funding_consents SET revoked_at=clock_timestamp(),revision=revision+1 WHERE id=$1", [receipt.fundingGrant.grantId]);
+    expect(await service.execution.check(f.engine, operation)).toMatchObject({ state: "revoked" });
+  });
+
+  it.each(["device", "member", "account", "source", "credential", "engine", "context"] as const)("ordinary execution keeps real %s revocation", async which => {
+    const { f, service, warm, accept } = await ordinary(), { receipt, operation } = await accept();
+    if (which === "device") await pool.query("UPDATE devices SET revoked_at=clock_timestamp(),trust_state='revoked' WHERE id=$1", [f.deviceId]);
+    if (which === "member") await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.user.id]);
+    if (which === "account") await pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [f.user.id]);
+    if (which === "source") await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE id=$1", [f.sourceId]);
+    if (which === "credential") await pool.query("UPDATE cloud_agent_credentials SET revoked_at=clock_timestamp() WHERE id=$1", [receipt.credentialId]);
+    if (which === "engine") await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=clock_timestamp() WHERE id=$1", [f.engineInstanceId]);
+    if (which === "context") await pool.query("UPDATE cloud_agent_boot_contexts SET retired_at=clock_timestamp() WHERE context_id=$1", [warm.contextId]);
+    if (which === "engine" || which === "member") await expect(service.execution.check(f.engine, operation)).rejects.toThrow();
+    else expect(await service.execution.check(f.engine, operation)).toMatchObject({ state: "revoked" });
+    await expect(withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, { kind: "boot-execution", contextId: warm.contextId,
+      acceptedWorkId: receipt.acceptedWorkId, commandId: f.command.commandId, claimId: operation.claimId, executionId: f.command.executionId }, false))).rejects.toThrow();
+  });
+
+  it("ordinary private routes are strict, bounded, no-store and independent of detached feature enrollment", async () => {
+    const { f, post, request } = await ordinary(); f.on.clear();
+    const result = await post("enroll", request);
+    expect(result.status).toBe(200); expect(result.headers.get("cache-control")).toBe("no-store");
+    expect((await post("enroll", { ...request, reusable: true })).status).toBe(422);
+    expect((await post("enroll", { padding: "x".repeat(65 * 1024) })).status).toBe(413);
+  });
+
+  it("context expiry during an unchanged renewal does not revoke already accepted execution", async () => {
+    const { f, service, warm, accept } = await ordinary(), { operation } = await accept();
+    const entered = deferred<void>(), release = deferred<void>(), original = gitAuthor.readGithubGitAuthor;
+    const held = vi.spyOn(gitAuthor, "readGithubGitAuthor").mockImplementationOnce(async (...args) => {
+      const value = await original(...args); entered.resolve(); await release.promise; return value;
+    });
+    const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = f.scope;
+    const warming = f.bootService.boot(f.engine, "warm-context", { ...reference, version: 1, mode: "boot-owner-v1",
+      actorSessionId: f.admission.actorSessionId, provider: f.command.provider, model: f.command.model,
+      conversationId: f.command.conversationId, cwd: f.command.cwd, repositoryServers: [] });
+    try {
+      await entered.promise;
+      await pool.query("UPDATE cloud_agent_boot_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE context_id=$1", [warm.contextId]);
+      release.resolve(); await warming;
+      expect(await service.execution.check(f.engine, operation)).toMatchObject({ state: "current" });
+    } finally { release.resolve(); held.mockRestore(); await warming; }
+  });
+
+  it("elapsed context deadline during unchanged renewal is observation loss, not execution revocation", async () => {
+    const { f, service, warm, accept } = await ordinary(), { operation } = await accept();
+    const expiry = (await pool.query<{ expires_at: Date }>(`UPDATE cloud_agent_boot_contexts
+      SET expires_at=clock_timestamp()+interval '2 seconds' WHERE context_id=$1 RETURNING expires_at`, [warm.contextId])).rows[0]!.expires_at;
+    const entered = deferred<void>(), release = deferred<void>(), original = gitAuthor.readGithubGitAuthor;
+    const held = vi.spyOn(gitAuthor, "readGithubGitAuthor").mockImplementationOnce(async (...args) => {
+      const value = await original(...args); entered.resolve(); await release.promise; return value;
+    });
+    const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = f.scope;
+    const warming = f.bootService.boot(f.engine, "warm-context", { ...reference, version: 1, mode: "boot-owner-v1",
+      actorSessionId: f.admission.actorSessionId, provider: f.command.provider, model: f.command.model,
+      conversationId: f.command.conversationId, cwd: f.command.cwd, repositoryServers: [] });
+    try {
+      await entered.promise;
+      expect((await pool.query<{ live: boolean }>("SELECT clock_timestamp()<$1 AS live", [expiry])).rows[0]!.live).toBe(true);
+      // Cross the actual DB deadline without changing a row (which would
+      // instead test SERIALIZABLE's concurrent-update retry).
+      await pool.query("SELECT pg_sleep(GREATEST(0,extract(epoch FROM $1::timestamptz-clock_timestamp()))+0.02)", [expiry]);
+      release.resolve(); await warming;
+      expect(await service.execution.check(f.engine, operation)).toMatchObject({ state: "current" });
+    } finally { release.resolve(); held.mockRestore(); await warming; }
+  });
+
+  it("ordinary provider proof holds no DB transaction or workspace lock", async () => {
+    const { f, request } = await ordinary(), entered = deferred<void>(), release = deferred<void>();
+    const service = f.make({ proof: { prove: async (input, signal) => {
+      entered.resolve(); await release.promise; return f.proof.prove(input, signal);
+    } } });
+    const enrolling = service.execution.enroll(f.engine, request);
+    const blocker = await pool.connect();
+    try {
+      await entered.promise;
+      await blocker.query("BEGIN; SET LOCAL lock_timeout='250ms'");
+      await expect(blocker.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [f.workspaceId])).resolves.toMatchObject({ rowCount: 1 });
+      await blocker.query("COMMIT"); release.resolve();
+      expect(await enrolling).toMatchObject({ command: request.command });
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); release.resolve(); await enrolling; }
+  });
+
+  it("ordinary admission rechecks actor expiry after the final INSERT lock", async () => {
+    const { f, request } = await ordinary(), blocker = await pool.connect();
+    const pid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+    const service = f.make({ proof: { prove: async (input, signal) => {
+      const proof = await f.proof.prove(input, signal);
+      await blocker.query("BEGIN; LOCK TABLE cloud_accepted_work_enrollments IN SHARE MODE");
+      await pool.query(`UPDATE cloud_workspace_actor_sessions SET admission_expires_at=clock_timestamp()+interval '800 milliseconds',
+        session_expires_at=clock_timestamp()+interval '800 milliseconds' WHERE id=$1`, [f.admission.actorSessionId]);
+      return proof;
+    } } });
+    const enrolling = service.execution.enroll(f.engine, request).catch(error => error);
+    try {
+      await vi.waitFor(async () => expect((await pool.query(`SELECT 1 FROM pg_stat_activity
+        WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))`, [pid])).rowCount).toBeGreaterThan(0));
+      await vi.waitFor(async () => expect((await pool.query("SELECT session_expires_at<=clock_timestamp() AS expired FROM cloud_workspace_actor_sessions WHERE id=$1",
+        [f.admission.actorSessionId])).rows[0]!.expired).toBe(true), { timeout: 2_000 });
+      await blocker.query("COMMIT");
+      expect(await enrolling).toMatchObject({ status: 401 }); expect(await f.count()).toBe(0);
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); await enrolling; }
+  });
+
+  it("native ordinary proof rechecks the hard provider deadline after its final receipt lock", async () => {
+    const { f, service, warm, request } = await ordinary();
+    f.list.mockResolvedValue({ data: [{ id: f.user.authentication.sessionId!, userId: f.user.identity.subject, status: "active",
+      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 1_500).toISOString() }], listMetadata: { after: null } });
+    const receipt = await service.execution.enroll(f.engine, request), blocker = await pool.connect();
+    let native: Promise<unknown> | undefined;
+    try {
+      await blocker.query("BEGIN"); const pid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      await blocker.query("SELECT id FROM cloud_accepted_work_enrollments WHERE id=$1 FOR UPDATE", [receipt.acceptedWorkId]);
+      native = withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, { kind: "boot-execution", contextId: warm.contextId,
+        acceptedWorkId: receipt.acceptedWorkId, claimId: request.claimId, commandId: f.command.commandId, executionId: f.command.executionId }, false)).catch(error => error);
+      await vi.waitFor(async () => expect((await pool.query(`SELECT 1 FROM pg_stat_activity
+        WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))`, [pid])).rowCount).toBeGreaterThan(0));
+      await vi.waitFor(async () => expect((await pool.query("SELECT $1::timestamptz<=clock_timestamp() AS expired", [new Date(receipt.providerExpiresAtMs)])).rows[0]!.expired)
+        .toBe(true), { timeout: 2_000 });
+      await blocker.query("COMMIT"); expect(await native).toMatchObject({ code: "github_cloud_write_denied" });
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); await native; }
+  });
 
   it("enrolls only exact owner work with finite original deadlines and no reusable token", async () => {
     const f = await fixture(), service = f.make(), input = f.request();
@@ -277,6 +534,7 @@ suite("exact accepted-work enrollment", () => {
     expect(response.acceptedWork.confirmedUntilMs).toBeLessThanOrEqual(Date.now() + 10_000);
     await expect(f.bootService.acceptedContext(f.engine, { ...request, command: { ...f.command, executionId: randomUUID() } }, service)).rejects.toThrow();
     const source = { kind: "boot-agent" as const, contextId: response.contextId };
+    await pool.query("UPDATE cloud_agent_boot_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE context_id=$1", [source.contextId]);
     await expect(withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, source, false))).rejects.toThrow();
     expect(await withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, source, false, service)))
       .toMatchObject({ actorUserId: f.user.id });

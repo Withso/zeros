@@ -269,6 +269,8 @@ import { z } from "zod";
 export const cloudGithubNativeSourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("agent"), leaseId: z.string().uuid() }).strict(),
   z.object({ kind: z.literal("boot-agent"), contextId: z.string().uuid() }).strict(),
+  z.object({ kind: z.literal("boot-execution"), contextId: z.string().uuid(), acceptedWorkId: z.string().uuid(),
+    commandId: z.string().uuid(), claimId: z.string().uuid(), executionId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) }).strict(),
   z.object({ kind: z.literal("terminal"), actorSessionId: z.string().uuid() }).strict(),
 ]);
 export type CloudGithubNativeSource = z.infer<typeof cloudGithubNativeSourceSchema>;

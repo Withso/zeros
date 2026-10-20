@@ -19,6 +19,7 @@ import type { AgentGateway } from "./agents/gateway";
 type Conversation = { id: string; folder: string; agentId: string | null; providerBinding?: ProviderBinding | null;
   sessionId?: string | null; permissionMode?: string | null; lastModeId?: string | null };
 type Boot = { readonly active: boolean; selectClaim(claim: unknown): CloudBootAgentSelection;
+  acceptClaim?(claim: CloudBootCommandClaim, selection: CloudBootAgentSelection, signal: AbortSignal): Promise<void>;
   /** Drop the private claim reference; native retention/retirement belongs to
    * the pump and factory, not this bookkeeping operation. */
   releaseClaim(claim: CloudBootCommandClaim): void | Promise<void> };
@@ -51,7 +52,8 @@ export type CloudLocalNativeExecutionInput = Omit<CloudBootSelectionInput, "exec
 /** The local queue owns durable claim/terminal state. This pump owns its exact
  * native reservation and conversation scope, independently of client sockets.
  * It is installed only with the real activated boot writer; legacy and Local
- * admission never call it. All authority checks here are synchronous/local. */
+ * admission never call it. Exact execution acceptance precedes allocation;
+ * subsequent native authority checks are synchronous/local. */
 export class CloudLocalCommandNativePump {
   private readonly records = new Map<string, Record>();
   private readonly hosts = new Map<string, Host>();
@@ -131,6 +133,8 @@ export class CloudLocalCommandNativePump {
       if (!isDeepStrictEqual(cloudExecutionPrincipalActor(selected.actor), parsed.data.actor))
         throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
       record.selection = selected; record.lifetime = cloudBootNativeAuthority(selected).lifetime;
+      this.assertPreparing(record);
+      await this.options.boot()!.acceptClaim?.(parsed.data, selected, record.controller.signal);
       this.assertPreparing(record);
       const conversation = this.options.conversation(claim.conversationId);
       if (!conversation || conversation.id !== claim.conversationId || conversation.agentId !== parsed.data.payload.agentId ||
@@ -239,7 +243,8 @@ export class CloudLocalCommandNativePump {
     record.retirement = (async () => {
       await record.preparation.catch(() => {});
       if (record.ownsExecution && result.state === "succeeded" && record.dispatched && !record.controller.signal.aborted &&
-          !record.snapshot.payload.operation && record.reservation && !isCloudAcceptedWork(record.selection?.actor)) {
+          !record.snapshot.payload.operation && record.reservation && !isCloudAcceptedWork(record.selection?.actor) &&
+          !cloudBootNativeAuthority(record.selection!).executionWork) {
         try {
           const retained = await this.options.gateway.completeCloudForeground(claim.payload.agentId, claim.executionId, undefined, record.reservation);
           if (!retained) throw new CloudCommandFailureError({ stage: "containment", category: "attestation_failed" });

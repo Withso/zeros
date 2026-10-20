@@ -12,6 +12,18 @@ function fixture() {
   return { authority, request };
 }
 describe("accepted work private transport", () => {
+  it.each(["execution-check", "execution-close"] as const)("keeps %s on its fixed closed private route", async operation => {
+    const f = fixture(), request = { ...f.request, claimId: randomUUID(), executionId: "execution:one" };
+    const response = operation === "execution-check" ? { version: 1, acceptedWorkId: request.acceptedWorkId, state: "current" } : { closed: true };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(response));
+    expect(await requestCloudAcceptedWork(f.authority, operation, request, new AbortController().signal, fetcher)).toEqual(response);
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe(`https://cp.example.test/internal/v2/cloud-workspaces/engine/execution-authority/${operation.slice(10)}`);
+    await expect(requestCloudAcceptedWork(f.authority, operation, { ...request, scope: { ...request.scope, engineInstanceId: randomUUID() } },
+      new AbortController().signal, fetcher)).rejects.toMatchObject({ code: "cloud_admission_authority_response_invalid" });
+    expect(fetcher).toHaveBeenCalledOnce();
+    await expect(requestCloudAcceptedWork(f.authority, operation, request, new AbortController().signal,
+      vi.fn(async () => Response.json({ ...response, secret: "synthetic unknown field" })))).rejects.toThrow();
+  });
   it("bounds a never-settling transport independently of cooperative fetch abort", async () => {
     vi.useFakeTimers(); const f = fixture();
     let outcome = "pending";
