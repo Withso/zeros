@@ -4,7 +4,7 @@ import { chmod, mkdtemp, open, rm, symlink, writeFile, type FileHandle } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CloudOwnerDiscardDeleteSchema, ownerDeleteTarget } from "./cloud-owner-discard-delete-contract.js";
+import { CloudOwnerDiscardDeleteSchema, CloudOwnerDeleteOperatorSchema, ownerDeleteTarget } from "./cloud-owner-discard-delete-contract.js";
 import { readOwnerDiscardDeleteRequest } from "./manage-cloud-owner-discard-delete.js";
 
 const request = { version: 1, channel: "alpha", operationId: randomUUID(), organizationId: randomUUID(),
@@ -23,6 +23,17 @@ describe("private owner-discard Delete request", () => {
   it("accepts only a complete private request", async () => {
     const filename = await file(); await writeFile(filename,JSON.stringify(request),{mode:0o600});
     expect(await readOwnerDiscardDeleteRequest(filename)).toEqual(request);
+  });
+  it("reads the explicit existing-Delete branch without accepting mixed authority", async () => {
+    const { stopIntentId,requestId,...base }=request;
+    const existing={...base,mode:"existing-delete",deleteIntentId:stopIntentId,recoveryIntentId:requestId};
+    const filename=await file();await writeFile(filename,JSON.stringify(existing),{mode:0o600});
+    expect(await readOwnerDiscardDeleteRequest(filename)).toEqual(existing);
+    for (const change of [{mode:"new-delete"},{stopIntentId},{requestId},{deleteIntentId:"invalid"},
+      {recoveryIntentId:"invalid"},{ownerAcknowledgedCompleteDataLoss:false},{channel:"production"}]) {
+      expect(CloudOwnerDeleteOperatorSchema.safeParse({...existing,...change}).success).toBe(false);
+    }
+    expect(CloudOwnerDeleteOperatorSchema.safeParse({...request,mode:"existing-delete"}).success).toBe(false);
   });
   it.each([{ownerAcknowledgedCompleteDataLoss:false},{channel:"beta"},{channel:"production"},{unknownAuthority:true},
     {reason:"short"},{sourceGeneration:0},{sourceGeneration:Number.MAX_SAFE_INTEGER+1},{providerResourceId:"elsewhere"}])(

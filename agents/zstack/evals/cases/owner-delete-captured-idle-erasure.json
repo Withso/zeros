@@ -1,0 +1,9 @@
+{
+  "id": "owner-delete-captured-idle-erasure",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pending",
+  "symptom": "A successful legacy idle Stop had no capture or recovery, so history coverage rejected erasure even after the exact complete-loss Delete positively completed.",
+  "rule": "An unenrolled historical gap needs its exact immutable complete-loss inventory plus the receipt-derived successful Delete, settled dispatch and positive provider deletion. Never infer a saved checkpoint from missing history.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/manage-cloud-owner-delete-idle-history.integration.test.ts"
+}

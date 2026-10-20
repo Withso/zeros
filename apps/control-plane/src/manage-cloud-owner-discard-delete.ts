@@ -9,8 +9,9 @@ import { createMigrationPool } from "./db.js";
 import { authorizeCloudWorkspaceCleanup } from "./cloud-workspaces/actors.js";
 import { requestCloudWorkspaceDeletion } from "./cloud-workspaces/routes.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./cloud-workspaces/runtime-access.js";
-import { CloudOwnerDiscardDeleteError, CloudOwnerDiscardDeleteSchema, ownerDeleteDigest,
-  ownerDeleteTarget, requireOwnerDelete as check, type CloudOwnerDiscardDeleteRequest } from "./cloud-owner-discard-delete-contract.js";
+import { manageCloudOwnerExistingDelete } from "./manage-cloud-owner-existing-delete.js";
+import { CloudOwnerDiscardDeleteError, CloudOwnerDiscardDeleteSchema, CloudOwnerDeleteOperatorSchema, ownerDeleteDigest,
+  ownerDeleteTarget, requireOwnerDelete as check, type CloudOwnerDeleteOperatorRequest } from "./cloud-owner-discard-delete-contract.js";
 
 type Options = { databaseUrl: string; execute?: boolean; approval?: string | undefined };
 type Source = Record<string, unknown> & { history: { id: string }[] };
@@ -26,8 +27,10 @@ export type CloudOwnerDiscardDeleteResult = {
 
 /** Database-owner only. No provider I/O: the ordinary reconciler and erasure
  * worker own all physical deletion and its positive receipts. */
-export async function manageCloudOwnerDiscardDelete(pool: pg.Pool, supplied: CloudOwnerDiscardDeleteRequest,
+export async function manageCloudOwnerDiscardDelete(pool: pg.Pool, supplied: CloudOwnerDeleteOperatorRequest,
   options: Options): Promise<CloudOwnerDiscardDeleteResult> {
+  if (supplied && typeof supplied === "object" && "mode" in supplied && supplied.mode === "existing-delete")
+    return manageCloudOwnerExistingDelete(pool,supplied,options);
   const parsed = CloudOwnerDiscardDeleteSchema.safeParse(supplied);
   check(parsed.success, "owner_delete_request_invalid");
   const request = parsed.data, target = ownerDeleteTarget(options.databaseUrl, request.channel);
@@ -139,7 +142,7 @@ export async function manageCloudOwnerDiscardDelete(pool: pg.Pool, supplied: Clo
   } finally { client.release(); }
 }
 
-export async function readOwnerDiscardDeleteRequest(filename: string): Promise<CloudOwnerDiscardDeleteRequest> {
+export async function readOwnerDiscardDeleteRequest(filename: string): Promise<CloudOwnerDeleteOperatorRequest> {
   const file = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
@@ -151,7 +154,7 @@ export async function readOwnerDiscardDeleteRequest(filename: string): Promise<C
     let value: unknown;
     try { value = JSON.parse(bytes.subarray(0, bytesRead).toString("utf8")); }
     catch { throw new CloudOwnerDiscardDeleteError("owner_delete_request_invalid"); }
-    const parsed = CloudOwnerDiscardDeleteSchema.safeParse(value);
+    const parsed = CloudOwnerDeleteOperatorSchema.safeParse(value);
     check(parsed.success, "owner_delete_request_invalid");
     return parsed.data;
   } finally { await file.close(); }

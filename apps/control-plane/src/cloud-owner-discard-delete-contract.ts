@@ -30,6 +30,15 @@ export const CloudOwnerDiscardDeleteSchema = z.object({
 }).strict();
 export type CloudOwnerDiscardDeleteRequest = z.infer<typeof CloudOwnerDiscardDeleteSchema>;
 
+export const CloudOwnerExistingDeleteSchema = CloudOwnerDiscardDeleteSchema.omit({ stopIntentId:true,requestId:true }).extend({
+  mode: z.literal("existing-delete"),
+  deleteIntentId: uuid,
+  recoveryIntentId: uuid,
+}).strict();
+export type CloudOwnerExistingDeleteRequest = z.infer<typeof CloudOwnerExistingDeleteSchema>;
+export const CloudOwnerDeleteOperatorSchema = z.union([CloudOwnerDiscardDeleteSchema,CloudOwnerExistingDeleteSchema]);
+export type CloudOwnerDeleteOperatorRequest = z.infer<typeof CloudOwnerDeleteOperatorSchema>;
+
 export const ownerDeleteDigest = (value: unknown): Buffer =>
   createHash("sha256").update(canonicalFinalSaveJson(value)).digest();
 

@@ -195,6 +195,10 @@
    manually calling adoption can hide an eligibility filter that prevents it.
    Retain earlier engine incarnations: historical erasure custody is not live
    dispatch proof. Bound adoption batches and preserve unproved-work backoff.
+   Classify retired legacy attempts consistently in adoption, SQL enrollment
+   and erasure claims. Already enrolled loss needs an exact owner receipt;
+   preserve its capture facts and accepted Delete, then prove ordinary provider
+   completion and physical erasure without converting loss to saved proof.
    For canaries with durable fixtures and moving defaults, test unchanged,
    moved, unavailable and mid-run selection. Refresh at most once against the
    captured qualified tuple, with separate build/lifecycle/cleanup budgets.

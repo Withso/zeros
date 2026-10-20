@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/manage-cloud-owner-discard-delete.ts",
+  "before": "return manageCloudOwnerExistingDelete(pool,supplied,options);",
+  "after": "throw new CloudOwnerDiscardDeleteError(\"owner_delete_request_invalid\");"
+}
