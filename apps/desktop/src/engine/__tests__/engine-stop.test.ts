@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../pty/node-pty-spawn", () => ({
   createNodePtyShell: vi.fn(),
@@ -16,6 +16,8 @@ vi.mock("../git/credential-broker", () => ({
 }));
 
 import { ZerosEngine } from "../zeros-engine";
+
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe("ZerosEngine.stop", () => {
   it("requests a clean local writer seal before closing transports or registration", async () => {
@@ -55,10 +57,13 @@ describe("ZerosEngine.stop", () => {
       await vi.advanceTimersByTimeAsync(2000); expect(latePoll).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
   });
-  it("attempts every cleanup stage before reporting containment failure", async () => {
+  it.each(["Local", "organization-local", "cloud"])("attempts every cleanup stage before reporting containment failure (%s)", async placement => {
     const calls: string[] = [];
-    const engine = {
+    const diagnostics = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Keep real lifecycle helpers while injecting only the owned services.
+    const engine = Object.setPrototypeOf({
       running: true,
+      cloudWorker: placement === "cloud" ? { version: 4 } : null,
       joinCloudLegacyResidentRetirement: vi.fn(async () => undefined),
       cloudIdleStop: { close: async () => { calls.push("idle-stop"); } },
       cloudRuntimeRegistration: {
@@ -97,7 +102,7 @@ describe("ZerosEngine.stop", () => {
       transports: [{ stop: async () => calls.push("transport") }],
       removePortFile: () => calls.push("port-file"),
       clearBusy: () => calls.push("busy"),
-    };
+    }, ZerosEngine.prototype);
 
     const error = await ZerosEngine.prototype.stop
       .call(engine as unknown as ZerosEngine)
@@ -135,5 +140,9 @@ describe("ZerosEngine.stop", () => {
     expect(engine.mcpGateway).toBeNull();
     expect(engine.settingsWatcher).toBeNull();
     expect(engine.gitWatcher).toBeNull();
+    if (placement === "cloud") {
+      expect(diagnostics).toHaveBeenCalledExactlyOnceWith("[Zeros cloud] engine shutdown failed",
+        { site: "engine-shutdown", code: "unclassified_failure" });
+    } else expect(diagnostics).not.toHaveBeenCalled();
   });
 });

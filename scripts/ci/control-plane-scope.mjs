@@ -64,6 +64,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "apps/desktop/src/engine/cloud-github-write-client.ts",
   "apps/desktop/src/engine/cloud-github-read-client.ts",
   "apps/desktop/src/engine/cloud-runtime-registration.ts",
+  "apps/desktop/src/engine/cloud-runtime-retirement.ts",
   "apps/desktop/src/engine/git/github-native-client.ts",
   "apps/desktop/src/engine/git/github-native-desktop.ts",
   "apps/desktop/src/renderer/platform/bridge/cloud-runtime-access-error.ts",
