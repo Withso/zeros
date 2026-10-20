@@ -2,7 +2,7 @@
   "id": "seeded-cloud-retry-original-command",
   "kind": "seeded",
   "area": "cloud-engine-resume",
-  "fixedBy": "pending",
+  "fixedBy": "pr:675",
   "symptom": "Retry submits a fresh prompt after recovering the accepted original command.",
   "rule": "An observed original command consumes Retry without another preparation, grant, enqueue or fork. Only a freshly confirmed prior terminal failure permits a separate explicit attempt.",
   "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/retry-agent-turn.test.ts"
