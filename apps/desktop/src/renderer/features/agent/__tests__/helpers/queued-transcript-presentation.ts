@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
-import type { AgentMessage, AgentTextMessage } from "../../use-agent-session";
+import type { AgentMessage, AgentSessionState, AgentTextMessage } from "../../use-agent-session";
+import { isCloudWorkspace } from "../../../../platform/bridge/cloud-workspace-key";
 
 // Run AgentChat's real projection. Transport tests must prove their accepted
 // row reaches the transcript, not merely that an invisible queue owns it.
@@ -19,8 +20,8 @@ if (!callback) throw new Error("AgentChat transcript projection was not found");
 const code = ts.transpileModule(`globalThis.project = (session) => (${callback})();`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const context: Record<string, unknown> = { transcriptParentId: () => undefined, computeEditBaselines: () => new Map() };
+const context: Record<string, unknown> = { isCloudWorkspace, transcriptParentId: () => undefined, computeEditBaselines: () => new Map() };
 vm.runInNewContext(code, context);
-export function queuedTranscriptPresentation(messages: AgentMessage[]): { visibleMessages: AgentMessage[]; queuedMessages: AgentTextMessage[] } {
-  return (context.project as (session: { messages: AgentMessage[] }) => ReturnType<typeof queuedTranscriptPresentation>)({ messages });
+export function queuedTranscriptPresentation(messages: AgentMessage[], session: Partial<AgentSessionState> = {}): { visibleMessages: AgentMessage[]; queuedMessages: AgentTextMessage[] } {
+  return (context.project as (session: Partial<AgentSessionState>) => ReturnType<typeof queuedTranscriptPresentation>)({ ...session, messages });
 }

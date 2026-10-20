@@ -1,0 +1,9 @@
+{
+  "id": "cloud-history-conflict-copy",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pending",
+  "symptom": "A transient native history conflict blocked sending and copying; failed revalidation could replace the confirmed transcript with an older cached window.",
+  "rule": "agents/zstack/changes/cloud-send-acceptance-and-history.md: retry only settled read conflicts within the original bound, retain confirmed exact-key rows, and make partial Copy explicit without granting restore or send authority.",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/bridge/__tests__/cloud-native-history-errors.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-transcript-cache-hydrate.test.ts apps/desktop/src/renderer/shell/__tests__/copy-restoring-transcript.test.ts apps/desktop/src/renderer/shell/__tests__/copy-cloud-history-boundary.test.ts"
+}

@@ -8,6 +8,9 @@ import { reconcileHistoryMessages } from "../history-message-identity";
 import { messageSnapshotsEqual, retainMessageReferences } from "../message-persistence-tracker";
 import { canApplyTranscriptRead, isCurrentTranscriptRequest, releaseTranscriptRequest, NativeTranscriptSnapshots } from "../transcript-retention";
 import type { AgentMessage } from "../use-agent-session";
+import { useWorkspaceStore } from "../../../state/workspace-store";
+import { forgetFreshCloudChat } from "../fresh-cloud-chats";
+import { consumeFreshCloudChat } from "../fresh-cloud-chats";
 import { localTranscriptCache } from "../../../state/local-transcript-cache";
 import { presentCachedLocalTranscript, presentKnownEmptyLocalTranscript, takeFreshLocalChat } from "../local-transcript-presentation";
 import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, type CloudHistoryRestoreFence } from "../../../platform/cloud-transcript-cache-contract";
@@ -29,8 +32,8 @@ function harness(chatId = cloudId, native = false, source = native ? "native" : 
   let current = true;
   let restoreHead: CloudHistoryRestoreFence | undefined;
   let requestedHead: CloudHistoryRestoreFence | undefined, responseHead: CloudHistoryRestoreFence | undefined;
-  let resolve!: (rows: AgentMessage[]) => void;
-  const server = new Promise<AgentMessage[]>(done => { resolve = done; });
+  let resolve!: (rows: AgentMessage[]) => void, reject!: (error: Error) => void;
+  const server = new Promise<AgentMessage[]>((done, fail) => { resolve = done; reject = fail; });
   const history = vi.fn((_id: string, _limit: number, _before?: number, onCached?: (rows: AgentMessage[]) => void) => {
     requestedHead = restoreHead;
     queueMicrotask(() => onCached?.([message("cached")])); return server;
@@ -52,10 +55,11 @@ function harness(chatId = cloudId, native = false, source = native ? "native" : 
     cloudHistoryRestoreHead: () => restoreHead, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, cloudHasNativeTranscript: () => native,
     hydrateCloudSendRef: { current: repair }, reconcileChatMessagesRef: { current: retry }, nativeTranscriptSnapshotsRef,
     hydrateInFlightRef: { current: requests }, pendingHydratesRef: { current: new Set() },
-    localTranscriptCache, presentCachedLocalTranscript, presentKnownEmptyLocalTranscript, takeFreshLocalChat };
+    localTranscriptCache, presentCachedLocalTranscript, presentKnownEmptyLocalTranscript, takeFreshLocalChat, consumeFreshCloudChat,
+    useWorkspaceStore: { getState: () => ({ chats: [] }) } };
   vm.runInNewContext(code, context);
   return { resolve: (rows: AgentMessage[], head?: CloudHistoryRestoreFence) => { responseHead = head; resolve(rows); },
-    requests, history, repair, retry, hydrate: context.hydrate as (id: string) => Promise<void>, reconcile: context.reconcile as (id: string) => Promise<void>, chatId,
+    reject, requests, history, repair, retry, hydrate: context.hydrate as (id: string) => Promise<void>, reconcile: context.reconcile as (id: string) => Promise<void>, chatId,
     retireRead: () => { current = false; },
     setHead: (head: CloudHistoryRestoreFence) => { restoreHead = head; } };
 }
@@ -68,6 +72,38 @@ const incomplete: CloudHistoryRestoreFence = { conversationId: "chat-a", project
     source: { kind: "mutation", mutationId: "77777777-7777-4777-8777-777777777777", operation: "edit" }, restoreRevision: 2, deleted: false,
     recordSequence: null, eventSequence: null, manifestSha256: null, incompleteReason: "history_limit" } };
 describe("production initial transcript hydration", () => {
+  it("uses the actual ADD_CHAT lifecycle to hydrate a new cloud chat as empty", async () => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    vi.stubGlobal("window", { setTimeout: () => 0, clearTimeout: () => {} });
+    vi.stubGlobal("localStorage", { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+    try {
+      useWorkspaceStore.setState({ chats: [] }); forgetFreshCloudChat(cloudId);
+      useWorkspaceStore.getState().dispatch({ type: "ADD_CHAT", chat: { id: cloudId, folder, agentId: "codex", agentName: "Codex",
+        model: null, effort: "high", permissionMode: "auto", title: "New chat", createdAt: 1, updatedAt: 1 } });
+      useSessionsStore.getState().setSession(cloudId, { ...BLANK, cwd: folder, transcriptState: "cold" });
+      const h = harness(); await h.hydrate(cloudId);
+      expect(h.history).not.toHaveBeenCalled();
+      expect(useSessionsStore.getState().sessions[cloudId]).toMatchObject({ transcriptState: "resident", messages: [], hasTranscript: false });
+      expect(consumeFreshCloudChat(cloudId, folder)).toBe(false);
+    } finally { forgetFreshCloudChat(cloudId); vi.unstubAllGlobals(); }
+  });
+
+  it("keeps the last confirmed transcript and optimistic send when provisional cache precedes a conflict", async () => {
+    const confirmed = [message("Confirmed answer"), { id: "queued", kind: "text" as const, role: "user" as const,
+      text: "New request", queued: true, createdAt: 2 }];
+    useSessionsStore.getState().setSession(cloudId, { ...BLANK,
+      cwd: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222",
+      transcriptState: "loading", hasTranscript: true, messages: confirmed });
+    const h = harness(), pending = h.hydrate(cloudId);
+    await Promise.resolve();
+    const during = useSessionsStore.getState().sessions[cloudId].messages;
+    h.reject(Object.assign(new Error("command_conflict"), { code: "command_conflict" }));
+    await pending;
+    expect(during).toBe(confirmed);
+    expect(useSessionsStore.getState().sessions[cloudId].messages).toBe(confirmed);
+    expect(useSessionsStore.getState().sessions[cloudId].transcriptState).toBe("loading");
+  });
+
   it("retains cached history when a legacy cloud projection returns an empty window after resume", async () => {
     const h = harness(), result = h.hydrate(h.chatId);
     await Promise.resolve();

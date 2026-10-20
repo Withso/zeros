@@ -19,6 +19,7 @@ import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-
 import { transcriptParentId } from "./transcript-parent";
 import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-cloud-transcript-latency";
 import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
+import { openCloudAdmissionSettings } from "./cloud-admission-status";
 import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { hasTranscriptPresentation } from "./transcript-retention";
 import { presentLeadingPrompt } from "./transcript-leading-prompt";
@@ -483,9 +484,10 @@ function AgentChatBody({
         string,
         import("./use-agent-session").AgentMessage[]
       >();
-      // Deliberately parked follow-ups render in the queue card. An accepted
-      // opening prompt and a send awaiting native consumption are already
-      // visible bubbles; delivery bookkeeping must not hide the user's send.
+      // Cloud queue acceptance and provider acceptance are different facts.
+      // Keep every unaccepted cloud message in the composer queue, including
+      // a dispatched command whose provider turn has not started yet.
+      const cloud = isCloudWorkspace(session.cwd);
       const queuedMessages: AgentTextMessage[] = [];
       // Tool calls present in THIS window. A child is only shadowed when its
       // parent SubagentCard is here to render it — the hydrate window (or a
@@ -500,13 +502,12 @@ function AgentChatBody({
         }
       }
       for (const m of session.messages) {
-        if (
-          m.kind === "text" &&
-          m.queued &&
-          m.queuedPresentation !== "active-turn" &&
-          m.queuedDelivery !== "sending"
-        ) {
-          queuedMessages.push(m);
+        const awaitingAgent = cloud && session.cloudPromptPending && m.id === session.foregroundTurnId;
+        if (m.kind === "text" && (awaitingAgent || m.queued &&
+            (cloud || m.queuedPresentation !== "active-turn" && m.queuedDelivery !== "sending"))) {
+          // The original message and payload stay owned by the in-flight RPC.
+          // This projection cannot edit, remove or resend an ambiguous command.
+          queuedMessages.push(awaitingAgent ? { ...m, queued: true, queuedDelivery: "sending", queuedEditable: false } : m);
           shadowed.add(m.id);
           continue;
         }
@@ -530,16 +531,17 @@ function AgentChatBody({
         editBaselines,
         queuedMessages,
       };
-    }, [session.messages]);
+    }, [session.messages, session.cwd, session.cloudPromptPending, session.foregroundTurnId]);
   // A refused prompt may still belong to the queue or the restored draft.
   // When it has no visible turn footer, the transcript owns its one banner.
   const detachedCloudAdmission = isCloudWorkspace(chatThread?.folder ?? session.cwd) &&
+    !session.cloudSendWait &&
     session.cwd === (chatThread?.folder ?? session.cwd) && session.cloudAdmissionFailure &&
     session.cloudAdmissionFailure.kind !== "unavailable" &&
     !visibleMessages.some(message => message.kind === "text" && message.role === "user" &&
       message.id === session.cloudAdmissionFailure?.turnId) ? session.cloudAdmissionFailure : null;
   const livePendingLocalTurnId = usePendingLocalTurnId(chatId);
-  const pendingLocalTurnId = readOnly ? null : livePendingLocalTurnId;
+  const pendingLocalTurnId = readOnly || isCloudWorkspace(session.cwd) && session.cloudPromptPending ? null : livePendingLocalTurnId;
   const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
   const backgroundContinuationActive = agentFamily(session.agentId) === "claude" && activity !== null && session.status !== "streaming";
   const waitingForBackgroundTasks = activity === "waiting";
@@ -583,6 +585,7 @@ function AgentChatBody({
   ]);
   const isStreaming =
     !readOnly &&
+    !(isCloudWorkspace(session.cwd) && session.cloudPromptPending) &&
     (agentFamily(session.agentId) === "claude"
       ? activity === "running"
       : chatAgentActivity(session) === "running");
@@ -3391,7 +3394,7 @@ function AgentChatBody({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) && composerShowsStopControl({
+  const composerStreaming = !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
     status: backgroundContinuationActive ? "streaming" : session.status,
     hasPendingLocalTurn: pendingLocalTurnId !== null,
     planReview: Boolean(planReview),
@@ -4363,6 +4366,7 @@ function AgentChatBody({
 
   const deleteQueued = (id: string) => {
     const idx = queuedMessages.findIndex((m) => m.id === id);
+    if (queuedMessages[idx]?.queuedDelivery) return;
     // Remove while the edit hold still owns the queue. Releasing first can
     // dispatch this very message if the running turn finished during editing.
     session.removeQueued?.(id);
@@ -4384,6 +4388,7 @@ function AgentChatBody({
    *  when idle. Sending the row that's being edited saves the edit first, so
    *  what's dispatched is what the user sees in the composer. */
   const sendNowQueued = async (id: string) => {
+    if (queuedMessages.find((message) => message.id === id)?.queuedDelivery === "sending") return;
     const wasEditing = editingQueuedRef.current === id;
     if (wasEditing && !(await saveQueuedEdit(false))) return;
     let delivery: Promise<boolean> | undefined;
@@ -4791,7 +4796,7 @@ function AgentChatBody({
       footerAgentId: transcriptAgentId,
       agentDisplayName: transcriptAgentName,
       signInAgentId,
-      cloudAdmissionFailure: session.cloudAdmissionFailure,
+      cloudAdmissionFailure: session.cloudSendWait?.turnId ? null : session.cloudAdmissionFailure,
       surfaceActive,
       deferContent: provisionalTranscript,
       scrollRoot: scrollEl,
@@ -4813,6 +4818,7 @@ function AgentChatBody({
       transcriptAgentName,
       signInAgentId,
       session.cloudAdmissionFailure,
+      session.cloudSendWait?.turnId,
       surfaceActive,
       provisionalTranscript,
       scrollEl,
@@ -4835,7 +4841,7 @@ function AgentChatBody({
     () => ({
       failure: session.failure,
       failureKind: session.failure?.kind,
-      sessionStreaming: session.status === "streaming",
+      sessionStreaming: session.status === "streaming" && !session.cloudPromptPending,
       lastStopReason: session.lastStopReason,
       activeTurnStartedAt: session.activeTurnStartedAt,
       backgroundContinuationActive,
@@ -4846,6 +4852,7 @@ function AgentChatBody({
     [
       session.failure,
       session.status,
+      session.cloudPromptPending,
       session.lastStopReason,
       session.activeTurnStartedAt,
       backgroundContinuationActive,
@@ -5253,8 +5260,16 @@ function AgentChatBody({
             steeringSupported={steeringSupported}
             streaming={composerStreaming}
             paused={session.queuePaused}
-            waiting={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "waiting"}
-            notSent={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "failed"}
+            waiting={isCloudWorkspace(session.cwd) && (session.cloudSendWait?.state === "waiting" || session.cloudPromptPending || queuedMessages.some(message => message.queuedDelivery === "sending"))}
+            notSent={isCloudWorkspace(session.cwd) && session.cloudSendWait?.state === "failed"}
+            statusMessage={isCloudWorkspace(session.cwd) ? session.cloudSendWait?.state === "failed"
+              ? session.cloudSendWait.message ?? (queuedMessages.some(message => message.id === session.cloudAdmissionFailure?.turnId) ? session.cloudAdmissionFailure?.message : undefined)
+              : session.cloudSendWait?.phase === "starting-workspace" ? "Starting workspace…" : undefined : undefined}
+            onStop={interactive && !readOnly && isCloudWorkspace(session.cwd) &&
+                (session.cloudSendWait?.state === "waiting" || session.cloudPromptPending || queuedMessages.some(message => message.queuedDelivery === "sending"))
+              ? () => { void session.cancel(); } : undefined}
+            onReconnect={interactive && !readOnly && isCloudWorkspace(session.cwd) && session.cloudSendWait?.state === "failed" && session.cloudAdmissionFailure?.action === "reconnect"
+              ? () => openCloudAdmissionSettings(session.cwd, session.agentId) : undefined}
             agentName={steeringAgentName}
           />
           {/* Permission card (2026-07-02): the ONE permission gate. While a

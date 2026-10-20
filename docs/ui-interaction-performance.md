@@ -94,7 +94,10 @@ receipt is never send authority: native commands retain their checkpoint and
 execution fences.
 An uncertain response retries the same idempotency ID and initiating reason;
 a definitive refusal needs a new explicit attempt. Stop, account replacement,
-owner deletion and the original fifteen-minute safety cap retire old work.
+owner deletion and the original attempt deadline retire old work. Cloud prompt
+preparation spends at most ten seconds while the workspace is ready, and at
+most 45 seconds including a wake. Serial history-conflict retries share an
+eight-second bound and never retry a mutation or an uncertain dispatch.
 Explicit Retry renews the intent; reconnect, catalog, history, hover and selection
 restore never do. This identity stays in renderer memory, outside persisted
 messages and provider commands. Local Personal and organization-local behavior

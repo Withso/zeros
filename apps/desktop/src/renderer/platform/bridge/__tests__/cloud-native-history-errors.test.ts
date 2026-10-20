@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudAgentBootConversationSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { WorkspaceRuntimeClient } from "../workspace-runtime-client";
 import { RuntimeClient } from "../ws-client";
@@ -92,6 +92,71 @@ afterEach(() => {
   for (const client of clients.splice(0)) client.dispose();
   for (const finish of finishProjections.splice(0)) finish();
   vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, "random").mockReturnValue(0.5);
+});
+
+describe("bounded native history conflict recovery", () => {
+
+  it.each(["messages.window", "messages.windowOlder", "messages.search", "chats.list"])(
+    "recovers %s without a runtime update after four timing conflicts", async op => {
+      const f = fixture();
+      await f.client.warmWorkspace(target);
+      f.request.mockClear();
+      const rows = op === "chats.list" ? "chats" : op === "messages.search" ? "hits" : "messages";
+      const response = { type: "WORKSPACE_RESPONSE", op, result: { [rows]: [], ...metadata } };
+      for (let i = 0; i < 4; i++) f.request.mockResolvedValueOnce(refusal(op));
+      f.request.mockResolvedValue(response);
+      const pending = Promise.allSettled([f.client.request(historyMessage(op))]);
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(await pending).toMatchObject([{ status: "fulfilled", value: response }]);
+      expect(f.request).toHaveBeenCalledTimes(5);
+      expect(f.open).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("shares five bounded attempts and preserves the final refusal without CP fallback", async () => {
+    const f = fixture();
+    await f.client.warmWorkspace(target);
+    f.request.mockClear(); f.readHistory.mockClear();
+    f.request.mockResolvedValue(refusal("messages.window"));
+    const pending = Promise.allSettled([f.client.request(historyMessage()), f.client.request(historyMessage())]);
+    await vi.advanceTimersByTimeAsync(8_000);
+    const results = await pending;
+    expect(results).toMatchObject([
+      { status: "rejected", reason: { code: "command_conflict" } },
+      { status: "rejected", reason: { code: "command_conflict" } },
+    ]);
+    expect(f.request).toHaveBeenCalledTimes(5);
+    expect(f.readHistory).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.request).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not dispatch another retry after account retirement during backoff", async () => {
+    const f = fixture(); await f.client.warmWorkspace(target);
+    f.request.mockClear(); f.request.mockResolvedValue(refusal("messages.window"));
+    const pending = Promise.allSettled([f.client.request(historyMessage())]);
+    await vi.advanceTimersByTimeAsync(0);
+    f.client.clearCloudConnections();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await pending).toMatchObject([{ status: "rejected", reason: { message: expect.stringMatching(/changed|retired/i) } }]);
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+
+  it("does not restart the original eight-second budget after a slow conflicting read", async () => {
+    const f = fixture(); await f.client.warmWorkspace(target);
+    f.request.mockClear();
+    f.request.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve(refusal("messages.window")), 7_500)));
+    const pending = Promise.allSettled([f.client.request(historyMessage())]);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await pending).toMatchObject([{ status: "rejected", reason: { code: "command_conflict" } }]);
+    expect(f.request).toHaveBeenCalledOnce();
+  });
 });
 
 describe("native cloud history error envelopes", () => {
@@ -100,14 +165,16 @@ describe("native cloud history error envelopes", () => {
       const f = fixture();
       await f.client.warmWorkspace(target);
       const failure = refusal(op);
-      f.request.mockResolvedValueOnce(failure);
+      f.request.mockResolvedValue(failure);
       f.readHistory.mockClear();
 
       const message = historyMessage(op);
-      await expect(workspaceOp(f.client, op, message.params)).rejects.toMatchObject({
+      const rejected = expect(workspaceOp(f.client, op, message.params)).rejects.toMatchObject({
         name: "WorkspaceOpError", code: failure.code,
         message: failure.message, remediation: failure.remediation,
       });
+      await vi.advanceTimersByTimeAsync(8_000); await rejected;
+      expect(f.request).toHaveBeenCalledTimes(6);
       expect(f.open).toHaveBeenCalledOnce();
       expect(f.readHistory).not.toHaveBeenCalled();
       expect(f.client.hasCloudMessageSnapshot(cloudScopedId(target, "chat"), 200)).toBe(false);
@@ -118,12 +185,13 @@ describe("native cloud history error envelopes", () => {
     "preserves %s when the initial native conversation list refuses", async code => {
       const f = fixture();
       const failure = refusal("chats.list", code);
-      f.request.mockResolvedValueOnce(failure);
+      f.request.mockResolvedValue(failure);
 
-      await expect(f.client.warmWorkspace(target)).rejects.toMatchObject({
+      const rejected = expect(f.client.warmWorkspace(target)).rejects.toMatchObject({
         name: "WorkspaceOpError", code, message: failure.message, remediation: failure.remediation,
       });
-      expect(f.request).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(8_000); await rejected;
+      expect(f.request).toHaveBeenCalledTimes(code === "command_conflict" ? 5 : 1);
       expect(f.release).toHaveBeenCalledOnce();
       expect(f.client.hasChatSnapshot(cloudWorkspaceKey(target))).toBe(false);
     },
@@ -133,7 +201,7 @@ describe("native cloud history error envelopes", () => {
     const f = fixture();
     await f.client.warmWorkspace(target);
     const { remediation: _remediation, ...failure } = refusal("messages.window", "CLOUD_ACTOR_FORBIDDEN");
-    f.request.mockResolvedValueOnce(failure);
+    f.request.mockResolvedValue(failure);
     const [result] = await Promise.allSettled([f.client.request(historyMessage())]);
     expect(result).toMatchObject({ status: "rejected", reason: {
       code: failure.code, message: failure.message,
@@ -146,10 +214,11 @@ describe("native cloud history error envelopes", () => {
   it("preserves explicitly empty error message and remediation fields", async () => {
     const f = fixture();
     await f.client.warmWorkspace(target);
-    f.request.mockResolvedValueOnce({ ...refusal("messages.window"), message: "", remediation: "" });
-    await expect(f.client.request(historyMessage())).rejects.toMatchObject({
+    f.request.mockResolvedValue({ ...refusal("messages.window"), message: "", remediation: "" });
+    const rejected = expect(f.client.request(historyMessage())).rejects.toMatchObject({
       code: "command_conflict", message: "", remediation: "",
     });
+    await vi.advanceTimersByTimeAsync(8_000); await rejected;
   });
 
   it("keeps a valid empty native transcript readable", async () => {
@@ -189,7 +258,7 @@ describe("native cloud history error envelopes", () => {
     expect(f.release).toHaveBeenCalledOnce();
   });
 
-  it("shares one exact-key native refusal without retrying or falling back to CP history", async () => {
+  it("shares one exact-key non-conflict refusal without retrying or falling back to CP history", async () => {
     const f = fixture();
     await f.client.warmWorkspace(target);
     let finish!: (response: WireRecord) => void;
@@ -200,7 +269,7 @@ describe("native cloud history error envelopes", () => {
       f.client.request(historyMessage()), f.client.request(historyMessage()),
     ]);
     await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce());
-    const failure = refusal("messages.window");
+    const failure = refusal("messages.window", "CLOUD_ACTOR_FORBIDDEN");
     finish(failure);
     const results = await pending;
     for (const result of results) expect(result).toMatchObject({

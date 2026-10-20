@@ -886,6 +886,16 @@ export async function bridgeMessageWindowSnapshot(
   return messageWindowSnapshot(bridge, chatId, r);
 }
 
+/** Explicit copy/export presentation; it cannot establish transcript authority. */
+export async function bridgeCloudCopyWindow(bridge: WorkspaceRuntimeClient, chatId: string, limit: number): Promise<MessageWindowSnapshot & { partial: boolean }> {
+  const { result, partial } = await bridge.readCloudCopyWindow(chatId, limit);
+  const page = messageWindowSnapshot(bridge, chatId, result);
+  if (page.isCurrent?.() === false)
+    throw Object.assign(new Error("Cloud history changed while copying"), { code: "cloud_history_changed" });
+  return { ...page, partial: !page.restoreHead?.head?.deleted && (partial || !!(page.restoreHead &&
+    !cloudHistoryFenceHasTranscript(page.restoreHead) && (page.source !== "native" || page.messages.length === 0))) };
+}
+
 export async function bridgeMessageWindowOlder(
   bridge: RuntimeClient,
   chatId: string,

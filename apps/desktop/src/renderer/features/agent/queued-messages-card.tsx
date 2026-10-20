@@ -42,7 +42,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
-import { Tooltip, TooltipProvider } from "@/renderer/shared/ui/primitives";
+import { Button, Tooltip, TooltipProvider } from "@/renderer/shared/ui/primitives";
 import type { AgentTextMessage } from "./use-agent-session";
 
 export interface QueuedMessagesCardProps {
@@ -71,8 +71,11 @@ export interface QueuedMessagesCardProps {
   paused?: boolean;
   /** Cloud readiness uses the existing editable queue; Local defaults match. */
   waiting?: boolean;
-  /** Cloud failures use one toast; pending rows retain neutral retry controls. */
+  /** The queue owns the single persistent reason and explicit Retry action. */
   notSent?: boolean;
+  statusMessage?: string;
+  onStop?: () => void;
+  onReconnect?: () => void;
   /** Name for a provider without mid-turn steering. */
   agentName: string;
 }
@@ -94,6 +97,9 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   paused = false,
   waiting = false,
   notSent = false,
+  statusMessage,
+  onStop,
+  onReconnect,
   agentName,
 }: QueuedMessagesCardProps) {
   if (messages.length === 0) return null;
@@ -111,12 +117,13 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
     // composer on top) — the "attached" look. pb-1.5 keeps the footer clear
     // of the hidden strip.
     <TooltipProvider delayDuration={500} skipDelayDuration={0}>
-      <div className="border-border1 bg-bg1 relative -mb-2.5 flex flex-col rounded-lg border pb-1.5">
+      <div data-queued-messages data-turn-failure-card={notSent || undefined} className="border-border1 bg-bg1 relative -mb-2.5 flex flex-col rounded-lg border pb-1.5">
+        <div className="flex items-center gap-2 pr-3.5">
         <button
           type="button"
           onClick={onToggleCollapsed}
           aria-expanded={!collapsed}
-          className="text-fg2 hover:text-fg1 flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left text-sm transition-colors"
+          className="text-fg2 hover:text-fg1 flex min-w-0 flex-1 items-center justify-between gap-2 px-3.5 py-2.5 text-left text-sm transition-colors"
         >
           <span>
             {waiting ? "Waiting for agent" : notSent ? "Not sent" : `${messages.length} queued message${messages.length === 1 ? "" : "s"}${paused ? " · Paused" : ""}`}
@@ -127,6 +134,10 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
             <ChevronDown size={16} aria-hidden="true" />
           )}
         </button>
+          {onStop && <Button variant="ghost" size="compact" onClick={onStop}>Stop</Button>}
+          {onReconnect && <Button variant="ghost" size="compact" onClick={onReconnect}>Reconnect</Button>}
+        </div>
+        {statusMessage && <div role="status" className="text-fg3 px-3.5 pb-2 text-xs">{statusMessage}</div>}
         {!collapsed && messages.length > 0 && (
           <>
             <div className="border-border1 flex flex-col gap-0.5 border-t px-1.5 py-1.5">
@@ -165,7 +176,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                     <div
                       className={cn(
                         "flex shrink-0 items-center gap-0.5",
-                        isSelected
+                        isSelected || notSent
                           ? "opacity-100"
                           : "opacity-0 group-hover/qrow:opacity-100",
                       )}
@@ -198,13 +209,17 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                       >
                         <Trash2 size={14} aria-hidden="true" />
                       </RowAction>
-                      <RowAction
-                        label={m.queuedDelivery === "sending" ? "Sending…" : m.queuedDelivery === "unconfirmed" ? "Retry delivery" : notSent ? "Retry" : sendLabel}
-                        onClick={() => onSendNow(m.id)}
-                        disabled={sendBlocked || m.queuedDelivery === "sending"}
-                      >
-                        <ArrowUp size={14} aria-hidden="true" />
-                      </RowAction>
+                      {notSent && !m.queuedDelivery ? (
+                        <Button variant="ghost" size="compact" onClick={() => onSendNow(m.id)} disabled={sendBlocked}>Retry</Button>
+                      ) : (
+                        <RowAction
+                          label={m.queuedDelivery === "sending" ? "Sending…" : m.queuedDelivery === "unconfirmed" ? "Retry delivery" : sendLabel}
+                          onClick={() => onSendNow(m.id)}
+                          disabled={sendBlocked || m.queuedDelivery === "sending"}
+                        >
+                          <ArrowUp size={14} aria-hidden="true" />
+                        </RowAction>
+                      )}
                     </div>
                   </div>
                 );

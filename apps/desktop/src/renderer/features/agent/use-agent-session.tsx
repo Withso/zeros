@@ -109,7 +109,9 @@ export interface AgentSessionState {
   /** Cloud-only refusal before provider execution; independent of local auth. */
   cloudAdmissionFailure?: CloudAdmissionState | null;
   /** Renderer-owned cloud FIFO readiness; Local sessions never set it. */
-  cloudSendWait?: { state: "waiting" | "failed"; message?: string };
+  cloudSendWait?: { state: "waiting" | "failed"; phase?: "sending" | "starting-workspace"; message?: string; turnId?: string };
+  /** Native dispatch is pending; only an exact accepted turn starts its clock. */
+  cloudPromptPending?: boolean;
   /** Stop preserves follow-ups until the next explicit send resumes FIFO. */
   queuePaused?: boolean;
   /** The provider resumed into an empty conversation; carry visible context on

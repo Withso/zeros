@@ -115,6 +115,7 @@ function setup(agentId = "claude", status = "streaming") {
     persistAuthPrompt: vi.fn(),
     drainOrDropQueue: vi.fn(),
     retryCloudQueuedPrompt: vi.fn(),
+    notifyAgentSendFailure: vi.fn(),
     refreshModelCatalog: vi.fn(),
     cloudFlushRef: { current: new Map() },
     beginCloudSendWaitRef: { current: vi.fn() },
@@ -205,17 +206,19 @@ afterEach(() => vi.useRealTimers());
 
 describe.each(["claude", "codex", "cursor"])("%s follow-up submission", agentId => {
   it.each(["/personal/project", "/organization/project", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"])(
-    "shows Steer immediately in %s while native consumption is pending", async folder => {
+    "keeps Steer visible in the correct surface for %s while native consumption is pending", async folder => {
       const h = setup(agentId);
       h.store.sessions.chat.cwd = folder;
       h.context.cloudComputerV2 = isCloudWorkspace(folder);
       await h.actions.sendPrompt("chat", "Steer now", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "steer");
       await vi.waitFor(() => expect(h.requests).toHaveLength(1));
-      const projected = queuedTranscriptPresentation(h.store.sessions.chat.messages);
-      expect(projected.visibleMessages).toEqual([expect.objectContaining({ text: "Steer now", steeredTurnId: "A" })]);
-      expect(projected.queuedMessages.map(message => message.id)).toEqual(["B", "C", "D"]);
+      const projected = queuedTranscriptPresentation(h.store.sessions.chat.messages, h.store.sessions.chat);
+      const steer = h.store.sessions.chat.messages.at(-1);
+      expect(isCloudWorkspace(folder) ? projected.queuedMessages.at(-1) : projected.visibleMessages[0]).toMatchObject({ text: "Steer now", steeredTurnId: "A" });
+      expect(projected.visibleMessages).toHaveLength(isCloudWorkspace(folder) ? 0 : 1);
+      expect(projected.queuedMessages.map(message => message.id)).toEqual(isCloudWorkspace(folder) ? ["B", "C", "D", steer.id] : ["B", "C", "D"]);
       expect(h.store.sessions.chat.cloudSendWait).toBeUndefined();
-      const bubbleId = projected.visibleMessages[0]!.id;
+      const bubbleId = steer.id;
       h.store.sessions.chat.messages.push({ id: "continued", kind: "text", role: "agent", text: "Still working", createdAt: 10 });
       h.requests[0]!.resolve({ type: "AGENT_STEERED", outcome: "delivered", turnId: "A" });
       await vi.waitFor(() => expect(h.queue.get("chat")).toHaveLength(3));
@@ -254,6 +257,34 @@ describe.each(["claude", "codex", "cursor"])("%s follow-up submission", agentId 
     ] });
     h.requests[0].resolve({ type: "AGENT_STEERED", outcome: "delivered", turnId: "A" });
     await vi.waitFor(() => expect(h.queue.get("chat")).toHaveLength(3));
+  });
+});
+
+describe("undispatched cloud cancellation", () => {
+  it.each(["waiting", "failed"])("retains the %s queued opening send as Not sent after Stop without cancelling a native turn", async state => {
+    const h = setup("codex", "ready");
+    h.context.cloudComputerV2 = true;
+    h.store.sessions.chat.cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    h.store.sessions.chat.cloudSendWait = { state, phase: "sending", turnId: "B" };
+    h.store.sessions.chat.messages[0].queuedPresentation = "active-turn";
+    const original = h.queue.get("chat")![0];
+    const attachments = [{ type: "image", data: "synthetic-retained-payload" }];
+    original.args.push(undefined, attachments);
+    const stop = h.actions.cancel("chat");
+    // Always release the old implementation's request, so an intended
+    // assertion red cannot leave a timer/transport flight behind.
+    for (const request of h.requests) request.resolve({ type: "AGENT_CANCELLED" });
+    await stop;
+    expect(h.requests).toEqual([]);
+    expect(h.store.sessions.chat.messages.map((m: { id: string }) => m.id)).toEqual(["B", "C", "D"]);
+    expect(h.queue.get("chat")?.map(row => row.bubbleId)).toEqual(["B", "C", "D"]);
+    expect(h.queue.get("chat")![0]).toBe(original);
+    expect(h.queue.get("chat")![0].args.at(-1)).toBe(attachments);
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "failed", turnId: "B", message: expect.stringContaining("Stopped") });
+    expect(h.queue.isPaused("chat")).toBe(true);
+    expect(h.context.cloudSendWaitRef.current.cancel).toHaveBeenCalledExactlyOnceWith("chat");
+    h.actions.drainNextQueued("chat");
+    expect(h.sent).toEqual([]);
   });
 });
 
@@ -342,6 +373,21 @@ describe.each(["/repo", "/organization/repo", "cloud://11111111-1111-4111-8111-1
 );
 
 describe("cloud Stop acknowledgement", () => {
+  it("retains a dispatched unaccepted prompt when Remove is called outside the queue UI", () => {
+    const h = setup("codex");
+    const slot = h.store.sessions.chat;
+    slot.cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    slot.cloudPromptPending = true;
+    slot.foregroundTurnId = "pending-command";
+    const prompt = { id: "pending-command", kind: "text", role: "user", text: "Keep this prompt", queued: false };
+    slot.messages.push(prompt);
+    h.actions.removeQueued("chat", prompt.id);
+    expect(slot.messages).toContain(prompt);
+    expect(slot.cloudPromptPending).toBe(true);
+    expect(h.queue.get("chat")?.map(entry => entry.bubbleId)).toEqual(["B", "C", "D"]);
+    expect(h.requests).toHaveLength(0);
+  });
+
   it("sends a correlated owned request and a late acknowledgement does not clear a newer turn", async () => {
     const h = setup("codex"); h.store.sessions.chat.cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     const pending = h.actions.cancel("chat");

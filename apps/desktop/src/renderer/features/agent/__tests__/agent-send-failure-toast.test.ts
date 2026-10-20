@@ -3,11 +3,12 @@ import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution
 import type { AgentSendFailureInput } from "../agent-send-failure-toast";
 import { classifyCloudAdmissionFailure, type CloudAdmissionState } from "../cloud-admission-failure";
 
-const mocks = vi.hoisted(() => ({ error: vi.fn(), settings: vi.fn(), restart: vi.fn(),
+const mocks = vi.hoisted(() => ({ error: vi.fn(), log: vi.fn(), settings: vi.fn(), restart: vi.fn(),
   workspace: vi.fn(), account: vi.fn(), restartVisible: vi.fn(), accountAccess: vi.fn(),
   sessions: {} as Record<string, { cwd: string; cloudAdmissionFailure: CloudAdmissionState | null }>,
 }));
 vi.mock("../../../shared/ui/primitives/elements/toast", () => ({ toast: { error: mocks.error } }));
+vi.mock("../../../platform/observability/logging/renderer-log", () => ({ logEvent: mocks.log }));
 vi.mock("../cloud-admission-status", () => ({ openCloudAdmissionSettings: mocks.settings }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({ cloudWorkspaceDocument: mocks.workspace, cloudCatalogGeneration: mocks.account }));
 vi.mock("../../../state/cloud-workspace-restart", () => ({ restartCloudWorkspace: mocks.restart, cloudWorkspaceRestartVisible: mocks.restartVisible }));
@@ -33,6 +34,38 @@ beforeEach(async () => {
 });
 
 describe("agent send failure toasts", () => {
+  it("does not label uncertain delivery as Not sent in diagnostics", () => {
+    notify(input("command_dispatch_rejected", { reason: "dispatch_ambiguous" }));
+    expect(mocks.log).toHaveBeenCalledExactlyOnceWith("agent_send_uncertain", { reason: "dispatch_ambiguous" }, ["cloud", "agent"]);
+  });
+
+  it("records each explicit retry failure while preserving the original message identity", () => {
+    const first = input(undefined, { reason: "history_unavailable", diagnosticAttemptId: "attempt-one" });
+    notify(first); notify(first);
+    notify({ ...first, diagnosticAttemptId: "attempt-two" });
+    expect(mocks.log).toHaveBeenCalledTimes(2);
+    expect(mocks.log.mock.calls.every(([event, detail]) => event === "agent_send_not_sent" &&
+      JSON.stringify(detail) === JSON.stringify({ reason: "history_unavailable" }))).toBe(true);
+  });
+
+  it.each([
+    ["command_conflict", "history_unavailable", "history_unavailable"],
+    [undefined, "queued_timeout", "queued_timeout"],
+    [undefined, "workspace_start_timeout", "workspace_start_timeout"],
+    ["cloud_agent_credential_required", undefined, "credential_missing"],
+    ["cloud_agent_credential_expired", undefined, "credential_expired_or_revoked"],
+    ["cloud_agent_model_not_authorized", undefined, "model_not_enabled"],
+    ["cloud_runtime_upgrade_required", undefined, "runtime_upgrade_required"],
+  ] as const)("logs only a closed reason for %s/%s", (error, reason, expected) => {
+    notify(input(error, { reason }));
+    expect(mocks.log).toHaveBeenCalledExactlyOnceWith("agent_send_not_sent", { reason: expected }, ["cloud", "agent"]);
+  });
+
+  it.each(["/personal/project", "/organization/project"])("leaves %s failure logging unchanged", folder => {
+    notify(input("private detail", { folder }));
+    expect(mocks.log).not.toHaveBeenCalled();
+  });
+
   it.each([
     "cloud_workspace_v2_required", "cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized",
     "cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked",

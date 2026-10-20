@@ -243,6 +243,7 @@ import {
   closeActivityForSession,
   closeRouteForSession,
 } from "./session-close-lifecycle";
+import { consumeFreshCloudChat } from "./fresh-cloud-chats";
 import { recoverCloudAdmissionFailure } from "./cloud-runtime-upgrade";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "./cloud-admission-failure";
 import { reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry } from "./workspace-agent-registry";
@@ -1443,6 +1444,7 @@ export function AgentSessionsProvider({
       cloudQueue?: CloudQueuedPrompt;
       waitStartedAt?: number;
       waitBudget?: CloudSendWaitBudget;
+      failureLogId?: string;
       waitStopVersion?: number;
       /** One user attempt, retained through readiness retries, never admission. */
       wakeIntent?: CloudWorkspaceWakeIntent;
@@ -1477,7 +1479,7 @@ export function AgentSessionsProvider({
     folder: string | null | undefined) => {
     if (!entry.cloud || account !== cloudCatalogGeneration() || getStore().sessions[chatId]?.cwd !== folder ||
         !sendQueueRef.current.get(chatId)?.includes(entry)) return;
-    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; }
+    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; queued.failureLogId = undefined; }
     resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
   }, [getStore, resumeQueue]);
   const markQueuedDelivery = useCallback(
@@ -1503,6 +1505,8 @@ export function AgentSessionsProvider({
         messages: turnId && message.steeredTurnId !== turnId
           ? promoteToEnd(slot.messages, messageId, pending, slot.historyExpanded)
           : slot.messages.map(m => m === message ? pending : m),
+        ...(isCloudWorkspace(slot.cwd) ? { transcriptState: slot.transcriptState,
+          transcriptPresentation: slot.transcriptPresentation, transcriptDirty: slot.transcriptDirty } : {}),
       });
     },
     [getStore],
@@ -2514,10 +2518,11 @@ export function AgentSessionsProvider({
           ...(segments?.length ? { segments } : {}), ...(autoAction ? { autoAction } : {}),
         };
         const q = sendQueueRef.current.get(chatId) ?? [];
-        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; entry.wakeIntent = undefined; }
+        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; entry.wakeIntent = undefined; entry.failureLogId = undefined; }
         q.push({ cloud: true, bubbleId, queueEntryId: bubbleId, cloudQueue, wakeIntent, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
         sendQueueRef.current.set(chatId, q);
-        getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded) });
+        getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded),
+          transcriptState: slot.transcriptState, transcriptPresentation: slot.transcriptPresentation, transcriptDirty: slot.transcriptDirty });
         resumeQueue(chatId);
         onAccepted?.();
         if (followUpBehavior === "steer" && (slot.status === "streaming" || hasBackgroundAgentWork(slot))) {
@@ -3105,7 +3110,9 @@ export function AgentSessionsProvider({
           failure: null,
           lastStopReason: null,
           foregroundTurnId: userMessage.id,
-          activeTurnStartedAt: userMessage.createdAt,
+          ...(isCloudWorkspace(current.cwd)
+            ? { cloudPromptPending: true, activeTurnStartedAt: null }
+            : { activeTurnStartedAt: userMessage.createdAt }),
           // On a queued-send flush, PROMOTE the placeholder. A follow-up's
           // array slot is mid-previous-turn and must move to the end; an active
           // admission placeholder is already the tail, so this preserves its
@@ -3161,12 +3168,13 @@ export function AgentSessionsProvider({
             getStore().patchSession(chatId, { status: "ready", error: null, failure: null, lastStopReason: null, activeTurnStartedAt: null,
               cloudAdmissionFailure: waiting ? null : { ...admission, code: String(cloudAdmissionFailureCode(error)),
                 turnId: userMessage.id, agentId: current.agentId!, model: submittedModel },
-              cloudSendWait: waiting ? undefined : { state: "failed", message: admission.message },
+              cloudSendWait: waiting ? undefined : { state: "failed", message: admission.message, turnId: userMessage.id },
               messages: slot.messages.map(message => message.id === userMessage.id && message.kind === "text"
                 ? { ...message, queued: true, queuedEditable: !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
                   queuedPresentation: undefined, queuedDelivery: undefined, recoveryFailure: undefined } : message) });
             if (waiting) { resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId); }
             else notifyAgentSendFailure({ folder: current.cwd, chatId, attemptId: flushedCloud.queueEntryId!,
+              diagnosticAttemptId: flushedCloud.failureLogId,
               agentId: current.agentId, model: submittedModel, error,
               onRetry: () => retryCloudQueuedPrompt(chatId, flushedCloud, cloudAccount, current.cwd) });
             return true;
@@ -4297,23 +4305,16 @@ export function AgentSessionsProvider({
     const slot = getStore().sessions[chatId], target = parseCloudWorkspaceKey(slot?.cwd);
     const first = sendQueueRef.current.get(chatId)?.[0];
     if (!slot || !target || !first?.cloud) return;
-    const opening = slot.messages.find((m): m is AgentTextMessage => m.id === first.bubbleId && m.kind === "text" && !!m.queued);
-    if (opening && opening.queuedPresentation !== "active-turn" && slot.status !== "streaming" &&
-        !hasBackgroundAgentWork(slot) && !sendingChatsRef.current.has(chatId)) {
-      getStore().patchSession(chatId, {
-        messages: slot.messages.map(m => m === opening ? { ...opening, queuedPresentation: "active-turn" } : m),
-        activeTurnStartedAt: opening.createdAt,
-      });
-      getStore().setPendingLocalTurn(chatId, opening.id);
-    }
     const startedAt = first.waitStartedAt ??= performance.now();
+    first.failureLogId ??= crypto.randomUUID();
     const stopVersion = first.waitStopVersion ??= cloudWorkspaceStopVersion(target);
     const folder = slot.cwd, account = cloudCatalogGeneration();
     let generation = cloudWorkspaceDocument(target)?.generation.number;
+    let phase: "admission" | "history" = "admission";
     const cancellation = cancelGeneration(cancelGenerationsRef.current, chatId);
     const current = () => cloudCatalogGeneration() === account && getStore().sessions[chatId]?.cwd === folder &&
       cancelGeneration(cancelGenerationsRef.current, chatId) === cancellation && !sendQueueRef.current.isPaused(chatId) &&
-      sendQueueRef.current.get(chatId)?.some(entry => entry.cloud) === true;
+      sendQueueRef.current.get(chatId)?.[0]?.bubbleId === first.bubbleId;
     const readiness = () => {
       if (cloudWorkspaceStopVersion(target) !== stopVersion)
         throw new CloudWorkspaceWakeEndedError("Cloud workspace was stopped. Your messages are still queued. Try again.");
@@ -4330,11 +4331,9 @@ export function AgentSessionsProvider({
       const fresh = getStore().sessions[chatId];
       // An admitted follow-up still crosses the same admission/checkpoint
       // guards, but it is not a first-session readiness wait.
-      const waiting = !ready || !fresh?.sessionId;
-      if (waiting && fresh?.cloudSendWait?.state !== "waiting")
-        getStore().patchSession(chatId, { cloudSendWait: { state: "waiting" } });
-      else if (!waiting && fresh?.cloudSendWait)
-        getStore().patchSession(chatId, { cloudSendWait: undefined });
+      const waitPhase = ready ? "sending" : "starting-workspace";
+      if (fresh?.cloudSendWait?.state !== "waiting" || fresh.cloudSendWait.phase !== waitPhase)
+        getStore().patchSession(chatId, { cloudSendWait: { state: "waiting", phase: waitPhase, turnId: first.bubbleId } });
       return ready;
     };
     cloudSendWaitRef.current.start(chatId, {
@@ -4342,18 +4341,28 @@ export function AgentSessionsProvider({
       readiness,
       observe: subscribeCloudWorkspaces,
       budget: first.waitBudget ??= { elapsedMs: 0 },
-      safetyTimeoutMs: 15 * 60_000 - (performance.now() - startedAt),
+      timeoutMs: 10_000,
+      timeoutError: () => phase === "history"
+        ? new CloudSendWaitError("Couldn't load chat history. Retry to send your message.", "history_unavailable")
+        : new CloudSendWaitError("The agent didn't accept your message in time. Retry to send it.", "queued_timeout"),
+      safetyTimeoutMs: 45_000 - (performance.now() - startedAt),
+      safetyTimeoutError: () => new CloudSendWaitError("The workspace is still starting. Retry when it is ready.", "workspace_start_timeout"),
       attempt: async signal => {
         readiness();
         const preparing = sendQueueRef.current.get(chatId)?.[0];
         if (!preparing?.cloud) return false;
         await prepareForSend(chatId, preparing.wakeIntent ??= { id: crypto.randomUUID() });
         if (signal.aborted || !current()) return false;
-        if (getStore().sessions[chatId]?.transcriptState !== "resident") await hydrateCloudSendRef.current?.(chatId);
+        if (getStore().sessions[chatId]?.transcriptState !== "resident") {
+          phase = "history";
+          await hydrateCloudSendRef.current?.(chatId);
+        }
         if (signal.aborted || !current()) return false;
         let fresh = getStore().sessions[chatId];
         if (!fresh?.agentId) throw new CloudSendWaitError("Choose an agent to send these messages.");
-        if (fresh.transcriptState !== "resident") return false;
+        if (fresh.transcriptState !== "resident")
+          throw new CloudSendWaitError("Couldn't load chat history. Retry to send your message.", "history_unavailable");
+        phase = "admission";
         const env = chatComposerEnv(chatId, fresh.initialize);
         const park = sendAdmissionPark({ hasAgent: true, hasSession: !!fresh.sessionId, status: fresh.status,
           appliedChatEnvKey: fresh.appliedChatEnvKey, expectedEnvKey: env ? chatEnvDriftKey(env) : undefined });
@@ -4412,21 +4421,18 @@ export function AgentSessionsProvider({
         const head = sendQueueRef.current.get(chatId)?.[0];
         if (head && getStore().pendingLocalTurns[chatId] === head.bubbleId) {
           getStore().setPendingLocalTurn(chatId, null);
-          const failed = getStore().sessions[chatId];
-          if (failed) getStore().patchSession(chatId, { activeTurnStartedAt: null,
-            messages: failed.messages.map(m => m.kind === "text" && m.id === head.bubbleId
-              ? { ...m, queuedPresentation: undefined } : m) });
         }
         if (admission && admission.kind !== "waiting" && agentId && head) {
           if (admission.kind === "runtime-upgrade-required") reportCloudAgentRuntimeUpgrade(folder!, agentId);
           else invalidateCloudAgentRegistry(folder!);
         }
-        getStore().patchSession(chatId, { cloudSendWait: { state: "failed", message: redactLogSecrets(
+        getStore().patchSession(chatId, { activeTurnStartedAt: null, cloudSendWait: { state: "failed", turnId: head?.bubbleId, message: redactLogSecrets(
           admission?.message ?? (error instanceof Error ? error.message : "The agent could not become ready. Your messages are still queued."),
         ).slice(0, 1000) }, ...(admission && admission.kind !== "waiting" && agentId && head ? {
           cloudAdmissionFailure: { ...admission, code: String(cloudAdmissionFailureCode(error)), turnId: head.bubbleId, agentId, model },
         } : {}) });
         if (head) notifyAgentSendFailure({ folder, chatId, attemptId: head.queueEntryId ??= head.bubbleId, agentId, model, error,
+          diagnosticAttemptId: head.failureLogId,
           reason: error instanceof CloudWorkspaceWakeEndedError || error instanceof CloudSendWaitError ? error.reason : undefined,
           onRetry: () => retryCloudQueuedPrompt(chatId, head, account, folder) });
       },
@@ -4451,6 +4457,23 @@ export function AgentSessionsProvider({
       // Ready follow-ups prepare silently, without cloudSendWait presentation.
       // Their readiness flight is still cancelled by Stop.
       cloudSendWaitRef.current.cancel(chatId);
+      const undispatched = getStore().sessions[chatId];
+      const pendingSendId = undispatched?.cloudSendWait?.turnId;
+      if (isCloudWorkspace(undispatched?.cwd) && pendingSendId && !sendingChatsRef.current.has(chatId) &&
+          undispatched.status !== "streaming" && !hasBackgroundAgentWork(undispatched) &&
+          sendQueueRef.current.get(chatId)?.some(entry => entry.bubbleId === pendingSendId)) {
+        // No prompt was dispatched. Stop pauses delivery; only explicit Remove
+        // owns deletion. Keep the exact rich payload for an explicit Retry and
+        // fence every late preparation before it can flush.
+        pauseQueue(chatId);
+        getStore().patchSession(chatId, { activeTurnStartedAt: null,
+          cloudSendWait: { state: "failed", turnId: pendingSendId, message: "Stopped before sending. Retry when you're ready." } });
+        const head = sendQueueRef.current.get(chatId)!.find(entry => entry.bubbleId === pendingSendId)!;
+        notifyAgentSendFailure({ folder: undispatched.cwd, chatId, attemptId: head.queueEntryId ?? head.bubbleId,
+          diagnosticAttemptId: head.failureLogId, reason: "user_stopped", agentId: undispatched.agentId });
+        evictUnretainedTranscripts();
+        return;
+      }
       if (getStore().sessions[chatId]?.cloudSendWait) {
         getStore().patchSession(chatId, { cloudSendWait: undefined });
       }
@@ -5105,11 +5128,20 @@ export function AgentSessionsProvider({
 
   const removeQueued = useCallback<SessionsActions["removeQueued"]>(
     (chatId, messageId) => {
+      const current = getStore().sessions[chatId];
+      // The queue also presents a dispatched prompt until its agent accepts it.
+      // Removing that row cannot retire the command or authorize a replacement.
+      if (current?.cloudPromptPending && current.foregroundTurnId === messageId && isCloudWorkspace(current.cwd)) return;
       if (sendQueueRef.current.isSending(chatId, messageId)) return;
       // Drop the pending queued send (by its placeholder bubble id) before
       // it flushes, and remove the greyed bubble from the transcript.
       const q = sendQueueRef.current.get(chatId);
       if (q?.find((e) => e.bubbleId === messageId)?.steerRequest) return;
+      const removedCloudHead = q?.[0]?.cloud && q[0].bubbleId === messageId;
+      if (removedCloudHead) {
+        cloudSendWaitRef.current.cancel(chatId); cloudSendPreparationRef.current.cancel(chatId);
+        getStore().patchSession(chatId, { cloudSendWait: undefined });
+      }
       if (q) {
         const filtered = q.filter((e) => e.bubbleId !== messageId);
         if (filtered.length > 0) sendQueueRef.current.set(chatId, filtered);
@@ -5125,9 +5157,12 @@ export function AgentSessionsProvider({
       if (slot) {
         getStore().patchSession(chatId, {
           messages: slot.messages.filter((m) => m.id !== messageId),
+          ...(isCloudWorkspace(slot.cwd) ? { transcriptState: slot.transcriptState,
+            transcriptPresentation: slot.transcriptPresentation, transcriptDirty: slot.transcriptDirty } : {}),
         });
       }
       evictUnretainedTranscripts();
+      if (removedCloudHead) beginCloudSendWaitRef.current?.(chatId);
     },
     [getStore, evictUnretainedTranscripts],
   );
@@ -5200,6 +5235,8 @@ export function AgentSessionsProvider({
                 }
               : m,
           ),
+          ...(isCloudWorkspace(slot.cwd) ? { transcriptState: slot.transcriptState,
+            transcriptPresentation: slot.transcriptPresentation, transcriptDirty: slot.transcriptDirty } : {}),
         });
       }
     },
@@ -5230,7 +5267,7 @@ export function AgentSessionsProvider({
       let slot = getStore().sessions[chatId];
       if (entry.cloud && slot?.cloudSendWait) {
         if (slot.cloudSendWait.state === "failed") {
-          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; }
+          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; queued.failureLogId = undefined; }
           resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
         }
         return true;
@@ -5698,6 +5735,12 @@ export function AgentSessionsProvider({
         // Local Personal or organization-local: never a cloud-scoped id or a
         // slot bound to a cloud workspace.
         const localChat = !parseCloudScopedId(chatId) && !isCloudWorkspace(slot?.cwd);
+        if (!localChat && !slot?.hasTranscript && !slot?.messages.some(message => message.kind !== "text" || !message.queued) &&
+            consumeFreshCloudChat(chatId, slot?.cwd ?? useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.folder)) {
+          getStore().setSession(chatId, { ...BLANK, ...slot, transcriptState: "resident", hasTranscript: false });
+          pendingHydratesRef.current.delete(chatId);
+          return;
+        }
         // A Local chat this renderer just created has no history to read.
         if (!slot && localChat && takeFreshLocalChat(chatId)) {
           getStore().setSession(chatId, { ...BLANK, transcriptState: "resident" });
@@ -5752,6 +5795,9 @@ export function AgentSessionsProvider({
                   !cached.restoreHead || !cloudHistoryFencesMatch(cached.restoreHead, head))) return;
               const fresh = getStore().sessions[chatId];
               if (!fresh || fresh.transcriptState !== "loading" || fresh.status === "streaming" || fresh.transcriptDirty) return;
+              // A cache may paint a cold slot, but cannot replace a confirmed
+              // or already painted exact-chat snapshot during revalidation.
+              if (fresh.messages.some(message => message.kind !== "text" || !message.queued)) return;
               const deduped = reconcileHistoryMessages(cached.messages);
               const next = [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))];
               getStore().patchSession(chatId, {

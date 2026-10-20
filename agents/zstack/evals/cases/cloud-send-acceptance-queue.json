@@ -1,0 +1,9 @@
+{
+  "id": "cloud-send-acceptance-queue",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pending",
+  "symptom": "Cloud prompts waiting on history, admission or a queued command appeared as running turns; Stop discarded an undispatched message.",
+  "rule": "agents/zstack/changes/cloud-send-acceptance-and-history.md: queue acceptance is not provider acceptance; preserve the payload on Stop, bound readiness and start the clock only on the exact accepted turn.",
+  "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/cloud-send-queue-presentation.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-composer-wake.test.ts apps/desktop/src/renderer/features/agent/__tests__/queue-workflow.test.ts apps/desktop/src/renderer/features/agent/__tests__/queued-edit-submission.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-runtime-upgrade-send.test.ts"
+}

@@ -765,6 +765,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           : patch.sessionId !== undefined
             ? patch.sessionId
             : (existing.executionId ?? existing.sessionId);
+      if (existing.cloudPromptPending && patch.cloudPromptPending === undefined &&
+          (!["streaming", "warming", "reconnecting"].includes(updated.status) || existing.cwd !== updated.cwd || existing.agentId !== updated.agentId ||
+            (existing.executionId ?? existing.sessionId) !== executionId || existing.foregroundTurnId !== updated.foregroundTurnId))
+        updated = { ...updated, cloudPromptPending: false };
       if (
         updated.executionId !== executionId ||
         updated.sessionId !== executionId
@@ -1138,6 +1142,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         (slot.executionId ?? slot.sessionId) !==
           (notification.executionId ?? notification.sessionId) ||
         (pendingTurn && upd.turnId && pendingTurn !== upd.turnId) ||
+        (slot.cloudPromptPending && slot.foregroundTurnId !== upd.turnId) ||
         // Adopted turns have no local prompt RPC. An old completion on the
         // same route cannot settle their successor, even after it finishes.
         (upd.state !== "running" && !pendingTurn && slot.foregroundTurnId && slot.foregroundTurnId !== upd.turnId)
@@ -1156,6 +1161,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           failure: null,
           lastStopReason: null,
           foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
+          ...(slot.cloudPromptPending ? { cloudPromptPending: false } : {}),
           // A local send starts this clock before session admission. Cursor's
           // provider create can acknowledge seconds later; lifecycle updates
           // may refine the start earlier, but must never move it forward and
@@ -1180,6 +1186,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
               lastStopReason:
                 upd.state === "cancelled" ? "cancelled" : (upd.stopReason ?? null),
               foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
+              ...(slot.cloudPromptPending ? { cloudPromptPending: false } : {}),
               activeTurnStartedAt: null,
             },
           },
@@ -1480,6 +1487,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         transcriptDirty: false, pendingPermissions: permissions, pendingPermission: permissions[0] ?? null, pendingQuestions: snapshot.questions,
         status: snapshot.activeTurn || newerPending ? "streaming" : failure ? "failed" : "ready", failure, error: failure?.message ?? null,
         foregroundTurnId: newerPending ? pendingId : snapshot.activeTurn?.turnId ?? terminal?.turnId ?? slot.foregroundTurnId,
+        ...(slot.cloudPromptPending && !newerPending ? { cloudPromptPending: false } : {}),
         activeTurnStartedAt: newerPending ? slot.activeTurnStartedAt : snapshot.activeTurn?.startedAt ?? null,
         lastStopReason: newerPending ? slot.lastStopReason : snapshot.activeTurn ? null : terminal?.stopReason ?? (terminal?.status === "cancelled" ? "cancelled" : null),
       } } };
