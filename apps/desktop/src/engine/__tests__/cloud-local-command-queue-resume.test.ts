@@ -151,6 +151,57 @@ describe("credential-control custody across verified writer replacement", () => 
     return {...f,file,target,unsealed,authorization,snapshot,pendingId,cancelledId,targetNormal,recover};
   }
 
+  it.each([
+    [false, "intact"], [true, "intact"],
+    [false, "operations"], [true, "operations"],
+    [false, "fences"], [true, "fences"],
+    [false, "floors"], [true, "floors"],
+  ] as const)("W2 installed checkpoint replay preserves native custody (prepared=%s, custody=%s)", async (prepared, custody) => {
+    const f = await lostWriter();
+    const first = await f.recover();
+    if (prepared) controls(f.file, f.target, first.predecessor, undefined, {},
+      (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, f.target)).close();
+    if (custody !== "intact") {
+      const table = {
+        operations: "local_credential_control_operations",
+        fences: "local_credential_start_fences",
+        floors: "local_credential_retirement_floors",
+      }[custody];
+      const db = openSqlite(f.file);
+      try { expect(db.prepare(`DELETE FROM ${table}`).run().changes).toBeGreaterThan(0); }
+      finally { db.close(); }
+    }
+    if (custody === "intact") await expect(f.recover()).resolves.toHaveProperty("predecessor");
+    else await expect(f.recover()).rejects.toMatchObject({ code: "checkpoint_inventory_hash" });
+  });
+
+  it.each([false, true])("rejects altered native ACK bytes with unchanged row counts (prepared=%s)", async prepared => {
+    const f = await lostWriter(), first = await f.recover();
+    if (prepared) controls(f.file, f.target, first.predecessor, undefined, {},
+      (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, f.target)).close();
+    const db = openSqlite(f.file);
+    try { expect(db.prepare("UPDATE local_credential_control_operations SET ack_bytes='altered' WHERE ack_bytes IS NOT NULL").run().changes).toBeGreaterThan(0); }
+    finally { db.close(); }
+    await expect(f.recover()).rejects.toMatchObject({ code: "checkpoint_inventory_hash" });
+  });
+
+  it("requires the original prepared retained digest on installed snapshot replay", async () => {
+    const f = await lostWriter(), first = await f.recover();
+    controls(f.file, f.target, first.predecessor, undefined, {},
+      (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, f.target)).close();
+    const db = openSqlite(f.file);
+    try {
+      const row = db.prepare("SELECT document FROM local_command_history_recovery_prepares WHERE writer_epoch=?")
+        .get(f.target.writerEpoch) as { document: string };
+      const document = JSON.parse(row.document);
+      expect(document.retainedSha256).not.toBe("0".repeat(64));
+      document.retainedSha256 = "0".repeat(64);
+      expect(db.prepare("UPDATE local_command_history_recovery_prepares SET document=? WHERE writer_epoch=?")
+        .run(canonical(document), f.target.writerEpoch).changes).toBe(1);
+    } finally { db.close(); }
+    await expect(f.recover()).rejects.toMatchObject({ code: "checkpoint_inventory_hash" });
+  });
+
   it("restores only CP history after owner discard, retaining deletes, gaps, null-actor receipts and accepted IDs",async()=>{
     const f=await lostWriter(), recovered=await f.recover(), db=openSqlite(f.file,{readonly:true});
     try {

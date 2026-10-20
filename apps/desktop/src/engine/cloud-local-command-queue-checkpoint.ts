@@ -640,7 +640,8 @@ function recoveryInventory(db: Sqlite.Database, deadline = inventoryDeadline()):
 
 /** The older sealed file proves a floor. It must not replace newer FULL
  * identities, accepted ACKs, delete/edit heads or credential tombstones. */
-function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Database, deadline: number): void {
+function verifyRecoveryBaselineRows(ledger: Sqlite.Database, baseline: Sqlite.Database, deadline: number,
+  exactCredentials = false): void {
   const stableRows = [
     ["local_commands", "id", "id,conversation_id,writer_epoch,generation,user_message_id,agent_id,created_at"],
     ["local_command_operations", "id", "*"],
@@ -656,6 +657,14 @@ function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Databa
     checkInventoryDeadline(deadline);
     if (!hasTable(baseline, table)) continue;
     if (!hasTable(ledger, table)) invalid("checkpoint_inventory_hash");
+    // An owner-discard snapshot imports no native credential evidence. Before
+    // activation these rows must still be exactly the acknowledged ancestor's,
+    // including after the credential namespace has been prepared.
+    if (exactCredentials && table.startsWith("local_credential_")) {
+      const count = (db: Sqlite.Database) => (db.prepare(`SELECT count(*) n FROM ${table}`).get() as { n: number }).n;
+      if (count(ledger) !== count(baseline)) invalid("checkpoint_inventory_hash");
+      checkInventoryDeadline(deadline);
+    }
     for (let offset = 0;; offset += 64) {
       checkInventoryDeadline(deadline);
       const old = baseline.prepare(`SELECT ${columns} FROM ${table} ORDER BY ${keys} LIMIT 64 OFFSET ?`).all(offset) as Record<string, unknown>[];
@@ -674,6 +683,11 @@ function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Databa
       }
     }
   }
+  checkInventoryDeadline(deadline);
+}
+
+function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Database, deadline: number): void {
+  verifyRecoveryBaselineRows(ledger, baseline, deadline);
   for (const raw of recoveryRows(baseline, "local_command_history_heads", "conversation_id", deadline)) {
     const row = raw as { conversation_id: string; restore_revision: number; document: string };
     checkInventoryDeadline(deadline);
@@ -913,13 +927,13 @@ async function recoverCheckpointOnlyLedger(input: {
   const current=()=>{input.assertCurrent!();checkInventoryDeadline(deadline);}, file=path.resolve(input.file), parent=path.dirname(file);
   const parsed=parseCheckpointHistory(authorization,current);
   if (!parsed.origins.some(item=>isDeepStrictEqual(item.scope,verified.manifest.seal.scope))) invalid("checkpoint_writer_scope");
+  const transcript=verifiedTranscriptPairs.get(verified);
+  if(!transcript) invalid("checkpoint_restore_identity");
   current();
   if (await absentRecoveryLedger(file)) {
     current(); await fs.mkdir(parent,{recursive:true,mode:0o700}); current(); await directory(parent); current();
     const temporary=path.join(parent,`.checkpoint-history-${randomUUID()}`);
     try {
-      const transcript=verifiedTranscriptPairs.get(verified);
-      if(!transcript) invalid("checkpoint_restore_identity");
       unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger);
       const baseline=openSqlite(verified.ledgerFile,{readonly:true,fileMustExist:true});
       let baselineInventory:string;
@@ -964,31 +978,44 @@ async function recoverCheckpointOnlyLedger(input: {
   try {
     const db=openSqlite(file,{readonly:true,fileMustExist:true});
     try {
-      const state=db.transaction(()=>{
-        const snapshot=verifyCheckpointHistoryImport(db,authorization,current);
-        const writer=recoveryScope(db,"local_command_metadata","writer");
-        const credentialScope=hasTable(db,"local_credential_control_metadata")?
-          recoveryScope(db,"local_credential_control_metadata","scope"):verified.manifest.seal.scope;
-        for(const scope of [writer,credentialScope]) {
-          if(isDeepStrictEqual(scope,verified.manifest.seal.scope)) continue;
-          const prepare=storedRecoveryPrepare(db,scope.writerEpoch);
-          if(!sameRecoveryTarget(authorization,scope) || prepare.recoveryId!==authorization.recoveryId ||
-            !isDeepStrictEqual(prepare.scope,scope) || prepare.checkpointOnly?.sha256!==authorization.checkpointOnly!.sha256)
-            invalid("checkpoint_writer_scope");
-        }
-        verifyRecoveryHistoryFences(db,deadline);
-        const bounds={recordSequence:Math.max(verified.manifest.seal.recordSequence,...snapshot.origins.map(item=>item.recordSequence)),
-          eventSequence:Math.max(verified.manifest.seal.eventSequence,...snapshot.origins.map(item=>item.eventSequence))};
-        return {credentialScope:Object.freeze({...credentialScope}),inventory:recoveryInventory(db,deadline),
-          custody:{retainedSha256:retainedRecoveryFingerprint(db,authorization.predecessor.writerEpoch,deadline),checkpointOnly:{
-            ownerDiscardReceiptId:authorization.checkpointOnly!.ownerDiscardReceiptId,checkpointId:authorization.checkpointOnly!.checkpointId,
-            sha256:authorization.checkpointOnly!.sha256}},
-          history:Object.freeze({scope:Object.freeze({...authorization.predecessor}),...bounds,origins:Object.freeze(snapshot.origins)})};
-      })();
-      if(!stable(before,await handle.stat()) || !stable(before,await fs.lstat(file))) invalid("checkpoint_restore_identity"); current();
-      const predecessor=Object.freeze({scope:state.history.scope});
-      recoveredPredecessors.set(predecessor,{file,dev:before.dev,ino:before.ino,authorization,...state});
-      return {...verified,ledgerFile:file,predecessor};
+      unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger); current();
+      const baseline=openSqlite(verified.ledgerFile,{readonly:true,fileMustExist:true});
+      try {
+        const state=db.transaction(()=>{
+          const snapshot=verifyCheckpointHistoryImport(db,authorization,current);
+          verifyRecoveryBaselineRows(db,baseline,deadline,true);
+          const retainedSha256=retainedRecoveryFingerprint(db,authorization.predecessor.writerEpoch,deadline);
+          const checkpointOnly={ownerDiscardReceiptId:authorization.checkpointOnly!.ownerDiscardReceiptId,
+            checkpointId:authorization.checkpointOnly!.checkpointId,sha256:authorization.checkpointOnly!.sha256};
+          const bounds={recordSequence:Math.max(verified.manifest.seal.recordSequence,...snapshot.origins.map(item=>item.recordSequence)),
+            eventSequence:Math.max(verified.manifest.seal.eventSequence,...snapshot.origins.map(item=>item.eventSequence))};
+          const writer=recoveryScope(db,"local_command_metadata","writer");
+          const credentialScope=hasTable(db,"local_credential_control_metadata")?
+            recoveryScope(db,"local_credential_control_metadata","scope"):verified.manifest.seal.scope;
+          for(const scope of [writer,credentialScope]) {
+            if(isDeepStrictEqual(scope,verified.manifest.seal.scope)) continue;
+            const prepare=storedRecoveryPrepare(db,scope.writerEpoch);
+            if(!sameRecoveryTarget(authorization,scope) || prepare.recoveryId!==authorization.recoveryId ||
+              !isDeepStrictEqual(prepare.scope,scope))
+              invalid("checkpoint_writer_scope");
+            if(!isDeepStrictEqual(prepare.checkpointOnly,checkpointOnly) ||
+              !isDeepStrictEqual(prepare.predecessor,authorization.predecessor) ||
+              !isDeepStrictEqual(prepare.checkpoint,authorization.checkpoint) ||
+              !isDeepStrictEqual(prepare.predecessorRecovery,authorization.predecessorRecovery) ||
+              !isDeepStrictEqual(prepare.history,bounds) || prepare.mirroredSequence!==authorization.mirroredSequence ||
+              prepare.retainedSha256!==retainedSha256) invalid("checkpoint_inventory_hash");
+          }
+          verifyRecoveryHistoryFences(db,deadline);
+          return {credentialScope:Object.freeze({...credentialScope}),inventory:recoveryInventory(db,deadline),
+            custody:{retainedSha256,checkpointOnly},
+            history:Object.freeze({scope:Object.freeze({...authorization.predecessor}),...bounds,origins:Object.freeze(snapshot.origins)})};
+        })();
+        unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger); current();
+        if(!stable(before,await handle.stat()) || !stable(before,await fs.lstat(file))) invalid("checkpoint_restore_identity"); current();
+        const predecessor=Object.freeze({scope:state.history.scope});
+        recoveredPredecessors.set(predecessor,{file,dev:before.dev,ino:before.ino,authorization,...state});
+        return {...verified,ledgerFile:file,predecessor};
+      } finally { baseline.close(); }
     } finally { db.close(); }
   } finally { await handle.close(); }
 }

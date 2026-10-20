@@ -18,3 +18,12 @@ ancestor inventory (including credential ACKs), preserve recovered mutation
 fences through a later unsealed restore, and keep all nested inventory reads on
 one original monotonic deadline. The bug-fix playbook and seeded
 `cloud-owner-discard-missing-history` eval carry the lesson forward.
+
+Review also exposed that an installed snapshot marker proves only the CP
+projection. Replaying it must compare retained native ACKs, start fences and
+retirement floors against the acknowledged ancestor, and compare prepared
+custody against its original retained digest. Recomputing that digest from a
+changed local file would approve the change. Six deletion regressions plus
+unchanged crash-replay, changed-ACK and prepared-digest controls enforce this.
+The protocol file is also an explicit control-plane CI input, covered by the
+existing import-closure test.
