@@ -75,6 +75,10 @@
   live identities strictly, and wait for a complete census across real exits.
   A busy launch wrapper is not command readiness: hold the launch gap, then
   await the actual workload's acknowledgement before testing owner handoff.
+  An empty mutation queue does not prove that a gesture awaiting preview or
+  admission has completed. Hold that earlier boundary and join the original
+  retained gesture before asserting either a save or a refusal; unrelated
+  inspector reads are not evidence that the gesture was admitted.
 - **Shared test helpers:** enumerate and run every direct and transitive importer,
   including callers reached through other fixture helpers, before READY. Keep
   fault injection explicit when replacing a reader: incomplete or unavailable
