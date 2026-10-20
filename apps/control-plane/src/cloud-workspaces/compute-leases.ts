@@ -28,6 +28,7 @@ import { retainCloudDiagnostic, diagnosticStorageFailed, recoverCloudDiagnostic 
 import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
 import { computeLeaseDueAtSql } from "./compute-rechecks.js";
 import { measureLifecyclePhase } from "./lifecycle-timing.js";
+import { ComputeAllocationDependencyError, ComputeAllocationContinuationUnavailable } from "./allocation-waits.js";
 
 export type ManagedComputePolicy = {
   provider: string;
@@ -71,7 +72,10 @@ type Lease = {
   lease_expires_at: Date | null;
   last_error_code: string | null;
 };
-type GenerationScope = Pick<ManagedComputeStart, "workspaceId" | "organizationId" | "generation">;
+type LifecycleAllocationClaim = { workerId: string; attemptCount: number };
+type GenerationScope = Pick<ManagedComputeStart, "workspaceId" | "organizationId" | "generation"> & {
+  intentId?: string; lifecycleClaim?: LifecycleAllocationClaim;
+};
 type Scope = {
   user_id: string;
   billing_epoch: string;
@@ -81,6 +85,8 @@ type Scope = {
   desired_state: string;
   generation: number;
   setup_failure_code: string | null;
+  allocation_dependency_live: boolean;
+  has_allocation_dependency: boolean;
 };
 function failure(code: string, retryable = false): CloudProviderError {
   return new CloudProviderError(
@@ -205,6 +211,13 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       await tx.query<Scope>(
         `SELECT workspace.owner_user_id AS user_id,workspace.current_billing_epoch AS billing_epoch,
       workspace.desired_state,workspace.current_generation AS generation,billing.entitlement_plan,
+      NOT EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_allocation_waits wait
+        WHERE wait.lifecycle_intent_id=$5 AND (wait.state<>'resolved'
+          OR cloud_lifecycle_allocation_wait_status(wait.lifecycle_intent_id) IS DISTINCT FROM 'ready'
+          OR NOT EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents intent WHERE intent.id=wait.lifecycle_intent_id
+            AND intent.state='dispatching' AND intent.lease_owner=$6 AND intent.attempt_count=$7
+            AND intent.lease_expires_at>clock_timestamp()))) AS allocation_dependency_live,
+      EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_allocation_waits wait WHERE wait.lifecycle_intent_id=$5) AS has_allocation_dependency,
       (
         SELECT CASE WHEN setup.state='failed' THEN setup.error_code ELSE NULL END
         FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=workspace.id AND setup.org_id=workspace.org_id
@@ -230,14 +243,18 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           input.organizationId,
           input.generation,
           this.options.workosEnabled,
+          input.intentId ?? null,
+          input.lifecycleClaim?.workerId ?? null,
+          input.lifecycleClaim?.attemptCount ?? null,
         ],
       )
     ).rows[0];
     if (!row) throw failure("compute_scope_unavailable");
+    if (!row.allocation_dependency_live) throw new ComputeAllocationContinuationUnavailable();
     if(row.live&&row.requires_credit&&row.entitlement_plan==='pro')row.live=await computeUserFundingAuthorityLive(tx,row.user_id);
     return row;
   }
-  private async recheckAllocationScope(input: ManagedComputeStart, lease: Lease): Promise<void> {
+  private async recheckAllocationScope(input: ManagedComputeStart & GenerationScope, lease: Lease): Promise<void> {
     await withRetryableSystemTx(this.options.pool, async tx => {
       const scope = await this.readScope(tx, input);
       if (!scope.live || scope.desired_state !== "running" || scope.generation !== input.generation ||
@@ -245,7 +262,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         throw failure("compute_lease_superseded");
       // Read time after the complete fresh scope check, including Pro funding.
       // The original lease deadline is never derived again from mutable state.
-      await this.assertAllocationRetryDeadline(tx, lease);
+      await this.assertAllocationRetryDeadline(tx, lease, scope.has_allocation_dependency ? input : undefined);
     });
   }
   private async prepare(
@@ -281,15 +298,31 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         ).rowCount
       )
         throw failure("compute_lease_superseded");
-      const existing = (
-        await tx.query<Lease>(
-          `SELECT * FROM managed_compute_allocation_leases WHERE workspace_id=$1 AND generation=$2 AND state<>'settled' FOR UPDATE`,
-          [input.workspaceId, input.generation],
+      const existingRows = (
+        await tx.query<Lease & { owner_present: boolean; owner_revision: string;
+          owner_original_generation: number | null; owner_current_generation: number | null }>(
+          // Discover a foreign blocker without locking its monetary row while
+          // holding the workspace. Own claims below are also nonblocking.
+          `SELECT lease.*,owner.workspace_id IS NOT NULL AS owner_present,coalesce(owner.revision,0)::text AS owner_revision,
+            owner.original_generation AS owner_original_generation,owner.current_generation AS owner_current_generation
+           FROM managed_compute_allocation_leases lease
+           LEFT JOIN cloud_workspace_allocation_owners owner ON owner.workspace_id=lease.workspace_id AND owner.org_id=lease.org_id
+             AND owner.provider_resource_id=lease.provider_resource_id
+           WHERE lease.workspace_id=$1 AND lease.org_id=$3 AND coalesce(owner.current_generation,lease.generation)=$2
+             AND lease.state<>'settled' LIMIT 2`,
+          [input.workspaceId, input.generation, input.organizationId],
         )
-      ).rows[0];
+      ).rows;
+      if (existingRows.length > 1) throw failure("compute_credit_conflict");
+      const existing = existingRows[0];
       if (existing) {
         if (existing.lifecycle_intent_id !== input.intentId)
-          throw failure("compute_previous_lease_pending", true);
+          throw new ComputeAllocationDependencyError({ leaseId: existing.id, workspaceId: existing.workspace_id,
+            organizationId: existing.org_id, generation: existing.generation, lifecycleIntentId: existing.lifecycle_intent_id,
+            userId: existing.user_id, billingEpoch: existing.billing_epoch, provider: existing.provider,
+            providerResourceId: existing.provider_resource_id, ownerPresent: existing.owner_present,
+            ownerRevision: existing.owner_revision, ownerOriginalGeneration: existing.owner_original_generation,
+            ownerCurrentGeneration: existing.owner_current_generation });
         if (
           existing.org_id !== input.organizationId ||
           existing.user_id !== scope.user_id ||
@@ -331,7 +364,8 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       const claimed = (await tx.query<Lease>(
         `UPDATE managed_compute_allocation_leases
          SET lease_owner=$2,lease_expires_at=clock_timestamp()+interval '30 minutes'
-         WHERE id=$1 AND state IN ('funding','authorized','active')
+         WHERE id=(SELECT id FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE SKIP LOCKED)
+           AND state IN ('funding','authorized','active')
            AND (lease_owner IS NULL OR lease_expires_at<=clock_timestamp()) RETURNING *`,
         [existing?.id ?? input.intentId, owner],
       )).rows[0];
@@ -339,12 +373,13 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       return claimed;
     }).catch(async (error: unknown) => {
       // The refused start waits for this lease to settle, which a long healthy cadence would otherwise delay.
-      if (error instanceof CloudProviderError && error.code === "compute_previous_lease_pending")
+      if (error instanceof ComputeAllocationDependencyError)
         await withRetryableSystemTx(this.options.pool, (tx) => tx.query(
           `UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()
-        WHERE workspace_id=$1 AND generation=$2 AND state<>'settled'
-          AND lifecycle_intent_id IS DISTINCT FROM $3 AND (next_check_at>clock_timestamp() OR lease_owner IS NOT NULL)`,
-          [input.workspaceId, input.generation, input.intentId],
+        WHERE id=(SELECT id FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE SKIP LOCKED)
+          AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND state<>'settled'
+          AND (next_check_at>clock_timestamp() OR lease_owner IS NOT NULL)`,
+          [error.blocker.leaseId, input.workspaceId, input.organizationId, error.blocker.generation],
         )).catch(() => undefined);
       throw error;
     });
@@ -474,8 +509,11 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     input: ManagedComputeStart,
     provider: CloudWorkspaceProvider,
     current: CloudProviderResource | null,
+    lifecycleClaim?: LifecycleAllocationClaim,
   ): Promise<CloudProviderResource> {
-    const scope = await measureLifecyclePhase("funding", () => this.scope(input));
+    // The lifecycle claim is CP-local custody, never part of provider input.
+    const continuation = { ...input, ...(lifecycleClaim ? { lifecycleClaim } : {}) };
+    const scope = await measureLifecyclePhase("funding", () => this.scope(continuation));
     if (
       !scope.live ||
       scope.desired_state !== "running" ||
@@ -499,7 +537,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       await measureLifecyclePhase("funding", () => this.fund(lease, plan, owner));
       // A lifecycle/ownership change during funding prevents dispatch, while
       // the reservation remains until independent absence/stop evidence.
-      await measureLifecyclePhase("funding", () => this.recheckAllocationScope(input, lease));
+      await measureLifecyclePhase("funding", () => this.recheckAllocationScope(continuation, lease));
       const resource = current
         ? await metered.startWithComputeLease(
             current.resourceId,
@@ -507,7 +545,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           )
         : await metered.createWithComputeLease(input, plan.ttlSeconds);
       assertProviderResourceIdentity(resource, input);
-      await measureLifecyclePhase("postDispatchObservation", () => this.observeRunning(input, provider, resource));
+      await measureLifecyclePhase("postDispatchObservation", () => this.observeRunning(continuation, provider, resource));
       return resource;
     } catch (error) {
       if (
@@ -545,7 +583,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
    * check of the lease unless the caller is that check (`requestCheck: false`),
    * which schedules the next one itself. */
   async observeRunning(
-    input: { workspaceId: string; organizationId: string; generation: number },
+    input: GenerationScope,
     provider: CloudWorkspaceProvider,
     resource: CloudProviderResource,
     { requestCheck = true }: { requestCheck?: boolean } = {},
@@ -638,10 +676,20 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       ).rows[0]!.now.getTime(),
     );
   }
-  private async assertAllocationRetryDeadline(tx: Tx, lease: Lease): Promise<void> {
-    if (lease.provider_expires_at !== null) return;
-    const now = (await tx.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now.getTime();
-    if (now >= lease.requested_at.getTime() + ALLOCATION_RETRY_WINDOW_MS)
+  private async assertAllocationRetryDeadline(tx: Tx, lease: Lease, continuation?: GenerationScope): Promise<void> {
+    if (lease.provider_expires_at !== null && !continuation) return;
+    const row = continuation
+      ? (await tx.query<{ now: Date; live: boolean }>(`SELECT clock_timestamp() AS now,
+          EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_allocation_waits wait
+            JOIN cloud_workspace_lifecycle_intents intent ON intent.id=wait.lifecycle_intent_id
+            WHERE wait.lifecycle_intent_id=$1 AND wait.state='resolved'
+              AND cloud_lifecycle_allocation_wait_status(wait.lifecycle_intent_id)='ready'
+              AND intent.state='dispatching' AND intent.lease_owner=$2 AND intent.attempt_count=$3
+              AND intent.lease_expires_at>clock_timestamp()) AS live`,
+        [continuation.intentId, continuation.lifecycleClaim?.workerId ?? null, continuation.lifecycleClaim?.attemptCount ?? null])).rows[0]!
+      : (await tx.query<{ now: Date; live?: boolean }>("SELECT clock_timestamp() AS now")).rows[0]!;
+    if (continuation && !row.live) throw new ComputeAllocationContinuationUnavailable();
+    if (lease.provider_expires_at === null && row.now.getTime() >= lease.requested_at.getTime() + ALLOCATION_RETRY_WINDOW_MS)
       throw failure("compute_allocation_retry_expired");
   }
 
@@ -1329,7 +1377,9 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       await tx.query(
         `UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=clock_timestamp(),updated_at=now()
         WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND operation IN ('create','wake')
-          AND state='observing' AND error_code='compute_previous_lease_pending' AND next_attempt_at>clock_timestamp()`,
+          AND state='observing' AND error_code='compute_previous_lease_pending' AND next_attempt_at>clock_timestamp()
+          AND NOT EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_allocation_waits wait
+            WHERE wait.lifecycle_intent_id=cloud_workspace_lifecycle_intents.id AND wait.state='pending')`,
         [lease.workspace_id, lease.org_id, lease.generation],
       );
     });
