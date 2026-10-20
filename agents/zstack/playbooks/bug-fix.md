@@ -69,6 +69,12 @@
    For resume bugs, test a real sealed store across fresh engine/writer identities;
    a fresh database cannot expose inherited fences. Require authenticated
    predecessor custody for any atomic scope migration and retain old ACKs.
+   For populated checkpoint inventories, inject monotonic time at real SQLite
+   reads: cold reads beyond 100 ms must not invalidate a valid proof. Bound the
+   whole synchronous proof, share its deadline across nested scans, and check
+   empty/final pages. Assert each intended delayed stage actually ran. Distinguish
+   native startup failure from the later readiness timeout; registration without
+   renewal alone does not prove heartbeat refusal.
    Exercise the actual history rebuild across controls, queue and CP activation
    crash points. Prepared namespaces need fresh CP custody; verify latest heads
    against immutable edit/delete and terminal receipts before issuing new proof.
