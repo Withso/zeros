@@ -2,7 +2,7 @@
   "id": "design-completed-nudge-smoke",
   "kind": "scenario",
   "area": "renderer-ui",
-  "fixedBy": "pending",
+  "fixedBy": "pr:663",
   "symptom": "The completed Design keyboard nudge smoke checks for one transaction while its iframe preview acknowledgement is still pending. A Foundation inspector read is present, but the submitted-mutation queue is empty and the smoke observes zero writes.",
   "rule": "playbooks/ci-red.md: hold the earlier acknowledgement and await the original retained gesture, including refusal and cleanup, before asserting exact save counts. The real-browser scenario retains three exact-one positives and four exact-zero directory/page/physical-runtime replacement controls. Test-only synchronization needs the held-acknowledgement schedule; an idle pass or a fixed-test overlay onto the parent is not regression evidence.",
   "check": "pnpm test:ui-smoke --shard=2/3"
