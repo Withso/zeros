@@ -259,6 +259,11 @@
    allocation adoption. An engine-failure reason on a compute-produced Stop
    does not cover an engine-health Stop key. Keep expired undelivered capture,
    undispatched intent, exact allocation and live-engine refusal controls.
+   For a repair that admits already accepted work, drain its earlier blocked
+   job before committing the repair, then drive the real queue claim, handler
+   and completion. Calling the handler directly hides a missing durable wake.
+   Replay already committed repairs across the migration and preserve exact
+   receipt scope, retry clocks, leases and terminal outcomes during backfill.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

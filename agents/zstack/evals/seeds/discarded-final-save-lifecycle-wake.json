@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/migrations/0179_cloud_discarded_lifecycle_jobs.sql",
+  "before": "ELSIF NEW.state IN ('proven','discarded') THEN",
+  "after": "ELSIF NEW.state='proven' THEN"
+}

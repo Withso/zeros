@@ -1,0 +1,9 @@
+{
+  "id": "discarded-final-save-lifecycle-wake",
+  "kind": "seeded",
+  "area": "control-plane-workers",
+  "fixedBy": "pending",
+  "symptom": "An accepted Delete remained queued after its exact owner-loss receipt committed because its blocked lifecycle job had already drained and discarded recovery scheduled no lifecycle wake.",
+  "rule": "Drain the blocked job, commit the actual repair, and drive durable queue claim, handler and completion. Backfill only active exact receipts, retaining source facts and retry clocks. See playbooks/bug-fix.md.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/owner-discard-lifecycle-jobs.integration.test.ts"
+}

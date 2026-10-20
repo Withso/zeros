@@ -160,6 +160,7 @@ END $$;`],
   cloud_final_save_dispatchable(uuid),require_cloud_unstarted_candidate_retirement() FROM PUBLIC;`],
   },
   "0178_cloud_owner_existing_delete.sql": {},
+  "0179_cloud_discarded_lifecycle_jobs.sql": {},
   "0177_cloud_owner_discard_delete.sql": {
     "new-table-privileges": ["REVOKE ALL ON cloud_workspace_owner_delete_receipts,cloud_workspace_owner_delete_dispositions FROM PUBLIC,zeros_app;"],
     "truncate-guard": [
@@ -247,6 +248,9 @@ const providerRecoveryEvidenceDigest = "e5f93ac17017bc01286ac0e856530ed299bfb030
 const authorityDigest = "797f837c345244da5af77d503614c9ddf3abb03048998a0081b98a3c2512ab30";
 const deletedBootPointerDigest = "9cff55a9f31819e2468f331b64d2ba978b0e1dd2bdb39d332dad892fe49fc562";
 const authorityCacheExemptionDigest = "414aa4d5653660ef6eee4300d1e52889ba36e9ca26f325c12b574ad4b0ad86b7";
+// Adds a transactional lifecycle hint for discarded recovery; claim authority
+// and every other recovery scheduling branch remain unchanged.
+const discardedLifecycleWakeDigest = "deaa3d1498f4aa79f0171db113a93e8bf512dff322802b358302f1f5542edb38";
 // New recovery metadata is erased only after the existing request erasure is
 // authorized. The replacement purge predicate retains the existing fences and
 // additionally refuses unsaved recoveries or unresolved provider dispatches.
@@ -388,7 +392,9 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
       (file === "0177_cloud_owner_discard_delete.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerDeleteDigests[rule]) ||
       (file === "0178_cloud_owner_existing_delete.sql" &&
-        createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]);
+        createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]) ||
+      (rule === "discarded-lifecycle-wake" && file === "0179_cloud_discarded_lifecycle_jobs.sql" &&
+        createHash("sha256").update(statement).digest("hex") === discardedLifecycleWakeDigest);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

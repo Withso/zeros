@@ -229,7 +229,7 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
 
 | Kind | Job kind | Dedupe key | Enqueued by (trigger on) | Handler, scoped to the job's workspace |
 | --- | --- | --- | --- | --- |
-| `lifecycle` | `cloud_lifecycle_intent` | `workspace:<id>` | intents (`next_attempt_at`, dispatch lease, leaving the active states), checkpoint requests, local-to-cloud forks, exact allocation wait publication/settlement and scope invalidation | fenced `claimIntent` + dispatch |
+| `lifecycle` | `cloud_lifecycle_intent` | `workspace:<id>` | intents (`next_attempt_at`, dispatch lease, leaving the active states), checkpoint requests, proven or owner-discarded final-save recovery, local-to-cloud forks, exact allocation wait publication/settlement and scope invalidation | fenced `claimIntent` + dispatch |
 | `paidAuthority` | `cloud_paid_authority_check` | `workspace:<id>` | `cloud_workspace_paid_authority_checks.next_check_at` | `DatabaseCloudWorkspacePaidAuthorityReconciler.runOnce` |
 | `engineHealth` | `cloud_engine_health` | `workspace:<id>` | engine enrollment, state or revocation change, shortened lease; workspace becoming running and ready or busy, or a new generation; an intent leaving the active states | `stopUnavailableCloudEngine` |
 | `compute` | `cloud_compute_lease` | `workspace:<id>` | allocation lease state, check time or lease; runtime transition phase or deadlines | `CloudWorkspaceComputeLeaseCoordinator.runOnce` |
@@ -344,6 +344,14 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   `SECURITY INVOKER` functions satisfy the queue's `system_only` policy.
   They keep PostgreSQL's default `PUBLIC` execute grant, which admits
   nothing: every table they write accepts only system context.
+- **Owner discard wakes the existing intent.** `0179_cloud_discarded_lifecycle_jobs.sql`
+  queues lifecycle work when final-save recovery becomes `discarded`, in the
+  same transaction as the receipt. The earlier blocked job can already have
+  drained; recovery at `infinity` cannot wake the lifecycle worker. The migration
+  backfills only active Deletes with a current exact existing-Delete receipt.
+  It preserves intent retry clocks, leases, source facts and provider proof.
+  A hint grants no dispatch authority; early jobs recheck and reschedule through
+  the ordinary worker. The hourly audit remains a fallback for lost jobs.
 - **`run_at` is a lower bound.** A trigger never schedules later than the
   real due time. A job that runs early claims nothing, and the handler then
   reschedules it at the exact next due time from the same per-kind query the
