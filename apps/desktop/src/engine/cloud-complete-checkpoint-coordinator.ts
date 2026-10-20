@@ -1,28 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { CloudDurabilityAuthority } from "./cloud-durability-runtime";
-
-const sequence = z.number().int().nonnegative().safe();
-const digest = z.string().regex(/^[a-f0-9]{64}$/);
-const sourceSchema = z.object({
-  organizationId: z.string().uuid(), workspaceId: z.string().uuid(),
-  generation: z.number().int().positive().safe(), engineInstanceId: z.string().uuid(),
-  writerEpoch: z.string().uuid(), scopeRevision: z.number().int().positive().safe(),
-  scopeSha256: digest, changeSequence: sequence, reconcileSequence: sequence,
-}).strict();
-export type CompleteCheckpointSource = z.infer<typeof sourceSchema>;
-
-const attemptSchema = z.object({
-  id: z.string().uuid(), source: sourceSchema, startedAtMs: sequence, deadlineAtMs: sequence,
-}).strict().refine(value => value.deadlineAtMs > value.startedAtMs);
-export type CompleteCheckpointAttempt = z.infer<typeof attemptSchema>;
-
-const receiptSchema = z.object({
-  version: z.literal(1), kind: z.literal("complete-periodic"), attemptId: z.string().uuid(),
-  source: sourceSchema, manifestSha256: digest, inventorySha256: digest, nativeExportSha256: digest,
-  cutAtMs: sequence, ackAtMs: sequence,
-}).strict().refine(value => value.cutAtMs <= value.ackAtMs);
-export type CompleteCheckpointReceipt = z.infer<typeof receiptSchema>;
+import {
+  CompleteCheckpointSourceSchema as sourceSchema, CompleteCheckpointAttemptSchema as attemptSchema,
+  CompleteCheckpointReceiptSchema as receiptSchema, CompleteCheckpointJournalReadSchema as journalReadSchema,
+  CompleteCheckpointJournalStateSchema as journalStateSchema,
+  completeCheckpointScopeKey as scopeKey, sameCompleteCheckpointSource as sameSource,
+  type CompleteCheckpointSource, type CompleteCheckpointAttempt, type CompleteCheckpointReceipt,
+  type CompleteCheckpointJournalState,
+} from "./cloud-complete-checkpoint-contract";
+export type {
+  CompleteCheckpointSource, CompleteCheckpointAttempt, CompleteCheckpointReceipt, CompleteCheckpointJournalState,
+} from "./cloud-complete-checkpoint-contract";
 
 const failureSchema = z.enum([
   "capture_failed", "coverage_unknown", "admission_deferred", "clock_invalid", "deadline",
@@ -37,13 +26,6 @@ const outcomeSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("committed"), retirement: z.literal("confirmed"), receipt: z.unknown() }).strict(),
   z.object({ status: z.literal("failed"), retirement: z.literal("confirmed"), reason: failureSchema }).strict(),
 ]);
-
-const journalStateSchema = z.object({
-  version: z.literal(1), source: sourceSchema, pending: attemptSchema.nullable(),
-  lastComplete: receiptSchema.nullable(), lastStartedAtMs: sequence.nullable(), retryAtMs: sequence.nullable(),
-}).strict();
-export type CompleteCheckpointJournalState = z.infer<typeof journalStateSchema>;
-const journalReadSchema = z.object({ revision: sequence, state: journalStateSchema.nullable() }).strict();
 
 // These are timer representability bounds, not measured production budgets.
 // Every policy value is mandatory; enrollment must supply qualified numbers.
@@ -89,12 +71,6 @@ export type CompleteCheckpointOptions = {
 type Dirty = { first: number; last: number; known: boolean };
 type Clock = { wall: number; mono: number };
 type Running = { attempt: CompleteCheckpointAttempt; start: Clock; controller: AbortController; after: Dirty | null };
-const scopeKey = (source: CompleteCheckpointSource) => JSON.stringify([
-  source.organizationId, source.workspaceId, source.generation, source.engineInstanceId,
-  source.writerEpoch, source.scopeRevision, source.scopeSha256,
-]);
-const sameSource = (a: CompleteCheckpointSource, b: CompleteCheckpointSource) => scopeKey(a) === scopeKey(b)
-  && a.changeSequence === b.changeSequence && a.reconcileSequence === b.reconcileSequence;
 const matchesAuthority = (source: CompleteCheckpointSource, authority: CloudDurabilityAuthority) =>
   source.organizationId === authority.organizationId && source.workspaceId === authority.workspaceId
   && source.generation === authority.generation && source.engineInstanceId === authority.engineInstanceId;

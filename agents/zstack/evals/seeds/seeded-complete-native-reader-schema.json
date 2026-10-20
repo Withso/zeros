@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/cloud-complete-checkpoint-native.ts",
+  "before": "        validatePeriodicNativeRow(entry.database, entry.table, entry.values);\n",
+  "after": "        // Seeded missing inert-row schema check.\n"
+}

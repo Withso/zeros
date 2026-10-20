@@ -1,0 +1,9 @@
+{
+  "id": "seeded-complete-cut-retirement-order",
+  "kind": "seeded",
+  "area": "cloud checkpoint durability",
+  "fixedBy": "pr:642",
+  "symptom": "Periodic semantic export or private transfer starts while original all-writer cut retirement is still pending.",
+  "rule": "Join positive original thaw before semantic export or network IO, retain immutable references, and recheck selection after all retirement IO.",
+  "check": "pnpm test:git apps/desktop/src/engine/__tests__/cloud-complete-checkpoint-adapter.test.ts"
+}

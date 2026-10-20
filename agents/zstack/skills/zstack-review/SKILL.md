@@ -26,6 +26,13 @@ failing input, or a reproduction. Drop anything you can't substantiate.
 - File checks open the file once (`O_NOFOLLOW`) and validate that descriptor.
   Never `stat` a path and then read it by path; CodeQL flags this even in
   tests.
+  If a native library opens independently, bind its actual reader to the held
+  original. Test swap-and-restore at that open, cached descriptor reuse masked
+  by an unrelated open, and cleanup on ambiguous evidence; a pathname or a
+  unique newly observed FD alone is not that proof.
+  On Linux, closing an independent ordinary FD can release a peer SQLite
+  connection's process locks. Verify kernel locks and second-process exclusion
+  through refusal and successful close; `inTransaction` alone is insufficient.
 - Authentication changes don't relax a check that ordinary users rely on. A
   test-only path stays gated, pinned, audited and absent on other channels.
 - SQL is parameterized and RLS context is transaction-local.

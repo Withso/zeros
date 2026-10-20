@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/cloud-complete-checkpoint-adapter.ts",
+  "before": "        await retire(cutOp); cutOp.verify(); guard();\n",
+  "after": "        cutOp.verify(); guard();\n"
+}
