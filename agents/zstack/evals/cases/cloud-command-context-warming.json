@@ -1,0 +1,9 @@
+{
+  "id": "cloud-command-context-warming",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pr:647",
+  "symptom": "Cloud follow-up commands remained queued indefinitely after a context warm failed or its proof expired, because discovery retained an inactive interest and dispatch only checked the cache.",
+  "rule": "An eligible command owns bounded asynchronous context warming and a terminal failure budget. Share existing flights, preserve exact actor and claim identity, and never reset the deadline on reads or fetch inside a FULL transaction.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-queue-boot.test.ts"
+}

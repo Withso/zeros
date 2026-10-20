@@ -79,9 +79,10 @@ type Options = { file: string; scope: CloudLocalCommandWriter; actors: ActorAuth
   captureHistory?(input: { scope: Readonly<CloudLocalCommandWriter>; conversationId: string;
     source: CloudLocalCommandHistorySource; nativeResult: unknown; restoreRevision: number;
     eventSequence: number; claimId: string | null }): CloudLocalCommandHistoryCapture;
-  /** Only checks already confirmed cached authority/material. It cannot fetch
-   * on Send. A desired-but-unready revision parks the queued intent. */
-  ready(payload: CloudBootCommandClaim["payload"], actor: ActorProvenance, conversationId: string): boolean;
+  /** Checks cached authority/material. A cold context may schedule background
+   * warming, but cannot fetch inside this FULL transaction. The exact queued
+   * command owns the wait budget; reads cannot restart it. */
+  ready(payload: CloudBootCommandClaim["payload"], actor: ActorProvenance, conversationId: string, commandId: string): boolean;
   /** Synchronous, engine-owned selection before the FULL dispatch marker.
    * A paused or unready source parks the intent without a native reservation. */
   selectExecution?(input: { commandId: string; claimId: string; conversationId: string;
@@ -100,7 +101,7 @@ type Options = { file: string; scope: CloudLocalCommandWriter; actors: ActorAuth
   /** Called after a commit that appended turn journal entries. */
   turnJournalChanged?(): void;
   /** Runs only after committed changes to the durable pending actor holds. */
-  pendingActorsChanged?(): void;
+  pendingActorsChanged?(snapshot?: CloudBootCommandSnapshot): void;
   now?(): number; limits?: Partial<Limits> };
 
 /** At-most-once dispatch within an immutable, CP-negotiated boot writer.
@@ -333,7 +334,7 @@ export class CloudLocalCommandQueue {
     if (value.kind === "claim") return this.claim(value);
     if (value.kind === "settle") {
       const result = this.settle(value.result);
-      this.options.pendingActorsChanged?.();
+      this.options.pendingActorsChanged?.(result);
       return result;
     }
     if (value.kind === "confirm-goal") return this.confirmGoal(value);
@@ -354,13 +355,13 @@ export class CloudLocalCommandQueue {
     const actor = this.actor(context.actorSessionId,request.kind === "mutate" && request.mutation.action.kind === "edit" ? "edit" : "run");
     if (request.kind === "stop") {
       const result = this.stop(request.conversationId,request.operationId,actor);
-      this.options.pendingActorsChanged?.();
+      this.options.pendingActorsChanged?.(result);
       return result;
     }
     if (value.kind !== "mutate" || ![null,"command_context_changed","command_not_found"].includes(value.admissionError))
       throw new CloudCommandRuntimeError("invalid_command");
     const result = this.mutate(request.mutation,actor,value.admissionError);
-    this.options.pendingActorsChanged?.();
+    this.options.pendingActorsChanged?.(result);
     return result;
   }
 
@@ -559,7 +560,7 @@ export class CloudLocalCommandQueue {
       let principal: CloudAuthorizedActor | null = null;
       if (!accepted) try { principal = this.options.actors.reauthorizeRecorded(provenance,"run"); } catch { /* cancelled claim below */ }
       const authorized = principal !== null;
-      if (authorized && !this.options.ready(JSON.parse(row.payload!),provenance,row.conversation_id)) return null;
+      if (authorized && !this.options.ready(JSON.parse(row.payload!),provenance,row.conversation_id,row.id)) return null;
       if (!this.journalCapacity(false)) return null;
       const claimId = input.claimId ?? randomUUID();
       const selected = work ? this.options.accepted!.selectExecution({ commandId: row.id, claimId,
