@@ -58,6 +58,8 @@ const ALLOWED: Record<string, string> = {
     "Operator CLI; beginProviderAttestation sets app.system in its own transaction.",
   "src/manage-cloud-owner-checkpoint-recovery.ts#manageCloudOwnerCheckpointRecovery":
     "Owner-only CLI; sets app.system in its own transaction before table access and retains the migration-owner role for the discard receipt.",
+  "src/manage-cloud-owner-discard-delete.ts#manageCloudOwnerDiscardDelete":
+    "Owner-only CLI; sets app.system in its own transaction and requires the migration owner for one exact complete-loss Delete receipt.",
   "src/manage-cloud-rollout-flag.ts#manageCloudRolloutFlag":
     "Operator CLI on the migration-owner pool; sets app.system in its own transaction.",
   "src/manage-cloud-workspace-deletion.ts#manageCloudWorkspaceDeletion":

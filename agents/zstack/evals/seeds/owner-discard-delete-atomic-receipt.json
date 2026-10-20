@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/migrations/0177_cloud_owner_discard_delete.sql",
+  "before": "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION require_cloud_owner_delete_atomic();",
+  "after": "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (false) EXECUTE FUNCTION require_cloud_owner_delete_atomic();"
+}

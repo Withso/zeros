@@ -1,0 +1,9 @@
+{
+  "id": "owner-discard-delete-atomic-receipt",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pending",
+  "symptom": "A complete-loss receipt committed without its exact Delete and dispositions would leave recovery abandoned without the normal deletion operation that the owner authorized.",
+  "rule": "Require loss disposition and normal Delete to commit atomically under source locks; prove rollback with a valid raw receipt and preserve application-role dispatch and physical-erasure guards.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/manage-cloud-owner-discard-delete-atomic.integration.test.ts"
+}

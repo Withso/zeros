@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/migrations/0177_cloud_owner_discard_delete.sql",
+  "before": "SELECT cloud_final_save_proven(target_intent_id) OR cloud_unstarted_candidate_current(target_intent_id) OR cloud_owner_delete_current(target_intent_id)",
+  "after": "SELECT cloud_final_save_proven(target_intent_id) OR cloud_unstarted_candidate_current(target_intent_id)"
+}
