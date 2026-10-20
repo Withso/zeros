@@ -226,7 +226,13 @@ A cloud read joins bounded discovery and rechecks lifetime after waiting. Cursor
 ID-only startup stays independent of catalog completion. Grok registry selections
 join that same bounded discovery before create/resume: the account's complete
 default variant supplies required parameters, and explicit empty schemas never
-inherit guessed effort/Fast fields. Recheck the original Local account or cloud
+inherit guessed effort/Fast fields. Cursor discovery has one shared 20-second
+budget, including one retry after 500 ms for a transient connection failure.
+The retry uses the original account and shows a quiet reconnect notice; an
+exhausted read remains a recoverable connection failure and preserves the saved
+conversation and model. A successful catalog missing the schema remains an
+account/model refusal. Authentication, throttling and malformed responses do not
+automatically retry. Recheck the original Local account or cloud
 lifetime after the wait. A missing registry schema marks the live model unavailable
 and refuses the attempt with an action to
 choose another model; it neither guesses parameters nor swaps the requested
