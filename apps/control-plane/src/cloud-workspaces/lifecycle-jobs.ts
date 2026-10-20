@@ -29,7 +29,7 @@ export function lifecycleWorkForJob(kind: string): LifecycleWork | null { return
 // are the running and settled-stopped drift intervals in ms.
 const DUE: Record<LifecycleWork, string> = {
   finalSave: `SELECT workspace_id,org_id,next_attempt_at AS due_at FROM cloud_workspace_final_save_recoveries
-    WHERE ($scope::uuid IS NULL OR workspace_id=$scope) AND state NOT IN ('proven','resolved')`,
+    WHERE ($scope::uuid IS NULL OR workspace_id=$scope) AND state NOT IN ('proven','resolved','discarded')`,
   lifecycle: `
     SELECT i.workspace_id, i.org_id, greatest(i.next_attempt_at,
       CASE WHEN i.state='dispatching' THEN i.lease_expires_at END,

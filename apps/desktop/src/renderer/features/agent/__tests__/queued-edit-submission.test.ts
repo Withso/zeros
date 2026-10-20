@@ -43,7 +43,10 @@ function fixture() {
     queueSelectedRef: { current: "queued-1" },
     queueSaveInFlightRef: { current: false },
     queueEditGenerationRef: { current: 0 },
-    queuedMessages: [{ id: "queued-1" }, { id: "queued-2" }],
+    queuedMessages: [{ id: "queued-1" }, { id: "queued-2" }] as Array<{
+      id: string;
+      queuedDelivery?: "sending" | "unconfirmed";
+    }>,
     serializeComposerState: () => structuredClone(draft),
     isSubmittedComposerDocument,
     browserPickerSelection: null,
@@ -82,6 +85,28 @@ function fixture() {
 }
 
 describe("saving a queued edit before Send now", () => {
+  it.each(["sending", "unconfirmed"] as const)(
+    "keeps a %s command owned when keyboard Remove bypasses its disabled button",
+    (queuedDelivery) => {
+      const f = fixture();
+      f.queuedMessages[0].queuedDelivery = queuedDelivery;
+      f.deleteQueued("queued-1");
+      expect(f.session.removeQueued).not.toHaveBeenCalled();
+      expect(f.exitQueuedEdit).not.toHaveBeenCalled();
+      expect(f.setQueueSelectedId).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not repeat a pending command through keyboard Send now", async () => {
+    const f = fixture();
+    f.queuedMessages[0].queuedDelivery = "sending";
+    await f.sendNowQueued("queued-1");
+    expect(f.session.editQueued).not.toHaveBeenCalled();
+    expect(f.session.steerQueued).not.toHaveBeenCalled();
+    expect(f.session.releaseQueue).not.toHaveBeenCalled();
+    expect(f.toast.error).not.toHaveBeenCalled();
+  });
+
   it("removes the edited message before releasing an idle queue", () => {
     const f = fixture();
     const pending = new Set(["queued-1", "queued-2"]);

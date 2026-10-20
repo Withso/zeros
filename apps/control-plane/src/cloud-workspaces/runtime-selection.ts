@@ -90,6 +90,11 @@ export function runtimeCredentialQualificationJoin(mode: string, requireMcp: str
         engine.runtime_base_compatibility_id,engine.runtime_profile,engine.runtime_engine_protocol_version)
         = ROW(generation.runtime_id,generation.runtime_manifest_sha256,generation.runtime_base_image_id,
           generation.runtime_base_compatibility_id,generation.runtime_profile,generation.runtime_engine_protocol_version)
+    -- Keep this lookup parameterized by the already selected generation and
+    -- credential. Flattening the lateral join can scan the entire historical
+    -- registry before it filters the one runtime. Existing primary keys cover
+    -- the exact lookup; no authority predicate or row is omitted.
+    OFFSET 0
   ) qualification ON true`;
 }
 

@@ -8,6 +8,7 @@ import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "..
 import { isSubmittedComposerDocument } from "../composer-submission";
 import * as lifecycle from "../session-reload-lifecycle";
 import * as retention from "../transcript-retention";
+import { BLANK, useSessionsStore } from "../sessions-store";
 import { SendQueue } from "../send-queue";
 import { CloudSendWait, CloudSendWaitError } from "../cloud-send-wait";
 import { CloudSendPreparation } from "../cloud-send-preparation";
@@ -94,14 +95,14 @@ function harness(cloud = true, status = "stopped", resident = true) {
       store.sessions.chat.messages = store.sessions.chat.messages.map((m: any) => m.id === id ? { ...m, queued: false } : m);
     } },
     chatComposerEnv: () => undefined, chatEnvDriftKey: () => "", CloudSendWaitError, CloudWorkspaceWakeEndedError, isRecoverable,
-    ControlPlaneError: class extends Error {}, classifyCloudAdmissionFailure, cloudAdmissionFailureCode, performance,
+    ControlPlaneError: class extends Error {}, classifyCloudAdmissionFailure, cloudAdmissionFailureCode, performance, Date,
     notifyAgentSendFailure: failureNotice,
     reportCloudAgentRuntimeUpgrade: vi.fn(), invalidateCloudAgentRegistry: vi.fn(),
     redactLogSecrets: (s: string) => s, crypto: { randomUUID: () => `message-${++sequence}` },
     capUserAppend: (messages: unknown[], message: unknown) => [...messages, message], evictUnretainedTranscripts: vi.fn(),
     hasPromptAttachmentReferences: () => false, refreshPromptAttachments: vi.fn(), toast: toasts, drainOrDropQueue: vi.fn(), persistAuthPrompt: vi.fn(),
     HYDRATE_WINDOW: 100, hydrateInFlightRef: { current: new Map() }, pendingHydratesRef: { current: new Set() },
-    takeFreshLocalChat: () => false, localTranscriptCache: { peek: () => null, read: async () => null },
+    takeFreshLocalChat: () => false, consumeFreshCloudChat: () => false, localTranscriptCache: { peek: () => null, read: async () => null },
     presentCachedLocalTranscript: vi.fn(), presentKnownEmptyLocalTranscript: () => false, retainMessageReferences: (_current: unknown[], next: unknown[]) => next,
     persistMessageWindow: vi.fn(async () => ({ source: "control-plane", messages: [{ id: "past", kind: "text", role: "user", text: "History" }] })),
     reconcileHistoryMessages: (messages: unknown[]) => messages, messageSnapshotsEqual: (a: unknown[], b: unknown[]) => JSON.stringify(a) === JSON.stringify(b),
@@ -141,6 +142,120 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it.each(["edit", "remove", "delivery"])("does not turn a queued %s into resident history", async action => {
+    const h = harness(true, "ready", false);
+    useSessionsStore.getState().clearAll();
+    useSessionsStore.getState().setSession("chat", { ...BLANK, ...h.store.sessions.chat, transcriptState: "loading" });
+    h.provider.getStore = useSessionsStore.getState;
+    await h.send();
+    const id = h.queue.get("chat")![0].bubbleId;
+    if (action === "edit") h.provider.actions.editQueued("chat", id, { text: "Revised prompt" });
+    else if (action === "remove") h.provider.actions.removeQueued("chat", id);
+    else h.provider.actions.markQueuedDelivery("chat", id, "sending");
+    expect(useSessionsStore.getState().sessions.chat.transcriptState).toBe("loading");
+    expect(h.delivered).not.toHaveBeenCalled();
+  });
+
+  it("gives a replacement queue head its own wait and ignores the removed head's late preparation", async () => {
+    const h = harness(true, "ready");
+    const oldPreparation = deferred(), nextPreparation = deferred();
+    h.prepare.mockImplementationOnce(() => oldPreparation.promise).mockImplementation(() => nextPreparation.promise);
+    await h.send();
+    const removed = h.queue.get("chat")![0].bubbleId;
+    h.type("Next prompt"); await h.send();
+    const next = h.queue.get("chat")![1].bubbleId;
+    h.provider.actions.removeQueued("chat", removed);
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", turnId: next });
+    oldPreparation.resolve(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).not.toHaveBeenCalled();
+    h.ready(); nextPreparation.resolve(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledOnce();
+    expect(h.delivered.mock.calls[0][0]).toBe(next);
+  });
+
+  it("does not turn an optimistic cloud bubble into history authority in the real session store", async () => {
+    const h = harness(true, "ready", false);
+    useSessionsStore.getState().clearAll();
+    useSessionsStore.getState().setSession("chat", { ...BLANK, ...h.store.sessions.chat, transcriptState: "loading" });
+    h.provider.getStore = useSessionsStore.getState;
+    await h.send();
+    const slot = useSessionsStore.getState().sessions.chat;
+    expect(slot.transcriptState).toBe("loading");
+    expect(slot.messages).toHaveLength(1);
+    expect(slot.activeTurnStartedAt).toBeNull();
+    expect(h.delivered).not.toHaveBeenCalled();
+  });
+
+  it("dispatches a freshly created cloud chat without reading nonexistent history", async () => {
+    const h = harness(true, "ready", false);
+    h.provider.consumeFreshCloudChat = () => true;
+    h.provider.persistMessageWindow.mockRejectedValue(new Error("command_conflict"));
+    await h.send(); h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.store.sessions.chat.transcriptState).toBe("resident");
+    expect(h.provider.persistMessageWindow).not.toHaveBeenCalled();
+    expect(h.delivered).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a pre-dispatch message in the queue without starting a running-turn clock", async () => {
+    const h = harness(true, "ready");
+    await h.send();
+    expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).queuedMessages).toHaveLength(1);
+    expect(h.store.pendingLocalTurns.chat).toBeUndefined();
+    expect(h.store.sessions.chat.activeTurnStartedAt ?? null).toBeNull();
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", phase: "sending" });
+  });
+
+  it.each([false, true])("bounds failed history reads at ten seconds without losing confirmed or optimistic rows (hung=%s)", async hung => {
+    const h = harness(true, "ready", false);
+    const confirmed = { id: "confirmed", kind: "text", role: "agent", text: "Confirmed answer", createdAt: 1 };
+    h.store.sessions.chat.messages = [confirmed];
+    h.store.sessions.chat.hasTranscript = true;
+    h.provider.persistMessageWindow.mockImplementation(() => hung ? new Promise(() => {}) : Promise.reject(new Error("command_conflict")));
+    await h.send(); h.ready(); await vi.advanceTimersByTimeAsync(10_000);
+    const slot = h.store.sessions.chat;
+    expect(slot.cloudSendWait).toMatchObject({ state: "failed", message: "Couldn't load chat history. Retry to send your message." });
+    expect(slot.messages).toContain(confirmed);
+    expect(slot.messages.some((row: any) => row.text === h.draft.displayText)).toBe(true);
+    expect(h.provider.persistMessageWindow.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(h.provider.persistMessageWindow.mock.calls.length).toBeLessThanOrEqual(5);
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "history_unavailable", onRetry: expect.any(Function) }));
+    expect(h.delivered).not.toHaveBeenCalled();
+  });
+
+  it("bounds workspace wake at 180 seconds without dispatching a late preparation", async () => {
+    const h = harness(); await h.send();
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", phase: "starting-workspace" });
+    await vi.advanceTimersByTimeAsync(179_999);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    expect(h.failureNotice).not.toHaveBeenCalled();
+    expect(h.store.sessions.chat.activeTurnStartedAt ?? null).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("failed");
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_start_timeout" }));
+    expect(h.queue.get("chat")).toHaveLength(1);
+    h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).not.toHaveBeenCalled();
+  });
+
+  it("retains the original wake deadline and display origin through readiness re-entry", async () => {
+    const h = harness(); await h.send();
+    const startedAt = h.store.sessions.chat.cloudSendWait.startedAt;
+    expect(startedAt).toBe(Date.now());
+    await vi.advanceTimersByTimeAsync(80_000);
+    h.provider.cloudSendWaitRef.current.cancel("chat");
+    h.provider.actions.beginCloudSendWait("chat");
+    expect(h.store.sessions.chat.cloudSendWait.startedAt).toBe(startedAt);
+    await vi.advanceTimersByTimeAsync(99_999);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_start_timeout" }));
+    h.failureNotice.mock.calls[0][0].onRetry();
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", startedAt: Date.now() });
+    expect(h.store.sessions.chat.cloudSendWait.startedAt).not.toBe(startedAt);
+    h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledOnce();
+  });
+
   it("saves an empty queued editor when its existing frozen additional payload survives, without using a new canvas selection", async () => {
     const h = harness(true, "ready");
     h.type("");
@@ -204,13 +319,13 @@ describe("cloud composer readiness queue", () => {
     expect(h.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "SET_CHAT_DRAFT", draft: expect.objectContaining({ designFrame: saved }) }));
   });
 
-  it.each(["stopped", "waking", "setting_up", "ready"])("paints the first cloud user bubble before %s preparation completes", async status => {
+  it.each(["stopped", "waking", "setting_up", "ready"])("keeps the first cloud prompt in the queue before %s preparation completes", async status => {
     const h = harness(true, status);
     await h.send();
     const bubbleId = h.queue.get("chat")![0].bubbleId;
     const projected = queuedTranscriptPresentation(h.store.sessions.chat.messages);
-    expect(projected.visibleMessages).toEqual([expect.objectContaining({ id: bubbleId, text: h.draft.displayText })]);
-    expect(projected.queuedMessages).toEqual([]);
+    expect(projected.visibleMessages).toEqual([]);
+    expect(projected.queuedMessages).toEqual([expect.objectContaining({ id: bubbleId, text: h.draft.displayText })]);
     expect(h.delivered).not.toHaveBeenCalled();
     expect(h.store.sessions.chat.cloudSendWait?.state).toBe("waiting");
     h.ready(); await vi.advanceTimersByTimeAsync(0);
@@ -218,12 +333,12 @@ describe("cloud composer readiness queue", () => {
     expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).visibleMessages).toHaveLength(1);
   });
 
-  it.each(["ready", "busy"])("sends an admitted %s follow-up without presenting first-session Waiting", async status => {
+  it.each(["ready", "busy"])("keeps a queued message while an admitted %s follow-up crosses preparation", async status => {
     const h = harness(true, status);
     Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "admitted" });
     await h.send();
-    expect(h.store.sessions.chat.cloudSendWait).toBeUndefined();
-    expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).visibleMessages).toEqual([
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", phase: "sending" });
+    expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).queuedMessages).toEqual([
       expect.objectContaining({ text: h.draft.displayText }),
     ]);
     h.ready(); await vi.advanceTimersByTimeAsync(0);
@@ -231,11 +346,11 @@ describe("cloud composer readiness queue", () => {
     expect(h.provider.ensureSessionRef.current).not.toHaveBeenCalled();
   });
 
-  it("keeps an explicit queued follow-up behind the optimistic opening turn", async () => {
+  it("keeps an explicit queued follow-up behind the unaccepted opening prompt in the queue", async () => {
     const h = harness(); await h.send(); h.type("After this finishes"); await h.send();
     const projected = queuedTranscriptPresentation(h.store.sessions.chat.messages);
-    expect(projected.visibleMessages).toHaveLength(1);
-    expect(projected.queuedMessages).toEqual([expect.objectContaining({ text: "After this finishes" })]);
+    expect(projected.visibleMessages).toHaveLength(0);
+    expect(projected.queuedMessages).toEqual([expect.objectContaining({ text: h.draft.displayText }), expect.objectContaining({ text: "After this finishes" })]);
     expect(h.queue.get("chat")).toHaveLength(2);
   });
 
@@ -293,19 +408,19 @@ describe("cloud composer readiness queue", () => {
     for (const call of h.prepare.mock.calls) expect(call[1]).toBe(intent);
   });
 
-  it("retains one wake intent across seven settled readiness attempts and final preparation", async () => {
+  it("retains one wake intent across bounded settled readiness attempts and final preparation", async () => {
     const h = harness(true, "ready");
     h.prepare.mockResolvedValue(undefined);
     h.provider.ensureSessionRef.current.mockResolvedValue(undefined);
-    await h.send(); await vi.advanceTimersByTimeAsync(12_000);
-    expect(h.prepare).toHaveBeenCalledTimes(7);
+    await h.send(); await vi.advanceTimersByTimeAsync(6_000);
+    expect(h.prepare).toHaveBeenCalledTimes(4);
     const intent = h.prepare.mock.calls[0][1];
     expect(intent?.id).toEqual(expect.any(String));
     for (const call of h.prepare.mock.calls) expect(call[1]).toBe(intent);
     Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "admitted" });
     await vi.advanceTimersByTimeAsync(2_000);
     expect(h.delivered).toHaveBeenCalledOnce();
-    expect(h.prepare).toHaveBeenCalledTimes(9);
+    expect(h.prepare).toHaveBeenCalledTimes(6);
     for (const call of h.prepare.mock.calls) expect(call[1]).toBe(intent);
   });
 
@@ -358,7 +473,7 @@ describe("cloud composer readiness queue", () => {
     expect(h.queue.get("chat")).toHaveLength(1); expect(h.clear).toHaveBeenCalledOnce();
     expect(h.provider.actions.getQueuedDraft("chat", h.queue.get("chat")![0].bubbleId).json).toBe(h.draft.json);
     expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting"); expect(encoding.run).not.toHaveBeenCalled();
-    expect(h.store.setPendingLocalTurn).toHaveBeenCalledExactlyOnceWith("chat", h.queue.get("chat")![0].bubbleId);
+    expect(h.store.setPendingLocalTurn).not.toHaveBeenCalled();
     expect(h.delivered).not.toHaveBeenCalled(); expect(h.toasts.error).not.toHaveBeenCalled();
     expect(h.failureNotice).not.toHaveBeenCalled();
   });
@@ -467,8 +582,8 @@ describe("cloud composer readiness queue", () => {
   });
   it("keeps a timed-out message editable and uses one shared toast with an explicit retry action", async () => {
     const h = harness(true, "ready"); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
-    await vi.advanceTimersByTimeAsync(179_999); expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
-    await vi.advanceTimersByTimeAsync(1); expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "failed", message: expect.stringContaining("three minutes") });
+    await vi.advanceTimersByTimeAsync(9_999); expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1); expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "failed", message: expect.stringContaining("didn't accept") });
     expect(h.store.pendingLocalTurns.chat).toBeUndefined();
     expect(h.store.sessions.chat.activeTurnStartedAt).toBeNull();
     expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).queuedMessages).toEqual([expect.objectContaining({ id })]);
@@ -519,7 +634,7 @@ describe("cloud composer readiness queue", () => {
     retry(); h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.prepare).toHaveBeenCalledTimes(calls); expect(h.delivered).not.toHaveBeenCalled();
   });
-  it.each([150_000, 360_000])("delivers once after a %i ms wake/replacement with no readiness failure", async duration => {
+  it.each([30_000, 42_000, 80_000, 150_000])("delivers once after a %i ms wake/replacement inside the bounded start window", async duration => {
     const h = harness(); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
     const doc = h.provider.cloudWorkspaceDocument(); doc.status = "stopping";
     await vi.advanceTimersByTimeAsync(duration / 3);
@@ -530,11 +645,33 @@ describe("cloud composer readiness queue", () => {
     h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.delivered).toHaveBeenCalledExactlyOnceWith(id, expect.anything()); expect(h.failureNotice).not.toHaveBeenCalled();
   });
-  it("reports a terminal document error while a wake preparation is still hung", async () => {
-    const h = harness(); await h.send();
-    const doc = h.provider.cloudWorkspaceDocument(); doc.status = "setting_up"; doc.error = { message: "Setup failed" };
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_unavailable", error: expect.objectContaining({ message: "Setup failed" }) }));
+  it("still allows only ten ready seconds after a 150-second wake", async () => {
+    const h = harness(); let changed!: () => void;
+    h.provider.subscribeCloudWorkspaces = (listener: () => void) => { changed = listener; return () => {}; };
+    h.prepare.mockResolvedValue(undefined);
+    await h.send();
+    const startedAt = h.store.sessions.chat.cloudSendWait.startedAt;
+    await vi.advanceTimersByTimeAsync(150_000);
+    h.provider.cloudWorkspaceDocument().status = "ready"; changed();
+    expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "waiting", phase: "sending", startedAt });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "queued_timeout" }));
+    h.ready(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).not.toHaveBeenCalled();
+  });
+  it.each([
+    { status: "failed", error: null },
+    { status: "error", error: null },
+    { status: "setting_up", error: { message: "Setup failed" } },
+  ])("reports a terminal CP $status/error immediately while wake preparation is still hung", async update => {
+    const h = harness(); let changed!: () => void;
+    h.provider.subscribeCloudWorkspaces = (listener: () => void) => { changed = listener; return () => {}; };
+    await h.send(); await vi.advanceTimersByTimeAsync(5_000);
+    Object.assign(h.provider.cloudWorkspaceDocument(), update); changed();
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("failed");
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_unavailable",
+      error: expect.objectContaining({ message: update.error?.message ?? expect.stringContaining(update.status) }) }));
     h.ready(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).not.toHaveBeenCalled();
   });
   it("ends an undispatched send immediately when explicit workspace Stop supersedes pending agent admission", async () => {

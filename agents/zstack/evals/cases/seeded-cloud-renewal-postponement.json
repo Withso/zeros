@@ -1,0 +1,9 @@
+{
+  "id": "seeded-cloud-renewal-postponement",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:652",
+  "symptom": "Unrelated execution activity repeatedly rescheduled the same active context renewal until its proof expired.",
+  "rule": "Keep the original scheduled renewal while work still owns that context. See changes/cloud-observation-db-budget.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-queue-boot.test.ts -t \"does not postpone a running context\""
+}

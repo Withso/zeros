@@ -140,7 +140,7 @@ describe("Cursor account catalog freshness", () => {
     try {
       await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test" } });
       expect(createSpy).toHaveBeenCalledOnce();
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(20_000);
       await adapter.initialize();
       expect(modelsListSpy).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(30_000);
@@ -1870,7 +1870,7 @@ describe("CursorSdkAdapter — multi-root workspaces (@cursor/sdk 1.0.28 local.d
 });
 
 describe("CursorSdkAdapter — bounded registry discovery", () => {
-  it.each(["newSession", "loadSession"] as const)("%s refuses after the existing discovery budget and ignores a late schema", async (operation) => {
+  it.each(["newSession", "loadSession"] as const)("%s refuses after the bounded discovery budget and ignores a late schema", async (operation) => {
     vi.useFakeTimers();
     let release!: (models: unknown[]) => void, started!: () => void;
     const catalog = new Promise(resolve => { release = resolve; });
@@ -1886,11 +1886,11 @@ describe("CursorSdkAdapter — bounded registry discovery", () => {
       .then(value => ({ value }), error => ({ error }));
     try {
       await discoveryStarted;
-      await vi.advanceTimersByTimeAsync(4_999);
+      await vi.advanceTimersByTimeAsync(19_999);
       expect(createSpy).not.toHaveBeenCalled();
       expect(resumeSpy).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(await pending).toMatchObject({ error: { failure: { advice: expect.stringContaining("choose another model") } } });
+      expect(await pending).toMatchObject({ error: { failure: { kind: "transport-closed", advice: expect.stringContaining("Try again") } } });
       release([{ id: "grok-4.6", parameters: [] }]);
       await vi.advanceTimersByTimeAsync(0);
       expect(createSpy).not.toHaveBeenCalled();
@@ -1905,13 +1905,13 @@ describe("CursorSdkAdapter — bounded registry discovery", () => {
   });
 
   it("refuses a failed Grok catalog read on resume without a native request", async () => {
-    modelsListSpy.mockRejectedValue(new Error("catalog unavailable"));
+    modelsListSpy.mockRejectedValue(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }));
     const adapter = new CursorSdkAdapter(makeCtx());
     try {
       await expect(adapter.loadSession({ sessionId: "saved", cwd: "/tmp/proj", env: {
         CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.6",
         ZEROS_THINKING_EFFORT: "xhigh", ZEROS_FAST_MODE: "1",
-      } })).rejects.toMatchObject({ failure: { stage: "loadSession", advice: expect.stringContaining("choose another model") } });
+      } })).rejects.toMatchObject({ failure: { kind: "transport-closed", stage: "loadSession", advice: expect.stringContaining("Try again") } });
       expect(resumeSpy).not.toHaveBeenCalled();
       expect(createSpy).not.toHaveBeenCalled();
     } finally { await adapter.dispose(); }

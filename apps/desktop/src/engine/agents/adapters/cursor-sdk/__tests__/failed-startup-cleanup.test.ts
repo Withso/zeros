@@ -151,6 +151,35 @@ afterEach(async () => {
 });
 
 describe("CursorSdkAdapter — failed session host startup cleanup", () => {
+  it.each(["newSession", "loadSession"] as const)("stops the dedicated host after %s exhausts registry discovery", async operation => {
+    vi.useFakeTimers();
+    let release!: (models: unknown[]) => void, started!: () => void;
+    const discovery = new Promise(resolve => { release = resolve; });
+    const requested = new Promise<void>(resolve => { started = resolve; });
+    modelsListSpy.mockImplementation(() => { started(); return discovery; });
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const options = { cwd: root, env: { CURSOR_API_KEY: "key", CURSOR_MODEL: "grok-4.6" }, executionBoundary: boundary() };
+    const pending = (operation === "newSession" ? adapter.newSession(options)
+      : adapter.loadSession({ ...options, sessionId: "saved" }))
+      .then(value => ({ value }), error => ({ error }));
+    try {
+      await requested;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(await pending).toMatchObject({ error: { failure: { kind: "transport-closed", stage: operation } } });
+      expect(disposeSpy).toHaveBeenCalledOnce();
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(resumeSpy).not.toHaveBeenCalled();
+      release([{ id: "grok-4.6", parameters: [] }]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(disposeSpy).toHaveBeenCalledOnce();
+    } finally {
+      release([]);
+      await pending;
+      await adapter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("refuses to replace missing cloud history with a fresh native agent", async () => {
     const coordinator = await cloudBoundary();
     vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({

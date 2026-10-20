@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/shell/pr/cloud-pr-status-reads.ts",
+  "before": "if (previous && (previous.pending || Date.now() < previous.retryAt)) return previous.result;",
+  "after": "if (previous && previous.pending) return previous.result;"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-history-read-snapshot",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pr:645",
+  "symptom": "Cloud prompts stayed queued because unrelated chat metadata writes invalidated history reads before they reached SQLite, leaving transcript residency unavailable.",
+  "rule": "Capture NORMAL rows and FULL restore metadata synchronously at the actual read. Retain writer and actor fences through delivery, and bound fresh reads after legacy attachment I/O without replaying stale row writes.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-history-read-snapshot.test.ts"
+}

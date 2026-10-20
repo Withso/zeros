@@ -14,6 +14,7 @@ import {
 } from "./capability-actor-contract.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import type { DatabaseCloudAcceptedWorkService } from "./accepted-work.js";
+import { CloudExecutionEnrollRequestSchema, CloudExecutionAuthorityOperationSchema } from "./execution-authority-contract.js";
 import { CloudAcceptedWorkEnrollRequestSchema, CloudAcceptedWorkContextRequestSchema, CloudAcceptedWorkCloseRequestSchema } from "./accepted-work-contract.js";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -103,6 +104,7 @@ export const CLOUD_WORKSPACE_SETUP_RECOVERY_PATH =
 export const CLOUD_ACCEPTED_WORK_PATH = "/internal/v2/cloud-workspaces/engine/accepted-work";
 export const CLOUD_ACCEPTED_WORK_CONTEXT_PATH = `${CLOUD_ACCEPTED_WORK_PATH}/context`;
 export const CLOUD_ACCEPTED_WORK_CLOSE_PATH = `${CLOUD_ACCEPTED_WORK_PATH}/close`;
+export const CLOUD_EXECUTION_AUTHORITY_PATH = "/internal/v2/cloud-workspaces/engine/execution-authority";
 
 /** Registration-time uplink advertisement (S2): the response gains
  * `uplink.endpoint` only for an engine that opted in with
@@ -676,6 +678,7 @@ export function createCloudWorkspaceInternalRoutes(
     CAPABILITY_SESSION_RENEWAL_PATH,
     CLOUD_ACCEPTED_WORK_PATH,
     CLOUD_ACCEPTED_WORK_CLOSE_PATH,
+    ...["enroll", "check", "close"].map(operation => `${CLOUD_EXECUTION_AUTHORITY_PATH}/${operation}`),
   ]) {
     routes.use(path, bodyLimit({ maxSize: INTERNAL_BODY_BYTES }));
   }
@@ -959,6 +962,27 @@ export function createCloudWorkspaceInternalRoutes(
   }
   if (options?.acceptedWork) {
     const acceptedWork = options.acceptedWork;
+    for (const operation of ["enroll", "check", "close"] as const) {
+      routes.post(`${CLOUD_EXECUTION_AUTHORITY_PATH}/${operation}`, async c => {
+        c.header("Cache-Control", "no-store");
+        const heartbeatToken = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
+        if (!heartbeatToken) return c.json({ error: { code: "invalid_capability" } }, 401);
+        const input = operation === "enroll" ? await strictJson(c.req, CloudExecutionEnrollRequestSchema)
+          : await strictJson(c.req, CloudExecutionAuthorityOperationSchema);
+        if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+        const { workspaceId, organizationId, generation, engineInstanceId } = input.scope;
+        const engine = { workspaceId, organizationId, generation, engineInstanceId, heartbeatToken };
+        try {
+          if (operation === "enroll") return c.json(await acceptedWork.execution.enroll(engine, input, c.req.raw.signal));
+          if (operation === "check") return c.json(await acceptedWork.execution.check(engine, input));
+          await acceptedWork.execution.close(engine, input); return c.json({ closed: true });
+        } catch (error) {
+          if (error instanceof HttpError) return c.json({ error: { code: error.code } }, error.status);
+          if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: { code: "execution_authority_rejected" } }, 403);
+          throw error;
+        }
+      });
+    }
     for (const operation of ["context", "close"] as const) {
       routes.post(operation === "context" ? CLOUD_ACCEPTED_WORK_CONTEXT_PATH : CLOUD_ACCEPTED_WORK_CLOSE_PATH, async c => {
         const heartbeatToken = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);

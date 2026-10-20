@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/agents/cloud-provider-execution.ts",
+  "before": "const observed=()=>{if(!record.executionWork&&!isCloudAcceptedWork(input.actor))ended();};",
+  "after": "const observed=()=>{ended();};"
+}

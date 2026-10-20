@@ -193,6 +193,7 @@ import {
 } from "./containment/warm-session-boundary-pool";
 import { providerAccountProfile } from "./provider-credentials";
 import { completeAgentSpawnEnv } from "./adapters/shared/config-isolation";
+import { pinCloudHistoryContentRedactor, type CloudHistoryRedactor } from "./cloud-history-redaction";
 import {
   localPreviewGatewayFactory,
   type BoundaryPreviewGateway,
@@ -4097,12 +4098,12 @@ export class AgentGateway {
 
   /** Capture the ORIGINAL run's content filter before retirement. This grants
    * no native authority and never resolves a replacement execution afterward. */
-  pinCloudHistoryRedactor(agentId: string, executionId: string): ((value: unknown) => unknown) | null {
+  pinCloudHistoryRedactor(agentId: string, executionId: string): CloudHistoryRedactor | null {
     if (this.executionBoundary.backend !== "cloud-worker" || this.disposed) return null;
     const cloud = cloudProviderExecution(this.executionBoundaries.get(executionId));
     if (!cloud || cloud.provider !== agentId || cloud.executionId !== executionId || !cloud.redactor) return null;
     const redactor = cloud.redactor;
-    return value => redactor.value(value, "terminal");
+    return pinCloudHistoryContentRedactor(redactor);
   }
 
   constructor(opts: AgentGatewayOptions) {

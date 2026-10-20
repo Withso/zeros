@@ -15,11 +15,13 @@ export interface CloudAuthorizedActor {
   readonly [authorizedActor]: true;
   readonly provenance: CloudActorProvenance;
   readonly signal: AbortSignal;
+  /** Explicit identity/policy retirement, independent of observation expiry. */
+  readonly revocationSignal: AbortSignal;
   assertLive(capability?: Capability): void;
 }
 type Record = {
   registry: CloudActorAuthorityRegistry; actor: CloudAuthorizedActor;
-  controller: AbortController; confirmation: CloudActorProvenance;
+  controller: AbortController; revocation: AbortController; confirmation: CloudActorProvenance;
   deadline: number; timer: ReturnType<typeof setTimeout> | null; cause: Error | null;
 };
 const authorized = new WeakMap<object, Record>();
@@ -111,6 +113,7 @@ export class CloudActorAuthorityRegistry {
       // A CP recorded actor session never changes its user or device. An
       // epoch/grant/key advance cannot authorize replacing either identity.
       this.retire(previous, failure("access_denied"));
+      previous.revocation.abort(failure("access_denied"));
       this.revoked.add(provenance.actorSessionId);
       throw failure("authority_response_invalid");
     }
@@ -150,6 +153,7 @@ export class CloudActorAuthorityRegistry {
       // A renewal cannot replace its recorded user/device/role/grant identity.
       // Require a fresh CP admission, not a delayed conflicting confirmation.
       this.retire(previous, failure("access_denied"));
+      previous.revocation.abort(failure("access_denied"));
       this.revoked.add(provenance.actorSessionId);
       throw failure("authority_response_invalid");
     }
@@ -161,12 +165,16 @@ export class CloudActorAuthorityRegistry {
       // replay fence, switches writer, or falls back to a legacy admission.
       if (this.records.size >= this.maxEntries) throw failure("execution_limit");
     }
-    if (previous) this.retire(previous, failure("lifecycle_superseded"));
+    if (previous) {
+      this.retire(previous, failure("lifecycle_superseded"));
+      if (!sameBinding(previous.confirmation, provenance)) previous.revocation.abort(failure("access_denied"));
+    }
     const controller = new AbortController();
+    const revocation = previous && sameBinding(previous.confirmation, provenance) ? previous.revocation : new AbortController();
     let record: Record;
-    const actor = Object.freeze({ provenance, signal: controller.signal,
+    const actor = Object.freeze({ provenance, signal: controller.signal, revocationSignal: revocation.signal,
       assertLive: (capability: Capability = "run") => this.assertRecord(record, capability) }) as CloudAuthorizedActor;
-    record = { registry: this, actor, controller, confirmation: provenance,
+    record = { registry: this, actor, controller, revocation, confirmation: provenance,
       deadline: this.time.monotonic() + remaining, timer: null, cause: null };
     this.records.set(provenance.actorSessionId, record);
     authorized.set(actor, record);
@@ -204,6 +212,7 @@ export class CloudActorAuthorityRegistry {
     const record = this.records.get(actorSessionId);
     if (!record) return;
     this.records.delete(actorSessionId);
+    record.revocation.abort(failure("lifecycle_superseded"));
     this.retire(record, failure("lifecycle_superseded"));
   }
   revoke(actorSessionId: string): void {
@@ -215,10 +224,12 @@ export class CloudActorAuthorityRegistry {
     }
     this.revoked.add(actorSessionId);
     const record = this.records.get(actorSessionId);
-    if (record) this.retire(record, failure("access_denied"));
+    if (record) { record.revocation.abort(failure("access_denied")); this.retire(record, failure("access_denied")); }
   }
   dispose(): void {
     this.disposed = true;
-    for (const record of this.records.values()) this.retire(record, failure("lifecycle_superseded"));
+    for (const record of this.records.values()) {
+      record.revocation.abort(failure("lifecycle_superseded")); this.retire(record, failure("lifecycle_superseded"));
+    }
   }
 }

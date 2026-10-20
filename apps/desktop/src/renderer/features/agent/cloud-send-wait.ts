@@ -23,6 +23,8 @@ export class CloudSendWait {
     ready(): void;
     failed(error: unknown): void;
     timeoutMs?: number;
+    timeoutError?(): CloudSendWaitError;
+    safetyTimeoutError?(): CloudSendWaitError;
     readiness?(): boolean;
     observe?(changed: () => void): () => void;
     budget?: CloudSendWaitBudget;
@@ -39,11 +41,12 @@ export class CloudSendWait {
       if (!owns()) return;
       controller.abort(); this.flights.delete(chatId); options.cancelPreparation(); options.failed(error);
     };
-    const timeoutError = () => new CloudSendWaitError(
+    const timeoutError = options.timeoutError ?? (() => new CloudSendWaitError(
       "The agent did not become ready within three minutes. Your messages are still queued. Try again.",
       "queued_timeout",
-    );
-    const budget = options.budget ?? { elapsedMs: Math.max(0, WAIT_LIMIT_MS - (options.timeoutMs ?? WAIT_LIMIT_MS)) };
+    ));
+    const limitMs = options.timeoutMs ?? WAIT_LIMIT_MS;
+    const budget = options.budget ?? { elapsedMs: 0 };
     const safetyAt = performance.now() + Math.min(options.safetyTimeoutMs ?? SAFETY_LIMIT_MS, SAFETY_LIMIT_MS);
     let deadline: ReturnType<typeof setTimeout> | undefined;
     let off = () => {};
@@ -61,10 +64,10 @@ export class CloudSendWait {
         else if (budget.readySince !== undefined) {
           budget.elapsedMs += now - budget.readySince; budget.readySince = undefined;
         }
-        const remaining = WAIT_LIMIT_MS - budget.elapsedMs - (budget.readySince === undefined ? 0 : now - budget.readySince);
+        const remaining = limitMs - budget.elapsedMs - (budget.readySince === undefined ? 0 : now - budget.readySince);
         if (ready && remaining <= 0) { fail(timeoutError()); return; }
         if (now >= safetyAt) {
-          fail(new CloudSendWaitError("The workspace is still starting after fifteen minutes. Your messages are still queued. Try again.", "queued_timeout")); return;
+          fail(options.safetyTimeoutError?.() ?? new CloudSendWaitError("The workspace is still starting after fifteen minutes. Your messages are still queued. Try again.", "queued_timeout")); return;
         }
         deadline = setTimeout(progress, Math.min(1_000, safetyAt - now, ready ? remaining : Infinity));
       } catch (error) { if (options.terminal(error)) fail(error); else deadline = setTimeout(progress, 1_000); }

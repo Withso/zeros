@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as refreshRules from "../pr-status-refresh";
 import { isCloudWorkspace, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { documentIsForeground } from "../../../shared/lib/element-activity";
+import { CloudPrStatusReads } from "../cloud-pr-status-reads";
 
 vi.mock("react", () => ({ useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot() }));
 import { useDocumentActive } from "../../../state/use-document-active";
@@ -30,25 +31,32 @@ const code = ts.transpileModule(`${declarations.join("\n")}\nglobalThis.disposer
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let page: EventTarget & { visibilityState: string; hasFocus: () => boolean };
 let focused: boolean;
+let cloudPrReads: CloudPrStatusReads;
+let reconciledCloudPrReads: WeakSet<object>;
 const cleanups: Array<() => void> = [];
 function unmount() { for (const cleanup of cleanups.splice(0)) cleanup(); }
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(1_000_000); focused = true;
+  cloudPrReads = new CloudPrStatusReads();
+  reconciledCloudPrReads = new WeakSet();
   page = Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => focused });
   vi.stubGlobal("document", page); vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval }));
 });
 afterEach(() => { unmount(); expect(vi.getTimerCount()).toBe(0); vi.useRealTimers(); vi.unstubAllGlobals(); });
-function mount(path = "/personal/project", id = "personal-workspace", rawKind = "ready", cache = new Map()) {
-  const reads = [vi.fn(async () => null), vi.fn(async () => null), vi.fn(async () => ({ number: 42, state: "ready" })), vi.fn(async () => null)];
+function mount(path = "/personal/project", id = "personal-workspace", rawKind = "ready", cache = new Map(),
+  options: { refreshKey?: number; failed?: boolean; reads?: ReturnType<typeof vi.fn>[];
+    prState?: string; sync?: ReturnType<typeof vi.fn> } = {}) {
+  const reads = options.reads ?? [vi.fn(async () => null), vi.fn(async () => null),
+    vi.fn(async () => { if (options.failed) throw new Error("unavailable"); return { number: 42, state: "ready" }; }), vi.fn(async () => null)];
   const setLive = vi.fn();
   const context = {
     ...refreshRules, useDocumentActive, documentIsForeground, isCloudWorkspace, parseCloudScopedId,
-    document, window, Date, Promise,
-    workspace: { id, path, repoRoot: path, prState: "ready", repoSlug: "repo", prNumber: 42 },
-    active: true, localDesktop: true, prNumber: 42, dataKey: `${id}#42`, refreshKey: 1, forceRefreshAt: 0,
+    document, window, Date, Promise, cloudPrReads, reconciledCloudPrReads,
+    workspace: { id, path, repoRoot: path, prState: options.prState ?? "ready", repoSlug: "repo", prNumber: 42 },
+    active: true, localDesktop: true, prNumber: 42, dataKey: `${id}#42`, refreshKey: options.refreshKey ?? 1, forceRefreshAt: 0,
     activationKeyRef: { current: null }, lastRequestAtRef: { current: 0 }, lastKnownData: cache,
     statusForGeneration: reads[0], changeCountsForGeneration: reads[1], ghPrGet: reads[2], ghPrChecks: reads[3],
-    ghPrSync: vi.fn(), notifyWorkspacesChanged: vi.fn(), setLive, setForceRefreshAt: vi.fn(),
+    ghPrSync: options.sync ?? vi.fn(), notifyWorkspacesChanged: vi.fn(), setLive, setForceRefreshAt: vi.fn(),
     checkingRetryRef: { current: { key: "", tries: 0 } }, stabilityKey: id, rawKind,
     disposers: [] as Array<() => void>,
   };
@@ -77,12 +85,41 @@ describe("Local PR island activity", () => {
     expect(hidden.cache.get("personal-workspace#42")).toBe(confirmed);
     expect(hidden.setLive).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
   });
-  it.each(["hidden", "blurred"])("preserves native cloud scheduling while %s", async mode => {
+  it.each(["hidden", "blurred"])("starts no cloud reads or timers while %s", async mode => {
     if (mode === "hidden") page.visibilityState = "hidden";
     else focused = false;
     const { reads } = mount("/physical/checkout", "cloud://organization/workspace");
     await vi.advanceTimersByTimeAsync(60_000);
-    for (const read of reads) expect(read).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(1);
+    for (const read of reads) expect(read).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each([false, true])("bounds cloud GitHub reads across Git refreshes (failed=%s), while keeping Git state fresh", async failed => {
+    const id = "cloud://organization/workspace", cache = new Map();
+    const first = mount(id, id, "ready", cache, { failed });
+    await vi.advanceTimersByTimeAsync(1_000); unmount();
+    for (let refreshKey = 2; refreshKey <= 30; refreshKey++) {
+      mount(id, id, "ready", cache, { refreshKey, reads: first.reads });
+      await vi.advanceTimersByTimeAsync(1_000); unmount();
+    }
+    expect(first.reads[0]).toHaveBeenCalledTimes(30);
+    expect(first.reads[1]).toHaveBeenCalledTimes(30);
+    expect(first.reads[2]).toHaveBeenCalledOnce();
+    expect(first.reads[3]).toHaveBeenCalledOnce();
+  });
+  it("does not repeat a failed durable reconciliation for every reuse of a cloud PR observation", async () => {
+    const id = "cloud://organization/workspace", cache = new Map();
+    const sync = vi.fn(async () => { throw new Error("unavailable"); });
+    const first = mount(id, id, "ready", cache, { prState: "draft", sync });
+    await vi.advanceTimersByTimeAsync(1_000); unmount();
+    for (let refreshKey = 2; refreshKey <= 30; refreshKey++) {
+      mount(id, id, "ready", cache, { refreshKey, prState: "draft", sync, reads: first.reads });
+      await vi.advanceTimersByTimeAsync(1_000); unmount();
+    }
+    expect(first.reads[0]).toHaveBeenCalledTimes(30);
+    expect(first.reads[2]).toHaveBeenCalledOnce();
+    expect(sync).toHaveBeenCalledOnce();
+    mount(id, id, "ready", cache, { refreshKey: 31, prState: "draft", sync, reads: first.reads });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sync).toHaveBeenCalledTimes(2);
   });
 });

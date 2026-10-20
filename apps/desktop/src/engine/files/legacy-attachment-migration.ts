@@ -90,6 +90,9 @@ export async function externalizeLegacyMessageImages(args: {
   cwd: string;
   chatId: string;
   rows: PersistedMessage[];
+  /** Cloud reads must not rewrite rows from a retired or changed snapshot
+   * after attachment I/O. Local callers retain their existing behavior. */
+  assertCurrent?: () => void;
 }): Promise<PersistedMessage[]> {
   if (!path.isAbsolute(args.cwd) || args.rows.length === 0) return args.rows;
   const changedRows: PersistedMessage[] = [];
@@ -199,6 +202,7 @@ export async function externalizeLegacyMessageImages(args: {
   }
 
   if (changedRows.length > 0) {
+    args.assertCurrent?.();
     upsertChatMessagesBulk(args.chatId, changedRows);
   }
   return result;

@@ -58,6 +58,6 @@ export function useTranscriptHistoryStatus({
   }, [identity, visible, pending, incomplete]);
 
   if (!visible || hasMessages) return "none";
-  if (incomplete) return "unavailable";
+  if (incomplete && !(resident && !hasTranscript)) return "unavailable";
   return pending && presentation.identity === identity ? presentation.status : "none";
 }

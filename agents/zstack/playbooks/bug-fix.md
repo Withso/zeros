@@ -31,6 +31,16 @@
    that read must still leave one catch-up for a quick reveal.
    For a scoped gate, drive the real request dispatcher for every op it names;
    calling the gate helper directly cannot show that dispatch never selects it.
+   For history consistency, hold the real service before and after its SQLite
+   read. Capture rows and restore metadata together at that synchronous boundary;
+   an admission-time global revision must not reject unrelated writes. Retain
+   writer/actor fences and bound fresh reads after legacy image I/O, checking
+   the original snapshot before persisting any rewritten rows.
+   For canonical history, drive production turn persistence and the original
+   pinned redactor through queue settlement. Collide a configured literal and
+   a one-character prefix with routing fields; filter content by record kind
+   while keeping independent identity and watermark refusal controls. Decode
+   payload JSON before filtering; arbitrary tool data gets no key-name exemption.
    A suspension holds prompt preparation until it resumes; Stop still ends the
    wait.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
@@ -71,6 +81,9 @@
    Reproject canonical controls with the predecessor's outbox above the successor's
    cursor. Validate each position in its own writer, retaining native identity and
    refusing uncovered or changed controls without recreating live events.
+   A new native stream can have a lower event head than retained history. Compare
+   seal event cursors only within their original writer or stream; keep all
+   restored NORMAL record coverage and pending-work gates across origins.
    For stop/seal races, hold background replies across the admission fence and
    local cancellation. Assert authority and heartbeats survive through a real
    seal, while explicit revocation and wrong identities remain terminal.
@@ -98,6 +111,12 @@
    unproved native work. Fence old confirmation and context flights before
    releasing registry capacity; test more historical sessions than the live
    cap, final-release timer cleanup and same-session readmission races.
+   For accepted cloud executions, cross actor/context observation deadlines
+   with a real owned child. Preserve original work/provider/runtime deadlines,
+   explicit Stop and real revocation; observation loss cannot mint or retire
+   authority. Hold acceptance through Stop and join late receipt cleanup.
+   Test actual deadline passage separately from a concurrent row mutation:
+   SERIALIZABLE retry can mask the elapsed-time branch.
    For redundant lifecycle writes, test explicit destination navigation with
    admission held across idle drain. Selected-row input alone misses a
    different-row or programmatic open, and joining a retiring flight can
@@ -108,6 +127,11 @@
    Inventory independent session-lock holders and hold them concurrently across
    provider barriers; their callbacks and an unrelated worker transaction must
    still progress. Count every lock pool in steady and rollout surge budgets.
+   When batching lifecycle reads, retain full post-I/O checks for no-dispatch
+   results and retry the whole DB-only admission after a confirmed abort.
+   Prove expiry while the actual row lock is held: a clock in a locking SELECT's
+   target list can be evaluated before that wait. Keep original deadlines after
+   funding, and measure complete passes as well as the shortened region.
    For finite compute leases, distinguish unavailable DB proof from revoked
    authority. Terminate the real connection before and after COMMIT, exhaust
    pool capacity and transaction retries, then re-observe the same allocation,
@@ -136,6 +160,10 @@
    not exist then; inspect the underlying SQL error before weakening a guard.
    Checkpoint/stop changes also run `recovery-migration.integration.test.ts`
    alongside the current-schema content, lease and reconciler suites.
+   Drive the actual worker and its deadline reader across a lazy migration;
+   manually calling adoption can hide an eligibility filter that prevents it.
+   Retain earlier engine incarnations: historical erasure custody is not live
+   dispatch proof. Bound adoption batches and preserve unproved-work backoff.
    For canaries with durable fixtures and moving defaults, test unchanged,
    moved, unavailable and mid-run selection. Refresh at most once against the
    captured qualified tuple, with separate build/lifecycle/cleanup budgets.

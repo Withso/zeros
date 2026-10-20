@@ -25,13 +25,15 @@ import {
   CloudAgentBootScopeSchema, CloudAgentWarmActorRequestSchema, CloudAgentWarmActorResponseSchema,
   type CloudAgentBootScope, type CloudAgentWarmActorRequest, type CloudAgentWarmActorResponse,
 } from "@zeros/protocol/cloud-agent-bootstrap";
-import { CloudActorAuthorityRegistry, isCloudActorAuthorityRegistry } from "./cloud-actor-authority";
+import { CloudActorAuthorityRegistry, isCloudActorAuthorityRegistry, isCloudAuthorizedActor } from "./cloud-actor-authority";
 import { CloudAcceptedWorkContextResponseSchema, type CloudAcceptedWorkContextRequest, type CloudAcceptedWorkContextResponse } from "@zeros/protocol/cloud-accepted-work";
 import { isCloudAcceptedWork } from "./cloud-accepted-work-authority";
 import { assertCloudExecutionPrincipal, cloudExecutionPrincipalSession, type CloudExecutionPrincipal } from "./cloud-execution-principal";
 import { cloudMcpDigest } from "./cloud-mcp";
 import { CloudAgentCredentialCache, isCloudAgentCredentialCache, type CloudAgentCredentialCapture } from "./cloud-agent-credential-cache";
 import { CloudAgentSessionLifetime } from "./cloud-agent-session-lifetime";
+import { CloudExecutionAuthority, type CloudExecutionWork } from "./cloud-execution-authority";
+import type { CloudExecutionEnrollRequest } from "@zeros/protocol/cloud-execution-authority";
 import type { CloudAgentCredentialRunInfo } from "@zeros/protocol/cloud-agent-bootstrap";
 import type { CloudAgentAccessMaterial } from "@zeros/protocol/cloud-agent-execution";
 
@@ -208,6 +210,7 @@ export interface CloudAuthorizedAgentContext{
   readonly conversationId:string;
   readonly cwd:string;
   readonly signal:AbortSignal;
+  readonly revocationSignal:AbortSignal;
   assertLive():void;
 }
 export type CloudAgentContextInput={
@@ -217,7 +220,7 @@ export type CloudAgentContextInput={
 type ContextClock={wall():number;monotonic():number};
 type AgentContextResponse=CloudAgentWarmActorResponse|CloudAcceptedWorkContextResponse;
 type AgentContextRecord={
-  cache:CloudAgentContextCache;context:CloudAuthorizedAgentContext;key:string;controller:AbortController;
+  cache:CloudAgentContextCache;context:CloudAuthorizedAgentContext;key:string;controller:AbortController;revocation:AbortController;
   response:AgentContextResponse|null;confirmedUntilMs:number;deadline:number;
   timer:ReturnType<typeof setTimeout>|null;cause:Error|null;notice?:CloudRepositoryMcpNotice;
 };
@@ -404,6 +407,7 @@ export class CloudAgentContextCache{
       if(existing){
         try{this.assertRecord(existing);}catch{throw contextFailure("lifecycle_superseded");}
         if(existing.key!==key||!existing.response||!isDeepStrictEqual(contextSnapshot(existing.response),contextSnapshot(response))){
+          existing.revocation.abort(contextFailure("authority_response_invalid","admission"));
           this.retire(existing,contextFailure("authority_response_invalid","admission"));throw existing.cause;
         }
         if(proofDeadline>existing.confirmedUntilMs){
@@ -423,11 +427,11 @@ export class CloudAgentContextCache{
       const active=[...this.records.values()].filter(record=>!record.cause).length;
       if(active-(previous&&!previous.cause?1:0)>=this.maxContexts||this.records.size+this.revoked.size>=this.maxSeenContexts)
         throw contextFailure("execution_limit");
-      const controller=new AbortController();let record:AgentContextRecord;
+      const controller=new AbortController(),revocation=new AbortController();let record:AgentContextRecord;
       const context=Object.freeze({contextId:response.contextId,contextRevision:response.contextRevision,scope:this.scope,
         actor:input.actor,provider:input.provider,model:input.model,conversationId:input.conversationId,cwd:input.cwd,
-        signal:controller.signal,assertLive:()=>this.assertRecord(record)}) as CloudAuthorizedAgentContext;
-      record={cache:this,context,key,controller,response:freezeCloudSnapshot(structuredClone(response)),notice,
+        signal:controller.signal,revocationSignal:revocation.signal,assertLive:()=>this.assertRecord(record)}) as CloudAuthorizedAgentContext;
+      record={cache:this,context,key,controller,revocation,response:freezeCloudSnapshot(structuredClone(response)),notice,
         confirmedUntilMs:proofDeadline,deadline:monotonicDeadline,timer:null,cause:null};
       this.records.set(response.contextId,record);authorizedContexts.set(context,record);
       this.current.set(key,record);this.schedule(record);
@@ -447,11 +451,13 @@ export class CloudAgentContextCache{
     if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(contextId))throw contextFailure("authority_response_invalid");
     if(!this.revoked.has(contextId)&&this.revoked.size+this.records.size>=this.maxSeenContexts){this.dispose();throw contextFailure("execution_limit");}
     this.revoked.add(contextId);
-    const record=this.records.get(contextId);if(record)this.retire(record,contextFailure("access_denied"));
+    const record=this.records.get(contextId);if(record){record.revocation.abort(contextFailure("access_denied"));this.retire(record,contextFailure("access_denied"));}
   }
   dispose():void{
     this.disposed=true;this.controller.abort();
-    for(const record of this.records.values())this.retire(record,contextFailure("lifecycle_superseded"));
+    for(const record of this.records.values()){
+      record.revocation.abort(contextFailure("lifecycle_superseded"));this.retire(record,contextFailure("lifecycle_superseded"));
+    }
   }
 }
 
@@ -475,6 +481,7 @@ export interface CloudBootNativeAuthority extends CloudExecutionMetadata{
   readonly mode:"boot-owner-v1";
   readonly scope:CloudAgentBootScope;
   readonly actor:CloudExecutionPrincipal;
+  readonly executionWork?:CloudExecutionWork;
   readonly contextId:string;
   readonly executionId:string;
   readonly conversationId:string;
@@ -522,6 +529,8 @@ type BootPreparedExecution={boundary:PreparedBoundary;env:Record<string,string>;
 export interface CloudBootAgentExecutionFactory extends CloudAgentExecutionFactory{
   bootDispatchReadiness(input:CloudBootSelectionInput):CloudBootDispatchReadiness;
   selectBoot(input:CloudBootSelectionInput):CloudBootAgentSelection;
+  /** After FULL claim commit and before native allocation. */
+  acceptBootExecution(selection:CloudBootAgentSelection,request:CloudExecutionEnrollRequest,signal:AbortSignal):Promise<void>;
   assertBootStart(selection:CloudBootAgentSelection):void;
   validateBootSelection(value:unknown,expected:CloudBootSelectionExpected):CloudBootAgentSelection;
   launchBootSelection(selection:CloudBootAgentSelection,spawnWorkload:(signal:AbortSignal)=>Promise<PreparedBoundary>):Promise<PreparedBoundary>;
@@ -545,12 +554,16 @@ export interface CloudBootAgentExecutionFactory extends CloudAgentExecutionFacto
   bootScopeActivity(selectors:readonly CloudBootCredentialSelector[]):CloudBootScopeActivity;
   /** Includes unproved native work after its foreground command settles. */
   hasActorWork(actorSessionId:string):boolean;
+  /** Exact context with reserved, foreground or unproved background work.
+   * Observing a chat and retaining an idle host are not renewal interests. */
+  hasContextWork(context:CloudAuthorizedAgentContext):boolean;
   retireBootCredentials(selectors:readonly CloudBootCredentialSelector[]):Promise<void>;
   disposeBoot():Promise<void>;
 }
 type BootScopeRecord={
   factory:CloudBootAgentExecutionFactory;selection:CloudBootAgentSelection;capture:CloudAgentCredentialCapture;
   rawLifetime:CloudAgentSessionLifetime;lifetime:CloudAgentExecutionLifetime;authority:CloudBootNativeAuthority;
+  executionWork:CloudExecutionWork|null;executionRequest:CloudExecutionEnrollRequest|null;accepting:boolean;
   phase:"launch-reserved"|"foreground"|"background"|"idle";
   workload:PreparedBoundary|null;execution:CloudBootProviderExecution|null;
   allocation:Promise<PreparedBoundary>|null;preparation:Promise<BootPreparedExecution>|null;
@@ -623,6 +636,7 @@ export function assertCloudBootNativeContinuation(execution:CloudProviderExecuti
 export function createCloudBootAgentExecutionFactory(options:{
   legacy:CloudAgentExecutionFactory;credentials:CloudAgentCredentialCache;contexts:CloudAgentContextCache;
   registry:CloudActorAuthorityRegistry;engineLive():boolean;supervisor:CloudAgentLeaseSupervisor;
+  executionAuthority?:CloudExecutionAuthority;
   /** W4's durable removal/pause fence. An exception is an authority refusal;
    * this is never an observational callback or a renderer-supplied boolean. */
   canStart(runInfo:CloudAgentCredentialRunInfo):boolean;
@@ -660,6 +674,8 @@ export function createCloudBootAgentExecutionFactory(options:{
       // Waiting allocations and late attachments remain raw lifetime owners.
       // Material survives any failed proof; inventory cannot report zero.
       await record.rawLifetime.invalidate(record.cause);
+      await record.executionWork?.close();
+      if(record.executionRequest)await options.executionAuthority!.closeCommand(record.executionRequest);
       const children=[...active].filter(child=>child.parent===record);
       await Promise.all(children.map(child=>closeRecord(child,record.cause)));
       record.proved=true;record.detach();active.delete(record);options.actorWorkChanged?.();
@@ -670,7 +686,14 @@ export function createCloudBootAgentExecutionFactory(options:{
   };
   const assertRecord=(record:BootScopeRecord)=>{
     assertEngine();if(record.closed)throw record.cause??contextFailure("lifecycle_superseded");
-    record.rawLifetime.assertLive();options.contexts.assertContext(record.selection.context);
+    record.rawLifetime.assertLive();
+    if(record.executionWork||isCloudAcceptedWork(record.selection.actor)){
+      if(record.selection.context.revocationSignal.aborted)throw contextFailure("access_denied");
+    }else options.contexts.assertContext(record.selection.context);
+  };
+  const assertExecutionAccepted=(record:BootScopeRecord)=>{
+    if(options.executionAuthority&&!record.executionWork&&!isCloudAcceptedWork(record.selection.actor))
+      throw contextFailure("access_denied");
   };
   const assertInput=(input:CloudBootSelectionInput)=>{
     assertEngine();assertCloudExecutionPrincipal(input.actor,options.registry);options.contexts.assertContext(input.context);
@@ -743,16 +766,19 @@ export function createCloudBootAgentExecutionFactory(options:{
         {customization:{value:customization},environment:{value:environment}})) as CloudBootAgentSelection;
       let record:BootScopeRecord;
       const lifetime:CloudAgentExecutionLifetime=Object.freeze({get signal(){return raw.signal;},assertLive:()=>assertRecord(record),
-        launch:async<T extends {stopAndProve():Promise<void>}>(spawn:()=>Promise<T>)=>{assertRecord(record);return raw.launch(spawn);},
+        launch:async<T extends {stopAndProve():Promise<void>}>(spawn:()=>Promise<T>)=>{
+          assertRecord(record);assertExecutionAccepted(record);return raw.launch(spawn);},
         attach:domain=>{raw.attach(domain);assertRecord(record);},retire:domain=>raw.retire(domain),close:()=>closeRecord(record)});
       const auth:CloudAgentExecutionAuth=Object.freeze({get credentialVersion(){return capture.credentialVersion;},
         codexAuth:()=>{assertRecord(record);return capture.codexAuth();},
         refreshCodex:async(version,previousAccountId)=>{assertRecord(record);return capture.refreshCodex(version,previousAccountId);}});
       const authority:CloudBootNativeAuthority=Object.freeze({...metadata,mode:"boot-owner-v1",scope:options.registry.scope,actor:input.actor,
+        get executionWork(){return record.executionWork??undefined;},
         contextId:input.context.contextId,executionId:input.executionId,conversationId:input.conversationId,cwd:input.cwd,lifetime,auth,
         takeMaterial:()=>{assertRecord(record);return capture.takeMaterial();}});
       const ended=()=>{
-        const cause=contextCause(input.context.signal.aborted?input.context.signal.reason:raw.signal.reason);
+        const cause=contextCause(input.context.revocationSignal.aborted?input.context.revocationSignal.reason:
+          raw.signal.aborted?raw.signal.reason:input.context.signal.reason);
         record.closed=true;record.cause??=cause;
         // An entered follow-up's captured deadline governs its actual native
         // host and descendants. Ordinary successful capture release is inert
@@ -761,13 +787,37 @@ export function createCloudBootAgentExecutionFactory(options:{
         if(parent){parent.closed=true;parent.cause??=cause;}
         queueMicrotask(()=>{void closeRecord(parent??record,cause).catch(()=>{});});
       };
-      const detach=()=>{raw.signal.removeEventListener("abort",ended);input.context.signal.removeEventListener("abort",ended);};
+      const observed=()=>{if(!record.executionWork&&!isCloudAcceptedWork(input.actor))ended();};
+      const detach=()=>{raw.signal.removeEventListener("abort",ended);input.context.signal.removeEventListener("abort",observed);
+        input.context.revocationSignal.removeEventListener("abort",ended);};
       record={factory,selection,capture,rawLifetime:raw,lifetime,authority,phase:"launch-reserved",workload:null,execution:null,
+        executionWork:null,executionRequest:null,accepting:false,
         allocation:null,preparation:null,reservation:null,parent:null,reuseOnly,turnUsed:false,backgroundTurn:null,
         closed:false,cause:null,closing:null,proved:false,detach};
       bootSelections.set(selection,record);bootAuthorities.set(authority,record);active.add(record);seen.add(input.executionId);
-      raw.signal.addEventListener("abort",ended,{once:true});input.context.signal.addEventListener("abort",ended,{once:true});
-      assertRecord(record);return selection;
+      raw.signal.addEventListener("abort",ended,{once:true});input.context.signal.addEventListener("abort",observed,{once:true});
+      input.context.revocationSignal.addEventListener("abort",ended,{once:true});
+      assertRecord(record);options.actorWorkChanged?.();return selection;
+    },
+    async acceptBootExecution(selection,request,signal){
+      const record=original(selection);factory.assertBootStart(selection);
+      if(!options.executionAuthority||record.executionWork||record.accepting||record.allocation||record.parent||record.reuseOnly||
+        !isCloudAuthorizedActor(selection.actor)||request.contextId!==selection.context.contextId||
+        request.contextRevision!==selection.context.contextRevision||
+        (["executionId","conversationId","provider","model","cwd"] as const).some(key=>request.command[key]!==selection[key]))
+        throw contextFailure("access_denied");
+      record.accepting=true;record.executionRequest=freezeCloudSnapshot(structuredClone(request));
+      let work:CloudExecutionWork|undefined;
+      try{
+        work=await options.executionAuthority.accept(request,{actor:selection.actor.provenance,
+          credentialId:record.capture.runInfo.credentialId,credentialRevision:record.capture.runInfo.credentialRevision,
+          revocation:AbortSignal.any([selection.actor.revocationSignal,selection.context.revocationSignal]),
+          assertAdmission:()=>factory.assertBootStart(selection)},AbortSignal.any([signal,record.rawLifetime.signal]));
+        factory.assertBootStart(selection);
+        record.rawLifetime.adoptExecution(work);record.executionWork=work;
+        assertRecord(record);
+      }catch(error){await work?.close();throw error;}
+      finally{record.accepting=false;}
     },
     assertBootStart(selection){
       const record=original(selection);assertRecord(record);
@@ -784,6 +834,7 @@ export function createCloudBootAgentExecutionFactory(options:{
     },
     launchBootSelection(selection,spawnWorkload){
       const record=original(selection);factory.assertBootStart(selection);
+      assertExecutionAccepted(record);
       if(record.allocation||record.workload||record.parent||record.reuseOnly)throw contextFailure("access_denied");
       const allocation=record.lifetime.launch(()=>{
         factory.assertBootStart(selection);
@@ -943,7 +994,11 @@ export function createCloudBootAgentExecutionFactory(options:{
     },
     hasActorWork(actorSessionId){
       return [...active].some(record=>!record.proved&&!isCloudAcceptedWork(record.selection.actor)&&record.selection.actor.provenance.actorSessionId===actorSessionId&&
-        (record.phase!=="idle"||record.reservation!==null));
+        (!record.turnUsed||record.phase!=="idle"||record.reservation!==null));
+    },
+    hasContextWork(context){
+      return [...active].some(record=>!record.proved&&record.selection.context===context&&
+        (!record.turnUsed||record.phase!=="idle"||record.reservation!==null));
     },
     bootScopeActivity(selectors){
       if(!validSelectors(selectors))return {complete:false,foreground:0,reservedLaunches:0,background:0,idleHosts:0,scopes:[]};

@@ -138,6 +138,18 @@ END $$;`],
       "cloud_accepted_lifecycle_changed()",
     ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
   },
+  "0172_cloud_owner_checkpoint_recovery.sql": {
+    "widen-check": ["ALTER TABLE cloud_workspace_final_save_recoveries DROP CONSTRAINT cloud_workspace_final_save_recoveries_state_check;"],
+    "new-table-privileges": ["REVOKE ALL ON cloud_workspace_owner_discard_receipts FROM PUBLIC,zeros_app;"],
+    "truncate-guard": [`CREATE TRIGGER cloud_owner_discard_no_truncate BEFORE TRUNCATE ON cloud_workspace_owner_discard_receipts
+  FOR EACH STATEMENT EXECUTE FUNCTION guard_cloud_owner_discard_receipt();`],
+    "privilege-tightening": [`REVOKE ALL ON FUNCTION guard_cloud_owner_discard_receipt(),require_cloud_owner_discard_transition(),cloud_owner_discard_retire_intent(),
+  cloud_owner_discard_hold_capture(),cloud_owner_discard_skip_lost_cleanup(),cloud_final_save_owner_discarded(uuid) FROM PUBLIC;`],
+  },
+  "0173_cloud_owner_recovery_safety_stop.sql": {
+    "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_owner_discard_recovery_digest(uuid),
+  cloud_owner_discard_safety_stop_matches(uuid,uuid,integer,uuid,uuid,uuid,uuid,bytea) FROM PUBLIC;`],
+  },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate
@@ -170,6 +182,18 @@ const authorityCacheExemptionDigest = "414aa4d5653660ef6eee4300d1e52889ba36e9ca2
 // additionally refuses unsaved recoveries or unresolved provider dispatches.
 const finalSavePurgeDigest = "06350d1e7c16d53a5dd4b49171ff868755547a455e12fc92e1419dca28d86da1";
 const finalSavePurgeAuthorityDigest = "1ffca4f787df85c473fe19c450b7cac2729c504aac4853f54a5d8a1f21b0dfee";
+// 0172 changes only the unresolved-history predicates: an exact owner-only
+// discard is a separate disposition, never final proof or dispatch authority.
+const ownerDiscardHistoryDigest = "b51397a2eba733a22244bab9ca0059e0ad2e9f64b75992922f98b6ffd695b5df";
+const ownerDiscardPurgeDigest = "552d05c7361c026239ef4b08f72ff6f2e6a5514a1a334e52f8e07d4a80a44318";
+// Optional 0173 companions retain v1 receipt behavior and add only the exact
+// safety Stop disposition. Pin whole statements, including every refusal.
+const ownerDiscardSafetyDigests: Record<string,string> = {
+  "owner-discard-safety-guard": "431be2403d3b46db9f60e943da9fac9799ee75b387058091420d188a0066e4c7",
+  "owner-discard-safety-disposition": "59c024f127915c9ec65528fc7bf32bf23c7e4cde107541ef99734269663bf9d5",
+  "owner-discard-safety-retirement": "674a58e6886c9341a1d8ddde10eec3dea1da964e08ef70f82faa0a1331b57aff",
+  "owner-discard-safety-transition": "6468791de8211c3fdf74a0678d419ca5dc65275f894ea5bd81563e5422a1bb3f",
+};
 
 /** Split only at top-level SQL semicolons. Dollar bodies, nested comments and
  * quoted values remain intact; an annotation inside a function cannot exempt
@@ -250,7 +274,13 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
       (rule === "final-save-purge" && file === "0171_cloud_final_save_recovery.sql" &&
         createHash("sha256").update(statement).digest("hex") === finalSavePurgeDigest) ||
       (rule === "final-save-purge-authority" && file === "0171_cloud_final_save_recovery.sql" &&
-        createHash("sha256").update(statement).digest("hex") === finalSavePurgeAuthorityDigest);
+        createHash("sha256").update(statement).digest("hex") === finalSavePurgeAuthorityDigest) ||
+      (rule === "owner-discard-history" && file === "0172_cloud_owner_checkpoint_recovery.sql" &&
+        createHash("sha256").update(statement).digest("hex") === ownerDiscardHistoryDigest) ||
+      (rule === "owner-discard-purge" && file === "0172_cloud_owner_checkpoint_recovery.sql" &&
+        createHash("sha256").update(statement).digest("hex") === ownerDiscardPurgeDigest) ||
+      (file === "0173_cloud_owner_recovery_safety_stop.sql" &&
+        createHash("sha256").update(statement).digest("hex") === ownerDiscardSafetyDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

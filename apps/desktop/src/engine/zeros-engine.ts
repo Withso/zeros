@@ -233,7 +233,7 @@ import { cloudLocalCommandCheckpointRoot, restoreCloudLocalCommandCheckpointLedg
 import { rebuildCloudLocalCommandHistory } from "./cloud-local-command-queue-history-rebuild";
 import { openSqlite } from "./db/sqlite";
 import { CloudLocalCommandMirrorDriver } from "./cloud-local-command-mirror";
-import { captureCloudLocalCommandHistory } from "./cloud-local-command-queue-history";
+import { captureCloudLocalCommandHistory, type CloudLocalCommandHistoryCaptureInput } from "./cloud-local-command-queue-history";
 import { headRev as cloudLocalRecordSequence } from "./db/sync";
 import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/containment/cloud-native-history";
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
@@ -1288,7 +1288,7 @@ export class ZerosEngine {
   private cloudLocalHistoryRestoreHeads = new Map<string, CloudLocalCommandHistoryHead>();
   private cloudLocalMirror: CloudLocalCommandMirrorDriver | null = null;
   private cloudLocalMirrorTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly cloudHistoryRedactors = new Map<string, (value: unknown) => unknown>();
+  private readonly cloudHistoryRedactors = new Map<string, CloudLocalCommandHistoryCaptureInput["redactDocument"]>();
   private readonly cloudAgentLegacyFactory: CloudAgentExecutionFactory | null;
   private readonly cloudGoals=new CloudGoalRecorder((claim,sequence,goal)=>{
     if(!this.cloudCommands)throw new CloudCommandRuntimeError("cloud_commands_unavailable");
@@ -3975,7 +3975,7 @@ export class ZerosEngine {
       activity: () => this.cloudEngineUplinkActivity(),
       features: registration.uplinkFeatures(),
       // Credential-control push (P0.10 C01): a pushed revision runs the same
-      // credential-controls exchange the 500 ms poll runs; the poll itself
+      // credential-controls exchange the fallback poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).
       onCredentialRevision: async () => {
         // Only agent-controls reaches here: the uplink acks any other kind
@@ -4900,6 +4900,10 @@ export class ZerosEngine {
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
       predecessor: this.cloudLocalCommandPredecessor,
       runtimeBootId: registration.runtimeBootId, registration, legacy,
+      execution: { runtimeId: registration.runtimeId,
+        enroll: (body, signal) => registration.acceptedWorkRequest("execution-enroll", body, signal),
+        check: (body, signal) => registration.acceptedWorkRequest("execution-check", body, signal),
+        close: (body, signal) => registration.acceptedWorkRequest("execution-close", body, signal) },
       ...(registration.acceptedWorkNegotiated() && this.cloudDetachedPushHealth ? { accepted: {
         auth: () => this.cloudCapabilityAuth, runtimeId: registration.runtimeId,
         enabled: () => registration.acceptedWorkNegotiated() && this.cloudEngineUplink?.detachedActive === true,
@@ -4918,8 +4922,8 @@ export class ZerosEngine {
       engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,
       // While the uplink's gate is open, cred.revision pushes carry control
       // changes and the poll drops to a 30 s safety net; any uplink loss
-      // returns it to the 500 ms fallback cadence.
-      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 500),
+      // returns it to the 5 s fallback cadence. Pending ACKs stay prompt.
+      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 5_000),
       // A successful poll clears the uplink's failed-push mark, so a
       // transient push failure recovers the slow cadence after one poll.
       controlsExchange: ok => { if (ok) this.cloudEngineUplink?.noteCredentialExchangeSucceeded(); },
@@ -11255,10 +11259,49 @@ export class ZerosEngine {
 
     const finishLoopObservation = this.cloudWorker ? null : this.slowWorkspaceOperations?.beginEventLoopObservation?.();
     try {
-      // Keep the original NORMAL rows and FULL head in one read snapshot across
-      // image migration and the outer dispatch awaits. A changed writer or head
-      // refuses this response rather than labelling older rows with a new head.
-      const historyRead = this.cloudWorker && this.cloudAgentBoot?.active ? this.captureCloudHistoryRead(op) : null;
+      // Admission retains writer identity, not a global data revision. The
+      // service takes the data ticket at the actual synchronous SQLite read,
+      // after any dispatch wait, and pairs rows with metadata before yielding.
+      const historyOperation = ["chats.list", "messages.window", "messages.windowOlder", "messages.search"].includes(op);
+      const historyBoot = this.cloudWorker && historyOperation && this.cloudAgentBoot?.active ? this.cloudAgentBoot : null;
+      const originalHistoryQueue = historyBoot?.queue;
+      const historyActor = client.cloudActor;
+      let historyReadCompleted = false;
+      const assertHistoryOwner = () => {
+        if (!historyBoot || this.cloudAgentBoot !== historyBoot || !historyBoot.active || historyBoot.queue !== originalHistoryQueue)
+          throw new CloudCommandRuntimeError("command_conflict");
+        if (historyActor && (client.cloudActor !== historyActor || client.authorized?.() !== true))
+          throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+        // The getter also validates the original queue's live engine/storage.
+        // Its changing counter alone cannot invalidate an already paired read.
+        void originalHistoryQueue!.historyReadRevision;
+      };
+      const readHistory = historyBoot ? async <T extends object>(read: () => T,
+        prepare?: (value: T, assertCurrent: () => void) => Promise<void> | undefined): Promise<T> => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          assertHistoryOwner();
+          const ticket = this.captureCloudHistoryRead(op);
+          if (!ticket) throw new CloudCommandRuntimeError("command_conflict");
+          try {
+            const value = read();
+            const snapshot = this.cloudHistoryReadResult(op, params, value, ticket) as T;
+            const pending = prepare?.(value, () => { assertHistoryOwner(); this.assertCloudHistoryRead(ticket); });
+            if (pending) {
+              await pending;
+              assertHistoryOwner();
+              // Migration may itself have rewritten NORMAL. Re-read both
+              // stores; never put a new head on the pre-I/O rows.
+              this.assertCloudHistoryRead(ticket);
+            }
+            historyReadCompleted = true;
+            return snapshot;
+          } catch (error) {
+            assertHistoryOwner();
+            if (!(error instanceof CloudCommandRuntimeError) || error.code !== "command_conflict" || attempt === 2) throw error;
+          }
+        }
+        throw new CloudCommandRuntimeError("command_conflict");
+      } : undefined;
       // A reset that truncates a chat's timeline must not race a turn still
       // streaming INTO that timeline (its trailing chunks would re-persist as
       // zombie rows past the cut). The renderer's footer cancels before it
@@ -11306,6 +11349,7 @@ export class ZerosEngine {
         const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
           ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         const handleWorkspaceRequest=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
+          ...(readHistory ? { cloudHistoryRead: readHistory } : {}),
           ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
             connectionId: client.id,
             authority: catalogAuthority,
@@ -11627,9 +11671,13 @@ export class ZerosEngine {
               },
             )
           : await operation;
-      if (!historyRead && this.cloudAgentBoot?.active && ["chats.list", "messages.window", "messages.windowOlder", "messages.search"].includes(op))
+      if (!historyBoot && this.cloudAgentBoot?.active && historyOperation)
         throw new CloudCommandRuntimeError("command_conflict");
-      const result = historyRead ? this.cloudHistoryReadResult(op, params, rawResult, historyRead) : rawResult;
+      if (historyBoot) {
+        assertHistoryOwner();
+        if (!historyReadCompleted) throw new CloudCommandRuntimeError("command_conflict");
+      }
+      const result = rawResult;
       const changed = dbChangedKinds(op, result, !!this.cloudWorker);
       const workspaceIds = changed && (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
         ? [params.workspaceId]

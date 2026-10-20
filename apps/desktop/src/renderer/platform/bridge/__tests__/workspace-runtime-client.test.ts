@@ -694,7 +694,7 @@ describe("workspace runtime routing", () => {
       expect(await client.request(request)).toMatchObject({ result: live });
       expect(peer.request).toHaveBeenLastCalledWith(expect.objectContaining({
         op: "messages.window", params: { chatId: "chat", limit: 100 },
-      }));
+      }), { timeoutMs: 5000 });
       Object.defineProperty(peer.peer.client, "status", { value: "disconnected" });
       expect(await client.request(request)).toMatchObject({ result: remote });
       expect(open).toHaveBeenCalledOnce();

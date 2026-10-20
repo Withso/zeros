@@ -18,6 +18,8 @@ import { reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry } from "..
 import { notifyAgentSendFailure } from "../agent-send-failure-toast";
 import { turnFailureForCard } from "../turn-failure";
 import { TurnFailureCard } from "../turn-failure-card";
+import { QueuedMessagesCard } from "../queued-messages-card";
+import { queuedTranscriptPresentation } from "./helpers/queued-transcript-presentation";
 import type { AgentMessage } from "../use-agent-session";
 import type { AgentFailure } from "../../../platform/bridge/failure";
 
@@ -45,18 +47,20 @@ const code = ts.transpileModule(`${promotion}\nglobalThis.send = ${callback};`, 
 // so the callback's refusal state must actually produce its sole error card.
 const chatSource = readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8");
 const chatAst = ts.createSourceFile("chat.tsx", chatSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let admissionProjection = "", admissionBanner = "";
+let admissionProjection = "", admissionBanner = "", queueCard = "";
 function collectAdmission(node: ts.Node) {
   if (ts.isVariableDeclaration(node) && node.name.getText(chatAst) === "detachedCloudAdmission")
     admissionProjection = `const ${node.getText(chatAst)};`;
   if (ts.isJsxExpression(node) && node.expression && ts.isBinaryExpression(node.expression) &&
       ts.isIdentifier(node.expression.left) && node.expression.left.text === "detachedCloudAdmission")
     admissionBanner = node.expression.getText(chatAst);
+  if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(chatAst) === "QueuedMessagesCard")
+    queueCard = node.getText(chatAst);
   ts.forEachChild(node, collectAdmission);
 }
 collectAdmission(chatAst);
-if (!admissionProjection || !admissionBanner) throw new Error("Cloud admission banner branch was not found");
-const bannerCode = ts.transpileModule(`${admissionProjection}\nglobalThis.banner = (${admissionBanner});`, {
+if (!admissionProjection || !admissionBanner || !queueCard) throw new Error("Cloud admission banner branch was not found");
+const bannerCode = ts.transpileModule(`${admissionProjection}\nglobalThis.banner = (${admissionBanner});\nglobalThis.queueCard = (${queueCard});`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
 }).outputText;
 const footerSource = readFileSync(new URL("../turn-footer.tsx", import.meta.url), "utf8");
@@ -77,11 +81,12 @@ const footerCode = ts.transpileModule(`globalThis.banner = (() => { ${footerAdmi
 
 function expectOneAdmissionBanner() {
   const session = useSessionsStore.getState().sessions.chat;
-  const queuedMessages = session.messages.filter(message => message.kind === "text" && message.queued &&
-    message.queuedPresentation !== "active-turn");
-  const visibleMessages = session.messages.filter(message => !queuedMessages.includes(message));
-  const context: Record<string, unknown> = { React, TurnFailureCard, isCloudWorkspace, session,
-    chatThread: { folder: session.cwd }, visibleMessages, queuedMessages, readOnly: false, interactive: true, sendNowQueued: vi.fn() };
+  const { queuedMessages, visibleMessages } = queuedTranscriptPresentation(session.messages, session);
+  const context: Record<string, unknown> = { React, TurnFailureCard, QueuedMessagesCard, isCloudWorkspace, session,
+    chatThread: { folder: session.cwd }, visibleMessages, queuedMessages, readOnly: false, interactive: true, surfaceActive: true, sendNowQueued: vi.fn(),
+    queueSelectedId: null, editingQueuedId: null, queueCollapsed: false, setQueueCollapsed: vi.fn(), setQueueSelectedId: vi.fn(),
+    startQueuedEdit: vi.fn(), saveQueuedEdit: vi.fn(), queuedEditHasContent: true, deleteQueued: vi.fn(),
+    steeringSupported: true, composerStreaming: false, steeringAgentName: "Codex", openCloudAdmissionSettings: vi.fn() };
   vm.runInNewContext(bannerCode, context);
   const footers = visibleMessages.map(message => {
     if (message.kind !== "text" || message.role !== "user") return null;
@@ -92,7 +97,7 @@ function expectOneAdmissionBanner() {
     vm.runInNewContext(footerCode, footerContext);
     return footerContext.banner as React.ReactNode;
   });
-  const html = renderToStaticMarkup(React.createElement(React.Fragment, null, ...footers, context.banner as React.ReactNode));
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null, ...footers, context.banner as React.ReactNode, context.queueCard as React.ReactNode));
   expect(html.match(/data-turn-failure-card/g)).toHaveLength(1);
   expect(mocks.toast).not.toHaveBeenCalled();
   return html;
@@ -163,6 +168,30 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
 }
 
 describe("production send callback on runtime rejection", () => {
+  it.each(["reconnecting", "warming"] as const)("keeps unaccepted delivery pending through %s", async status => {
+    let pending: typeof BLANK | undefined;
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", () => {
+      useSessionsStore.getState().patchSession("chat", { status });
+      pending = useSessionsStore.getState().sessions.chat;
+    }, true, { success: true });
+    await h.send();
+    expect(pending).toMatchObject({ cloudPromptPending: true, activeTurnStartedAt: null });
+  });
+
+  it("shows Sending without a running clock until the exact cloud turn is accepted", async () => {
+    let pending: typeof BLANK | undefined, accepted: typeof BLANK | undefined;
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", () => {
+      pending = useSessionsStore.getState().sessions.chat;
+      useSessionsStore.getState().applyBridgeUpdate({ sessionId: "session", update: { sessionUpdate: "turn_state",
+        turnId: useSessionsStore.getState().pendingLocalTurns.chat, state: "running", startedAt: 2_000 } });
+      accepted = useSessionsStore.getState().sessions.chat;
+    }, true, { success: true });
+    await h.send();
+    expect(pending).toMatchObject({ cloudPromptPending: true, activeTurnStartedAt: null });
+    expect(accepted).toMatchObject({ cloudPromptPending: false, activeTurnStartedAt: 2_000 });
+    expect(useSessionsStore.getState().sessions.chat.status).toBe("ready");
+  });
+
   const successorCases = ["claude", "codex", "cursor"].flatMap(agentId =>
     ["/personal/project", "/organization/project", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"].flatMap(folder =>
       ["complete", "failed", "rejected"].flatMap(receipt => [false, true].map(settled => ({ agentId, folder, receipt, settled })))));

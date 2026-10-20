@@ -6,6 +6,8 @@ import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test
 import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.js";
 import { DatabaseCloudWorkspaceCommandService, type CloudCommandEngineScope, type CloudLocalCommandMirrorBatch, type CloudLocalCommandMirrorChange } from "./commands.js";
 import { canonicalCloudHistoryJson, HISTORY_WORKSPACE_BYTES } from "./history-local-contract.js";
+import { withSystemTx } from "../db.js";
+import { seedFinalSaveEngine } from "./final-save-test-fixtures.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("actual authenticated CP mirror commits", () => {
@@ -69,6 +71,92 @@ suite("actual authenticated CP mirror commits", () => {
     const fields = { version: 1 as const, scope: bootScope(), sealId: randomUUID(), sequence, recordSequence, eventSequence, inventorySha256: "a".repeat(64) };
     return { ...fields, sha256: hash(fields) };
   };
+
+  async function replaceWriter() {
+    const previous = bootScope();
+    const next = await withSystemTx(pool, async tx => {
+      await tx.query("UPDATE cloud_workspace_local_command_writers SET state='retired',retired_at=now() WHERE writer_epoch=$1", [writerEpoch]);
+      await tx.query("UPDATE cloud_agent_boot_bindings SET retired_at=now() WHERE writer_epoch=$1", [writerEpoch]);
+      await tx.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=now() WHERE id=$1", [scope.engineInstanceId]);
+      return seedFinalSaveEngine(tx, { ...workspace, setupAttempt: 2 });
+    });
+    scope = next;
+    workspace.engineInstanceId = next.engineInstanceId;
+    workspace.heartbeatToken = next.heartbeatToken;
+    bootId = (await pool.query("SELECT runtime_boot_id AS id FROM cloud_workspace_engine_instances WHERE id=$1", [next.engineInstanceId])).rows[0]!.id;
+    writerEpoch = randomUUID(); const bindingId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_local_command_writers(workspace_id,org_id,generation,engine_instance_id,
+      boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch) VALUES($1,$2,1,$3,$4,$5,$6,1)`,
+    [workspace.workspaceId, workspace.organizationId, next.engineInstanceId, bootId, writerEpoch, workspace.userId]);
+    await pool.query(`INSERT INTO cloud_agent_boot_bindings(id,workspace_id,org_id,generation,engine_instance_id,
+      boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch,credentials_initialized)
+      VALUES($1,$2,$3,1,$4,$5,$6,$7,1,true)`,
+    [bindingId, workspace.workspaceId, workspace.organizationId, next.engineInstanceId, bootId, writerEpoch, workspace.userId]);
+    await pool.query("UPDATE cloud_workspace_local_command_writers SET state='active',activated_at=now() WHERE writer_epoch=$1", [writerEpoch]);
+    await pool.query("UPDATE cloud_workspaces SET agent_boot_id=$2 WHERE id=$1", [workspace.workspaceId, bindingId]);
+    return previous;
+  }
+
+  it.each(["command", "history_head"])("seals a fresh stream below retained %s event cursors without changing historical proof", async source => {
+    const original = terminal();
+    if (source === "history_head") {
+      original.history = { restoreRevision: 1, recordSequence: 4, eventSequence: 2, incompleteReason: "capture_unavailable" };
+      original.historyHead = { ...original.historyHead!, history: original.history };
+    }
+    const retainedHead = { originWriterEpoch: writerEpoch,
+      source: { kind: "mutation" as const, mutationId: randomUUID(), operation: "repair" as const }, deleted: false,
+      history: { restoreRevision: 2, recordSequence: 4, eventSequence: 9, incompleteReason: "capture_unavailable" as const } };
+    await service.mirror(scope, flight([original]));
+    if (source === "history_head") await service.mirror(scope, flight([change({ revision: 2, historyHead: retainedHead })], 1));
+    const previousSeal = seal(source === "history_head" ? 2 : 1, 4, 9);
+    await service.seal(scope, previousSeal);
+    const previous = await replaceWriter();
+    if (source === "command") {
+      await service.mirror(scope, flight([original]));
+      await service.mirror(scope, flight([change({ revision: 2, historyHead: {
+        originWriterEpoch: writerEpoch, source: { kind: "mutation", mutationId: randomUUID(), operation: "repair" },
+        deleted: false, history: { restoreRevision: 2, recordSequence: 4, eventSequence: 2, incompleteReason: "capture_unavailable" },
+      } })], 1));
+    } else {
+      await service.mirror(scope, flight([original]));
+      await service.mirror(scope, flight([change({ revision: 2, historyHead: retainedHead })], 1));
+    }
+    const value = seal(2, 4, 3);
+    await expect(service.seal(scope, value)).resolves.toMatchObject({ writerEpoch, eventSequence: 3, sha256: value.sha256 });
+    expect((await rows("cloud_workspace_local_command_writers")).rows.find(row => row.writer_epoch === previous.writerEpoch))
+      .toMatchObject({ state: "retired", seal: previousSeal, seal_event_sequence: "9" });
+    expect((await rows("cloud_workspace_local_commands")).rows[0]).toMatchObject({ writer_epoch: previous.writerEpoch,
+      history_event_sequence: source === "command" ? "9" : "2" });
+    expect(await service.seal(scope, value)).toMatchObject({ sha256: value.sha256 });
+  });
+
+  it("still checks the restored NORMAL record head when history belongs to a retired stream", async () => {
+    const original = terminal(); await service.mirror(scope, flight([original]));
+    await service.seal(scope, seal(1, 4, 9)); await replaceWriter();
+    await service.mirror(scope, flight([original]));
+    await expect(service.seal(scope, seal(1, 3, 9))).rejects.toMatchObject({ code: "command_conflict" });
+    expect((await rows("cloud_workspace_local_command_writers")).rows.find(row => row.writer_epoch === writerEpoch)!.seal).toBeNull();
+  });
+
+  it.each(["current", "prior"])("compares compact control cursors only within the %s native stream", async origin => {
+    const original = terminal();
+    original.history = { restoreRevision: 1, recordSequence: 4, eventSequence: 2, incompleteReason: "capture_unavailable" };
+    original.historyHead = { ...original.historyHead!, history: original.history };
+    await service.mirror(scope, flight([original]));
+    await service.seal(scope, seal(1, 4, 9)); const previous = await replaceWriter();
+    await service.mirror(scope, flight([original]));
+    // Existing compact-control projection, with its immutable native stream
+    // separate from the writer currently carrying the history.
+    const streamId = origin === "current" ? scope.engineInstanceId : previous.engineInstanceId;
+    await pool.query(`INSERT INTO cloud_workspace_local_agent_controls(workspace_id,org_id,projection_epoch,outbox_sequence,
+      local_stream_id,local_sequence,conversation_id,execution_id,command_id,user_message_id,agent_id,resolver_id,type,frame)
+      VALUES($1,$2,$3,1,$4,10,'chat','execution',$5,'turn','cursor','permission','AGENT_PERMISSION_SETTLED',$6::jsonb)`,
+    [workspace.workspaceId, workspace.organizationId, writerEpoch, streamId, original.entry!.commandId,
+      JSON.stringify({ type: "AGENT_PERMISSION_SETTLED", cloudStream: { streamId, sequence: 10 } })]);
+    const result = service.seal(scope, seal(1, 4, 3));
+    if (origin === "current") await expect(result).rejects.toMatchObject({ code: "command_conflict" });
+    else await expect(result).resolves.toMatchObject({ writerEpoch, eventSequence: 3 });
+  });
 
   it("stores one exact immutable seal and ACK after mirrored drain, with concurrent/lost-ACK replay and no lifecycle advance", async () => {
     const batch = flight(); await service.mirror(scope, batch);

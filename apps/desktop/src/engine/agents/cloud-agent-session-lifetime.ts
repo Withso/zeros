@@ -3,6 +3,7 @@ import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution
 import { CloudCommandFailureError, decodeCloudCommandFailure, type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
 import { isCloudAuthorizedActor } from "./cloud-actor-authority";
 import { isCloudAcceptedWork } from "./cloud-accepted-work-authority";
+import { isCloudExecutionWork, type CloudExecutionWork } from "./cloud-execution-authority";
 import { cloudExecutionPrincipalScope, type CloudExecutionPrincipal } from "./cloud-execution-principal";
 import { isCloudAgentCredentialCapture, type CloudAgentCredentialCapture } from "./cloud-agent-credential-cache";
 import type { CloudAgentLeaseSupervisor } from "./cloud-agent-lease";
@@ -33,6 +34,7 @@ export class CloudAgentSessionLifetime {
   private failures = 0;
   private escalated = false;
   private retry: ReturnType<typeof setTimeout> | null = null;
+  private execution: CloudExecutionWork | null = null;
   constructor(private readonly options: {
     actor: CloudExecutionPrincipal; credential: CloudAgentCredentialCapture;
     engineLive(): boolean; supervisor: CloudAgentLeaseSupervisor;
@@ -45,7 +47,8 @@ export class CloudAgentSessionLifetime {
   }
   get signal(): AbortSignal { return this.controller.signal; }
   private readonly authorityEnded = (): void => {
-    const error = this.options.actor.signal.aborted ? this.options.actor.signal.reason : this.options.credential.signal.reason;
+    const authority = this.execution ?? this.options.actor;
+    const error = authority.signal.aborted ? authority.signal.reason : this.options.credential.signal.reason;
     this.cause ??= safeCause(error, "access_denied");
     void this.close().catch(() => {});
   };
@@ -53,11 +56,26 @@ export class CloudAgentSessionLifetime {
     if (this.cause) throw this.cause;
     try {
       if (this.retired || !this.options.engineLive()) throw failure("lifecycle_superseded");
-      this.options.actor.assertLive("run"); this.options.credential.assertLive();
+      if (this.execution) this.execution.assertLive();
+      else this.options.actor.assertLive("run");
+      this.options.credential.assertLive();
     } catch (error) {
       this.cause ??= safeCause(error, "authority_unavailable");
       void this.close().catch(() => {}); throw this.cause;
     }
+  }
+  /** Called before the first allocation, only after exact CP acceptance. */
+  adoptExecution(work: CloudExecutionWork): void {
+    this.assertLive();
+    if (this.execution || this.domains.size || this.launches.size || !isCloudExecutionWork(work) ||
+      !isCloudAuthorizedActor(this.options.actor) ||
+      !isDeepStrictEqual(work.receipt.scope, this.options.actor.provenance.scope) ||
+      !isDeepStrictEqual(work.receipt.actor, this.options.actor.provenance.actor) ||
+      work.receipt.actorSessionId !== this.options.actor.provenance.actorSessionId) throw failure("access_denied");
+    work.assertLive();
+    this.options.actor.signal.removeEventListener("abort", this.authorityEnded);
+    this.execution = work; work.signal.addEventListener("abort", this.authorityEnded, { once: true });
+    this.assertLive();
   }
   /** Reserve cleanup before invoking a possibly asynchronous native launch. */
   async launch<T extends Domain>(spawn: () => Promise<T>): Promise<T> {
@@ -121,6 +139,7 @@ export class CloudAgentSessionLifetime {
     this.cause ??= failure("lifecycle_superseded"); this.retired = true;
     if (!this.controller.signal.aborted) this.controller.abort(this.cause);
     this.options.actor.signal.removeEventListener("abort", this.authorityEnded);
+    this.execution?.signal.removeEventListener("abort", this.authorityEnded);
     this.options.credential.signal.removeEventListener("abort", this.authorityEnded);
     if (this.closing) return this.closing;
     const closing = (async () => {

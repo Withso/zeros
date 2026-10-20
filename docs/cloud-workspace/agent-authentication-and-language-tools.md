@@ -35,7 +35,7 @@ the unchanged share dialog needs no extra note, toggle or confirmation. CP
 records that consent. The sending member's verified actor/device authority,
 Git attribution, private customization and conversation scope remain independent
 of the funding owner. Viewers cannot run. Member, role, account and device
-revocation still take effect immediately.
+revocation remain execution-ending events.
 
 This mode currently requires `zeros-managed` compute. Non-Zeros-managed compute
 is refused before provider material is selected or delivered. Legacy explicit
@@ -51,9 +51,10 @@ the worker. The share dialog is unchanged.
 
 ### Next-run adoption and cards
 
-Background refresh installs the next provider selection; Send does not issue
-a new grant, validation or credential fetch in this mode. Each run captures its
-original selection and first-write reservation. Pending publication parks new
+Background refresh installs the next provider selection; Send does not fetch
+provider credentials in this mode. Each run captures its original selection
+and first-write reservation, then obtains exact execution acceptance before
+native allocation. Pending publication parks new
 starts rather than fetching or using obsolete material on Send. A running turn
 keeps its captured account; the next run adopts the acknowledged replacement.
 Codex access renewal happens through CP near expiry in the background; refresh
@@ -81,12 +82,49 @@ new command, claim and original first-write reservation even when its native
 execution ID stays the same. Changed native auth, actor, model or MCP/context
 eligibility requires fresh preparation; an unrelated label or cache revision
 alone does not recycle an otherwise eligible host.
+Execution-enrolled commands retire their native scope at settlement. Their next
+command obtains fresh acceptance and resumes the persisted provider conversation
+in a new native scope; the previous command's grant cannot fund another turn.
+The unenrolled legacy path retains its existing warm reuse.
 
 Stop immediately fences that conversation, then proves whole-scope descendant
 retirement, including late allocations and background children. Sibling
 conversations and the boot cache survive. The next Send needs a fresh scope;
-it cannot revive the stopped native execution. Closing a tab or connection
-does not issue Stop.
+it cannot revive the stopped native execution. Network detach does not issue Stop.
+
+### Execution-owned authority
+
+An admitted command survives socket, actor-observation and context-observation
+expiry. These observations still govern new admissions. They neither revoke
+already accepted work nor extend its immutable source-session deadline.
+Captured provider credential deadlines and the runtime authority deadline also
+remain in force. Explicit Stop and real account, member, device, funding,
+credential, writer or policy revocation end the original work.
+
+For an ordinary boot command, the engine first commits the exact FULL queue
+claim. The private `execution-authority/enroll` route verifies its boot, writer,
+command, claim, execution, payload digest and current actor/context. CP proves
+the original authenticated source session outside the database transaction,
+then rechecks the locked policy before recording an immutable
+`boot-execution-v1` receipt. Admission is bounded to ten seconds. A parsed
+receipt alone cannot create native authority; the owning engine adopts its
+genuine local execution handle before allocation.
+
+While that command runs, one private check per 30 seconds observes revocation;
+there are no checks after retirement. Only an exact authenticated revoked
+response ends work. Transport errors and unavailable observations cannot renew
+or shorten the original deadline. Locally delivered revocations remain
+immediate. Native Git independently checks the exact execution receipt and
+the sender's edit permission. Stop joins pending acceptance and native cleanup
+before publishing terminal command state.
+
+The signed-client accepted-work route keeps its separate strict v1 contract.
+Its original source deadline, explicit Stop and verifier revocations remain;
+client token expiry or lost push observation alone no longer retires accepted
+work. The new ordinary routes require the CP deployment before the new runtime:
+an older CP refuses new execution acceptance, with no context-only fallback.
+Older engines keep their existing path. No renderer wire, Local Personal or
+organization-local admission changes are required.
 
 ### Removing a connection
 

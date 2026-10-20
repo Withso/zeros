@@ -74,6 +74,7 @@ import { liveEditDraftEntries, subscribeToLiveEditDrafts, pruneLiveEditDrafts } 
 import { onNativeBeforeQuit } from "../platform/runtime";
 import { startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
 import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
+import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
 import { localTranscriptCache } from "./local-transcript-cache";
 import { loadProjects } from "./projects-store";
 import { DEFAULT_REPO_MODE_VIEWS, repoPageModeForView } from "./repo-page-mode";
@@ -2273,15 +2274,17 @@ export interface WorkspaceStore extends WorkspaceState {
 /** Transcript side effects of renderer-originated chat lifecycle actions.
  * ADD_CHAT is only ever a chat this renderer just created (engine rows arrive
  * through HYDRATE/MERGE), so its transcript is known to be empty; DELETE_CHAT
- * must not leave a cached copy behind. Local chats only. */
+ * must not leave a cached copy behind. */
 function noteChatTranscriptLifecycle(state: WorkspaceState, action: Action): void {
   if (action.type === "ADD_CHAT") {
     const chat = action.chat;
     if (chat.kind !== "terminal" && !state.chats.some((known) => known.id === chat.id)) {
       markFreshLocalChat(chat.id, chat.folder);
+      if (!chat.providerBinding && !chat.sessionId && !chat.sourceChatId) markFreshCloudChat(chat.id, chat.folder);
     }
   } else if (action.type === "DELETE_CHAT") {
     forgetFreshLocalChat(action.id);
+    forgetFreshCloudChat(action.id);
     localTranscriptCache.forget(action.id);
   }
 }

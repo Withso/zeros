@@ -12,6 +12,7 @@ import { CloudClientAuthorityTransientError, CloudRuntimeRegistration, type Clou
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { CloudAgentAdmissionError, CloudAgentExecutionError, type CloudAgentBootResponses } from "../cloud-agent-execution-client";
 import { CloudAgentBootSyncResponseSchema, CloudAgentBootRefreshResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+import type { CloudExecutionEnrollRequest } from "@zeros/protocol/cloud-execution-authority";
 import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
 import { restoreCloudLocalCommandCheckpointLedger, recoverCloudLocalCommandCheckpointLedger } from "../cloud-local-command-queue-checkpoint";
@@ -20,7 +21,8 @@ import ts from "typescript";
 import { ZerosEngine } from "../zeros-engine";
 import { CloudTransport } from "../transport/cloud";
 import type { TransportClient } from "../transport/types";
-import { CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
+import { CloudBootCommandClaimSchema, CloudBootCommandEntrySchema, CloudBootCommandSnapshotSchema,
+  type CloudBootCommandMutation } from "@zeros/protocol/cloud-commands";
 import { DesignCatalogReader, type DesignCatalogSnapshot } from "../design/catalog";
 import { isCloudAcceptedWork } from "../agents/cloud-accepted-work-authority";
 import { cloudExecutionPrincipalSession } from "../agents/cloud-execution-principal";
@@ -90,6 +92,7 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
     controlsPollIntervalMs: undefined as (() => number) | undefined,
     controlsExchange: undefined as ((ok: boolean) => void) | undefined,
     turnJournalChanged: undefined as (() => void) | undefined,
+    execution: undefined as ConstructorParameters<typeof CloudLocalAgentBootRuntime>[0]["execution"],
     accepted: undefined as ConstructorParameters<typeof CloudLocalAgentBootRuntime>[0]["accepted"] };
   const boot = new CloudLocalAgentBootRuntime(options); cleanups.push(() => boot.dispose());
   const admission = { accountUserId: f.provenance.actor.userId, authorityEpoch: f.provenance.authorityEpoch,
@@ -99,6 +102,169 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
     expireAuthorityAt: (at: number) => { authorityExpiresAt = at; },
     unnegotiate: () => { negotiated = false; }, retire: () => { live = false; } };
 }
+
+describe("cloud idle observation load", () => {
+  it("does not keep renewing eight observed chats while their actor stays connected", async () => {
+    vi.useFakeTimers();
+    const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!;
+    const ids = new Map<string, ReturnType<typeof randomUUID>>();
+    f.f.contextRequest.mockImplementation(async input => {
+      if (!ids.has(input.conversationId)) ids.set(input.conversationId, randomUUID());
+      return { ...await original(input), contextId: ids.get(input.conversationId)!,
+        actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } };
+    });
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "idle-client");
+    for (let index = 0; index < 8; index++) await f.boot.observeConversation(f.admission.actor.sessionId, `idle-${index}`);
+    f.request.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const renewals = f.request.mock.calls.filter(([operation]) => operation === "warm-context").length;
+    console.info("cloud idle minute", JSON.stringify({ chats: 8, warmContext: renewals,
+      actorConfirm: f.request.mock.calls.filter(([operation]) => operation === "actor-confirm").length }));
+    expect(renewals).toBe(0);
+    f.boot.releaseActor(f.admission.actor.sessionId, "idle-client");
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(10_000);
+    expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it("bounds empty credential-control fallback to twelve polls per minute without push", async () => {
+    vi.useFakeTimers(); const f = await fixture(); await f.boot.initialize();
+    f.controls.mockClear(); await vi.advanceTimersByTimeAsync(60_000);
+    console.info("cloud controls minute", JSON.stringify({ polls: f.controls.mock.calls.length }));
+    expect(f.controls.mock.calls.length).toBeLessThanOrEqual(12);
+    expect(f.controls.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  it("renews just the original native-work context among eight chats, then stops after retirement", async () => {
+    vi.useFakeTimers();
+    const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!;
+    const ids = new Map<string, ReturnType<typeof randomUUID>>();
+    f.f.contextRequest.mockImplementation(async input => {
+      if (!ids.has(input.conversationId)) ids.set(input.conversationId, randomUUID());
+      return { ...await original(input), contextId: ids.get(input.conversationId)!,
+        actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } };
+    });
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "running-client");
+    const conversationId = f.f.input.conversationId;
+    for (const id of [conversationId, ...Array.from({ length: 7 }, (_, index) => `idle-${index}`)])
+      await f.boot.observeConversation(f.admission.actor.sessionId, id);
+    const commandId = randomUUID();
+    f.boot.queue.handle({ kind: "mutate", mutation: { conversationId, operationId: commandId, expectedRevision: 0,
+      action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.f.input.model, modeRevision: 0,
+        userMessageId: randomUUID(), prompt: [{ type: "text", text: "Synthetic work" }] } } }, admissionError: null },
+    { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+    const claim = f.boot.queue.handle({ kind: "claim", conversationId, executionId: randomUUID(), claimId: randomUUID() },
+      { writerEpoch: f.f.scope.writerEpoch });
+    const selection = f.boot.selectClaim(claim);
+    f.request.mockClear(); f.controls.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const warmed = f.request.mock.calls.filter(([operation]) => operation === "warm-context");
+    console.info("cloud running minute", JSON.stringify({ chats: 8, warmContext: warmed.length,
+      controls: f.controls.mock.calls.length, actorConfirm: f.request.mock.calls.filter(([operation]) => operation === "actor-confirm").length }));
+    expect(warmed).toHaveLength(15);
+    expect(warmed.every(([, input]) => (input as { conversationId: string }).conversationId === conversationId)).toBe(true);
+    expect(cloudBootNativeAuthority(selection).lifetime.signal.aborted).toBe(false);
+    await cloudBootNativeAuthority(selection).lifetime.close();
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(20_000);
+    expect(f.request.mock.calls.filter(([operation]) => operation === "warm-context")).toHaveLength(0);
+  });
+
+  it("releases expired idle interests so visiting more chats cannot exhaust the active-context bound", async () => {
+    vi.useFakeTimers(); const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!;
+    f.f.contextRequest.mockImplementation(async input => ({ ...await original(input),
+      actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } }));
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "browsing-client");
+    for (let index = 0; index < 32; index++) await f.boot.observeConversation(f.admission.actor.sessionId, `before-${index}`);
+    await vi.advanceTimersByTimeAsync(9_000);
+    for (let index = 0; index < 32; index++) await f.boot.observeConversation(f.admission.actor.sessionId, `after-${index}`);
+    f.boot.releaseActor(f.admission.actor.sessionId, "browsing-client");
+    await f.boot.dispose(); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["stop", "revocation", "deadline"] as const)("keeps accepted work through exact-context renewal loss until %s", async end => {
+    vi.useFakeTimers();
+    const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!;
+    const ids = new Map<string, ReturnType<typeof randomUUID>>(), acceptedWorkId = randomUUID(), providerExpiresAtMs = Date.now() + 20_000;
+    f.f.contextRequest.mockImplementation(async input => {
+      if (!ids.has(input.conversationId)) ids.set(input.conversationId, randomUUID());
+      return { ...await original(input), contextId: ids.get(input.conversationId)!,
+        actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } };
+    });
+    const provider = f.f.response.providers[0]!;
+    if (provider.status !== "ready") throw new Error("Expected synthetic provider");
+    const close = vi.fn(async () => ({ closed: true }));
+    f.options.execution = { runtimeId: `r1-${"f".repeat(64)}`,
+      enroll: vi.fn(async (request: CloudExecutionEnrollRequest) => ({ ...request, mode: "boot-execution-v1",
+        acceptedWorkId, revision: 1, actor: f.f.provenance.actor, fundingGrant: f.f.provenance.fundingGrant,
+        sourceSessionId: randomUUID(), epochs: { wa: 1, wr: 1, me: 1, ac: 1, dk: 1 },
+        credentialId: provider.credentialId, credentialRevision: provider.credentialRevision, acceptedAtMs: Date.now(),
+        admissionExpiresAtMs: Date.now() + 8_000, providerExpiresAtMs, providerProofVersion: 1 })),
+      check: vi.fn(async () => ({ version: 1, acceptedWorkId, state: "current" })), close };
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "accepted-client");
+    const conversationId = f.f.input.conversationId, commandId = randomUUID();
+    for (const id of [conversationId, ...Array.from({ length: 7 }, (_, index) => `idle-${index}`)])
+      await f.boot.observeConversation(f.admission.actor.sessionId, id);
+    f.boot.queue.handle({ kind: "mutate", mutation: { conversationId, operationId: commandId, expectedRevision: 0,
+      action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.f.input.model, modeRevision: 0,
+        userMessageId: randomUUID(), prompt: [{ type: "text", text: "Synthetic accepted work" }] } } }, admissionError: null },
+    { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+    const claim = CloudBootCommandClaimSchema.parse(f.boot.queue.handle({ kind: "claim", conversationId,
+      executionId: randomUUID(), claimId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch }));
+    const selection = f.boot.selectClaim(claim), authority = cloudBootNativeAuthority(selection);
+    await f.boot.acceptClaim(claim, selection, new AbortController().signal);
+    const workload = { stopAndProve: vi.fn(async () => {}) };
+    await authority.lifetime.launch(async () => workload);
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(4_000);
+    const warms = () => f.request.mock.calls.filter(([operation]) => operation === "warm-context");
+    expect(warms()).toHaveLength(1);
+    f.f.contextRequest.mockRejectedValue(new CloudAgentExecutionError("authority_http_5xx"));
+    f.boot.releaseActor(f.admission.actor.sessionId, "accepted-client");
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(warms().length).toBeGreaterThan(1);
+    expect(warms().every(([, input]) => (input as { conversationId: string }).conversationId === conversationId)).toBe(true);
+    expect(selection.context.signal.aborted).toBe(true);
+    expect(() => f.boot.executionFactory.selectBoot({ ...selection, executionId: randomUUID() })).toThrow();
+    authority.lifetime.assertLive(); expect(workload.stopAndProve).not.toHaveBeenCalled();
+    if (end === "revocation") f.boot.revokeActor(f.admission.actor.sessionId);
+    if (end === "deadline") await vi.advanceTimersByTimeAsync(7_000);
+    if (end !== "stop") expect(authority.lifetime.signal.aborted).toBe(true);
+    await authority.lifetime.close();
+    expect(workload.stopAndProve).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce();
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(10_000);
+    expect(warms()).toHaveLength(0);
+  });
+
+  it("does not postpone a running context's renewal when other selections start and retire", async () => {
+    vi.useFakeTimers();
+    const f = await fixture(), original = f.f.contextRequest.getMockImplementation()!, contextId = randomUUID();
+    f.f.contextRequest.mockImplementation(async input => ({ ...await original(input),
+      contextId,
+      actor: { ...f.f.provenance, confirmedUntilMs: Date.now() + 8_000 } }));
+    await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    f.boot.attachActor(f.admission.actor.sessionId, "running-client");
+    const conversationId = f.f.input.conversationId;
+    await f.boot.observeConversation(f.admission.actor.sessionId, conversationId);
+    const commandId = randomUUID();
+    f.boot.queue.handle({ kind: "mutate", mutation: { conversationId, operationId: commandId, expectedRevision: 0,
+      action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.f.input.model, modeRevision: 0,
+        userMessageId: randomUUID(), prompt: [{ type: "text", text: "Synthetic work" }] } } }, admissionError: null },
+    { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+    const claim = f.boot.queue.handle({ kind: "claim", conversationId, executionId: randomUUID(), claimId: randomUUID() },
+      { writerEpoch: f.f.scope.writerEpoch });
+    const selection = f.boot.selectClaim(claim);
+    f.request.mockClear();
+    for (let index = 0; index < 45; index++) {
+      await vi.advanceTimersByTimeAsync(100);
+      const transient = f.boot.executionFactory.selectBoot({ ...selection, executionId: randomUUID() });
+      await cloudBootNativeAuthority(transient).lifetime.close();
+    }
+    expect(f.request.mock.calls.filter(([operation]) => operation === "warm-context")).toHaveLength(1);
+    expect(cloudBootNativeAuthority(selection).lifetime.signal.aborted).toBe(false);
+  });
+});
 
 function actorSockets(f: Awaited<ReturnType<typeof fixture>>, catalog = new DesignCatalogReader()) {
   const engine = { root: f.f.input.cwd, cloudWorker: { version: 4 }, cloudAgentBoot: f.boot, cloudRuntimeAuthorityStopping: false,
@@ -166,6 +332,265 @@ async function acceptedFixture() {
   return { ...f, ...accepted, bootOptions: f.options, requestCommand: request, senderProof: () => accepted.senderProof(request) };
 }
 
+/** Real FULL queue, boot cache and command pump. Only CP replies and the
+ * provider dispatch are synthetic; no renderer discovery is required. */
+async function contextWaitFixture() {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+  const f = await fixture(), originalContext = f.f.contextRequest.getMockImplementation()!;
+  let context: Awaited<ReturnType<typeof originalContext>> | undefined;
+  f.f.contextRequest.mockImplementation(async input => {
+    if (!context || context.actor.confirmedUntilMs <= Date.now()) context = await originalContext(input);
+    context = { ...context, actor: { ...context.actor, confirmedUntilMs: Date.now() + 8_000 } };
+    return context;
+  });
+  await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+  f.boot.attachActor(f.admission.actor.sessionId, "context-wait-client");
+  let execution: string | null = null;
+  const dispatch = vi.fn(async () => ({ state: "succeeded" as const, resultCode: null }));
+  const prepare = vi.fn(async (claim: Parameters<typeof f.boot.releaseClaim>[0]) => {
+    f.boot.selectClaim(claim); execution = claim.executionId;
+  });
+  const runtime = new CloudCommandRuntime({ request: async () => { throw new Error("Unexpected legacy queue"); },
+    validate: () => {}, execution: () => execution, prepare, retire: claim => f.boot.releaseClaim(CloudBootCommandClaimSchema.parse(claim)),
+    dispatch, cancel: async () => {}, changed: () => {} });
+  cleanups.push(() => runtime.close()); runtime.installLocalQueue(f.boot.queue);
+  f.options.changed.mockImplementation(() => runtime.wakePending());
+  const commandId = randomUUID(), conversationId = f.f.input.conversationId;
+  const payload = { agentId: "cursor" as const, model: f.f.input.model, permissionMode: "auto" as const,
+    modeRevision: 0, userMessageId: randomUUID(), prompt: [{ type: "text" as const, text: "Synthetic queued turn" }] };
+  const send = () => runtime.handle({ kind: "mutate", mutation: { conversationId, operationId: commandId,
+    expectedRevision: 0, action: { kind: "enqueue", commandId, payload } } }, f.admission.actor.sessionId);
+  const receipt = (id = commandId) => {
+    const { conversationId: _conversationId, ...entry } = f.boot.queue.handle({ kind: "read", commandId: id },
+      { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId }) as Record<string, unknown>;
+    return CloudBootCommandEntrySchema.parse(entry);
+  };
+  const snapshot = () => CloudBootCommandSnapshotSchema.parse(f.boot.queue.handle({ kind: "snapshot", conversationId },
+    { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId }));
+  const mutate = (action: CloudBootCommandMutation["action"]) => runtime.handle({ kind: "mutate", mutation: {
+    conversationId, operationId: randomUUID(), expectedRevision: snapshot().revision, action } }, f.admission.actor.sessionId);
+  const warms = () => f.request.mock.calls.filter(([operation]) => operation === "warm-context");
+  return { ...f, runtime, commandId, conversationId, payload, send, receipt, snapshot, mutate, warms, dispatch, prepare };
+}
+
+describe("queued context recovery after reconnect", () => {
+  it("warms a queued command without a prior renderer discovery", async () => {
+    const f = await contextWaitFixture();
+    await f.send(); await vi.advanceTimersByTimeAsync(0);
+    expect(f.receipt().state).toBe("succeeded");
+    expect(f.warms()).toHaveLength(1); expect(f.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("retries an initial transient warming failure without another client read", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    let failed = false;
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context" && !failed) { failed = true; throw new CloudAgentExecutionError("authority_http_5xx"); }
+      return original(operation, input, signal);
+    });
+    await expect(f.boot.observeConversation(f.admission.actor.sessionId, f.conversationId))
+      .rejects.toMatchObject({ code: "cloud_admission_authority_http_5xx" });
+    await f.send(); await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.receipt().state).toBe("succeeded");
+    expect(f.warms()).toHaveLength(2); expect(f.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("rewarms an expired interest for a new queued command without reviving its old context", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    let unavailable = false;
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context" && unavailable) throw new CloudAgentExecutionError("authority_http_5xx");
+      return original(operation, input, signal);
+    });
+    await f.boot.observeConversation(f.admission.actor.sessionId, f.conversationId);
+    unavailable = true; await vi.advanceTimersByTimeAsync(8_100);
+    unavailable = false;
+    await f.send(); await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.receipt().state).toBe("succeeded");
+    expect(f.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("settles repeated context outages with a closed failure within ten seconds", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context") throw new CloudAgentExecutionError("authority_http_5xx");
+      return original(operation, input, signal);
+    });
+    const started = Date.now(); await f.send(); await vi.advanceTimersByTimeAsync(10_050);
+    expect(f.receipt()).toMatchObject({ state: "failed", resultCode: "cloud_admission_authority_http_5xx" });
+    expect(Date.parse(f.receipt().updatedAt) - started).toBeLessThanOrEqual(10_000);
+    expect(f.warms().length).toBeGreaterThan(1); expect(f.warms().length).toBeLessThanOrEqual(6);
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("does not park a definitive context refusal or retry it automatically", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context") throw new CloudAgentExecutionError("access_denied");
+      return original(operation, input, signal);
+    });
+    await f.send(); await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.receipt()).toMatchObject({ state: "failed", resultCode: "cloud_admission_access_denied" });
+    expect(f.warms()).toHaveLength(1); expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("bounds a held context read and ignores its late success after the failed receipt", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context") await held;
+      return original(operation, input, signal);
+    });
+    try {
+      await f.send(); await vi.advanceTimersByTimeAsync(10_050);
+      expect(f.receipt()).toMatchObject({ state: "failed", resultCode: "cloud_admission_authority_timeout" });
+      release(); await vi.advanceTimersByTimeAsync(1_000);
+      expect(f.receipt().state).toBe("failed"); expect(f.dispatch).not.toHaveBeenCalled();
+    } finally { release(); await vi.advanceTimersByTimeAsync(0); }
+  });
+
+  it("shares a discovery flight and does not reset the command deadline on reads or pump wakes", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context") await held;
+      return original(operation, input, signal);
+    });
+    const discovery = f.boot.observeConversation(f.admission.actor.sessionId, f.conversationId).catch(() => {});
+    try {
+      await f.send(); await vi.advanceTimersByTimeAsync(0);
+      for (let index = 0; index < 9; index++) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await f.runtime.handle({ kind: "snapshot", conversationId: f.conversationId }, f.admission.actor.sessionId);
+        f.runtime.wakePending();
+      }
+      expect(f.receipt().state).toBe("queued"); expect(f.warms()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_050);
+      expect(f.receipt()).toMatchObject({ state: "failed", resultCode: "cloud_admission_authority_timeout" });
+      expect(f.warms()).toHaveLength(1); expect(f.dispatch).not.toHaveBeenCalled();
+    } finally { release(); await discovery; await vi.advanceTimersByTimeAsync(0); }
+  });
+
+  it("starts the warming budget only when a paused command becomes eligible", async () => {
+    const f = await contextWaitFixture(); f.runtime.pauseClaims();
+    await f.send(); await vi.advanceTimersByTimeAsync(15_000);
+    expect(f.receipt().state).toBe("queued"); expect(f.warms()).toHaveLength(0);
+    f.runtime.resumeClaims(); await vi.advanceTimersByTimeAsync(0);
+    expect(f.receipt().state).toBe("succeeded"); expect(f.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("removes a waiting command without allowing its held reply to dispatch", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    let release!: () => void, requestSignal: AbortSignal | undefined;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context") { requestSignal = signal; await held; }
+      return original(operation, input, signal);
+    });
+    try {
+      await f.send(); await vi.advanceTimersByTimeAsync(0);
+      expect(f.warms()).toHaveLength(1);
+      await f.mutate({ kind: "remove", commandId: f.commandId });
+      expect(requestSignal?.aborted).toBe(true);
+      release(); await vi.advanceTimersByTimeAsync(10_050);
+      expect(f.receipt()).toMatchObject({ state: "cancelled", resultCode: "removed_before_dispatch" });
+      expect(f.dispatch).not.toHaveBeenCalled();
+    } finally { release(); await vi.advanceTimersByTimeAsync(0); }
+  });
+
+  it("stops a waiting command and gives an explicit Resume its own context attempt", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    let release!: () => void, requestSignal: AbortSignal | undefined;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context" && !requestSignal) { requestSignal = signal; await held; }
+      return original(operation, input, signal);
+    });
+    try {
+      await f.send(); await vi.advanceTimersByTimeAsync(0);
+      await f.runtime.handle({ kind: "stop", conversationId: f.conversationId, operationId: randomUUID() }, f.admission.actor.sessionId);
+      expect(requestSignal?.aborted).toBe(true);
+      release(); await vi.advanceTimersByTimeAsync(12_000);
+      expect(f.receipt().state).toBe("queued"); expect(f.snapshot().paused).toBe(true);
+      expect(f.dispatch).not.toHaveBeenCalled();
+      await f.mutate({ kind: "resume" }); await vi.advanceTimersByTimeAsync(0);
+      expect(f.receipt().state).toBe("succeeded"); expect(f.dispatch).toHaveBeenCalledOnce();
+    } finally { release(); await vi.advanceTimersByTimeAsync(0); }
+  });
+
+  it("keeps context I/O outside the synchronous FULL claim transaction", async () => {
+    const f = await contextWaitFixture();
+    f.boot.queue.handle({ kind: "mutate", admissionError: null, mutation: { conversationId: f.conversationId,
+      operationId: f.commandId, expectedRevision: 0, action: { kind: "enqueue", commandId: f.commandId, payload: f.payload } } },
+    { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+    expect(f.boot.queue.handle({ kind: "claim", conversationId: f.conversationId, claimId: randomUUID(), executionId: randomUUID() },
+      { writerEpoch: f.f.scope.writerEpoch })).toBeNull();
+    expect(f.warms()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.warms()).toHaveLength(1);
+  });
+
+  it("reports a local context admission refusal instead of parking without a request", async () => {
+    const f = await contextWaitFixture(); f.options.isAdmittedCwd = () => false;
+    await f.send(); await vi.advanceTimersByTimeAsync(10_050);
+    expect(f.receipt()).toMatchObject({ state: "failed", resultCode: "cloud_validation_access_denied" });
+    expect(f.warms()).toHaveLength(0); expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original ten-second budget when the wall clock moves backwards", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context") await held;
+      return original(operation, input, signal);
+    });
+    try {
+      await f.send(); await vi.advanceTimersByTimeAsync(5_000);
+      vi.setSystemTime(Date.now() - 60_000);
+      await vi.advanceTimersByTimeAsync(5_050);
+      expect(f.receipt()).toMatchObject({ state: "failed", resultCode: "cloud_admission_authority_timeout" });
+      expect(f.dispatch).not.toHaveBeenCalled();
+    } finally { release(); await vi.advanceTimersByTimeAsync(0); }
+  });
+
+  it("binds failed admission and its cleanup to the exact original claim", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context") throw new CloudAgentExecutionError("access_denied");
+      return original(operation, input, signal);
+    });
+    f.prepare.mockImplementation(async claim => {
+      expect(() => f.boot.selectClaim({ ...claim, commandId: randomUUID() })).toThrow("command_conflict");
+      await expect(f.boot.releaseClaim({ ...claim, executionId: randomUUID() })).rejects.toThrow("command_conflict");
+      f.boot.selectClaim(claim);
+    });
+    await f.send(); await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.prepare).toHaveBeenCalledOnce();
+    expect(f.receipt()).toMatchObject({ state: "failed", resultCode: "cloud_admission_access_denied" });
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps repeated discovery reads inside the queued command's retry budget", async () => {
+    const f = await contextWaitFixture(), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (operation, input, signal) => {
+      if (operation === "warm-context") throw new CloudAgentExecutionError("authority_http_5xx");
+      return original(operation, input, signal);
+    });
+    await f.send(); await vi.advanceTimersByTimeAsync(0);
+    for (let index = 0; index < 9; index++) {
+      if (f.receipt().state !== "queued") break;
+      await f.boot.observeConversation(f.admission.actor.sessionId, f.conversationId).catch(() => {});
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    await vi.advanceTimersByTimeAsync(1_050);
+    expect(f.receipt()).toMatchObject({ state: "failed", resultCode: "cloud_admission_authority_http_5xx" });
+    expect(f.warms()).toHaveLength(6); expect(f.dispatch).not.toHaveBeenCalled();
+  });
+});
+
 describe("accepted work boot wiring", () => {
   it("keeps accepted work and its context live during a start-only checkpoint pause, then retires on seal", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
@@ -203,6 +628,8 @@ describe("accepted work boot wiring", () => {
     expect(f.boot.queue.handle({ kind: "claim", conversationId: f.f.input.conversationId, claimId: randomUUID(), executionId: randomUUID() },
       { writerEpoch: f.f.scope.writerEpoch })).toBeNull();
     f.losePush();
+    expect(selection.actor.signal.aborted).toBe(false);
+    f.boot.queue.acceptedWork.close(claim.commandId);
     expect(selection.actor.signal.aborted).toBe(true);
     await Promise.resolve(); expect(f.closed).toHaveBeenCalledOnce();
   });
@@ -959,7 +1386,7 @@ describe("engine boot-mode orchestration", () => {
     expect(f.request.mock.calls.map(([operation]) => operation)).toEqual(["bootstrap", "activate"]);
     expect(f.controls).not.toHaveBeenCalled(); expect(f.boot.active).toBe(false);
     release(); await starting;
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(f.controls).toHaveBeenCalled();
   });
   it("backs the credential-control poll off to the wired fallback cadence and back", async () => {
@@ -1252,7 +1679,7 @@ describe("engine boot-mode orchestration", () => {
     await f.boot.initialize(); await vi.advanceTimersByTimeAsync(6_000);
     expect(f.request.mock.calls.filter(([operation]) => operation === "refresh")).toHaveLength(1);
     expect(f.boot.metadata.cacheRevision).toBe(2);
-    expect(f.controls.mock.calls.length).toBeGreaterThanOrEqual(10);
+    expect(f.controls).toHaveBeenCalledOnce();
     await f.boot.dispose(); const calls = f.controls.mock.calls.length;
     await vi.advanceTimersByTimeAsync(2_000); expect(f.controls).toHaveBeenCalledTimes(calls);
   });
@@ -1491,6 +1918,9 @@ describe("engine boot-mode orchestration", () => {
       executionId: randomUUID(), claimId: randomUUID() });
     expect(queue.handle(claimRequest(), { writerEpoch: f.f.scope.writerEpoch })).toBeNull();
     await vi.advanceTimersByTimeAsync(100); await warming;
+    // A reserved native launch owns renewal; discovery alone does not.
+    const claim = queue.handle(claimRequest(), { writerEpoch: f.f.scope.writerEpoch });
+    expect(claim).toMatchObject({ commandId });
     f.request.mockClear(); await vi.advanceTimersByTimeAsync(4_000);
     // Repository MCP reads precede the HTTP boundary even under fake timers.
     await vi.waitFor(() => expect(f.request.mock.calls.filter(([operation]) => operation === "warm-context")).toHaveLength(1),
@@ -1498,8 +1928,6 @@ describe("engine boot-mode orchestration", () => {
     let renewed = false;
     const renewal = f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId).then(() => { renewed = true; });
     const count = f.request.mock.calls.length;
-    const claim = queue.handle(claimRequest(), { writerEpoch: f.f.scope.writerEpoch });
-    expect(claim).toMatchObject({ commandId });
     const selection = f.boot.selectClaim(claim);
     expect(isCloudBootAgentSelection(selection)).toBe(true); expect(renewed).toBe(false);
     expect(f.request).toHaveBeenCalledTimes(count);
@@ -1556,6 +1984,14 @@ describe("engine boot-mode orchestration", () => {
     });
     await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
     await f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId);
+    const commandId = randomUUID();
+    f.boot.queue.handle({ kind: "mutate", mutation: { conversationId: f.f.input.conversationId, operationId: commandId,
+      expectedRevision: 0, action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.f.input.model,
+        modeRevision: 0, userMessageId: randomUUID(), prompt: [{ type: "text", text: "Synthetic" }] } } }, admissionError: null },
+      { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+    const claim = f.boot.queue.handle({ kind: "claim", conversationId: f.f.input.conversationId,
+      executionId: randomUUID(), claimId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch });
+    expect(claim).toMatchObject({ commandId });
     f.request.mockClear(); await vi.advanceTimersByTimeAsync(600);
     // Repository configuration uses real asynchronous file reads even under
     // fake timers; let the scheduled renewal reach its request boundary.

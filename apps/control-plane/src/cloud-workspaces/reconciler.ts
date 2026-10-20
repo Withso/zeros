@@ -8,6 +8,7 @@ import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { CLOUD_WORKSPACE_V2_REQUIRED, requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { withRetryableSystemTx } from "../db-retry.js";
 import { createDatabaseTimingReporter } from "../database-timing.js";
 import { observeTransactionTiming } from "../request-timing.js";
 import { measureLifecyclePhase, readLifecycleTiming, recordLifecycleDatabaseElapsed, withLifecycleTiming } from "./lifecycle-timing.js";
@@ -755,19 +756,22 @@ export class CloudWorkspaceReconciler {
     try {
       provider = await measureLifecyclePhase("providerResolution", async () => {
         if (intent.operation === "create" || intent.operation === "wake") {
-          await withSystemTx(this.pool, async tx => {
+          const resolution = await withRetryableSystemTx(this.pool, async tx => {
             await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
             await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [intent.workspaceId, intent.orgId]);
-            await requireSupportedCloudWorkspaceGeneration(tx, {
+            const scope = {
               workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
-            });
+            };
+            // A stopped revoked pin must still reach the existing upgrade
+            // decision. Ordinary admission checks support as part of the full pin.
+            if (mayUpgradeOnWake) await requireSupportedCloudWorkspaceGeneration(tx, scope);
+            else await requireGenerationRuntime(tx, scope, this.runtimeUpgradeConfig?.runtime?.qualificationMode);
+            return this.providerResolver?.resolveInTransaction?.(tx, { ...scope, purpose: "lifecycle" });
           });
+          if (resolution) return resolution.provider;
         }
-        if (!mayUpgradeOnWake && (intent.operation === "create" || intent.operation === "wake")) {
-          await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
-            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
-          }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
-        }
+        // An arbitrary resolver is not a DB-only callback. Its legacy entry
+        // point runs after admission commits, with no transaction held over I/O.
         return this.providerResolver
           ? (
               await this.providerResolver.resolve({
@@ -826,15 +830,6 @@ export class CloudWorkspaceReconciler {
             workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
             intentId: intent.id, workerId: this.workerId,
           }, this.workosEnabled)) return true;
-      // A replacement may repair a revoked stopped pin. Any ordinary resume
-      // still validates that saved pin before provider or compute-lease writes.
-      if (mayUpgradeOnWake) await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
-        workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation,
-      },this.runtimeUpgradeConfig?.runtime?.qualificationMode));
-      if(current?.state==='running'&&['create','wake'].includes(intent.operation))
-        await measureLifecyclePhase("funding", () => this.computeLeases.observeRunning(
-          {workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current!));
-
       // The provider adapter's destructive lifecycle contract includes
       // provider-wide access revocation. Even when provider state already
       // satisfies stop/archive, dispatch once so a stale SSH bearer cannot be
@@ -843,11 +838,21 @@ export class CloudWorkspaceReconciler {
         current !== null &&
         current.state !== "deleted" &&
         ["stop", "archive"].includes(intent.operation);
-      if (
+      const shouldDispatch =
         (!operationSatisfied(intent.operation, current) ||
           forceProviderAccessDrain) &&
-        (!isTransitional(current) || current?.computeStopped === true)
-      ) {
+        (!isTransitional(current) || current?.computeStopped === true);
+      // Inspect/upgrade may have crossed a revocation. Dispatch validates at
+      // its pre-allocation boundary; a no-dispatch result needs the same fresh
+      // full pin before accepting running or publishing an observation.
+      if (!shouldDispatch && ["create", "wake"].includes(intent.operation))
+        await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
+          workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+        }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
+      if(current?.state==='running'&&['create','wake'].includes(intent.operation))
+        await measureLifecyclePhase("funding", () => this.computeLeases.observeRunning(
+          {workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current!));
+      if (shouldDispatch) {
         current = await measureLifecyclePhase("dispatch", () => this.dispatch(provider, intent, current));
         if (["stop", "archive", "delete"].includes(intent.operation)) {
           providerAccessRevocationProven = true;
@@ -952,9 +957,6 @@ export class CloudWorkspaceReconciler {
         await withSystemTx(this.pool, async tx => {
           await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
           await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [intent.workspaceId, intent.orgId]);
-          await requireSupportedCloudWorkspaceGeneration(tx, {
-            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
-          });
           await requireGenerationRuntime(tx, {
             workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
           }, this.runtimeUpgradeConfig?.runtime?.qualificationMode);

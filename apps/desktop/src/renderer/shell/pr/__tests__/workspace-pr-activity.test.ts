@@ -77,12 +77,24 @@ describe("Local workspace PR discovery activity", () => {
     expect(fixture.probe).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each(["hidden", "blurred"])("preserves cloud discovery scheduling while %s", async mode => {
+  it.each(["hidden", "blurred"])("does no cloud discovery or timer work while %s", async mode => {
     if (mode === "hidden") page.visibilityState = "hidden";
     else focused = false;
     Fixture("cloud://organization/workspace", "cloud://organization/workspace");
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(fixture.probe).toHaveBeenCalledTimes(mode === "hidden" ? 1 : 2);
-    expect(vi.getTimerCount()).toBe(1);
+    expect(fixture.probe).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("backs cloud errors off across repeated Git refresh generations", async () => {
+    const cloud = "cloud://organization/workspace";
+    fixture.probe.mockRejectedValue(new Error("GitHub read unavailable"));
+    for (let index = 0; index < 30; index++) {
+      fixture.refreshKey++; Fixture(cloud, cloud);
+      await vi.advanceTimersByTimeAsync(1_000); unmount();
+    }
+    expect(fixture.probe).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(30_000); Fixture(cloud, cloud);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledTimes(2);
   });
 });

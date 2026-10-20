@@ -8,6 +8,8 @@ const uuid = z.string().regex(/^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F
 export const cloudGithubNativeSourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("agent"), leaseId: uuid }).strict(),
   z.object({ kind: z.literal("boot-agent"), contextId: uuid }).strict(),
+  z.object({ kind: z.literal("boot-execution"), contextId: uuid, acceptedWorkId: uuid, commandId: uuid, claimId: uuid,
+    executionId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) }).strict(),
   z.object({ kind: z.literal("terminal"), actorSessionId: uuid }).strict(),
 ]);
 export type CloudGithubNativeSource = z.infer<typeof cloudGithubNativeSourceSchema>;

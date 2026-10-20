@@ -7,13 +7,21 @@ import {
 } from "@zeros/protocol/cloud-accepted-work";
 import type { CloudRuntimeAuthority } from "./cloud-runtime-registration";
 import { CloudAgentExecutionError } from "./cloud-agent-execution-client";
+import { CloudExecutionEnrollRequestSchema, CloudExecutionAuthorityReceiptSchema, CloudExecutionAuthorityOperationSchema,
+  CloudExecutionAuthorityCheckSchema, type CloudExecutionEnrollRequest, type CloudExecutionAuthorityReceipt,
+  type CloudExecutionAuthorityOperation, type CloudExecutionAuthorityCheck } from "@zeros/protocol/cloud-execution-authority";
 
-export type AcceptedWorkRequests = { enroll: CloudAcceptedWorkEnrollRequest; context: CloudAcceptedWorkContextRequest; close: CloudAcceptedWorkCloseRequest };
-export type AcceptedWorkResponses = { enroll: CloudAcceptedWorkReceipt; context: CloudAcceptedWorkContextResponse; close: { closed: true } };
+export type AcceptedWorkRequests = { enroll: CloudAcceptedWorkEnrollRequest; context: CloudAcceptedWorkContextRequest; close: CloudAcceptedWorkCloseRequest;
+  "execution-enroll": CloudExecutionEnrollRequest; "execution-check": CloudExecutionAuthorityOperation; "execution-close": CloudExecutionAuthorityOperation };
+export type AcceptedWorkResponses = { enroll: CloudAcceptedWorkReceipt; context: CloudAcceptedWorkContextResponse; close: { closed: true };
+  "execution-enroll": CloudExecutionAuthorityReceipt; "execution-check": CloudExecutionAuthorityCheck; "execution-close": { closed: true } };
 const contracts = {
-  enroll: { path: "", request: CloudAcceptedWorkEnrollRequestSchema, response: CloudAcceptedWorkReceiptSchema, limit: 32 * 1024 },
-  context: { path: "/context", request: CloudAcceptedWorkContextRequestSchema, response: CloudAcceptedWorkContextResponseSchema, limit: 3 * 1024 * 1024 },
-  close: { path: "/close", request: CloudAcceptedWorkCloseRequestSchema, response: z.object({ closed: z.literal(true) }).strict(), limit: 1024 },
+  enroll: { path: "accepted-work", request: CloudAcceptedWorkEnrollRequestSchema, response: CloudAcceptedWorkReceiptSchema, limit: 32 * 1024 },
+  context: { path: "accepted-work/context", request: CloudAcceptedWorkContextRequestSchema, response: CloudAcceptedWorkContextResponseSchema, limit: 3 * 1024 * 1024 },
+  close: { path: "accepted-work/close", request: CloudAcceptedWorkCloseRequestSchema, response: z.object({ closed: z.literal(true) }).strict(), limit: 1024 },
+  "execution-enroll": { path: "execution-authority/enroll", request: CloudExecutionEnrollRequestSchema, response: CloudExecutionAuthorityReceiptSchema, limit: 32 * 1024 },
+  "execution-check": { path: "execution-authority/check", request: CloudExecutionAuthorityOperationSchema, response: CloudExecutionAuthorityCheckSchema, limit: 1024 },
+  "execution-close": { path: "execution-authority/close", request: CloudExecutionAuthorityOperationSchema, response: z.object({ closed: z.literal(true) }).strict(), limit: 1024 },
 } as const;
 
 /** Fixed engine-authenticated routes. Responses never renew client or push
@@ -40,7 +48,7 @@ export async function requestCloudAcceptedWork<Operation extends keyof AcceptedW
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     if (bounded.aborted) throw bounded.reason;
-    const response = await within(requestFetch(new URL(`/internal/v2/cloud-workspaces/engine/accepted-work${contract.path}`, origin), {
+    const response = await within(requestFetch(new URL(`/internal/v2/cloud-workspaces/engine/${contract.path}`, origin), {
       method: "POST", redirect: "error", signal: bounded,
       headers: { "content-type": "application/json", authorization: `Bearer ${authority.heartbeatToken}` }, body }).then(response => {
       if (bounded.aborted) { void response.body?.cancel().catch(() => {}); throw bounded.reason; }

@@ -29,4 +29,12 @@ describe("cloud GitHub read transport", () => {
         "https://api.github.com/repos/org/repo", {}, async () => response)).rejects.toThrow("GitHub read authorization is unavailable.");
     }
   });
+  it.each([401, 403, 404, 429, 502, 503, 504])("preserves closed HTTP status %s instead of an invented GitHub 500", async status => {
+    const body = new Response("synthetic-private-details", { status });
+    const failure = await requestCloudGithubRead(authority, actorSessionId, new AbortController().signal,
+      "https://api.github.com/repos/org/repo/pulls/7", {}, async () => body).catch(error => error);
+    expect(failure).toMatchObject({ status });
+    expect(String(failure)).not.toContain("synthetic-private-details");
+    expect(body.bodyUsed).toBe(true);
+  });
 });

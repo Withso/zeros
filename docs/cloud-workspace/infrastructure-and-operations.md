@@ -233,6 +233,24 @@ terminal rows without recovery still need separately reviewed exact-source
 adoption; the migration neither treats their status as proof nor replays them
 as new user actions.
 
+The operations worker encounters missing legacy history before applying that
+eligibility filter. It adopts at most eight intents for one provider-retired
+workspace per transaction, taking organization, workspace and job locks in
+that order. The deadline reader exposes this finite backlog without writing.
+Existing jobs retain their keys, attempts and leases; no second Delete is
+requested. Unproved history retains the existing recovery job and retry floors.
+
+An earlier engine's successful final receipt can resolve historical erasure
+custody after a later Delete in the same generation has exact current proof and
+a settled provider dispatch, with physical deletion verified for every
+generation. Resolution validates the historical request, durable checkpoint,
+original registration/token, authority epoch, runtime/boot and required writer
+seal. It records `resolved` with the original receipt; it does not make that
+engine current or satisfy the live dispatch validator. Invalidated receipts,
+changed registrations, unproved current Deletes, unresolved dispatches and
+cross-generation history remain blocked. The deployed SQL gates and migration
+0171 are unchanged.
+
 The native companion uses `x-zeros-final-save-version: 1` alongside committed
 local-command negotiation for an exact qualified runtime registration. Its
 closed report endpoint is `/internal/v1/cloud-workspaces/engine/final-save`;
