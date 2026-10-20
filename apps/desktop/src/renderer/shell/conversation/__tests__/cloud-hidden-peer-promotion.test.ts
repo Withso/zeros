@@ -188,7 +188,7 @@ describe("hidden cloud chats retain speculative peer ownership", () => {
     expect(harness.hydrate).toHaveBeenCalledOnce();
     expect(history).toHaveBeenCalledOnce();
     expect(client.hasChatSnapshot(folder)).toBe(true);
-    expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "WORKSPACE_REQUEST", op: "messages.window" }));
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "WORKSPACE_REQUEST", op: "messages.window" }), expect.objectContaining({ timeoutMs: expect.any(Number) }));
     expect(harness.spawn).not.toHaveBeenCalled();
     expect(renderToStaticMarkup(createElement(PreparedIntent))).toBe("");
     if (cleanup === "expiry") await vi.advanceTimersByTimeAsync(15_001);
