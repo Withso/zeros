@@ -29,6 +29,11 @@ export const CloudOwnerCheckpointRecoverySchema = z.object({
   providerResourceId: z.string().regex(BOAT_RESOURCE_ID_PATTERN),
   providerAccountScope: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
   providerLossAttestationId: uuid,
+  /** A lease worker may have admitted one never-delivered safety Stop while
+   * provider loss was being attested. It needs its own exact disposition. */
+  safetyStop: z.object({ intentId: uuid, requestId: uuid }).strict().optional(),
+  /** Reobserve the same lost allocation; never renew the original attestation. */
+  lossRecheck: z.object({ providerAccount: z.string().min(1).max(256) }).strict().optional(),
   checkpointId: uuid,
   checkpointSha256: sha256,
   checkpointContentRevision: revision,
@@ -41,7 +46,9 @@ export const CloudOwnerCheckpointRecoverySchema = z.object({
   ownerApprovalReference: z.string().trim().min(16).max(512),
   reason: z.string().trim().min(16).max(512),
 }).strict().refine(value => value.stopIntentId === value.recoveryId && value.stopIntentId !== value.wakeIntentId,
-  { message: "The exact Stop recovery and dependent Wake are required" });
+  { message: "The exact Stop recovery and dependent Wake are required" })
+  .refine(value => !value.safetyStop || (![value.stopIntentId,value.wakeIntentId].includes(value.safetyStop.intentId) &&
+    value.safetyStop.requestId !== value.requestId), { message: "The safety Stop and request must be distinct" });
 
 export type CloudOwnerCheckpointRecoveryRequest = z.infer<typeof CloudOwnerCheckpointRecoverySchema>;
 
