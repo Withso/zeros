@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/platform/bridge/runtime-client.ts",
+  "before": "if (scope) this.runtimeDiagnostics.observe(msg, scope, line => this.environment.logger.warn(line));",
+  "after": "if (scope) void this.runtimeDiagnostics;"
+}

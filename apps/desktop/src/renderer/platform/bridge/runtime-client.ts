@@ -3,6 +3,7 @@ import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { cloudBridgeCloseDiagnostic } from "@zeros/protocol/cloud-bridge-diagnostics";
+import { CloudRuntimeDiagnostics, type CloudDiagnosticScope } from "./cloud-runtime-diagnostics";
 import { RuntimeConnectionTargetSchema, type CloudRuntimeConnectionTarget as LegacyCloudRuntimeConnectionTarget,
   type RuntimeConnectionTarget as ProtocolRuntimeConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
 import { CloudSdkRuntimeTargetSchema, type CloudSdkRuntimeTarget } from "../../../../shared/cloud-sdk-contract";
@@ -130,7 +131,6 @@ const DIAGNOSTIC_OPERATIONS = new Set(["workspace.list", "workspace.get", "works
   "cloudEvents.request", "cloudCommands.request", "cloudCommands.conversation", "cloudCommands.createConversation", "cloudCommands.setMode",
   "cloudActions.request", "cloudLsp.request", "chats.list", "chats.replaceAll", "messages.window", "messages.windowOlder",
   "git.status", "git.diff", "git.log", "git.reviewHunks", "file.read", "file.list", "design.status"]);
-type CloudDiagnosticScope = Pick<CloudRuntimeConnectionTarget, "workspaceId" | "generation" | "connectionSequence" | "channel">;
 type CloudDiagnosticEvent = "close" | "request_failed" | "reconnect" | "connect" | "ready" | "rejection";
 function requestDiagnostic(msg: Partial<BridgeMessage> & { type: string }) {
   const operation = "op" in msg ? msg.op : undefined;
@@ -537,6 +537,7 @@ export class RuntimeClient {
       this.engineCapabilities.has("cloud.localCommands.v1") ? this.activatedCloudBinding : null;
   }
   private diagnostics = { at: 0, suppressed: 0, counts: { close: 0, request_failed: 0, reconnect: 0, connect: 0, ready: 0, rejection: 0 } };
+  private readonly runtimeDiagnostics = new CloudRuntimeDiagnostics();
   get extensionConnected(): boolean {
     return this._engineConnected;
   }
@@ -1061,7 +1062,8 @@ export class RuntimeClient {
 
   private diagnosticScope(): CloudDiagnosticScope | undefined {
     const target = this.connectionTarget;
-    return target.kind === "cloud" ? { workspaceId: target.workspaceId, generation: target.generation,
+    return target.kind === "cloud" ? { organizationId: target.organizationId, workspaceId: target.workspaceId,
+      generation: target.generation, authorityEpoch: target.authorityEpoch, engineInstanceId: target.engineInstanceId,
       connectionSequence: target.connectionSequence, channel: target.channel } : undefined;
   }
   private cloudDiagnostic(event: CloudDiagnosticEvent, data: Record<string, string | number | null | undefined>,
@@ -1222,6 +1224,12 @@ export class RuntimeClient {
       for (const cb of this.rejectionListeners) cb(this.lastRejection);
       return;
     }
+
+    // Observe only accepted messages from the current cloud socket. The socket
+    // epoch fence and ENGINE_READY boot check above run before this projection.
+    // Renderer capture retains its frontend provenance in the shared log store.
+    const scope = this.diagnosticScope();
+    if (scope) this.runtimeDiagnostics.observe(msg, scope, line => this.environment.logger.warn(line));
 
     // Resolve pending request-response.
     const requestId =

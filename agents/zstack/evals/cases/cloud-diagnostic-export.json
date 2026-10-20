@@ -1,0 +1,9 @@
+{
+  "id": "cloud-diagnostic-export",
+  "kind": "seeded",
+  "area": "desktop-cloud-ui-state",
+  "fixedBy": "pr:678",
+  "symptom": "Exported desktop logs include cloud bridge events but omit VM engine and agent-run diagnostics.",
+  "rule": "Project bounded closed VM metadata after the current socket and boot fences; prove privacy and inclusion through actual persisted exports while preserving Local behavior. See agents/zstack/changes/cloud-diagnostic-export.md.",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/bridge/__tests__/cloud-diagnostic-export.test.ts"
+}
