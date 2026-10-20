@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { withSystemTx } from "../db.js";
+import { cloudFinalSaveErasureAdoptionPending } from "./final-save-erasure.js";
 
 /** Scheduling only: these reads never grant authority or claim work. The
  * existing mutation transaction rechecks every deadline, owner and lease. */
@@ -53,7 +54,8 @@ const deadlines = {
       LEFT JOIN workspace_retention_policies policy ON policy.workspace_id=job.workspace_id AND policy.org_id=job.org_id
       WHERE job.state IN ('waiting_for_provider','deleting_objects','deleting_records')
         AND workspace.status='deleted' AND workspace.data_deleted_at IS NULL AND NOT coalesce(policy.legal_hold,false)
-        AND cloud_final_save_deletion_claimable(workspace.id,workspace.org_id)
+        AND (cloud_final_save_deletion_claimable(workspace.id,workspace.org_id)
+          OR (workspace.desired_state='deleted' AND ${cloudFinalSaveErasureAdoptionPending}))
         AND NOT EXISTS (SELECT 1 FROM workspace_blob_references reference JOIN workspace_blobs blob ON blob.id=reference.blob_id AND blob.org_id=reference.org_id
           WHERE reference.workspace_id=job.workspace_id AND reference.org_id=job.org_id AND blob.legal_hold)
         AND NOT EXISTS (SELECT 1 FROM workspace_checkpoints checkpoint WHERE checkpoint.workspace_id=job.workspace_id AND checkpoint.org_id=job.org_id AND checkpoint.legal_hold)

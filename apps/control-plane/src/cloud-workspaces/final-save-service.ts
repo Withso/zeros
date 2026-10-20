@@ -8,6 +8,7 @@ import { canonicalFinalSaveJson, canonicalFinalSaveSource, CloudFinalSaveDirecti
   CloudFinalSaveRequestSchema, CloudFinalSaveSourceSchema, type CloudFinalSaveDirective,
   type CloudFinalSaveRequest, type CloudFinalSaveResponse } from "./final-save-contract.js";
 import { ensureFinalSaveRecovery, finalSaveProven, scheduleFinalSaveRecovery } from "./final-save-recovery.js";
+import { resolveHistoricalFinalSaveForErasure } from "./final-save-erasure.js";
 import { CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL, checkpointHintKey } from "./engine-checkpoint-hints.js";
 
 type Recovery = {
@@ -231,6 +232,7 @@ export async function runFinalSaveRecovery(pool: pg.Pool, workspaceId: string | 
     for (const candidate of rows.rows) {
       await ensureFinalSaveRecovery(tx, candidate.lifecycle_intent_id);
       const row = (await recoveryRow(tx, candidate.lifecycle_intent_id))!;
+      if (await resolveHistoricalFinalSaveForErasure(tx, row.lifecycle_intent_id)) continue;
       if (await markProven(tx, row)) continue;
       let request = row.current_request_id ? await attemptRow(tx, row, row.current_request_id) : undefined;
       if (!request) { await scheduleFinalSaveRecovery(tx, { intentId: row.lifecycle_intent_id, failure: "source_unavailable", blocked: true }); continue; }

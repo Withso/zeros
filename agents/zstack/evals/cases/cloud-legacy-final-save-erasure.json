@@ -1,0 +1,9 @@
+{
+  "id": "cloud-legacy-final-save-erasure",
+  "kind": "replay",
+  "area": "cloud-workspaces",
+  "fixedBy": "pending",
+  "symptom": "A provider-verified Delete stayed in waiting_for_provider because the claim and scheduler required recovery rows for historical successful Stops before any worker could adopt them.",
+  "rule": "Exercise the real deadline reader and erasure worker across lazy migration, with earlier engine incarnations. Bound adoption and retain exact historical receipts without granting current dispatch authority or resetting the accepted Delete.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/final-save-migration.integration.test.ts -t 'schedules adoption|recovers an existing'"
+}
