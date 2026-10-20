@@ -1545,6 +1545,30 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
       id: "grok-4.5-thinking-high-fast",
     });
   });
+  it.each(["Local", "organization-local"])("keeps complete composer snapshot semantics for %s sessions", async owner => {
+    modelsListSpy.mockResolvedValue([{ id: "grok-4.6", parameters: [] }, { id: "composer-2.5", parameters: [] }]);
+    const adapter = new CursorSdkAdapter({ ...makeCtx(), authenticationContext: () => owner });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj",
+        env: { CURSOR_API_KEY: "fixture-local-key", CURSOR_MODEL: "grok-4.6" } });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      await adapter.updateConfig({ sessionId: session.sessionId, env: { ZEROS_FAST_MODE: "0" } });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      expect(sendSpy.mock.calls.map(call => call[1].model)).toEqual([{ id: "grok-4.6" }, { id: "composer-2.5" }]);
+    } finally { await adapter.dispose(); }
+  });
+  it("still requires an explicit model in a Local exact-model qualification snapshot", async () => {
+    modelsListSpy.mockResolvedValue([{ id: "grok-4.6", parameters: [] }]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: {
+        CURSOR_API_KEY: "fixture-local-key", CURSOR_MODEL: "grok-4.6", ZEROS_REQUIRE_EXACT_MODEL: "1",
+      } });
+      await expect(adapter.updateConfig({ sessionId: session.sessionId, env: { ZEROS_FAST_MODE: "0" } }))
+        .rejects.toThrow("Exact model selection requires an explicit model identifier");
+      expect(sendSpy).not.toHaveBeenCalled();
+    } finally { await adapter.dispose(); }
+  });
 });
 
 describe("Cursor modes — Ask / Auto / Full access + autoReview rebuild", () => {

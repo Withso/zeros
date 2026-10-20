@@ -3049,19 +3049,33 @@ export class CursorSdkAdapter implements AgentAdapter {
   }): Promise<void> {
     const session = this.sessions.get(opts.sessionId);
     if (!session) return;
+    const cloud = session.cloudExecution;
+    if (cloud) {
+      cloudExecutionLifetime(cloud).assertLive();
+      if ((opts.env.CURSOR_MODEL !== undefined && opts.env.CURSOR_MODEL !== cloud.model) ||
+          (opts.env.ZEROS_REQUIRE_EXACT_MODEL !== undefined && opts.env.ZEROS_REQUIRE_EXACT_MODEL !== "1")) {
+        throw new CloudCommandFailureError({ stage: "validation", category: "access_denied" });
+      }
+    }
     const carried = { ...(session.env ?? {}) };
     delete carried.CURSOR_MODEL;
     delete carried.ZEROS_THINKING_EFFORT;
     delete carried.ZEROS_FAST_MODE;
     delete carried.ZEROS_ADDITIONAL_DIRS;
     delete carried.ZEROS_PERMISSION_MODE;
-    session.env = { ...carried, ...opts.env };
-    session.modelId = this.resolveModel(
-      session.env.CURSOR_MODEL,
-      session.env,
+    // Cloud follow-up snapshots carry mutable composer settings, while the
+    // exact model belongs to the admitted execution. Local snapshots continue
+    // to own their model selection, including an omitted/default choice.
+    const env = { ...carried, ...opts.env,
+      ...(cloud ? { CURSOR_MODEL: cloud.model, ZEROS_REQUIRE_EXACT_MODEL: "1" } : {}) };
+    const modelId = this.resolveModel(
+      env.CURSOR_MODEL,
+      env,
       session.modelState,
       "setMode",
     );
+    session.env = env;
+    session.modelId = modelId;
   }
 
   /** Reconcile only between runs. A versioned gateway header is part of the

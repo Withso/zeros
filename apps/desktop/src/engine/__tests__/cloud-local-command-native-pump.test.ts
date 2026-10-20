@@ -28,6 +28,10 @@ import { CloudExecutionAuthorityReceiptSchema, type CloudExecutionEnrollRequest,
   type CloudExecutionAuthorityOperation } from "@zeros/protocol/cloud-execution-authority";
 import { cloudBootNativeAuthority } from "../agents/cloud-provider-execution";
 import { openSqlite } from "../db/sqlite";
+import { CursorSdkAdapter, type CursorSdkSendOptions } from "../agents/adapters/cursor-sdk/adapter";
+import { createCloudNativeHome } from "../agents/containment/cloud-native-home";
+import { cloudNativeProviderEnvironment } from "../agents/containment/cloud-native-boundary";
+import { AgentGateway } from "../agents/gateway";
 
 const bootResponses: { [Operation in CloudAgentBootOperation]: { parse(value: unknown): CloudAgentBootResponses[Operation] } } = {
   bootstrap: CloudAgentBootCredentialResponseSchema, sync: CloudAgentBootSyncResponseSchema,
@@ -36,7 +40,7 @@ const bootResponses: { [Operation in CloudAgentBootOperation]: { parse(value: un
   "recover-history": CloudAgentHistoryRecoveryResponseSchema,
 };
 
-const native = vi.hoisted(() => ({ prepare: vi.fn() }));
+const native = vi.hoisted(() => ({ prepare: vi.fn(), cursorRuntime: vi.fn(), cursorCreate: vi.fn(), cursorSend: vi.fn() }));
 const deployment = vi.hoisted(() => ({version: 4 as const, backend: "cloud-worker" as const,
   profile: "zeros-cloud-worker-v4" as const, uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0,
   toolchain: {node: process.execPath, supervisor: `${process.cwd()}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`}}));
@@ -44,7 +48,15 @@ vi.mock("../agents/containment/cloud-worker-config", async original => ({
   ...await original<typeof import("../agents/containment/cloud-worker-config")>(),
   isCloudWorkerConfiguration: (value: unknown) => value === deployment,
 }));
-vi.mock("../agents/containment/cloud-native-boundary", () => ({ CloudNativeBoundary: { prepareBoot: native.prepare } }));
+vi.mock("../agents/containment/cloud-native-boundary", async original => ({
+  ...await original<typeof import("../agents/containment/cloud-native-boundary")>(),
+  CloudNativeBoundary: { prepareBoot: native.prepare },
+}));
+vi.mock("../agents/adapters/cursor-sdk/host/host-client", () => ({
+  createCursorHostRuntime: native.cursorRuntime, getCursorHostModule: vi.fn(),
+  CURSOR_HOST_EXITED_CODE: "CURSOR_HOST_EXITED", CURSOR_HOST_CRASH_LOOP_CODE: "CURSOR_HOST_CRASH_LOOP",
+  CURSOR_HOST_CRASH_LOOP_ADVICE: "Restart Cursor",
+}));
 vi.mock("../agents/cloud-workload-tools", () => ({ CloudWorkloadTools: class {
   async stopAndProve() {}
 } }));
@@ -56,20 +68,20 @@ vi.mock("../agents/containment/cloud-runtime-root.mjs", async original => ({
 }));
 
 const cleanups: (() => void | Promise<void>)[] = [];
-afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks(); });
+afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks(); vi.unstubAllEnvs(); });
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });
   return { promise, resolve };
 }
 
-async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detached = false, executionOwned = false) {
+async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detached = false, executionOwned = false, realCursor = false) {
   const directory = mkdtempSync(path.join(tmpdir(), "zeros-native-pump-"));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const cwd = path.join(directory, "workspace"); mkdirSync(cwd);
   const workloads = portableCloudWorkloads(deployment); cleanups.push(() => workloads.drain(workloads.fence()));
   const boundary = new CloudExecutionBoundary({projectRoot: process.cwd(), configuration: deployment, workloads});
-  const f = await testCloudBootFixture(cwd, provider); cleanups.push(f.close);
+  const f = await testCloudBootFixture(cwd, provider, realCursor ? "grok-4.6" : undefined); cleanups.push(f.close);
   const accepted = detached ? await testAcceptedWorkOptions(f) : null;
   if (accepted) cleanups.push(accepted.close);
   const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, bootId: _boot, writerEpoch: _writer, ...scope } = f.scope;
@@ -137,11 +149,35 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detac
   let background = false;
   native.prepare.mockImplementation(async (authority: CloudBootNativeAuthority, workload: PreparedBoundary) => {
     const stop = vi.fn(async () => {}); stops.set(authority.executionId, stop);
-    const coordinator = { ...workload, providerHomePath: path.join(directory, "home"), stopAndProve: stop,
-      environment: () => ({ HOME: path.join(directory, "home") }), codexExternalAuth: () => null,
+    const nativeHome = realCursor ? await createCloudNativeHome({ dataRoot: directory,
+      conversationId: authority.conversationId, provider, executionId: authority.executionId }) : null;
+    const material = realCursor ? authority.takeMaterial() : null;
+    const coordinator = { ...workload, nativeHome, providerHomePath: nativeHome?.paths.home ?? path.join(directory, "home"), stopAndProve: stop,
+      environment: () => nativeHome && material ? cloudNativeProviderEnvironment(material, authority.model,
+        undefined, authority.environment?.values, nativeHome) : { HOME: path.join(directory, "home") }, codexExternalAuth: () => null,
       hasBackgroundServers: async () => background };
     authority.lifetime.attach(coordinator); return coordinator;
   });
+  let cursor: CursorSdkAdapter | null = null;
+  if (realCursor) {
+    vi.stubEnv("CURSOR_API_KEY", ""); vi.stubEnv("CURSOR_RIPGREP_PATH", "/usr/bin/rg");
+    native.cursorCreate.mockResolvedValue({ agentId: "fixture-native", send: native.cursorSend, close() {} });
+    native.cursorRuntime.mockImplementation(() => ({ module: {
+      Agent: { create: native.cursorCreate }, Cursor: { models: { list: async () => [{ id: f.input.model, parameters: [
+        { id: "reasoning_effort", values: [{ value: "high" }] }, { id: "fast", values: [{ value: "true" }, { value: "false" }] },
+      ] }] } }, platform: { prewarm: async () => ({}) },
+    }, dispose: async () => {} }));
+    native.cursorSend.mockImplementation(async (_message, opts: CursorSdkSendOptions) => {
+      opts.beforeNativeWrite?.(); opts.onNativePromptStage?.("native_write");
+      return { id: "fixture-run", stream: async function* () {}, wait: async () => ({ status: "finished" }), cancel: async () => {} };
+    });
+    cursor = new CursorSdkAdapter({ projectRoot: cwd, sessionDirRoot: path.join(directory, "sessions"), mcpServers: [],
+      emit: { onSessionUpdate() {}, onPermissionRequest() {}, onQuestionRequest() {}, onAgentStderr() {}, onAgentExit() {} } });
+    cleanups.push(() => cursor!.dispose());
+  }
+  // The actual gateway capability resolver must reach the real adapter. The
+  // boot factory remains the owner of native reservations and retirement.
+  const cursorGateway = { adapterForSession: () => cursor! } as unknown as AgentGateway;
   const gateway = {
     reserveCloudBootTurn: vi.fn((_agent: string, id: string, selection: CloudBootAgentSelection) => factory.reserveBootTurn(executions.get(id)!, selection)),
     cloudBootReservation: vi.fn((_agent: string, id: string) => cloudBootTurnReservation(executions.get(id)!)),
@@ -155,8 +191,12 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detac
     cancel: vi.fn(async (_agent: string, id: string) => {
       const execution = executions.get(id); if (execution) await cloudExecutionLifetime(execution).close();
     }),
-    setMode: vi.fn(async (_agent: string, _id: string, _mode: string) => {}),
-    updateConfig: vi.fn(async (_agent: string, _id: string, _env: Record<string, string>) => {}),
+    setMode: vi.fn(async (agent: string, id: string, mode: string) => {
+      if (cursor) await AgentGateway.prototype.setMode.call(cursorGateway, agent, id, mode);
+    }),
+    updateConfig: vi.fn(async (agent: string, id: string, env: Record<string, string>) => {
+      if (cursor) await AgentGateway.prototype.updateConfig.call(cursorGateway, agent, id, env);
+    }),
   };
   const broadcast = vi.fn(), bindings = new Map<object, CloudBootCommandClaim>(), retirementFailure = vi.fn();
   const handleAgentMessage = vi.fn(async (message: EngineMessage, receiver: TransportClient) => {
@@ -167,6 +207,8 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detac
     const prepared = await factory.prepareBoot({ selection, workload, signal: pump.record(claim)!.controller.signal });
     const execution = cloudProviderExecution(prepared.boundary)! as CloudBootProviderExecution;
     factory.reserveBootTurn(execution, selection); executions.set(claim.executionId, execution);
+    if (cursor) await cursor.newSession({ executionId: claim.executionId, cwd,
+      env: { ...prepared.env, ...("env" in message ? message.env : {}) }, executionBoundary: prepared.boundary });
     routes.set(claim.conversationId, claim.executionId);
     expect(message.id).toBe(claim.commandId);
   });
@@ -193,7 +235,9 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detac
   };
   const finish = async (value: CloudBootCommandClaim) => {
     const execution = executions.get(value.executionId)!;
-    pump.assertDispatch(value); factory.markNativeHandoff(execution, cloudBootTurnReservation(execution)!);
+    pump.assertDispatch(value);
+    if (cursor) await cursor.prompt({ sessionId: value.executionId, prompt: value.payload.prompt });
+    else factory.markNativeHandoff(execution, cloudBootTurnReservation(execution)!);
     await pump.retire(value, { state: "succeeded" });
     boot.queue.handle({ kind: "settle", result: { commandId: value.commandId, claimId: value.claimId, state: "succeeded", resultCode: null } },
       { writerEpoch: f.scope.writerEpoch });
@@ -304,6 +348,24 @@ describe("VM-local native command pump", () => {
     expect(f.gateway.endSession).not.toHaveBeenCalled();
     await f.finish(second);
     expect(f.gateway.completeCloudForeground.mock.calls.map(call => call[3])).toEqual([firstToken, secondToken]);
+    expect(f.request).not.toHaveBeenCalled();
+  });
+  it("dispatches repeated cloud Cursor turns with the original admitted model through the real adapter", async () => {
+    const f = await fixture("cursor", false, false, true), first = f.claim();
+    await f.pump.prepare(first); await f.finish(first);
+    for (let turn = 0; turn < 2; turn++) {
+      const next = f.claim(first.executionId);
+      expect(next.executionId).toBe(first.executionId);
+      await expect(f.pump.prepare(next)).resolves.toBeUndefined();
+      await f.finish(next);
+    }
+    expect(native.cursorCreate).toHaveBeenCalledOnce();
+    expect(native.cursorSend).toHaveBeenCalledTimes(3);
+    for (const call of native.cursorSend.mock.calls) expect(call[1]).toMatchObject({ model: { id: "grok-4.6" } });
+    expect(f.gateway.updateConfig).toHaveBeenCalledTimes(2);
+    expect(f.gateway.updateConfig.mock.calls[0]![2]).not.toHaveProperty("CURSOR_MODEL");
+    expect(f.handleAgentMessage).toHaveBeenCalledOnce();
+    expect(f.gateway.endSession).not.toHaveBeenCalled();
     expect(f.request).not.toHaveBeenCalled();
   });
   it("rejects an old or copied claim without settling the newer warm reservation", async () => {
