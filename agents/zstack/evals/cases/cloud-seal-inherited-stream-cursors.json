@@ -1,0 +1,9 @@
+{
+  "id": "cloud-seal-inherited-stream-cursors",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pr:651",
+  "symptom": "A replacement cloud writer could not seal when inherited command or history event cursors exceeded its fresh native stream head, preventing final checkpoints and Stop.",
+  "rule": "The bug-fix playbook requires predecessor-to-successor cursor regressions. Compare event cursors only within the exact originating writer or native stream, while preserving restored NORMAL record coverage and all pending-work and immutable-ACK gates.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/commands-mirror.integration.test.ts"
+}

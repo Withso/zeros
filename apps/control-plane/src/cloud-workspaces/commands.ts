@@ -456,17 +456,22 @@ export class DatabaseCloudWorkspaceCommandService {
       }
       if (safeInteger(writer.mirrored_sequence) !== seal.sequence)
         throw new CloudCommandError("command_conflict", "Cloud writer seal is not drained");
+      // Reprojection preserves the origin's event cursor. Only this writer's
+      // native stream is comparable to its seal; NORMAL record revisions and
+      // pending commands still cover the entire restored projection.
       const projection = (await tx.query<{ pending: boolean; record_sequence: string; event_sequence: string }>(
         `SELECT EXISTS(SELECT 1 FROM cloud_workspace_local_commands WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3
             AND state IN ('queued','dispatching')) AS pending,
           coalesce(max(record_sequence),0)::text AS record_sequence,coalesce(max(event_sequence),0)::text AS event_sequence
-          FROM (SELECT history_record_sequence AS record_sequence,history_event_sequence AS event_sequence
+          FROM (SELECT history_record_sequence AS record_sequence,
+              CASE WHEN writer_epoch=$3 THEN history_event_sequence END AS event_sequence
             FROM cloud_workspace_local_commands WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3
-            UNION ALL SELECT record_sequence,event_sequence FROM cloud_workspace_local_command_history_heads
+            UNION ALL SELECT record_sequence,CASE WHEN origin_writer_epoch=$3 THEN event_sequence END
+              FROM cloud_workspace_local_command_history_heads
               WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3
             UNION ALL SELECT NULL::bigint,local_sequence FROM cloud_workspace_local_agent_controls
-              WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3) projected`,
-        [scope.workspaceId, scope.organizationId, seal.scope.writerEpoch])).rows[0];
+              WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3 AND local_stream_id=$4) projected`,
+        [scope.workspaceId, scope.organizationId, seal.scope.writerEpoch, scope.engineInstanceId])).rows[0];
       if (!projection || projection.pending || safeInteger(projection.record_sequence) > seal.recordSequence || safeInteger(projection.event_sequence) > seal.eventSequence)
         throw new CloudCommandError("command_conflict", "Cloud writer seal projection is incomplete");
       await assertCloudEngineAuthorityDeadline(tx, scope.engineInstanceId, this.options.workosEnabled === true);

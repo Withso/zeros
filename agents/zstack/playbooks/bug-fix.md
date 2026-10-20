@@ -71,6 +71,9 @@
    Reproject canonical controls with the predecessor's outbox above the successor's
    cursor. Validate each position in its own writer, retaining native identity and
    refusing uncovered or changed controls without recreating live events.
+   A new native stream can have a lower event head than retained history. Compare
+   seal event cursors only within their original writer or stream; keep all
+   restored NORMAL record coverage and pending-work gates across origins.
    For stop/seal races, hold background replies across the admission fence and
    local cancellation. Assert authority and heartbeats survive through a real
    seal, while explicit revocation and wrong identities remain terminal.
