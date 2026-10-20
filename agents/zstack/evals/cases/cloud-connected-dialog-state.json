@@ -1,0 +1,9 @@
+{
+  "id": "cloud-connected-dialog-state",
+  "kind": "seeded",
+  "area": "desktop-cloud-ui-state",
+  "fixedBy": "pr:664",
+  "symptom": "Cloud account Configure still offers Connect while its row is connected, and an open dialog retains stale identity or readiness after credential metadata changes.",
+  "rule": "The cloud-connected-dialog-state lesson requires the row and open dialog to use current exact selected-source health, a disabled Connected action, retained explicit import retries, and unchanged owner and Local boundaries.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/settings/__tests__/cloud-provider-connections.test.ts apps/desktop/src/renderer/features/settings/__tests__/cloud-provider-connection.test.ts"
+}

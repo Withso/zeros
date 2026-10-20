@@ -189,8 +189,13 @@ function CloudProviderConnection({
   };
   const removal = useCloudCredentialRemoval({ userId, organizationId, active: surfaceActive, onRemoved: refresh });
   const busy = connectionBusy || removal.pending || !surfaceActive;
-  const connected = !!selected && connection?.credentialId === selected.id && connection.connected &&
-    connection.health?.status === "ready" && connection.health.credentialRevision === selected.revision;
+  const readyCredential = matching.find(credential => connection?.credentialId === credential.id &&
+    connection.connected && connection.health?.status === "ready" &&
+    connection.health.credentialRevision === credential.revision && !credential.revoked);
+  // The clicked account is a dialog intent, not a health snapshot. Keep an
+  // unlisted import for explicit retry, but use current metadata for readiness.
+  const displayedCredential = matching.find(credential => credential.id === selected?.id) ?? selected;
+  const connected = !!selected && readyCredential?.id === selected.id;
   const run = async (action: (current: () => boolean) => Promise<void>) => {
     if (inFlight.current || removal.isPending() || !surfaceActive || !removal.current()) return;
     const epoch = operationEpoch.current;
@@ -337,8 +342,7 @@ function CloudProviderConnection({
       {matching.map((credential) => {
         const isSelected = connection?.credentialId === credential.id;
         const health = isSelected ? connection?.health : undefined;
-        const ready = isSelected && connection?.connected && health?.status === "ready" &&
-          health.credentialRevision === credential.revision && !credential.revoked;
+        const ready = readyCredential?.id === credential.id;
         const reconnect = isSelected && (credential.revoked || health?.status === "expired" ||
           health?.status === "expiring" || health?.status === "credential_unavailable");
         // Health is the selected source's last observation, never a model or
@@ -423,7 +427,7 @@ function CloudProviderConnection({
           createIntent.current = null;
         }}
         connected={connected}
-        connectedIdentity={selected?.displayName}
+        connectedIdentity={displayedCredential?.displayName}
         busy={busy}
         methodOptions={[
           {
@@ -438,10 +442,10 @@ function CloudProviderConnection({
           },
         ]}
       >
-        {selected ? (
+        {displayedCredential ? (
           (!connected || method === "account") && (
             <p className="text-fg1 min-w-0 break-words text-sm" role={connected ? "status" : undefined}>
-              {connected ? connectedAccountLabel(method, selected.displayName) : selected.displayName}
+              {connected ? connectedAccountLabel(method, displayedCredential.displayName) : displayedCredential.displayName}
             </p>
           )
         ) : (
@@ -533,6 +537,7 @@ function CloudProviderConnection({
           <Button
             disabled={
               busy ||
+              connected ||
               !snapshot.data ||
               (!selected &&
                 !token.trim() &&
@@ -540,7 +545,7 @@ function CloudProviderConnection({
             }
             onClick={() => void connect()}
           >
-            {busy ? "Connecting…" : "Connect"}
+            {busy ? "Connecting…" : connected ? "Connected" : "Connect"}
           </Button>
         </div>
       </ProviderConnectionDialog>
