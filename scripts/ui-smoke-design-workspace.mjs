@@ -1,6 +1,7 @@
 import { runDesignFloatingChromeSmoke } from "./ui-smoke-design-floating-chrome.mjs";
 import { runDesignFloatingChromeEdgesSmoke } from "./ui-smoke-design-floating-chrome-edges.mjs";
 import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
+import { shiftClickDesignGroupMember } from "./ui-smoke-design-group-selection.mjs";
 import { expect } from "@playwright/test";
 import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
 // Design-workspace portion of the real-browser interaction contract. Keeping
@@ -4884,19 +4885,13 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
 
   // Toggling the primary member off promotes the remaining member without
   // collapsing through a stale async runtime response.
-  const selectedCopyOverlay = homeFrame.locator(
-    '[data-design-element-overlay="home-copy"]',
-  );
-  const selectedCopyOverlayBox = await selectedCopyOverlay.boundingBox();
-  if (!selectedCopyOverlayBox) {
-    throw new Error("selected additive outline has no geometry");
-  }
-  await page.keyboard.down("Shift");
-  await page.mouse.click(
-    selectedCopyOverlayBox.x + selectedCopyOverlayBox.width / 2,
-    selectedCopyOverlayBox.y + selectedCopyOverlayBox.height / 2,
-  );
-  await page.keyboard.up("Shift");
+  await shiftClickDesignGroupMember({
+    page,
+    homeFrame,
+    workspaceId: "ws_design_harness",
+    frameFile: "home.html",
+    nodeId: "home-copy",
+  });
   check(
     "canvas Shift-click toggles a group member and keeps the remaining layer",
     await waitFor(

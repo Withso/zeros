@@ -1,0 +1,5 @@
+{
+  "file": "scripts/ui-smoke-design-group-selection.mjs",
+  "before": "  await waitForSavedDesignSelection(page, { workspaceId, frameFile, nodeId });",
+  "after": "  // Seed: start the pointer gesture while the prior save can still advance its source."
+}
