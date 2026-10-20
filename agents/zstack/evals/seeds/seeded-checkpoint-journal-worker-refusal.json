@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/__tests__/fixtures/complete-checkpoint-journal-process.mts",
+  "before": "    if (!(error instanceof Error) || error.message !== \"complete checkpoint journal unconfirmed\") throw error;\n    // Lock contention is bounded refusal, never a successful or conflicting CAS.\n    process.stdout.write('{\"refused\":\"unconfirmed\"}\\n');",
+  "after": "    throw error;"
+}

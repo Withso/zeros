@@ -94,6 +94,12 @@
   assert each exact outcome, the stored identity/capacity bound and each caller's
   original deadline. Uniqueness does not promise both calls succeed. Don't rely
   on database victim selection, accept any error or widen production retries.
+- **Native journal process races:** initialize each handle before racing CAS
+  writes. A bounded lock refusal is a distinct losing outcome, not process EOF
+  or a successful conflict. Retain exactly one confirmed winner, its exact
+  stored custody, and a stale-revision check from the loser. Hold real locks
+  through open/write refusal, preserve unexpected child failures with bounded
+  stderr diagnostics, and never widen production busy limits to stabilize CI.
 - **Database test timeouts:** first trace whether the changed code actually runs in the failing test,
   then reproduce with bounded database transit delay. Large lifecycle or pagination fixtures can
   legitimately exceed the default 5 s test budget. Give only that case a justified bounded timeout,

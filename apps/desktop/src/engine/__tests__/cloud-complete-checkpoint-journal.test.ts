@@ -68,29 +68,70 @@ describe("durable complete checkpoint custody", () => {
     expect(await second.read(new AbortController().signal)).toEqual({ revision: 1, state: left });
   });
 
-  async function worker(directory: string) {
+  async function worker(directory: string, opened: { ready: true } | { refused: "unconfirmed" } = { ready: true }) {
     const child = spawn(process.execPath, ["--import", "tsx",
       path.join(import.meta.dirname, "fixtures/complete-checkpoint-journal-process.mts")], { stdio: ["pipe", "pipe", "pipe"] });
     children.push(child);
+    const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+    let stderr = "";
+    child.stderr!.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(0, 8192); });
     const messages = createInterface({ input: child.stdout! })[Symbol.asyncIterator]();
     const request = async (value: unknown) => {
       child.stdin!.write(`${JSON.stringify(value)}\n`);
       const message = await messages.next();
-      expect(message.done).not.toBe(true); return JSON.parse(message.value!);
+      if (message.done) await closed;
+      expect(message.done, `journal worker exited (${child.exitCode ?? child.signalCode}): ${stderr}`).not.toBe(true);
+      return JSON.parse(message.value!);
     };
-    expect(await request({ action: "open", directory, source })).toEqual({ ready: true });
+    expect(await request({ action: "open", directory, source })).toEqual(opened);
     return { child, request };
   }
 
+  it.each(["open", "write"] as const)("keeps the worker alive after a bounded %s refusal", async action => {
+    const directory = root(), journal = await open(directory), pending = state();
+    let childWorker = action === "write" ? await worker(directory) : undefined;
+    const holder = openSqlite(path.join(directory, "journal.sqlite"));
+    try {
+      holder.exec("BEGIN IMMEDIATE");
+      expect(holder.inTransaction).toBe(true);
+      if (action === "open") childWorker = await worker(directory, { refused: "unconfirmed" });
+      else expect(await childWorker!.request({ action, revision: 0, state: pending })).toEqual({ refused: "unconfirmed" });
+      expect(await journal.read(new AbortController().signal)).toEqual({ revision: 0, state: null });
+    } finally {
+      if (holder.inTransaction) holder.exec("ROLLBACK");
+      holder.close();
+    }
+    expect(childWorker!.child.exitCode).toBeNull();
+    expect(childWorker!.child.signalCode).toBeNull();
+    if (action === "open") expect(await childWorker!.request({ action, directory, source })).toEqual({ ready: true });
+    expect(await childWorker!.request({ action: "write", revision: 0, state: pending })).toEqual({ written: true });
+    expect(await journal.read(new AbortController().signal)).toEqual({ revision: 1, state: pending });
+  });
+
+  it("does not normalize unexpected worker failures into a refused CAS", async () => {
+    const directory = root(), journal = await open(directory), childWorker = await worker(directory);
+    await expect(childWorker.request({ action: "unknown" })).rejects.toThrow("unknown test command");
+    expect(childWorker.child.exitCode).toBe(1);
+    expect(await journal.read(new AbortController().signal)).toEqual({ revision: 0, state: null });
+  });
+
   it("permits exactly one of two real processes to own the same revision", async () => {
     const directory = root(), journal = await open(directory);
-    const [left, right] = await Promise.all([worker(directory), worker(directory)]);
+    // Opening verifies a native reservation too. Admit both handles before
+    // racing the writes whose CAS outcome this test proves.
+    const left = await worker(directory), right = await worker(directory);
     const pending = [state(), state()];
     const results = await Promise.all([left.request({ action: "write", revision: 0, state: pending[0] }),
       right.request({ action: "write", revision: 0, state: pending[1] })]);
-    expect(results.filter(value => value.written)).toHaveLength(1);
-    expect(await journal.read(new AbortController().signal)).toEqual({ revision: 1,
-      state: pending[results.findIndex(value => value.written)] });
+    expect(results.filter(value => value.written === true)).toHaveLength(1);
+    const winner = results.findIndex(value => value.written === true), loser = 1 - winner;
+    expect([{ written: false }, { refused: "unconfirmed" }]).toContainEqual(results[loser]);
+    const stored = { revision: 1, state: pending[winner] };
+    expect(await journal.read(new AbortController().signal)).toEqual(stored);
+    // A bounded refusal cannot confer ownership. Once the winner is durable,
+    // the original losing revision must be an exact conflict, with no write.
+    expect(await [left, right][loser]!.request({ action: "write", revision: 0, state: pending[loser] })).toEqual({ written: false });
+    expect(await journal.read(new AbortController().signal)).toEqual(stored);
   });
 
   it("preserves pending custody after an actual writer process is killed", async () => {
