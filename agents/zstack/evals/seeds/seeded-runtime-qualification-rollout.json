@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/cloud-workspaces/runtime-qualification.ts",
+  "before": "baseRollout: cloud?.runtime?.baseRollout",
+  "after": "baseRollout: undefined"
+}

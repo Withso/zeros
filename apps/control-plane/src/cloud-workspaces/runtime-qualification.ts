@@ -10,6 +10,7 @@ import { RUNTIME_SMOKE_CHECKS, type ClosedDiagnostic } from "./cloud-builder-com
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { RuntimeDescriptorSchema, RuntimeInstallInputSchema, type RuntimeDescriptor } from "./runtime-contract.js";
 import type { RuntimeArtifactStore } from "./runtime-artifact-store.js";
+import type { CloudRuntimeBaseRollout } from "./runtime-base-rollout.js";
 import { notifyRuntimeStaging } from "./runtime-staging-notification.js";
 
 export const RUNTIME_QUALIFICATION_KINDS = ["claude-setup-token", "codex-chatgpt", "cursor-api-key", "claude-api-key", "codex-api-key"] as const;
@@ -45,6 +46,24 @@ async function newestBase(tx: Tx): Promise<Base | null> {
     WHERE base.revoked_at IS NULL AND contract.revoked_at IS NULL AND base.provider='boat' AND base.approved_at<=clock_timestamp()
     ORDER BY base.approved_at DESC,base.base_image_id LIMIT 1 FOR SHARE OF base,contract`)).rows[0] ?? null;
 }
+/** Only bases that this deployment can assign need automatic qualification.
+ * Rotate by durable attempt time so a new default cannot starve its candidate.
+ * An absent policy alone preserves legacy newest-base discovery. */
+async function qualificationBases(tx: Tx, policy: CloudRuntimeBaseRollout | undefined): Promise<Base[]> {
+  if (!policy) {
+    const base = await newestBase(tx);
+    return base ? [base] : [];
+  }
+  const ids = [policy.defaultBaseImageId,
+    ...(policy.candidate?.organizationIds.length ? [policy.candidate.baseImageId] : [])];
+  return (await tx.query<Base>(`SELECT base.base_image_id,base.base_compatibility_id FROM cloud_runtime_base_images base
+    JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
+    WHERE base.base_image_id=ANY($1::text[]) AND base.revoked_at IS NULL AND contract.revoked_at IS NULL
+      AND base.provider='boat' AND base.approved_at<=clock_timestamp()
+    ORDER BY (SELECT max(run.created_at) FROM cloud_runtime_qualification_runs run WHERE run.base_image_id=base.base_image_id) ASC NULLS FIRST,
+      array_position($1::text[],base.base_image_id)
+    FOR SHARE OF base,contract`, [ids])).rows;
+}
 async function eligibleBundle(tx: Tx, id: string): Promise<Bundle | null> {
   return (await tx.query<Bundle>(`SELECT bundle.* FROM cloud_runtime_bundles bundle
     JOIN cloud_runtime_channel_releases release USING (runtime_id)
@@ -66,6 +85,7 @@ export class RuntimeQualificationWorker {
   constructor(private readonly options: {
     pool: pg.Pool; enabled: boolean; vms: CloudBuilderVms | null;
     operations: BuilderVmOperationStore | null; artifacts: RuntimeArtifactStore | null;
+    baseRollout?: CloudRuntimeBaseRollout | undefined;
     intervalMs?: number;
   }) {}
 
@@ -80,18 +100,27 @@ export class RuntimeQualificationWorker {
       const previous = (await tx.query<Run>(`SELECT * FROM cloud_runtime_qualification_runs
         WHERE runtime_id=$1 AND state IN ('queued','running')`, [runtimeId])).rows[0];
       if (previous) return { status: previous.state as "queued" | "running", runId: previous.id };
-      const base = await newestBase(tx);
-      if (!options.force && base && await qualified(tx, runtimeId, base)) return { status: "qualified", runId: null };
+      const bases = await qualificationBases(tx, this.options.baseRollout);
+      if (!bases.length) throw new HttpError(503, "runtime_smoke_unavailable", "Runtime smoke qualification unavailable");
+      const needed: Base[] = [];
+      for (const base of bases) if (!await qualified(tx, runtimeId, base)) needed.push(base);
+      if (!options.force && !needed.length) return { status: "qualified", runId: null };
       // An automatic publication replay does not loop indefinitely on a failed
-      // runtime. Operators retry explicitly; a new base can get a fresh smoke.
-      if (!options.force && base) {
-        const failed = (await tx.query<Run>(`SELECT * FROM cloud_runtime_qualification_runs
-          WHERE runtime_id=$1 AND base_compatibility_id=$2 AND state='failed' ORDER BY created_at DESC LIMIT 1`,
-        [runtimeId, base.base_compatibility_id])).rows[0];
-        if (failed) return { status: "failed", runId: failed.id };
+      // pair. Failure on one compatibility must not block the other target.
+      let failed: Run | undefined;
+      for (const base of needed.length ? needed : bases) {
+        if (!options.force) {
+          const previousFailure = (await tx.query<Run>(`SELECT * FROM cloud_runtime_qualification_runs
+            WHERE runtime_id=$1 AND base_compatibility_id=$2 AND state='failed' ORDER BY created_at DESC LIMIT 1`,
+          [runtimeId, base.base_compatibility_id])).rows[0];
+          if (previousFailure) { failed ??= previousFailure; continue; }
+        }
+        const run = (await tx.query<Run>(`INSERT INTO cloud_runtime_qualification_runs
+          (runtime_id,base_image_id,base_compatibility_id) VALUES ($1,$2,$3) RETURNING *`,
+        [runtimeId, base.base_image_id, base.base_compatibility_id])).rows[0]!;
+        return { status: "queued", runId: run.id };
       }
-      const run = (await tx.query<Run>(`INSERT INTO cloud_runtime_qualification_runs (runtime_id) VALUES ($1) RETURNING *`, [runtimeId])).rows[0]!;
-      return { status: "queued", runId: run.id };
+      return { status: "failed", runId: failed!.id };
     });
   }
 
@@ -122,12 +151,12 @@ export class RuntimeQualificationWorker {
         if (!expired) return null;
         return { run: expired, reconcile: true };
       }
-      const base = await newestBase(tx);
-      if (!base) return null;
+      const bases = await qualificationBases(tx, this.options.baseRollout);
       let queued = (await tx.query<Run>(`SELECT run.* FROM cloud_runtime_qualification_runs run
         JOIN cloud_runtime_bundles bundle USING (runtime_id)
         WHERE run.state='queued' ORDER BY run.created_at,run.id LIMIT 1 FOR UPDATE OF run`)).rows[0];
-      if (!queued) {
+      for (const base of bases) {
+        if (queued) break;
         // Bound discovery before removing completed/qualified candidates so a
         // new base cannot walk all historical releases. A failed newest release
         // blocks automatic fallback; queued work and explicit retries stay above.
@@ -148,17 +177,32 @@ export class RuntimeQualificationWorker {
             AND NOT EXISTS (SELECT 1 FROM cloud_runtime_qualification_runs run
               WHERE run.runtime_id=release.runtime_id AND run.base_compatibility_id=$2 AND run.state IN ('failed','succeeded'))
           ORDER BY release.release_order DESC LIMIT 1`, [CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, base.base_compatibility_id, RUNTIME_QUALIFICATION_KINDS])).rows[0];
-        if (!candidate) return null;
-        queued = (await tx.query<Run>(`INSERT INTO cloud_runtime_qualification_runs (runtime_id) VALUES ($1) RETURNING *`, [candidate.runtime_id])).rows[0];
+        if (!candidate) continue;
+        queued = (await tx.query<Run>(`INSERT INTO cloud_runtime_qualification_runs
+          (runtime_id,base_image_id,base_compatibility_id) VALUES ($1,$2,$3) RETURNING *`,
+        [candidate.runtime_id, base.base_image_id, base.base_compatibility_id])).rows[0];
       }
       if (!queued) return null;
-      if (!await eligibleBundle(tx, queued.runtime_id)) {
+      // Pre-policy queued rows may acquire a base once. New rows already own
+      // an exact pair; a policy/approval change cannot retarget that work.
+      let base = queued.base_image_id === null ? bases[0]
+        : bases.find(row => row.base_image_id === queued.base_image_id && row.base_compatibility_id === queued.base_compatibility_id);
+      if (!base && queued.base_image_id !== null && !this.options.baseRollout) {
+        base = (await tx.query<Base>(`SELECT base.base_image_id,base.base_compatibility_id FROM cloud_runtime_base_images base
+          JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
+          WHERE base.base_image_id=$1 AND base.base_compatibility_id=$2 AND base.revoked_at IS NULL AND contract.revoked_at IS NULL
+            AND base.provider='boat' AND base.approved_at<=clock_timestamp() FOR SHARE OF base,contract`,
+        [queued.base_image_id, queued.base_compatibility_id])).rows[0];
+      }
+      if (!base && queued.base_image_id === null) return null;
+      if (!base || !await eligibleBundle(tx, queued.runtime_id)) {
         await tx.query(`UPDATE cloud_runtime_qualification_runs SET state='failed',finished_at=clock_timestamp(),diagnostic=$2 WHERE id=$1`,
         [queued.id, JSON.stringify(failure("admit", "runtime_ineligible"))]);
         return null;
       }
       const run = (await tx.query<Run>(`UPDATE cloud_runtime_qualification_runs SET state='running',base_image_id=$2,base_compatibility_id=$3,
-        started_at=clock_timestamp(),deadline_at=clock_timestamp()+$4*interval '1 millisecond' WHERE id=$1 RETURNING *`,
+        started_at=clock_timestamp(),deadline_at=clock_timestamp()+$4*interval '1 millisecond' WHERE id=$1 AND state='queued'
+          AND (base_image_id IS NULL OR (base_image_id=$2 AND base_compatibility_id=$3)) RETURNING *`,
       [queued.id, base.base_image_id, base.base_compatibility_id, RUN_MS])).rows[0]!;
       await this.prepareOperation(tx, run);
       return { run, reconcile: false };
@@ -324,5 +368,5 @@ export function createRuntimeQualificationWorker(config: Config, pool: pg.Pool, 
     billingOrg: cloud.boat.billingOrg, operations, resolveSource: builderVmSourceResolver(pool),
     resolveDisplayName: () => boatRuntimeDisplayName(config.deploymentChannel, "qualify"),
   }) : null;
-  return new RuntimeQualificationWorker({ pool, enabled, vms, operations, artifacts });
+  return new RuntimeQualificationWorker({ pool, enabled, vms, operations, artifacts, baseRollout: cloud?.runtime?.baseRollout });
 }
