@@ -367,6 +367,25 @@ and accepts only ordinary empty descendants in projection directories. Malformed
 nonempty data, aliases, hard links, special files and nested projection mounts
 remain invalid. The active runtime descriptor still requires fresh publication.
 
+Computer sanitation supports one exact systemd document alias:
+`/var/log/README -> ../../usr/share/doc/systemd/README.logs`. It checks the
+literal link and independently opens the fixed target through directory
+descriptors; it does not resolve arbitrary links. The original regular target
+must have one link, root ownership, mode 0644 and no extended attributes. Its
+`/usr/share/doc/systemd` ancestry must remain root-owned, mode 0755 and free of
+aliases and extended attributes. The held original target is truncated and
+synced before the log entry becomes an empty regular file. All other aliases,
+missing targets, hard links and special files still refuse sanitation.
+
+An atomic exchange retains a raced replacement in a private log directory.
+Only its validated completed shape, containing one empty regular entry, can
+pass a later sanitation attempt; an interrupted or changed shape remains
+refused before ordinary recursion can clear it. The recursive entry/depth
+limits and the strict empty saved-tree check remain unchanged. Supporting
+this checked layout does not identify an unnamed failure in an older image:
+the changed base still needs its own sanitation, saved-tree and cold-clone
+qualification before promotion.
+
 The new protected helper and bootstrap must be qualified together in a new
 base; a control-plane release does not replace old pinned helper bytes. The
 [qualification sequence](../../../docs/cloud-workspace/computer-template-builds.md#qualifying-a-base-with-empty-state-sanitation)

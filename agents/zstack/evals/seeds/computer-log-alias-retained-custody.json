@@ -1,0 +1,5 @@
+{
+  "file": "scripts/cloud-workspace-validation/runtime-base-v4/computer-build.py",
+  "before": "if name.startswith('.zeros-log-document-'):",
+  "after": "if False and name.startswith('.zeros-log-document-'):"
+}
