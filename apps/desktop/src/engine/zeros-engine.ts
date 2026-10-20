@@ -4900,6 +4900,10 @@ export class ZerosEngine {
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
       predecessor: this.cloudLocalCommandPredecessor,
       runtimeBootId: registration.runtimeBootId, registration, legacy,
+      execution: { runtimeId: registration.runtimeId,
+        enroll: (body, signal) => registration.acceptedWorkRequest("execution-enroll", body, signal),
+        check: (body, signal) => registration.acceptedWorkRequest("execution-check", body, signal),
+        close: (body, signal) => registration.acceptedWorkRequest("execution-close", body, signal) },
       ...(registration.acceptedWorkNegotiated() && this.cloudDetachedPushHealth ? { accepted: {
         auth: () => this.cloudCapabilityAuth, runtimeId: registration.runtimeId,
         enabled: () => registration.acceptedWorkNegotiated() && this.cloudEngineUplink?.detachedActive === true,

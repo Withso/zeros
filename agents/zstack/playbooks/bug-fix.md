@@ -101,6 +101,12 @@
    unproved native work. Fence old confirmation and context flights before
    releasing registry capacity; test more historical sessions than the live
    cap, final-release timer cleanup and same-session readmission races.
+   For accepted cloud executions, cross actor/context observation deadlines
+   with a real owned child. Preserve original work/provider/runtime deadlines,
+   explicit Stop and real revocation; observation loss cannot mint or retire
+   authority. Hold acceptance through Stop and join late receipt cleanup.
+   Test actual deadline passage separately from a concurrent row mutation:
+   SERIALIZABLE retry can mask the elapsed-time branch.
    For redundant lifecycle writes, test explicit destination navigation with
    admission held across idle drain. Selected-row input alone misses a
    different-row or programmatic open, and joining a retiring flight can

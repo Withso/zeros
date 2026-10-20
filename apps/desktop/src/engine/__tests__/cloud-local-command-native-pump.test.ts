@@ -24,6 +24,10 @@ import type { TransportClient } from "../transport/types";
 import { CloudCommandRuntime } from "../cloud-command-runtime";
 import type { CloudAgentBootOperation, CloudAgentBootRequests, CloudAgentBootResponses } from "../cloud-agent-execution-client";
 import { CloudAgentCredentialControlExchangeResponseSchema } from "../cloud-local-command-queue-start-fences";
+import { CloudExecutionAuthorityReceiptSchema, type CloudExecutionEnrollRequest,
+  type CloudExecutionAuthorityOperation } from "@zeros/protocol/cloud-execution-authority";
+import { cloudBootNativeAuthority } from "../agents/cloud-provider-execution";
+import { openSqlite } from "../db/sqlite";
 
 const bootResponses: { [Operation in CloudAgentBootOperation]: { parse(value: unknown): CloudAgentBootResponses[Operation] } } = {
   bootstrap: CloudAgentBootCredentialResponseSchema, sync: CloudAgentBootSyncResponseSchema,
@@ -59,7 +63,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detached = false) {
+async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detached = false, executionOwned = false) {
   const directory = mkdtempSync(path.join(tmpdir(), "zeros-native-pump-"));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const cwd = path.join(directory, "workspace"); mkdirSync(cwd);
@@ -93,8 +97,28 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detac
       version: 1, mode: "boot-owner-v1", controls: [],
     })),
   } satisfies Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootAuthorityRemainingMs" | "agentBootRequest" | "credentialControlsRequest">;
+  const execution = {
+    runtimeId: `r1-${"e".repeat(64)}`,
+    enroll: vi.fn(async (input: CloudExecutionEnrollRequest, _signal: AbortSignal) => {
+      // A second SQLite reader sees the exact claim before any CP request.
+      const disk = openSqlite(path.join(directory, "queue.sqlite"), { readonly: true, fileMustExist: true });
+      try { expect(disk.prepare("SELECT id,claim_id,execution_id,state FROM local_commands WHERE id=?").get(input.command.commandId))
+        .toEqual({ id: input.command.commandId, claim_id: input.claimId, execution_id: input.command.executionId, state: "dispatching" }); }
+      finally { disk.close(); }
+      const credential = f.response.providers.find(value => value.provider === provider && value.status === "ready");
+      if (!credential || credential.status !== "ready") throw new Error("Missing fixture credential");
+      return CloudExecutionAuthorityReceiptSchema.parse({ ...input, mode: "boot-execution-v1", acceptedWorkId: randomUUID(), revision: 1,
+        actor: f.provenance.actor, fundingGrant: f.provenance.fundingGrant, sourceSessionId: randomUUID(),
+        epochs: { wa: f.provenance.authorityEpoch, wr: 1, me: 1, ac: 1, dk: f.provenance.actor.deviceKeyVersion },
+        credentialId: credential.credentialId, credentialRevision: credential.credentialRevision, acceptedAtMs: Date.now(),
+        admissionExpiresAtMs: Date.now() + 5_000, providerExpiresAtMs: Date.now() + 60_000, providerProofVersion: 1 });
+    }),
+    check: vi.fn(async (input: CloudExecutionAuthorityOperation, _signal: AbortSignal) => ({ version: 1, acceptedWorkId: input.acceptedWorkId, state: "current" })),
+    close: vi.fn(async (_input: CloudExecutionAuthorityOperation, _signal: AbortSignal) => ({ closed: true })),
+  };
   const boot = new CloudLocalAgentBootRuntime({ file: path.join(directory, "queue.sqlite"), scope,
     ...(accepted ? { accepted: accepted.options } : {}),
+    ...(executionOwned ? { execution } : {}),
     runtimeBootId: f.scope.bootId, registration,
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => true,
     isAdmittedCwd: root => root === cwd, resolveConversation: conversationId => conversations.has(conversationId)
@@ -175,7 +199,7 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detac
       { writerEpoch: f.scope.writerEpoch });
   };
   request.mockClear(); f.contextRequest.mockClear();
-  return { f, boot, factory, pump, options, gateway, claim, finish, handleAgentMessage, request, broadcast,
+  return { f, boot, factory, pump, options, gateway, claim, finish, handleAgentMessage, request, broadcast, execution,
     routes, executions, stops, retirementFailure, bindings, releaseClaim,
     acceptedClaim: async () => {
       if (!accepted) throw new Error("accepted fixture missing");
@@ -195,6 +219,59 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detac
 }
 
 describe("VM-local native command pump", () => {
+  it("commits the claim before execution acceptance and joins its grant before terminal publication", async () => {
+    const f = await fixture("cursor", false, true), claim = f.claim(), entered = deferred(), release = deferred();
+    const enroll = f.execution.enroll.getMockImplementation()!;
+    f.execution.enroll.mockImplementationOnce(async (...args) => {
+      const receipt = await enroll(...args); entered.resolve(); await release.promise; return receipt;
+    });
+    const preparing = f.pump.prepare(claim);
+    try {
+      await entered.promise;
+      expect(f.handleAgentMessage).not.toHaveBeenCalled(); expect(native.prepare).not.toHaveBeenCalled();
+      release.resolve(); await preparing;
+      const work = cloudBootNativeAuthority(f.pump.admissionSelection(claim)).executionWork!;
+      expect(work.receipt).toMatchObject({ claimId: claim.claimId, command: { commandId: claim.commandId, executionId: claim.executionId } });
+      f.background(); await f.finish(claim);
+      expect(work.signal.aborted).toBe(true); expect(f.execution.close).toHaveBeenCalledOnce();
+      expect(f.gateway.completeCloudForeground).not.toHaveBeenCalled(); expect(f.executions.size).toBe(0);
+      const next = f.claim(); await f.pump.prepare(next); await f.finish(next);
+      expect(next.executionId).not.toBe(claim.executionId); expect(f.execution.enroll).toHaveBeenCalledTimes(2);
+      expect(f.execution.close).toHaveBeenCalledTimes(2);
+    } finally { release.resolve(); await preparing.catch(() => {}); }
+  });
+  it("refuses an old CP without falling back to a context-only native launch", async () => {
+    const f = await fixture("cursor", false, true), claim = f.claim();
+    f.execution.enroll.mockRejectedValue(Object.assign(new Error("Synthetic old CP refusal"), { code: "cloud_admission_authority_unavailable" }));
+    await expect(f.pump.prepare(claim)).rejects.toThrow(); await f.pump.retire(claim, { state: "failed" });
+    expect(f.execution.enroll).toHaveBeenCalledOnce(); expect(f.handleAgentMessage).not.toHaveBeenCalled();
+    expect(native.prepare).not.toHaveBeenCalled(); expect(f.f.legacy.prepare).not.toHaveBeenCalled();
+  });
+  it("the factory cannot allocate an enrolled-mode selection before CP acceptance", async () => {
+    const f = await fixture("cursor", false, true), claim = f.claim(), selection = f.boot.selectClaim(claim);
+    const spawn = vi.fn(async () => { throw new Error("Unadmitted allocation invoked"); });
+    await expect(Promise.resolve().then(() => f.factory.launchBootSelection(selection, spawn))).rejects.toMatchObject({
+      code: "cloud_validation_access_denied" });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+  it("Stop during execution enrollment never dispatches a late acceptance", async () => {
+    const f = await fixture("cursor", false, true), claim = f.claim(), entered = deferred(), release = deferred();
+    const enroll = f.execution.enroll.getMockImplementation()!;
+    f.execution.enroll.mockImplementationOnce(async (...args) => {
+      const receipt = await enroll(...args); entered.resolve(); await release.promise; return receipt;
+    });
+    const preparing = f.pump.prepare(claim); void preparing.catch(() => {});
+    try {
+      await entered.promise; let stopped = false;
+      const stopping = f.pump.cancel(claim.conversationId).then(() => { stopped = true; });
+      await expect(preparing).rejects.toThrow();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(stopped).toBe(false);
+      release.resolve(); await stopping; await f.pump.retire(claim, { state: "cancelled" });
+      await vi.waitFor(() => expect(f.execution.close).toHaveBeenCalledOnce());
+      expect(f.handleAgentMessage).not.toHaveBeenCalled(); expect(native.prepare).not.toHaveBeenCalled();
+    } finally { release.resolve(); await preparing.catch(() => {}); }
+  });
   it("proves terminal accepted work and removes its native host before publishing settlement", async () => {
     const f = await fixture("cursor", true), claim = await f.acceptedClaim();
     await f.pump.prepare(claim); f.background(); await f.finish(claim);

@@ -98,6 +98,21 @@ async function fixture(options: { fundedByGrant?: boolean; maxEntries?: number; 
 }
 
 describe("accepted work remains separate from client authority", () => {
+  it.each(["before", "after"] as const)("accepted work survives push observation loss %s client expiry", async timing => {
+    const f = await fixture({ continuation: true }), { work } = await f.authority.accept(f.input());
+    if (timing === "after") { f.advance(299_000); f.health(true); f.advance(2_000); }
+    f.health(false);
+    if (timing === "before") f.advance(301_000);
+    expect(() => work.assertLive()).not.toThrow();
+    expect(work.signal.aborted).toBe(false);
+    expect(f.queue.acceptedWork.get(work.receipt.command.commandId)?.state).toBe("accepted");
+    // Outage tolerance never renews the client or the accepted hard deadline.
+    await expect(f.authority.accept(f.input())).rejects.toThrow();
+    f.advance(3_600_000);
+    expect(() => work.assertLive()).toThrow();
+    expect(work.signal.aborted).toBe(true);
+  });
+
   it.each([25, 500])("clamps a context response delayed by %ims to the original request-start deadline", async delay => {
     const f = await fixture(), { work } = await f.authority.accept(f.input());
     const request = vi.fn(async () => { throw new Error("legacy context used"); });
@@ -170,7 +185,7 @@ describe("accepted work remains separate from client authority", () => {
     expect(f.queue.handle(request, ctx)).toBeNull(); expect(f.selected).toHaveBeenCalledOnce();
     expect(() => f.queue.authorizeClaim({ ...claim, executionId: randomUUID() })).toThrow();
     f.health(false);
-    expect(() => f.queue.authorizeClaim(claim)).toThrow();
+    expect(f.queue.authorizeClaim(claim)).toBe(work);
   });
 
   it("an accepted dispatch cannot substitute another native execution", async () => {
@@ -191,21 +206,24 @@ describe("accepted work remains separate from client authority", () => {
     await expect(f.authority.accept(f.input())).rejects.toThrow();
   });
 
-  it("lost_push_after_exp_stops_immediately", async () => {
+  it("lost push after client expiry keeps the exact grant until its own deadline", async () => {
     const f = await fixture({ continuation: true }), { work } = await f.authority.accept(f.input());
     f.advance(299_000); f.health(true); f.advance(2_000);
     expect(() => work.assertLive()).not.toThrow();
     f.health(false);
-    expect(work.signal.aborted).toBe(true);
-    expect(f.queue.acceptedWork.get(work.receipt.command.commandId)?.state).toBe("closed");
+    expect(work.signal.aborted).toBe(false);
+    expect(f.queue.acceptedWork.get(work.receipt.command.commandId)?.state).toBe("accepted");
+    f.advance(3_299_000);
+    expect(() => work.assertLive()).toThrow();
   });
 
-  it("lost_push_before_exp_stops_at_original_exp", async () => {
+  it("lost push before client expiry cannot shorten or renew the work deadline", async () => {
     const f = await fixture({ continuation: true }), { work } = await f.authority.accept(f.input());
     f.health(true); f.advance(20_000); f.health(false);
     f.advance(279_999); expect(() => work.assertLive()).not.toThrow();
-    f.advance(1); expect(() => work.assertLive()).toThrow();
-    f.health(true); expect(work.signal.aborted).toBe(true);
+    f.advance(1); expect(() => work.assertLive()).not.toThrow();
+    f.health(true); expect(work.signal.aborted).toBe(false);
+    f.advance(3_300_000); expect(() => work.assertLive()).toThrow();
   });
 
   it("provider_expiry_ends_work_when_job_is_late", async () => {
@@ -220,11 +238,11 @@ describe("accepted work remains separate from client authority", () => {
     expect(() => work.assertLive()).toThrow(); expect(work.signal.aborted).toBe(true);
   });
 
-  it("reconnect_after_36m_cannot_resurrect", async () => {
+  it("reconnect after the work deadline cannot resurrect", async () => {
     const f = await fixture({ continuation: true }), { work } = await f.authority.accept(f.input());
     f.advance(299_000); f.health(true); f.advance(2_000);
     expect(() => work.assertLive()).not.toThrow();
-    f.health(false); f.advance(36 * 60_000); f.health(true);
+    f.health(false); f.advance(60 * 60_000); f.health(true);
     expect(f.authority.get(work.receipt.command.commandId)).toBeUndefined();
     expect(() => work.assertLive()).toThrow();
     expect(f.queue.acceptedWork.get(work.receipt.command.commandId)?.state).toBe("closed");
@@ -304,9 +322,9 @@ describe("accepted work remains separate from client authority", () => {
     expect(f.authority.get(work.receipt.command.commandId)).toBeUndefined();
   });
 
-  it("never applies ordinary token grace and a backward wall clock cannot extend accepted work", async () => {
+  it("a backward wall clock cannot extend the original provider deadline", async () => {
     const f = await fixture(), { work } = await f.authority.accept(f.input());
-    f.clock.monotonic += 300_000; f.clock.wall -= 60_000;
+    f.clock.monotonic += 3_600_000; f.clock.wall -= 60_000;
     expect(() => work.assertLive()).toThrow(); expect(work.signal.aborted).toBe(true);
   });
 

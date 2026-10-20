@@ -8,6 +8,7 @@ import {lockCustomization,readCustomizationRows} from "./customization-store.js"
 import {readCloudAgentFundingConsent} from "./agent-funding-consent.js";
 import {assertCloudEngineAuthorityDeadline} from "./engine-authority.js";
 import type { CloudAcceptedWorkOperationAuthority } from "./accepted-work.js";
+import { authorizeCloudExecutionContextInTx } from "./execution-authority.js";
 const denied = () => new HttpError(403, "github_cloud_write_denied", "Current repository write authority is required.");
 
 /** A connected desktop may courier authority only for this live native source.
@@ -26,6 +27,13 @@ export async function assertNativeGithubActor(tx: Tx, scope: Omit<CloudActorEngi
         source.actorSessionId,
         "edit",
       );
+    else if(source.kind==="boot-execution"){
+      try {
+        const receipt=await authorizeCloudExecutionContextInTx(tx,scope,source,workosEnabled);
+        actor={actorUserId:receipt.actor.userId,deviceId:receipt.actor.deviceId,deviceKeyVersion:receipt.actor.deviceKeyVersion,
+          fingerprint:receipt.actor.fingerprint,role:receipt.actor.role,sourceSessionId:receipt.actorSessionId};
+      }catch{throw denied();}
+    }
     else if(source.kind==="boot-agent"){
       try {
       const row=(await tx.query<{binding:unknown;organization_revision:string;member_revision:string;actor_session_id:string}>(`SELECT context.binding,
@@ -37,7 +45,8 @@ export async function assertNativeGithubActor(tx: Tx, scope: Omit<CloudActorEngi
         JOIN cloud_workspaces workspace ON workspace.id=boot.workspace_id AND workspace.org_id=boot.org_id
           AND workspace.agent_command_mode='boot-owner-v1' AND workspace.agent_boot_id=boot.id
         WHERE context.context_id=$1 AND boot.workspace_id=$2 AND boot.org_id=$3 AND boot.generation=$4 AND boot.engine_instance_id=$5
-          AND context.retired_at IS NULL AND context.expires_at>clock_timestamp() AND boot.retired_at IS NULL AND writer.state='active'
+          AND context.retired_at IS NULL AND (context.binding ? 'acceptedWorkId' OR context.expires_at>clock_timestamp())
+          AND boot.retired_at IS NULL AND writer.state='active'
           AND context.binding->>'contextId'=context.context_id::text AND context.binding->>'actorSessionId'=context.actor_session_id::text
           AND context.binding->>'organizationId'=boot.org_id::text AND context.binding->>'workspaceId'=boot.workspace_id::text
           AND context.binding->>'generation'=boot.generation::text AND context.binding->>'engineInstanceId'=boot.engine_instance_id::text
@@ -68,7 +77,8 @@ export async function assertNativeGithubActor(tx: Tx, scope: Omit<CloudActorEngi
       if(binding.acceptedWorkId)await acceptedSender();
       else await confirmDetachedCloudActor(tx,scope,row.actor_session_id);
       await assertCloudEngineAuthorityDeadline(tx,scope.engineInstanceId,workosEnabled);
-      if((await tx.query("SELECT 1 FROM cloud_agent_boot_contexts WHERE context_id=$1 AND retired_at IS NULL AND expires_at>clock_timestamp()",[source.contextId])).rowCount!==1)throw denied();
+      if((await tx.query(`SELECT 1 FROM cloud_agent_boot_contexts WHERE context_id=$1 AND retired_at IS NULL
+        AND ($2::boolean OR expires_at>clock_timestamp())`,[source.contextId,!!binding.acceptedWorkId])).rowCount!==1)throw denied();
       actor=sender;
       }catch{throw denied();}
     }

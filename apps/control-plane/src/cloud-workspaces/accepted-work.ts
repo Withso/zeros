@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type pg from "pg";
 import { ProviderSessionProofUnavailable, type AuthSessionProofService } from "../auth-session-proof.js";
 import { HttpError } from "../authz.js";
+import { DatabaseCloudExecutionAuthorityService } from "./execution-authority.js";
 import { withSystemTx, type Tx } from "../db.js";
 import type { RolloutFlagReader } from "../rollout-flags.js";
 import type { CapabilityClaims } from "./capability-contract.js";
@@ -191,13 +192,15 @@ export class CloudAcceptedWorkOperationAuthority {
   }
 }
 
-/** Only enrolled operations outlive the token; the engine independently
- * needs current challenged push health and the original provider deadline. */
+/** Only enrolled operations outlive client observation; the engine retains
+ * the original provider/runtime deadlines and explicit revocation fences. */
 export class DatabaseCloudAcceptedWorkService extends CloudAcceptedWorkOperationAuthority {
+  readonly execution: DatabaseCloudExecutionAuthorityService;
   private readonly monotonic: () => number;
   private readonly maxActive: number;
   constructor(private readonly options: AcceptedWorkOptions) {
     super(options);
+    this.execution = new DatabaseCloudExecutionAuthorityService(options);
     this.monotonic = options.monotonicNow ?? (() => performance.now());
     this.maxActive = options.maxActive ?? 256;
     if (!Number.isInteger(this.maxActive) || this.maxActive < 1 || this.maxActive > 256) throw new Error("accepted_work_options_invalid");

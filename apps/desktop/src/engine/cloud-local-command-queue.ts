@@ -25,6 +25,7 @@ import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { openSqlite } from "./db/sqlite";
 import { CloudAcceptedWorkLedger } from "./cloud-accepted-work-ledger";
 import { isCloudAcceptedWork, type CloudAcceptedWork } from "./agents/cloud-accepted-work-authority";
+import { CloudAcceptedWorkCommandSchema } from "@zeros/protocol/cloud-accepted-work";
 import type { CloudLocalCommandHistoryCapture, CloudLocalCommandHistoryDocument } from "./cloud-local-command-queue-history";
 
 // This store is selected only by the explicitly negotiated cloud mode. Local
@@ -631,6 +632,14 @@ export class CloudLocalCommandQueue {
       if (!claim.dispatchAllowed || !isDeepStrictEqual(principal.provenance.actor, claim.actor)) throw new Error("Actor changed");
       return principal;
     } catch { throw new CloudCommandRuntimeError("cloud_actor_authority_rejected"); }
+  }
+  /** Hash the exact FULL-committed claim, including non-prompt operations.
+   * This never authorizes a payload copied from a client or a mirror row. */
+  executionCommand(value: CloudBootCommandClaim, cwd: string) {
+    this.authorizeClaim(value);
+    return CloudAcceptedWorkCommandSchema.parse({ commandId: value.commandId, conversationId: value.conversationId,
+      turnId: value.payload.userMessageId, executionId: value.executionId, payloadSha256: hash(value.payload),
+      provider: value.payload.agentId, model: value.payload.model, cwd });
   }
   /** This writer's turn transitions after `afterSeq`, in order. */
   turnJournal(afterSeq: number, limit: number): CloudLocalTurnJournalEntry[] {

@@ -27,7 +27,7 @@ export type AcceptedWorkAuthorityOptions = { ledger: CloudAcceptedWorkLedger; au
 export type AcceptedWorkInput = { mutation: CloudBootCommandMutation; cwd: string; executionId: string;
   clientSessionId: string; actorSessionId: string; auth: EngineClientAuth & { commandSignature: string }; route: CapabilityRoute };
 type Lifetime = { commandId: string; sessionId: string; stop: AbortController; deadline: number; wallDeadline: number;
-  verified?: CapabilityVerifySuccess; capabilityDeadline?: number; providerDeadline?: number; releaseHealth?: () => void;
+  verified?: CapabilityVerifySuccess; providerDeadline?: number; releaseHealth?: () => void;
   timer: ReturnType<typeof setTimeout> | null; reserved: boolean; ioPending: boolean; done: boolean; work?: CloudAcceptedWork };
 const genuine = new WeakSet<object>();
 const time = { wall: () => Date.now(), monotonic: () => performance.now() };
@@ -97,10 +97,7 @@ export class CloudAcceptedWorkAuthority {
     if (work) {
       const { receipt } = work, verified = lifetime.verified!;
       const verifier = this.options.auth.verifier;
-      const expired = this.time.wall() >= receipt.capabilityExpiresAtMs || this.time.monotonic() >= lifetime.capabilityDeadline!;
-      const health = this.options.enabled() ? this.options.continuation?.deadline() : null;
       if (this.time.wall() >= receipt.providerExpiresAtMs || this.time.monotonic() >= lifetime.providerDeadline! ||
-        (expired && (health == null || this.time.monotonic() >= health)) ||
         !verifier.keyIds().includes(receipt.kid) || verifier.isRevoked("sid", receipt.sourceSessionId) ||
         verifier.isRevoked("did", receipt.actor.deviceId) || Object.entries(verified.claims.ep).some(([key, epoch]) => {
           const subject = capabilityEpochSubject(key, verified.claims);
@@ -129,14 +126,12 @@ export class CloudAcceptedWorkAuthority {
     if (lifetime.timer) clearTimeout(lifetime.timer);
     const work = lifetime.work;
     const wall = this.time.wall(), mono = this.time.monotonic();
-    const capabilityRemaining = work ? Math.min(work.receipt.capabilityExpiresAtMs - wall, lifetime.capabilityDeadline! - mono) : 0;
-    const remaining = work ? Math.min(work.receipt.providerExpiresAtMs - wall, lifetime.providerDeadline! - mono,
-      capabilityRemaining > 0 ? capabilityRemaining : (this.options.continuation?.deadline() ?? mono) - mono) :
+    const remaining = work ? Math.min(work.receipt.providerExpiresAtMs - wall, lifetime.providerDeadline! - mono) :
       Math.min(lifetime.deadline - mono, lifetime.wallDeadline - wall, bound ?? Infinity);
     lifetime.timer = setTimeout(() => {
       if (!lifetime.work) return this.retire(lifetime);
       try { this.assertLifetime(lifetime); this.schedule(lifetime); } catch { /* deadline retired it */ }
-    }, Math.max(0, remaining));
+    }, Math.max(0, Math.min(remaining, 2_147_000_000)));
     lifetime.timer.unref?.();
   }
   private retire(lifetime: Lifetime): void {
@@ -214,7 +209,6 @@ export class CloudAcceptedWorkAuthority {
       const snapshot = this.options.ledger.commit(commandId, receipt, recheck);
       const work = Object.freeze({ receipt: freezeCloudSnapshot(receipt), signal: lifetime.stop.signal,
         assertLive: (operation: "run" | "context" | "native-git" = "run") => this.assertWork(lifetime, operation) }) as CloudAcceptedWork;
-      lifetime.capabilityDeadline = mono + receipt.capabilityExpiresAtMs - wall;
       lifetime.providerDeadline = mono + receipt.providerExpiresAtMs - wall;
       lifetime.work = work; this.records.set(commandId, lifetime); genuine.add(work);
       // Enrollment has ended. Generic session expiry cannot govern the

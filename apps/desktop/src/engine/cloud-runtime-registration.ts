@@ -789,8 +789,9 @@ export class CloudRuntimeRegistration {
   async acceptedWorkRequest<Operation extends keyof AcceptedWorkRequests>(operation: Operation,
     request: AcceptedWorkRequests[Operation], signal: AbortSignal): Promise<AcceptedWorkResponses[Operation]> {
     const document = this.document;
-    const current = () => this.acceptedWorkAcknowledged && document !== null && document === this.document &&
-      this.localWriterCurrent(request.scope.bootId, request.scope.writerEpoch, operation === "close");
+    const execution = operation === "execution-enroll" || operation === "execution-check" || operation === "execution-close";
+    const current = () => (execution ? this.localCommandsAcknowledged : this.acceptedWorkAcknowledged) && document !== null && document === this.document &&
+      this.localWriterCurrent(request.scope.bootId, request.scope.writerEpoch, operation === "close" || operation === "execution-close");
     if (!current()) throw new CloudAgentExecutionError();
     const result = await requestCloudAcceptedWork(this.authority(document!), operation, request,
       AbortSignal.any([signal, this.abortController.signal]), this.fetch);
