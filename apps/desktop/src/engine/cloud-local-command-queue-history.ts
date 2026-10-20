@@ -31,7 +31,7 @@ export interface CloudLocalCommandHistoryCaptureInput {
   eventSequence: number;
   /** Original execution's redactor; routing/source identities are separately
    * checked after redaction. Failure never exports unfiltered artifacts. */
-  redactDocument(value: unknown): unknown;
+  redactDocument(value: unknown, kind: CloudLocalCommandHistoryRecord["entityKind"]): unknown;
   /** Already captured exact original compact controls, never guessed from the
    * current warm execution. Normal transcript-only capture uses explicit []. */
   controls: readonly unknown[];
@@ -143,7 +143,7 @@ export function captureCloudLocalCommandHistory(input: CloudLocalCommandHistoryC
       // Bound before invoking a possibly recursive redactor, then detach from
       // mutable SQLite rows and preserve inert own JSON keys exactly.
       if (Buffer.byteLength(canonical(document)) > CLOUD_LOCAL_COMMAND_HISTORY_RECORD_MAX_BYTES) throw new CaptureRefusal("history_limit");
-      const redacted = json(input.redactDocument(json(document)));
+      const redacted = json(input.redactDocument(json(document), entityKind));
       const object = redacted as JsonObject;
       if (!object || typeof object !== "object" || Array.isArray(object) ||
           (entityKind === "chat" && (object.chat as JsonObject | undefined)?.id !== conversationId) ||

@@ -114,6 +114,12 @@ withholds incomplete literals in text and cumulative tool snapshots, and scrubs
 startup/resume/prompt errors before teardown. Field names and protocol identities
 stay intact even when a configured value matches a nested field name. Ambiguous
 trailing prefixes are redacted at termination, including diagnostic line ends
-and stack headers. Native image qualification additionally exercises
+and stack headers. Even a one-character suffix can be ambiguous: ordinary
+content ending with the first character of a configured literal can be withheld
+or redacted. This conservative policy also applies to terminal output and
+Computer build logs. Complete-literal-only filtering of the private handoff
+does not have that suffix behavior. Canonical history filtering protects its
+structural identities separately; it does not relax content filtering.
+Native image qualification additionally exercises
 secret rotation, removal and an owner handoff through real provider resumes;
 those paid image checks must be run before rollout.

@@ -94,6 +94,12 @@ Capture reads a stable NORMAL source head, applies the original run's redactor,
 and produces immutable canonical records, a manifest and 128 KiB parts. The
 FULL queue publishes their CAS bytes, terminal, current restore head and outbox
 atomically; the mirror verifies all bytes/references before complete visibility.
+The pinned filter uses each record's kind to separate content from structure:
+chat, turn, message and compact-control identities, enums and timestamps stay
+exact, while text and provider data are filtered. Message payload JSON is decoded
+before filtering; a property named `id` inside arbitrary tool output is still
+content. Unknown variants or malformed payloads refuse capture. Independent
+identity, source-head, event-cursor and native-outcome guards remain mandatory.
 The current canonical capture transport has a 16 MiB / 16,384-record bundle
 bound. This is a capture defect to replace with segmented history, not a
 supported chat-size limit. Capture or capacity failure preserves the known

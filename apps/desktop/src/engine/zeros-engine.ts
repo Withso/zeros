@@ -233,7 +233,7 @@ import { cloudLocalCommandCheckpointRoot, restoreCloudLocalCommandCheckpointLedg
 import { rebuildCloudLocalCommandHistory } from "./cloud-local-command-queue-history-rebuild";
 import { openSqlite } from "./db/sqlite";
 import { CloudLocalCommandMirrorDriver } from "./cloud-local-command-mirror";
-import { captureCloudLocalCommandHistory } from "./cloud-local-command-queue-history";
+import { captureCloudLocalCommandHistory, type CloudLocalCommandHistoryCaptureInput } from "./cloud-local-command-queue-history";
 import { headRev as cloudLocalRecordSequence } from "./db/sync";
 import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/containment/cloud-native-history";
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
@@ -1288,7 +1288,7 @@ export class ZerosEngine {
   private cloudLocalHistoryRestoreHeads = new Map<string, CloudLocalCommandHistoryHead>();
   private cloudLocalMirror: CloudLocalCommandMirrorDriver | null = null;
   private cloudLocalMirrorTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly cloudHistoryRedactors = new Map<string, (value: unknown) => unknown>();
+  private readonly cloudHistoryRedactors = new Map<string, CloudLocalCommandHistoryCaptureInput["redactDocument"]>();
   private readonly cloudAgentLegacyFactory: CloudAgentExecutionFactory | null;
   private readonly cloudGoals=new CloudGoalRecorder((claim,sequence,goal)=>{
     if(!this.cloudCommands)throw new CloudCommandRuntimeError("cloud_commands_unavailable");

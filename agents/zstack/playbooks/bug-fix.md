@@ -36,6 +36,11 @@
    an admission-time global revision must not reject unrelated writes. Retain
    writer/actor fences and bound fresh reads after legacy image I/O, checking
    the original snapshot before persisting any rewritten rows.
+   For canonical history, drive production turn persistence and the original
+   pinned redactor through queue settlement. Collide a configured literal and
+   a one-character prefix with routing fields; filter content by record kind
+   while keeping independent identity and watermark refusal controls. Decode
+   payload JSON before filtering; arbitrary tool data gets no key-name exemption.
    A suspension holds prompt preparation until it resumes; Stop still ends the
    wait.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only

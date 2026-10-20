@@ -125,12 +125,15 @@ describe("gateway genuine boot mode", () => {
     expect(f.gateway.pinCloudHistoryRedactor("codex", session.executionId)).toBeNull();
     const redact = f.gateway.pinCloudHistoryRedactor("cursor", session.executionId);
     expect(redact).not.toBeNull();
-    const document = { chatId: "conversation", payload: '{"text":"synthetic-actor-setting"}', nested: { value: "synthetic-actor-settin" } };
-    expect(redact!(document)).toEqual({ chatId: "conversation", payload: '{"text":"[redacted]"}', nested: { value: "[redacted]" } });
+    const document = { version: 1, chatId: "conversation", msgId: "message", ord: 0, kind: "text", createdAt: 1,
+      payload: JSON.stringify({ id: "message", kind: "text", role: "agent", text: "synthetic-actor-setting",
+        createdAt: 1, nested: { value: "synthetic-actor-settin" } }) };
+    const expected = { ...document, payload: '{"createdAt":1,"id":"message","kind":"text","nested":{"value":"[redacted]"},"role":"agent","text":"[redacted]"}' };
+    expect(redact!(document, "message")).toEqual(expected);
     expect(document.payload).toContain("synthetic-actor-setting");
     await f.gateway.endSession("cursor", session.executionId, { failClosed: true });
     expect(f.gateway.pinCloudHistoryRedactor("cursor", session.executionId)).toBeNull();
-    expect(redact!(document)).toEqual({ chatId: "conversation", payload: '{"text":"[redacted]"}', nested: { value: "[redacted]" } });
+    expect(redact!(document, "message")).toEqual(expected);
     expect(f.writes).not.toHaveBeenCalled(); expect(f.request.sync).not.toHaveBeenCalled();
   });
   it("does not expose a cloud history redactor through a Local gateway even for a foreign native boundary", async () => {
