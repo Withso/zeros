@@ -198,8 +198,17 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   idempotencyKey:string; requestDigest:Buffer | ((profile: CloudWorkspaceProvisioningProfile) => Buffer); allowDataLoss?:boolean;
   incidentId?: string;
   drainIntentId?: string;
+  /** Private database-owner operator only. A receipt is an explicit discard,
+   * never a successful Stop or final-save proof. No HTTP route supplies it. */
+  ownerDiscardReceiptId?: string;
 }) {
   const {workspace,authorization,point}=await requireCloudRecoveryAdmission(tx,input);
+  const discarded = input.ownerDiscardReceiptId ? (await tx.query<{
+    transition_id:string;candidate_generation:number;computer_build_id:string;computer_config_id:string;runtime_id:string;
+  }>(`SELECT * FROM cloud_workspace_owner_discard_receipts WHERE id=$1 AND workspace_id=$2 AND org_id=$3
+    AND source_generation=$4 AND checkpoint_id=$5 AND stop_intent_id=$6`,
+  [input.ownerDiscardReceiptId,input.workspaceId,input.organizationId,input.sourceGeneration,input.checkpointId,input.drainIntentId])).rows[0] : null;
+  if (input.ownerDiscardReceiptId && !discarded) throw new HttpError(409,"owner_recovery_receipt_mismatch","Recovery requires its exact owner discard receipt");
   const source=(await tx.query<{provider:string;spec_version:number;repository_forge:string;repository_owner:string;repository_name:string;repository_revision:string;github_installation_id:string|null}>(
     `SELECT g.provider,ss.spec_version,ss.repository_forge,ss.repository_owner,ss.repository_name,ss.repository_revision,ss.github_installation_id
      FROM cloud_workspace_generations g JOIN cloud_workspace_setup_specs ss USING(workspace_id,generation,org_id)
@@ -211,7 +220,10 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
       AND binding.generation=incident.source_generation AND binding.provider='boat' AND binding.provider_resource_id=incident.provider_resource_id
     WHERE incident.workspace_id=$1 AND incident.org_id=$2 AND incident.source_generation=$3
       AND incident.evidence_code='provider_snapshot_missing'`,[input.workspaceId,input.organizationId,input.sourceGeneration])).rowCount;
-  const currentComputer=missingCapture ? await selectCheckpointComputerSource(tx,{...input,qualificationMode}) : null;
+  const currentComputer=missingCapture || discarded ? await selectCheckpointComputerSource(tx,{...input,qualificationMode}) : null;
+  if (discarded && (!currentComputer || currentComputer.computer.buildId!==discarded.computer_build_id ||
+    currentComputer.computer.configId!==discarded.computer_config_id || currentComputer.runtime.runtimeId!==discarded.runtime_id))
+    throw new HttpError(409,"owner_recovery_computer_changed","The approved Computer changed before recovery");
   const pins=currentComputer ?? await requireGenerationRuntime(tx,{...input,generation:input.sourceGeneration},qualificationMode);
   const profile=pins.profile;
   const connection=await loadGenerationCloudProviderConnection(tx,{...input,generation:input.sourceGeneration});
@@ -221,7 +233,9 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   await loadQuota(tx,input.organizationId);
   const digest=typeof input.requestDigest==='function'?input.requestDigest(profile):input.requestDigest;
   const generation=(await tx.query<{generation:number}>("SELECT coalesce(max(generation),0)::integer+1 AS generation FROM cloud_workspace_generations WHERE workspace_id=$1",[input.workspaceId])).rows[0]!.generation;
-  const transitionId=randomUUID(),intentId=input.drainIntentId??randomUUID();
+  if (discarded && generation!==discarded.candidate_generation)
+    throw new HttpError(409,"owner_recovery_generation_changed","The approved candidate generation changed");
+  const transitionId=discarded?.transition_id??randomUUID(),intentId=input.drainIntentId??randomUUID();
   if(currentComputer) await pinCheckpointComputerSource(tx,{...input,targetGeneration:generation,providerConnectionId:connection.id,
     providerConnectionVersion:connection.credentialVersion,checkpointId:point.id,selected:currentComputer});
   else await copyGenerationPins(tx,{...input,targetGeneration:generation,providerConnectionId:connection.id,
@@ -236,14 +250,17 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   await retireCloudWorkspaceRuntimeAccess(tx,{...input,generation:input.sourceGeneration,reason:"generation_replacement_requested"});
   await tx.query(`UPDATE cloud_workspaces SET desired_state='running',status='stopping',authority_epoch=authority_epoch+1,version=version+1,updated_at=now(),
     last_error_code='recovery_restoring',last_error_message='Restoring workspace from saved checkpoint' WHERE id=$1 AND org_id=$2`,[input.workspaceId,input.organizationId]);
-  const intent=input.drainIntentId ? (await tx.query("SELECT * FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND operation='stop' AND state='succeeded' AND NOT affects_workspace",[input.drainIntentId,input.workspaceId,input.organizationId,input.sourceGeneration])).rows[0] : (await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace)
+  const intent=input.drainIntentId ? (await tx.query(`SELECT * FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4
+    AND operation='stop' AND NOT affects_workspace AND (state='succeeded' OR ($5::boolean AND state='superseded' AND error_code='owner_discarded'))`,
+  [input.drainIntentId,input.workspaceId,input.organizationId,input.sourceGeneration,!!discarded])).rows[0] : (await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace)
     VALUES($1,$2,$3,$4,$5,'stop',$6,$7,false) RETURNING *`,[intentId,input.workspaceId,input.sourceGeneration,input.organizationId,input.actorUserId,input.idempotencyKey,digest])).rows[0]!;
   const transition=(await tx.query(`INSERT INTO cloud_workspace_generation_transitions(id,workspace_id,org_id,requested_by,operation,source_generation,template_generation,candidate_generation,state,drain_intent_id)
     VALUES($1,$2,$3,$4,'recover',$5,$5,$6,'draining',$7) RETURNING *`,[transitionId,input.workspaceId,input.organizationId,input.actorUserId,input.sourceGeneration,generation,intentId])).rows[0]!;
   await tx.query("UPDATE cloud_workspace_lifecycle_intents SET generation_transition_id=$2 WHERE id=$1",[intentId,transitionId]);
   if(input.drainIntentId){
     if(!intent)throw new HttpError(409,"recovery_drain_unconfirmed","Source stop is not confirmed");
-    await advanceCloudWorkspaceGenerationTransitionAfterDrain(tx,{...input,transitionId});
+    if (!await advanceCloudWorkspaceGenerationTransitionAfterDrain(tx,{...input,transitionId}))
+      throw new HttpError(409,"recovery_drain_unconfirmed","Recovery source did not advance");
   }
   await tx.query(`UPDATE cloud_workspace_restore_incidents SET state='cancelled',reason='explicit_recovery_requested',updated_at=now()
     WHERE workspace_id=$1 AND id IS DISTINCT FROM $2::uuid AND state IN ('observing','queued','waiting_for_capacity','waiting_for_funding','recovery_needed')`,[input.workspaceId,input.incidentId??null]);

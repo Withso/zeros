@@ -31,7 +31,7 @@ export async function scheduleFinalSaveRecovery(tx: Tx, input: {
     failure_started_at=coalesce(failure_started_at,clock_timestamp()),first_failure=coalesce(first_failure,$3),last_failure=$3,
     next_attempt_at=clock_timestamp()+(ARRAY[5,15,30,60,120,300])[least(retry_count,5)+1]*interval '1 second',
     retry_count=least(retry_count+1,1000000),updated_at=clock_timestamp()
-    WHERE lifecycle_intent_id=$1 AND ($2::uuid IS NULL OR current_request_id=$2) AND state NOT IN ('proven','resolved')`,
+    WHERE lifecycle_intent_id=$1 AND ($2::uuid IS NULL OR current_request_id=$2) AND state NOT IN ('proven','resolved','discarded')`,
   [input.intentId, input.requestId ?? null, input.failure, input.blocked ?? false]);
 }
 

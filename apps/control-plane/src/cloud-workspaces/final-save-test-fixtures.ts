@@ -108,8 +108,11 @@ export async function commitFinalSaveFixture(pool: pg.Pool, source: FixtureSourc
 
 /** Real relational source with a sealed writer. Native custody/retirement is
  * independently exercised by engine tests; no fixture shortcut enters product. */
-export async function seedFinalSave(pool: pg.Pool) {
+export async function seedFinalSave(pool: pg.Pool, options: { providerResourceId?: string; sealed?: boolean; registeredAt?: Date|string } = {}) {
   const fixture = await seedReadyCloudWorkspace(pool);
+  if (options.registeredAt) await pool.query("UPDATE cloud_workspace_engine_instances SET registered_at=$2,last_heartbeat_at=$2 WHERE id=$1", [fixture.engineInstanceId,options.registeredAt]);
+  const providerResourceId = options.providerResourceId ?? `sandbox-${fixture.workspaceId}`;
+  if (options.providerResourceId) await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2 WHERE workspace_id=$1", [fixture.workspaceId,providerResourceId]);
   const scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
     generation: 1, engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
   const bootId = (await pool.query("SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [scope.engineInstanceId])).rows[0].runtime_boot_id as string;
@@ -130,7 +133,7 @@ export async function seedFinalSave(pool: pg.Pool) {
       fundingOwnerUserId: fixture.userId, fundingOwnerEpoch: 1 }, sealId: randomUUID(), sequence: 0, recordSequence: 0,
       eventSequence: 0, inventorySha256: "a".repeat(64), sha256: "b".repeat(64) };
     const { scope: _scope, ...descriptor } = seal;
-    await tx.query(`UPDATE cloud_workspace_local_command_writers SET sealed_sequence=0,seal_record_sequence=0,seal_event_sequence=0,
+    if (options.sealed !== false) await tx.query(`UPDATE cloud_workspace_local_command_writers SET sealed_sequence=0,seal_record_sequence=0,seal_event_sequence=0,
       seal=$2::jsonb,seal_ack=$3::jsonb WHERE writer_epoch=$1`, [writerEpoch,JSON.stringify(seal),JSON.stringify({ ...descriptor,writerEpoch })]);
     await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
       (id,workspace_id,org_id,generation,requested_by,operation,state,completed_at,idempotency_key,request_sha256)
@@ -140,7 +143,7 @@ export async function seedFinalSave(pool: pg.Pool) {
       (id,workspace_id,org_id,generation,billing_epoch,user_id,lifecycle_intent_id,provider,provider_resource_id,
        policy_id,seconds_per_dollar,weight_numerator,weight_denominator,ttl_seconds,state,funded_until,provider_expires_at)
       VALUES($1,$2,$3,1,1,$4,$5,'boat',$6,'fixture',1000,1,1,600,'active',now()+interval '10 minutes',now()+interval '9 minutes')`,
-    [allocationLeaseId,scope.workspaceId,scope.organizationId,fixture.userId,fundingIntentId,`sandbox-${scope.workspaceId}`]);
+    [allocationLeaseId,scope.workspaceId,scope.organizationId,fixture.userId,fundingIntentId,providerResourceId]);
   });
   const intentId = randomUUID();
   const request = await withSystemTx(pool, async tx => {

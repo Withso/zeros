@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { audit } from "../audit.js";
 import type { Tx } from "../db.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
+import { ownerDiscardedTransition } from "./owner-discard.js";
 
 /** Shared owner for wake replacements and retained-allocation transitions.
  * Keep organization -> workspace order, including before the unique active
@@ -147,7 +148,9 @@ export async function rollbackCloudWorkspaceGenerationTransition(
     await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),updated_at=now()
       WHERE generation_transition_id=$1 AND state IN ('queued','observing')`,[transition.id]);
     await queueTransitionIntent(tx,{...input,generation:transition.candidate_generation,transitionId:transition.id,operation:"delete",affectsWorkspace:false});
-    if(transition.state === "draining" || transition.state === "rolling_back") await queueTransitionIntent(tx,{...input,generation:transition.source_generation,transitionId:transition.id,operation:"stop",affectsWorkspace:false});
+    if((transition.state === "draining" || transition.state === "rolling_back") &&
+      !await ownerDiscardedTransition(tx,{...input,transitionId:transition.id,sourceGeneration:transition.source_generation}))
+      await queueTransitionIntent(tx,{...input,generation:transition.source_generation,transitionId:transition.id,operation:"stop",affectsWorkspace:false});
     return true;
   }
 
@@ -285,6 +288,7 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
   );
   const transition = selected.rows[0];
   if (!transition) return false;
+  const ownerDiscardReceiptId=await ownerDiscardedTransition(tx,{...input,transitionId:transition.id,sourceGeneration:transition.source_generation});
   await retireCloudWorkspaceRuntimeAccess(tx, {
     workspaceId: input.workspaceId,
     organizationId: input.organizationId,
@@ -335,7 +339,7 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
     tx,
     input.organizationId,
     null,
-    "cloud_workspace.generation_source_drained",
+    ownerDiscardReceiptId ? "cloud_workspace.generation_source_discarded" : "cloud_workspace.generation_source_drained",
     {
       workspaceId: input.workspaceId,
       transitionId: transition.id,
@@ -343,6 +347,7 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
       candidateGeneration: transition.candidate_generation,
       recoveryCheckpointId: transition.checkpoint_id,
       provisionIntentId,
+      ...(ownerDiscardReceiptId ? {ownerDiscardReceiptId} : {}),
     },
   );
   return true;
@@ -447,7 +452,8 @@ export async function completeCloudWorkspaceGenerationTransition(
     [transition.id],
   );
   await tx.query("UPDATE cloud_workspace_restore_incidents SET state='succeeded',updated_at=now() WHERE transition_id=$1",[transition.id]);
-  const cleanupIntentId = await queueTransitionIntent(tx, {
+  const ownerDiscardReceiptId=await ownerDiscardedTransition(tx,{...input,transitionId:transition.id,sourceGeneration:transition.source_generation});
+  const cleanupIntentId = ownerDiscardReceiptId ? null : await queueTransitionIntent(tx, {
     workspaceId: input.workspaceId,
     organizationId: input.organizationId,
     generation: transition.source_generation,
@@ -466,6 +472,7 @@ export async function completeCloudWorkspaceGenerationTransition(
       sourceGeneration: transition.source_generation,
       candidateGeneration: transition.candidate_generation,
       cleanupIntentId,
+      ...(ownerDiscardReceiptId ? {ownerDiscardReceiptId} : {}),
     },
   );
   return "candidate_succeeded";
