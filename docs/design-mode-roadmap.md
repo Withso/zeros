@@ -2365,6 +2365,15 @@ source tools remain usable. Continue validates the resolved staged manifest,
 canvas and referenced source; Abort restores Git's previous checkout. Neither
 operation needs a second Design pull or import.
 
+Continue on a new branch (after a merged PR) carries uncommitted Code and
+Design edits onto the fresh branch. Edits the target does not touch move with
+the checkout, staging intact. Tracked edits the target also changed are merged
+three-way and arrive unstaged; a genuine overlap stays unmerged and pauses the
+canvas like any conflict, and the prior edits also stay in the Git stash list.
+It refuses, changing nothing, when the target adds a path that already exists
+as an untracked file (Git itself overwrites those in sparse checkouts) or would
+overwrite an ignored Design draft.
+
 Zeros-owned checkout/index/ref mutations share a re-entrant FIFO lane for the
 physical worktree and a repository-global ref/stash lane across linked
 worktrees. They revalidate the latest branch tip. Ordinary Code editing,

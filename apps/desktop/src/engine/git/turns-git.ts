@@ -45,7 +45,7 @@ import { prepareSnapshotIndex } from "./snapshot-index";
 
 // ── Identity for snapshot commits (commit-tree needs an author/committer; we
 //    don't want to depend on, or pollute, the user's git config). ──
-const SNAPSHOT_ENV: Record<string, string> = {
+export const SNAPSHOT_ENV: Record<string, string> = {
   GIT_AUTHOR_NAME: "Zeros",
   GIT_AUTHOR_EMAIL: "turns@zeros.local",
   GIT_COMMITTER_NAME: "Zeros",

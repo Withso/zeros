@@ -1083,7 +1083,7 @@ export async function workspaceContinueOnNewBranch(args: {
   workspaceId: string;
   baseBranch?: string;
   mergedSha?: string;
-}): Promise<{ branch: string }> {
+}): Promise<{ branch: string; conflicts?: string[] }> {
   return bridgeWorkspaceContinueOnNewBranch(
     requireBridge("continue on a new branch"),
     args,

@@ -1,0 +1,9 @@
+{
+  "id": "owner-lifecycles-run-concurrently",
+  "kind": "replay",
+  "area": "engine-design-territory",
+  "fixedBy": "pr:659",
+  "symptom": "Restoring six archived Local workspaces at once took up to 33 s for the last one: each restore waited for every earlier one, although each workspace's own work took 4-9 s.",
+  "rule": "An owner-scoped gate must not chain on an app-wide FIFO tail. Drive two owners through the real WORKSPACE_REQUEST dispatcher, Local and cloud worker, and pin ordering against an app-wide transition.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/workspace-lifecycle-design-scope.test.ts"
+}
