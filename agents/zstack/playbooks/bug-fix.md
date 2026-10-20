@@ -43,6 +43,11 @@
    payload JSON before filtering; arbitrary tool data gets no key-name exemption.
    A suspension holds prompt preparation until it resumes; Stop still ends the
    wait.
+   For warm provider reuse, complete a real first turn and prepare the next
+   through the production configuration port and adapter. Preserve the admitted
+   cloud model when a composer snapshot omits it; keep Local snapshot semantics
+   and reject changed or retired authority. A mocked configuration port cannot
+   catch creation-only environment values being cleared on a follow-up.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    Before calling a before/after snapshot "stable", sample the live row for a

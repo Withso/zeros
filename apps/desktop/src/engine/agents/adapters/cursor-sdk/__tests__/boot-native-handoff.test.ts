@@ -89,6 +89,26 @@ async function setup(operation: "new" | "load" = "new", selection: {
 }
 const blocks = [{ type: "text" as const, text: "Synthetic" }];
 describe("Cursor original boot reservation across native preparation", () => {
+  it.each<Record<string, string>>([
+    { CURSOR_MODEL: "alternate-model" },
+    { CURSOR_MODEL: "test-model", ZEROS_REQUIRE_EXACT_MODEL: "0" },
+  ])("rejects a cloud configuration authority change without replacing the original model: %j", async env => {
+    native.models.mockResolvedValue([{ id: "test-model" }, { id: "alternate-model" }]);
+    const f = await setup();
+    await expect(f.adapter.updateConfig({ sessionId: f.sessionId, env })).rejects.toHaveProperty("code", "cloud_validation_access_denied");
+    await expect(f.adapter.updateConfig({ sessionId: f.sessionId, env: { ZEROS_FAST_MODE: "0" } })).resolves.toBeUndefined();
+    await expect(f.adapter.prompt({ sessionId: f.sessionId, prompt: blocks })).resolves.toMatchObject({ stopReason: "end_turn" });
+    expect(native.send).toHaveBeenCalledExactlyOnceWith(expect.anything(), expect.objectContaining({ model: { id: "test-model" } }));
+    expect(f.writes).toHaveBeenCalledOnce();
+    await f.factory.settleBootTurn(f.execution, f.reservation);
+  });
+  it("refuses cloud configuration after its original execution authority retires", async () => {
+    const f = await setup();
+    await cloudExecutionLifetime(f.execution).close();
+    await expect(f.adapter.updateConfig({ sessionId: f.sessionId, env: { CURSOR_MODEL: "test-model" } }))
+      .rejects.toHaveProperty("code", "cloud_validation_lifecycle_superseded");
+    expect(f.writes).not.toHaveBeenCalled();
+  });
   it.each(["new", "load"] as const)("does not %s from a late registry reply after its original cloud authority retires", async operation => {
     let release!: (models: unknown[]) => void;
     let started!: () => void;

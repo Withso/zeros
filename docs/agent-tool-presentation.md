@@ -220,6 +220,14 @@ the engine's current conversation binding; the reply rechecks actor authority
 and that binding. Unknown, disposed and revoked executions return generic
 metadata. Passive initialization never starts a provider process.
 
+Cursor cloud follow-ups keep the exact model from the admitted execution when
+the composer configuration snapshot omits a model. Updating effort or Fast
+must not remove that model or disable exact selection. Recheck the original
+execution lifetime and refuse a different model before changing session state.
+Local Personal and organization-local snapshots retain their normal complete-
+snapshot behavior; local exact-model qualification still requires an explicit
+model.
+
 After a turn, including a model refusal, the renderer performs a detached
 metadata read keyed by account generation, workspace, chat, execution and bridge.
 A cloud read joins bounded discovery and rechecks lifetime after waiting. Cursor
