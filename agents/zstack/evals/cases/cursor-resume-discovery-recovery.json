@@ -1,0 +1,9 @@
+{
+  "id": "cursor-resume-discovery-recovery",
+  "kind": "replay",
+  "area": "vm-engine-agents",
+  "fixedBy": "pr:648",
+  "symptom": "Resuming a saved registry model on a slow Cursor connection is refused as an unavailable account setting before discovery can finish.",
+  "rule": "Keep connection failure separate from a successful account catalog. Join bounded discovery, retry only transient transport failures within its original deadline, retain the saved conversation and exact model, and recheck original authority. See docs/agent-tool-presentation.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/registry-discovery-recovery.test.ts"
+}
