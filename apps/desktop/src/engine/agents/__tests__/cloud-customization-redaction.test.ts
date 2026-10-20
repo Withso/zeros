@@ -66,3 +66,23 @@ it("redacts overlapping complete values before withholding a snapshot suffix", (
   const event = redactor.notification({ sessionId: "s", update: { sessionUpdate: "tool_call_update", toolCallId: "t", status: "in_progress", rawOutput: "abcabc" } });
   expect(event.update).toHaveProperty("rawOutput", "[redacted]");
 });
+
+describe("ambiguous one-character content suffix policy", () => {
+  it("retains conservative terminal filtering in tool output and error diagnostics", () => {
+    const redactor = new CloudCustomizationRedactor(["e-synthetic-private-value"]);
+    expect(redactor.value("Done")).toBe("Done");
+    expect(redactor.value("Done\nMore", "terminal")).toBe("Don[redacted]\nMor[redacted]");
+    expect(redactor.error(new Error("Done"))).toHaveProperty("message", "Don[redacted]");
+    expect(redactor.notification({ sessionId: "session-e", update: { sessionUpdate: "tool_call_update", toolCallId: "tool-e",
+      status: "completed", rawOutput: "Done" } })).toMatchObject({ sessionId: "session-e",
+      update: { toolCallId: "tool-e", status: "completed", rawOutput: "Don[redacted]" } });
+  });
+  it("withholds a transcript or log suffix until later bytes disambiguate or the stream ends", () => {
+    const redactor = new CloudCustomizationRedactor(["e-synthetic-private-value"]);
+    expect(redactor.stream("stderr", "Done") + redactor.stream("stderr", ".")).toBe("Done.");
+    expect(redactor.stream("pty", "Done") + redactor.finish("pty")).toBe("Don[redacted]");
+    expect(redactor.notification({ sessionId: "session-e", update: { sessionUpdate: "agent_message_chunk",
+      messageId: "message-e", content: { type: "text", text: "Done" } } })).toMatchObject({ update: { content: { text: "Don" } } });
+    expect(redactor.finishSession("session-e")).toMatchObject([{ update: { messageId: "message-e", content: { text: "[redacted]" } } }]);
+  });
+});
