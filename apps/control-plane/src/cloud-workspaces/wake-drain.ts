@@ -31,6 +31,7 @@ export async function preserveCloudWorkspaceWakeDrain(tx: Tx, input: {
     LEFT JOIN workspace_checkpoint_requests request ON request.lifecycle_intent_id=intent.id
     WHERE intent.workspace_id=$1 AND intent.org_id=$2 AND intent.generation=$3
       AND intent.operation IN ('stop','archive') AND intent.state IN ('queued','observing','dispatching','failed','superseded')
+      AND NOT cloud_final_save_owner_discarded(intent.id)
       AND (cloud_workspace_drain_is_mandatory(intent.id) OR ($4 AND intent.created_at>=$5)
         OR EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries recovery
           WHERE recovery.lifecycle_intent_id=intent.id AND recovery.state NOT IN ('proven','resolved')))

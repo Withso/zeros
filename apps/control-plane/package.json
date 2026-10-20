@@ -19,6 +19,7 @@
     "cloud-workspace-deletion:manage": "tsx src/manage-cloud-workspace-deletion.ts",
     "cloud-provider-absence:manage": "tsx src/manage-cloud-provider-absence.ts",
     "cloud-provider-loss:manage": "tsx src/manage-cloud-provider-loss.ts",
+    "cloud-owner-checkpoint-recovery:manage": "tsx src/manage-cloud-owner-checkpoint-recovery.ts",
     "cloud-compute:grant": "tsx src/manage-cloud-compute-credit.ts",
     "cloud-object-storage:manage": "tsx src/manage-cloud-workspace-object-storage.ts",
     "cloud-object-rotation:retry": "tsx src/manage-cloud-workspace-object-rotation.ts",
