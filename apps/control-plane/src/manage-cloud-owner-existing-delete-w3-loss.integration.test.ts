@@ -37,7 +37,7 @@ suite("W3 existing Delete with attested provider loss versus a bare 404", () => 
     const journal = new DatabaseCloudProviderOperationStore(pool, "boat", f.account);
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ok: false, error: { code: "not_found", status: 404 } }, { status: 404 }));
     const access = { createSshAccess: vi.fn(), revokeSshAccess: vi.fn(), getPreviewEndpoint: vi.fn() };
-    const provider = new BoatWorkspaceProvider({ apiKey: "w3-synthetic-fixture", billingOrg: "team_11111111-1111-4111-8111-111111111111",
+    const provider = new BoatWorkspaceProvider({ apiKey: "w3-synthetic-fixture", billingOrg: "team_11111111-1111-4111-8111-111111111111", // gitleaks:allow — synthetic fixture
       operations: journal, access, ttlSeconds: null, imageRef: `boat:zeros-w3-qualified@sha256:${"a".repeat(64)}`,
       qualifiedStorageMiB: 20480, timeoutMs: 1000, fetch: fetcher });
     const deleteCall = vi.spyOn(provider, "delete");
