@@ -1,0 +1,9 @@
+{
+  "id": "cloud-event-capture-retirement",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pending",
+  "symptom": "Late cloud notifications called a closed durable event journal during engine shutdown, causing unhandled promise and timer failures and hiding the first retirement cause.",
+  "rule": "Retire capture before closing the cloud journal; never fan out uncaptured events. Retain only the first closed site and code before cleanup and keep Local routing independent.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-event-retirement-engine.test.ts apps/desktop/src/engine/__tests__/cloud-runtime-registration.test.ts"
+}

@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/transport/router.ts",
+  "before": "retireCapture(): void { if (this.capture) this.captureRetired = true; }",
+  "after": "retireCapture(): void { if (this.capture) this.captureRetired = false; }"
+}

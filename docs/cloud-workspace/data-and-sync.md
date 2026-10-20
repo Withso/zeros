@@ -1035,3 +1035,11 @@ Cleanup and evidence:
 4. Keep screenshots, IDs, cursors, revisions, and cleanup receipts in the
    private run log. Publish only the closed pass/fail results and blockers, with
    no credentials, private file contents, or native grant/proof material.
+
+Cloud engine shutdown retires the router's durable event capture before closing
+its journal. Late producer notifications cannot publish unjournaled events or
+turn a deliberate retirement into an unhandled event-loop failure. The first
+retirement records only a closed site and code before cleanup; a separate
+closed shutdown diagnostic cannot overwrite that cause. No provider payload,
+HTTP body, credential, path, or raw error reaches these diagnostics. Journal
+proof, revocation, lease deadlines and the bounded process exit stay enforced.
