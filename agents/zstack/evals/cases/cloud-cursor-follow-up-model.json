@@ -2,7 +2,7 @@
   "id": "cloud-cursor-follow-up-model",
   "kind": "replay",
   "area": "vm-engine-agents",
-  "fixedBy": "pending",
+  "fixedBy": "pr:656",
   "symptom": "The second cloud Cursor prompt fails locally with cloud_admission_rejected after a successful first turn because its configuration update removes the required exact model.",
   "rule": "Exercise warm reuse through the actual configuration port and adapter. Preserve the admitted cloud model, reject changed or retired authority, and retain Local complete-snapshot semantics. See agents/zstack/playbooks/bug-fix.md.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-native-pump.test.ts apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/boot-native-handoff.test.ts apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts"
