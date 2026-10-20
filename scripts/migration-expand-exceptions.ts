@@ -159,6 +159,18 @@ END $$;`],
   cloud_unstarted_candidate_hold_capture(),adopt_cloud_unstarted_candidate_cleanup(uuid),cloud_unstarted_candidate_hold_source(),
   cloud_final_save_dispatchable(uuid),require_cloud_unstarted_candidate_retirement() FROM PUBLIC;`],
   },
+  "0177_cloud_owner_discard_delete.sql": {
+    "new-table-privileges": ["REVOKE ALL ON cloud_workspace_owner_delete_receipts,cloud_workspace_owner_delete_dispositions FROM PUBLIC,zeros_app;"],
+    "truncate-guard": [
+      `CREATE TRIGGER cloud_owner_delete_receipt_no_truncate BEFORE TRUNCATE ON cloud_workspace_owner_delete_receipts
+  FOR EACH STATEMENT EXECUTE FUNCTION guard_cloud_owner_delete_receipt();`,
+      `CREATE TRIGGER cloud_owner_delete_disposition_no_truncate BEFORE TRUNCATE ON cloud_workspace_owner_delete_dispositions
+  FOR EACH STATEMENT EXECUTE FUNCTION guard_cloud_owner_delete_disposition();`,
+    ],
+    "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_owner_delete_source(uuid),guard_cloud_owner_delete_receipt(),guard_cloud_owner_delete_disposition(),
+  cloud_owner_delete_current(uuid),cloud_owner_delete_hold_intent(),require_cloud_owner_delete_atomic(),cloud_owner_delete_hold_source(),
+  cloud_owner_delete_lock_recovery_source(),cloud_owner_delete_hold_capture_facts(),cloud_owner_delete_hold_data() FROM PUBLIC;`],
+  },
   "0174_cloud_lifecycle_scheduling.sql": {
     "privilege-tightening": [
       "cloud_lifecycle_allocation_wait_status(uuid)",
@@ -260,6 +272,15 @@ const unstartedCandidateDigests: Record<string,string> = {
   "candidate-purge": "cde2e5c569b87bfd6adc2bd373f954db82c661c55df557c336054ef649968f0f",
 };
 
+// Explicit complete loss permits one ordinary Delete. Pin only these scoped
+// extensions; checkpoint proof and physical data-purge authority stay intact.
+const ownerDeleteDigests: Record<string,string> = {
+  "owner-delete-disposition": "08da6b4a619fe610dedf0b426655d18d2929c6c97e7ce04aa5fb118dfead01c9",
+  "owner-delete-dispatch": "46cf98bf6c907f4da51b586f5263c50f8152d2d3be240256595e131dcfbe34e8",
+  "owner-delete-failure": "97dd1238301f36de9a27188a8637289ed8ce7a0c7bac854c184281712471667f",
+  "owner-delete-erasure": "f9ad30f4845bbb178eede1256a90014ae24f3c473dd525d967395d438529b184",
+};
+
 /** Split only at top-level SQL semicolons. Dollar bodies, nested comments and
  * quoted values remain intact; an annotation inside a function cannot exempt
  * a nested destructive statement. The ordinary guard still inspects all body
@@ -347,7 +368,9 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
       (file === "0173_cloud_owner_recovery_safety_stop.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerDiscardSafetyDigests[rule]) ||
       (file === "0175_cloud_unstarted_candidate_cleanup.sql" &&
-        createHash("sha256").update(statement).digest("hex") === unstartedCandidateDigests[rule]);
+        createHash("sha256").update(statement).digest("hex") === unstartedCandidateDigests[rule]) ||
+      (file === "0177_cloud_owner_discard_delete.sql" &&
+        createHash("sha256").update(statement).digest("hex") === ownerDeleteDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

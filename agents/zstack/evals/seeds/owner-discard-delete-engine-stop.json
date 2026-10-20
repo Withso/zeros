@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/migrations/0177_cloud_owner_discard_delete.sql",
+  "before": "OR (i.idempotency_key LIKE 'system:engine-stop:%'",
+  "after": "OR (false AND i.idempotency_key LIKE 'system:engine-stop:%'"
+}

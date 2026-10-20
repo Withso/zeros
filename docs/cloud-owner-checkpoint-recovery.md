@@ -4,6 +4,7 @@ This Alpha/development operator restores an explicitly selected durable
 checkpoint after the owner acknowledges loss of all newer unsaved work. It is
 for a failed final Stop with a retired capture and its dependent Restart.
 Ordinary Stop, Restart and Delete still require final-save proof.
+Complete workspace loss and deletion uses the separate operator described below.
 
 The operator defaults to a plan. Before execution,
 the incident owner separately authorizes provider deletion and runs the existing
@@ -201,3 +202,77 @@ receipt-backed historical recovery is excluded from unresolved history.
 Local Personal and organization-local workspaces are unaffected. The tool is an
 exact organization/workspace operator; its optional history recovery uses the
 private authenticated cloud boot wire. There is no renderer mutation surface.
+
+## Complete workspace discard and Delete
+
+Migration `0177_cloud_owner_discard_delete.sql` adds an Alpha/development
+operator for an owner who explicitly accepts loss of **all** workspace data and
+requests permanent deletion. It supports an undispatched system compute Stop
+blocked on final save after a never-ready wake or a crashed previously-ready
+engine, including delivered captures and an unsealed writer. It also supports
+the engine-health producer's `system:engine-stop:` intent when its current
+capture expired without delivery. Both require attempt zero, no dispatch and
+the exact allocation's `stop_intent_id`; live authority and competing work
+remain refused. Other system Stop families are not admitted. The existing
+checkpoint-restore operator above has different authority and cannot substitute
+for this complete-loss acknowledgement.
+
+Use the stable migration table owner through `DATABASE_MIGRATION_ROLE` and an
+active platform-owner operator. The current workspace owner must still pass
+ordinary workspace cleanup authorization. There is no HTTP/engine admission
+path and the application role cannot write the receipts. Local Personal and
+organization-local workspaces do not use this control-plane operation.
+
+Prepare an operator-owned regular JSON file, mode `0600`, at most 16 KiB:
+
+| Scope | Required fields |
+| --- | --- |
+| Request | `version: 1`, `operationId`, `channel: "alpha"` or `"development"` |
+| Owner | `organizationId`, `expectedOrganizationSlug`, `workspaceId`, `ownerUserId`, `operatorUserId` |
+| Exact blocked source | `sourceGeneration`, `stopIntentId`, `requestId`, `engineInstanceId`, `allocationLeaseId` |
+| Provider | `providerResourceId`, `providerAccountScope` |
+| Explicit total loss | `ownerAcknowledgedCompleteDataLoss: true`, `ownerApprovalReference`, `reason` |
+
+The approval reference and reason must each have 16–512 characters. Keep real
+identities, approval records and credentials outside the public checkout.
+Preserve the same operation ID and body for replay.
+
+Set `CONTROL_PLANE_OWNER_DELETE_REQUEST_FILE` to that path and run:
+
+```sh
+pnpm --dir apps/control-plane cloud-owner-discard-delete:manage
+```
+
+Planning takes no provider action and rolls back all database work. It freezes
+the target, current authority, original engine and allocation, content/record
+heads, destructive lifecycle history, capture attempts/reports and generation
+bindings. There must be no live engine lease, setup, transition, capture,
+unsettled provider dispatch or legal hold. Every noncurrent generation must
+already have positive provider deletion verification. The exact current capture
+must be terminal. The inventory is bounded to 256 destructive intents,
+512 captures, 128 engines, 64 generations and 1 MiB of retained source.
+
+Review the exact plan, set `CONTROL_PLANE_OWNER_DELETE_APPROVAL` to its returned
+`approval`, and run the same command with `--execute`. Request, target or source
+changes require a fresh plan. Execution atomically records the owner loss
+receipt, marks the named unproved recoveries `discarded`, preserves their
+failure/custody facts, supersedes the blocked Stop and admits one normal Delete.
+It revokes stale runtime/grant authority, but does not label that revocation as
+native retirement. It creates no final-save proof, seal, checkpoint, provider
+loss receipt or early erasure completion.
+
+`deleting` reports committed intent, not provider or data deletion. The normal
+workers retain compute settlement, provider deletion and independent absence
+verification, all-generation checks, legal holds, object deletion and record
+purge. An unsealed writer can retire only after the exact Delete's positive
+provider result; its missing seal remains missing. Observe `providerDeletion`
+and `dataErasure` separately. Immutable loss receipts survive normal data purge
+and permit only their owning workspace's cascade during final organization
+erasure. Direct receipt deletion remains refused while the workspace exists;
+accounting retention and all other organization-purge gates remain in force.
+The existing allocation-lease foreign key can still block organization erasure
+after workspace deletion. Resolving that accounting-retention boundary is a
+separate follow-up; this operator does not remove retained accounting rows.
+A terminal provider failure or object-erasure failure requires operator
+follow-up; replay never resets either operation. There is one approved Delete
+per workspace, and a failed operation does not authorize a successor.

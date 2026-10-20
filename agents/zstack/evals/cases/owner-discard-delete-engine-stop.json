@@ -1,0 +1,9 @@
+{
+  "id": "owner-discard-delete-engine-stop",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:671",
+  "symptom": "Owner-approved complete deletion refused an unavailable-engine Stop because only the compute Stop producer's key was admitted.",
+  "rule": "Exercise the real engine-health Stop and allocation adoption. Admit only its expired undelivered capture under the existing exact owner receipt; refuse dispatched, live, foreign-allocation and unsupported Stop variants.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/manage-cloud-owner-discard-delete-engine.integration.test.ts"
+}

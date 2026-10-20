@@ -1,0 +1,9 @@
+{
+  "id": "owner-discard-delete-exact-authority",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:671",
+  "symptom": "An owner-approved complete workspace deletion remained blocked behind an impossible final save after a failed wake or a crashed ready engine.",
+  "rule": "Complete loss needs its own exact owner receipt and one ordinary Delete. Preserve delivered and unsealed custody, never fabricate save proof, and drive the real reconciler and erasure worker through positive provider deletion.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/manage-cloud-owner-discard-delete.integration.test.ts"
+}
