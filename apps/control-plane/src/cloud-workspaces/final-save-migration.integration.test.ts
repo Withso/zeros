@@ -108,7 +108,9 @@ suite("final-save expansion adopts only exact historical evidence",()=>{
   const deletionClaimable=async(f:Awaited<ReturnType<typeof legacy>>)=>
     (await withSystemTx(pool,tx=>tx.query("SELECT cloud_final_save_deletion_claimable($1,$2) AS allowed",[f.workspaceId,f.organizationId]))).rows[0].allowed as boolean;
 
-  async function deletionWithLegacyHistory(historyCount = 1, currentSchema = false) {
+  // Current workers run after the complete migration ladder. Keep the
+  // standalone 0171 adoption cases above pinned to that migration alone.
+  async function deletionWithLegacyHistory(historyCount = 1, currentSchema = true) {
     const f = await legacy(true);
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [f.intentId]);
     for (let index = 1; index < historyCount; index++) {

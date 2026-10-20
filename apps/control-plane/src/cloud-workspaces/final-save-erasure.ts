@@ -2,11 +2,12 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import { ensureFinalSaveRecovery } from "./final-save-recovery.js";
 
-// Same admission rule as 0171: a reversible unsuccessful idle attempt has no
-// durable recovery owner. The existing SQL erasure guard checks its exact
-// retired-request exception; this scheduling hint grants no erasure authority.
+// Enrollment and SQL claimability share the exact abandoned compute Stop
+// classification. Existing unresolved rows still require explicit disposition.
+// This scheduling hint grants no erasure authority.
 const missingHistory = `intent.operation IN ('stop','archive','delete')
   AND NOT EXISTS (SELECT 1 FROM cloud_workspace_final_save_recoveries recovery WHERE recovery.lifecycle_intent_id=intent.id)
+  AND NOT cloud_final_save_retired_compute_stop(intent.id)
   AND (intent.idempotency_key NOT LIKE 'system:idle:%' OR cloud_workspace_drain_is_mandatory(intent.id)
     OR EXISTS (SELECT 1 FROM workspace_checkpoint_requests request WHERE request.lifecycle_intent_id=intent.id AND request.state='succeeded'))`;
 

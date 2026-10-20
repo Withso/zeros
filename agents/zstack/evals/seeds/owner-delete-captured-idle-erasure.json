@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/migrations/0178_cloud_owner_existing_delete.sql",
+  "before": "        AND NOT cloud_owner_delete_captured_idle_history(intent.id)\n",
+  "after": ""
+}

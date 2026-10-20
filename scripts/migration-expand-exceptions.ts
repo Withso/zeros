@@ -159,6 +159,7 @@ END $$;`],
   cloud_unstarted_candidate_hold_capture(),adopt_cloud_unstarted_candidate_cleanup(uuid),cloud_unstarted_candidate_hold_source(),
   cloud_final_save_dispatchable(uuid),require_cloud_unstarted_candidate_retirement() FROM PUBLIC;`],
   },
+  "0178_cloud_owner_existing_delete.sql": {},
   "0177_cloud_owner_discard_delete.sql": {
     "new-table-privileges": ["REVOKE ALL ON cloud_workspace_owner_delete_receipts,cloud_workspace_owner_delete_dispositions FROM PUBLIC,zeros_app;"],
     "truncate-guard": [
@@ -281,6 +282,21 @@ const ownerDeleteDigests: Record<string,string> = {
   "owner-delete-erasure": "f9ad30f4845bbb178eede1256a90014ae24f3c473dd525d967395d438529b184",
 };
 
+// Exact additions retain prior save proof and physical-purge authority.
+const ownerExistingDeleteDigests: Record<string,string> = {
+  "new-table-privileges": "5dcd878e4e2935bddcf73f215d27bd635dde05c6ecea4e29b07911e0ed542699",
+  "truncate-guard": "94c229ad90475d9cf2c51ea2534669c2465b63d3adc5fc3677145e93172c942a",
+  "privilege-tightening": "278774e5015f08a153b37fc287b31c7de58781684701fa299a43af6ba4eda15d",
+  "retired-stop-enrollment": "0d2ee62ce3ee74c6b70e4d3a4659b5cdc2294f80990ad6ad3c231bcd8764be07",
+  "existing-delete-disposition": "7868657bef6e6df6b152e35fa83c4640d88c8977fdb3d4a088279a38b5933614",
+  "existing-delete-dispatch": "3b94db9135e9f621335c2dd4d47d31b66d12bdb0b261cdb8d6e53cb9e28c6433",
+  "existing-delete-failure": "34425ace259b828584dc44bdedc4a23bbcc656a0ce02dfa25ae193d9b9783f68",
+  "existing-delete-erasure": "b1486df5cbb74afeb49e1d2b63c2f5ee5db1332cdcb6f6544bbedabbabd9f0db",
+  "existing-delete-source-hold": "a3d84af36e73438c73537c690e97f6fdd1c76b905c63a966be6037bf1d0f4833",
+  "existing-delete-capture-hold": "f6a39e1eaa5b9806bcb729cd8806f313ca9ace516a42e346ea94cf25d529b3ed",
+  "existing-delete-data-hold": "0258ee7a3527eb0834a4cf6b51706d624a1fed430f7e2d702374930f5dfcabc6",
+};
+
 /** Split only at top-level SQL semicolons. Dollar bodies, nested comments and
  * quoted values remain intact; an annotation inside a function cannot exempt
  * a nested destructive statement. The ordinary guard still inspects all body
@@ -370,7 +386,9 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
       (file === "0175_cloud_unstarted_candidate_cleanup.sql" &&
         createHash("sha256").update(statement).digest("hex") === unstartedCandidateDigests[rule]) ||
       (file === "0177_cloud_owner_discard_delete.sql" &&
-        createHash("sha256").update(statement).digest("hex") === ownerDeleteDigests[rule]);
+        createHash("sha256").update(statement).digest("hex") === ownerDeleteDigests[rule]) ||
+      (file === "0178_cloud_owner_existing_delete.sql" &&
+        createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

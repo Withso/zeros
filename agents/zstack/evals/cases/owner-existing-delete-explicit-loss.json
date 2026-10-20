@@ -1,0 +1,9 @@
+{
+  "id": "owner-existing-delete-explicit-loss",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:674",
+  "symptom": "A dead-source accepted Delete and a separately adopted historical Stop could not use a complete-loss operator without replacing the accepted Delete or mutating its original capture facts.",
+  "rule": "Bind explicit loss to the exact existing Delete, source and recovery. Retain keys, delivered capture bytes and prior proof; require ordinary provider completion before native retirement and physical erasure before declaring completion.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/manage-cloud-owner-existing-delete.integration.test.ts src/manage-cloud-owner-existing-delete-history-w3.integration.test.ts"
+}

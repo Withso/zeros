@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/migrations/0178_cloud_owner_existing_delete.sql",
+  "before": "WHERE i.id=target_intent_id AND i.operation='stop' AND i.requested_by IS NULL\n      AND i.idempotency_key LIKE 'system:compute-stop:%'",
+  "after": "WHERE false AND i.id=target_intent_id AND i.operation='stop' AND i.requested_by IS NULL\n      AND i.idempotency_key LIKE 'system:compute-stop:%'"
+}
