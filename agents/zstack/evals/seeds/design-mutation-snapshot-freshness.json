@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/workspace/service.ts",
+  "before": "if (current && !options.fresh && this.joinsDesignSnapshotFlight(current, epoch))",
+  "after": "if (current && this.joinsDesignSnapshotFlight(current, epoch))"
+}

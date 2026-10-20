@@ -1335,6 +1335,8 @@ describe("WorkspaceService", () => {
       });
       const target = { workspaceId: design.workspaceId };
       let release = () => {};
+      let restoreFlight = () => {};
+      const requests: Promise<unknown>[] = [];
       const flights = (
         svc as unknown as {
           designSnapshotFlights: Map<string, Promise<unknown>>;
@@ -1362,11 +1364,29 @@ describe("WorkspaceService", () => {
         });
         const key = `${design.workspaceId}\u0000${path.resolve(design.path)}\u0000read\u0000${designDirectoryNameFor(design.path)}\u0000host-resources`;
         flights.set(key, blocked);
-        const getFlight = vi.spyOn(flights, "get");
+        let joinedRead = () => {};
+        let reachedMutationRead = () => {};
+        const readJoined = new Promise<void>((resolve) => { joinedRead = resolve; });
+        const mutationRead = new Promise<void>((resolve) => { reachedMutationRead = resolve; });
+        const get = flights.get.bind(flights);
+        let lookups = 0;
+        const getFlight = vi.spyOn(flights, "get").mockImplementation((lookupKey) => {
+          const flight = get(lookupKey);
+          if (lookupKey === key) {
+            if (++lookups === 1) joinedRead();
+            else if (lookups === 2) reachedMutationRead();
+          }
+          return flight;
+        });
+        restoreFlight = () => getFlight.mockRestore();
         const observing = svc.handle("design.snapshot", target) as Promise<
           typeof before
         >;
-        await vi.waitFor(() => expect(getFlight).toHaveBeenCalledTimes(1));
+        requests.push(observing);
+        await Promise.race([readJoined, observing.then(() => {
+          throw new Error("The older snapshot did not join its retained flight.");
+        })]);
+        expect(getFlight).toHaveBeenCalledTimes(1);
         const op =
           operation === "undo" || operation === "redo"
             ? `design.history.${operation}`
@@ -1376,9 +1396,14 @@ describe("WorkspaceService", () => {
           frame: created.frame.file,
           title: "New frame",
         }) as Promise<typeof before>;
-        await vi.waitFor(() =>
-          expect(getFlight.mock.calls.length).toBeGreaterThanOrEqual(2),
-        );
+        requests.push(writing);
+        // Real filesystem/history work can exceed waitFor's 1 s default.
+        // Hold the old read until the mutation actually looks up this key;
+        // the suite's existing 20 s test budget still bounds the operation.
+        await Promise.race([mutationRead, writing.then(() => {
+          throw new Error("The mutation did not request its snapshot.");
+        })]);
+        expect(getFlight.mock.calls.length).toBeGreaterThanOrEqual(2);
         release();
         const [old, reply] = await Promise.all([observing, writing]);
         expect(old.snapshot).toBe(before.snapshot);
@@ -1390,9 +1415,10 @@ describe("WorkspaceService", () => {
             operation === "undo" ? "Original" : "Renamed",
           );
         else expect(frames).toHaveLength(2);
-        getFlight.mockRestore();
       } finally {
         release();
+        await Promise.allSettled(requests);
+        restoreFlight();
         flights.clear();
         await svc.handle("workspace.delete", {
           ...target,
