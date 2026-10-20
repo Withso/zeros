@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/features/settings/cloud-provider-connections.tsx",
+  "before": "const connected = !!selected && readyCredential?.id === selected.id;",
+  "after": "const connected = !!selected && connection?.credentialId === selected.id && connection.connected &&\n    connection.health?.status === \"ready\" && connection.health.credentialRevision === selected.revision;"
+}

@@ -559,6 +559,24 @@ export async function runCloudConnectionHealthSmoke({ page, check, harnessBase }
       await expect(page.getByText("Connected · Account", { exact: true })).toBeVisible();
       expect(selections).toHaveLength(2);
       expect(await nativeConnects()).toBe(1);
+      const connectedRow = page.getByText("New account", { exact: true }).locator("../..");
+      await connectedRow.getByRole("button", { name: "Configure", exact: true }).click();
+      await expect(dialog.getByLabel("Connected", { exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Connected", exact: true })).toBeDisabled();
+      await expect(dialog.getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
+      state.credentials[1] = { ...state.credentials[1], revision: 9, displayName: "Refreshed account" };
+      state.connections[0] = { ...state.connections[0], revision: 16,
+        health: { ...state.connections[0].health, selectedCredentialRevision: 9, credentialRevision: 9 } };
+      await page.evaluate(async () => {
+        const { cloudOrganizationConnectionsCache } = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
+        cloudOrganizationConnectionsCache.invalidateAll();
+      });
+      await expect(page.getByText("Refreshed account", { exact: true })).toBeVisible();
+      await expect(page.getByText("Connected · Account", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Refreshed account is connected", { exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Connected", exact: true })).toBeDisabled();
+      expect(selections).toHaveLength(2);
+      expect(await nativeConnects()).toBe(1);
       delete state.connections[0].health;
       await page.evaluate(async () => {
         const { cloudOrganizationConnectionsCache } = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
@@ -566,8 +584,13 @@ export async function runCloudConnectionHealthSmoke({ page, check, harnessBase }
       });
       await expect(page.getByText("Selected · Status unavailable · Account", { exact: true })).toBeVisible();
       await expect(page.getByText("Connected · Account", { exact: true })).toHaveCount(0);
+      await expect(dialog.getByLabel("Connected", { exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
       expect(selections).toHaveLength(2);
       check(`${theme} expired cloud account reconnects once, preserves its import on conflict and retries explicitly with refreshed revisions`, true);
+      check(`${theme} connected cloud account stays consistent across row, Configure and metadata refresh without reconnecting`, true);
       expect(errors).toEqual([]);
     } finally {
       await page.unroute("https://api.example.test/v1/**", routeMetadata);

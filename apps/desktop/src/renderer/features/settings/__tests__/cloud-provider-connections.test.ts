@@ -185,6 +185,64 @@ function selectedCodex(status: CloudAgentConnectionHealth["status"] = "expired")
 }
 
 describe("selected cloud account health and reconnect", () => {
+  it.each(["claude", "codex", "cursor"])("keeps an already connected %s account from offering another Connect", provider => {
+    f.provider = provider;
+    f.snapshot.data!.credentials[0]!.kind = `${provider}-api-key`;
+    Object.assign(f.snapshot.data!.connections[0]!, { provider, health: selectedHealth("ready") });
+    expect(text(tree())).toContain("Connected");
+    action("Configure").props.onClick!();
+    expect(dialog().props.connected).toBe(true);
+    expect(submit().props.children).toBe("Connected");
+    expect(submit().props.disabled).toBe(true);
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.signIn).not.toHaveBeenCalled();
+  });
+
+  it("keeps the open Codex dialog on the current selected credential after metadata revalidates", () => {
+    selectedCodex("ready");
+    f.snapshot.data!.connections[0]!.connected = true;
+    action("Configure").props.onClick!();
+    expect(dialog().props.connected).toBe(true);
+    f.snapshot.data = {
+      credentials: [{ ...f.snapshot.data!.credentials[0]!, revision: 8, displayName: "Refreshed account" }],
+      connections: [{ ...f.snapshot.data!.connections[0]!, revision: 13,
+        health: { ...selectedHealth("ready"), selectedCredentialRevision: 8, credentialRevision: 8 } }],
+    };
+    expect(text(tree())).toContain("Connected · Account");
+    expect(dialog().props.connected).toBe(true);
+    expect(dialog().props.connectedIdentity).toBe("Refreshed account");
+    expect(text(dialog().props.children)).toContain("Refreshed account is connected");
+    expect(submit().props.children).toBe("Connected");
+    expect(submit().props.disabled).toBe(true);
+    expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it.each(["expired", "changed revision", "revoked", "missing credential", "missing health", "unselected"])(
+    "does not retain connected feedback when the open account becomes %s", change => {
+      selectedCodex("ready");
+      f.snapshot.data!.connections[0]!.connected = true;
+      action("Configure").props.onClick!();
+      expect(dialog().props.connected).toBe(true);
+      const source = f.snapshot.data!;
+      f.snapshot.data = {
+        credentials: source.credentials.map(row => ({ ...row })),
+        connections: source.connections.map(row => ({ ...row })),
+      };
+      const credential = f.snapshot.data.credentials[0]!, connection = f.snapshot.data.connections[0]!;
+      if (change === "expired") connection.health = selectedHealth("expired");
+      if (change === "changed revision") credential.revision += 1;
+      if (change === "revoked") credential.revoked = true;
+      if (change === "missing credential") f.snapshot.data.credentials = [];
+      if (change === "missing health") delete connection.health;
+      if (change === "unselected") connection.credentialId = f.createdId;
+      expect(dialog().props.connected).toBe(false);
+      expect(text(dialog().props.children)).not.toContain("is connected");
+      expect(submit().props.children).toBe("Connect");
+      expect(f.request).not.toHaveBeenCalled();
+      expect(f.signIn).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["claude", "codex", "cursor"])("uses only %s's selected cloud identity for connected feedback", provider => {
     f.provider = provider;
     const saved = f.snapshot.data!.credentials[0]!;
