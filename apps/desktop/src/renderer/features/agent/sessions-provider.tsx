@@ -70,7 +70,7 @@ import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { refreshAgentModelCatalog } from "./refresh-agent-model-catalog";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { NativeTranscriptSnapshots } from "./transcript-retention";
-import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { cloudScopedId, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudReplyOwnership } from "../../platform/bridge/cloud-runtime-wire";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { cloudHistoryRestoreHead, onCloudHistoryRestoreHead, readCachedCloudTranscriptWindow, peekCloudTranscriptWindow, type CloudHistoryRestoreOrigin } from "../../platform/cloud-transcript-cache";
@@ -1535,7 +1535,8 @@ export function AgentSessionsProvider({
    *  send is still parked on a session rebuild / resume and has therefore not
    *  reached the engine yet. See bumpCancelGeneration. */
   const cancelGenerationsRef = useRef(new Map<string, number>());
-  const cloudStopsRef = useRef(new Map<string, { operationId: string; promise: Promise<void> }>());
+  const cloudStopsRef = useRef(new Map<string, { operationId: string; promise: Promise<boolean> }>());
+  const cloudClosesRef = useRef(new Map<string, Promise<boolean>>());
   const cloudSendPreparationRef = useRef(new CloudSendPreparation());
   const cloudSendWaitRef = useRef(new CloudSendWait());
   useEffect(() => () => { cloudSendPreparationRef.current.clear(); cloudSendWaitRef.current.clear(); }, [bridge, cloudComputerV2]);
@@ -4515,7 +4516,11 @@ export function AgentSessionsProvider({
           lastStopReason: "cancelled",
         });
       }
-      const currentExecutionId = current?.executionId ?? current?.sessionId;
+      const cloudConversation = isCloudWorkspace(current?.cwd) && (current?.foregroundTurnId || current?.cloudStop ||
+        current?.cloudPromptPending || current?.status === "reconnecting") ? parseCloudScopedId(chatId) : null;
+      const originalRoute = current?.executionId ?? current?.sessionId;
+      const currentExecutionId = originalRoute ??
+        (cloudConversation ? cloudScopedId(cloudConversation, `conversation:${cloudConversation.id}`) : undefined);
       const cancellationAction = admissionCancellationAction({
         hasAgent: Boolean(current?.agentId),
         hasSession: Boolean(currentExecutionId),
@@ -4551,14 +4556,15 @@ export function AgentSessionsProvider({
       if (!current?.agentId || !currentExecutionId) return;
       if (isCloudWorkspace(current.cwd)) {
         const turnId = current.foregroundTurnId ?? null, stopCwd = current.cwd, agentId = current.agentId;
+        const account = cloudCatalogGeneration();
         const startedAt = current.activeTurnStartedAt;
         const operationId = current.cloudStop && current.cloudStop.turnId === turnId ? current.cloudStop.operationId : crypto.randomUUID();
         const existing = cloudStopsRef.current.get(chatId);
-        if (existing?.operationId === operationId) return existing.promise;
+        if (existing?.operationId === operationId) { await existing.promise; return; }
         const ownsStop = () => {
           const slot = getStore().sessions[chatId];
-          return slot?.cwd === stopCwd && (slot.foregroundTurnId ?? null) === turnId && slot.cloudStop?.operationId === operationId &&
-            (turnId !== null || (slot.executionId ?? slot.sessionId) === currentExecutionId && slot.activeTurnStartedAt === startedAt);
+          return cloudCatalogGeneration() === account && slot?.cwd === stopCwd && (slot.foregroundTurnId ?? null) === turnId && slot.cloudStop?.operationId === operationId &&
+            (turnId !== null || (slot.executionId ?? slot.sessionId) === originalRoute && slot.activeTurnStartedAt === startedAt);
         };
         getStore().setCancelling(chatId, true);
         const recordedFailure = current.failure?.stage !== "cancel" ? current.failure : null;
@@ -4571,7 +4577,7 @@ export function AgentSessionsProvider({
             if (!result || typeof result !== "object" || !("conversationId" in result) || result.conversationId !== chatId ||
                 !("state" in result) || !["succeeded", "failed", "cancelled"].includes(String(result.state)))
               throw new Error("Stop could not be confirmed");
-            if (!ownsStop()) return;
+            if (!ownsStop()) return false;
             const slot = getStore().sessions[chatId];
             const failure = slot.failure?.stage !== "cancel" ? slot.failure : null;
             const terminalFailure = failure ?? (result.state === "failed" ? {
@@ -4582,18 +4588,21 @@ export function AgentSessionsProvider({
               status: terminalFailure ? "failed" : "ready", error: terminalFailure?.message ?? null, failure: terminalFailure,
               lastStopReason: result.state === "cancelled" && !terminalFailure ? "cancelled" : slot.lastStopReason, activeTurnStartedAt: null,
               pendingPermission: null, pendingPermissions: [], pendingQuestions: [] });
+            return true;
           } catch {
-            if (!ownsStop()) return;
+            if (!ownsStop()) return false;
             const message = "Stop could not be confirmed. Reconnect to check this turn.";
             const slot = getStore().sessions[chatId], failure = slot.failure?.stage !== "cancel" ? slot.failure : null;
             getStore().patchSession(chatId, { cloudStop: { operationId, turnId, state: "unconfirmed" }, error: failure?.message ?? message,
               failure: failure ?? { kind: "transport-closed", stage: "cancel", agentId, message } });
+            return false;
           } finally {
             if (cloudStopsRef.current.get(chatId)?.operationId === operationId) cloudStopsRef.current.delete(chatId);
           }
         })();
         cloudStopsRef.current.set(chatId, { operationId, promise });
-        return promise;
+        await promise;
+        return;
       }
       // Optimistic state transition: cancel is intentional, the chat
       // should immediately be ready for the next prompt. The flag
@@ -4635,6 +4644,38 @@ export function AgentSessionsProvider({
     },
     [bridge, getStore, cancelStalledAdmission, evictUnretainedTranscripts, pauseQueue],
   );
+
+  const recoverCloudPrompt = useCallback<SessionsActions["recoverCloudPrompt"]>(async (chatId, turnId) => {
+    const original = getStore().sessions[chatId];
+    if (!isCloudWorkspace(original?.cwd)) return false;
+    if (!original?.agentId || !(bridge instanceof WorkspaceRuntimeClient))
+      throw new Error("Reconnect to check this cloud command before retrying.");
+    const account = cloudCatalogGeneration(), generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+    const current = () => {
+      const slot = getStore().sessions[chatId];
+      return cloudCatalogGeneration() === account && cancelGeneration(cancelGenerationsRef.current, chatId) === generation &&
+        slot?.cwd === original.cwd && slot.agentId === original.agentId &&
+        (!slot.foregroundTurnId || slot.foregroundTurnId === turnId) &&
+        (lastUserPrompt(slot.messages) ?? slot.leadingPrompt)?.id === turnId;
+    };
+    if (!current() || original.cloudStop) return true;
+    const response = await bridge.recoverCloudPrompt(chatId, turnId, original.agentId);
+    if (!current() || getStore().sessions[chatId]?.cloudStop) return true;
+    if (response === null) return false;
+    if ((response.type !== "AGENT_PROMPT_COMPLETE" && response.type !== "AGENT_PROMPT_FAILED") ||
+        !("chatId" in response) || response.chatId !== chatId || "turnId" in response && response.turnId && response.turnId !== turnId)
+      throw new Error("The original cloud command result could not be confirmed.");
+    // Recovery can finish before the ordered transcript catches up. Reconcile
+    // that same chat without creating another execution or user message.
+    await reconcileChatMessagesRef.current(chatId);
+    if (!current() || getStore().sessions[chatId]?.cloudStop) return true;
+    const failure = response.type === "AGENT_PROMPT_FAILED"
+      ? failureFromAgentError({ ...response, message: response.error } as unknown as AgentErrorMessage, "prompt") : null;
+    getStore().patchSession(chatId, { status: failure ? statusForFailure(failure) : "ready", error: failure?.message ?? null,
+      failure, cloudPromptPending: false, activeTurnStartedAt: null,
+      lastStopReason: response.type === "AGENT_PROMPT_COMPLETE" ? response.stopReason : null });
+    return true;
+  }, [bridge, getStore]);
 
   const respondToPermission = useCallback<
     SessionsActions["respondToPermission"]
@@ -6689,6 +6730,8 @@ export function AgentSessionsProvider({
 
   const closeSession = useCallback<SessionsActions["closeSession"]>(
     (chatId) => {
+      const existing = cloudClosesRef.current.get(chatId);
+      if (existing) return existing;
       // Closing a tab has the same cancellation boundary as Stop. Record it
       // before any bridge/route guard so a prompt still awaiting create/load
       // cannot dispatch after the tab has disappeared.
@@ -6697,55 +6740,103 @@ export function AgentSessionsProvider({
       if (getStore().sessions[chatId]?.cloudSendWait) cloudSendWaitRef.current.cancel(chatId);
       cloudFlushRef.current.delete(chatId);
       const slot = getStore().sessions[chatId];
-      prebindDirtySessionsRef.current.delete(chatId);
-      clearPrebindGoalSnapshotsForChat(prebindGoalSnapshotsRef.current, chatId);
-      prebindBackgroundTasksRef.current.clearChat(chatId);
-      pendingHydratesRef.current.delete(chatId);
-      invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
-      invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
-      nativeTranscriptSnapshotsRef.current.delete(chatId);
-      // Release the dedupe owner immediately. Its promise still settles behind
-      // identity checks, while a fast History reopen may start a fresh bind.
-      ensureInFlightRef.current.delete(chatId);
-      loadFlightKeysRef.current.delete(chatId);
-      loadFlightAdoptOnlyRef.current.delete(chatId);
-      sendQueueRef.current.delete(chatId);
-      queueHeldRef.current.delete(chatId);
-      flushBubbleRef.current.delete(chatId);
-      authPromptsRef.current.delete(chatId);
-      turnProducedOutputRef.current.delete(chatId);
-      announcedDirsRef.current.delete(chatId);
-      promptActivityRef.current.delete(chatId);
+      const chat = useWorkspaceStore.getState().chats.find((row) => row.id === chatId);
+      const agentId = slot?.agentId ?? chat?.agentId;
+      const release = () => {
+        prebindDirtySessionsRef.current.delete(chatId);
+        clearPrebindGoalSnapshotsForChat(prebindGoalSnapshotsRef.current, chatId);
+        prebindBackgroundTasksRef.current.clearChat(chatId);
+        pendingHydratesRef.current.delete(chatId);
+        invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
+        invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
+        nativeTranscriptSnapshotsRef.current.delete(chatId);
+        // Release the dedupe owner immediately. Its promise still settles behind
+        // identity checks, while a fast History reopen may start a fresh bind.
+        ensureInFlightRef.current.delete(chatId);
+        loadFlightKeysRef.current.delete(chatId);
+        loadFlightAdoptOnlyRef.current.delete(chatId);
+        sendQueueRef.current.delete(chatId);
+        queueHeldRef.current.delete(chatId);
+        flushBubbleRef.current.delete(chatId);
+        authPromptsRef.current.delete(chatId);
+        turnProducedOutputRef.current.delete(chatId);
+        announcedDirsRef.current.delete(chatId);
+        promptActivityRef.current.delete(chatId);
+        getStore().detachSession(chatId);
+      };
+      const requestClose = () => bridge!.request({ type: "AGENT_CLOSE_SESSION", agentId: agentId!, chatId,
+        ...closeRouteForSession(getStore().sessions[chatId]) }, { timeoutMs: 15_000 });
+      if (isCloudWorkspace(slot?.cwd ?? chat?.folder)) {
+        const account = cloudCatalogGeneration(), cwd = slot?.cwd, turnId = slot?.foregroundTurnId;
+        const executionId = slot?.executionId ?? slot?.sessionId;
+        let generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+        let queued = sendQueueRef.current.get(chatId);
+        const ownsClose = () => {
+          const current = getStore().sessions[chatId];
+          return cloudCatalogGeneration() === account && current?.cwd === cwd &&
+            cancelGeneration(cancelGenerationsRef.current, chatId) === generation && sendQueueRef.current.get(chatId) === queued &&
+            current?.agentId === slot?.agentId && current?.foregroundTurnId === turnId &&
+            (turnId != null || (current?.executionId ?? current?.sessionId) === executionId);
+        };
+        const unconfirmed = () => {
+          if (ownsClose() && getStore().sessions[chatId]) {
+            const current = getStore().sessions[chatId], message = "Chat close could not be confirmed. Retry closing the tab.";
+            if (!current.failure || current.failure.stage === "cancel") getStore().patchSession(chatId, {
+              error: message, failure: { kind: "transport-closed", stage: "cancel", agentId: agentId!, message },
+            });
+          }
+          return false;
+        };
+        let promise: Promise<boolean>;
+        promise = (async () => {
+          if (!bridge || !agentId) return unconfirmed();
+          const activity = closeActivityForSession(slot, { localSendInFlight: sendingChatsRef.current.has(chatId),
+            queuedCount: sendQueueRef.current.get(chatId)?.length ?? 0 });
+          if (activity.running || slot?.cloudStop || slot?.cloudPromptPending || slot?.status === "reconnecting" || slot?.activeTurnStartedAt != null) {
+            // Reuse Stop's exact operation and positive terminal proof. Its
+            // public Promise<void> also resolves on uncertainty, so it alone
+            // must never authorize detach or removal of queued payloads.
+            const stopping = cancel(chatId);
+            const stop = cloudStopsRef.current.get(chatId);
+            generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+            queued = sendQueueRef.current.get(chatId);
+            await stopping;
+            if (!stop) return unconfirmed();
+            if (!await stop.promise || !ownsClose()) return false;
+          }
+          if (!ownsClose()) return false;
+          try {
+            const expectedRoute = closeRouteForSession(getStore().sessions[chatId]);
+            const response = await requestClose();
+            if (!ownsClose()) return false;
+            if (response.type !== "AGENT_SESSION_CLOSED" || response.agentId !== agentId ||
+                (response.chatId !== undefined ? response.chatId !== chatId :
+                  !expectedRoute.executionId || (response.executionId ?? response.sessionId) !== expectedRoute.executionId)) return unconfirmed();
+            release();
+            return true;
+          } catch { return unconfirmed(); }
+        })().finally(() => {
+          if (cloudClosesRef.current.get(chatId) === promise) cloudClosesRef.current.delete(chatId);
+        });
+        cloudClosesRef.current.set(chatId, promise);
+        return promise;
+      }
       // A conversation-only close invalidates a provider create/load that is
       // still awaiting its execution id. When a route already exists the
       // engine also cancels and settles that exact active turn before dispose.
-      const agentId =
-        slot?.agentId ??
-        useWorkspaceStore.getState().chats.find((chat) => chat.id === chatId)
-          ?.agentId;
       if (bridge && agentId) {
         // request() gives the lifecycle transaction a correlated acknowledgement
         // while still using the bridge's bounded reconnect queue. A transient
         // socket gap must not turn tab close into "keep working invisibly".
-        void bridge
-          .request(
-            {
-              type: "AGENT_CLOSE_SESSION",
-              agentId,
-              chatId,
-              ...closeRouteForSession(slot),
-            },
-            { timeoutMs: 15_000 },
-          )
-          .catch(() => {});
+        void requestClose().catch(() => {});
       }
       // Always detach locally — including while the bridge is disconnected or
       // before a session id exists. Otherwise explicitly closed/discarded cold
       // slots are themselves an unbounded map. Detach deliberately preserves
       // the scroll anchor and policies; only explicit reset/delete removes those.
-      getStore().detachSession(chatId);
+      release();
     },
-    [bridge, getStore],
+    [bridge, cancel, getStore],
   );
 
   // The actions object is stable across renders. No `sessions` field —
@@ -6762,6 +6853,7 @@ export function AgentSessionsProvider({
       ensureSession,
       sendPrompt,
       cancel,
+      recoverCloudPrompt,
       stopBrowserUse,
       stopBackgroundTask,
       openBoundaryPort,
@@ -6804,6 +6896,7 @@ export function AgentSessionsProvider({
       ensureSession,
       sendPrompt,
       cancel,
+      recoverCloudPrompt,
       stopBrowserUse,
       stopBackgroundTask,
       openBoundaryPort,

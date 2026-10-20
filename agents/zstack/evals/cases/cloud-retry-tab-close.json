@@ -1,0 +1,9 @@
+{
+  "id": "cloud-retry-tab-close",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pending",
+  "symptom": "An interrupted cloud prompt could prepare another command on Retry, while explicit tab close detached and archived before exact Stop retirement.",
+  "rule": "Recover the original command with bounded passive reads before any separate explicit attempt. Cloud close must await the same durable Stop and exact conversation ACK, then revalidate live neighbors and navigation; Local remains synchronous.",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/bridge/__tests__/cloud-durable-stop.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-stop-lifecycle.test.ts apps/desktop/src/renderer/features/agent/__tests__/retry-agent-turn.test.ts apps/desktop/src/renderer/shell/conversation/__tests__/cloud-chat-close-ordering.test.ts"
+}

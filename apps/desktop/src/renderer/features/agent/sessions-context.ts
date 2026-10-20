@@ -136,6 +136,9 @@ export interface SessionsActions {
     followUpBehavior?: import("../settings/follow-up-behavior").FollowUpBehavior,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
+  /** Observe the original cloud command before an explicit Retry. False means
+   * its durable terminal receipt already permits a separate user attempt. */
+  recoverCloudPrompt(chatId: string, turnId: string): Promise<boolean>;
   /** Revoke only the active native Browser lease. If the official Browser
    * plugin is parked on an approval, dismiss that approval so Codex can
    * observe the stopped tool and continue the surrounding chat turn. */
@@ -257,7 +260,7 @@ export interface SessionsActions {
    * Conversation history and the provider binding remain durable, so restoring
    * an archived chat can resume into a fresh execution. Safe before a route has
    * been published: the conversation id invalidates an in-flight bind. */
-  closeSession(chatId: string): void;
+  closeSession(chatId: string): void | Promise<boolean>;
   disposeAll(): void;
 }
 

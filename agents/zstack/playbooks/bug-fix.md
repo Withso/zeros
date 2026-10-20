@@ -55,6 +55,10 @@
    lost claim replies. Cover late enrollment,
    receipt visibility, the initial connection deadline, and renderer reattachment;
    provider terminal events alone cannot settle the pending Stop.
+   For cloud Retry, observe the original accepted command before preparing a
+   new send; fresh exact terminal custody must precede any separate attempt.
+   Pair close callbacks with the real adapter ACK and workspace reducer: cover
+   missing routes, retired neighbors during the wait, and later navigation.
    For warm provider reuse, complete a real first turn and prepare the next
    through the production configuration port and adapter. Preserve the admitted
    cloud model when a composer snapshot omits it; keep Local snapshot semantics

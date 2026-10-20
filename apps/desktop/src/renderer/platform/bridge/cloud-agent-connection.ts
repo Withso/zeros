@@ -26,16 +26,16 @@ type Options = Exclude<
   number | undefined
 >;
 type CommandBinding = { key: string; generation?: number; exactStop: boolean };
-type CommandObservation = {
-  id: Promise<string>; turnId: string; binding: CommandBinding;
+export type CloudCommandObservation = {
+  id: Promise<string>; conversationId: string; turnId: string; binding: CommandBinding;
   submitted: boolean; stopRequested?: boolean; executionId?: string;
-  position?: number; createdAt?: string;
+  position?: number; createdAt?: string; terminal?: "succeeded" | "failed" | "cancelled";
 };
 /** Renderer receipt ownership only. No payload, grant or authority moves from
  * a retired connection; each replacement must authenticate the original pins. */
 export type CloudCommandStop = {
   conversationId: string; operationId: string; agentId: string;
-  binding: CommandBinding; command?: CommandObservation; turnId?: string;
+  binding: CommandBinding; command?: CloudCommandObservation; turnId?: string;
   requested: boolean; acknowledged?: { revision: number; paused: boolean };
   removal?: { conversationId: string; operationId: string; expectedRevision: number; action: { kind: "remove"; commandId: string } };
   result?: WireRecord;
@@ -46,6 +46,9 @@ export function retryableCloudStopError(error: unknown): boolean {
 }
 function stopOwnershipChanged(): Error {
   return Object.assign(new Error("Cloud Stop target changed. Reopen the chat to check the original turn."), { code: "cloud_stop_target_changed" });
+}
+function commandOwnershipChanged(): Error {
+  return Object.assign(new Error("Cloud command target changed. Reopen the chat to check its original result."), { code: "cloud_command_target_changed" });
 }
 async function commandIdentity(conversationId: string, turnId: string): Promise<string> {
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(
@@ -75,7 +78,7 @@ type Conversation = {
   snapshotRevision?: number;
   backgroundRevision?: number;
   backgroundTasks?: BackgroundTasksUpdate;
-  command?: CommandObservation;
+  command?: CloudCommandObservation;
   stop?: CloudCommandStop;
 };
 type NativeSnapshot = {
@@ -247,6 +250,37 @@ export class CloudAgentConnection {
     };
   }
 
+  preparePrompt(message: WireRecord, recoveryOnly = false): CloudCommandObservation | undefined {
+    const owner = this.owner(message);
+    if (!owner) return undefined;
+    const turnId = String(message.userMessageId);
+    if (owner.command?.turnId === turnId) return owner.command;
+    if (recoveryOnly && (owner.command || owner.turnId && owner.turnId !== turnId)) throw commandOwnershipChanged();
+    owner.turnId = turnId;
+    owner.intentRevision = (owner.intentRevision ?? 0) + 1;
+    const command = { id: commandIdentity(owner.id, turnId), conversationId: owner.id, turnId,
+      binding: this.commandBinding(), submitted: recoveryOnly };
+    void command.id.catch(() => {});
+    return owner.command = command;
+  }
+
+  /** Receipt observation survives peer replacement; the original request body
+   * is used only before this command first crosses its enqueue boundary. */
+  continuePrompt(command: CloudCommandObservation, message: WireRecord, signal?: AbortSignal,
+    observed?: () => void): Promise<WireRecord> {
+    const owner = this.conversations.get(command.conversationId);
+    if (!owner || owner.command !== command || owner.turnId && owner.turnId !== command.turnId)
+      return Promise.reject(commandOwnershipChanged());
+    const key = `${owner.id}:${command.turnId}`;
+    const existing = this.pending.get(key);
+    if (existing) return existing;
+    const flight = this.prompt(owner, message, signal, command, observed).finally(() => {
+      if (this.pending.get(key) === flight) this.pending.delete(key);
+    });
+    this.pending.set(key, flight);
+    return flight;
+  }
+
   prepareStop(message: WireRecord): CloudCommandStop | undefined {
     const owner = this.owner(message);
     if (!owner || (!owner.command && !this.commandBinding().exactStop)) return undefined;
@@ -289,7 +323,7 @@ export class CloudAgentConnection {
           owner!.execution ? row.executionId === owner!.execution : queue!.pending.length === 1 && row === queue!.pending[0]);
       if (matches.length !== 1) throw new Error("Cloud Stop receipt is unavailable. Reopen the chat to check its active turn.");
       const row = matches[0]!;
-      command = { id: Promise.resolve(row.commandId), turnId: row.payload?.userMessageId ?? row.result?.terminal?.turnId ?? "",
+      command = { id: Promise.resolve(row.commandId), conversationId: owner!.id, turnId: row.payload?.userMessageId ?? row.result?.terminal?.turnId ?? "",
         binding: stop.binding, submitted: true, stopRequested: true, executionId: row.executionId ?? undefined };
       owner!.command = stop.command = command;
     }
@@ -320,11 +354,15 @@ export class CloudAgentConnection {
         stop.binding.generation !== undefined && entry.generation !== stop.binding.generation ||
         command.executionId && entry.executionId !== command.executionId ||
         command.position !== undefined && entry.position !== command.position ||
-        command.createdAt !== undefined && entry.createdAt !== command.createdAt) throw stopOwnershipChanged();
+        command.createdAt !== undefined && entry.createdAt !== command.createdAt ||
+        entry.payload && entry.payload.userMessageId !== command.turnId ||
+        command.terminal && command.terminal !== entry.state) throw stopOwnershipChanged();
     command.executionId ??= entry.executionId ?? undefined;
     command.position ??= entry.position; command.createdAt ??= entry.createdAt;
-    if (["succeeded", "failed", "cancelled"].includes(entry.state))
+    if (entry.state === "succeeded" || entry.state === "failed" || entry.state === "cancelled") {
+      command.terminal = entry.state;
       return complete({ conversationId: entry.conversationId, commandId, state: entry.state });
+    }
     if (entry.state === "uncertain" && !stop.binding.exactStop) return null;
     if (!stop.acknowledged) {
       // Older strict workers do not accept the target. A lost first reply is
@@ -903,29 +941,7 @@ export class CloudAgentConnection {
       return {type:"AGENT_GOAL_CHANGED",agentId:owner.agentId,sessionId:routeId(owner.id),executionId:routeId(owner.id),goal:entry.result.goal};
     }
     if (message.type === "AGENT_PROMPT") {
-      const key = `${owner.id}:${String(message.userMessageId)}`;
-      const existing = this.pending.get(key);
-      if (existing) return existing;
-      // Fence an older Stop before credential lookup or any other await. A
-      // queued local send changes intent even before its execution is admitted.
-      owner.turnId = typeof message.userMessageId === "string" ? message.userMessageId : undefined;
-      owner.intentRevision = (owner.intentRevision ?? 0) + 1;
-      const command = owner.command && owner.command.turnId === owner.turnId ? owner.command : {
-        id: commandIdentity(owner.id, String(message.userMessageId)), turnId: String(message.userMessageId),
-        binding: this.commandBinding(), submitted: false,
-      };
-      void command.id.catch(() => {});
-      owner.command = command;
-      const flight = this.prompt(
-        owner,
-        message,
-        typeof options === "object" ? options.signal : undefined,
-        command,
-      ).finally(() => {
-        if (this.pending.get(key) === flight) this.pending.delete(key);
-      });
-      this.pending.set(key, flight);
-      return flight;
+      return this.continuePrompt(this.preparePrompt(message)!, message, typeof options === "object" ? options.signal : undefined);
     }
     if (message.type === "AGENT_SET_MODE") {
       const mode = cloudPermissionMode(owner.agentId, message.modeId);
@@ -951,6 +967,7 @@ export class CloudAgentConnection {
       return {
         type: "AGENT_SESSION_CLOSED",
         agentId: owner.agentId,
+        chatId: owner.id,
         sessionId: routeId(owner.id),
         executionId: routeId(owner.id),
       };
@@ -1002,42 +1019,56 @@ export class CloudAgentConnection {
   private async prompt(
     owner: Conversation,
     message: WireRecord,
-    signal?: AbortSignal,
-    command?: CommandObservation,
+    signal: AbortSignal | undefined,
+    command: CloudCommandObservation,
+    observed?: () => void,
   ): Promise<WireRecord> {
     // Composer changes apply to the next send. This command must retain the
     // model/effort that its credential lookup authorizes across every await.
     const { agentId, model, effort, fast, localDirectories, claudePreferences } = owner;
     const permissionMode = owner.permissionMode ?? cloudPermissionMode(agentId);
-    if (!model)
+    const recovering = command.submitted;
+    const assertObservation = () => {
+      signal?.throwIfAborted();
+      if (this.closed) throw new Error("Cloud workspace connection closed");
+      if (this.conversations.get(owner.id) !== owner || owner.command !== command ||
+          this.commandBinding().key !== command.binding.key) throw commandOwnershipChanged();
+    };
+    if (!recovering && !model)
       throw new Error("Choose a model before sending to the cloud workspace");
-    if (localDirectories)
+    if (!recovering && localDirectories)
       throw new Error(
         "Additional local folders cannot be used in a cloud workspace",
       );
     if (
-      effort &&
+      !recovering && effort &&
       !["low", "medium", "high", "xhigh", "max", "ultracode"].includes(effort)
     )
       throw new Error(
         "Choose a supported effort level before sending to the cloud workspace.",
       );
-    // These independently authenticated reads do not depend on the credential
-    // grant. Await all three before any queue mutation or execution admission.
-    const [grant, conversation, snapshot] = await Promise.all([
-      this.localCommandsBinding ? Promise.resolve(undefined) : this.grant(agentId, model),
+    // A replacement must authenticate its boot before comparing retained pins.
+    // Recovery never obtains a grant, resumes a queue or submits another body.
+    const [conversation, preparation] = await Promise.all([
       this.op("cloudCommands.conversation", { conversationId: owner.id }),
-      this.op("cloudCommands.request", {
+      recovering ? Promise.resolve(undefined) : Promise.all([
+        this.localCommandsBinding ? Promise.resolve(undefined) : this.grant(agentId, model),
+        this.op("cloudCommands.request", {
         request: { kind: "snapshot", conversationId: owner.id },
-      }),
+        }),
+      ]),
     ]);
+    if (signal?.aborted) throw new Error("Cloud prompt was cancelled before submission");
+    assertObservation();
     owner.modeRevision = Number(conversation.modeRevision);
-    let queue = this.parseQueue(snapshot);
+    const grant = preparation?.[0];
+    let queue = preparation ? this.parseQueue(preparation[1]) : undefined;
     if (signal?.aborted)
       throw new Error("Cloud prompt was cancelled before submission");
     // The optimistic user-message identity survives retry/reload. Hash it into
     // a stable UUID so an unknown acknowledgement cannot send the prompt twice.
-    const commandId = await (command?.id ?? commandIdentity(owner.id, String(message.userMessageId)));
+    const commandId = await command.id;
+    assertObservation();
     this.commandOwners.set(commandId, owner.id);
     // Mutated by the finally below while observeReceipt may still be awaiting.
     const observation = { live: true };
@@ -1051,13 +1082,13 @@ export class CloudAgentConnection {
     });
     try {
       const submission = { owner, signal, deadline: Date.now() + 60_000,
-        intentCurrent: () => !command || owner.command === command && !command.stopRequested };
+        intentCurrent: () => owner.command === command && !command.stopRequested && this.commandBinding().key === command.binding.key };
       const observeReceipt = async (): Promise<WireRecord> => {
-        const prior = [...queue.pending, ...queue.receipts].find(
+        const prior = queue && [...queue.pending, ...queue.receipts].find(
           (row) => row.commandId === commandId,
         );
-        if (prior && command) command.submitted = true;
-        if (!prior) {
+        if (prior) command.submitted = true;
+        if (!command.submitted && queue && !prior) {
           if (queue.paused) {
             const operationId = crypto.randomUUID();
             for (let attempt = 0; ; attempt++) {
@@ -1100,7 +1131,7 @@ export class CloudAgentConnection {
               mutation: {
                 conversationId: owner.id,
                 operationId: commandId,
-                expectedRevision: queue.revision,
+                expectedRevision: queue!.revision,
                 action: {
                   kind: "enqueue",
                   commandId,
@@ -1153,30 +1184,31 @@ export class CloudAgentConnection {
         // The server still serializes subsequent execution behind retirement.
         for (;;) {
           if (!observation.live) return terminal!;
-          if (signal?.aborted || this.closed || this.conversations.get(owner.id) !== owner)
-            throw new Error(
-              "Cloud prompt observation ended; reconnect to view its result",
-            );
-          let entry;
-          try {
-            entry = this.parseReceipt(
+          assertObservation();
+          const entry = this.parseReceipt(
               await this.op("cloudCommands.request", {
                 request: { kind: "read", commandId },
               }),
-            );
-          } catch (error) {
-            if (!observation.live) return terminal!;
-            if (this.client.status === "connected") throw error;
-          }
+          );
           if (!observation.live) return terminal!;
-          if (entry && (entry.commandId !== commandId || entry.conversationId !== owner.id))
-            throw new Error("Cloud command receipt does not match this conversation");
+          assertObservation();
+          if (entry.commandId !== commandId || entry.conversationId !== owner.id)
+            throw Object.assign(new Error("Cloud command receipt does not match this conversation"), { code: "cloud_command_target_changed" });
+          if (command.binding.generation !== undefined && entry.generation !== command.binding.generation ||
+              command.executionId && entry.executionId !== command.executionId ||
+              command.position !== undefined && entry.position !== command.position ||
+              command.createdAt !== undefined && entry.createdAt !== command.createdAt ||
+              entry.payload && entry.payload.userMessageId !== command.turnId ||
+              command.terminal && command.terminal !== entry.state) throw commandOwnershipChanged();
+          command.position ??= entry.position; command.createdAt ??= entry.createdAt;
           const outcome = this.cloudTurnProtocolVersion === 1 ? entry?.result?.terminal : undefined;
           if (entry && outcome && (outcome.commandId !== commandId || outcome.conversationId !== owner.id || outcome.executionId !== entry.executionId ||
-              outcome.turnId !== message.userMessageId || outcome.agentId !== owner.agentId || entry.payload && entry.payload.userMessageId !== outcome.turnId ||
+              outcome.turnId !== command.turnId || outcome.agentId !== owner.agentId || entry.payload && entry.payload.userMessageId !== outcome.turnId ||
               entry.state === "succeeded" && outcome.status !== "completed" || entry.state === "cancelled" && outcome.status !== "cancelled" ||
               entry.state === "failed" && outcome.status !== "failed"))
             throw new Error("Cloud terminal receipt does not match this turn");
+          if (entry.state === "succeeded" || entry.state === "failed" || entry.state === "cancelled") command.terminal = entry.state;
+          observed?.();
           if (entry?.executionId) {
             if (command) command.executionId ??= entry.executionId;
             const result = this.promptResults.get(commandId);
@@ -1191,6 +1223,7 @@ export class CloudAgentConnection {
             const state = await this.restoreNativeState(owner);
             if (!observation.live) { state.restoration?.finish(); return terminal!; }
             try {
+              assertObservation();
               this.attachSnapshot(state);
               const changed = { type: "DB_CHANGED", kinds: ["messages"], chatIds: [owner.id] };
               for (const listener of this.listeners.get("DB_CHANGED") ?? []) listener(changed as unknown as BridgeMessage);
@@ -1249,6 +1282,7 @@ export class CloudAgentConnection {
       }
       // A terminal receipt also ends the execution's interactive controls when
       // its terminal event was lost. An interrupted observer proves nothing.
+      assertObservation();
       owner.promptActive = false;
       return result;
     } finally {

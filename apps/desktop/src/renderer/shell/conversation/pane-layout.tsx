@@ -489,6 +489,7 @@ export function ConversationPaneLayout({
       // Fresh read — the pane-focus pointerdown that preceded this click
       // may have re-pointed the global selection this same tick.
       const globalActive = useWorkspaceStore.getState().activeChatId;
+      const navigationVersion = useWorkspaceStore.getState().navigationVersion;
       const wasActive = globalActive === chat.id;
 
       // Prefer the pane-local neighbor (tab to the right, else left) so
@@ -522,53 +523,77 @@ export function ConversationPaneLayout({
         storedDraft: useWorkspaceStore.getState().chatComposerDrafts[chat.id],
       });
 
-      // Closing a chat is an explicit stop boundary for every agent. The
-      // conversation/provider binding remain durable when archived, but the
-      // current execution and every queued follow-up are cancelled now.
-      // Terminals remain explicit process resources and are killed on close.
+      const finish = (deferred = false) => {
+        const state = useWorkspaceStore.getState();
+        const current = state.chats.find((row) => row.id === chat.id);
+        if (!current || current.archived || current.folder !== closedFolder) return;
+        const selectionChanged = state.navigationVersion !== navigationVersion || state.activeChatId !== globalActive;
+        let next = replacement, hasSibling = visibleChats.length > 1;
+        let currentPaneChats = paneChats;
+        if (deferred) {
+          // A background tab can disappear without changing navigation. Keep
+          // the same-pane preference, but resolve it from still-live records.
+          const live = new Set(state.chats.filter(row => !row.archived && row.folder === closedFolder).map(row => row.id));
+          currentPaneChats = paneChats.filter(row => live.has(row.id));
+          const index = currentPaneChats.findIndex(row => row.id === chat.id);
+          next = index < 0 ? null : currentPaneChats[index + 1] ?? currentPaneChats[index - 1] ?? null;
+          hasSibling = live.size > 1;
+        }
+        // A cloud close can wait while its final transcript lands. Preserve
+        // that history even when the tab was pristine at the original click.
+        dispatch({ type: discard && !deferred ? "DELETE_CHAT" : "ARCHIVE_CHAT", id: chat.id });
+        if (deferred && selectionChanged) return;
+
+        if (wasActive) {
+          if (next) {
+            dispatch({ type: "SET_ACTIVE_CHAT", id: next.id });
+          } else if (hasSibling) {
+            // Pane emptied but other panes still have chats — the
+            // ARCHIVE_CHAT / DELETE_CHAT reducer already re-pointed the
+            // selection to the most-recent live sibling; reconcile collapses
+            // this pane.
+          } else {
+            // Last chat in the workspace: spawn a fresh default chat so
+            // the user is never parked on a no-chat pane.
+            dispatch({ type: "SET_NEW_AGENT_FOLDER", folder: closedFolder });
+            void spawnDefaultChatForWorkspace({
+              folder: closedFolder,
+              sessions,
+              dispatch,
+            });
+          }
+        } else if (next && activeWorkspacePath) {
+          // The closed chat wasn't the global selection, but if it WAS
+          // this pane's displayed chat, keep the pane on its neighbor.
+          // Gated on the displayed chat — closing a background tab must
+          // not clobber the pane's memory (the displayed chat stays).
+          const displayed = resolvePaneActiveChatId(
+            layout,
+            paneId,
+            globalActive,
+            currentPaneChats,
+          );
+          if (displayed === chat.id) {
+            setPaneActiveChat(activeWorkspacePath, paneId, next.id);
+          }
+        }
+      };
+      // Local close remains synchronous. Cloud close joins the exact durable
+      // Stop and its detach ACK before this gesture may archive the tab.
       switch (tabCloseResourceAction({ kind: chat.kind, discard })) {
         case "kill-terminal":
           void ptyKill({ sessionId: chat.id });
           break;
-        case "close-session":
-          closeSession(chat.id);
+        case "close-session": {
+          const closing = closeSession(chat.id);
+          if (closing) {
+            void closing.then((confirmed) => { if (confirmed) finish(true); }).catch(() => {});
+            return;
+          }
           break;
-      }
-      dispatch({ type: discard ? "DELETE_CHAT" : "ARCHIVE_CHAT", id: chat.id });
-
-      if (wasActive) {
-        if (replacement) {
-          dispatch({ type: "SET_ACTIVE_CHAT", id: replacement.id });
-        } else if (visibleChats.length > 1) {
-          // Pane emptied but other panes still have chats — the
-          // ARCHIVE_CHAT / DELETE_CHAT reducer already re-pointed the
-          // selection to the most-recent live sibling; reconcile collapses
-          // this pane.
-        } else {
-          // Last chat in the workspace: spawn a fresh default chat so
-          // the user is never parked on a no-chat pane.
-          dispatch({ type: "SET_NEW_AGENT_FOLDER", folder: closedFolder });
-          void spawnDefaultChatForWorkspace({
-            folder: closedFolder,
-            sessions,
-            dispatch,
-          });
-        }
-      } else if (replacement && activeWorkspacePath) {
-        // The closed chat wasn't the global selection, but if it WAS
-        // this pane's displayed chat, keep the pane on its neighbor.
-        // Gated on the displayed chat — closing a background tab must
-        // not clobber the pane's memory (the displayed chat stays).
-        const displayed = resolvePaneActiveChatId(
-          layout,
-          paneId,
-          globalActive,
-          paneChats,
-        );
-        if (displayed === chat.id) {
-          setPaneActiveChat(activeWorkspacePath, paneId, replacement.id);
         }
       }
+      finish();
     },
     [
       readOnly,
