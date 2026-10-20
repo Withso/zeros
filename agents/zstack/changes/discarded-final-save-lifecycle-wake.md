@@ -12,6 +12,11 @@ active exact receipts without changing source facts, retry clocks or leases.
 Cover rollback, dedupe, a running job, a future retry, a terminal failure and a
 new legal hold. Scheduling never supplies save or provider-deletion proof.
 
+Own review also reproduced an old-trigger discard committing after the new
+backfill had scanned. A bounded recovery-table writer lock closes that rollout
+window; the unchanged concurrent regression requires the committed job, not
+just successful migration and operator transactions.
+
 Encoded in the three owner-discard lifecycle integration suites, migration
 0179 and its exact expansion guard, the bug-fix playbook, and the
 `discarded-final-save-lifecycle-wake` seeded eval. Local Personal and

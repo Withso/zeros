@@ -143,6 +143,57 @@ suite("discarded lifecycle migration from committed existing-Delete receipts", (
     expect((await jobs()).rows).toHaveLength(1);
   }, 30_000);
 
+  it("includes an old-trigger discard that is still uncommitted when migration starts", async () => {
+    const f = await seedExistingDelete(pool), workers = existingDeleteWorkers(pool, f);
+    await runDueLifecycleJobs(pool, workers.reconciler, ["lifecycle"]);
+    expect((await jobs()).rows).toEqual([]);
+    const plan = await manageCloudOwnerDiscardDelete(pool, f.request, options());
+    const discarded = latch(), resume = latch();
+    const gated = { connect: async () => {
+      const client = await pool.connect();
+      return { query: async (sql: string, values?: unknown[]) => {
+        const result = await client.query(sql, values);
+        if (sql.includes("UPDATE cloud_workspace_final_save_recoveries SET state='discarded'")) {
+          discarded.resolve();
+          await resume.promise;
+        }
+        return result;
+      }, release: () => client.release() };
+    } } as unknown as pg.Pool;
+    const executing = manageCloudOwnerDiscardDelete(gated, f.request, { ...options(), execute: true, approval: plan.approval })
+      .then(value => ({ value, error: undefined }), (error: unknown) => ({ value: undefined, error }));
+    const client = await pool.connect();
+    let finished = false, migrationError: unknown, migrating: Promise<void> | undefined;
+    try {
+      await Promise.race([discarded.promise, executing.then(result => { throw result.error ?? new Error("discard gate not reached"); })]);
+      expect((await jobs()).rows).toEqual([]);
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_owner_existing_delete_receipts")).rowCount).toBe(0);
+      await client.query("BEGIN");
+      const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      const source = await readFile(new URL(migration, directory), "utf8");
+      migrating = (async () => { await client.query(source); await client.query("COMMIT"); })()
+        .catch((error: unknown) => { migrationError = error; }).finally(() => { finished = true; });
+      // Observe either the migration's completion or its actual lock wait;
+      // release the old writer only after one of those boundaries is reached.
+      await vi.waitFor(async () => {
+        const waiting = (await pool.query(`SELECT wait_event_type='Lock' AS waiting
+          FROM pg_stat_activity WHERE pid=$1`, [pid])).rows[0]?.waiting;
+        expect(finished || waiting === true).toBe(true);
+      }, { timeout: 3_000, interval: 10 });
+    } finally {
+      resume.resolve();
+      await executing;
+      await migrating;
+      try { await client.query("ROLLBACK"); } finally { client.release(); }
+    }
+    expect(migrationError).toBeUndefined();
+    expect((await executing).error).toBeUndefined();
+    expect((await executing).value).toMatchObject({ state: "deleting", deleteIntentId: f.deleteId });
+    expect((await jobs()).rows).toMatchObject([{ workspace_id: f.workspaceId, state: "queued", due: true }]);
+    await runDueLifecycleJobs(pool, workers.reconciler, ["lifecycle"]);
+    expect(workers.provider.delete).toHaveBeenCalledExactlyOnceWith(f.resourceId);
+  }, 30_000);
+
   it("excludes a receipt whose current authority is no longer valid", async () => {
     const { f, workers } = await committedWithoutWake();
     await pool.query("UPDATE workspace_blobs SET legal_hold=true WHERE id=$1", [f.blobId]);

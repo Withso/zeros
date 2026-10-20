@@ -264,6 +264,8 @@
    and completion. Calling the handler directly hides a missing durable wake.
    Replay already committed repairs across the migration and preserve exact
    receipt scope, retry clocks, leases and terminal outcomes during backfill.
+   Hold an old writer uncommitted across trigger replacement: the backfill must
+   serialize with it, or it can miss both the new enqueue and the old receipt.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

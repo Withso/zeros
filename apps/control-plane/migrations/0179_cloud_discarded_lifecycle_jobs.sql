@@ -1,6 +1,10 @@
 -- zeros-migration: expand
 SET LOCAL lock_timeout = '5s';
 
+-- Finish writers that used the old trigger before taking the backfill's
+-- snapshot. Later recovery writes wait and use the replacement after commit.
+LOCK TABLE cloud_workspace_final_save_recoveries IN SHARE ROW EXCLUSIVE MODE;
+
 -- A committed owner discard can admit an existing lifecycle intent without
 -- updating that intent. Its earlier blocked job may already have drained.
 -- Commit a lifecycle wake with the discard, just as with proven final saves;

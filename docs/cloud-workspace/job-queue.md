@@ -350,6 +350,8 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   drained; recovery at `infinity` cannot wake the lifecycle worker. The migration
   backfills only active Deletes with a current exact existing-Delete receipt.
   It preserves intent retry clocks, leases, source facts and provider proof.
+  A bounded recovery-table writer lock makes earlier uncommitted discards
+  visible to the backfill before later writers use the replacement trigger.
   A hint grants no dispatch authority; early jobs recheck and reschedule through
   the ordinary worker. The hourly audit remains a fallback for lost jobs.
 - **`run_at` is a lower bound.** A trigger never schedules later than the
