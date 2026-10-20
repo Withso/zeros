@@ -1,0 +1,9 @@
+{
+  "id": "seeded-cloud-stop-admission-target",
+  "kind": "seeded",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pr:673",
+  "symptom": "Stopping a queued cloud command cancels a different earlier command that is still preparing because both share the conversation pause bit.",
+  "rule": "playbooks/bug-fix.md: hold the earlier command in native preparation while stopping a queued successor; pause future claims without cancelling unrelated admission, while exact and legacy Stop still cancel their own work.",
+  "check": "pnpm test:git apps/desktop/src/engine/__tests__/w3-cloud-stop-target-review.test.ts"
+}

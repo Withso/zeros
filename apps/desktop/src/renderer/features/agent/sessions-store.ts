@@ -279,6 +279,32 @@ function isLocalSessionSlot(chatId: string, slot: AgentSessionState): boolean {
   return !!slot.cwd && !isCloudWorkspace(slot.cwd) && !parseCloudScopedId(chatId);
 }
 
+/** Reattachment is metadata, not proof that a command stopped. Only the Stop
+ * observer clears its exact operation; an authoritative successor drops it. */
+function settleCloudStop(previous: AgentSessionState | undefined, next: AgentSessionState, reattaching = false): AgentSessionState {
+  const sameOwner = isCloudWorkspace(next.cwd) && (!previous || previous.cwd === next.cwd && previous.agentId === next.agentId);
+  if (reattaching && !next.cloudStop && previous?.cloudStop && sameOwner &&
+      (!next.foregroundTurnId || next.foregroundTurnId === previous.cloudStop.turnId))
+    next = { ...next, cloudStop: previous.cloudStop, foregroundTurnId: previous.foregroundTurnId };
+  const stop = next.cloudStop;
+  if (!stop) return next;
+  if (!sameOwner || stop.turnId !== (next.foregroundTurnId ?? null) || stop.turnId === null && previous &&
+      (next.executionId ?? next.sessionId) && (previous.executionId ?? previous.sessionId) &&
+      (next.executionId ?? next.sessionId) !== (previous.executionId ?? previous.sessionId))
+    return { ...next, cloudStop: undefined };
+  if (previous?.cloudStop?.operationId === stop.operationId && next.activeTurnStartedAt === null && previous.activeTurnStartedAt !== null)
+    next = { ...next, activeTurnStartedAt: previous.activeTurnStartedAt };
+  if (stop.state === "unconfirmed" && previous?.cloudStop?.operationId === stop.operationId && !next.error && previous.error)
+    next = { ...next, error: previous.error, failure: previous.failure };
+  return next;
+}
+
+function retiredCloudStop(state: SessionsStoreState, chatId: string, previous: AgentSessionState | undefined, next: AgentSessionState): Partial<Pick<SessionsStoreState, "cancellingChats">> {
+  if (!previous?.cloudStop || next.cloudStop || !state.cancellingChats.has(chatId)) return {};
+  const cancellingChats = new Set(state.cancellingChats); cancellingChats.delete(chatId);
+  return { cancellingChats };
+}
+
 export const BLANK: AgentSessionState = {
   agentId: null,
   agentName: null,
@@ -708,6 +734,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         normalized = { ...normalized, transcriptPresentation: null };
       }
       normalized = settleSlotLeadingPrompt(chatId, previous, normalized, slot.leadingPrompt);
+      normalized = settleCloudStop(previous, normalized, true);
       if (
         previous &&
         (previous.executionId ?? previous.sessionId) !== executionId &&
@@ -729,6 +756,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const next = { ...state.sessions, [chatId]: normalized };
       return {
         sessions: next,
+        ...retiredCloudStop(state, chatId, previous, normalized),
         executionToChatId: local && previous &&
           (previous.executionId ?? previous.sessionId) === executionId
           ? state.executionToChatId : rebuildIndex(next),
@@ -790,6 +818,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       // Repeated status/metadata writes should not wake transcript consumers.
       // This checks field identity only; no history scan or serialization on
       // the patch path, and an absent slot must still be installed.
+      updated = settleCloudStop(existing, updated);
       if (state.sessions[chatId] && isLocalSessionSlot(chatId, updated) && shallow(existing, updated)) return state;
       const next = { ...state.sessions, [chatId]: updated };
       // Only rebuild the reverse index if executionId changed — saves work
@@ -797,6 +826,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const indexNeedsUpdate = existing.executionId !== updated.executionId;
       return {
         sessions: next,
+        ...retiredCloudStop(state, chatId, existing, updated),
         executionToChatId: indexNeedsUpdate
           ? rebuildIndex(next)
           : state.executionToChatId,
@@ -1187,7 +1217,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
                 upd.state === "cancelled" ? "cancelled" : (upd.stopReason ?? null),
               foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
               ...(slot.cloudPromptPending ? { cloudPromptPending: false } : {}),
-              activeTurnStartedAt: null,
+              activeTurnStartedAt: slot.cloudStop ? slot.activeTurnStartedAt : null,
             },
           },
           // Cloud process retirement and its durable command receipt can
@@ -1479,9 +1509,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const failure = !newerPending && !snapshot.activeTurn && terminal?.status === "failed"
         ? terminal.failure ?? { kind: "protocol-error" as const, stage: "prompt" as const, message: terminal.error ?? "The cloud turn failed.", agentId: snapshot.agentId }
         : null;
-      installed = true;
-      return { pendingLocalTurns: !snapshot.activeTurn && terminal?.turnId === pendingId ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId) : state.pendingLocalTurns,
-        sessions: { ...state.sessions, [chatId]: { ...slot, ...metadata, messages, hasTranscript: awaitingHistory || hasDurableMessages(messages),
+      const next = settleCloudStop(slot, { ...slot, ...metadata, messages, hasTranscript: awaitingHistory || hasDurableMessages(messages),
         transcriptState: awaitingHistory ? "loading" : "resident",
         transcriptPresentation: awaitingHistory ? slot.transcriptPresentation : null,
         transcriptDirty: false, pendingPermissions: permissions, pendingPermission: permissions[0] ?? null, pendingQuestions: snapshot.questions,
@@ -1490,7 +1518,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         ...(slot.cloudPromptPending && !newerPending ? { cloudPromptPending: false } : {}),
         activeTurnStartedAt: newerPending ? slot.activeTurnStartedAt : snapshot.activeTurn?.startedAt ?? null,
         lastStopReason: newerPending ? slot.lastStopReason : snapshot.activeTurn ? null : terminal?.stopReason ?? (terminal?.status === "cancelled" ? "cancelled" : null),
-      } } };
+      });
+      installed = true;
+      return { pendingLocalTurns: !snapshot.activeTurn && terminal?.turnId === pendingId ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId) : state.pendingLocalTurns,
+        ...retiredCloudStop(state, chatId, slot, next), sessions: { ...state.sessions, [chatId]: next } };
     });
     if (installed && snapshot.latestTurn) turnRowCache.invalidate(turnRowKey(chatId, snapshot.latestTurn.turnId));
   },
@@ -1793,6 +1824,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       // next AGENT_PROMPT target an execution the engine has already removed.
       // Keep transcript, cwd, usage and providerBinding/providerMetadata — they
       // are conversation state and are exactly what silent re-adoption needs.
+      // A cloud route names the conversation, not the native execution.
+      // Its retained Stop still needs that route and turn until the command
+      // observer proves retirement; revocation alone cannot settle it.
+      const stoppingCloud = isCloudWorkspace(slot.cwd) && !!slot.cloudStop;
       const terminal =
         slot.status === "failed" || slot.status === "auth-required";
       const sessions = {
@@ -1800,15 +1835,15 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         [chatId]: {
           ...slot,
           status: terminal ? slot.status : ("reconnecting" as SessionStatus),
-          error: terminal ? slot.error : null,
-          failure: terminal ? slot.failure : null,
-          executionId: null,
-          sessionId: null,
-          session: null,
+          error: terminal || stoppingCloud ? slot.error : null,
+          failure: terminal || stoppingCloud ? slot.failure : null,
+          executionId: stoppingCloud ? slot.executionId : null,
+          sessionId: stoppingCloud ? slot.sessionId : null,
+          session: stoppingCloud ? slot.session : null,
           boundary: null,
           boundaryPorts: null,
-          foregroundTurnId: null,
-          activeTurnStartedAt: null,
+          foregroundTurnId: stoppingCloud ? slot.foregroundTurnId : null,
+          activeTurnStartedAt: stoppingCloud ? slot.activeTurnStartedAt : null,
           pendingPermission: null,
           pendingPermissions: [],
           pendingQuestions: [],
@@ -1819,7 +1854,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           backgroundTasksWaitingSince: null,
         },
       };
-      const cancellingChats = state.cancellingChats.has(chatId)
+      const cancellingChats = !stoppingCloud && state.cancellingChats.has(chatId)
         ? new Set(
             [...state.cancellingChats].filter(
               (candidate) => candidate !== chatId,
@@ -1921,7 +1956,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         const activelyDriven =
           !!sessionId &&
           (cur.status === "streaming" || cur.status === "warming");
-        if (terminal || activelyDriven) {
+        // Native exit can follow turn_state before the paired command
+        // retirement. Keep the logical cloud route available for Stop retry.
+        const stoppingCloud = isCloudWorkspace(cur.cwd) && !!cur.cloudStop;
+        if (terminal || activelyDriven || stoppingCloud) {
           next[chatId] = cur;
           continue;
         }

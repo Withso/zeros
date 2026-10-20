@@ -112,6 +112,9 @@ export interface AgentSessionState {
   cloudSendWait?: { state: "waiting" | "failed"; phase?: "sending" | "starting-workspace"; message?: string; turnId?: string; startedAt?: number };
   /** Native dispatch is pending; only an exact accepted turn starts its clock. */
   cloudPromptPending?: boolean;
+  /** Explicit cloud Stop remains owned until the exact command has a terminal
+   * receipt. Transport loss and a paused queue acknowledgement cannot clear it. */
+  cloudStop?: { operationId: string; turnId: string | null; state: "pending" | "unconfirmed" };
   /** Stop preserves follow-ups until the next explicit send resumes FIFO. */
   queuePaused?: boolean;
   /** The provider resumed into an empty conversation; carry visible context on

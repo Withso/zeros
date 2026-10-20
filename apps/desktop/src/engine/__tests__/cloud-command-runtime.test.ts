@@ -421,6 +421,24 @@ describe("engine-owned cloud command dispatch", () => {
     await f.stop(); expect(f.dependencies.cancel).not.toHaveBeenCalled();
     f.completion.resolve({ state: "succeeded", resultCode: null }); f.runtime.close();
   });
+  it("retries the original native cancellation after its durable Stop was already recorded", async () => {
+    const f = fixture(), original = f.dependencies.request.getMockImplementation()!;
+    const stop = { kind: "stop", conversationId: "chat", operationId: randomUUID() };
+    let stops = 0, cancellations = 0;
+    f.dependencies.request.mockImplementation(async input => input.kind === "stop"
+      ? f.snapshot(3, true, true, ++stops > 1) : original(input));
+    f.dependencies.cancel.mockImplementation(async () => {
+      if (++cancellations === 1) throw new Error("synthetic native cancellation unavailable");
+      f.completion.resolve({ state: "cancelled", resultCode: null });
+    });
+    try {
+      await f.send(); await vi.waitFor(() => expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      await expect(f.runtime.handle(stop)).rejects.toThrow("synthetic native cancellation unavailable");
+      await f.runtime.handle(stop);
+      expect(f.dependencies.cancel).toHaveBeenCalledTimes(2);
+      expect(f.dependencies.dispatch).toHaveBeenCalledOnce();
+    } finally { f.completion.resolve({ state: "cancelled", resultCode: null }); f.runtime.close(); }
+  });
   it("does not accept engine dispatch operations or provider overrides from a device", async () => {
     const f = fixture();
     await expect(f.runtime.handle({ kind: "claim", conversationId: "chat", executionId: "forged" })).rejects.toMatchObject({ code: "invalid_command" });

@@ -1,0 +1,9 @@
+{
+  "id": "durable-cloud-stop",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pr:673",
+  "symptom": "Cloud Stop cleared its control on a paused acknowledgement while the original command was still dispatching, and transport replacement or repeated cancellation could lose its operation identity.",
+  "rule": "A cloud Stop owns an exact command and operation above replaceable peers. Keep its control through reconnect and native retirement, use passive bounded recovery, and never cancel a successor or resubmit the prompt.",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/bridge/__tests__/cloud-durable-stop.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-stop-lifecycle.test.ts"
+}

@@ -1535,6 +1535,7 @@ export function AgentSessionsProvider({
    *  send is still parked on a session rebuild / resume and has therefore not
    *  reached the engine yet. See bumpCancelGeneration. */
   const cancelGenerationsRef = useRef(new Map<string, number>());
+  const cloudStopsRef = useRef(new Map<string, { operationId: string; promise: Promise<void> }>());
   const cloudSendPreparationRef = useRef(new CloudSendPreparation());
   const cloudSendWaitRef = useRef(new CloudSendWait());
   useEffect(() => () => { cloudSendPreparationRef.current.clear(); cloudSendWaitRef.current.clear(); }, [bridge, cloudComputerV2]);
@@ -2900,6 +2901,9 @@ export function AgentSessionsProvider({
        *  recorded failure is never overwritten — it's the more useful truth. */
       const settleStoppedSend = () => {
         const slot = getStore().sessions[chatId];
+        // Observation loss and provider completion do not prove the accepted
+        // cloud command's paired retirement. Its Stop flight owns that wait.
+        if (slot?.cloudStop && isCloudWorkspace(slot.cwd)) return;
         if (
           slot &&
           (slot.status === "streaming" || slot.status === "warming")
@@ -3980,7 +3984,8 @@ export function AgentSessionsProvider({
             return;
           }
           const wasCancelling = getStore().cancellingChats.has(chatId);
-          if (wasCancelling) getStore().setCancelling(chatId, false);
+          const pendingCloudStop = isCloudWorkspace(slot.cwd) && !!slot.cloudStop;
+          if (wasCancelling && !pendingCloudStop) getStore().setCancelling(chatId, false);
           const u = slot.usage;
           const nextUsage: AgentUsage = turnUsage
             ? {
@@ -3996,15 +4001,15 @@ export function AgentSessionsProvider({
               }
             : u;
           getStore().patchSession(chatId, {
-            status: "ready",
-            error: null,
-            failure: null,
-            lastStopReason: wasCancelling
+            status: pendingCloudStop ? slot.status : "ready",
+            error: pendingCloudStop ? slot.error : null,
+            failure: pendingCloudStop ? slot.failure : null,
+            lastStopReason: pendingCloudStop ? slot.lastStopReason : wasCancelling
               ? "cancelled"
               : resp.type === "AGENT_PROMPT_COMPLETE"
                 ? resp.stopReason
                 : null,
-            activeTurnStartedAt: null,
+            activeTurnStartedAt: pendingCloudStop ? slot.activeTurnStartedAt : null,
             usage: nextUsage,
           });
           // Analytics: a prompt turn completed. Metadata only — model NAME,
@@ -4465,7 +4470,7 @@ export function AgentSessionsProvider({
       cloudSendWaitRef.current.cancel(chatId);
       const undispatched = getStore().sessions[chatId];
       const pendingSendId = undispatched?.cloudSendWait?.turnId;
-      if (isCloudWorkspace(undispatched?.cwd) && pendingSendId && !sendingChatsRef.current.has(chatId) &&
+      if (isCloudWorkspace(undispatched?.cwd) && !undispatched?.cloudStop && pendingSendId && !sendingChatsRef.current.has(chatId) &&
           undispatched.status !== "streaming" && !hasBackgroundAgentWork(undispatched) &&
           sendQueueRef.current.get(chatId)?.some(entry => entry.bubbleId === pendingSendId)) {
         // No prompt was dispatched. Stop pauses delivery; only explicit Remove
@@ -4503,7 +4508,7 @@ export function AgentSessionsProvider({
       }
       evictUnretainedTranscripts();
       const current = getStore().sessions[chatId];
-      if (current) {
+      if (current && !isCloudWorkspace(current.cwd)) {
         getStore().patchSession(chatId, {
           ...loadedBackgroundTaskState(),
           activeTurnStartedAt: null,
@@ -4544,6 +4549,52 @@ export function AgentSessionsProvider({
       }
       if (!bridge || cancellationAction !== "cancel-session") return;
       if (!current?.agentId || !currentExecutionId) return;
+      if (isCloudWorkspace(current.cwd)) {
+        const turnId = current.foregroundTurnId ?? null, stopCwd = current.cwd, agentId = current.agentId;
+        const startedAt = current.activeTurnStartedAt;
+        const operationId = current.cloudStop && current.cloudStop.turnId === turnId ? current.cloudStop.operationId : crypto.randomUUID();
+        const existing = cloudStopsRef.current.get(chatId);
+        if (existing?.operationId === operationId) return existing.promise;
+        const ownsStop = () => {
+          const slot = getStore().sessions[chatId];
+          return slot?.cwd === stopCwd && (slot.foregroundTurnId ?? null) === turnId && slot.cloudStop?.operationId === operationId &&
+            (turnId !== null || (slot.executionId ?? slot.sessionId) === currentExecutionId && slot.activeTurnStartedAt === startedAt);
+        };
+        getStore().setCancelling(chatId, true);
+        const recordedFailure = current.failure?.stage !== "cancel" ? current.failure : null;
+        getStore().patchSession(chatId, { cloudStop: { operationId, turnId, state: "pending" }, error: recordedFailure?.message ?? null, failure: recordedFailure });
+        const promise = (async () => {
+          try {
+            const response = await bridge.request({ type: "AGENT_CANCEL", agentId,
+              executionId: currentExecutionId, sessionId: currentExecutionId, chatId, id: operationId }, { timeoutMs: 60_000 });
+            const result = response.type === "WORKSPACE_RESPONSE" ? response.result : null;
+            if (!result || typeof result !== "object" || !("conversationId" in result) || result.conversationId !== chatId ||
+                !("state" in result) || !["succeeded", "failed", "cancelled"].includes(String(result.state)))
+              throw new Error("Stop could not be confirmed");
+            if (!ownsStop()) return;
+            const slot = getStore().sessions[chatId];
+            const failure = slot.failure?.stage !== "cancel" ? slot.failure : null;
+            const terminalFailure = failure ?? (result.state === "failed" ? {
+              kind: "protocol-error" as const, stage: "prompt" as const, agentId, message: "The cloud turn failed.",
+            } : null);
+            getStore().setCancelling(chatId, false);
+            getStore().patchSession(chatId, { ...loadedBackgroundTaskState(), cloudStop: undefined, cloudPromptPending: false,
+              status: terminalFailure ? "failed" : "ready", error: terminalFailure?.message ?? null, failure: terminalFailure,
+              lastStopReason: result.state === "cancelled" && !terminalFailure ? "cancelled" : slot.lastStopReason, activeTurnStartedAt: null,
+              pendingPermission: null, pendingPermissions: [], pendingQuestions: [] });
+          } catch {
+            if (!ownsStop()) return;
+            const message = "Stop could not be confirmed. Reconnect to check this turn.";
+            const slot = getStore().sessions[chatId], failure = slot.failure?.stage !== "cancel" ? slot.failure : null;
+            getStore().patchSession(chatId, { cloudStop: { operationId, turnId, state: "unconfirmed" }, error: failure?.message ?? message,
+              failure: failure ?? { kind: "transport-closed", stage: "cancel", agentId, message } });
+          } finally {
+            if (cloudStopsRef.current.get(chatId)?.operationId === operationId) cloudStopsRef.current.delete(chatId);
+          }
+        })();
+        cloudStopsRef.current.set(chatId, { operationId, promise });
+        return promise;
+      }
       // Optimistic state transition: cancel is intentional, the chat
       // should immediately be ready for the next prompt. The flag
       // suppresses the AGENT_PROMPT_FAILED that arrives when the
@@ -4580,15 +4631,7 @@ export function AgentSessionsProvider({
         executionId: currentExecutionId,
         sessionId: currentExecutionId,
       } as const;
-      if (isCloudWorkspace(current.cwd)) {
-        try { await bridge.request({ ...stop, id: crypto.randomUUID(), chatId }, { timeoutMs: 60_000 }); }
-        catch {
-          const slot = getStore().sessions[chatId];
-          if (slot?.cwd === current.cwd && (slot.executionId ?? slot.sessionId) === currentExecutionId && slot.status === "ready" && !slot.activeTurnStartedAt)
-            getStore().patchSession(chatId, { error: "Stop could not be confirmed. Reconnect to check this turn.",
-              failure: { kind: "transport-closed", stage: "cancel", agentId: current.agentId, message: "Stop could not be confirmed. Reconnect to check this turn." } });
-        }
-      } else bridge.send(stop);
+      bridge.send(stop);
     },
     [bridge, getStore, cancelStalledAdmission, evictUnretainedTranscripts, pauseQueue],
   );

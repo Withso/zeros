@@ -392,15 +392,13 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true, se
     client.commands.CloudQueuedPromptSchema.parse(payload);
     assert.equal(payload.model, "contract-model");
     assert.equal(payload.permissionMode, "auto-edit");
-    if (stop)
-      await bridge.request(
-        connection.outgoing({
-          type: "AGENT_CANCEL",
-          sessionId: `conversation:${conversationId}`,
-          agentId: "codex",
-        }),
-      );
-    else completion.resolve(settled ?? { state: "succeeded", resultCode: null });
+    if (stop) {
+      const cancel = { type: "AGENT_CANCEL", sessionId: `conversation:${conversationId}`, agentId: "codex" };
+      // Current clients own acknowledged Stop through request. The pinned
+      // legacy client returns null here and still uses its outgoing translator.
+      const result = await bounded(connection.request(cancel), "runtime_skew_stop_completion_incompatible");
+      if (result === null) await bridge.request(connection.outgoing(cancel));
+    } else completion.resolve(settled ?? { state: "succeeded", resultCode: null });
     const result = await bounded(observed, "runtime_skew_receipt_completion_incompatible");
     assert.ifError(result.error);
     const failed = settled?.state === "failed";

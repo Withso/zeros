@@ -4,7 +4,7 @@ import { WORKSPACE_RESOURCE_USAGE_CAPABILITY } from "@zeros/protocol/workspace-r
 import { isCloudGithubWriteOperation } from "@zeros/protocol/github-auth";
 import { RuntimeClient, type ConnectionStatus } from "./ws-client";
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
-import type { CloudAgentConnection, CloudConversationAttachment } from "./cloud-agent-connection";
+import { retryableCloudStopError, type CloudAgentConnection, type CloudConversationAttachment, type CloudCommandStop } from "./cloud-agent-connection";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { CloudHistoryRestoreTracker, type CloudHistoryRestoreTicket } from "../../state/cloud-transcript-cache";
 import { CloudHistoryRestoreMetadataSchema, type CloudHistoryRestoreMetadata, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
@@ -134,6 +134,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private readonly peers = new Map<string, PeerEntry>();
   private readonly opening = new Map<string, OpeningPeer>();
   private readonly refusedAdmissions = new Map<string, RefusedAdmission>();
+  private readonly commandStops = new WeakMap<CloudCommandStop, Promise<BridgeMessage>>();
+  private readonly stoppingCommands = new Set<AbortController>();
   private readonly speculative = new Map<string, ReturnType<typeof setTimeout>>();
   private ongoingOpens = 0;
   private readonly historyIntents = new Map<string, number>();
@@ -1245,6 +1247,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         } as unknown as BridgeMessage;
     }
     this.claimPeer(cloudWorkspaceKey(target));
+    if (message.type === "AGENT_CANCEL") return this.observeCloudStop(target, message, options);
     const entry = await this.peer(target);
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed before dispatch");
@@ -1277,6 +1280,83 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"].includes(String(incoming.type)) && typeof incoming.chatId === "string")
       this.checkpointCloudTranscript(incoming.chatId);
     return incoming as unknown as BridgeMessage;
+  }
+
+  private observeCloudStop(target: CloudWorkspaceTarget, message: Message,
+    options: number | RequestOptions): Promise<BridgeMessage> {
+    const signal = typeof options === "object" ? options.signal : undefined;
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const first = this.peers.get(cloudWorkspaceKey(target));
+    // Fence this send intent synchronously when its receipt owner is retained.
+    // A disconnected peer is then free to retire with this Stop attached.
+    let stop = first && !first.retired ? first.agents?.prepareStop(cloudOutgoing(first.scope, message as WireRecord)) : undefined;
+    const existing = stop && this.commandStops.get(stop);
+    if (existing) return existing;
+    const epoch = this.accountEpoch, identity = this.identity(target), controller = new AbortController();
+    const requestedTimeout = typeof options === "number" ? options : options.timeoutMs;
+    const deadline = Date.now() + Math.min(60_000, requestedTimeout && requestedTimeout > 0 ? requestedTimeout : 60_000);
+    const abort = () => controller.abort(signal?.reason ?? new Error("Cloud Stop observation ended"));
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    const timer = setTimeout(() => controller.abort(new Error("Stop could not be confirmed. Reconnect to check this turn.")), Math.max(0, deadline - Date.now()));
+    const current = () => !this.closed && epoch === this.accountEpoch && identity === this.identity(target) &&
+      this.routing.canAccess?.(target) !== false && !controller.signal.aborted;
+    let rejectAborted!: (error: unknown) => void;
+    const aborted = new Promise<never>((_, reject) => { rejectAborted = reject; });
+    void aborted.catch(() => {});
+    const abortedNow = () => rejectAborted(controller.signal.reason);
+    controller.signal.addEventListener("abort", abortedNow, { once: true });
+    if (controller.signal.aborted) abortedNow();
+    this.stoppingCommands.add(controller);
+    let flight!: Promise<BridgeMessage>;
+    flight = (async (): Promise<BridgeMessage> => {
+      let entry = first;
+      for (;;) {
+        controller.signal.throwIfAborted();
+        if (!current()) throw new Error("Cloud account or workspace changed before Stop confirmation");
+        try {
+          entry = await Promise.race([this.peer(target), aborted]);
+          if (!current()) throw new Error("Cloud account or workspace changed before Stop confirmation");
+          this.assertCurrent(entry);
+          const native = cloudOutgoing(entry.scope, message as WireRecord);
+          if (!stop) {
+            stop = entry.agents?.prepareStop(native);
+            if (stop) {
+              const pending = this.commandStops.get(stop);
+              if (pending && pending !== flight) return await Promise.race([pending, aborted]);
+              this.commandStops.set(stop, flight);
+            }
+          }
+          const response = await Promise.race([stop && entry.agents
+            ? entry.agents.continueStop(stop, deadline, controller.signal, current)
+            : (async () => {
+              const requestOptions = { timeoutMs: Math.max(1, deadline - Date.now()), signal: controller.signal };
+              return await entry!.agents?.request(native, requestOptions) ?? await entry!.client.request(native as Message, requestOptions);
+            })(), aborted]);
+          if (!current()) throw new Error("Cloud account or workspace changed before Stop confirmation");
+          this.assertCurrent(entry);
+          if (response) return cloudIncoming(entry.scope, response as unknown as WireRecord) as unknown as BridgeMessage;
+        } catch (error) {
+          if (!current() || !(retryableCloudStopError(error) || error instanceof CloudRuntimeAccessError && error.category === "transient")) throw error;
+          // Opening is passive and the adapter rechecks the exact engine,
+          // boot, writer and command before replaying this same Stop operation.
+          if (entry && entry.client.status !== "connected") this.retirePeer(entry);
+        }
+        await new Promise<void>(resolve => {
+          const done = () => { clearTimeout(delay); controller.signal.removeEventListener("abort", done); resolve(); };
+          const delay = setTimeout(done, 1000);
+          controller.signal.addEventListener("abort", done, { once: true });
+          if (controller.signal.aborted) done();
+        });
+      }
+    })().finally(() => {
+      clearTimeout(timer); signal?.removeEventListener("abort", abort);
+      controller.signal.removeEventListener("abort", abortedNow);
+      this.stoppingCommands.delete(controller);
+      if (stop && this.commandStops.get(stop) === flight) this.commandStops.delete(stop);
+    });
+    if (stop) this.commandStops.set(stop, flight);
+    return flight;
   }
 
   override async request<T extends BridgeMessage = BridgeMessage>(
@@ -1395,6 +1475,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         "Cloud workspace is disconnected; reconnect before sending this action",
       );
     this.assertCurrent(entry);
+    if (message.type === "AGENT_CANCEL") throw new Error("Cloud Stop requires an acknowledged request");
     const native = cloudOutgoing(entry.scope, message as unknown as WireRecord);
     if (entry.agents?.send(native)) return;
     entry.client.send((entry.agents?.outgoing(native) ?? native) as Message);
@@ -1440,6 +1521,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   clearCloudConnections(): void {
     this.accountEpoch++;
+    for (const controller of this.stoppingCommands) controller.abort(new Error("Cloud account changed before Stop confirmation"));
     this.historyRestore.setAccount(String(this.accountEpoch));
     this.nativeHistoryRestore.setAccount(String(this.accountEpoch));
     this.cloudRepositorySlugs.clear();

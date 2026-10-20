@@ -1,7 +1,7 @@
 import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
 import { LocalLinksProvider } from "./local-links/provider";
 import { TurnFailureCard } from "./turn-failure-card";
-import { AgentNotice } from "./agent-notice";
+import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
 import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
 import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
@@ -3394,7 +3394,7 @@ function AgentChatBody({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
+  const composerStreaming = Boolean(isCloudWorkspace(session.cwd) && session.cloudStop) || !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
     status: backgroundContinuationActive ? "streaming" : session.status,
     hasPendingLocalTurn: pendingLocalTurnId !== null,
     planReview: Boolean(planReview),
@@ -5099,6 +5099,19 @@ function AgentChatBody({
                 />
               );
             })}
+            {!readOnly && isCloudWorkspace(session.cwd) && session.cloudStop?.state === "unconfirmed" && (
+              <AgentNotice
+                data-cloud-stop-notice
+                message="Stop could not be confirmed. Reconnect to check this turn."
+              >
+                <div className="mt-1">
+                  <Button type="button" variant="ghost" size="sm" className={AGENT_NOTICE_ACTION}
+                    disabled={!interactive} onClick={() => { void session.cancel(); }}>
+                    Retry Stop
+                  </Button>
+                </div>
+              </AgentNotice>
+            )}
             {preparationFailure && (
               <AgentNotice
                 data-agent-preparation-notice

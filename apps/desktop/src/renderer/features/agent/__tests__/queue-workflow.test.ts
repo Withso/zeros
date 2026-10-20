@@ -118,6 +118,7 @@ function setup(agentId = "claude", status = "streaming") {
     notifyAgentSendFailure: vi.fn(),
     refreshModelCatalog: vi.fn(),
     cloudFlushRef: { current: new Map() },
+    cloudStopsRef: { current: new Map() },
     beginCloudSendWaitRef: { current: vi.fn() },
     capUserAppend: (list: unknown[], message: unknown) => [...list, message],
     crypto: {

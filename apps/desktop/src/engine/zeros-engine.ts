@@ -259,7 +259,7 @@ import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
   type CloudAgentTurnTimingsPacket, type CloudNativePromptStage } from "@zeros/protocol/cloud-events";
 import { CloudLocalCommandHistoryHeadSchema, type CloudLocalCommandHistoryHead } from "@zeros/protocol/cloud-local-mirror";
-import { cloudPermissionMode, legacyCloudCommandResponse, withoutCloudClaudePreferences, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
+import { CLOUD_COMMAND_STOP_CAPABILITY, cloudPermissionMode, legacyCloudCommandResponse, withoutCloudClaudePreferences, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
 import { cloudClaudePreferencesEnv } from "./cloud-claude-preferences";
 import { CloudConversationCreateSchema, CloudConversationReadSchema, CloudConversationModeSchema, CloudCommandSnapshotSchema,
   CloudCommandClientRequestSchema, CloudBootCommandClientRequestSchema, CloudBootCommandSnapshotSchema, CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
@@ -13529,7 +13529,7 @@ export class ZerosEngine {
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
         ...(cloudLocalCommands ? { cloudLocalCommands } : {}),
-        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, ...(this.cloudCommands ? ["cloud.commands.v1", ...(cloudLocalCommands ? ["cloud.localCommands.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig ? ["workspace.resourceUsage.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig && !this.cloudRuntimeAuthorityStopping && this.cloudAgentTurnTimings?.active ? ["cloud.turnTimings.v1"] : []), ...(this.cloudEvents ? ["cloud.events.v1"] : []), ...(this.cloudActions ? ["cloud.actions.v1"] : []), ...(this.cloud?.supportsNativeServices ? ["cloud.services.v1"] : [])] : [])],
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, ...(this.cloudCommands ? ["cloud.commands.v1", ...(cloudLocalCommands ? ["cloud.localCommands.v1", CLOUD_COMMAND_STOP_CAPABILITY] : []), ...(this.cloudWorker && this.cloudRuntimeConfig ? ["workspace.resourceUsage.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig && !this.cloudRuntimeAuthorityStopping && this.cloudAgentTurnTimings?.active ? ["cloud.turnTimings.v1"] : []), ...(this.cloudEvents ? ["cloud.events.v1"] : []), ...(this.cloudActions ? ["cloud.actions.v1"] : []), ...(this.cloud?.supportsNativeServices ? ["cloud.services.v1"] : [])] : [])],
       }),
     );
   }
