@@ -6,6 +6,7 @@ import { withSystemTx } from "../db.js";
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
+import { adoptFinalSaveErasureHistory } from "./final-save-erasure.js";
 
 export interface CloudWorkspaceDeletionObjectService {
   deleteUnreferencedSystem(input: {
@@ -581,7 +582,10 @@ export class CloudWorkspaceOperationsWorker {
   }
 
   async processDeletionOnce(): Promise<boolean> {
-    const job = await this.claimDeletionJob();
+    let job = await this.claimDeletionJob();
+    if (!job && await adoptFinalSaveErasureHistory(this.pool)) {
+      job = await this.claimDeletionJob();
+    }
     if (!job) return false;
     try {
       if (job.state === "waiting_for_provider") {

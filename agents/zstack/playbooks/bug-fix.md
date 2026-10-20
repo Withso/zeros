@@ -136,6 +136,10 @@
    not exist then; inspect the underlying SQL error before weakening a guard.
    Checkpoint/stop changes also run `recovery-migration.integration.test.ts`
    alongside the current-schema content, lease and reconciler suites.
+   Drive the actual worker and its deadline reader across a lazy migration;
+   manually calling adoption can hide an eligibility filter that prevents it.
+   Retain earlier engine incarnations: historical erasure custody is not live
+   dispatch proof. Bound adoption batches and preserve unproved-work backoff.
    For canaries with durable fixtures and moving defaults, test unchanged,
    moved, unavailable and mid-run selection. Refresh at most once against the
    captured qualified tuple, with separate build/lifecycle/cleanup budgets.
