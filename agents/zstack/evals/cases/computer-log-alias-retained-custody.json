@@ -2,7 +2,7 @@
   "id": "computer-log-alias-retained-custody",
   "kind": "seeded",
   "area": "vm-image-bootstrap",
-  "fixedBy": "pending",
+  "fixedBy": "pr:676",
   "symptom": "After a failed log-alias exchange, another sanitation attempt clears an unexpected file retained by the first refusal.",
   "rule": "Exercise the real exchange and a second sanitation attempt; retain rejected object bytes before ordinary recursion, even when the original alias is absent. See agents/zstack/changes/computer-log-document-alias.md.",
   "check": "pnpm test:git scripts/__tests__/cloud-computer-template-helpers.test.ts"
