@@ -31,6 +31,7 @@ import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { readCloudTranscriptWithCachedPaint } from "../../platform/cloud-transcript-cache";
+import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import {
@@ -129,6 +130,7 @@ export async function windowMessages(
 export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "source" | "turnOpening"> & {
   messages: AgentMessage[];
   source: MessageWindowSnapshot["source"] | "cache";
+  nativeObservation?: true;
   /** Local only: the opening prompt of the turn the window starts inside. */
   leadingPrompt?: AgentTextMessage;
 };
@@ -153,12 +155,13 @@ export async function windowMessagesSnapshot(
 ): Promise<AgentMessageWindow> {
   const bridge = requireBridge("load the chat transcript");
   const target = parseCloudScopedId(chatId);
-  const canPaintCached = !!target && before === undefined && !!onCached &&
-    !(bridge instanceof WorkspaceRuntimeClient && bridge.hasCloudMessageSnapshot(chatId, limit));
+  const canPaintCached = !!target && before === undefined && !!onCached;
   const page = await readCloudTranscriptWithCachedPaint(chatId,
     () => bridgeMessageWindowSnapshot(bridge, chatId, limit, before),
-    canPaintCached ? window => onCached!({ source: "cache", restoreHead: window.restoreHead,
+    canPaintCached ? window => onCached!({ source: "cache", restoreHead: window.restoreHead, nativeObservation: window.nativeObservation,
       messages: window.messages.map(fromPersistedMessage).filter((message): message is AgentMessage => message !== null) }) : undefined,
+    page => page.messages.length === 0 && (page.source === "control-plane" && !page.restoreHead ||
+      !!page.restoreHead && !page.restoreHead.head?.deleted && !cloudHistoryFenceHasTranscript(page.restoreHead)),
   );
   const { turnOpening, ...rest } = page;
   const messages = page.messages

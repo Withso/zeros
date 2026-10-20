@@ -158,7 +158,7 @@ export interface AgentSessionState {
    * pending. It never grants admission, completes a turn or drains a queue.
    * Only a CP/cache window carries this proof; native live rows are separate. */
   /** `empty`: a Local chat known to be empty paints its empty state. */
-  transcriptPresentation: { source: "cache" | "control-plane"; restoreHead?: CloudHistoryRestoreFence; empty?: true } | null;
+  transcriptPresentation: { source: "cache" | "control-plane"; restoreHead?: CloudHistoryRestoreFence; nativeObservation?: true; empty?: true } | null;
   /** A durable transcript update arrived while the payload was cold/loading.
    *  Raw streaming deltas are deliberately not folded into an empty array;
    *  reopening performs an exact SQLite window read instead. */

@@ -1,5 +1,12 @@
 import type { AgentMessage } from "./use-agent-session";
 
+function orderedMessageJson(message: AgentMessage): string {
+  // Disk field selection and native JSON may enumerate identical fields in a
+  // different order. That is not a transcript edit. Arrays keep their order.
+  return JSON.stringify(message, (_key, value) => value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
+}
+
 /** Content equality for a low-frequency authoritative reconcile. Comparing
  *  only count + last id misses an edit that keeps ids stable (cross-device
  *  click-to-edit); object identity is also unusable because IPC returns fresh
@@ -14,7 +21,8 @@ export function messageSnapshotsEqual(
   for (let index = 0; index < current.length; index += 1) {
     if (current[index]?.id !== next[index]?.id) return false;
     try {
-      if (JSON.stringify(current[index]) !== JSON.stringify(next[index])) {
+      if (JSON.stringify(current[index]) !== JSON.stringify(next[index]) &&
+          orderedMessageJson(current[index]!) !== orderedMessageJson(next[index]!)) {
         return false;
       }
     } catch {

@@ -139,11 +139,29 @@ export const CachedTranscriptWindowSchema = z.object({
   recordEpoch: z.string().min(1).max(255).nullable(), revision: integer, cursor: id.nullable(),
   messages: z.array(CachedTranscriptMessageSchema).max(CLOUD_TRANSCRIPT_WINDOW_MESSAGES),
   restoreHead: CloudHistoryRestoreFenceSchema.optional(),
+  // A verified live read can outpace CP capture. This is presentation only,
+  // not a complete manifest, a record epoch or authority to resume/write.
+  nativeObservation: z.literal(true).optional(),
 }).strict();
 export type CachedTranscriptWindow = z.infer<typeof CachedTranscriptWindowSchema>;
 
+export function cachedTranscriptHasPresentation(window: CachedTranscriptWindow): boolean {
+  if (window.nativeObservation) return window.messages.length > 0 && !!window.restoreHead?.head && !window.restoreHead.head.deleted;
+  return !window.restoreHead || cloudHistoryFenceHasTranscript(window.restoreHead);
+}
+
+export function cachedTranscriptPresentationContinues(presentation: { restoreHead?: CloudHistoryRestoreFence; nativeObservation?: true },
+  fence: CloudHistoryRestoreFence): boolean {
+  if (!presentation.restoreHead) return false;
+  // Even a complete CP manifest cannot attest to additional live rows. Native
+  // observations survive only the identical head on the identical binding.
+  return presentation.nativeObservation
+    ? !!fence.head && !fence.head.deleted && cloudHistoryFencesMatch(presentation.restoreHead, fence)
+    : cloudHistoryPresentationContinues(presentation.restoreHead, fence);
+}
+
 export function continueCachedTranscriptPresentation(window: CachedTranscriptWindow, fence: CloudHistoryRestoreFence): CachedTranscriptWindow | null {
-  if (!window.restoreHead || !cloudHistoryPresentationContinues(window.restoreHead, fence)) return null;
+  if (!cachedTranscriptPresentationContinues(window, fence)) return null;
   // Revisions from different bindings are not comparable. Only the proven
   // presentation and its message cursor survive; a new page validates afresh.
   return { ...window, recordEpoch: null, revision: 0, restoreHead: fence };
@@ -173,7 +191,8 @@ export function prepareCachedTranscriptWindow(input: unknown): CachedTranscriptW
     } catch { /* An unreadable row is not a confirmed presentation snapshot. */ }
   }
   const result: CachedTranscriptWindow = { recordEpoch: page.recordEpoch, revision: page.revision,
-    cursor: page.cursor, messages, ...(page.restoreHead ? { restoreHead: page.restoreHead } : {}) };
+    cursor: page.cursor, messages, ...(page.restoreHead ? { restoreHead: page.restoreHead } : {}),
+    ...(page.nativeObservation ? { nativeObservation: true } : {}) };
   const encoder = new TextEncoder();
   let bytes = encoder.encode(JSON.stringify({ ...result, messages: [] })).byteLength;
   let first = messages.length;
