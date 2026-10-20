@@ -1,7 +1,7 @@
 import type pg from "pg";
 
 import { bindCloudAllocationProvider } from "./allocation-provider.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { withRetryableSystemTx } from "../db-retry.js";
 import {
   CloudWorkspaceProviderRegistry,
@@ -35,13 +35,18 @@ export type CloudWorkspaceProviderCleanupScope = {
   credentialSource: "hosted" | "delegated";
 };
 
+type ProviderResolutionInput = {
+  workspaceId: string;
+  organizationId: string;
+  generation: number;
+  purpose: CloudWorkspaceProviderPurpose;
+};
+
 export interface CloudWorkspaceProviderResolver {
-  resolve(input: {
-    workspaceId: string;
-    organizationId: string;
-    generation: number;
-    purpose: CloudWorkspaceProviderPurpose;
-  }): Promise<CloudWorkspaceProviderResolution>;
+  resolve(input: ProviderResolutionInput): Promise<CloudWorkspaceProviderResolution>;
+  /** Optional DB-only admission in the caller's transaction. Takes O -> W
+   * before child locks; never performs provider I/O or acquires another client. */
+  resolveInTransaction?(tx: Tx, input: ProviderResolutionInput): Promise<CloudWorkspaceProviderResolution>;
   /** Resolve every exact provider-account scope that may still own a remote
    * resource. Unavailable delegated credentials are counted and skipped so a
    * revoked/missing key can never turn into a cross-account deletion. */
@@ -113,18 +118,17 @@ export class DatabaseCloudWorkspaceProviderResolver implements CloudWorkspacePro
 
   }
 
-  async resolve(input: {
-    workspaceId: string;
-    organizationId: string;
-    generation: number;
-    purpose: CloudWorkspaceProviderPurpose;
-  }): Promise<CloudWorkspaceProviderResolution> {
+  async resolve(input: ProviderResolutionInput): Promise<CloudWorkspaceProviderResolution> {
+    return withRetryableSystemTx(this.pool, tx => this.resolveInTransaction(tx, input));
+  }
+
+  async resolveInTransaction(tx: Tx, input: ProviderResolutionInput): Promise<CloudWorkspaceProviderResolution> {
     // Cleanup validates no authority or policy, so it reads one point-in-time
     // snapshot: it skips the paid-authority and policy functions and takes no
     // row locks. The locks are released at commit before remote I/O either
     // way, so a cleanup resolution cannot change what a writer observes.
     const cleanup = input.purpose === "cleanup";
-    const row = await withRetryableSystemTx(this.pool, async (tx) => {
+    const read = async () => {
       if (!cleanup) {
         // Joined row marks do not establish a parent-first acquisition order.
         // Heartbeat owns W before updating G (including an empty ports census),
@@ -178,7 +182,8 @@ export class DatabaseCloudWorkspaceProviderResolver implements CloudWorkspacePro
           : [input.workspaceId, input.organizationId, input.generation, this.workosEnabled],
       );
       return result.rows[0] ?? null;
-    });
+    };
+    const row = await read();
     if (!row || !this.registry.supports(row.provider)) {
       throw providerFailure(
         "provider_connection_unavailable",

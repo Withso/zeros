@@ -12,6 +12,7 @@ import {
   type CloudProviderIdentity,
   type CloudProviderInventoryItem,
   type CloudProviderResource,
+  type CloudWorkspaceAccessProvider,
   type CloudWorkspaceProvider,
 } from "./provider.js";
 import { runtimeWitness } from "./runtime-test-fixtures.js";
@@ -35,6 +36,9 @@ import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
 import {retireCloudWorkspaceRuntimeAccess} from "./runtime-access.js";
 import {commitFinalSaveFixture,seedFinalSaveEngine,sealFinalSaveFixture} from "./final-save-test-fixtures.js";
+import { DatabaseCloudWorkspaceProviderResolver } from "./provider-resolver.js";
+import { CloudWorkspaceProviderRegistry } from "./provider-registry.js";
+import { lifecycleDatabaseCost } from "./lifecycle-cost-test-fixtures.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -631,6 +635,116 @@ d("cloud workspace reconciliation", () => {
       logger: { info() {}, warn() {}, error() {} },
       ...options,
     });
+
+  describe("T6 C1 transaction batching", () => {
+    it.each(["40P01", "40001"] as const)("rechecks the full pin after a real resolver %s rollback", async code => {
+      const seeded = await seedWorkspace();
+      const provider = new FakeProvider(), find = vi.spyOn(provider, "find");
+      let aborts = 0, rollbacks = 0;
+      const cost = lifecycleDatabaseCost(pool, async (sql, client) => {
+        if (sql.startsWith("SELECT connection.id AS connection_id") && aborts === 0) {
+          aborts++;
+          await client.query("DO $abort$ BEGIN RAISE EXCEPTION USING ERRCODE='" + code + "', MESSAGE='admission rollback fixture'; END $abort$");
+        }
+        if (sql === "ROLLBACK" && aborts === 1 && rollbacks++ === 0)
+          await pool.query(`UPDATE cloud_runtime_bundles SET revoked_at=clock_timestamp()
+            WHERE runtime_id=(SELECT runtime_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1)`, [seeded.workspaceId]);
+      });
+      const providerResolver = new DatabaseCloudWorkspaceProviderResolver({ pool: cost.pool, workosEnabled: false,
+        registry: new CloudWorkspaceProviderRegistry([{ name: "boat", hosted: {
+          provider: provider as FakeProvider & CloudWorkspaceAccessProvider,
+        } }]) });
+      const worker = reconciler(provider, { pool: cost.pool, providerResolver });
+      try {
+        expect(await worker.runOnce(seeded.workspaceId)).toBe(true);
+        expect(aborts).toBe(1);
+        expect(rollbacks).toBe(2);
+        expect(find).not.toHaveBeenCalled();
+        expect(provider.createCount).toBe(0);
+        expect(cost.snapshot().checkedOut).toBe(0);
+        expect((await pool.query("SELECT state,error_code FROM cloud_workspace_lifecycle_intents WHERE id=$1", [seeded.intentId])).rows[0])
+          .toMatchObject({ state: "failed", error_code: "cloud_runtime_revoked" });
+      } finally { await worker.stop(); vi.restoreAllMocks(); }
+    });
+
+    it("calls a legacy resolver only after the database admission commits", async () => {
+      const seeded = await seedWorkspace(), provider = new FakeProvider(), cost = lifecycleDatabaseCost(pool);
+      const resolve = vi.fn(async () => {
+        expect(cost.snapshot().checkedOut).toBe(0);
+        // Exercise a real concurrent parent writer, not only a mock counter.
+        await withSystemTx(pool, async tx => {
+          await tx.query("SET LOCAL lock_timeout='1s'");
+          await tx.query("SELECT 1 FROM organizations WHERE id=$1 FOR UPDATE", [orgId]);
+          await tx.query("SELECT 1 FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [seeded.workspaceId]);
+        });
+        return { provider, connectionId: seeded.providerConnectionId, connectionVersion: 1, credentialSource: "hosted" };
+      });
+      const worker = reconciler(provider, { pool: cost.pool, providerResolver: { resolve } });
+      try {
+        expect(await worker.runOnce(seeded.workspaceId)).toBe(true);
+        expect(resolve).toHaveBeenCalledOnce();
+        expect(provider.createCount).toBe(1);
+        expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [seeded.intentId])).rows[0].state).toBe("succeeded");
+      } finally { await worker.stop(); vi.restoreAllMocks(); }
+    });
+
+    it.each(["create", "wake"] as const)("bounds the real %s database passes and records the full interval", async operation => {
+      const seeded = await seedWorkspace({ operation, status: operation === "wake" ? "waking" : "requested" });
+      const provider = new FakeProvider(), cost = lifecycleDatabaseCost(pool);
+      const providerResolver = new DatabaseCloudWorkspaceProviderResolver({ pool: cost.pool, workosEnabled: false,
+        registry: new CloudWorkspaceProviderRegistry([{ name: "boat", hosted: {
+          provider: provider as FakeProvider & CloudWorkspaceAccessProvider,
+        } }]) });
+      let beforeInspect: ReturnType<typeof cost.snapshot> | undefined;
+      const find = provider.find.bind(provider), create = provider.create.bind(provider);
+      vi.spyOn(provider, "find").mockImplementation(async identity => {
+        beforeInspect = cost.snapshot();
+        expect(beforeInspect.checkedOut).toBe(0);
+        return find(identity);
+      });
+      vi.spyOn(provider, "create").mockImplementation(async input => {
+        expect(cost.snapshot().checkedOut).toBe(0);
+        return create(input);
+      });
+      const worker = reconciler(provider, { pool: cost.pool, providerResolver });
+      try {
+        expect(await worker.runOnce(seeded.workspaceId)).toBe(true);
+        const complete = cost.snapshot();
+        console.info("[t6-c1-cost]", JSON.stringify({ version: 1, operation, beforeInspect, complete,
+          providerCreates: provider.createCount }));
+        const audit = (await pool.query("SELECT subject FROM audit_log WHERE subject->>'intentId'=$1", [seeded.intentId])).rows;
+        expect(audit).toHaveLength(1);
+        expect(audit[0].subject.phaseTiming.version).toBe(1);
+        expect(audit[0].subject.phaseTiming.monotonicMs.providerResolution).toBeGreaterThanOrEqual(0);
+        expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [seeded.intentId])).rows[0].state).toBe("succeeded");
+        expect(provider.createCount).toBe(1);
+        expect(complete.checkedOut).toBe(0);
+        expect(complete.maximumCheckedOut).toBe(1);
+        // Claim, DB-only generation/provider admission, and the allocation-owner
+        // lookup before find. Keep that exact-owner read at its existing boundary.
+        expect(beforeInspect!.checkouts).toBe(3);
+        expect(complete.supportedGenerationReads).toBe(2);
+      } finally { await worker.stop(); vi.restoreAllMocks(); }
+    });
+
+    it.each(["absent", "running"] as const)("rechecks a revoked runtime after inspect returns %s", async observed => {
+      const seeded = await seedWorkspace();
+      const provider = new FakeProvider();
+      vi.spyOn(provider, "find").mockImplementation(async identity => {
+        await pool.query(`UPDATE cloud_runtime_bundles SET revoked_at=clock_timestamp()
+          WHERE runtime_id=(SELECT runtime_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1)`, [seeded.workspaceId]);
+        return observed === "running" ? [provider.make(identity)] : [];
+      });
+      const worker = reconciler(provider);
+      try {
+        expect(await worker.runOnce(seeded.workspaceId)).toBe(true);
+        expect(provider.createCount).toBe(0);
+        expect((await pool.query("SELECT state,error_code FROM cloud_workspace_lifecycle_intents WHERE id=$1", [seeded.intentId])).rows[0])
+          .toMatchObject({ state: "failed", error_code: "cloud_runtime_revoked" });
+        expect((await pool.query("SELECT 1 FROM cloud_workspace_setup_runs WHERE workspace_id=$1", [seeded.workspaceId])).rowCount).toBe(0);
+      } finally { await worker.stop(); vi.restoreAllMocks(); }
+    });
+  });
 
   describe("lifecycle phase timing", () => {
     const timingAudit = async (intentId: string) => (await pool.query(
