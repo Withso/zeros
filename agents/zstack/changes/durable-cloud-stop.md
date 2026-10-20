@@ -20,6 +20,9 @@ Retain a turn's real failure or completion when Stop loses the race.
 Native exit and boundary revocation can precede the paired command receipt.
 Retain a pending Stop's logical cloud conversation route and error through those
 events; only exact retirement or a successor releases its owner.
+The normal transport-error filters can hide a retained cancellation error.
+Verify the real browser shows the unconfirmed Stop and its exact Retry action,
+including after a remount; a store error alone is not visible recovery.
 
 Encoded in the bridge and renderer Stop regressions, real SQLite queue and native
 pump retirement/enrollment controls, negotiated protocol tests, the client runtime
