@@ -73,7 +73,11 @@ specific reported workspace's provider failure or guarantee that every generic
 dispatch error has been removed.
 
 The gate captures each cohort's actual engine handlers and failure formatter,
-plus standalone control-plane Zod 3 schemas. Terminal acknowledgement is bound
+plus standalone control-plane Zod 3 schemas. Its schema dependency capture follows
+selected named imports through the same cohort's source resolver, so a schema
+can move into a dependency-only module without substituting current definitions
+for a frozen contract. Unavailable imported source still fails closed.
+Terminal acknowledgement is bound
 to the exact CP/org/workspace/generation/engine; lost support restores legacy
 projection. Alpha CP refuses all 17 new producer categories even after terminal
 stripping, so **deploy the control plane first**. Unsupported cloud contracts

@@ -135,28 +135,52 @@ export async function loadContractSource(pin = null) {
               for (const node of variables.filter(node => node.end <= request?.end))
                 for (const declaration of node.declarationList.declarations)
                   if (ts.isIdentifier(declaration.name)) declarations.set(declaration.name.text, node);
-              const selected = new Set();
+              const imports = new Map();
+              for (const node of source.statements.filter(ts.isImportDeclaration)) {
+                const clause = node.importClause;
+                if (clause?.isTypeOnly || !clause?.namedBindings || !ts.isNamedImports(clause.namedBindings) ||
+                  node.moduleSpecifier.text === "zod") continue;
+                for (const specifier of clause.namedBindings.elements)
+                  if (!specifier.isTypeOnly) imports.set(specifier.name.text, { node, specifier });
+              }
+              const selected = new Set(), selectedImports = new Set();
               const capture = name => {
+                if (imports.has(name)) { selectedImports.add(name); return; }
                 const node = declarations.get(name);
                 if (!node) throw new Error("runtime_skew_source_unavailable");
                 if (selected.has(node)) return;
                 selected.add(node);
                 const visit = child => {
-                  if (ts.isIdentifier(child) && declarations.has(child.text)) capture(child.text);
+                  if (ts.isIdentifier(child) && (declarations.has(child.text) || imports.has(child.text))) capture(child.text);
                   ts.forEachChild(child, visit);
                 };
                 for (const declaration of node.declarationList.declarations)
                   if (declaration.initializer) visit(declaration.initializer);
               };
-              for (const name of ["CloudCommandRequestSchema", "CloudCommandSettleSchema", "CloudNativeResultSchema"]) capture(name);
+              const contracts = ["CloudCommandRequestSchema", "CloudCommandSettleSchema", "CloudNativeResultSchema"];
+              for (const name of contracts) capture(name);
+              const dependencies = [...selectedImports].map(name => {
+                const { node, specifier } = imports.get(name);
+                const module = node.moduleSpecifier.text;
+                if (!module.startsWith(".")) throw new Error("runtime_skew_source_path_invalid");
+                const dependency = path.posix.normalize(path.posix.join(path.posix.dirname(file), module));
+                if (dependency.startsWith("../") || path.posix.isAbsolute(dependency))
+                  throw new Error("runtime_skew_source_path_invalid");
+                // The pinned-source resolver reads this dependency from the
+                // same cohort, including when the current checkout differs.
+                return `import { ${specifier.getText(source)} } from ${JSON.stringify(`./${dependency}`)};`;
+              });
               // The standalone CP schema uses Zod 3. Capture its actual schema
               // dependency closure in source order. Negotiated boot/mirror
               // declarations have separate dependencies and are not part of
               // this legacy contract slice. Every selected declaration still
-              // comes from the exact current or frozen source cohort.
+              // comes from the exact current or frozen source cohort. Imported
+              // schema leaves retain their own lexical scope and dependencies.
               return { loader: "ts", resolveDir: path.join(root, "apps/control-plane"), contents: `
                 import { z } from "zod";
+                ${dependencies.join("\n")}
                 ${variables.filter(node => selected.has(node)).map(node => node.getText(source)).join("\n")}
+                ${contracts.filter(name => selectedImports.has(name)).map(name => `export { ${name} };`).join("\n")}
               ` };
             }
             const engine = args.path === "runtime-skew:engine-replies";
