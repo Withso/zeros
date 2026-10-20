@@ -71,7 +71,7 @@ N-1 fence, strict expiry, separate context proofs and rollback behavior.
 
 `lifecycle_allocation_waits` is internal to the control-plane scheduler and has
 no S3/SDK discovery feature or prerequisite transport flag. It remains off until
-the complete 0172 migration and every lifecycle/compute reader are deployed and
+the complete 0174 migration and every lifecycle/compute reader are deployed and
 old dispatchers have drained. A SQL guard rejects an old worker's attempt to
 dispatch an unresolved edge, even if it ignores `UPDATE RETURNING`. Disable
 stops new edges; keep readers and guards while any accepted edge is pending or

@@ -175,7 +175,7 @@ attempt. Independent settlement may fill a missing identity before publication;
 that attempt still retries and never adopts the later binding into an edge.
 The flag does not grant compute authority or change a client/engine contract.
 
-Migration `0172_cloud_lifecycle_scheduling.sql` stores one immutable edge per
+Migration `0174_cloud_lifecycle_scheduling.sql` stores one immutable edge per
 lifecycle intent. It freezes the organization/workspace/generation, original
 owner, billing and authority epochs, source and predecessor, provider
 connection/version/resource, and exact allocation/owner revision. The writer
