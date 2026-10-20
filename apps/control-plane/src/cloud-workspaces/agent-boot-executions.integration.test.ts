@@ -17,6 +17,7 @@ import {interceptQueries,withAuthorityDeadlineBarrier,withHeldEngineRows} from "
 import {assertNativeGithubActor} from "./github-native-grants.js";
 import {cloudGithubNativeSourceSchema} from "./github-native-schema.js";
 import {purgeCloudAgentAdoptions} from "./agent-boot-credentials.js";
+import {observeTransactionTiming, type TransactionTimingSummary} from "../request-timing.js";
 const suite=process.env.TEST_DATABASE_URL?describe:describe.skip;
 suite("genuine private boot credential execution",()=>{
   let pool:pg.Pool,fixture:Awaited<ReturnType<typeof seedReadyCloudWorkspace>>,credentials:DatabaseCloudAgentCredentialService,service:DatabaseCloudAgentExecutionService;
@@ -211,6 +212,91 @@ suite("genuine private boot credential execution",()=>{
     expect(second.contextRevision).toBe(first.contextRevision);
     expect(await versions()).toEqual(before);
     expect(queries.some(sql => /pg_advisory_xact_lock|FOR UPDATE|cloud_workspace_engine_authority_current/.test(sql))).toBe(false);
+  });
+  it("bounds repeated warm-context authority work without republishing its source", async () => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    const first = CloudAgentWarmActorResponseSchema.parse(await service.boot(engine(), "warm-context", input));
+    const queries: string[] = [];
+    const reader = interceptQueries(pool, sql => { queries.push(sql); });
+    const started = performance.now();
+    const second = CloudAgentWarmActorResponseSchema.parse(await new DatabaseCloudAgentExecutionService(reader, keys, false)
+      .boot(engine(), "warm-context", input));
+    const elapsedMs = performance.now() - started;
+    const engineChecks = queries.filter(sql => sql.includes("cloud_workspace_runtime_authority_live")).length;
+    console.info("cloud warm-context DB cost", JSON.stringify({ queries: queries.length, engineChecks, elapsedMs,
+      statements: queries.map(sql => sql.replace(/\s+/g, " ").slice(0, 95)) }));
+    expect(second.contextId).toBe(first.contextId);
+    expect(second.actor.confirmedUntilMs).toBeLessThanOrEqual(Date.now() + 10_000);
+    expect(engineChecks).toBeLessThanOrEqual(2);
+    expect(queries.length).toBeLessThanOrEqual(30);
+  });
+  const seedHistoricalRuntimes = async () => {
+    await withCloudFixtureOwnerTx(pool, async tx => {
+      await tx.query("SET LOCAL session_replication_role=replica");
+      // Representative historical registry volume, outside the measured read.
+      for (const table of ["cloud_runtime_bundles", "cloud_runtime_qualifications"] as const) {
+        await tx.query(`INSERT INTO ${table}
+          SELECT (jsonb_populate_record(NULL::${table},to_jsonb(original)||jsonb_build_object(
+            'runtime_id','r1-'||encode(digest('unrelated-runtime-'||n::text,'sha256'),'hex'),
+            'manifest_sha256',encode(digest('unrelated-runtime-'||n::text,'sha256'),'hex'),
+            'object_key','unrelated-runtime-'||n::text))).*
+          FROM (SELECT * FROM ${table} LIMIT 1) original CROSS JOIN generate_series(1,1500) n`);
+        await tx.query(`ANALYZE ${table}`);
+      }
+    });
+  };
+  it("measures the recurring eight-chat boot routes with the production transaction observer", async () => {
+    const bound = await boot(), sender = await actor();
+    await seedHistoricalRuntimes();
+    await service.boot(engine(), "activate", syncRequest(bound));
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    for (let index = 0; index < 8; index++) await service.boot(engine(), "warm-context", { ...input, conversationId: `chat-${index}` });
+    await service.boot(engine(), "warm-context", input);
+    const routes: Record<string, TransactionTimingSummary[]> = { warmContext: [], actorConfirm: [], controls: [] };
+    for (let index = 0; index < 12; index++) {
+      await observeTransactionTiming(() => service.boot(engine(), "warm-context", input), value => { routes.warmContext!.push(value); });
+      await observeTransactionTiming(() => service.boot(engine(), "actor-confirm", {
+        ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      }), value => { routes.actorConfirm!.push(value); });
+      await observeTransactionTiming(() => service.credentialControls(engine(), {
+        ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, acknowledgements: [],
+      }), value => { routes.controls!.push(value); });
+    }
+    console.info("cloud boot route transaction samples", JSON.stringify(routes));
+    for (const samples of Object.values(routes)) {
+      expect(samples).toHaveLength(12);
+      expect(samples.every(value => value.transactions === 1 && value.heldMs > 0 && value.waitMs >= 0)).toBe(true);
+    }
+  });
+  it("bounds the qualified credential lookup with a large unrelated runtime registry", async () => {
+    const bound = await boot(), sender = await actor();
+    await seedHistoricalRuntimes();
+    type Plan = { "Relation Name"?: string; "Actual Rows"?: number; "Actual Loops"?: number;
+      "Rows Removed by Filter"?: number; Plans?: Plan[] };
+    const scans: Array<{ table: string; rows: number }> = [];
+    const reader = interceptQueries(pool, async (sql, tx) => {
+      if (!sql.includes("qualification.native_capabilities,qualification.mcp_qualified")) return;
+      const plans = await tx.query<{ "QUERY PLAN": Array<{ Plan: Plan; "Planning Time": number; "Execution Time": number }> }>(
+        `EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ${sql}`,
+        [fixture.organizationId, sql.startsWith("SELECT selected.") ? fixture.userId : credentialId,
+          fixture.engineInstanceId, "cursor", "full", fixture.userId]);
+      const walk = (node: Plan): void => {
+        if (node["Relation Name"]?.startsWith("cloud_runtime_")) scans.push({ table: node["Relation Name"],
+          rows: ((node["Actual Rows"] ?? 0) + (node["Rows Removed by Filter"] ?? 0)) * (node["Actual Loops"] ?? 1) });
+        node.Plans?.forEach(walk);
+      };
+      walk(plans.rows[0]!["QUERY PLAN"][0]!.Plan);
+    });
+    await new DatabaseCloudAgentExecutionService(reader, keys, false).boot(engine(), "warm-context", {
+      ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [],
+    });
+    console.info("cloud qualified lookup scans", JSON.stringify(scans));
+    expect(scans.length).toBeGreaterThan(0);
+    expect(scans.reduce((total, scan) => total + scan.rows, 0)).toBeLessThan(30);
   });
   it.each(["adoption", "writer"] as const)("refuses warm renewal after the %s identity was retired", async retired => {
     const bound = await boot(), sender = await actor();

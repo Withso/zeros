@@ -388,7 +388,8 @@ describe("genuine boot execution factory", () => {
   it("surviving background descendants retain the selected warm authority and run provenance until retirement", async () => {
     vi.useFakeTimers();
     const f = await fixture(), factory = f.register(f.create()), prepared = await f.prepare(factory);
-    expect(factory.hasActorWork(f.provenance.actorSessionId)).toBe(false);
+    // Preparation still owns the first launch before its turn is reserved.
+    expect(factory.hasActorWork(f.provenance.actorSessionId)).toBe(true);
     const first = factory.reserveBootTurn(prepared.execution, prepared.selection); factory.markNativeHandoff(prepared.execution, first);
     expect(factory.hasActorWork(f.provenance.actorSessionId)).toBe(true);
     await factory.settleBootTurn(prepared.execution, first);

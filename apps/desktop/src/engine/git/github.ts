@@ -1108,11 +1108,15 @@ export interface GithubRepositoryOwnerAvatar {
 export async function getRepositoryOwnerAvatar(
   originUrl: string,
 ): Promise<GithubRepositoryOwnerAvatar | null> {
-  const { owner } = parseGitHubRemote(originUrl);
+  const { owner, repo } = parseGitHubRemote(originUrl);
   const oct = await getOptionalAuthOctokit();
   try {
-    const response = await oct.users.getByUsername({ username: owner });
-    const avatarUrl = response.data.avatar_url?.trim();
+    // Cloud authority covers this exact repository, including its owner
+    // metadata. A global /users lookup is outside that read contract.
+    const account = githubReadTransport()
+      ? (await oct.repos.get({ owner, repo })).data.owner
+      : (await oct.users.getByUsername({ username: owner })).data;
+    const avatarUrl = account?.avatar_url?.trim();
     if (!avatarUrl) return null;
 
     let parsed: URL;
@@ -1125,9 +1129,9 @@ export async function getRepositoryOwnerAvatar(
       return null;
     }
 
-    const rawType = response.data.type?.toLowerCase();
+    const rawType = account?.type?.toLowerCase();
     return {
-      login: response.data.login || owner,
+      login: account?.login || owner,
       type:
         rawType === "organization" ? "org" : rawType === "user" ? "user" : null,
       avatarUrl: parsed.href,

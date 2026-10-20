@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/git/github.ts",
+  "before": "const account = githubReadTransport()\n      ? (await oct.repos.get({ owner, repo })).data.owner",
+  "after": "const account = false\n      ? (await oct.repos.get({ owner, repo })).data.owner"
+}

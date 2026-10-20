@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/cloud-local-command-queue-boot.ts",
+  "before": "Date.now() < interest.confirmedUntilMs && !!interest.context && this.factory?.hasContextWork(interest.context) === true;",
+  "after": "Date.now() < interest.confirmedUntilMs && !!interest.context;"
+}

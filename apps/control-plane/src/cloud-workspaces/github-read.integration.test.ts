@@ -9,6 +9,8 @@ import { DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
 import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 import { DatabaseCloudGithubReads } from "./github-read-proxy.js";
 import { CLOUD_GITHUB_READ_PATH, createCloudGithubReadRoutes } from "./github-read-routes.js";
+import { interceptQueries } from "./authority-deadline-test-utils.js";
+import { observeTransactionTiming, type TransactionTimingSummary } from "../request-timing.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("computer repository GitHub reads", () => {
@@ -62,6 +64,96 @@ suite("computer repository GitHub reads", () => {
     expect(broker.mintWorkspaceRead).toHaveBeenCalledWith({ installationId: 123, repositoryId: 456 });
     expect((await pool.query("SELECT 1 FROM cloud_github_write_grants")).rowCount).toBe(0);
     expect((await pool.query("SELECT 1 FROM cloud_github_connections")).rowCount).toBe(0);
+  });
+  it("shares concurrent exact reads through both database authority boundaries", async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const queries: string[] = [];
+    const reader = new DatabaseCloudGithubReads(interceptQueries(pool, sql => { queries.push(sql); }), false, broker,
+      { fetch: async input => { await held; return upstream(input); } });
+    const reads = Array.from({ length: 8 }, () => reader.read(engine(), request));
+    try {
+      await vi.waitFor(() => expect(broker.mintWorkspaceRead).toHaveBeenCalledOnce());
+      release(); await Promise.all(reads);
+      const transactions = queries.filter(sql => sql.startsWith("BEGIN")).length;
+      console.info("cloud concurrent GitHub DB cost", JSON.stringify({ readers: 8, transactions, queries: queries.length }));
+      expect(transactions).toBe(2);
+      // A settled response is never an authority cache.
+      await pool.query("UPDATE cloud_workspace_actor_sessions SET revoked_at=now() WHERE id=$1", [actorSessionId]);
+      await expect(reader.read(engine(), request)).rejects.toBeDefined();
+    } finally { release(); await Promise.allSettled(reads); await reader.close(); }
+  });
+  it("measures shared and sequential GitHub transactions without caching authority", async () => {
+    const shared: TransactionTimingSummary[] = [], sequential: TransactionTimingSummary[] = [];
+    try {
+      for (let index = 0; index < 12; index++) {
+        await observeTransactionTiming(() => Promise.all(Array.from({ length: 8 }, () => service.read(engine(), request))), value => { shared.push(value); });
+        await observeTransactionTiming(() => service.read(engine(), request), value => { sequential.push(value); });
+      }
+      console.info("cloud GitHub route transaction samples", JSON.stringify({ readers: 8, shared, sequential }));
+      expect(shared.every(value => value.transactions === 2 && value.heldMs > 0)).toBe(true);
+      expect(sequential.every(value => value.transactions === 2 && value.heldMs > 0)).toBe(true);
+    } finally { await service.close(); }
+  });
+  it("charges every authorized waiter to the original workspace read budget", async () => {
+    try {
+      const results = await Promise.allSettled(Array.from({ length: 241 }, () => service.read(engine(), request)));
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(240);
+      expect(results.filter(result => result.status === "rejected")).toEqual([
+        { status: "rejected", reason: expect.objectContaining({ status: 429 }) },
+      ]);
+      expect(upstream).toHaveBeenCalledTimes(2);
+    } finally { await service.close(); }
+  });
+  it.each(["heartbeatToken", "actorSessionId", "engineInstanceId", "organizationId", "workspaceId", "generation"] as const)(
+    "never joins a read with a different %s", async field => {
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const reader = new DatabaseCloudGithubReads(pool, false, broker, { fetch: async input => { await held; return upstream(input); } });
+      const reads = [reader.read(engine(), request), reader.read({ ...engine(), [field]: field === "generation" ? 2 : randomUUID() }, request)];
+      const done = Promise.allSettled(reads);
+      try {
+        await vi.waitFor(() => expect(broker.mintWorkspaceRead).toHaveBeenCalledOnce());
+        release();
+        expect((await done).map(result => result.status)).toEqual(["fulfilled", "rejected"]);
+      } finally { release(); await done; await reader.close(); }
+    });
+  it("refuses all shared waiters when actor revocation wins during upstream I/O", async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const reader = new DatabaseCloudGithubReads(pool, false, broker, { fetch: async input => { await held; return upstream(input); } });
+    const reads = Promise.allSettled(Array.from({ length: 8 }, () => reader.read(engine(), request)));
+    try {
+      await vi.waitFor(() => expect(broker.mintWorkspaceRead).toHaveBeenCalledOnce());
+      await pool.query("UPDATE cloud_workspace_actor_sessions SET revoked_at=now() WHERE id=$1", [actorSessionId]);
+      release();
+      expect((await reads).every(result => result.status === "rejected")).toBe(true);
+    } finally { release(); await reads; await reader.close(); }
+  });
+  it("does not charge refused callers against an authorized workspace's budget", async () => {
+    try {
+      const refused = await Promise.allSettled(Array.from({ length: 241 }, () => service.read({ ...engine(), heartbeatToken: "invalid-token" }, request)));
+      expect(refused.every(result => result.status === "rejected")).toBe(true);
+      await expect(service.read(engine(), request)).resolves.toMatchObject({ status: 200 });
+      expect(upstream).toHaveBeenCalledTimes(2);
+    } finally { await service.close(); }
+  });
+  it("joins the final authority transaction on close and refuses its late shared result", async () => {
+    let reached!: () => void, release!: () => void, transactions = 0;
+    const atFinal = new Promise<void>(resolve => { reached = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const reader = new DatabaseCloudGithubReads(interceptQueries(pool, async sql => {
+      if (sql.startsWith("BEGIN") && ++transactions === 2) { reached(); await held; }
+    }), false, broker, { fetch: upstream });
+    const reads = Promise.allSettled(Array.from({ length: 8 }, () => reader.read(engine(), request)));
+    let closed = false;
+    try {
+      await atFinal;
+      const closing = reader.close().then(() => { closed = true; });
+      await Promise.resolve(); expect(closed).toBe(false);
+      release(); await closing;
+      expect((await reads).every(result => result.status === "rejected")).toBe(true);
+    } finally { release(); await reads; await reader.close(); }
   });
   it.each(["actor", "engine", "installation", "repository", "generation"])("fences cached reads after %s revocation", async change => {
     await service.read(engine(), request);

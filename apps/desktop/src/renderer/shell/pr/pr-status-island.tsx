@@ -129,6 +129,7 @@ import { registerPrWorkspaceCacheForget } from "./pr-cache-forget";
 import { useDocumentActive } from "../../state/use-document-active";
 import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { documentIsForeground } from "../../shared/lib/element-activity";
+import { CloudPrStatusReads } from "./cloud-pr-status-reads";
 
 interface PrStatusIslandProps {
   workspace: Workspace;
@@ -255,6 +256,11 @@ interface IslandData {
  *  Bounded by the number of live workspaces with PRs. */
 const lastKnownData = new Map<string, IslandData>();
 const MAX_PR_ISLAND_SNAPSHOTS = 64;
+const cloudPrReads = new CloudPrStatusReads();
+// A cached observation may outlive many Git broadcasts. Reconcile its durable
+// PR state once; a new observation permits another attempt. Weak references
+// do not retain evicted or deleted workspace results.
+const reconciledCloudPrReads = new WeakSet<object>();
 
 function rememberIslandData(key: string, data: IslandData): void {
   lastKnownData.delete(key);
@@ -272,6 +278,7 @@ function rememberIslandData(key: string, data: IslandData): void {
 // the restored island instantly. The `#` in the prefix guards against one
 // workspace id being a prefix of another.
 registerPrWorkspaceCacheForget((workspaceId) => {
+  cloudPrReads.forgetWorkspace(workspaceId);
   const prefix = `${workspaceId}#`;
   for (const key of lastKnownData.keys()) {
     if (key.startsWith(prefix)) lastKnownData.delete(key);
@@ -291,14 +298,14 @@ export function PrStatusIsland({
   localDesktop,
 }: PrStatusIslandProps) {
   const local = !!workspace.path && !isCloudWorkspace(workspace.path) && !isCloudWorkspace(workspace.id) && !parseCloudScopedId(workspace.id);
-  const foreground = useDocumentActive(local && active, true);
-  const observing = local ? foreground : active;
+  const foreground = useDocumentActive(active, true);
+  const observing = foreground;
   const prNumber = workspace.prNumber;
   const sendToChat = useSendToActiveChat(workspace.path);
   // The repo's configured push/PR remote — action prompts must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
-  const refreshKey = useGitRefreshKey(workspace.path, workspace.id, local ? observing : true);
+  const refreshKey = useGitRefreshKey(workspace.path, workspace.id, observing);
   // Focus workbench's pinned Review tab — shared by the View-PR chip and the
   // Show-checks action (which lands directly on its Checks sub-tab).
   const showPr = useShowReviewTab();
@@ -367,7 +374,7 @@ export function PrStatusIsland({
   useEffect(() => {
     // Blur pauses the same surface; it is not a new tab activation. Keep
     // terminal-state suppression and same-key navigation freshness intact.
-    if (local && active && !observing) return;
+    if (active && !observing) return;
     const effectTrigger = classifyPrStatusEffectTrigger(
       activationKeyRef.current,
       observing && prNumber != null,
@@ -409,12 +416,15 @@ export function PrStatusIsland({
     }
     lastRequestAtRef.current = Date.now();
     let cancelled = false;
-    void Promise.allSettled([
-      statusForGeneration(workspace.id, refreshKey, workspace.path),
-      changeCountsForGeneration(workspace.id, refreshKey),
+    const readGithub = () => Promise.allSettled([
       ghPrGet({ workspaceId: workspace.id, prNumber }),
       ghPrChecks({ workspaceId: workspace.id, prNumber }),
-    ]).then(([s, n, p, c]) => {
+    ]);
+    void Promise.all([
+      Promise.allSettled([statusForGeneration(workspace.id, refreshKey, workspace.path),
+        changeCountsForGeneration(workspace.id, refreshKey)]),
+      local ? readGithub() : cloudPrReads.read(dataKey, readGithub),
+    ]).then(([[s, n], [p, c]]) => {
       if (cancelled) return;
       const prev = lastKnownData.get(dataKey);
       const next: IslandData = {
@@ -429,8 +439,10 @@ export function PrStatusIsland({
       setLive({ key: dataKey, data: next });
       if (
         p.status === "fulfilled" &&
+        (local || !reconciledCloudPrReads.has(p)) &&
         shouldReconcileWorkspacePrState(workspace.prState, p.value.state)
       ) {
+        if (!local) reconciledCloudPrReads.add(p);
         // ghPrGet supplies detailed mergeability for this row; ghPrSync is the
         // durable/cross-device reconciliation path for an external draft,
         // ready, closed, or merged transition. It broadcasts only as a write
@@ -471,7 +483,7 @@ export function PrStatusIsland({
     if (!active || prNumber == null) return;
     const requestExternalRefresh = (trigger: "interval" | "resume") => {
       if (document.visibilityState !== "visible") return;
-      if (local && !documentIsForeground()) return;
+      if (!documentIsForeground()) return;
       const batch = lastKnownData.get(dataKey);
       if (
         !shouldPollPrStatus(
@@ -509,13 +521,14 @@ export function PrStatusIsland({
    *  refetch the engine write triggers then confirms it. */
   const applyOptimistic = useCallback(
     (mutate: (d: IslandData) => IslandData) => {
+      if (!local) cloudPrReads.forget(dataKey);
       const prev = lastKnownData.get(dataKey);
       if (!prev) return;
       const next = mutate(prev);
       rememberIslandData(dataKey, next);
       setLive({ key: dataKey, data: next });
     },
-    [dataKey],
+    [dataKey, local],
   );
 
   const actionErrorToast = useCallback((title: string, err: unknown) => {

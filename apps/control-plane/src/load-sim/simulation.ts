@@ -19,8 +19,8 @@ export type Cadence = {
 /** Steady-state cadences for one running workspace with one connected desktop.
  * Keep in step with the referenced constants; the doc lists the same table. */
 export const STEADY_STATE_CADENCES = {
-  "engine.credentialControls": { periodSeconds: 0.5, afterCompletion: true, role: "engine",
-    source: "apps/desktop/src/engine/cloud-local-command-queue-boot.ts: controls poll 500 ms after each exchange" },
+  "engine.credentialControls": { periodSeconds: 5, afterCompletion: true, role: "engine",
+    source: "apps/desktop/src/engine/cloud-local-command-queue-boot.ts: empty fallback poll 5 s after completion (30 s with push; pending ACK 500 ms)" },
   // S2 checkpoint.fallback.v1: push pauses the hint wait, but a successful
   // independent API observation is still required at least once per minute.
   "engine.heartbeat": { periodSeconds: 60, afterCompletion: false, role: "engine",

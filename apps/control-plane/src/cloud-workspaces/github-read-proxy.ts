@@ -4,13 +4,15 @@ import { withSystemTx } from "../db.js";
 import { assertCloudActorSession, type CloudActorEngineScope } from "./actor-sessions.js";
 import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { resolveComputerRepositoryGrant } from "./computer-workspace-source.js";
-import { authorizeGithubRead, type GithubReadRequest } from "./github-read-policy.js";
+import { authorizeGithubRead, githubReadRequestSchema, type GithubReadRequest } from "./github-read-policy.js";
 import { GithubReadCredentials, type GithubReadCredentialBroker } from "./github-read-credentials.js";
 
 type Scope = CloudActorEngineScope & { actorSessionId: string };
 type Repository = { owner: string; repository: string; repositoryId: string; installationId: number };
 type Result = { status: 200; contentType: string; body: string };
 type CacheEntry = { result: Result; etag: string | null; at: number; bytes: number };
+type ReadFlight = { authorization: Promise<{ repository: Repository; request: GithubReadRequest }>;
+  result?: Promise<Result>; readers: number };
 const MAX_BYTES = 8 * 1024 * 1024;
 const CACHE_BYTES = 32 * 1024 * 1024;
 const TTL_MS = 5000;
@@ -43,6 +45,7 @@ async function boundedBody(response: Response, maxBytes = MAX_BYTES): Promise<st
  * before cache lookup and again after I/O. Cache and budgets are bounded per
  * control-plane process; a restart discards them, never workspace authority. */
 export class DatabaseCloudGithubReads {
+  private readonly reads = new Map<string, ReadFlight>();
   private readonly cache = new Map<string, CacheEntry>();
   private readonly pending = new Map<string, Promise<CacheEntry>>();
   private readonly budgets = new Map<string, { at: number; count: number }>();
@@ -70,6 +73,7 @@ export class DatabaseCloudGithubReads {
     this.abort.abort();
     await this.credentials.close();
     await Promise.allSettled([...this.pending.values()]);
+    await Promise.allSettled([...this.reads.values()].map(async flight => { await flight.authorization; await flight.result; }));
     this.cache.clear(); this.cacheBytes = 0; this.identities.clear(); this.budgets.clear();
   }
 
@@ -111,9 +115,34 @@ export class DatabaseCloudGithubReads {
 
   async read(scope: Scope, value: unknown): Promise<Result> {
     if (this.closed) throw new GithubReadError();
-    const repository = await this.authorize(scope);
-    const request = authorizeGithubRead(repository, value);
-    this.admit(scope.workspaceId);
+    const request = githubReadRequestSchema.parse(value), captured = { ...scope };
+    // Share only overlapping requests with the same complete engine/token,
+    // actor and read identity. Every flight still performs both database
+    // checks; a completed answer never caches authority for a later caller.
+    const key = createHash("sha256").update(JSON.stringify([captured.organizationId, captured.workspaceId,
+      captured.generation, captured.engineInstanceId, captured.heartbeatToken, captured.actorSessionId, request])).digest("hex");
+    let flight = this.reads.get(key);
+    if (!flight) {
+      if (this.reads.size >= 64) throw new GithubReadError(429);
+      flight = { authorization: this.authorize(captured).then(repository => ({ repository,
+        request: authorizeGithubRead(repository, request) })), readers: 0 };
+      this.reads.set(key, flight);
+    }
+    flight.readers++;
+    try {
+      const authorized = await flight.authorization;
+      if (this.closed) throw new GithubReadError();
+      // Joining shares database work, never the caller's budget charge.
+      // Failed authentication/policy cannot spend another workspace's budget.
+      this.admit(captured.workspaceId);
+      flight.result ??= this.readAuthorized(captured, authorized.repository, authorized.request);
+      return { ...await flight.result };
+    } finally {
+      if (--flight.readers === 0 && this.reads.get(key) === flight) this.reads.delete(key);
+    }
+  }
+
+  private async readAuthorized(scope: Scope, repository: Repository, request: GithubReadRequest): Promise<Result> {
     const { fresh, ...cacheRequest } = request;
     const key = createHash("sha256").update(JSON.stringify([scope.workspaceId, scope.generation, repository, cacheRequest])).digest("hex");
     const cached = this.cache.get(key);
@@ -130,7 +159,9 @@ export class DatabaseCloudGithubReads {
       finally { if (this.pending.get(key) === pending) this.pending.delete(key); }
     }
     // Revoke/stop/role changes that win during network I/O fence this response.
-    if (this.closed || JSON.stringify(await this.authorize(scope)) !== JSON.stringify(repository)) throw new GithubReadError(403);
+    if (this.closed) throw new GithubReadError(403);
+    const currentRepository = await this.authorize(scope);
+    if (this.closed || JSON.stringify(currentRepository) !== JSON.stringify(repository)) throw new GithubReadError(403);
     const current = this.cache.get(key);
     if (current !== entry && (!current || current.at <= entry.at)) {
       if (current && this.cache.delete(key)) this.cacheBytes -= current.bytes;

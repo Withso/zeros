@@ -3975,7 +3975,7 @@ export class ZerosEngine {
       activity: () => this.cloudEngineUplinkActivity(),
       features: registration.uplinkFeatures(),
       // Credential-control push (P0.10 C01): a pushed revision runs the same
-      // credential-controls exchange the 500 ms poll runs; the poll itself
+      // credential-controls exchange the fallback poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).
       onCredentialRevision: async () => {
         // Only agent-controls reaches here: the uplink acks any other kind
@@ -4918,8 +4918,8 @@ export class ZerosEngine {
       engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,
       // While the uplink's gate is open, cred.revision pushes carry control
       // changes and the poll drops to a 30 s safety net; any uplink loss
-      // returns it to the 500 ms fallback cadence.
-      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 500),
+      // returns it to the 5 s fallback cadence. Pending ACKs stay prompt.
+      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 5_000),
       // A successful poll clears the uplink's failed-push mark, so a
       // transient push failure recovers the slow cadence after one poll.
       controlsExchange: ok => { if (ok) this.cloudEngineUplink?.noteCredentialExchangeSucceeded(); },

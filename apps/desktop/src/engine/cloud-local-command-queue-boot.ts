@@ -41,7 +41,8 @@ type StartupObservation = { phase: CloudEngineStartupPhase; outcome: "start" | "
 type Reference = Pick<CloudAgentBootScope, "organizationId" | "workspaceId" | "generation" | "engineInstanceId">;
 type Conversation = { provider: "claude" | "codex" | "cursor"; model: string; cwd: string };
 type Interest = Conversation & { key: string; conversationId: string; sessionId: string; timer: ReturnType<typeof setTimeout> | null;
-  flight: Promise<void> | null; proof: { contextId: string; confirmedUntilMs: number } | null; confirmedUntilMs: number };
+  flight: Promise<void> | null; proof: { contextId: string; confirmedUntilMs: number } | null; confirmedUntilMs: number;
+  context: ReturnType<CloudAgentContextCache["authorize"]> | null };
 type AcceptedInterest = { work: CloudAcceptedWork; timer: ReturnType<typeof setTimeout> | null; flight: Promise<void> | null };
 type ContextWait = { commandId: string; input: CloudAgentContextInput; controller: AbortController;
   deadline: number; wallDeadline: number; attempts: number; failure: Error | null;
@@ -73,10 +74,9 @@ type Options = {
   startsAllowed?(): boolean;
   /** Closed, content-free evidence only; never readiness or admission. */
   observeStartup?(observation: StartupObservation): void;
-  /** Credential-control poll cadence, read at every schedule. The engine
-   * wires 500 ms while the S2 uplink is down (today's behavior, the
-   * fallback) and a slow safety cadence once the uplink's cred push carries
-   * revisions (P0.10 C01). Defaults to 500 ms. */
+  /** Empty observation cadence: 5 s without push, 30 s with a healthy
+   * uplink. A pending acknowledgement retains the 500 ms handshake cadence.
+   * This never extends actor/context/credential authority deadlines. */
   controlsPollIntervalMs?(): number;
   /** The outcome of each credential-control exchange. The engine clears its
    * failed-push-outstanding mark on a poll success so the uplink's
@@ -323,7 +323,7 @@ export class CloudLocalAgentBootRuntime {
         synchronize: () => this.credentials!.synchronize(this.controller.signal) });
       this.factory = createCloudBootAgentExecutionFactory({ legacy: this.options.legacy, registry: this.registry,
         credentials: this.credentials, contexts: this.contexts, engineLive: () => this.live(), supervisor: this.options.supervisor,
-        actorWorkChanged: () => this.releaseUnusedActors(),
+        actorWorkChanged: () => { this.releaseUnusedActors(); this.scheduleInterests(); },
         canStart: run => !this.sealing && (this.options.startsAllowed?.() ?? true) && this.fencesValue!.canStart(run) });
       this.queueValue = new CloudLocalCommandQueue({ file: this.options.file, scope: this.scope, actors: this.registry,
         ...(this.options.accepted ? { accepted: {
@@ -458,7 +458,7 @@ export class CloudLocalAgentBootRuntime {
   private scheduleControls(): void {
     if (this.controlsTimer) clearTimeout(this.controlsTimer);
     if (!this.active) return;
-    const intervalMs = this.options.controlsPollIntervalMs?.() ?? 500;
+    const intervalMs = this.fencesValue?.pendingAcknowledgement() ? 500 : this.options.controlsPollIntervalMs?.() ?? 5_000;
     this.controlsTimer = setTimeout(() => { this.controlsTimer = null; void this.pollCredentialControls().catch(() => {}); },
       Math.min(30_000, Math.max(100, intervalMs)));
     this.controlsTimer.unref?.();
@@ -534,11 +534,18 @@ export class CloudLocalAgentBootRuntime {
     return this.warmInterest(interest);
   }
   private interestFor(sessionId: string, conversationId: string, conversation: Conversation): Interest {
+    for (const [key, previous] of this.interests) {
+      if (!previous.flight && Date.now() >= previous.confirmedUntilMs &&
+          (!previous.context || !this.factory?.hasContextWork(previous.context))) {
+        if (previous.timer) clearTimeout(previous.timer);
+        this.interests.delete(key);
+      }
+    }
     const key = JSON.stringify([sessionId, conversationId, conversation.provider, conversation.model, conversation.cwd]);
     let interest = this.interests.get(key);
     if (!interest) {
       if (this.interests.size >= 32) throw new CloudCommandRuntimeError("command_limit");
-      interest = { ...conversation, key, sessionId, conversationId, timer: null, flight: null, proof: null, confirmedUntilMs: 0 }; this.interests.set(key, interest);
+      interest = { ...conversation, key, sessionId, conversationId, timer: null, flight: null, proof: null, confirmedUntilMs: 0, context: null }; this.interests.set(key, interest);
     }
     return interest;
   }
@@ -561,13 +568,30 @@ export class CloudLocalAgentBootRuntime {
       // identity then binds this deadline; actor-only renewals cannot extend it.
       if (!interest.proof || interest.proof.contextId !== context.contextId) throw new CloudAgentExecutionError("authority_response_invalid");
       interest.confirmedUntilMs = interest.proof.confirmedUntilMs;
+      interest.context = context;
       this.options.changed(interest.conversationId);
-      this.schedule(interest, (interest.confirmedUntilMs - Date.now()) / 2, () => this.warmInterest(interest),
-        () => this.interests.get(interest.key) === interest && Date.now() < interest.confirmedUntilMs);
+      this.scheduleInterest(interest);
     })();
     interest.flight = task; this.flights.add(task);
     void task.finally(() => { if (interest.flight === task) interest.flight = null; this.flights.delete(task); }).catch(() => {});
     return task;
+  }
+  private scheduleInterests(): void {
+    for (const interest of this.interests.values()) this.scheduleInterest(interest);
+  }
+  private scheduleInterest(interest: Interest): void {
+    const current = () => this.active && this.interests.get(interest.key) === interest &&
+      Date.now() < interest.confirmedUntilMs && !!interest.context && this.factory?.hasContextWork(interest.context) === true;
+    if (!current()) {
+      if (interest.timer) clearTimeout(interest.timer);
+      interest.timer = null;
+      return;
+    }
+    // Other launches/retirements must not postpone an already due renewal.
+    if (interest.timer) return;
+    // The queue warms its eligible head on demand. Only original native work
+    // owns periodic renewal; reading a chat must not create a permanent loop.
+    this.schedule(interest, (interest.confirmedUntilMs - Date.now()) / 2, () => this.warmInterest(interest), current);
   }
   /** Called only for the eligible queue head. Fetches start in a microtask,
    * after its FULL transaction has returned. Neither discovery reads nor pump

@@ -447,14 +447,7 @@ type BootProviderSelection={status:"unavailable";code:Parameters<typeof unavaila
  * warm-context admits. Delivery holds the rows FOR SHARE; discovery reads its
  * consistent snapshot without locks. Material is never opened here. */
 async function readBootProviderSource(tx:Tx,scope:CloudAgentBootScope,consentFingerprint:string,provider:BootProvider,lock:boolean):Promise<BootProviderSelection> {
-  const share=lock?" FOR SHARE":"";
-  const selected=(await tx.query<{credential_id:string|null;credential_revision:string|null;revision:string;consent_fingerprint:string}>(`SELECT credential_id,credential_revision,revision,consent_fingerprint
-    FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3${share}`,[scope.organizationId,scope.fundingOwnerUserId,provider])).rows[0];
-  if(!selected?.credential_id)return {status:"unavailable",code:"cloud_agent_credential_required"};
-  const parent=(await tx.query<{revoked_at:Date|null;revision:string}>(`SELECT revoked_at,revision FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2${share}`,[selected.credential_id,scope.fundingOwnerUserId])).rows[0];
-  if(!parent||parent.revoked_at||!selected.credential_revision||selected.credential_revision!==parent.revision||selected.consent_fingerprint!==consentFingerprint)
-    return {status:"unavailable",code:"cloud_agent_credential_revoked"};
-  const source=(await tx.query<BootSource>(`SELECT credential.id,credential.kind,credential.display_name,credential.revision,credential.current_version,material.material_mode,
+  const sourceSql=`SELECT credential.id,credential.kind,credential.display_name,credential.revision,credential.current_version,material.material_mode,
     material.key_version,material.nonce,material.ciphertext,material.auth_tag,material.material_expires_at,
     connection.revision AS connection_revision,connection.models,connection.all_models,qualification.native_capabilities,qualification.mcp_qualified
     FROM cloud_agent_credentials credential JOIN cloud_agent_credential_versions material ON material.credential_id=credential.id AND material.version=credential.current_version
@@ -462,9 +455,36 @@ async function readBootProviderSource(tx:Tx,scope:CloudAgentBootScope,consentFin
     JOIN cloud_agent_organization_connections connection ON connection.credential_id=credential.id AND connection.owner_user_id=credential.owner_user_id AND connection.org_id=$1 AND connection.provider=$4
     JOIN cloud_workspace_engine_instances engine ON engine.id=$3 JOIN cloud_workspace_generations generation ON generation.workspace_id=engine.workspace_id AND generation.generation=engine.generation
     ${runtimeCredentialQualificationJoin("$5","false")}
-    WHERE credential.id=$2 AND credential.owner_user_id=$6 AND credential.revoked_at IS NULL${lock?" FOR SHARE OF credential,material,connection":""}`,
-    [scope.organizationId,selected.credential_id,scope.engineInstanceId,provider,cloudRuntimeQualificationMode(),scope.fundingOwnerUserId])).rows[0];
-  if(!source||source.material_mode!=="local"||!source.kind.startsWith(`${provider}-`))return {status:"unavailable",code:"cloud_runtime_upgrade_required"};
+    WHERE credential.id=${lock?"$2":"selected.credential_id"} AND credential.owner_user_id=$6 AND credential.revoked_at IS NULL${lock?" FOR SHARE OF credential,material,connection":""}`;
+  let source:BootSource|undefined;
+  if(lock){
+    // Delivery preserves its connection -> credential -> material lock order.
+    const selected=(await tx.query<{credential_id:string|null;credential_revision:string|null;consent_fingerprint:string}>(`SELECT credential_id,credential_revision,consent_fingerprint
+      FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3 FOR SHARE`,[scope.organizationId,scope.fundingOwnerUserId,provider])).rows[0];
+    if(!selected?.credential_id)return {status:"unavailable",code:"cloud_agent_credential_required"};
+    const parent=(await tx.query<{revoked_at:Date|null;revision:string}>("SELECT revoked_at,revision FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2 FOR SHARE",[selected.credential_id,scope.fundingOwnerUserId])).rows[0];
+    if(!parent||parent.revoked_at||!selected.credential_revision||selected.credential_revision!==parent.revision||selected.consent_fingerprint!==consentFingerprint)
+      return {status:"unavailable",code:"cloud_agent_credential_revoked"};
+    source=(await tx.query<BootSource>(sourceSql,[scope.organizationId,selected.credential_id,scope.engineInstanceId,provider,cloudRuntimeQualificationMode(),scope.fundingOwnerUserId])).rows[0];
+  }else{
+    // Passive/warm reads need the same three facts in one statement. LEFT
+    // joins retain the original missing/revoked/unqualified classifications.
+    const observed=(await tx.query<BootSource & {selected_id:string|null;selected_revision:string|null;consent_fingerprint:string;
+      parent_revision:string|null;parent_revoked_at:Date|null}>(`SELECT selected.credential_id AS selected_id,
+        selected.credential_revision AS selected_revision,selected.consent_fingerprint,
+        parent.revision AS parent_revision,parent.revoked_at AS parent_revoked_at,source.*
+      FROM cloud_agent_organization_connections selected
+      LEFT JOIN cloud_agent_credentials parent ON parent.id=selected.credential_id AND parent.owner_user_id=$6
+      LEFT JOIN LATERAL (${sourceSql}) source ON true
+      WHERE selected.org_id=$1 AND selected.owner_user_id=$2 AND selected.provider=$4`,
+    [scope.organizationId,scope.fundingOwnerUserId,scope.engineInstanceId,provider,cloudRuntimeQualificationMode(),scope.fundingOwnerUserId])).rows[0];
+    if(!observed?.selected_id)return {status:"unavailable",code:"cloud_agent_credential_required"};
+    if(!observed.parent_revision||observed.parent_revoked_at||!observed.selected_revision||
+      observed.selected_revision!==observed.parent_revision||observed.consent_fingerprint!==consentFingerprint)
+      return {status:"unavailable",code:"cloud_agent_credential_revoked"};
+    source=observed;
+  }
+  if(!source?.id||source.material_mode!=="local"||!source.kind.startsWith(`${provider}-`))return {status:"unavailable",code:"cloud_runtime_upgrade_required"};
   if(source.material_expires_at&&source.material_expires_at.getTime()<=Date.now()+30_000)return {status:"unavailable",code:"cloud_agent_credential_expired"};
   const caps=runtimeQualifiedNativeCapabilities(source.native_capabilities),models=[...cloudAgentModels(provider)];
   if(!caps||!models.length)return {status:"unavailable",code:"cloud_agent_model_not_authorized"};
@@ -850,7 +870,11 @@ export class DatabaseCloudAgentBootService {
     const current=accepted?{...actor}:await this.confirmActor(tx,bootScope(row),request.actorSessionId,identity.authorityEpoch,true);
     current.confirmedUntilMs=Math.min(current.confirmedUntilMs,actor.confirmedUntilMs);
     if(bootMetadataJson([current.actor,current.fundingGrant])!==bootMetadataJson([actor.actor,actor.fundingGrant])||current.confirmedUntilMs<=Date.now())rejected();
-    await assertCloudEngineAuthorityDeadline(tx,engine.engineInstanceId,this.workosEnabled);
+    // Ordinary warming has no provider I/O and runs in withReadBinding's
+    // SERIALIZABLE observation. Its final engine/deadline check follows this
+    // publication and rolls it back on refusal; do not repeat that expensive
+    // check immediately before the INSERT. Accepted work uses withBinding.
+    if(accepted)await assertCloudEngineAuthorityDeadline(tx,engine.engineInstanceId,this.workosEnabled);
     const published=await tx.query(`INSERT INTO cloud_agent_boot_contexts(context_id,binding_id,actor_session_id,provider,conversation_id,model,cwd,context_revision,binding,
       organization_revision,member_revision,repository_digest,digest,key_version,nonce,ciphertext,auth_tag,expires_at)
       SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18 WHERE $18::timestamptz>clock_timestamp()
