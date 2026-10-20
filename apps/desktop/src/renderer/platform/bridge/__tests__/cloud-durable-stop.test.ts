@@ -329,13 +329,31 @@ describe("durable cloud Stop", () => {
     expect(stopping.outcome.error).toBeUndefined();
   });
 
-  it("keeps a pending Stop on A isolated through A to B to A with equal native command IDs", async () => {
+  it.each([false, true])("keeps a pending Stop on A isolated through A to B to A with equal native command IDs (held identity: %s)", async holdIdentity => {
     const a = await harness(), other = { ...target, organizationId: "99999999-9999-4999-8999-999999999999" };
     const b = await harness({ target: other, attach: false });
     a.open.mockImplementationOnce(async requested => { expect(requested).toMatchObject(other); return b.makePeer(); });
     await a.start(); const stopping = a.request(a.stop); await a.tick();
     await a.bridge.request({ type: "AGENT_NEW_SESSION", chatId: b.prompt.chatId, agentId: "codex", cwd: cloudWorkspaceKey(other), env: { OPENAI_MODEL: "test-model" } });
-    const bRun = a.request(b.prompt); await a.tick(2000);
+    // WebCrypto completes outside fake timers, so even a long virtual tick
+    // cannot prove that B reached its durable queue. Hold that boundary too.
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let releaseDigest!: () => void;
+    const held = new Promise<void>(resolve => { releaseDigest = resolve; });
+    const digestSpy = holdIdentity ? vi.spyOn(crypto.subtle, "digest").mockImplementationOnce(async (...args) => {
+      await held;
+      return digest(...args);
+    }) : undefined;
+    const bRun = a.request(b.prompt);
+    try {
+      await a.tick(2000);
+      if (holdIdentity) {
+        expect(digestSpy).toHaveBeenCalledOnce();
+        expect(b.command).toBeUndefined();
+        expect(stopping.outcome).toEqual({});
+      }
+    } finally { releaseDigest(); }
+    await vi.waitFor(() => expect(b.command).toBeDefined());
     expect(a.command?.commandId).toBe(b.command?.commandId);
     b.state.value = "cancelled"; await a.tick(); await bRun.pending;
     expect(stopping.outcome).toEqual({}); expect(b.calls("stop")).toHaveLength(0);
