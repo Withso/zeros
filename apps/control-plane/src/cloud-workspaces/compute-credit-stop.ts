@@ -7,7 +7,7 @@ import { findInitiatingCloudStopTx, tryRetainCloudDiagnosticTx } from "./cloud-d
 import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { cancelCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
-import { ensureFinalSaveRecovery, finalSaveProven, scheduleFinalSaveRecovery } from "./final-save-recovery.js";
+import { ensureFinalSaveRecovery, finalSaveDispatchable, scheduleFinalSaveRecovery } from "./final-save-recovery.js";
 
 /** Give the engine a finite final-save window while execution is funded.
  * Expiry closes access, never authorizes destruction of an unsaved source.
@@ -143,7 +143,7 @@ export async function requestManagedComputeStop(
     }
     if (pending && ["queued", "observing", "dispatching"].includes(pending.state)) {
       await ensureFinalSaveRecovery(tx, pending.id);
-      if (await finalSaveProven(tx, pending.id)) return;
+      if (await finalSaveDispatchable(tx, pending.id)) return;
       if (!pending.checkpoint_id) await enqueueWorkspaceCheckpointRequest(tx, {
         workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
         requestedBy: pending.requested_by, lifecycleIntentId: pending.id,

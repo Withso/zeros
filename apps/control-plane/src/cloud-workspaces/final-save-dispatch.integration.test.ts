@@ -71,7 +71,7 @@ suite("final-save dispatch custody and database privileges",()=>{
         AND (p.proname LIKE 'cloud_final_save_%' OR p.proname='ensure_cloud_final_save_recovery'
           OR p.proname LIKE 'cloud_restart_%' OR p.proname LIKE 'cloud_accepted_lifecycle_%'
           OR p.proname='cloud_workspace_accepted_lifecycle')`)).rows;
-    expect(functions).toHaveLength(27);
+    expect(functions).toHaveLength(28);
     expect(functions.some(fn => fn.proname === "cloud_final_save_owner_discarded")).toBe(true);
     for(const fn of functions)expect(fn).toMatchObject({prosecdef:false,public_execute:false});
     expect((await pool.query(`SELECT relrowsecurity,relforcerowsecurity FROM pg_class

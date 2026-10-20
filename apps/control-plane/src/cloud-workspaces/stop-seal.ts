@@ -1,6 +1,6 @@
 import type { Tx } from "../db.js";
 import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
-import { ensureFinalSaveRecovery, finalSaveProven, scheduleFinalSaveRecovery } from "./final-save-recovery.js";
+import { ensureFinalSaveRecovery, finalSaveDispatchable, scheduleFinalSaveRecovery } from "./final-save-recovery.js";
 
 type StopScope = { workspaceId: string; organizationId: string; generation: number; intentId: string };
 
@@ -12,7 +12,7 @@ export async function prepareCloudWorkspaceStopSeal(
   input: StopScope & { operation: "stop" | "archive" | "delete"; requestedBy?: string | null },
 ): Promise<boolean> {
   await ensureFinalSaveRecovery(tx, input.intentId);
-  if (await finalSaveProven(tx, input.intentId)) return true;
+  if (await finalSaveDispatchable(tx, input.intentId)) return true;
   const request = (await tx.query<{ id: string; state: string; error_code: string | null }>(
     `SELECT id,state,error_code FROM workspace_checkpoint_requests
      WHERE lifecycle_intent_id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4`,

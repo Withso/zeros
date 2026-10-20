@@ -221,17 +221,18 @@ export async function runFinalSaveRecovery(pool: pg.Pool, workspaceId: string | 
   return withSystemTx(pool, async tx => {
     const candidate = (await tx.query<{ workspace_id: string; org_id: string }>(`SELECT recovery.workspace_id,recovery.org_id
       FROM cloud_workspace_final_save_recoveries recovery JOIN organizations organization ON organization.id=recovery.org_id
-      WHERE recovery.state NOT IN ('proven','resolved','discarded') AND recovery.next_attempt_at<=clock_timestamp()
+      WHERE recovery.state NOT IN ('proven','resolved','discarded','not_required') AND recovery.next_attempt_at<=clock_timestamp()
         AND ($1::uuid IS NULL OR recovery.workspace_id=$1) ORDER BY recovery.next_attempt_at,recovery.lifecycle_intent_id
       FOR UPDATE OF organization SKIP LOCKED LIMIT 1`, [workspaceId])).rows[0];
     if (!candidate) return 0;
     if (!(await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE SKIP LOCKED", [candidate.workspace_id, candidate.org_id])).rowCount) return 0;
     const rows = await tx.query<Recovery>(`SELECT * FROM cloud_workspace_final_save_recoveries
-      WHERE workspace_id=$1 AND org_id=$2 AND state NOT IN ('proven','resolved','discarded') AND next_attempt_at<=clock_timestamp()
+      WHERE workspace_id=$1 AND org_id=$2 AND state NOT IN ('proven','resolved','discarded','not_required') AND next_attempt_at<=clock_timestamp()
       ORDER BY next_attempt_at,lifecycle_intent_id LIMIT 8 FOR UPDATE`, [candidate.workspace_id, candidate.org_id]);
     for (const candidate of rows.rows) {
       await ensureFinalSaveRecovery(tx, candidate.lifecycle_intent_id);
       const row = (await recoveryRow(tx, candidate.lifecycle_intent_id))!;
+      if ((await tx.query<{ adopted: boolean }>("SELECT adopt_cloud_unstarted_candidate_cleanup($1) AS adopted", [row.lifecycle_intent_id])).rows[0]?.adopted) continue;
       if (await resolveHistoricalFinalSaveForErasure(tx, row.lifecycle_intent_id)) continue;
       if (await markProven(tx, row)) continue;
       let request = row.current_request_id ? await attemptRow(tx, row, row.current_request_id) : undefined;
