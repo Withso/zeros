@@ -11255,10 +11255,49 @@ export class ZerosEngine {
 
     const finishLoopObservation = this.cloudWorker ? null : this.slowWorkspaceOperations?.beginEventLoopObservation?.();
     try {
-      // Keep the original NORMAL rows and FULL head in one read snapshot across
-      // image migration and the outer dispatch awaits. A changed writer or head
-      // refuses this response rather than labelling older rows with a new head.
-      const historyRead = this.cloudWorker && this.cloudAgentBoot?.active ? this.captureCloudHistoryRead(op) : null;
+      // Admission retains writer identity, not a global data revision. The
+      // service takes the data ticket at the actual synchronous SQLite read,
+      // after any dispatch wait, and pairs rows with metadata before yielding.
+      const historyOperation = ["chats.list", "messages.window", "messages.windowOlder", "messages.search"].includes(op);
+      const historyBoot = this.cloudWorker && historyOperation && this.cloudAgentBoot?.active ? this.cloudAgentBoot : null;
+      const originalHistoryQueue = historyBoot?.queue;
+      const historyActor = client.cloudActor;
+      let historyReadCompleted = false;
+      const assertHistoryOwner = () => {
+        if (!historyBoot || this.cloudAgentBoot !== historyBoot || !historyBoot.active || historyBoot.queue !== originalHistoryQueue)
+          throw new CloudCommandRuntimeError("command_conflict");
+        if (historyActor && (client.cloudActor !== historyActor || client.authorized?.() !== true))
+          throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+        // The getter also validates the original queue's live engine/storage.
+        // Its changing counter alone cannot invalidate an already paired read.
+        void originalHistoryQueue!.historyReadRevision;
+      };
+      const readHistory = historyBoot ? async <T extends object>(read: () => T,
+        prepare?: (value: T, assertCurrent: () => void) => Promise<void> | undefined): Promise<T> => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          assertHistoryOwner();
+          const ticket = this.captureCloudHistoryRead(op);
+          if (!ticket) throw new CloudCommandRuntimeError("command_conflict");
+          try {
+            const value = read();
+            const snapshot = this.cloudHistoryReadResult(op, params, value, ticket) as T;
+            const pending = prepare?.(value, () => { assertHistoryOwner(); this.assertCloudHistoryRead(ticket); });
+            if (pending) {
+              await pending;
+              assertHistoryOwner();
+              // Migration may itself have rewritten NORMAL. Re-read both
+              // stores; never put a new head on the pre-I/O rows.
+              this.assertCloudHistoryRead(ticket);
+            }
+            historyReadCompleted = true;
+            return snapshot;
+          } catch (error) {
+            assertHistoryOwner();
+            if (!(error instanceof CloudCommandRuntimeError) || error.code !== "command_conflict" || attempt === 2) throw error;
+          }
+        }
+        throw new CloudCommandRuntimeError("command_conflict");
+      } : undefined;
       // A reset that truncates a chat's timeline must not race a turn still
       // streaming INTO that timeline (its trailing chunks would re-persist as
       // zombie rows past the cut). The renderer's footer cancels before it
@@ -11306,6 +11345,7 @@ export class ZerosEngine {
         const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
           ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         const handleWorkspaceRequest=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
+          ...(readHistory ? { cloudHistoryRead: readHistory } : {}),
           ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
             connectionId: client.id,
             authority: catalogAuthority,
@@ -11627,9 +11667,13 @@ export class ZerosEngine {
               },
             )
           : await operation;
-      if (!historyRead && this.cloudAgentBoot?.active && ["chats.list", "messages.window", "messages.windowOlder", "messages.search"].includes(op))
+      if (!historyBoot && this.cloudAgentBoot?.active && historyOperation)
         throw new CloudCommandRuntimeError("command_conflict");
-      const result = historyRead ? this.cloudHistoryReadResult(op, params, rawResult, historyRead) : rawResult;
+      if (historyBoot) {
+        assertHistoryOwner();
+        if (!historyReadCompleted) throw new CloudCommandRuntimeError("command_conflict");
+      }
+      const result = rawResult;
       const changed = dbChangedKinds(op, result, !!this.cloudWorker);
       const workspaceIds = changed && (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
         ? [params.workspaceId]

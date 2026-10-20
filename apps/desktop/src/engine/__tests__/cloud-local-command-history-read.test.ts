@@ -10,6 +10,7 @@ import { headRev, nextRev } from "../db/sync";
 import { createMessage, type EngineMessage } from "../types";
 import type { TransportClient } from "../transport/types";
 import type { CloudLocalCommandHistoryHead } from "@zeros/protocol/cloud-local-mirror";
+import type { WorkspaceService } from "../workspace/service";
 
 const methods = ZerosEngine.prototype as unknown as {
   handleWorkspaceMessage(this: unknown, message: Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>, client: TransportClient, admitted?: boolean): Promise<void>;
@@ -39,13 +40,20 @@ const reads = [
 function fixture(op: string, params: Record<string, unknown>, placement: "cloud" | "Personal" | "organization-local" = "cloud") {
   const rows = deferred<unknown>(), entered = deferred<void>(), sent: EngineMessage[] = [];
   let current = historyHead(1), revision = 1;
+  let duringRead: (() => void) | undefined;
   const queue = { scope, mirroredSequence: 10, get historyReadRevision() { return revision; }, currentHistoryHead: () => current };
   const boot = { active: true, queue };
   const state = { cloudWorker: placement === "cloud" ? { version: 3 } : null,
     cloudAgentBoot: placement === "cloud" ? boot : null, cloudLocalHistoryRestoreHeads: new Map(),
     isHostRelayClient: () => false,
     workspace: { isWriteOp: () => false, lifecycleMutationWorkspaceId: () => null,
-      handle: async () => { entered.resolve(); return rows.promise; } },
+      handle: async (_op: string, _params: unknown, options: Parameters<WorkspaceService["handle"]>[2]) => {
+        entered.resolve();
+        const value = await rows.promise as object;
+        const read = () => { duringRead?.(); return value; };
+        return options?.cloudHistoryRead ? options.cloudHistoryRead(read) : read();
+      } },
+    reportEngineError: vi.fn(),
     router: { broadcast: vi.fn(), broadcastExcept: vi.fn() }, slowWorkspaceOperations: { observe: vi.fn() } };
   Object.setPrototypeOf(state, ZerosEngine.prototype);
   const client: TransportClient = { id: "reader", kind: placement === "cloud" ? "cloud" : "local", authorized: () => true,
@@ -53,18 +61,19 @@ function fixture(op: string, params: Record<string, unknown>, placement: "cloud"
     send: value => { sent.push(value); }, close: () => {} };
   const flight = methods.handleWorkspaceMessage.call(state, createMessage({ type: "WORKSPACE_REQUEST", source: "browser", op, params }), client, true);
   return { rows, entered, sent, flight, state, boot, queue,
+    duringRead: (run: () => void) => { duringRead = run; },
     replaceHead: () => { current = historyHead(2); revision++; } };
 }
 
 describe("original live rows and their authoritative history head", () => {
-  it.each(reads)("refuses old %s rows if the FULL head advances while the original read awaits", async (op, params, raw) => {
-    const f = fixture(op, params); await f.entered.promise; f.replaceHead(); f.rows.resolve(raw); await f.flight;
+  it.each(reads)("refuses old %s rows if the FULL head changes inside every synchronous snapshot", async (op, params, raw) => {
+    const f = fixture(op, params); await f.entered.promise; f.duringRead(f.replaceHead); f.rows.resolve(raw); await f.flight;
     expect(f.sent).toContainEqual(expect.objectContaining({ type: "WORKSPACE_ERROR", code: "command_conflict" }));
     expect(f.sent.some(value => value.type === "WORKSPACE_RESPONSE")).toBe(false);
   });
-  it("also refuses an unmirrored NORMAL change before its current FULL fence is published", async () => {
+  it("also refuses an unmirrored NORMAL change inside every synchronous snapshot", async () => {
     const f = fixture("messages.window", { chatId: "chat" }); await f.entered.promise;
-    nextRev(); f.rows.resolve({ messages: [{ msgId: "old" }] }); await f.flight;
+    f.duringRead(() => { nextRev(); }); f.rows.resolve({ messages: [{ msgId: "old" }] }); await f.flight;
     expect(f.sent.some(value => value.type === "WORKSPACE_RESPONSE")).toBe(false);
     expect(f.sent).toContainEqual(expect.objectContaining({ type: "WORKSPACE_ERROR", code: "command_conflict" }));
   });
