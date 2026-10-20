@@ -439,17 +439,20 @@ export class KeyedAsyncCache<T> {
     ) {
       const [key, entry] = candidates.shift() as [string, CacheEntry<T>];
       if ((key === newestPayloadKey || key === oversizedKey) && this.entries.size <= this.maxEntries) continue;
-      // A newer request may settle first. Do not evict that newer snapshot just
-      // because the true LRU key is temporarily request-owned; its completion
-      // will run pruning again. Subscribers are different: they are retained
-      // indefinitely, so an inactive candidate may still be discarded.
+      // A newer request may settle first. Keep a bounded set of newer results
+      // while the true LRU key is request-owned, without letting one slow read
+      // exempt every later completion from count/byte limits. Pending entries
+      // may exceed the count; completed inactive payloads still have a budget.
+      // Subscribers remain pinned until their own unsubscribe.
       const olderRequestPending = [...this.pending.entries()].some(
         ([pendingKey]) => {
           const pendingEntry = this.entries.get(pendingKey);
           return pendingEntry && pendingEntry.accessOrder < entry.accessOrder;
         },
       );
-      if (olderRequestPending) break;
+      if (olderRequestPending &&
+          this.entries.size <= this.maxEntries + this.pending.size &&
+          totalWeight <= this.maxWeight) break;
       this.entries.delete(key);
       const remainingWeight = totalWeight - (key === oversizedKey ? 0 : entry.weight);
       totalWeight = Number.isNaN(remainingWeight)

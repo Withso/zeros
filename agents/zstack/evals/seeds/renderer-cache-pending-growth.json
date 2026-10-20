@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/shared/lib/keyed-async-cache.ts",
+  "before": "if (olderRequestPending &&\n          this.entries.size <= this.maxEntries + this.pending.size &&\n          totalWeight <= this.maxWeight) break;",
+  "after": "if (olderRequestPending) break;"
+}
