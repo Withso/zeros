@@ -31,8 +31,17 @@ SQLite FD plus an unrelated new FD therefore cannot masquerade as the reader.
 The probe changes no rows. Missing, reused, replaced or ambiguous descriptors,
 unsupported lock evidence and another simultaneous native reservation refuse;
 every probe exit rolls back and failed opening closes its owned references.
-The retained original and native descriptor identities are rechecked for
-subsequent operations. A pathname, `database_list` or `/proc/self/fd` alias by
+The retained original is an `O_PATH` reference on supported Linux x86-64/arm64;
+its metadata, mount and descriptor flags are rechecked. Closing a separate
+ordinary data FD would release the process's POSIX locks for that inode, even
+when another SQLite connection still reports an active transaction. The adapter
+therefore syncs the positively witnessed native SQLite FD and lets SQLite
+manage its own data-FD lifetime. Both refusal and successful close preserve
+peer read/write locks, as verified by kernel evidence and a separate SQLite
+process. Initial creation closes its unpublished creator before linking the
+canonical name without replacement; later cleanup owns only the path reference.
+The original and native descriptor identities are rechecked for subsequent
+operations. A pathname, `database_list` or `/proc/self/fd` alias by
 itself is insufficient. This driver/kernel boundary needs native runtime
 qualification before enrollment; unsupported behavior has no permissive fallback.
 

@@ -15,3 +15,13 @@ driver/kernel qualification remains separate from these local controls.
 Encoded in the retained journal-reader and journal-descriptor regression suites,
 the complete-checkpoint journal, its documentation, and zstack-review's native
 reader rule. No new production caller or serialized format is introduced.
+
+A same-inode peer exposed a second cleanup hazard: closing the independent
+read/write original FD released the process's POSIX reservation even though
+the peer still reported an active transaction. Pin originals with `O_PATH`,
+sync through the positively witnessed native reader, and publish a new journal
+only after its independent creator has closed. Preserve the native witness.
+The lock and lock-boundary suites retain real kernel evidence and a separate
+SQLite process across failure, successful close, late read/write reservations,
+creation publication and cleanup. The review rule now requires that evidence
+instead of relying on the native connection's transaction flag.

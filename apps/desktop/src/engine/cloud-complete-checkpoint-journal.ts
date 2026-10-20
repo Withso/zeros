@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type Sqlite from "better-sqlite3";
 import { openSqlite } from "./db/sqlite";
 import {
@@ -9,6 +10,9 @@ import {
 } from "./cloud-complete-checkpoint-contract";
 
 const MAX_STATE_BYTES = 64 * 1024;
+// Linux x86-64/arm64 UAPI. Node does not export O_PATH. Unlike a separate
+// read/write FD, closing this reference cannot drop SQLite's process locks.
+const O_PATH = 0o10000000;
 const TABLE = `CREATE TABLE complete_checkpoint_journal (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
   version INTEGER NOT NULL CHECK(version=1),
@@ -46,6 +50,45 @@ function descriptorMount(fd: number): string {
   const ids = [...info.matchAll(/^mnt_id:\s*([1-9][0-9]*)$/gm)];
   if (ids.length !== 1) refuse();
   return ids[0]![1]!;
+}
+function descriptorFlags(fd: number): number {
+  const flags = [...descriptorInfo(fd).matchAll(/^flags:\s*([0-7]+)$/gm)];
+  if (flags.length !== 1) refuse();
+  const value = Number.parseInt(flags[0]![1]!, 8);
+  if (!Number.isSafeInteger(value)) refuse();
+  return value;
+}
+/** Close the creator before publishing the canonical name. Thereafter the
+ * adapter owns only an O_PATH reference and SQLite owns every data FD. A
+ * writer opening the newly published journal is safe even if our open fails. */
+function createOriginalJournal(file: string): number {
+  const staging = `${file}.${randomUUID()}.new`;
+  let original: fs.Stats | undefined, reference: number | undefined, staged = true;
+  try {
+    const creator = fs.openSync(staging, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW
+      | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    try { original = fs.fstatSync(creator); privateMetadata(original, false); }
+    finally { fs.closeSync(creator); }
+    reference = fs.openSync(staging, O_PATH | fs.constants.O_NOFOLLOW);
+    const held = fs.fstatSync(reference); privateMetadata(held, false);
+    if (!identity(original, held) || !identity(held, fs.lstatSync(staging))
+      || (descriptorFlags(reference) & O_PATH) !== O_PATH) refuse();
+    // link, unlike rename, cannot replace existing custody. Remove only our
+    // original staging link, then require the single canonical link below.
+    fs.linkSync(staging, file);
+    if (!identity(held, fs.lstatSync(staging)) || !identity(held, fs.lstatSync(file))) refuse();
+    fs.unlinkSync(staging); staged = false;
+    privateMetadata(fs.fstatSync(reference), false);
+    const result = reference; reference = undefined; return result;
+  } finally {
+    try { if (reference !== undefined) fs.closeSync(reference); }
+    finally {
+      if (staged && original !== undefined) {
+        try { if (identity(original, fs.lstatSync(staging))) fs.unlinkSync(staging); }
+        catch { /* Opening already failed; retain unknown staging names. */ }
+      }
+    }
+  }
 }
 /** The driver does not expose sqlite3_file_control. A unique new FD is only
  * a candidate: SQLite can reuse a cached FD while an unrelated open adds one.
@@ -123,7 +166,8 @@ export function openCompleteCheckpointJournal(options: {
     }
   };
   try {
-    if (process.platform !== "linux" || !fs.constants.O_NOFOLLOW || !fs.constants.O_DIRECTORY
+    if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)
+      || !fs.constants.O_NOFOLLOW || !fs.constants.O_DIRECTORY
       || !["create", "open"].includes(options.mode)) refuse();
     const source = CompleteCheckpointSourceSchema.parse(options.source), scope = completeCheckpointScopeKey(source);
     const directory = path.resolve(options.directory);
@@ -131,8 +175,8 @@ export function openCompleteCheckpointJournal(options: {
     directoryFd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     const originalDirectory = fs.fstatSync(directoryFd); privateMetadata(originalDirectory, true);
     const file = `/proc/self/fd/${directoryFd}/journal.sqlite`;
-    fileFd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
-      | (options.mode === "create" ? fs.constants.O_CREAT | fs.constants.O_EXCL : 0), 0o600);
+    fileFd = options.mode === "create" ? createOriginalJournal(file)
+      : fs.openSync(file, O_PATH | fs.constants.O_NOFOLLOW);
     const originalFile = fs.fstatSync(fileFd); privateMetadata(originalFile, false);
     const originalMount = descriptorMount(fileFd);
     const sidecars = () => {
@@ -153,7 +197,7 @@ export function openCompleteCheckpointJournal(options: {
       if (fs.realpathSync(directory) !== directory || !identity(originalDirectory, namedDirectory)
         || !identity(originalDirectory, fs.fstatSync(directoryFd)) || !identity(originalFile, namedFile)
         || !identity(originalFile, fs.fstatSync(fileFd))) refuse();
-      if (descriptorMount(fileFd) !== originalMount) refuse();
+      if ((descriptorFlags(fileFd) & O_PATH) !== O_PATH || descriptorMount(fileFd) !== originalMount) refuse();
       if (sqliteFd !== undefined) {
         const sqliteFile = fs.fstatSync(sqliteFd); privateMetadata(sqliteFile, false);
         if (!identity(originalFile, sqliteFile) || descriptorMount(sqliteFd) !== originalMount) refuse();
@@ -167,8 +211,7 @@ export function openCompleteCheckpointJournal(options: {
     const opened = [...afterSqlite].filter(([fd]) => !beforeSqlite.has(fd));
     if (opened.length !== 1) refuse();
     sqliteFd = opened[0]![0];
-    const flags = [...descriptorInfo(sqliteFd).matchAll(/^flags:\s*([0-7]+)$/gm)];
-    if (flags.length !== 1 || (Number.parseInt(flags[0]![1]!, 8) & 3) !== fs.constants.O_RDWR) refuse();
+    if ((descriptorFlags(sqliteFd) & (O_PATH | 3)) !== fs.constants.O_RDWR) refuse();
     guard();
     const database = db;
     // Configure the per-connection busy limit before any schema or journal I/O.
@@ -192,7 +235,9 @@ export function openCompleteCheckpointJournal(options: {
     if (mode.journal_mode !== "delete" || synchronous.synchronous !== 3) refuse();
     const durable = () => {
       guard();
-      fs.fsyncSync(fileFd!); fs.fsyncSync(directoryFd!);
+      // The positively bound native reader is also the durability FD. Never
+      // reopen the journal for fsync: closing that FD could unlock a peer.
+      fs.fsyncSync(sqliteFd!); fs.fsyncSync(directoryFd!);
       guard();
     };
     if (options.mode === "create") {
