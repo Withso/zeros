@@ -1,0 +1,9 @@
+{
+  "id": "cloud-connection-unserved-boot",
+  "kind": "replay",
+  "area": "cloud-agent-credentials",
+  "fixedBy": "pending",
+  "symptom": "A cloud account reconnect waits forever for a revoked initialized boot that never received that provider, and an abandoned positively retired publication never closes.",
+  "rule": "The cloud-connection-unserved-boot lesson requires exact boot and immutable first-delivery evidence, permanent revocation, holder refusal controls and bounded authorized Settings reconciliation without selecting a source.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-credential-reconnect.integration.test.ts"
+}
