@@ -7,6 +7,7 @@ import type {
   CloudAgentBootSyncRequest, CloudAgentWarmActorRequest, CloudAgentWarmActorResponse,
 } from "@zeros/protocol/cloud-agent-bootstrap";
 import { cloudMcpDigest } from "../agents/cloud-mcp";
+import { CLOUD_CHECKPOINT_HISTORY_MAX_BYTES } from "@zeros/protocol/cloud-checkpoint-history";
 import { isTransientCloudAgentAuthorityError, requestCloudAgentBoot } from "../cloud-agent-execution-client";
 
 const capabilities = { version: 1 as const, goals: false, nativeFork: false, transcriptFork: false,
@@ -60,6 +61,25 @@ function fixture() {
 }
 
 describe("private negotiated boot client", () => {
+  it("allows a maximally escaped checkpoint-only document and envelope only for an explicit request",async()=>{
+    const f=fixture(),{writerEpoch:_writer,...target}=f.scope;
+    // The transport treats the authenticated canonical snapshot as opaque;
+    // the native importer separately validates its hash and complete schema.
+    const document='"'+"\\\\".repeat((CLOUD_CHECKPOINT_HISTORY_MAX_BYTES-2)/2)+'"';
+    expect(Buffer.byteLength(document)).toBe(CLOUD_CHECKPOINT_HISTORY_MAX_BYTES);
+    const result={...target,version:1,mode:"boot-owner-v1",recoveryId:randomUUID(),
+      code:"history_recovered_with_gap",coverage:"unknown",predecessorRetiredAt:new Date().toISOString(),
+      predecessor:{...f.scope,engineInstanceId:randomUUID(),bootId:randomUUID(),writerEpoch:randomUUID()},
+      checkpoint:{writerEpoch:randomUUID(),sha256:"a".repeat(64)},mirroredSequence:0,
+      checkpointOnly:{ownerDiscardReceiptId:randomUUID(),checkpointId:randomUUID(),document,sha256:"b".repeat(64)}};
+    const body=JSON.stringify({result}),requestFetch=vi.fn().mockImplementation(async()=>new Response(body));
+    expect(Buffer.byteLength(body)).toBeGreaterThan(2*CLOUD_CHECKPOINT_HISTORY_MAX_BYTES);
+    await expect(requestCloudAgentBoot(f.authority,"recover-history",{...f.bootstrap,checkpointOnly:true},f.signal,requestFetch)
+      .then(value=>value.checkpointOnly?.document.length)).resolves.toBe(document.length);
+    await expect(requestCloudAgentBoot(f.authority,"recover-history",f.bootstrap,f.signal,requestFetch))
+      .rejects.toMatchObject({code:"cloud_validation_authority_response_invalid"});
+  });
+
   it("validates an exact history-gap authorization without treating it as writer activation", async () => {
     const f = fixture(), { writerEpoch: _writer, ...target } = f.scope;
     const result = { ...target, version: 1, mode: "boot-owner-v1", recoveryId: randomUUID(),

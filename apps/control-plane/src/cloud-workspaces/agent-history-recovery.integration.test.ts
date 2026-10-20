@@ -37,6 +37,11 @@ suite("CP-authorized unsealed history recovery", () => {
     }));
   const rows = () => pool.query("SELECT * FROM cloud_agent_history_recoveries WHERE workspace_id=$1", [fixture.workspaceId]);
 
+  it("does not authorize checkpoint-only import for ordinary retired history without an owner discard", async () => {
+    await expect(service.execute(engine(), "recover-history", { ...request(), checkpointOnly: true })).rejects.toMatchObject({ status: 403 });
+    expect((await rows()).rowCount).toBe(0);
+  });
+
   // Positive source death comes from the same persisted lifecycle proof as the
   // reconciler; these are disposable relational fixtures, never provider calls.
   async function retire() {

@@ -5,6 +5,7 @@ import { runRuntimeSkewGate, validatePins } from "../runtime-skew/gate.mjs";
 import * as gate from "../runtime-skew/gate.mjs";
 import { loadContractSource } from "../runtime-skew/source.mjs";
 import { decideScope, loadPolicy, selectJobs } from "../ci/scope.mjs";
+import { CloudNativeResultSchema } from "../../apps/control-plane/src/cloud-workspaces/command-entry-contract.js";
 
 describe("source-pinned cloud runtime skew gate", () => {
   let gateResult: ReturnType<typeof runRuntimeSkewGate> | undefined;
@@ -100,6 +101,45 @@ describe("source-pinned cloud runtime skew gate", () => {
       claimId: "22222222-2222-4222-8222-222222222222",
       state: "succeeded", resultCode: null,
     }).success).toBe(true);
+  }, 30_000);
+
+  it("captures imported command contracts without broadening native results or admitted operations", async () => {
+    const current = await loadContractSource();
+    const result = { version: 1, goal: { objective: "Synthetic retained goal", status: "active",
+      tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 } };
+    for (const value of [result, { ...result, unrecognized: true },
+      { ...result, goal: { ...result.goal, status: "unrecognized" } }]) {
+      expect(current.controlCommands.CloudNativeResultSchema.safeParse(value).success)
+        .toBe(CloudNativeResultSchema.safeParse(value).success);
+    }
+    const request = { kind: "mutate", mutation: { conversationId: "synthetic-conversation",
+      operationId: "11111111-1111-4111-8111-111111111111", expectedRevision: 0,
+      action: { kind: "enqueue", commandId: "22222222-2222-4222-8222-222222222222", payload: {
+        agentId: "codex", userMessageId: "synthetic-message", prompt: [{ type: "text", text: "Synthetic prompt" }],
+        modeRevision: 0, model: "synthetic-model", agentCredentialGrantId: "33333333-3333-4333-8333-333333333333",
+        operation: { version: 1, kind: "goal", action: "set", update: { objective: "Synthetic goal" } },
+      } } } };
+    expect(current.controlCommands.CloudCommandRequestSchema.safeParse(request).success).toBe(true);
+    request.mutation.action.payload.operation.update = { objective: "" };
+    expect(current.controlCommands.CloudCommandRequestSchema.safeParse(request).success).toBe(false);
+  }, 30_000);
+
+  it("resolves split contract imports from the committed cohort as well as the working tree", async () => {
+    const result = spawnSync("git", ["--no-lazy-fetch", "rev-parse", "HEAD", "HEAD^{tree}"], {
+      encoding: "utf8", timeout: 5_000,
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => ![
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES",
+      ].includes(key))),
+    });
+    expect(result.status).toBe(0);
+    const [sourceCommit, sourceTree] = result.stdout.trim().split("\n");
+    const frozen = await loadContractSource({ sourceCommit, sourceTree });
+    expect(frozen.controlCommands.CloudCommandRequestSchema.safeParse({
+      kind: "snapshot", conversationId: "synthetic-conversation",
+    }).success).toBe(true);
+    expect(frozen.controlCommands.CloudNativeResultSchema.safeParse({ version: 1 }).success).toBe(true);
+    expect(frozen.controlCommands.CloudNativeResultSchema.safeParse({ version: 1, unrecognized: true }).success).toBe(false);
   }, 30_000);
   it("keeps terminal settlements compatible with the strict Alpha control plane until acknowledgement", async () => {
     const pins = JSON.parse(await readFile(new URL("../runtime-skew/pins.json", import.meta.url), "utf8"));

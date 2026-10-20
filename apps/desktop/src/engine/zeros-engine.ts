@@ -5067,10 +5067,12 @@ export class ZerosEngine {
       if (remaining <= 0) throw new CloudCommandRuntimeError("engine_authority_rejected");
       const authorization = await registration!.agentBootRequest("recover-history", {
         version: 1, mode: "boot-owner-v1", ...input.scope, generation: config.execution.generation,
-        engineInstanceId: config.engine.instanceId, ...(preparedCustody.length ? { preparedCustody } : {}),
+        engineInstanceId: config.engine.instanceId, ...(preparedCustody === null ? { checkpointOnly: true as const } :
+          preparedCustody.length ? { preparedCustody } : {}),
       }, AbortSignal.timeout(Math.min(10_000, remaining)));
       recoveryCurrent();
       verified = await recoverCloudLocalCommandCheckpointLedger({ ...input, authorization,
+        assertCurrent: recoveryCurrent,
         scope: { ...input.scope, generation: config.execution.generation, engineInstanceId: config.engine.instanceId,
           bootId: registration!.runtimeBootId } });
       recovering = true;

@@ -170,7 +170,7 @@ type Mutation = {
 type Control = { id: string; binding_id: string; operation: CloudAgentCredentialControlRequest["operation"];
   request: unknown; acknowledgement: unknown; control_revision: string; attempt: number; source_retirement?: unknown;
   publication_unserved?: boolean };
-const sourceRetirementSchema=z.object({kind:z.enum(["provider-lifecycle","resident-consumed"]),proofId:uuid,
+const sourceRetirementSchema=z.object({kind:z.enum(["provider-lifecycle","resident-consumed","owner-discard"]),proofId:uuid,
   retiredAt:z.string().datetime({offset:true})}).strict();
 function sourceRetired(control:Control):boolean {
   if(control.source_retirement===null || control.source_retirement===undefined)return false;

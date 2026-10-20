@@ -15,6 +15,7 @@ import { openSqlite } from "./db/sqlite";
 import { CloudAgentBootScopeSchema, CloudAgentHistoryRecoveryResponseSchema, type CloudAgentBootScope,
   type CloudAgentHistoryRecoveryRequest, type CloudAgentHistoryRecoveryResponse } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudLocalCommandHistoryHeadSchema } from "@zeros/protocol/cloud-local-mirror";
+import { checkpointHistoryMarker, importCheckpointHistory, parseCheckpointHistory, verifyCheckpointHistoryImport } from "./cloud-local-command-checkpoint-history";
 
 const PART_BYTES = 16 * 1024 * 1024;
 const MAX_BYTES = 2 * 1024 * 1024 * 1024;
@@ -77,10 +78,14 @@ const recoveryPrepareSchema = z.object({ version: z.literal(1), scope: CloudAgen
   checkpoint: CloudAgentHistoryRecoveryResponseSchema.shape.checkpoint,
   predecessorRecovery: CloudAgentHistoryRecoveryResponseSchema.shape.predecessorRecovery,
   history: z.object({ recordSequence: z.number().int().nonnegative().safe(), eventSequence: z.number().int().nonnegative().safe() }).strict(),
-  mirroredSequence: z.number().int().nonnegative().safe(), mirrorHead: z.number().int().nonnegative().safe(),
-  journalHead: z.number().int().nonnegative().safe(), retainedSha256: digest,
-}).strict();
-type RecoveryCustody = Pick<z.infer<typeof recoveryPrepareSchema>, "mirrorHead" | "journalHead" | "retainedSha256">;
+  mirroredSequence: z.number().int().nonnegative().safe(), mirrorHead: z.number().int().nonnegative().safe().optional(),
+  journalHead: z.number().int().nonnegative().safe().optional(), retainedSha256: digest,
+  checkpointOnly: z.object({ ownerDiscardReceiptId: z.string().uuid(), checkpointId: z.string().uuid(), sha256: digest }).strict().optional(),
+}).strict().refine(value => value.checkpointOnly ? value.mirrorHead === undefined && value.journalHead === undefined :
+  value.mirrorHead !== undefined && value.journalHead !== undefined);
+type RecoveryCustody = { mirrorHead: number; journalHead: number; retainedSha256: string; checkpointOnly?: never } |
+  { mirrorHead?: never; journalHead?: never; retainedSha256: string;
+    checkpointOnly: { ownerDiscardReceiptId: string; checkpointId: string; sha256: string } };
 const recoveredPredecessors = new WeakMap<CloudLocalCommandPredecessor, {
   file: string; dev: number; ino: number; authorization: CloudAgentHistoryRecoveryResponse;
   inventory: string; history: RecoveryHistory; credentialScope: Readonly<CloudAgentBootScope>; custody: RecoveryCustody;
@@ -347,6 +352,20 @@ function sealInventory(db: Sqlite.Database, seal: Pick<CloudLocalCommandWriterSe
       digest.update(canonicalCloudLocalCommandHistoryJson(row));
     }
   }
+  if (hasTable(db, "local_command_recovered_history_mutations")) {
+    let started = false;
+    for (const row of recoveryRows(db, "local_command_recovered_history_mutations", "mutation_id", deadline)) {
+      if (!started) { digest.update("\0local_command_recovered_history_mutations:v1\0"); started = true; }
+      digest.update(canonicalCloudLocalCommandHistoryJson(row));
+    }
+  }
+  if (hasTable(db, "local_command_checkpoint_history")) {
+    let started = false;
+    for (const row of recoveryRows(db, "local_command_checkpoint_history", "recovery_id", deadline)) {
+      if (!started) { digest.update("\0local_command_checkpoint_history:v1\0"); started = true; }
+      digest.update(canonicalCloudLocalCommandHistoryJson(row));
+    }
+  }
   checkInventoryDeadline(deadline);
   return digest.digest("hex");
 }
@@ -589,6 +608,8 @@ const recoveryTables = [
   ["local_credential_control_scopes", "writer_epoch"], ["local_credential_start_fences", "mutation_id"],
   ["local_credential_control_operations", "request_id"], ["local_credential_retirement_floors", "mutation_id,provider,credential_id"],
   ["local_command_history_recovery_prepares", "writer_epoch"],
+  ["local_command_checkpoint_history", "recovery_id"],
+  ["local_command_recovered_history_mutations", "mutation_id"],
 ] as const;
 function hasTable(db: Sqlite.Database, table: string): boolean {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
@@ -619,7 +640,8 @@ function recoveryInventory(db: Sqlite.Database, deadline = inventoryDeadline()):
 
 /** The older sealed file proves a floor. It must not replace newer FULL
  * identities, accepted ACKs, delete/edit heads or credential tombstones. */
-function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Database, deadline: number): void {
+function verifyRecoveryBaselineRows(ledger: Sqlite.Database, baseline: Sqlite.Database, deadline: number,
+  exactCredentials = false): void {
   const stableRows = [
     ["local_commands", "id", "id,conversation_id,writer_epoch,generation,user_message_id,agent_id,created_at"],
     ["local_command_operations", "id", "*"],
@@ -628,11 +650,21 @@ function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Databa
     ["local_credential_control_operations", "request_id", "*"],
     ["local_credential_retirement_floors", "mutation_id,provider,credential_id", "*"],
     ["local_command_history_recovery_prepares", "writer_epoch", "*"],
+    ["local_command_checkpoint_history", "recovery_id", "*"],
+    ["local_command_recovered_history_mutations", "mutation_id", "*"],
   ] as const;
   for (const [table, keys, columns] of stableRows) {
     checkInventoryDeadline(deadline);
     if (!hasTable(baseline, table)) continue;
     if (!hasTable(ledger, table)) invalid("checkpoint_inventory_hash");
+    // An owner-discard snapshot imports no native credential evidence. Before
+    // activation these rows must still be exactly the acknowledged ancestor's,
+    // including after the credential namespace has been prepared.
+    if (exactCredentials && table.startsWith("local_credential_")) {
+      const count = (db: Sqlite.Database) => (db.prepare(`SELECT count(*) n FROM ${table}`).get() as { n: number }).n;
+      if (count(ledger) !== count(baseline)) invalid("checkpoint_inventory_hash");
+      checkInventoryDeadline(deadline);
+    }
     for (let offset = 0;; offset += 64) {
       checkInventoryDeadline(deadline);
       const old = baseline.prepare(`SELECT ${columns} FROM ${table} ORDER BY ${keys} LIMIT 64 OFFSET ?`).all(offset) as Record<string, unknown>[];
@@ -651,6 +683,11 @@ function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Databa
       }
     }
   }
+  checkInventoryDeadline(deadline);
+}
+
+function verifyRecoveryBaseline(ledger: Sqlite.Database, baseline: Sqlite.Database, deadline: number): void {
+  verifyRecoveryBaselineRows(ledger, baseline, deadline);
   for (const raw of recoveryRows(baseline, "local_command_history_heads", "conversation_id", deadline)) {
     const row = raw as { conversation_id: string; restore_revision: number; document: string };
     checkInventoryDeadline(deadline);
@@ -724,6 +761,20 @@ function recoveryHistoryChain(db: Sqlite.Database, target: CloudAgentBootScope,
     const previous = origins.get(origin.scope.writerEpoch);
     if (previous && !isDeepStrictEqual(previous, origin)) invalid("checkpoint_inventory_hash");
     origins.set(origin.scope.writerEpoch, origin);
+    if (record.checkpointOnly) {
+      const check=()=>checkInventoryDeadline(deadline);
+      const proof = checkpointHistoryMarker(db, record.predecessor.writerEpoch,check);
+      if (!proof || proof.recoveryId !== record.recoveryId || !sameRecoveryTarget(proof, record.scope) ||
+          proof.checkpointOnly?.sha256 !== record.checkpointOnly.sha256 || proof.checkpointOnly.ownerDiscardReceiptId !== record.checkpointOnly.ownerDiscardReceiptId ||
+          proof.checkpointOnly.checkpointId !== record.checkpointOnly.checkpointId) invalid("checkpoint_inventory_hash");
+      for (const retained of parseCheckpointHistory(proof,check).origins) {
+        check();
+        const prior = origins.get(retained.scope.writerEpoch);
+        if (prior && (!isDeepStrictEqual(prior.scope, retained.scope) || prior.recordSequence < retained.recordSequence || prior.eventSequence < retained.eventSequence))
+          invalid("checkpoint_inventory_hash");
+        if (!prior) origins.set(retained.scope.writerEpoch, Object.freeze(retained));
+      }
+    }
     if (origins.size > 4096) invalid("checkpoint_writer_scope");
     checkInventoryDeadline(deadline);
     if (!record.predecessorRecovery) return;
@@ -770,13 +821,16 @@ function sealedHistoryOrigins(db: Sqlite.Database, seal: CloudLocalCommandWriter
 /** At most the two observed namespaces may be offered for CP verification.
  * No hint chooses the history source or authorizes an older checkpoint. */
 export async function cloudLocalCommandHistoryRecoveryCustody(file: string, expectedWriterEpoch: string):
-  Promise<NonNullable<CloudAgentHistoryRecoveryRequest["preparedCustody"]>> {
+  Promise<NonNullable<CloudAgentHistoryRecoveryRequest["preparedCustody"]> | null> {
   try {
+    if (await absentRecoveryLedger(file)) return null;
     const { handle, before } = await readHandle(file, MAX_BYTES);
     try {
       const db = openSqlite(file, { readonly: true, fileMustExist: true });
       try {
         const result = db.transaction(() => {
+          const deadline=inventoryDeadline();
+          if (checkpointHistoryMarker(db, expectedWriterEpoch,()=>checkInventoryDeadline(deadline))) return null;
           const epochs = new Set([recoveryScope(db, "local_command_metadata", "writer").writerEpoch,
             recoveryScope(db, "local_credential_control_metadata", "scope").writerEpoch]);
           epochs.delete(expectedWriterEpoch);
@@ -804,6 +858,7 @@ function retainedRecoveryFingerprint(db: Sqlite.Database, sourceWriter: string, 
     ["local_credential_control_operations", "request_id", "request_id,request_sha256,acknowledgement,ack_bytes,ack_delivered"],
     ["local_credential_retirement_floors", "mutation_id,provider,credential_id", "mutation_id,provider,credential_id,cache_revision,connection_revision"],
     ["local_command_history_mutations", "mutation_id", "*"], ["local_command_history_documents", "sha256", "*"],
+    ["local_command_recovered_history_mutations", "mutation_id", "*"],
     ["local_command_history_limits", "conversation_id,sha256", "*"],
     ["local_command_journal", "writer_epoch,sequence", "*"], ["local_command_mirror_batches", "writer_epoch", "*"],
   ] as const;
@@ -829,7 +884,7 @@ function retainedRecoveryFingerprint(db: Sqlite.Database, sourceWriter: string, 
 }
 
 function verifyPreparedRecoveryCustody(db: Sqlite.Database, authorization: CloudAgentHistoryRecoveryResponse,
-  scope: CloudAgentBootScope, fingerprint: string): RecoveryCustody | null {
+  scope: CloudAgentBootScope, fingerprint: string): Extract<RecoveryCustody, { mirrorHead: number }> | null {
   if (isDeepStrictEqual(scope, authorization.predecessor)) return null;
   const allowed = authorization.preparedCustody?.find(item => isDeepStrictEqual(item.scope, scope));
   if (!allowed || scope.organizationId !== authorization.organizationId || scope.workspaceId !== authorization.workspaceId ||
@@ -837,7 +892,8 @@ function verifyPreparedRecoveryCustody(db: Sqlite.Database, authorization: Cloud
       scope.fundingOwnerUserId !== authorization.fundingOwnerUserId || scope.fundingOwnerEpoch !== authorization.fundingOwnerEpoch)
     invalid("checkpoint_writer_scope");
   const prepare = storedRecoveryPrepare(db, scope.writerEpoch);
-  if (prepare.recoveryId !== allowed.recoveryId || !isDeepStrictEqual(prepare.scope, scope) ||
+  if (prepare.checkpointOnly || prepare.mirrorHead === undefined || prepare.journalHead === undefined ||
+      prepare.recoveryId !== allowed.recoveryId || !isDeepStrictEqual(prepare.scope, scope) ||
       !isDeepStrictEqual(prepare.predecessor, authorization.predecessor) || !isDeepStrictEqual(prepare.checkpoint, authorization.checkpoint) ||
       !isDeepStrictEqual(prepare.predecessorRecovery, authorization.predecessorRecovery) ||
       prepare.mirroredSequence !== authorization.mirroredSequence || prepare.retainedSha256 !== fingerprint)
@@ -852,6 +908,118 @@ function verifyRecoveryJournal(db: Sqlite.Database, source: string, mirrorHead: 
       row.n > 0 && (row.first !== mirrorHead + 1 || row.last !== journalHead)) invalid("checkpoint_journal_head");
 }
 
+async function absentRecoveryLedger(file: string): Promise<boolean> {
+  try { await fs.lstat(file); return false; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  for (const suffix of ["-wal", "-shm", "-journal"]) {
+    try { await fs.lstat(file + suffix); invalid("checkpoint_restore_identity"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  return true;
+}
+
+async function recoverCheckpointOnlyLedger(input: {
+  file: string; assertCurrent?(): void;
+  scope: Pick<CloudAgentBootScope, "organizationId" | "workspaceId" | "generation" | "engineInstanceId" | "bootId">;
+}, verified: Awaited<ReturnType<typeof verifyCloudLocalCommandCheckpoint>>, authorization: CloudAgentHistoryRecoveryResponse) {
+  if (!input.assertCurrent || !authorization.checkpointOnly || authorization.preparedCustody?.length) invalid("checkpoint_writer_scope");
+  const deadline=inventoryDeadline();
+  const current=()=>{input.assertCurrent!();checkInventoryDeadline(deadline);}, file=path.resolve(input.file), parent=path.dirname(file);
+  const parsed=parseCheckpointHistory(authorization,current);
+  if (!parsed.origins.some(item=>isDeepStrictEqual(item.scope,verified.manifest.seal.scope))) invalid("checkpoint_writer_scope");
+  const transcript=verifiedTranscriptPairs.get(verified);
+  if(!transcript) invalid("checkpoint_restore_identity");
+  current();
+  if (await absentRecoveryLedger(file)) {
+    current(); await fs.mkdir(parent,{recursive:true,mode:0o700}); current(); await directory(parent); current();
+    const temporary=path.join(parent,`.checkpoint-history-${randomUUID()}`);
+    try {
+      unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger);
+      const baseline=openSqlite(verified.ledgerFile,{readonly:true,fileMustExist:true});
+      let baselineInventory:string;
+      try {baselineInventory=recoveryInventory(baseline,deadline);} finally {baseline.close();}
+      unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger); current();
+      await fs.copyFile(verified.ledgerFile,temporary,constants.COPYFILE_EXCL); current();
+      unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger);
+      const copied=await readHandle(temporary,MAX_BYTES); current();
+      try {
+        const digest=createHash("sha256");
+        for(let offset=0;offset<copied.before.size;offset+=PART_BYTES) {
+          const bytes=Buffer.alloc(Math.min(PART_BYTES,copied.before.size-offset)); let consumed=0;
+          while(consumed<bytes.length) {
+            const read=await copied.handle.read(bytes,consumed,bytes.length-consumed,offset+consumed); current();
+            if(!read.bytesRead) invalid("checkpoint_restore_read"); consumed+=read.bytesRead;
+          }
+          digest.update(bytes);
+        }
+        if(copied.before.size!==verified.manifest.files[0].bytes || digest.digest("hex")!==verified.manifest.files[0].sha256)
+          invalid("checkpoint_restore_hash");
+      } finally { await copied.handle.close(); }
+      current();
+      const db=openSqlite(temporary,{fileMustExist:true});
+      try {
+        db.pragma("journal_mode = DELETE"); db.pragma("synchronous = FULL");
+        // Verify the actual SQLite reader after opening it, as well as the
+        // copied bytes. No changed native custody may enter the CP projection.
+        verifyLedger(db,verified.manifest.seal,deadline); current();
+        if(recoveryInventory(db,deadline)!==baselineInventory)invalid("checkpoint_inventory_hash"); current();
+        importCheckpointHistory(db,authorization,current);
+      } finally { db.close(); }
+      const durable=await fs.open(temporary,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+      try { await durable.sync(); current(); } finally { await durable.close(); }
+      if(!await absentRecoveryLedger(file)) invalid("checkpoint_restore_identity"); current();
+      // Atomic no-replace publication. A racing file or sidecar never gets
+      // overwritten, and a crash retains the exact CP marker for fresh auth.
+      await fs.link(temporary,file); current(); await fs.unlink(temporary); current(); await syncDirectory(parent); current();
+    } finally { await fs.rm(temporary,{force:true}); }
+  }
+  current();
+  const {handle,before}=await readHandle(file,MAX_BYTES); current();
+  try {
+    const db=openSqlite(file,{readonly:true,fileMustExist:true});
+    try {
+      unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger); current();
+      const baseline=openSqlite(verified.ledgerFile,{readonly:true,fileMustExist:true});
+      try {
+        const state=db.transaction(()=>{
+          const snapshot=verifyCheckpointHistoryImport(db,authorization,current);
+          verifyRecoveryBaselineRows(db,baseline,deadline,true);
+          const retainedSha256=retainedRecoveryFingerprint(db,authorization.predecessor.writerEpoch,deadline);
+          const checkpointOnly={ownerDiscardReceiptId:authorization.checkpointOnly!.ownerDiscardReceiptId,
+            checkpointId:authorization.checkpointOnly!.checkpointId,sha256:authorization.checkpointOnly!.sha256};
+          const bounds={recordSequence:Math.max(verified.manifest.seal.recordSequence,...snapshot.origins.map(item=>item.recordSequence)),
+            eventSequence:Math.max(verified.manifest.seal.eventSequence,...snapshot.origins.map(item=>item.eventSequence))};
+          const writer=recoveryScope(db,"local_command_metadata","writer");
+          const credentialScope=hasTable(db,"local_credential_control_metadata")?
+            recoveryScope(db,"local_credential_control_metadata","scope"):verified.manifest.seal.scope;
+          for(const scope of [writer,credentialScope]) {
+            if(isDeepStrictEqual(scope,verified.manifest.seal.scope)) continue;
+            const prepare=storedRecoveryPrepare(db,scope.writerEpoch);
+            if(!sameRecoveryTarget(authorization,scope) || prepare.recoveryId!==authorization.recoveryId ||
+              !isDeepStrictEqual(prepare.scope,scope))
+              invalid("checkpoint_writer_scope");
+            if(!isDeepStrictEqual(prepare.checkpointOnly,checkpointOnly) ||
+              !isDeepStrictEqual(prepare.predecessor,authorization.predecessor) ||
+              !isDeepStrictEqual(prepare.checkpoint,authorization.checkpoint) ||
+              !isDeepStrictEqual(prepare.predecessorRecovery,authorization.predecessorRecovery) ||
+              !isDeepStrictEqual(prepare.history,bounds) || prepare.mirroredSequence!==authorization.mirroredSequence ||
+              prepare.retainedSha256!==retainedSha256) invalid("checkpoint_inventory_hash");
+          }
+          verifyRecoveryHistoryFences(db,deadline);
+          return {credentialScope:Object.freeze({...credentialScope}),inventory:recoveryInventory(db,deadline),
+            custody:{retainedSha256,checkpointOnly},
+            history:Object.freeze({scope:Object.freeze({...authorization.predecessor}),...bounds,origins:Object.freeze(snapshot.origins)})};
+        })();
+        unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger); current();
+        if(!stable(before,await handle.stat()) || !stable(before,await fs.lstat(file))) invalid("checkpoint_restore_identity"); current();
+        const predecessor=Object.freeze({scope:state.history.scope});
+        recoveredPredecessors.set(predecessor,{file,dev:before.dev,ino:before.ino,authorization,...state});
+        return {...verified,ledgerFile:file,predecessor};
+      } finally { baseline.close(); }
+    } finally { db.close(); }
+  } finally { await handle.close(); }
+}
+
 /** Called only after strict restore names incomplete predecessor custody and
  * the authenticated CP explicitly authorizes this exact unsealed source.
  * The surviving FULL ledger stays in place, including WAL and every ACK.
@@ -860,6 +1028,7 @@ export async function recoverCloudLocalCommandCheckpointLedger(input: {
   root: string; file: string; expectedWriterEpoch: string;
   scope: Pick<CloudAgentBootScope, "organizationId" | "workspaceId" | "generation" | "engineInstanceId" | "bootId">;
   authorization: CloudAgentHistoryRecoveryResponse;
+  assertCurrent?(): void;
 }): Promise<Awaited<ReturnType<typeof verifyCloudLocalCommandCheckpoint>> & { predecessor: CloudLocalCommandPredecessor }> {
   const parsed = CloudAgentHistoryRecoveryResponseSchema.safeParse(input.authorization);
   if (!parsed.success || !sameRecoveryTarget(parsed.data, input.scope) ||
@@ -872,6 +1041,8 @@ export async function recoverCloudLocalCommandCheckpointLedger(input: {
   const file = path.resolve(input.file);
   try {
     if (verified.manifest.seal.sha256 !== authorization.checkpoint.sha256) invalid("checkpoint_seal_document");
+    input.assertCurrent?.();
+    if (authorization.checkpointOnly) return await recoverCheckpointOnlyLedger(input, verified, authorization);
     const { handle, before } = await readHandle(file, MAX_BYTES);
     try {
       const deadline = inventoryDeadline();

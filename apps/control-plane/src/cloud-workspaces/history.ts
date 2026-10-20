@@ -7,7 +7,7 @@ import { authorizeCloudWorkspaceActor } from "./actors.js";
 import { lockCloudWorkspaceScope } from "./authorization.js";
 import { CloudActorProvenanceSchema, CloudAgentBootScopeSchema, type CloudAgentBootScope } from "./agent-boot-contract.js";
 import { readCurrentCloudAgentBootBinding, type CurrentCloudAgentBootBinding } from "./agent-boot-credentials.js";
-import { CloudBootCommandEntrySchema, CloudBootCommandSnapshotSchema } from "./commands.js";
+import { CloudBootCommandEntrySchema, CloudBootCommandSnapshotSchema } from "./command-entry-contract.js";
 import { CloudCompactControlEventSchema } from "./event-streams.js";
 import { recordDatabasePersistenceCost } from "../request-timing.js";
 import {

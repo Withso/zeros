@@ -6,6 +6,8 @@ import { CloudAgentHistoryRecoveryPreparedCustodySchema, CloudAgentHistoryRecove
   type CloudAgentBootScope, type CloudAgentHistoryRecoveryRequest, type CloudAgentHistoryRecoveryResponse } from "./agent-boot-contract.js";
 import { serializeCloudAgentCredentialSourceMutation } from "./agent-credential-mutations.js";
 import { assertCloudEngineAuthorityDeadline, assertCurrentCloudEngineAuthority } from "./engine-authority.js";
+import { retireCloudAgentBootSources } from "./agent-boot-credentials.js";
+import { checkpointHistoryOwner, checkpointHistorySnapshot, checkCheckpointHistoryActivation } from "./checkpoint-history.js";
 
 type Engine = { organizationId: string; workspaceId: string; generation: number; engineInstanceId: string; heartbeatToken: string };
 type Target = { runtime_boot_id: string; owner_user_id: string; agent_funding_owner_epoch: string; cloud_local_commands_version: number | null };
@@ -71,7 +73,7 @@ async function revalidatePreparedCustody(tx: Tx, engine: Pick<Engine, "engineIns
 /** This is authority for one explicit history gap, not execution or a bearer.
  * No material is delivered and no writer is allocated. The exact source comes
  * from the persisted pointer, never a caller selector or latest-writer guess. */
-export async function authorizeCloudAgentHistoryRecovery(pool: pg.Pool, engine: Engine, workosEnabled: boolean, hints: CustodyHint = []) {
+export async function authorizeCloudAgentHistoryRecovery(pool: pg.Pool, engine: Engine, workosEnabled: boolean, hints: CustodyHint = [], checkpointOnly = false) {
   return withSystemTx(pool, async tx => {
     const candidate = (await tx.query<{ owner_user_id: string }>(
       "SELECT owner_user_id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL",
@@ -90,7 +92,13 @@ export async function authorizeCloudAgentHistoryRecovery(pool: pg.Pool, engine: 
     if (!target || target.owner_user_id !== candidate.owner_user_id) rejected();
     if (target.cloud_local_commands_version !== 1)
       throw new HttpError(409, "cloud_runtime_upgrade_required", "cloud_runtime_upgrade_required");
+    if (checkpointOnly && hints.length) rejected();
+    const owner = checkpointOnly ? await checkpointHistoryOwner(tx, engine.engineInstanceId) : null;
+    if (owner) await retireCloudAgentBootSources(tx, { ...engine, generation: owner.source_generation },
+      { kind: "owner-discard", receiptId: owner.id, engineInstanceId: owner.engine_instance_id });
     const existing = (await tx.query<{ id: string }>("SELECT id FROM cloud_agent_history_recoveries WHERE engine_instance_id=$1", [engine.engineInstanceId])).rows[0];
+    if (existing && checkpointOnly !== !!(await tx.query("SELECT 1 FROM cloud_agent_checkpoint_history_snapshots WHERE recovery_id=$1", [existing.id])).rowCount)
+      rejected();
     if (!existing) {
       const prepared = await preparedCustody(tx, engine, hints);
       const inserted = await tx.query(`INSERT INTO cloud_agent_history_recoveries
@@ -146,6 +154,7 @@ export async function authorizeCloudAgentHistoryRecovery(pool: pg.Pool, engine: 
       target.runtime_boot_id, target.owner_user_id, target.agent_funding_owner_epoch])).rows[0];
     if (!row) rejected();
     const prepared = await revalidatePreparedCustody(tx, engine, row.id, row.prepared_custody, hints);
+    const snapshot = owner ? await checkpointHistorySnapshot(tx, row.id, row.predecessor as CloudAgentBootScope, owner) : undefined;
     await assertCloudEngineAuthorityDeadline(tx, engine.engineInstanceId, workosEnabled);
     return CloudAgentHistoryRecoveryResponseSchema.parse({ version: 1, mode: "boot-owner-v1",
       organizationId: engine.organizationId, workspaceId: engine.workspaceId, generation: engine.generation,
@@ -154,6 +163,7 @@ export async function authorizeCloudAgentHistoryRecovery(pool: pg.Pool, engine: 
       recoveryId: row.id, code: "history_recovered_with_gap", coverage: "unknown", predecessor: row.predecessor,
       predecessorRetiredAt: row.predecessor_retired_at.toISOString(), mirroredSequence: Number(row.mirrored_sequence),
       checkpoint: { writerEpoch: row.ancestor_writer_epoch, sha256: row.ancestor_seal_sha256 }, preparedCustody: prepared,
+      ...(snapshot ? { checkpointOnly: snapshot } : {}),
       ...(row.predecessor_recovery ? { predecessorRecovery: row.predecessor_recovery } : {}) });
   });
 }
@@ -200,6 +210,7 @@ export async function checkCloudAgentHistoryActivation(tx: Tx, scope: CloudAgent
   [recoveryId, scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId, scope.bootId,
     scope.fundingOwnerUserId, scope.fundingOwnerEpoch, scope.writerEpoch])).rows[0];
   if (!row) rejected();
+  await checkCheckpointHistoryActivation(tx, recoveryId, scope.engineInstanceId);
   if (row.activated_at && row.custody_sha256 !== custodySha256) rejected();
   await revalidatePreparedCustody(tx, scope, recoveryId, row.prepared_custody);
   return row.activated_at ? null : recoveryId;

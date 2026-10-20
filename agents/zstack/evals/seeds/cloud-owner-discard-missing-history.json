@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/cloud-local-command-queue-checkpoint.ts",
+  "before": "if (await absentRecoveryLedger(file)) return null;",
+  "after": "if (await absentRecoveryLedger(file)) invalid(\"checkpoint_restore_read\");"
+}

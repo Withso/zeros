@@ -104,15 +104,20 @@ function storedSeal(ledger: Sqlite.Database, writerEpoch: string): CloudLocalCom
 type HistoryOrigin = Pick<CloudLocalCommandWriterSeal, "scope" | "recordSequence" | "eventSequence">;
 type HistorySource = HistoryOrigin & { origins?: readonly HistoryOrigin[] };
 function source(ledger: Sqlite.Database, conversationId: string, head: CloudLocalCommandHistoryHead, seal: HistorySource): CloudAgentBootScope {
-  if (head.source.kind !== "command") {
-    const origin = head.originWriterEpoch === seal.scope.writerEpoch ? seal :
-      seal.origins?.find(value => value.scope.writerEpoch === head.originWriterEpoch) ?? storedSeal(ledger,head.originWriterEpoch);
-    if (origin.scope.organizationId !== seal.scope.organizationId || origin.scope.workspaceId !== seal.scope.workspaceId ||
-        origin.scope.generation > seal.scope.generation || origin.scope.fundingOwnerEpoch > seal.scope.fundingOwnerEpoch ||
-        head.history.recordSequence !== null && head.history.recordSequence > origin.recordSequence ||
-        head.history.eventSequence !== null && head.history.eventSequence > origin.eventSequence) refuse();
-    return origin.scope;
-  }
+  const origin = head.originWriterEpoch === seal.scope.writerEpoch ? seal :
+    seal.origins?.find(value => value.scope.writerEpoch === head.originWriterEpoch) ??
+      (head.source.kind === "command" ? undefined : storedSeal(ledger,head.originWriterEpoch));
+  // Records retain their workspace revision. Events belong to the original
+  // writer's stream, so a successor starting at zero cannot bound an older
+  // conversation. The authenticated origin still bounds that exact stream.
+  if (origin && (origin.scope.organizationId !== seal.scope.organizationId || origin.scope.workspaceId !== seal.scope.workspaceId ||
+      origin.scope.generation > seal.scope.generation || origin.scope.fundingOwnerEpoch > seal.scope.fundingOwnerEpoch ||
+      head.history.recordSequence !== null && head.history.recordSequence > origin.recordSequence ||
+      head.history.eventSequence !== null && head.history.eventSequence > origin.eventSequence)) refuse();
+  if (head.source.kind !== "command") return origin!.scope;
+  // Older acknowledged artifacts retain a command's own actor provenance
+  // without a separate origin seal. Keep their existing envelope unchanged.
+  if (!origin && head.history.eventSequence !== null && head.history.eventSequence > seal.eventSequence) refuse();
   const row = ledger.prepare(`SELECT conversation_id,writer_epoch,generation,user_message_id,agent_id,execution_id,result,actor,state
     FROM local_commands WHERE id=?`).get(head.source.commandId) as {
       conversation_id: string; writer_epoch: string; generation: number; user_message_id: string; agent_id: string;
@@ -122,10 +127,16 @@ function source(ledger: Sqlite.Database, conversationId: string, head: CloudLoca
       row.user_message_id !== head.source.intent.userMessageId || row.agent_id !== head.source.intent.agentId || row.execution_id !== head.source.executionId ||
       row.state === "queued" || row.state === "dispatching" ||
       (row.result === null ? null : hash(canonical(JSON.parse(row.result)))) !== head.source.nativeResultSha256) refuse();
-  const actor = JSON.parse(row.actor) as { scope?: unknown }, origin = CloudAgentBootScopeSchema.parse(actor.scope);
-  if (origin.writerEpoch !== head.originWriterEpoch || origin.generation !== row.generation || origin.organizationId !== seal.scope.organizationId ||
-      origin.workspaceId !== seal.scope.workspaceId || origin.generation > seal.scope.generation || origin.fundingOwnerEpoch > seal.scope.fundingOwnerEpoch) refuse();
-  return origin;
+  const actor = JSON.parse(row.actor) as { scope?: unknown } | null;
+  // A terminal receipt without execution may legitimately have no actor.
+  // Only authenticated recovered origin custody can fill that history scope;
+  // this does not manufacture an actor or runnable authority.
+  const actorScope = CloudAgentBootScopeSchema.parse(actor?.scope ?? (row.execution_id === null ?
+    seal.origins?.find(value => value.scope.writerEpoch === head.originWriterEpoch)?.scope : undefined));
+  if (origin && canonical(actorScope) !== canonical(origin.scope) || actorScope.writerEpoch !== head.originWriterEpoch ||
+      actorScope.generation !== row.generation || actorScope.organizationId !== seal.scope.organizationId || actorScope.workspaceId !== seal.scope.workspaceId ||
+      actorScope.generation > seal.scope.generation || actorScope.fundingOwnerEpoch > seal.scope.fundingOwnerEpoch) refuse();
+  return actorScope;
 }
 function content(payload: string): string {
   const value: unknown = JSON.parse(payload);
@@ -259,8 +270,7 @@ export function rebuildCloudLocalCommandHistory(input: CloudLocalCommandHistoryR
       if (!stored || stored.document.length > 64 * 1024) refuse();
       const head = CloudLocalCommandHistoryHeadSchema.parse(JSON.parse(stored.document));
       if (stored.restore_revision !== head.history.restoreRevision || canonical(head) !== stored.document ||
-          (head.history.recordSequence !== null && head.history.recordSequence > seal.recordSequence) ||
-          (head.history.eventSequence !== null && head.history.eventSequence > seal.eventSequence)) refuse();
+          (head.history.recordSequence !== null && head.history.recordSequence > seal.recordSequence)) refuse();
       const origin = source(input.ledger,conversationId,head,seal);
       let chat: Row | null = null; const messages: Row[] = [], turns: Row[] = [];
       const preserveSealed = !("manifestSha256" in head.history) && input.sealedCheckpoint !== undefined;
