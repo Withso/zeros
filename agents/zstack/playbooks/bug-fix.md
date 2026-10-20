@@ -31,6 +31,10 @@
    that read must still leave one catch-up for a quick reveal.
    For a scoped gate, drive the real request dispatcher for every op it names;
    calling the gate helper directly cannot show that dispatch never selects it.
+   For terminal admission refusals, drive repeated passive snapshots through
+   optional preparatory writes and the real mirror dispatcher. Retain the exact
+   owner refusal until explicit reauthorization or identity replacement; keep
+   transient recovery, newer edits and held A → B → A failures independent.
    For history consistency, hold the real service before and after its SQLite
    read. Capture rows and restore metadata together at that synchronous boundary;
    an admission-time global revision must not reject unrelated writes. Retain
