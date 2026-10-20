@@ -940,19 +940,54 @@ export async function runDesignRelativePinnedMovementSmoke({ page, check }) {
 export async function runDesignCompletedNudgeRuntimeSmoke({ page, check }) {
   for (const action of ["none", "same-selection", "new-gesture", "directory-ABA", "page-ABA", "physical-same-revision", "physical-new-revision"]) {
     await openCanvasFixture(page, "layoutGestures&coldFoundation");
-    if (action === "page-ABA") await page.evaluate(async () => {
-      const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-      useDesignWorkspaceUiStore.getState().setActivePage("ws_design_harness", "page_1");
-    });
+    // Start on the fixture's resolved page: a synthetic page_1 makes layer
+    // selection refuse before any gesture exists, vacuously passing zero.
     await page.locator('[data-design-layer-id="home-heading"]').click();
+    await expect(page.locator('[data-design-element-overlay="home-heading"][data-design-selected-element]')).toHaveCount(1);
     await page.getByLabel("Design canvas", { exact: true }).focus();
+    await expect(page.getByLabel("Design canvas", { exact: true })).toBeFocused();
+    await page.evaluate(async () => {
+      const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+      const { DesignSavedEditingSession } = await import("/apps/desktop/src/renderer/features/design-workspace/design-saved-editing.ts");
+      const runtime = designFrameRuntime("ws_design_harness", "home.html");
+      const preview = runtime.previewStyles;
+      const retain = DesignSavedEditingSession.prototype.retain;
+      const observation = window.__zerosHarnessCompletedNudge = { saves: [], previewHeld: false, settled: false };
+      const gate = new Promise((resolve) => { observation.releasePreview = resolve; });
+      // Preserve the real iframe request and hold only its acknowledgement.
+      // Foundation reads can belong to the inspector, before this gesture has
+      // submitted a mutation. Keep that gap open on every run.
+      runtime.previewStyles = async function (...args) {
+        const result = await preview.apply(this, args);
+        observation.previewHeld = true;
+        await gate;
+        return result;
+      };
+      DesignSavedEditingSession.prototype.retain = function (save) {
+        const result = retain.call(this, save);
+        observation.saves.push(save);
+        const settled = () => {
+          observation.settled = true;
+          runtime.previewStyles = preview;
+          DesignSavedEditingSession.prototype.retain = retain;
+        };
+        void save.then(settled, settled);
+        return result;
+      };
+    });
     await page.keyboard.press("ArrowRight");
+    await expect.poll(() => page.evaluate(() => ({
+      previewHeld: window.__zerosHarnessCompletedNudge.previewHeld,
+      saves: window.__zerosHarnessCompletedNudge.saves.length,
+      settled: window.__zerosHarnessCompletedNudge.settled,
+    }))).toEqual({ previewHeld: true, saves: 1, settled: false });
     await expect.poll(() => page.evaluate(() => window.__zerosHarnessFoundation.reads.length)).toBeGreaterThan(0);
     const replacement = await page.evaluate(async (action) => {
       const { designFrameRuntime, connectDesignFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
-      const { useDesignWorkspaceUiStore, designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+      const { useDesignWorkspaceUiStore, designWorkspaceView, captureDesignPageOwner } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
       const { useDesignRuntimeStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-runtime-store.ts");
       const workspaceId = "ws_design_harness", file = "home.html";
+      const ownerBefore = captureDesignPageOwner(workspaceId);
       const old = designFrameRuntime(workspaceId, file);
       const state = useDesignRuntimeStore.getState();
       const snapshot = state.byWorkspace[workspaceId].frames[file].snapshot;
@@ -982,8 +1017,13 @@ export async function runDesignCompletedNudgeRuntimeSmoke({ page, check }) {
         original.remove();
         if (action === "physical-new-revision") useDesignRuntimeStore.getState().publishSnapshot(workspaceId, folder, file, { ...snapshot, revision: snapshot.revision + 1 }, old.sourceVersion);
       }
-      return { active: old.isActive(), same: old === designFrameRuntime(workspaceId, file), before: snapshot.revision, after: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[file]?.snapshot?.revision };
+      return { active: old.isActive(), same: old === designFrameRuntime(workspaceId, file), before: snapshot.revision, after: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[file]?.snapshot?.revision, ownerBefore, ownerAfter: captureDesignPageOwner(workspaceId) };
     }, action);
+    if (action === "page-ABA") {
+      expect(replacement.ownerBefore.pageId).toBeTruthy();
+      expect(replacement.ownerAfter.pageId).toBe(replacement.ownerBefore.pageId);
+      expect(replacement.ownerAfter.revision).toBeGreaterThan(replacement.ownerBefore.revision);
+    }
     if (action === "physical-same-revision") expect(replacement).toMatchObject({ active: false, same: false, after: replacement.before });
     if (action === "new-gesture") {
       const label = await page.locator('[data-design-frame="home.html"] [data-design-frame-label]').boundingBox();
@@ -998,6 +1038,14 @@ export async function runDesignCompletedNudgeRuntimeSmoke({ page, check }) {
       const { waitForPendingDesignEdits } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
       await waitForPendingDesignEdits("ws_design_harness");
     });
+    // A submitted-mutation drain is empty while the nudge still owns the
+    // preview acknowledgement. Join the retained gesture, including refusal
+    // and cleanup, before either the exact-one or exact-zero assertion.
+    expect(await transactionWrites(page)).toBe(0);
+    expect(await page.evaluate(() => window.__zerosHarnessCompletedNudge.settled)).toBe(false);
+    await page.evaluate(() => window.__zerosHarnessCompletedNudge.releasePreview());
+    await expect.poll(() => page.evaluate(() => window.__zerosHarnessCompletedNudge.settled)).toBe(true);
+    await page.evaluate(() => Promise.all(window.__zerosHarnessCompletedNudge.saves));
     expect(await transactionWrites(page)).toBe(["none", "same-selection", "new-gesture"].includes(action) ? 1 : 0);
     if (action === "new-gesture") {
       await page.keyboard.press("Escape");
