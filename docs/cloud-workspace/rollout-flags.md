@@ -46,6 +46,7 @@ registered `whileFeedUnavailable` value:
 | `checkpoint_push` | retain | Transport choice for a timing hint; the heartbeat still delivers and fences every checkpoint request, and the long-poll remains as fallback. A flip closes the affected uplinks (`1001 features_changed`). |
 | `cp_idle_stop` | retain | Moves who decides an idle stop, not whether the engine proves idleness: the engine cancels a request it cannot prove and its own timer resumes once the uplink is gone. A flip closes the affected uplinks (`1001 features_changed`). |
 | `turn_journal` | retain | Transport choice: the engine keeps its turn journal either way and sends it only over an uplink that negotiated `turns.v1`. A flip closes the affected uplinks (`1001 features_changed`). |
+| `lifecycle_allocation_waits` | **off** | Enables new exact-allocation scheduling edges only. Existing edge readers, SQL dispatch fences and settlement enqueues stay active independently of the flag. |
 
 `retain` keeps the last loaded value, still corrected by the safety refresh.
 Use `off` for any new flag that relaxes a database check or a security
@@ -67,6 +68,14 @@ requires `capabilities`: its endpoints issue S1 client capabilities.
 engine implement the explicit mode; merely deploying the schema does not change
 any timer. See [capability actor sessions](capability-actor-sessions.md) for the
 N-1 fence, strict expiry, separate context proofs and rollback behavior.
+
+`lifecycle_allocation_waits` is internal to the control-plane scheduler and has
+no S3/SDK discovery feature or prerequisite transport flag. It remains off until
+the complete 0172 migration and every lifecycle/compute reader are deployed and
+old dispatchers have drained. A SQL guard rejects an old worker's attempt to
+dispatch an unresolved edge, even if it ignores `UPDATE RETURNING`. Disable
+stops new edges; keep readers and guards while any accepted edge is pending or
+resolved. See [exact previous-allocation waits](compute-credits.md#exact-previous-allocation-waits).
 
 `engine_lease_over_uplink` requires `realtime_uplink`: the uplink renews the
 36 min engine lease (S2 `lease.v1`). Enable it only once every control-plane

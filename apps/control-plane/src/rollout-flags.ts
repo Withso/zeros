@@ -56,6 +56,9 @@ export const ROLLOUT_FLAGS = {
   agent_runners: { whileFeedUnavailable: "off", summary: "Negotiate the stable cloud execution coordinator",
     requires: ["detached_turns"] },
   build_qualification: { whileFeedUnavailable: "off", summary: "Reuse exact Computer build qualification with fresh boot checks" },
+  // Reader/due/SQL fences are unconditional once installed. This flag only
+  // creates new edges after the old dispatch workers have been drained.
+  lifecycle_allocation_waits: { whileFeedUnavailable: "off", summary: "Park exact previous-allocation dependencies on the durable queue" },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

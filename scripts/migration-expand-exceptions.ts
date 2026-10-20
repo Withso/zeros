@@ -149,6 +149,24 @@ END $$;`],
   "0173_cloud_owner_recovery_safety_stop.sql": {
     "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_owner_discard_recovery_digest(uuid),
   cloud_owner_discard_safety_stop_matches(uuid,uuid,integer,uuid,uuid,uuid,uuid,bytea) FROM PUBLIC;`],
+  "0174_cloud_lifecycle_scheduling.sql": {
+    "privilege-tightening": [
+      "cloud_lifecycle_allocation_wait_status(uuid)",
+      "preserve_cloud_lifecycle_allocation_wait()",
+      "require_cloud_lifecycle_allocation_dependency()",
+      "cloud_lifecycle_allocation_wait_jobs()",
+      "cloud_lifecycle_allocation_settled_jobs()",
+      "cloud_lifecycle_allocation_scope_jobs()",
+      "retire_cloud_lifecycle_allocation_wait()",
+      "purge_cloud_lifecycle_allocation_waits()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+    // Only the new scheduling data follows the pre-existing erasure boundary.
+    "new-scheduling-purge": [`CREATE FUNCTION purge_cloud_lifecycle_allocation_waits() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+  DELETE FROM cloud_workspace_lifecycle_allocation_waits WHERE workspace_id=NEW.id AND org_id=NEW.org_id;
+  RETURN NEW;
+END $$;`],
   },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.

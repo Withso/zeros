@@ -164,6 +164,53 @@ A failed check that carries a provider wait (an HTTP `Retry-After` or
 Boat's body wait, capped at five minutes) is not retried sooner, but an
 active allocation is still re-checked before its checkpoint and stop margin.
 
+### Exact previous-allocation waits
+
+The internal `lifecycle_allocation_waits` organization flag enables a scheduling
+edge only after the ordinary allocator refuses an exact previous allocation.
+A funded running allocation can still satisfy a warm wake before that refusal.
+Incomplete blocker identity keeps the ordinary retry. The flag does not grant
+compute authority or change a client/engine contract.
+
+Migration `0172_cloud_lifecycle_scheduling.sql` stores one immutable edge per
+lifecycle intent. It freezes the organization/workspace/generation, original
+owner, billing and authority epochs, source and predecessor, provider
+connection/version/resource, and exact allocation/owner revision. The writer
+holds the normal parent/intent locks but never waits on a monetary lease or
+allocation-owner lock; those tables have no foreign key from the edge.
+
+An unchanged pending edge releases the worker claim and has no recurring timer,
+retry audit, or repeated provider/funding attempt. Both edge publication and
+independent settlement enqueue the workspace's existing lifecycle job in their
+transactions. Each settlement transition enqueues even when no edge is yet
+visible, so crossing transactions cannot drain the edge's job before settlement
+commits and then lose the wakeup. This is one coalesced hint per settlement,
+including a harmless job when there is no waiter. Scope changes enqueue
+re-evaluation, and the existing lost-job audit repairs a missing hint. Settlement
+enqueues without updating or locking a waiter. The legacy error-based settlement
+nudge excludes pending edges.
+
+Resolution requires the original lease to be positively settled with no open
+reservation, its original identity and owner revision intact, any saved
+predecessor successful, and any old source and final-save dispatch retired.
+A destructive predecessor's exact successful request and checkpoint are frozen
+with the edge. Initial resolution uses the final-save dispatch proof; afterward
+the original historical receipt is checked without mistaking this continuation's
+own new allocation for an unrelated replacement. Checkpoint invalidation, a new
+engine/token incarnation, or different allocation still refuses continuation.
+A different allocation reusing the resource is not that proof. Changed scope
+retires only the old continuation; it cannot update the replacement workspace,
+adopt new authority, or synthesize a new wake. The normal runtime/provider,
+funding, deadline and source checks run again. The original lifecycle claim and
+frozen edge are checked after funding and before accepting a late result. All
+independent meter floors, retry deadlines and reservation custody remain.
+
+Deploy all readers and the SQL dispatch guard before enabling new edge writes;
+drain old dispatchers before rollout. Disabling the flag, including loss of its
+change feed, stops new writes only. Keep the readers, guard and durable enqueue
+path until pending and resolved edges finish; deleting edges or rolling back
+past their reader is not a safe rollback. Local workspaces do not use this path.
+
 ## Configuration and rollout
 
 Managed Boat requires `BOAT_COMPUTE_POLICY_ID` and

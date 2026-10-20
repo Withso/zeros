@@ -62,6 +62,10 @@ import { CloudWorkspaceComputeLeaseCoordinator, type ManagedComputePolicy } from
 import { computeObservationAllocationIdSql, requestComputeObservationRecheck } from "./compute-rechecks.js";
 import {retireCloudAgentBootSources} from "./agent-boot-credentials.js";
 import type { CloudRuntimeRollbackCache } from "./runtime-rollback.js";
+import { ROLLOUT_FLAGS_OFF, type RolloutFlagReader } from "../rollout-flags.js";
+import { ComputeAllocationDependencyError, ComputeAllocationContinuationUnavailable,
+  allocationWaitContinuationLiveSql, parkCloudAllocationWait, reconcileCloudAllocationContinuation,
+  releaseCloudAllocationContinuation, resolveCloudAllocationWait } from "./allocation-waits.js";
 
 type LifecycleOperation = "create" | "stop" | "wake" | "archive" | "delete";
 type DesiredState = "running" | "stopped" | "archived" | "deleted";
@@ -90,6 +94,9 @@ type ClaimedIntent = {
   authorityEpoch: string;
   sourceBindingId: string | null;
   requestedBy: string | null;
+  ownerUserId: string;
+  billingEpoch: string;
+  resumeAfterIntentId: string | null;
 };
 
 type DriftCandidate = {
@@ -142,6 +149,8 @@ export type CloudWorkspaceReconcilerOptions = {
   jobConcurrency?: number;
   /** Safety audit for lost job enqueues (default hourly). */
   jobAuditIntervalMs?: number;
+  /** Gates new scheduling edges only; existing edge readers/fences stay on. */
+  rolloutFlags?: Pick<RolloutFlagReader, "enabled">;
 };
 
 // Bounded work per job run, as in the former per-tick loops; a job that hits
@@ -353,6 +362,7 @@ export class CloudWorkspaceReconciler {
   private readonly jobs: JobRunner;
   private authExpiryRepair: Promise<void> | null = null;
   private readonly jobAuditIntervalMs: number;
+  private readonly rolloutFlags: Pick<RolloutFlagReader, "enabled">;
   private stopped = false;
   private ticking = false;
   private orphanSweepAt = Date.now() + ORPHAN_SWEEP_INTERVAL_MS;
@@ -366,6 +376,7 @@ export class CloudWorkspaceReconciler {
     this.runtimeRollbackCache = options.runtimeRollbackCache;
     this.checkpointRequests = options.checkpointRequests ?? new CloudWorkspaceCheckpointRequestWorker(options.pool, { workosEnabled: options.workosEnabled ?? false });
     this.workosEnabled = options.workosEnabled === true;
+    this.rolloutFlags = options.rolloutFlags ?? ROLLOUT_FLAGS_OFF;
     this.computeLeases = new CloudWorkspaceComputeLeaseCoordinator({pool:options.pool,provider:options.provider,
       ...(options.providerResolver?{providerResolver:options.providerResolver}:{}),workosEnabled:options.workosEnabled===true,
       ...(options.computePolicy?{policy:options.computePolicy}:{}),
@@ -570,13 +581,20 @@ export class CloudWorkspaceReconciler {
         created_at: Date;
         first_claim_wait_ms: string | null;
         previous_lease_wait_ms: string | null;
+        owner_user_id: string;
+        current_billing_epoch: string;
+        resume_after_intent_id: string | null;
+        allocation_wait_id: string | null;
       }>(
         `SELECT i.id, i.workspace_id, i.org_id, i.operation,
                 cw.desired_state, cw.current_generation, cw.authority_epoch, cw.agent_boot_id, i.generation,
-                i.requested_by,i.created_at,
+                i.requested_by,i.created_at,cw.owner_user_id,cw.current_billing_epoch,i.resume_after_intent_id,
+                allocation_wait.lifecycle_intent_id AS allocation_wait_id,
                 CASE WHEN i.attempt_count=0
                   THEN extract(epoch FROM (clock_timestamp()-i.created_at))*1000 END AS first_claim_wait_ms,
-                CASE WHEN i.error_code='compute_previous_lease_pending'
+                CASE WHEN allocation_wait.state='pending'
+                  THEN extract(epoch FROM (clock_timestamp()-allocation_wait.created_at))*1000
+                  WHEN i.error_code='compute_previous_lease_pending'
                   THEN extract(epoch FROM (clock_timestamp()-i.updated_at))*1000 END AS previous_lease_wait_ms,
                 i.affects_workspace, i.generation_transition_id, g.provider,
                 g.provider_connection_id, g.provider_connection_version::text,
@@ -594,9 +612,12 @@ export class CloudWorkspaceReconciler {
            ON pb.workspace_id = g.workspace_id AND pb.generation = g.generation
          LEFT JOIN workspace_checkpoint_requests checkpoint_request
            ON checkpoint_request.lifecycle_intent_id = i.id
-         WHERE i.next_attempt_at <= now()
+         LEFT JOIN cloud_workspace_lifecycle_allocation_waits allocation_wait ON allocation_wait.lifecycle_intent_id=i.id
+         WHERE CASE WHEN allocation_wait.lifecycle_intent_id IS NULL THEN i.next_attempt_at<=now()
+           ELSE cloud_lifecycle_allocation_wait_status(i.id)<>'pending'
+             AND (allocation_wait.state='pending' OR cloud_lifecycle_allocation_wait_status(i.id)='invalid' OR i.next_attempt_at<=now()) END
            AND ($1::uuid IS NULL OR i.workspace_id = $1)
-           AND (i.resume_after_intent_id IS NULL OR EXISTS (
+           AND (allocation_wait.lifecycle_intent_id IS NOT NULL OR i.resume_after_intent_id IS NULL OR EXISTS (
              SELECT 1 FROM cloud_workspace_lifecycle_intents prerequisite
              WHERE prerequisite.id=i.resume_after_intent_id AND prerequisite.state='succeeded'
            ))
@@ -630,6 +651,9 @@ export class CloudWorkspaceReconciler {
       );
       const row = result.rows[0];
       if (!row) return null;
+      // Re-read under the acquired parent/intent locks. An excluded pending
+      // provider claim is not the only discovery path for its dependency.
+      if (row.allocation_wait_id && await resolveCloudAllocationWait(tx, row.id) !== "ready") return { deferred: true };
       recordLifecycleDatabaseElapsed("firstClaimWait", row.first_claim_wait_ms);
       recordLifecycleDatabaseElapsed("previousLeaseWait", row.previous_lease_wait_ms);
 
@@ -738,6 +762,9 @@ export class CloudWorkspaceReconciler {
         authorityEpoch,
         sourceBindingId: row.agent_boot_id,
         requestedBy: row.requested_by,
+        ownerUserId: row.owner_user_id,
+        billingEpoch: row.current_billing_epoch,
+        resumeAfterIntentId: row.resume_after_intent_id,
       };
     });
   }
@@ -851,7 +878,8 @@ export class CloudWorkspaceReconciler {
         }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
       if(current?.state==='running'&&['create','wake'].includes(intent.operation))
         await measureLifecyclePhase("funding", () => this.computeLeases.observeRunning(
-          {workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current!));
+          {workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation,intentId:intent.id,
+            lifecycleClaim:{workerId:this.workerId,attemptCount:intent.attemptCount}},provider,current!));
       let successfulStart = false;
       if (shouldDispatch) {
         current = await measureLifecyclePhase("dispatch", () => this.dispatch(provider, intent, current));
@@ -880,7 +908,12 @@ export class CloudWorkspaceReconciler {
         await this.recordResult(intent, current, "observing", false, successfulStart);
       }
     } catch (error) {
-      await this.recordFailure(intent, error, current);
+      if (error instanceof ComputeAllocationDependencyError && this.rolloutFlags.enabled(intent.orgId, "lifecycle_allocation_waits")) {
+        const handled = await withRetryableSystemTx(this.pool, tx => parkCloudAllocationWait(tx, intent, this.workerId, error.blocker));
+        if (!handled) await this.recordFailure(intent, error, current);
+      } else if (error instanceof ComputeAllocationContinuationUnavailable) {
+        await withRetryableSystemTx(this.pool, tx => reconcileCloudAllocationContinuation(tx, intent, this.workerId));
+      } else await this.recordFailure(intent, error, current);
     }
     return true;
   }
@@ -891,10 +924,15 @@ export class CloudWorkspaceReconciler {
       const workspace = (await tx.query<{ current_generation: number; desired_state: string; authority_epoch: string; agent_boot_id: string | null }>(
         "SELECT current_generation,desired_state,authority_epoch,agent_boot_id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",
         [intent.workspaceId, intent.orgId])).rows[0];
-      const owned = await tx.query(`SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND workspace_id=$2 AND org_id=$3
-        AND generation=$4 AND state='dispatching' AND lease_owner=$5 AND lease_expires_at>clock_timestamp() FOR UPDATE`,
-      [intent.id, intent.workspaceId, intent.orgId, intent.generation, this.workerId]);
+      const owned = await tx.query<{ allocation_dependency_live: boolean }>(`SELECT ${allocationWaitContinuationLiveSql} AS allocation_dependency_live
+        FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND workspace_id=$2 AND org_id=$3
+        AND generation=$4 AND state='dispatching' AND lease_owner=$5 AND attempt_count=$6 AND lease_expires_at>clock_timestamp() FOR UPDATE`,
+      [intent.id, intent.workspaceId, intent.orgId, intent.generation, this.workerId, intent.attemptCount]);
       if (!owned.rowCount) return true;
+      if (!owned.rows[0]!.allocation_dependency_live) {
+        await releaseCloudAllocationContinuation(tx, intent.id);
+        return true;
+      }
       const binding = await tx.query(`SELECT 1 FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND org_id=$2 AND generation=$3
         AND provider_resource_id IS NOT DISTINCT FROM $4::text FOR UPDATE`,
       [intent.workspaceId, intent.orgId, intent.generation, intent.providerResourceId]);
@@ -981,7 +1019,7 @@ export class CloudWorkspaceReconciler {
               memoryMiB: intent.memoryMiB,
               storageMiB: intent.storageMiB,
               idempotencyKey: intent.id,
-            },provider,current);
+            },provider,current,{workerId:this.workerId,attemptCount:intent.attemptCount});
         assertProviderResourceIdentity(next, intent);
         return next;
       }
@@ -1071,8 +1109,10 @@ export class CloudWorkspaceReconciler {
         attempt_count: number;
         dispatched_age_ms: string;
         healthy_observation_count: number | null;
+        allocation_dependency_live: boolean;
       }>(
         `SELECT state, affects_workspace, lease_owner, attempt_count, healthy_observation_count,
+                ${allocationWaitContinuationLiveSql} AS allocation_dependency_live,
                 lease_expires_at>clock_timestamp() AS lease_current,
                 extract(epoch FROM (now() - dispatched_at)) * 1000 AS dispatched_age_ms
          FROM cloud_workspace_lifecycle_intents
@@ -1083,6 +1123,10 @@ export class CloudWorkspaceReconciler {
       if (!row || row.state === "succeeded" || row.state === "superseded")
         return;
       if (row.lease_owner !== this.workerId || row.attempt_count !== intent.attemptCount || !row.lease_current) return;
+      if (!row.allocation_dependency_live) {
+        await releaseCloudAllocationContinuation(tx, intent.id);
+        return;
+      }
 
       const desired = current.desired_state;
       const generationIsCurrent =
@@ -1310,14 +1354,22 @@ export class CloudWorkspaceReconciler {
         affects_workspace: boolean;
         lease_owner: string | null;
         lease_current: boolean;
+        allocation_dependency_live: boolean;
+        attempt_count: number;
       }>(
-        `SELECT state, affects_workspace, lease_owner, lease_expires_at>clock_timestamp() AS lease_current
+        `SELECT state, affects_workspace, lease_owner, lease_expires_at>clock_timestamp() AS lease_current,attempt_count,
+                ${allocationWaitContinuationLiveSql} AS allocation_dependency_live
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
         [intent.id],
       );
       const row = owned.rows[0];
       if (!row || row.lease_owner !== this.workerId) return;
+      if (!row.allocation_dependency_live) {
+        if (row.state === "dispatching" && row.lease_current && row.attempt_count === intent.attemptCount)
+          await releaseCloudAllocationContinuation(tx, intent.id);
+        return;
+      }
       if (failure.code === "provider_snapshot_missing" && (!row.lease_current || row.state !== "dispatching")) return;
 
       const newerCaptureAuthority = failure.code === "provider_snapshot_missing" &&

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-exact-allocation-wait",
+  "kind": "replay",
+  "area": "control-plane-lifecycle",
+  "fixedBy": "pending",
+  "symptom": "A wake refused by an unsettled previous allocation repeated provider and funding admission work on error backoff; a held foreign lease could also block the workspace transaction.",
+  "rule": "bug-fix.md: persist an exact scheduling dependency only after allocator refusal, with no monetary foreign key, paired durable enqueues, original claim and scope rechecks, and no repeated pending work; keep funded warm reuse and legacy retries.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/allocation-waits.integration.test.ts -t 'parks a real refused|parks a foreign allocation|retains the legacy retry|keeps funded running reuse'"
+}

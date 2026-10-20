@@ -229,7 +229,7 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
 
 | Kind | Job kind | Dedupe key | Enqueued by (trigger on) | Handler, scoped to the job's workspace |
 | --- | --- | --- | --- | --- |
-| `lifecycle` | `cloud_lifecycle_intent` | `workspace:<id>` | intents (`next_attempt_at`, dispatch lease, leaving the active states), checkpoint requests and local-to-cloud forks changing state | fenced `claimIntent` + dispatch |
+| `lifecycle` | `cloud_lifecycle_intent` | `workspace:<id>` | intents (`next_attempt_at`, dispatch lease, leaving the active states), checkpoint requests, local-to-cloud forks, exact allocation wait publication/settlement and scope invalidation | fenced `claimIntent` + dispatch |
 | `paidAuthority` | `cloud_paid_authority_check` | `workspace:<id>` | `cloud_workspace_paid_authority_checks.next_check_at` | `DatabaseCloudWorkspacePaidAuthorityReconciler.runOnce` |
 | `engineHealth` | `cloud_engine_health` | `workspace:<id>` | engine enrollment, state or revocation change, shortened lease; workspace becoming running and ready or busy, or a new generation; an intent leaving the active states | `stopUnavailableCloudEngine` |
 | `compute` | `cloud_compute_lease` | `workspace:<id>` | allocation lease state, check time or lease; runtime transition phase or deadlines | `CloudWorkspaceComputeLeaseCoordinator.runOnce` |

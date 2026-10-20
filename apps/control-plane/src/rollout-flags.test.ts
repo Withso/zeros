@@ -38,7 +38,7 @@ describe("rollout flag snapshot", () => {
   it("registers the initial flags and defaults every organization to off", async () => {
     expect(Object.keys(ROLLOUT_FLAGS).sort()).toEqual([
       "agent_runners", "authority_cache_enforce", "authority_cache_shadow", "build_qualification", "capabilities", "capability_actor_sessions", "checkpoint_push", "cp_idle_stop", "credential_push", "detached_turns",
-      "device_stream", "engine_lease_over_uplink", "presence_in_memory", "realtime_uplink", "relay_over_uplink", "runtime_connect",
+      "device_stream", "engine_lease_over_uplink", "lifecycle_allocation_waits", "presence_in_memory", "realtime_uplink", "relay_over_uplink", "runtime_connect",
       "turn_journal",
     ]);
     expect(isRolloutFlagName("capabilities")).toBe(true);
@@ -64,6 +64,17 @@ describe("rollout flag snapshot", () => {
     }
     h.handlers.onUnavailable();
     expect(h.snapshot.enabled(ORG, "build_qualification" as never)).toBe(false);
+    await h.snapshot.stop();
+  });
+
+  it("keeps the allocation wait writer off on feed loss and isolated across A to B to A", async () => {
+    const h = harness([{ org_id: ORG, flag: "lifecycle_allocation_waits" }]);
+    await h.snapshot.start();
+    expect(h.snapshot.enabled(ORG, "lifecycle_allocation_waits")).toBe(false);
+    h.handlers.onReady(); await h.snapshot.reload();
+    for (const org of [ORG, OTHER, ORG]) expect(h.snapshot.enabled(org, "lifecycle_allocation_waits")).toBe(org === ORG);
+    h.handlers.onUnavailable();
+    expect(h.snapshot.enabled(ORG, "lifecycle_allocation_waits")).toBe(false);
     await h.snapshot.stop();
   });
 

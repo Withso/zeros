@@ -143,6 +143,18 @@
    requests after the claim snapshot, retry floors and independent meter lag.
    Pin allocation identity before I/O, including same-resource lease replacement.
    An enqueue or SKIP LOCKED write alone does not prove durable scheduling.
+   For exact allocation waits, first observe the real allocator refusal, then
+   freeze one edge with no monetary foreign key. Test both settlement/edge
+   commit orders and overlapping uncommitted producers: the edge can commit
+   and drain before settlement commits, so a visible-waiter conditional hint
+   loses that wakeup. Also test a running job and lost enqueue, unchanged pending waits,
+   held lease/owner rows, and original claim loss after funding. Recheck the
+   frozen scope at final result publication as well as before provider I/O.
+   A current-allocation stop proof cannot be reused as a historical proof after
+   a legitimate new allocation: retain its exact receipt and test saved source
+   retirement together with settlement. Assert fixture mutations themselves
+   succeed in the production system role before counting an outcome as red;
+   a caught fixture SQL error can otherwise look like a product retry.
    For renewal telemetry, test real success, refusal, concurrency and retirement
    paths. Use a separate monotonic clock, closed labels and bounded aggregates;
    never let logging alter authority outcomes or add idle timers. State exactly

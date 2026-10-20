@@ -719,6 +719,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       pool: workerPool,
       provider: workerDeployment!.provider,
       providerResolver: workerProviderResolver!,
+      ...(rolloutFlagSnapshot ? { rolloutFlags: rolloutFlagSnapshot } : {}),
       runtimeUpgradeConfig: cloud,
       runtimeRollbackCache: createCloudRuntimeRollbackCache(workerPool, cloud, runtimeArtifacts),
       checkpointRequests: checkpointRequestWorker!,
