@@ -13,7 +13,11 @@ export const ownerRecoveryConfig = { provider: "boat", imageRef: "qualified-imag
   settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null,
   boat: { accountScope: computerTestAccount, billingOrg: computerTestWallet } } as CloudWorkspaceBackendConfig;
 
-export async function seedOwnerCheckpointRecovery(pool: pg.Pool) {
+export async function seedOwnerCheckpointRecovery(pool: pg.Pool, options: {
+  beforeLoss?: (fixture: Awaited<ReturnType<typeof seedFinalSave>>) => Promise<void>;
+  /** Historical rows exercise freshness without sleeping or rewriting evidence. */
+  historicalLoss?: boolean;
+} = {}) {
   const resourceId = "bx_zst7k2m4";
   // A real Postgres incarnation includes microseconds. Date round trips must
   // not turn exact SQL registration equality into a false scope mismatch.
@@ -65,11 +69,24 @@ export async function seedOwnerCheckpointRecovery(pool: pg.Pool) {
   const lossRequest = validateCloudProviderLossRequest({ databaseUrl:process.env.TEST_DATABASE_URL!,channel:"alpha",execute:false,
     organizationId:f.scope.organizationId,expectedOrganizationSlug:slug,actorUserId:f.fixture.userId,workspaceId:f.scope.workspaceId,
     generation:"1",resourceId,accountScope:computerTestAccount,expectedProviderAccount:"fixture-account",reason:"Owner approved restoring the selected durable checkpoint" });
+  await options.beforeLoss?.(f);
   const observedAt = (await pool.query("SELECT clock_timestamp() AS now")).rows[0].now;
   const inventory = { observedAt,providerAccount:"fixture-account",accountProof:null,resources:[] };
   const lookup = { observedAt,resourceId,notFound:true };
-  const plan = await manageCloudProviderLoss(pool,lossRequest,inventory,lookup);
-  await manageCloudProviderLoss(pool,{ ...lossRequest,execute:true,approval:plan.approval },inventory,lookup);
+  if (options.historicalLoss) {
+    await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
+      (id,provider,account_scope,workspace_id,generation,resource_id,attested_by,database_principal,target_fingerprint,
+       reason,provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
+      VALUES($1,'boat',$2,$3,1,$4,$5,current_user,$6,$7,'fixture-account',$8,
+        clock_timestamp()-interval '16 minutes',0,clock_timestamp()-interval '16 minutes')`,
+    [randomUUID(),computerTestAccount,f.scope.workspaceId,resourceId,f.fixture.userId,
+      lossRequest.targetFingerprint,lossRequest.reason,Buffer.alloc(32,1)]);
+    await pool.query(`UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp()-interval '16 minutes'
+      WHERE workspace_id=$1 AND generation=1`,[f.scope.workspaceId]);
+  } else {
+    const plan = await manageCloudProviderLoss(pool,lossRequest,inventory,lookup);
+    await manageCloudProviderLoss(pool,{ ...lossRequest,execute:true,approval:plan.approval },inventory,lookup);
+  }
   const loss = (await pool.query("SELECT id FROM cloud_workspace_provider_loss_attestations WHERE workspace_id=$1", [f.scope.workspaceId])).rows[0];
   const point = (await pool.query("SELECT * FROM workspace_checkpoints WHERE id=$1", [checkpointId])).rows[0];
   const request = CloudOwnerCheckpointRecoverySchema.parse({ version:1,operationId:randomUUID(),channel:"alpha",

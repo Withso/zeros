@@ -2,13 +2,14 @@
 
 This Alpha/development operator restores an explicitly selected durable
 checkpoint after the owner acknowledges loss of all newer unsaved work. It is
-for a failed final Stop with a retired capture and a queued dependent Restart.
+for a failed final Stop with a retired capture and its dependent Restart.
 Ordinary Stop, Restart and Delete still require final-save proof.
 
-The operator defaults to a plan. It makes no provider call. Before execution,
+The operator defaults to a plan. Before execution,
 the incident owner separately authorizes provider deletion and runs the existing
 `cloud-provider-loss:manage` operator. Its complete inventory omission and exact
-not-found lookup must both be at most 15 minutes old. An expired lease, a missing
+not-found lookup must both be at most 15 minutes old, or the recovery request
+must select the authenticated recheck described below. An expired lease, a missing
 database row, or a loss acknowledgement alone cannot establish provider loss.
 Keep the source VM preserved until that separate action is approved. A dry run
 of this tool also requires the provider-loss receipt; do not destroy a VM just
@@ -18,8 +19,9 @@ Use an authorized database login with `DATABASE_MIGRATION_ROLE` set to the stabl
 table owner. The application role cannot create or change discard receipts.
 The named operator must be an active platform owner; the named workspace owner
 must still have normal organization, team and paid recovery admission. Apply
-migration `0172_cloud_owner_checkpoint_recovery.sql` first with the normal
-migration runner. Existing 0171 proof and dispatch guards remain installed.
+migrations `0172_cloud_owner_checkpoint_recovery.sql` and
+`0173_cloud_owner_recovery_safety_stop.sql` first with the normal migration
+runner. Existing 0171 proof and dispatch guards remain installed.
 
 Create a private regular JSON file owned by the operator OS user, mode `0600`,
 at most 16 KiB. The strict v1 fields are:
@@ -34,6 +36,30 @@ at most 16 KiB. The strict v1 fields are:
 | Durable recovery point | `checkpointId`, `checkpointSha256`, `checkpointContentRevision`, `checkpointRecordRevision`, `checkpointAt` (ISO timestamp) |
 | Current qualified Computer | `computerBuildId`, `computerConfigId`, `runtimeId` |
 | Owner approval | `ownerAcknowledgedUnsavedLoss: true`, `ownerApprovalReference`, `reason` |
+
+Two optional strict companions extend v1 without changing an existing request:
+
+- `safetyStop: { intentId, requestId }` names the single system safety Stop that
+  the compute worker can insert after a provider 404, before or after the loss
+  attestation. Its producer audit, settled allocation lease, original engine
+  incarnation and exact superseded Wake must agree. Both Stops must remain
+  undispatched. The safety capture must never have been delivered and must have
+  no custody, capture/commit/reconcile report or successor. Any additional active
+  intent or unresolved source-generation recovery prevents execution. Do not add this companion
+  for arbitrary cancelled, delivered or unrelated lifecycle work.
+- `lossRecheck: { providerAccount }` reuses the immutable original loss identity
+  while obtaining fresh authenticated inventory and an exact-resource 404 using
+  `BOAT_API_KEY`. The account must equal the original attestation. This mode
+  permits an expired original observation, but does not edit or renew it. Each
+  plan and execute performs fresh reads outside database locks, then revalidates
+  all pins under locks. The executed observation timestamps, inventory hash,
+  account and count are recorded on the discard receipt. Both observations must
+  still be within 15 minutes by the database clock when that receipt inserts.
+
+There are no provider mutations. Without `lossRecheck`, there are no provider
+calls and the original observations must still be fresh. A committed exact
+replay needs no further provider read. Failed or changed evidence never grants
+new authority and leaves the source disposition uncommitted.
 
 The acknowledgement must identify the checkpoint and loss of newer unsaved work.
 Both reference and reason must be 16–512 characters. Keep incident identifiers,
@@ -55,12 +81,15 @@ the same command with `--execute`. Never pass database credentials in command
 arguments. A mismatch requires a fresh plan and review; do not weaken the pins.
 
 Execution atomically appends the immutable owner receipt, marks the exact Stop
-recovery `discarded` with no next attempt, supersedes the original Stop and Wake,
-and starts one existing recovery transition into a fresh generation. Failure,
-request and custody records remain unchanged. The old Stop is never `succeeded`,
+recovery and optional safety recovery `discarded` with no next attempt,
+supersedes the original Stop and Wake plus the optional safety Stop, and starts
+one existing recovery transition into a fresh generation. Failure and custody
+records remain unchanged. A queued, never-delivered safety request is cancelled
+with its normal retirement; an already terminal request remains unchanged.
+The old Stops are never `succeeded`,
 `proven` or `resolved`, and no seal ACK or final checkpoint is invented. The
 selected durable checkpoint and current qualified Computer are pinned exactly.
-The source binding receives deletion verification only from the existing fresh
+The source binding receives deletion verification only from fresh authenticated
 provider-loss evidence. Exact replay returns the same receipt and transition.
 
 `restoring` means the transition committed, not that the new workspace is ready.
@@ -71,7 +100,7 @@ discarded source. Replaying the command does not create another candidate.
 
 The migration supports deployed health and retry readers: the discarded row is
 not blocked/retrying, and its next-attempt timestamp is infinity. Stale workers
-cannot reopen either intent or create a successor capture. The original failed
+cannot reopen any named intent or create a successor capture. The original failed
 save remains false under `cloud_final_save_proven`. Later data erasure still
 requires the new generation's final proof, settled dispatch, deletion-job
 custody, legal-hold checks and physical object/record retirement. Only the exact

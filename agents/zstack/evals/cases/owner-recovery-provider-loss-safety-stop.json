@@ -1,0 +1,9 @@
+{
+  "id": "owner-recovery-provider-loss-safety-stop",
+  "kind": "replay",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:655",
+  "symptom": "Provider 404 observation inserted a safety Stop and superseded the accepted Restart before an owner recovery receipt could be written.",
+  "rule": "Replay the real compute worker before and after loss attestation. Account for both exact recoveries and the superseded Wake atomically; retain custody and refuse delivered safety captures. Expired loss identity needs fresh authenticated observations on the new receipt, never edited evidence. Exercise the actual restricted-login CLI and late-worker SQL guards.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/manage-cloud-owner-checkpoint-recovery-race.integration.test.ts"
+}

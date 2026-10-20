@@ -15,6 +15,10 @@ import { selectCheckpointComputerSource } from "./cloud-workspaces/checkpoint-co
 import { cloudRuntimeQualificationMode } from "./cloud-workspaces/runtime-config.js";
 import { authorizeCloudWorkspaceActor } from "./cloud-workspaces/actors.js";
 import { authorizeCloudWorkspaceOperation } from "./cloud-workspaces/authorization.js";
+import { BOAT_RESOURCE_ID_PATTERN, BoatApiClient } from "./cloud-workspaces/boat-client.js";
+import { assertInventoryAccount, assertInventoryComplete, databaseClock, inventoryDigest, readBoatInventory,
+  type ProviderInventory } from "./cloud-provider-evidence.js";
+import { lookupBoatResource, type ProviderLookup } from "./manage-cloud-provider-loss.js";
 
 export type CloudOwnerCheckpointRecoveryResult = {
   state: "planned" | "restoring" | "unchanged";
@@ -25,7 +29,9 @@ export type CloudOwnerCheckpointRecoveryResult = {
   candidateGeneration: number;
 };
 
-type Options = { databaseUrl:string; config:CloudWorkspaceBackendConfig; workosEnabled:boolean; execute?:boolean; approval?:string|undefined };
+export type OwnerRecoveryLossEvidence = { inventory: ProviderInventory; lookup: ProviderLookup };
+type Options = { databaseUrl:string; config:CloudWorkspaceBackendConfig; workosEnabled:boolean; execute?:boolean;
+  approval?:string|undefined; lossEvidence?:OwnerRecoveryLossEvidence };
 
 async function readPlan(tx: Tx, request: CloudOwnerCheckpointRecoveryRequest, options: Options) {
   const workspace = (await tx.query(`SELECT * FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE`,
@@ -66,13 +72,30 @@ async function readPlan(tx: Tx, request: CloudOwnerCheckpointRecoveryRequest, op
   }
   const intents = (await tx.query(`SELECT * FROM cloud_workspace_lifecycle_intents
     WHERE workspace_id=$1 AND org_id=$2 AND (id=ANY($3::uuid[]) OR state IN ('queued','observing','dispatching')) FOR UPDATE`,
-  [request.workspaceId,request.organizationId,[request.stopIntentId,request.wakeIntentId]])).rows;
+  [request.workspaceId,request.organizationId,[request.stopIntentId,request.wakeIntentId,
+    ...(request.safetyStop ? [request.safetyStop.intentId] : [])]])).rows;
   const stop = intents.find(row => row.id===request.stopIntentId), wake = intents.find(row => row.id===request.wakeIntentId);
-  check(intents.length===2 && stop && wake && stop.operation==="stop" && wake.operation==="wake" &&
+  check(intents.length===(request.safetyStop ? 3 : 2) && stop && wake && stop.operation==="stop" && wake.operation==="wake" &&
     wake.resume_after_intent_id===stop.id && wake.restart_version===1 &&
-    intents.every(row => ["queued","observing"].includes(row.state) && row.generation===request.sourceGeneration &&
+    ["queued","observing"].includes(stop.state) &&
+    (request.safetyStop ? wake.state==="superseded" : ["queued","observing"].includes(wake.state)) &&
+    [stop,wake].every(row => row.generation===request.sourceGeneration &&
       row.requested_by===request.ownerUserId && row.attempt_count===0 && row.dispatched_at===null &&
       row.lease_owner===null && row.generation_transition_id===null),"owner_recovery_lifecycle_changed");
+  let safetySourceSha256: Buffer | null = null;
+  if (request.safetyStop) {
+    // Freeze both rows before consulting the shared SQL gate. A later delivery,
+    // capture report or successor cannot be hidden by a once-valid plan.
+    await tx.query("SELECT lifecycle_intent_id FROM cloud_workspace_final_save_recoveries WHERE lifecycle_intent_id=$1 FOR UPDATE",
+      [request.safetyStop.intentId]);
+    await tx.query("SELECT id FROM workspace_checkpoint_requests WHERE id=$1 FOR UPDATE",[request.safetyStop.requestId]);
+    await tx.query("SELECT id FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE",[source.data.allocationLeaseId]);
+    safetySourceSha256=(await tx.query<{ digest:Buffer|null }>("SELECT cloud_owner_discard_recovery_digest($1) AS digest",
+      [request.safetyStop.intentId])).rows[0]!.digest;
+    check(safetySourceSha256 && (await tx.query<{ matches:boolean }>(`SELECT cloud_owner_discard_safety_stop_matches($1,$2,$3,$4,$5,$6,$7,$8) AS matches`,
+      [request.workspaceId,request.organizationId,request.sourceGeneration,request.stopIntentId,request.wakeIntentId,
+        request.safetyStop.intentId,request.safetyStop.requestId,safetySourceSha256])).rows[0]!.matches,"owner_recovery_safety_stop_changed");
+  }
   check([request.stopIntentId,request.wakeIntentId].includes(workspace.accepted_lifecycle_intent_id),"owner_recovery_accepted_intent_changed");
   check(!(await tx.query(`SELECT 1 FROM cloud_workspace_generation_transitions WHERE workspace_id=$1 AND org_id=$2
     AND state IN ('draining','provisioning','setting_up','rolling_back') UNION ALL
@@ -103,17 +126,34 @@ async function readPlan(tx: Tx, request: CloudOwnerCheckpointRecoveryRequest, op
       AND (owner.current_generation<>$4 OR owner.allocation_lease_id<>lease.id))`,
   [source.data.allocationLeaseId,request.workspaceId,request.organizationId,request.sourceGeneration,request.providerResourceId])).rowCount===1,
   "owner_recovery_allocation_changed");
-  const loss = (await tx.query(`SELECT loss.id,loss.inventory_sha256 FROM cloud_workspace_provider_loss_attestations loss
+  const loss = (await tx.query(`SELECT loss.id,loss.inventory_sha256,loss.provider_account,
+      loss.inventory_observed_at BETWEEN clock_timestamp()-interval '15 minutes' AND clock_timestamp()
+        AND loss.lookup_observed_at BETWEEN clock_timestamp()-interval '15 minutes' AND clock_timestamp() AS fresh
+    FROM cloud_workspace_provider_loss_attestations loss
     JOIN cloud_workspace_provider_operations operation ON operation.provider=loss.provider AND operation.account_scope=loss.account_scope
       AND operation.workspace_id=loss.workspace_id AND operation.generation=loss.generation AND operation.resource_id=loss.resource_id
     WHERE loss.id=$1 AND loss.provider='boat' AND loss.account_scope=$2 AND loss.workspace_id=$3 AND loss.generation=$4
       AND loss.resource_id=$5 AND operation.org_id=$6 AND operation.lost_at IS NOT NULL
-      AND loss.inventory_observed_at BETWEEN clock_timestamp()-interval '15 minutes' AND clock_timestamp()
-      AND loss.lookup_observed_at BETWEEN clock_timestamp()-interval '15 minutes' AND clock_timestamp()
       AND cloud_provider_allocation_lost($3,$4,$6,$5) FOR SHARE OF loss,operation`,
   [request.providerLossAttestationId,request.providerAccountScope,request.workspaceId,request.sourceGeneration,
     request.providerResourceId,request.organizationId])).rows[0];
   check(loss,"owner_recovery_loss_unconfirmed");
+  let lossObservation: { inventorySha256:Buffer; inventoryObservedAt:Date; lookupObservedAt:Date; providerAccount:string; inventoryResourceCount:number } | null=null;
+  if (request.lossRecheck) {
+    check(request.lossRecheck.providerAccount===loss.provider_account,"owner_recovery_loss_account_changed");
+    check(options.lossEvidence,"owner_recovery_loss_evidence_required");
+    const {inventory,lookup}=options.lossEvidence;
+    check(inventory.providerAccount===loss.provider_account && lookup.resourceId===request.providerResourceId && lookup.notFound &&
+      inventory.resources.length<=100_000 && inventory.resources.every(row=>BOAT_RESOURCE_ID_PATTERN.test(row.id)) &&
+      !inventory.resources.some(row=>row.id===request.providerResourceId),"owner_recovery_loss_unconfirmed");
+    const now=(await tx.query<{ now:Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now.getTime();
+    check([inventory.observedAt,lookup.observedAt].every(at=>Number.isFinite(at.getTime()) &&
+      now-at.getTime()>=0 && now-at.getTime()<=15*60_000),"owner_recovery_loss_evidence_expired");
+    await assertInventoryAccount(tx,request.providerAccountScope,inventory);
+    await assertInventoryComplete(tx,request.providerAccountScope,[...new Set(inventory.resources.map(row=>row.id))],request.providerResourceId);
+    lossObservation={inventorySha256:inventoryDigest(request.providerAccountScope,inventory),inventoryObservedAt:inventory.observedAt,
+      lookupObservedAt:lookup.observedAt,providerAccount:inventory.providerAccount,inventoryResourceCount:new Set(inventory.resources.map(row=>row.id)).size};
+  } else check(loss.fresh,"owner_recovery_loss_unconfirmed");
   const point = await requireCloudRecoveryPoint(tx,request);
   check(point.integrity_sha256.toString("hex")===request.checkpointSha256 && Number(point.content_revision)===request.checkpointContentRevision &&
     Number(point.record_revision)===request.checkpointRecordRevision && point.durable_at.getTime()===Date.parse(request.checkpointAt),
@@ -131,8 +171,13 @@ async function readPlan(tx: Tx, request: CloudOwnerCheckpointRecoveryRequest, op
     attemptOrdinal:recovery.attempt_ordinal,authorityEpoch:String(workspace.authority_epoch),billingEpoch:workspace.current_billing_epoch,
     owner:workspace.owner_user_id,acceptedIntent:workspace.accepted_lifecycle_intent_id,candidateGeneration,
     lossInventorySha256:loss.inventory_sha256.toString("hex"),runtime:selected.runtime,computer:selected.computer,
-    stopDigest:stop.request_sha256.toString("hex"),wakeDigest:wake.request_sha256.toString("hex") };
-  return { sourceSha256,candidateGeneration,snapshot };
+    stopDigest:stop.request_sha256.toString("hex"),wakeDigest:wake.request_sha256.toString("hex"),
+    ...(request.safetyStop ? {safetySourceSha256:safetySourceSha256!.toString("hex"),
+      safetyStopDigest:intents.find(row=>row.id===request.safetyStop!.intentId)!.request_sha256.toString("hex")} : {}) };
+  // Fresh provider observations necessarily change between plan and execute.
+  // Approval binds their requested account/target, not a movable timestamp;
+  // execute independently checks freshness and retains that exact observation.
+  return { sourceSha256,candidateGeneration,snapshot,safetySourceSha256,lossObservation };
 }
 
 export async function manageCloudOwnerCheckpointRecovery(
@@ -177,29 +222,37 @@ export async function manageCloudOwnerCheckpointRecovery(
       return {state:"planned",approval,receiptId:request.operationId,transitionId:null,transitionState:null,candidateGeneration:plan.candidateGeneration};
     }
     check(options.approval===approval,"owner_recovery_approval_mismatch");
+    if (request.safetyStop) await client.query(`UPDATE workspace_checkpoint_requests
+      SET state='cancelled',completed_at=clock_timestamp(),error_code='owner_discarded'
+      WHERE id=$1 AND state='queued' AND delivery_count=0 AND last_delivered_at IS NULL`,[request.safetyStop.requestId]);
     const transitionId=randomUUID();
     await client.query(`INSERT INTO cloud_workspace_owner_discard_receipts
       (id,workspace_id,org_id,source_generation,stop_intent_id,wake_intent_id,request_id,retirement_id,custody_id,source_sha256,
        provider_loss_attestation_id,provider_resource_id,checkpoint_id,checkpoint_sha256,checkpoint_content_revision,checkpoint_record_revision,
        checkpoint_at,computer_build_id,computer_config_id,runtime_id,owner_user_id,operator_user_id,owner_approval_reference,reason,
-       request_sha256,plan_sha256,target_fingerprint,database_principal,transition_id,candidate_generation)
+       request_sha256,plan_sha256,target_fingerprint,database_principal,transition_id,candidate_generation,
+       safety_stop_intent_id,safety_request_id,safety_source_sha256,
+       loss_inventory_sha256,loss_inventory_observed_at,loss_lookup_observed_at,loss_provider_account,loss_inventory_resource_count)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
         (SELECT durable_at FROM workspace_checkpoints WHERE id=$13 AND date_trunc('milliseconds',durable_at)=$17::timestamptz),
-        $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,current_user,$28,$29)`,
+        $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,current_user,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)`,
     [request.operationId,request.workspaceId,request.organizationId,request.sourceGeneration,request.stopIntentId,request.wakeIntentId,
       request.requestId,request.retirementId,request.custodyId,plan.sourceSha256,request.providerLossAttestationId,request.providerResourceId,
       request.checkpointId,Buffer.from(request.checkpointSha256,"hex"),request.checkpointContentRevision,request.checkpointRecordRevision,request.checkpointAt,
       request.computerBuildId,request.computerConfigId,request.runtimeId,request.ownerUserId,request.operatorUserId,request.ownerApprovalReference,request.reason,
-      requestDigest,planDigest,target,transitionId,plan.candidateGeneration]);
+      requestDigest,planDigest,target,transitionId,plan.candidateGeneration,
+      request.safetyStop?.intentId??null,request.safetyStop?.requestId??null,plan.safetySourceSha256,
+      plan.lossObservation?.inventorySha256??null,plan.lossObservation?.inventoryObservedAt??null,
+      plan.lossObservation?.lookupObservedAt??null,plan.lossObservation?.providerAccount??null,plan.lossObservation?.inventoryResourceCount??null]);
     await client.query(`UPDATE cloud_workspace_final_save_recoveries SET state='discarded',next_attempt_at='infinity'::timestamptz
-      WHERE lifecycle_intent_id=$1`,[request.stopIntentId]);
+      WHERE lifecycle_intent_id=ANY($1::uuid[])`,[[request.stopIntentId,...(request.safetyStop ? [request.safetyStop.intentId] : [])]]);
     await client.query(`UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=clock_timestamp(),updated_at=clock_timestamp()
-      WHERE id=ANY($1::uuid[])`,[[request.stopIntentId,request.wakeIntentId]]);
+      WHERE id=ANY($1::uuid[])`,[[request.stopIntentId,request.wakeIntentId,...(request.safetyStop ? [request.safetyStop.intentId] : [])]]);
     await client.query("UPDATE cloud_workspaces SET accepted_lifecycle_intent_id=NULL WHERE id=$1 AND org_id=$2",[request.workspaceId,request.organizationId]);
     await createCloudRecoveryTransition(client,{...request,actorUserId:request.ownerUserId,workosEnabled:options.workosEnabled,
       config:options.config,idempotencyKey:`owner-recovery.${request.operationId}`,requestDigest,
       allowDataLoss:true,drainIntentId:request.stopIntentId,ownerDiscardReceiptId:request.operationId});
-    // This fact comes from the existing exact, fresh loss attestation. It is
+    // This fact comes from exact loss identity plus fresh authenticated observations. It is
     // not inferred from a timeout, a missing row, or the owner's acknowledgement.
     check((await client.query(`UPDATE cloud_workspace_provider_bindings SET observed_state='deleted',provider_target=NULL,
       deletion_verified_at=clock_timestamp(),last_observed_at=clock_timestamp(),updated_at=clock_timestamp()
@@ -209,6 +262,8 @@ export async function manageCloudOwnerCheckpointRecovery(
     await audit(client,request.organizationId,request.operatorUserId,"cloud_workspace.owner_discard_checkpoint_recovery",{
       workspaceId:request.workspaceId,receiptId:request.operationId,sourceGeneration:request.sourceGeneration,
       candidateGeneration:plan.candidateGeneration,transitionId,stopIntentId:request.stopIntentId,wakeIntentId:request.wakeIntentId,
+      ...(request.safetyStop ? {safetyStopIntentId:request.safetyStop.intentId,safetyRequestId:request.safetyStop.requestId} : {}),
+      lossRechecked:plan.lossObservation!==null,
       checkpointId:request.checkpointId,reasonCode:"owner_accepted_unsaved_loss",reasonSha256:ownerRecoveryDigest(request.reason).toString("hex")});
     await client.query("COMMIT");
     return {state:"restoring",approval,receiptId:request.operationId,transitionId,transitionState:"provisioning",candidateGeneration:plan.candidateGeneration};
@@ -216,6 +271,20 @@ export async function manageCloudOwnerCheckpointRecovery(
     await client.query("ROLLBACK").catch(()=>{});
     throw error;
   } finally { client.release(); }
+}
+
+/** Provider reads happen after the failed read-only transaction has released
+ * its locks. Committed replay never performs another provider lookup. */
+export async function manageCloudOwnerCheckpointRecoveryWithEvidence(
+  pool: pg.Pool, request: CloudOwnerCheckpointRecoveryRequest, options: Options,
+  readEvidence: () => Promise<OwnerRecoveryLossEvidence>,
+): Promise<CloudOwnerCheckpointRecoveryResult> {
+  try { return await manageCloudOwnerCheckpointRecovery(pool,request,options); }
+  catch (error) {
+    if (!(error instanceof CloudOwnerCheckpointRecoveryError) || error.code!=="owner_recovery_loss_evidence_required") throw error;
+  }
+  const lossEvidence=await readEvidence();
+  return manageCloudOwnerCheckpointRecovery(pool,request,{...options,lossEvidence});
 }
 
 /** Nonblocking same-FD validation avoids FIFO/symlink hangs before a plan. */
@@ -246,8 +315,14 @@ async function runCli(): Promise<void> {
   check(config.cloudWorkspaces && config.deploymentChannel===request.channel,"owner_recovery_channel_mismatch");
   const pool=createMigrationPool(config.databaseUrl,{maxConnections:1});
   try {
-    const result=await manageCloudOwnerCheckpointRecovery(pool,request,{databaseUrl:config.databaseUrl,config:config.cloudWorkspaces,
-      workosEnabled:config.auth.provider==="workos",execute:process.argv.includes("--execute"),approval:process.env.CONTROL_PLANE_OWNER_RECOVERY_APPROVAL});
+    const result=await manageCloudOwnerCheckpointRecoveryWithEvidence(pool,request,{databaseUrl:config.databaseUrl,config:config.cloudWorkspaces,
+      workosEnabled:config.auth.provider==="workos",execute:process.argv.includes("--execute"),approval:process.env.CONTROL_PLANE_OWNER_RECOVERY_APPROVAL},async()=>{
+      const apiKey=process.env.BOAT_API_KEY?.trim();
+      check(apiKey,"owner_recovery_provider_key_required");
+      const boat=new BoatApiClient({apiKey,timeoutMs:30_000});
+      return {inventory:await readBoatInventory(pool,boat,request.providerAccountScope),
+        lookup:await lookupBoatResource(boat,request.providerResourceId,await databaseClock(pool))};
+    });
     console.log(JSON.stringify(result));
   } finally { await pool.end(); }
 }
