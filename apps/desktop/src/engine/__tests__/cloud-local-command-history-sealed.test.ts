@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Sqlite from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createMessage } from "@zeros/protocol/messages";
 import { CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
 import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
 import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
@@ -39,7 +40,9 @@ function drain(queue: CloudLocalCommandQueue) {
   throw new Error("Synthetic mirror failed to drain");
 }
 async function fixture(operation: "edit" | "prune" | "delete" | "none", beforeSeal?: (db: Sqlite.Database) => void,
-  duringInstall?: "replace-normal" | "change-normal", options?: { beforeCapture?: (db: Sqlite.Database) => void; sibling?: boolean }) {
+  duringInstall?: "replace-normal" | "change-normal", options?: {
+    beforeCapture?: (db: Sqlite.Database) => void; sibling?: boolean; events?: number; terminal?: "succeeded" | "cancelled";
+  }) {
   const root = mkdtempSync(join(tmpdir(), "zeros-sealed-transcript-"));
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const repositoryRoot = join(root, "repository"), file = join(root, "queue.sqlite"), checkpointRoot = join(root, "checkpoint");
@@ -54,11 +57,13 @@ async function fixture(operation: "edit" | "prune" | "delete" | "none", beforeSe
       deviceId: randomUUID(), deviceKeyVersion: 1, fingerprint: "a".repeat(64), role: "owner" } });
   const recordSequence = (source = db) => (source.prepare("SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0").get() as { rev: number }).rev;
   const queue = new CloudLocalCommandQueue({ file, scope, actors, engineLive: () => true, ready: () => true, now: () => now,
-    history: () => ({ recordSequence: recordSequence(), eventSequence: 0 }),
+    history: () => ({ recordSequence: recordSequence(), eventSequence: events.head }),
     captureHistory: input => captureCloudLocalCommandHistory({ ...input, db, repositoryRoot,
       redactDocument: value => value, controls: [] }) });
   cleanup.push(() => queue.close());
   const events = new CloudLocalCommandEventStore({ file, queue, engineLive: () => true }); cleanup.push(() => events.close());
+  for (let index = 0; index < (options?.events ?? 0); index++) events.append(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["messages"],
+    cloudStream: { streamId: events.streamId, sequence: events.head + 1 } }));
   db.prepare("INSERT INTO chats(id,folder,agent_id,title,session_id,created_at,updated_at,rev) VALUES('chat',?,'claude','Original title','old-native',1,2,1)").run(repositoryRoot);
   const insert = db.prepare("INSERT INTO chat_messages(chat_id,msg_id,ord,kind,payload,created_at,rev) VALUES('chat',?,?, 'text',?,?,?)");
   for (let index = 0; index < 17; index++) insert.run(index === 0 ? "turn" : `message-${index}`, index,
@@ -75,7 +80,7 @@ async function fixture(operation: "edit" | "prune" | "delete" | "none", beforeSe
       modeRevision: 0, prompt: [{ type: "text", text: "Synthetic transcript fixture" }] } } } }, { actorSessionId, writerEpoch: scope.writerEpoch });
   const claim = CloudBootCommandClaimSchema.parse(queue.handle({ kind: "claim", conversationId: "chat", claimId: randomUUID(), executionId: randomUUID() },
     { writerEpoch: scope.writerEpoch }));
-  queue.handle({ kind: "settle", result: { commandId: claim.commandId, claimId: claim.claimId, state: "succeeded",
+  queue.handle({ kind: "settle", result: { commandId: claim.commandId, claimId: claim.claimId, state: options?.terminal ?? "succeeded",
     resultCode: null, result: { version: 1 } } }, { writerEpoch: scope.writerEpoch });
   expect(queue.currentHistoryHead("chat")!.history).toHaveProperty(options?.beforeCapture ? "incompleteReason" : "manifestSha256");
   const before = rows(db);
@@ -91,7 +96,7 @@ async function fixture(operation: "edit" | "prune" | "delete" | "none", beforeSe
   }
   db.prepare("UPDATE sync_meta SET next_rev=21 WHERE id=0").run();
   const latest = operation === "none" ? queue.currentHistoryHead("chat")! : queue.publishHistoryMutation({ conversationId: "chat", mutationId: randomUUID(), operation,
-    deleted: operation === "delete", recordSequence: recordSequence(), eventSequence: 0 });
+    deleted: operation === "delete", recordSequence: recordSequence(), eventSequence: events.head });
   if (options?.sibling) queue.publishHistoryMutation({ conversationId: "sibling", mutationId: randomUUID(), operation: "edit",
     deleted: false, recordSequence: recordSequence(), eventSequence: 0 });
   beforeSeal?.(db);
@@ -286,6 +291,56 @@ describe("sealed NORMAL transcript survives a newer incomplete FULL mutation", (
       sourceSeal: source.manifest.seal, sealedCheckpoint: source });
     expect(rows(target)).toEqual(f.expected);
     expect(target.prepare("SELECT title FROM chats WHERE id='chat'").get()).toEqual({ title: "Synthetic title 6" });
+  });
+  it.each([
+    { kind: "same-generation", terminal: "succeeded", source: "command" }, { kind: "same-generation", terminal: "cancelled", source: "command" },
+    { kind: "replacement", terminal: "succeeded", source: "command" }, { kind: "replacement", terminal: "cancelled", source: "command" },
+    { kind: "same-generation", terminal: "succeeded", source: "mutation" }, { kind: "replacement", terminal: "succeeded", source: "mutation" },
+  ] as const)("restores retained $terminal $source history after an idle $kind writer seals a lower event cursor", async ({ kind, terminal, source: sourceKind }) => {
+    const f = await fixture(sourceKind === "command" ? "none" : "edit", undefined, undefined, { events: 8, terminal });
+    expect(f.latest.history.eventSequence).toBe(8);
+    expect(f.latest.source.kind).toBe(sourceKind);
+    let source = f.verified, ledger = f.input.ledger, target = f.target;
+    for (let cycle = 0; cycle < 3; cycle++) {
+      // Rebuild the unchanged historical head on each wake. The intervening
+      // idle stop creates an acknowledged seal for its own empty event stream.
+      expect(rebuildCloudLocalCommandHistory({ ...f.input, db: target, ledger, scope: source.manifest.seal.scope,
+        sourceSeal: source.manifest.seal, sealedCheckpoint: source })).toMatchObject({ historyHead: f.latest, restored: true });
+      expect(rows(target)).toEqual(f.expected);
+      expect(target.prepare("SELECT session_id,provider_binding,provider_metadata FROM chats WHERE id='chat'").get())
+        .toEqual({ session_id: null, provider_binding: null, provider_metadata: null });
+      ledger.close();
+      if (cycle === 2) break;
+      const prior = source.manifest.seal.scope, scope = { ...prior, generation: prior.generation + (kind === "replacement" ? 1 : 0),
+        writerEpoch: randomUUID(), engineInstanceId: randomUUID(), bootId: randomUUID() };
+      const proof = openSqlite(f.file, { readonly: true });
+      try { expect(verifiedCloudLocalCommandPredecessor(source.predecessor, f.file, proof)).toEqual(prior); }
+      finally { proof.close(); }
+      const actors = new CloudActorAuthorityRegistry({ scope, engineLive: () => true }); cleanup.push(() => actors.dispose());
+      const queue = new CloudLocalCommandQueue({ file: f.file, scope, actors, engineLive: () => true, ready: () => true,
+        history: () => ({ recordSequence: f.recordSequence(target), eventSequence: 0 }) }); cleanup.push(() => queue.close());
+      const changes = drain(queue);
+      expect(changes.filter(change => change.historyHead).at(-1)?.historyHead).toEqual(f.latest);
+      expect(changes.some(change => change.historyPart || change.event)).toBe(false);
+      expect(queue.handle({ kind: "claim", conversationId: "chat", claimId: randomUUID(), executionId: randomUUID() },
+        { writerEpoch: scope.writerEpoch })).toBeNull();
+      const events = new CloudLocalCommandEventStore({ file: f.file, queue, engineLive: () => true }); cleanup.push(() => events.close());
+      expect(events.head).toBe(0);
+      const db = target, lifecycle = new CloudLocalCommandWriterLifecycle({ file: f.file, queue, normalDb: () => db,
+        heads: (normal = db) => ({ recordSequence: f.recordSequence(normal), eventSequence: events.head }), assertQuiescent: () => {} });
+      cleanup.push(() => lifecycle.close());
+      await lifecycle.drainAndSeal({ mirror: { flush: async () => { drain(queue); } }, retireNative: async () => {}, waitForWork: async () => {},
+        freezeNormal: () => db.close(), request: async seal => {
+          expect(seal.eventSequence).toBe(0);
+          const { scope: _scope, ...ack } = seal; return { ...ack, writerEpoch: scope.writerEpoch };
+        } });
+      await lifecycle.captureCheckpoint(f.checkpointRoot);
+      lifecycle.close(); events.close(); queue.close();
+      source = await restoreCloudLocalCommandCheckpointLedger({ root: f.checkpointRoot, file: f.file, scope, expectedWriterEpoch: scope.writerEpoch });
+      cleanup.push(source.cleanup);
+      ledger = openSqlite(source.ledgerFile, { readonly: true }); const current = ledger; cleanup.push(() => { if (current.open) current.close(); });
+      target = normal(join(f.root, `idle-restored-${cycle}.sqlite`));
+    }
   });
   it.each(["copied-receipt", "missing-receipt", "replaced-normal", "changed-normal", "normal-wal", "foreign-ledger", "foreign-root", "unsealed-recovery"] as const)(
     "refuses %s before changing the destination transcript", async mismatch => {

@@ -368,6 +368,38 @@ describe("verified canonical FULL to NORMAL rebuild", () => {
     expect(f.ledger.prepare("SELECT writer_epoch,actor FROM local_commands").get())
       .toEqual({ writer_epoch: origin.writerEpoch, actor: canonical({ scope: origin }) });
   });
+  it.each(["event-bound", "record-bound", "foreign-workspace", "foreign-boot", "missing-ack", "foreign-ack", "seal-digest", "absent-origin"] as const)(
+    "refuses retained command origin %s before touching the last confirmed transcript", async mismatch => {
+      const f = fixture(); f.stale(); const before = snapshot(f.db), original = f.input.sourceSeal;
+      // The successor's larger stream must never mask an invalid original
+      // writer. Only an absent legacy seal can use the older envelope rules.
+      const successor = { ...scope, writerEpoch: randomUUID(), engineInstanceId: randomUUID(), bootId: randomUUID() };
+      const descriptor = { ...original, scope: successor, eventSequence: mismatch === "absent-origin" ? 0 : 20 };
+      const current = { ...descriptor, sha256: createHash("sha256").update(canonicalCloudLocalCommandWriterSealDescriptor(descriptor)).digest("hex") };
+      f.writeSeal(current); f.input.scope = successor; f.input.sourceSeal = current;
+      f.full.prepare("UPDATE local_command_metadata SET value=? WHERE key='writer'").run(canonical(successor));
+      f.full.prepare("UPDATE local_command_metadata SET value=? WHERE key='sealedWriter'").run(successor.writerEpoch);
+      if (mismatch === "event-bound" || mismatch === "record-bound" || mismatch === "foreign-workspace" || mismatch === "foreign-boot") {
+        const changed = { ...original,
+          ...(mismatch === "event-bound" ? { eventSequence: 9 } : {}),
+          ...(mismatch === "record-bound" ? { recordSequence: 3 } : {}),
+          ...(mismatch === "foreign-workspace" ? { scope: { ...scope, workspaceId: randomUUID() } } : {}),
+          ...(mismatch === "foreign-boot" ? { scope: { ...scope, bootId: randomUUID() } } : {}),
+        };
+        f.writeSeal({ ...changed, sha256: createHash("sha256").update(canonicalCloudLocalCommandWriterSealDescriptor(changed)).digest("hex") });
+      }
+      if (mismatch === "missing-ack") f.full.prepare("UPDATE local_command_writer_seals SET ack=NULL WHERE writer_epoch=?").run(scope.writerEpoch);
+      if (mismatch === "foreign-ack") {
+        const { scope: _scope, ...fields } = original;
+        f.full.prepare("UPDATE local_command_writer_seals SET ack=? WHERE writer_epoch=?")
+          .run(canonical({ ...fields, writerEpoch: successor.writerEpoch }), scope.writerEpoch);
+      }
+      if (mismatch === "seal-digest") f.full.prepare("UPDATE local_command_writer_seals SET document=? WHERE writer_epoch=?")
+        .run(canonical({ ...original, sha256: "f".repeat(64) }), scope.writerEpoch);
+      if (mismatch === "absent-origin") f.full.prepare("DELETE FROM local_command_writer_seals WHERE writer_epoch=?").run(scope.writerEpoch);
+      await expect(rebuild(f.input)).rejects.toThrow("cloud_history_rebuild_refused");
+      expect(snapshot(f.db)).toEqual(before);
+    });
   it("newer incomplete history removes an already rebuilt transcript without resurrecting old CAS", async () => {
     const f = fixture(); await rebuild(f.input);
     const newest: CloudLocalCommandHistoryHead = { originWriterEpoch: scope.writerEpoch,
