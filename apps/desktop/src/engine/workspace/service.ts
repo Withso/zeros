@@ -2527,6 +2527,11 @@ export class WorkspaceService {
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
       catalogAdmission?: DesignCatalogAdmission;
+      /** Engine-owned snapshot boundary, never a wire parameter. Read NORMAL
+       * rows and their FULL metadata without yielding; optional image I/O may
+       * retry the entire read, with its original writer still fenced. */
+      cloudHistoryRead?: <T extends object>(read: () => T,
+        prepare?: (value: T, assertCurrent: () => void) => Promise<void> | undefined) => Promise<T>;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
@@ -4016,14 +4021,17 @@ export class WorkspaceService {
       // be absurd to prompt the desktop on every chat title change). So these
       // are deliberately NOT in WRITE_OPS — direct for local AND remote. ──
       case "chats.list": {
-        const chats = listChats();
-        return {
-          chats: remote ? this.redactChatsForRemote(chats) : chats,
-          // A full list cannot represent deletions by itself. Pair it with the
-          // complete tombstone set so a renderer's instant boot cache never
-          // resurrects a chat deleted while that renderer was offline.
-          chatDeletions: tombstonesSince("chat", 0),
+        const read = () => {
+          const chats = listChats();
+          return {
+            chats: remote ? this.redactChatsForRemote(chats) : chats,
+            // A full list cannot represent deletions by itself. Pair it with the
+            // complete tombstone set so a renderer's instant boot cache never
+            // resurrects a chat deleted while that renderer was offline.
+            chatDeletions: tombstonesSince("chat", 0),
+          };
         };
+        return opts.cloudHistoryRead ? opts.cloudHistoryRead(read) : read();
       }
       // What names an Untitled chat (desktop only: relay clients are refused
       // by the deny-by-default remote gate, which does not list this op).
@@ -4171,6 +4179,14 @@ export class WorkspaceService {
         const chatId = reqStr(params, "chatId");
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         const before = optNum(params, "before");
+        if (opts.cloudHistoryRead) return opts.cloudHistoryRead(
+          () => ({ messages: windowChatMessagesPage(chatId, limit, before).messages }),
+          (page, assertCurrent) => {
+            const folder = page.messages.some(row => payloadNeedsLegacyImageMigration(row.payload))
+              ? this.legacyImageMigrationCwd(chatId) : null;
+            return folder ? externalizeLegacyMessageImages({ cwd: folder, chatId, rows: page.messages, assertCurrent }).then(() => {}) : undefined;
+          },
+        );
         const page = windowChatMessagesPage(chatId, limit, before);
         // A Local turn longer than the row budget reports its opening prompt
         // beside the contiguous window. Cloud workers keep their existing
@@ -4193,10 +4209,19 @@ export class WorkspaceService {
       case "messages.windowOlder": {
         const chatId = reqStr(params, "chatId");
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
+        const beforeMsgId = reqStr(params, "beforeMsgId");
+        if (opts.cloudHistoryRead) return opts.cloudHistoryRead(
+          () => ({ messages: windowOlderChatMessages(chatId, limit, beforeMsgId) }),
+          (page, assertCurrent) => {
+            const folder = page.messages.some(row => payloadNeedsLegacyImageMigration(row.payload))
+              ? this.legacyImageMigrationCwd(chatId) : null;
+            return folder ? externalizeLegacyMessageImages({ cwd: folder, chatId, rows: page.messages, assertCurrent }).then(() => {}) : undefined;
+          },
+        );
         const messages = windowOlderChatMessages(
           chatId,
           limit,
-          reqStr(params, "beforeMsgId"),
+          beforeMsgId,
         );
         const needsImageMigration = messages.some((row) =>
           payloadNeedsLegacyImageMigration(row.payload),
@@ -4229,14 +4254,13 @@ export class WorkspaceService {
         const chatId = optStr(params, "chatId");
         const folder = optStr(params, "folder");
         const scope = chatId ?? folder;
-        if (remote && !scope) return { hits: [] };
-        let hits = searchMessages(reqStr(params, "query"), limit, {
-          chatId,
-          folder,
-        });
-        if (remote)
-          hits = hits.filter((h) => !this.remoteChatRestricted(h.chatId));
-        return { hits };
+        const read = () => {
+          if (remote && !scope) return { hits: [] };
+          let hits = searchMessages(reqStr(params, "query"), limit, { chatId, folder });
+          if (remote) hits = hits.filter((h) => !this.remoteChatRestricted(h.chatId));
+          return { hits };
+        };
+        return opts.cloudHistoryRead ? opts.cloudHistoryRead(read) : read();
       }
       case "messages.clear":
         return { cleared: clearChatMessages(reqStr(params, "chatId")) };

@@ -31,6 +31,11 @@
    that read must still leave one catch-up for a quick reveal.
    For a scoped gate, drive the real request dispatcher for every op it names;
    calling the gate helper directly cannot show that dispatch never selects it.
+   For history consistency, hold the real service before and after its SQLite
+   read. Capture rows and restore metadata together at that synchronous boundary;
+   an admission-time global revision must not reject unrelated writes. Retain
+   writer/actor fences and bound fresh reads after legacy image I/O, checking
+   the original snapshot before persisting any rewritten rows.
    A suspension holds prompt preparation until it resumes; Stop still ends the
    wait.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
