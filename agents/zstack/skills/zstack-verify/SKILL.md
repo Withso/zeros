@@ -1,6 +1,6 @@
 ---
 name: zstack-verify
-description: "Choose and run the right checks for a Zeros change, Local and cloud: adjacent Vitest suites, required static gates, UI smoke, platform-only checks, and live Alpha verification with the zeros-dev harness. Includes evidence rules and known gotchas."
+description: "Choose and run the right checks for a Zeros change, Local and cloud: adjacent Vitest suites, required static gates, UI smoke, platform-only checks, and live Alpha verification with the cloud v2 gate0 probe. Includes evidence rules and known gotchas."
 globs: "**"
 ---
 
@@ -51,38 +51,31 @@ for limits and the closed error codes.
 
 ## Live cloud checks on Alpha
 
-For the canary, `node scripts/zstack/verify.mjs cloud-dispatch --source <sha>`
-plans a dispatch of the existing main-only hourly workflow. Explicit execution
-uses the existing automation identity; it reports `dispatch_requested`, never
-a pass. Use `cloud-status --source <sha> --execute --receipt <file>` to observe
-the newest completed trusted run at that exact source, including the executed
-lifecycle and two-hour freshness limit. A newer active run does not erase
-completed evidence. `cloud-health` delegates to zeros-dev's Alpha health check;
-it cannot prove a workspace lifecycle. These commands use the task's existing
-Alpha authorization and never copy model keys into the checkout.
+Cloud workspaces run one Boat VM each, with a dial-out worker behind the
+control-plane relay. Before a live run, run the offline suites:
 
-Use the zeros-dev harness against the fixed Alpha fixture (`docs/zeros-dev.md`):
+- `apps/cloud-worker` (`pnpm --dir apps/cloud-worker test`);
+- `pnpm test:control-plane`, with real PostgreSQL for store tests;
+- the shared renderer suites under `platform/bridge`.
+
+The live proof is the deployed Dev gate0 probe:
 
 ```sh
-pnpm exec tsx scripts/zeros-dev/cli.ts login
-pnpm exec tsx scripts/zeros-dev/cli.ts whoami
-pnpm exec tsx scripts/zeros-dev/cli.ts computer build --wait
-pnpm exec tsx scripts/zeros-dev/cli.ts repo ensure
-pnpm exec tsx scripts/zeros-dev/cli.ts workspace create --wait
+pnpm --dir apps/control-plane cloud-v2:gate0 --api "$ZEROS_GATE0_API_URL" --runtime <runtime-sha256>
 ```
 
-Then run `terminal run`, `workspace stop` and `workspace resume` with
-`--run <id>`, and finish with `cleanup --run <id> --apply`.
-
-- Agent prompts against real providers run in CI, where the dedicated test
-  keys live. Trigger that workflow; never copy provider keys into `.env.agent`.
-- Every live run leaves a signed receipt. Report the failing stage and its
-  closed code, never raw provider output.
-- A lifecycle run counts only once stop and resume both pass; create alone
-  hid a resume loop.
-- Scripted live runs stop at the first failed stage. Capture server-side
-  state (database rows, control-plane logs, the failing attempt) before any
-  cleanup; never chain cleanup unconditionally after a failure.
+- Run it only with the task's Alpha authorization, against a deployed Dev
+  backend whose `CLOUD_V2_RUNTIME_SHA256` matches `--runtime`.
+- It creates one disposable workspace from the existing Cloud Computer. It
+  runs native Claude, Codex and Cursor turns, plus terminal, file and Git
+  round trips. It reads the mirrored history while the VM is stopped, wakes
+  the VM once, then deletes the workspace. Pass `--keep` only when you will
+  delete the workspace yourself.
+- It starts a real VM. Run it once per deployed change; never loop it.
+- It reports the failing stage only. Before any cleanup, capture the
+  server-side state: control-plane logs and the workspace row through the API.
+- Provider keys stay in `.env.agent` (Alpha and test only) or Actions; never
+  copy them into the checkout or into output.
 
 ## Evidence rules
 
@@ -111,8 +104,7 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   clean checkout of your base commit. A base worktree at another path changes
   path- and Git-dependent suites; for an exact comparison, swap only your
   changed source files back to the base revision in the same checkout, compare
-  failing test names, then rerun every differing test in isolation. macOS
-  cannot run the `/proc`-based portable cloud fixtures at all.
+  failing test names, then rerun every differing test in isolation.
 - `pnpm typecheck` keeps incremental state in `node_modules/.cache/zeros-typecheck`.
   An error in a file you did not touch may be stale state: confirm with
   `pnpm exec tsgo --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
@@ -124,7 +116,7 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
 - On macOS the default `TMPDIR` (`/var/folders/…`) is reached through the
   `/var` symlink, so path-safety suites fail with `zstack_source_unsafe`,
   `zstack_receipt_unsafe` or "not canonical". Rerun them with `TMPDIR` set to a
-  directory under `/private/tmp`; Linux-only cloud fixtures still fail on macOS.
+  directory under `/private/tmp`.
 - Outside CI, Vitest reuses transformed modules from
   `node_modules/.experimental-vitest-cache` between runs. If a rerun behaves
   differently from a fresh checkout, clear it with `pnpm exec vitest --clearCache`

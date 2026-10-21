@@ -2,26 +2,24 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy } from "../ci/scope.mjs";
-import { createGitHubApi } from "../ci/recovery-api.mjs";
 import { planVerification } from "./check-plan.mjs";
 import { captureSource, sourceBytes } from "./source.mjs";
 import { executeVerification, writeReceipt } from "./runner.mjs";
-import { planDriver, runDriver, observeHourly } from "./drivers.mjs";
+import { planDriver, runDriver } from "./drivers.mjs";
 
 export const HELP = `node scripts/zstack/verify.mjs plan|run [--test repository/path.test.ts ...]
   run --execute --receipt /private/scratch/receipt.json
   local-ui [--shard 1/3] [--execute --receipt FILE]
-  cloud-health|cloud-status|cloud-dispatch --source SHA [--execute --receipt FILE]
   --mode single-session|master-subagents --agent MODEL [--master MODEL]
-Plans are offline. Cloud execution requires the task's Alpha authorization.
-Cloud model turns run only in the main hourly Actions workflow; dispatch is
-unverified until cloud-status observes its exact source green. No workflow,
-required check or credential is configured by this tool. Receipts never overwrite.`;
+Plans are offline. Live cloud proof is the deployed Dev gate0 probe
+(pnpm --dir apps/control-plane cloud-v2:gate0), run only with the task's Alpha
+authorization; this tool never runs it. No workflow, required check or
+credential is configured by this tool. Receipts never overwrite.`;
 
 function parse(args) {
   if (!args.length || args[0] === "--help") return null;
   const [action, ...rest] = args, value = { action, tests: [], mode: "single-session", agent: "unspecified", master: null, execute: false };
-  if (!["plan", "run", "local-ui", "cloud-health", "cloud-status", "cloud-dispatch"].includes(action)) throw new Error("zstack_input_invalid");
+  if (!["plan", "run", "local-ui"].includes(action)) throw new Error("zstack_input_invalid");
   const known = new Set(["--test", "--mode", "--agent", "--master", "--source", "--receipt", "--shard"]), seen = new Set();
   for (let index = 0; index < rest.length; index++) {
     const flag = rest[index];
@@ -40,7 +38,7 @@ function parse(args) {
 }
 
 export async function runCli(args, { cwd = process.cwd(), write = value => process.stdout.write(`${JSON.stringify(value)}\n`),
-  capture = captureSource, receipt = writeReceipt, run = runDriver, observe = observeHourly, signal } = {}) {
+  capture = captureSource, receipt = writeReceipt, run = runDriver, signal } = {}) {
   try {
     const options = parse(args);
     if (!options) { write({ schema: "zeros.zstack-help/v1", help: HELP }); return 0; }
@@ -57,21 +55,16 @@ export async function runCli(args, { cwd = process.cwd(), write = value => proce
       const plan = planDriver(options.action, { sourceSha: options.source, shard: options.shard });
       if (!options.execute) { write({ ...plan, ...metadata }); return 0; }
       const startedAt = new Date().toISOString();
-      const budget = globalThis.AbortSignal.any([...(signal ? [signal] : []), globalThis.AbortSignal.timeout(60_000)]);
-      const observation = options.action === "cloud-status"
-        ? await observe(createGitHubApi({ fetchImpl: (url, init) => fetch(url, { ...init,
-          signal: globalThis.AbortSignal.any([budget, init.signal]) }) }), options.source)
-        : await run(plan.command, { cwd, signal, timeoutMs: options.action === "local-ui" ? 20 * 60_000 : 60_000 });
-      const dispatch = options.action === "cloud-dispatch" && observation.status === "passed";
+      const observation = await run(plan.command, { cwd, signal, timeoutMs: 20 * 60_000 });
       result = { schema: "zeros.zstack-receipt/v1", ...metadata, intendedSourceSha: options.source ?? null, startedAt,
-        completedAt: new Date().toISOString(), status: dispatch ? "unverified" : observation.status,
-        code: dispatch ? "dispatch_requested" : observation.code, results: [{ argv: plan.command?.argv ?? null, ...observation }],
+        completedAt: new Date().toISOString(), status: observation.status,
+        code: observation.code, results: [{ argv: plan.command.argv, ...observation }],
         unverified: [...plan.unverified, ...(observation.unverified ?? [])], evidence: [], tokens: null };
     }
     await receipt(path.resolve(cwd, options.receipt), result); write(result);
-    return result.status === "passed" || result.code === "dispatch_requested" ? 0 : 1;
+    return result.status === "passed" ? 0 : 1;
   } catch (error) {
-    const known = new Set(["zstack_input_invalid", "zstack_requires_linux", "zstack_test_invalid", "zstack_path_invalid", "zstack_source_unsafe",
+    const known = new Set(["zstack_input_invalid", "zstack_test_invalid", "zstack_path_invalid", "zstack_source_unsafe",
       "zstack_source_limit", "zstack_plan_invalid", "zstack_plan_blocked", "zstack_git_unavailable", "zstack_receipt_unsafe"]);
     write({ schema: "zeros.zstack-error/v1", code: known.has(error?.message) ? error.message : "zstack_failed" }); return 1;
   }

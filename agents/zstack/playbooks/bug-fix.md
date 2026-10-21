@@ -1,5 +1,9 @@
 # Playbook: bug fix
 
+Lessons that name v1 cloud subsystems (checkpoints, seals, custody, accepted
+commands, final saves, boot owners) describe code retired by cloud v2. Keep
+their general method; those subsystems no longer exist.
+
 1. **Reproduce.** Capture the exact symptom: a closed error code, a failing
    check or user-visible behavior. Note the revision and environment.
 2. **Red.** Write the smallest regression test that fails for the stated
