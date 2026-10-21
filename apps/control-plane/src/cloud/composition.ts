@@ -10,7 +10,8 @@ import { cloudAgentCredentialKeys } from "../cloud-workspaces/agent-credentials.
 import { createCloudV2AgentLogins, type CloudV2AgentLogins } from "./agent-logins.js";
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
-import { createCloudV2GithubTokens } from "./github.js";
+import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
+import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./github.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
@@ -51,6 +52,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     throw new HttpError(409, "github_unavailable", "GitHub is not configured");
   };
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
+  const computers = new CloudV2Computers(pool);
+  const repositoryToken = config.github ? createCloudV2RepositoryTokens(pool, config.github) : null;
 
   const workerConfig = async (workspace: CloudV2Workspace): Promise<ConfigFrame> => {
     const proxy = async () => {
@@ -78,6 +81,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
 
   const routes: CloudV2RouteDeps = {
     store,
+    computers,
+    baseSnapshot: v2.baseSnapshot,
     installedRepositories: organizationId => store.installedRepositories(organizationId),
     bridgeBaseUrl: v2.realtimeUrl,
   };
@@ -90,7 +95,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     answerOffline: (workspace, frame) => answerCloudV2Offline(store, workspace, frame),
     logger: console,
   }) : null;
+  const builder = roles.lifecycle && repositoryToken ? new CloudV2ComputerBuilder({
+    computers, compute, channel: config.deploymentChannel,
+    cloneToken: async (organizationId, userId, repository) => (await repositoryToken(organizationId, userId, repository)).token,
+    logger: console,
+  }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
+    ...(builder ? { builds: builder } : {}),
     store,
     compute,
     bootEnv: workspace => ({ ZEROS_WORKER_URL: `${v2.realtimeUrl}/v2/cloud/worker`, ZEROS_WORKSPACE_ID: workspace.id }),

@@ -22,6 +22,8 @@ export type CloudV2LifecycleDeps = {
   /** Non-secret boot settings, e.g. the relay URL and workspace id. */
   bootEnv(workspace: CloudV2Workspace): Record<string, string>;
   sandboxName(workspace: CloudV2Workspace): string;
+  /** Cloud Computer builds share this loop; one runs at a time. */
+  builds?: { tick(): Promise<void> };
   now?: () => number;
   logger?: Pick<Console, "warn">;
 };
@@ -56,11 +58,17 @@ export class CloudV2Lifecycle {
       if (this.timer) clearInterval(this.timer);
       this.timer = null;
       await this.running;
+      await this.building;
     };
   }
 
+  private building: Promise<void> | null = null;
+
   async tick(): Promise<void> {
     const now = this.deps.now?.() ?? Date.now();
+    // A build can take many minutes; it never blocks workspace lifecycle steps.
+    if (this.deps.builds && !this.building)
+      this.building = this.deps.builds.tick().catch(() => {}).finally(() => { this.building = null; });
     for (const idle of await this.deps.store.idleSince(new Date(now - CLOUD_V2_IDLE_STOP_MS))) {
       await this.deps.store.transition(idle.id, ["running"], "stopping");
     }

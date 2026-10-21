@@ -7,6 +7,7 @@ import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { CloudV2Capabilities } from "./contract.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
+import { CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
 
 const CONNECT_TICKET_TTL_MS = 60_000;
@@ -27,6 +28,9 @@ const CreateSchema = z.object({
 
 export type CloudV2RouteDeps = {
   store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "transition" | "issueToken">;
+  computers: Pick<CloudV2Computers, "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
+  /** Boat named snapshot of the Zeros v2 base image; builds start from it. */
+  baseSnapshot: string | null;
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly string[] | null>;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
@@ -116,6 +120,46 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const moved = await deps.store.transition(workspace.id,
       ["creating", "running", "stopping", "stopped", "starting", "failed"], "deleting");
     return c.json({ workspace: document(moved ?? workspace) }, 202);
+  });
+
+  const BuildSchema = z.object({ repositories: CloudV2RecipeSchema.shape.repositories }).strict();
+  const org = (value: string | undefined) => {
+    const parsed = uuid.safeParse(value);
+    if (!parsed.success) throw new HttpError(404, "not_found", "Organization not found");
+    return parsed.data;
+  };
+
+  app.get("/v1/cloud-v2/organizations/:org/computer", async c => {
+    const organizationId = org(c.req.param("org"));
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    return c.json(await deps.computers.overview(organizationId));
+  });
+
+  app.post("/v1/cloud-v2/organizations/:org/computer/builds", json, async c => {
+    const organizationId = org(c.req.param("org"));
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    if (!deps.baseSnapshot) throw new HttpError(409, "computer_base_unavailable", "Cloud Computer builds are not configured");
+    const parsed = BuildSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer build");
+    const build = await deps.computers.enqueue(organizationId, c.get("user").id,
+      { base: deps.baseSnapshot, repositories: parsed.data.repositories });
+    return c.json({ build }, 202);
+  });
+
+  app.post("/v1/cloud-v2/organizations/:org/computer/builds/:build/activate", async c => {
+    const organizationId = org(c.req.param("org"));
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    const build = uuid.safeParse(c.req.param("build"));
+    if (!build.success) throw new HttpError(404, "not_found", "Cloud Computer build not found");
+    return c.json({ build: await deps.computers.reactivate(organizationId, c.get("user").id, build.data) }, 202);
+  });
+
+  app.get("/v1/cloud-v2/organizations/:org/computer/builds/:build/log", async c => {
+    const organizationId = org(c.req.param("org"));
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    const build = uuid.safeParse(c.req.param("build"));
+    if (!build.success) throw new HttpError(404, "not_found", "Cloud Computer build not found");
+    return c.text(await deps.computers.log(organizationId, build.data));
   });
 
   return app;

@@ -385,6 +385,8 @@ export type CloudV2Config = {
   apiUrl: string;
   /** wss:// origin of the realtime service; workers and the app connect here. */
   realtimeUrl: string;
+  /** Boat named snapshot of the Zeros v2 base image; null disables builds. */
+  baseSnapshot: string | null;
 };
 
 function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
@@ -410,6 +412,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
+    baseSnapshot: /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(env.CLOUD_V2_BASE_SNAPSHOT?.trim() ?? "")
+      ? env.CLOUD_V2_BASE_SNAPSHOT!.trim() : null,
   };
 }
 
