@@ -106,14 +106,32 @@ export async function planHourly(api, execution) {
   return { execution, bootstrap: true, previous: null, artifactId: null, ...(prestartRecovery ? { prestartRecovery } : {}) };
 }
 
+// Activation proof must see the whole history, not only its newest page. Read
+// every page within a fixed bound; a short, shifted or duplicated page is
+// unknown history and still fails closed.
+const HISTORY_PAGES = 10;
+async function historyRuns(api, query) {
+  const first = await api.get(`${WORKFLOW}/runs?${query}&per_page=100`);
+  const runs = [...collection(first, "workflow_runs")];
+  for (let page = 2; runs.length < first.total_count; page++) {
+    if (page > HISTORY_PAGES) throw failure("artifact_invalid");
+    const next = await api.get(`${WORKFLOW}/runs?${query}&per_page=100&page=${page}`);
+    const rows = collection(next, "workflow_runs");
+    if (next.total_count !== first.total_count || !rows.length) throw failure("artifact_invalid");
+    runs.push(...rows);
+  }
+  if (runs.length !== first.total_count || new Set(runs.map(run => run?.id)).size !== runs.length) throw failure("artifact_invalid");
+  return { total_count: first.total_count, workflow_runs: runs };
+}
+
 export async function hourlySnapshot(api) {
   // Query successes separately: a long red sequence must never reset the
   // activation latch merely because the first green fell off the recent page.
-  const greens = await api.get(`${WORKFLOW}/runs?branch=main&status=success&per_page=100`);
-  const successes = collection(greens, "workflow_runs");
+  const greens = await historyRuns(api, "branch=main&status=success");
+  const successes = greens.workflow_runs;
   if (successes.some(run => !trustedHourlyRun(run) || run.status !== "completed" || run.conclusion !== "success")) throw failure("artifact_invalid");
-  const rows = await api.get(`${WORKFLOW}/runs?branch=main&per_page=100`);
-  const runs = collection(rows, "workflow_runs");
+  const rows = await historyRuns(api, "branch=main");
+  const runs = rows.workflow_runs;
   if (runs.some(run => !trustedHourlyRun(run))) throw failure("artifact_invalid");
   runs.sort((a, b) => b.run_number - a.run_number);
   if (!runs.length && rows.total_count) throw failure("artifact_invalid");
