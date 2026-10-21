@@ -33,10 +33,21 @@ describe("cloud request account boundaries", () => {
     expect((await changeCloudWorkspaceLifecycle(target, "wake", "fixture-intent", "interaction")).status).toBe("waking");
     expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}/start`,
       expect.objectContaining({ method: "POST", body: "{}" }));
+    // Archive is its own v2 operation: a plain stop would never become archived.
     await changeCloudWorkspaceLifecycle(target, "archive", "fixture-archive");
-    expect(fetch).toHaveBeenLastCalledWith(expect.stringMatching(/\/v1\/cloud-v2\/workspaces\/[^/]+\/stop$/), expect.objectContaining({ method: "POST" }));
+    expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}/archive`, expect.objectContaining({ method: "POST" }));
     await changeCloudWorkspaceLifecycle(target, "delete", "fixture-delete");
     expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}`, expect.objectContaining({ method: "DELETE" }));
+  });
+  it("shows a stopped workspace with an archive mark as archived, and only then", async () => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };
+    const archivedAt = "2026-10-05T00:00:00.000Z";
+    for (const [state, mark, status] of [["stopped", archivedAt, "archived"], ["stopping", archivedAt, "stopping"],
+      ["stopped", null, "stopped"], ["running", null, "ready"]] as const) {
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...v2Workspace(id, state), archivedAt: mark } })));
+      expect((await getCloudWorkspaceDocument(target)).status).toBe(status);
+    }
   });
   it("preserves optional server-derived edit access without inferring it from legacy write access", () => {
     const capabilities = { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null };

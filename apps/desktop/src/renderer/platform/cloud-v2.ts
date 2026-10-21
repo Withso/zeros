@@ -23,6 +23,8 @@ export const CloudV2WorkspaceSchema = z.object({
   baseBranch: z.string().min(1).max(255),
   state: z.enum(["creating", "running", "stopping", "stopped", "starting", "deleting", "deleted", "failed"]),
   errorCode: z.string().nullable(),
+  /** Set while an archived workspace is stopped; starting it clears the mark. */
+  archivedAt: z.string().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   version: z.literal(2),
@@ -53,7 +55,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     createdBy: workspace.creatorUserId,
     ownerUserId: workspace.creatorUserId,
     placement: "cloud",
-    status: STATUS[workspace.state],
+    status: workspace.archivedAt && workspace.state === "stopped" ? "archived" : STATUS[workspace.state],
     capabilities: {
       canWrite: true, canEdit: true, canManage: true,
       canStart: workspace.state === "stopped",
@@ -114,7 +116,7 @@ export async function createCloudV2Workspace(input: {
   return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body, idempotencyKey })).workspace;
 }
 
-export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "delete"): Promise<CloudV2Workspace> {
+export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "archive" | "delete"): Promise<CloudV2Workspace> {
   const id = uuid.parse(target.workspaceId);
   const { workspace } = action === "delete"
     ? await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}`, one, { body: {}, idempotencyKey: key(), method: "DELETE" })

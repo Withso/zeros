@@ -122,8 +122,8 @@ export async function changeCloudWorkspaceLifecycle(
   _idempotencyKey: string,
   _reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {
-  // v2 has no archive: a stopped workspace already keeps its disk.
-  const action = operation === "wake" ? "start" : operation === "delete" ? "delete" : "stop";
+  // Archive stops the workspace and marks it; starting it again restores it.
+  const action = operation === "wake" ? "start" : operation;
   const workspace = cloudV2Document(await changeCloudV2Workspace(target, action));
   if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud lifecycle response changed identity");
