@@ -2,7 +2,7 @@ import { expect, it, vi } from "vitest";
 import { newHostedGeneration, hostedName } from "../dev-environment/hosted-state.mjs";
 import { ensurePlanetScaleBranch } from "../dev-environment/planetscale.mjs";
 import { ensureDevDns } from "../dev-environment/hosted-cloudflare.mjs";
-import * as images from "../dev-environment/hosted-image.mjs";
+import * as images from "../dev-environment/retired-resources.mjs";
 import { reconcileHosted } from "../dev-environment/hosted-reconcile.mjs";
 const fixture = () => ({ state: newHostedGeneration({ owner: "a".repeat(24), identity: "test" }), save: vi.fn(), fence: vi.fn() });
 it("reports an uncertain SSH registration in explicit reconciliation", async () => {

@@ -70,11 +70,7 @@
     "exclude": [
       "docs/README.md",
       "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
-      "docs/cloud-workspace/README.md",
-      "docs/cloud-workspace/qualification-status.md",
-      "docs/cloud-workspace/engineering-reference.md",
       "docs/deployment-environments.md",
-      "docs/cloud-workspace/infrastructure-and-operations.md",
       "docs/design-system.md",
       "docs/design-tokens.md"
     ],
@@ -92,34 +88,6 @@
       "docs/changes-history.md",
       "docs/chat-titles.md",
       "docs/claude-event-coverage.md",
-      "docs/cloud-workspace/account-pro-operations.md",
-      "docs/cloud-workspace/agent-authentication-and-language-tools.md",
-      "docs/cloud-workspace/architecture.md",
-      "docs/cloud-workspace/checkpoint-native-format.md",
-      "docs/cloud-workspace/client-runtime-contract.md",
-      "docs/cloud-workspace/compute-credits.md",
-      "docs/cloud-workspace/computer-environment.md",
-      "docs/cloud-workspace/computer-template-builds.md",
-      "docs/cloud-workspace/computer-template-retention.md",
-      "docs/cloud-workspace/computer-tools.md",
-      "docs/cloud-workspace/data-and-sync.md",
-      "docs/cloud-workspace/database-qualification.md",
-      "docs/cloud-workspace/enterprise-and-self-hosting.md",
-      "docs/cloud-workspace/lifecycle-diagnostics.md",
-      "docs/cloud-workspace/mcp-and-skills.md",
-      "docs/cloud-workspace/native-access-acceptance.md",
-      "docs/cloud-workspace/native-preview-acceptance.md",
-      "docs/cloud-workspace/organization-setup.md",
-      "docs/cloud-workspace/pro-backend.md",
-      "docs/cloud-workspace/product-contract.md",
-      "docs/cloud-workspace/provider-background-work.md",
-      "docs/cloud-workspace/provider-contract.md",
-      "docs/cloud-workspace/relay-capacity.md",
-      "docs/cloud-workspace/release-worker-qualification.md",
-      "docs/cloud-workspace/runtime-bundles.md",
-      "docs/cloud-workspace/runtime-lifecycle-acceptance.md",
-      "docs/cloud-workspace/security.md",
-      "docs/cloud-workspace/template-forks.md",
       "docs/code-review.md",
       "docs/codex-app-server-compatibility.md",
       "docs/color-names.md",
@@ -150,10 +118,7 @@
   },
   "lane_names": [
     "ci-config",
-    "cloud-chaos",
-    "cloud-client",
     "cloud-runtime",
-    "cloud-scale",
     "control-plane",
     "control-plane-db",
     "dependencies-toolchain",
@@ -168,7 +133,6 @@
     "packaging",
     "protocol",
     "repository-contracts",
-    "runtime-bundle",
     "smoke-harness",
     "ui-smoke",
     "web"
@@ -192,10 +156,10 @@
     {
       "id": "shared-cloud-channel-policy",
       "include": [
-        "apps/control-plane/src/cloud-workspace-channels.json",
-        "apps/control-plane/src/cloud-workspaces/channel-policy.ts",
+        "apps/control-plane/src/cloud/channel-policy.ts",
         "apps/desktop/shared/cloud-workspace-channel.ts",
-        "scripts/release/channel-policy.mjs"
+        "scripts/release/channel-policy.mjs",
+        "apps/control-plane/src/cloud/channels.json"
       ],
       "lanes": [
         "control-plane",
@@ -311,8 +275,6 @@
     {
       "id": "cloud-runtime-and-dev-kit",
       "include": [
-        "scripts/cloud-workspace-validation/**",
-        "scripts/runtime-skew/**",
         "scripts/preview-browser-smoke.ts",
         "scripts/dev-environment/**",
         "scripts/setup-zeros-dev.sh"
@@ -321,19 +283,13 @@
     },
     {
       "id": "cloud-worker-backend",
-      "include": ["apps/control-plane/src/cloud-workspaces/**"],
+      "include": ["apps/control-plane/src/cloud/**"],
       "lanes": ["cloud-runtime"]
     },
     {
       "id": "cloud-v2-worker",
       "include": ["apps/cloud-worker/**"],
       "lanes": ["cloud-runtime"]
-    },
-    {
-      "id": "cloud-clients-tested-by-backend",
-      "include": ["apps/desktop/**"],
-      "lanes": ["control-plane", "control-plane-db"],
-      "input_source": "control-plane-database"
     },
     {
       "id": "operating-documents-are-db-inputs",
@@ -346,9 +302,6 @@
       "include": [
         "docs/README.md",
         "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
-        "docs/cloud-workspace/README.md",
-        "docs/cloud-workspace/qualification-status.md",
-        "docs/cloud-workspace/engineering-reference.md",
         "README.md",
         "REPOSITORY-ARCHITECTURE.md"
       ],
@@ -367,11 +320,7 @@
       "exclude": [
         "docs/README.md",
         "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
-        "docs/cloud-workspace/README.md",
-        "docs/cloud-workspace/qualification-status.md",
-        "docs/cloud-workspace/engineering-reference.md",
         "docs/deployment-environments.md",
-        "docs/cloud-workspace/infrastructure-and-operations.md",
         "docs/design-system.md",
         "docs/design-tokens.md"
       ],
@@ -485,28 +434,13 @@
         "scripts/ui-smoke/**",
         "apps/desktop/src/renderer/harnesses/**"
       ],
-      "lanes": ["smoke-harness", "runtime-bundle"]
+      "lanes": ["smoke-harness"]
     },
     {
       "id": "control-plane-database-inputs",
       "include": ["**"],
       "input_source": "control-plane-database",
       "lanes": ["control-plane", "control-plane-db"]
-    },
-    {
-      "id": "cloud-chaos",
-      "include": ["apps/control-plane/src/chaos/**"],
-      "lanes": ["cloud-chaos"]
-    },
-    {
-      "id": "cloud-load-scale",
-      "include": ["apps/control-plane/src/load-sim/**"],
-      "lanes": ["cloud-scale"]
-    },
-    {
-      "id": "cloud-client-sdk",
-      "include": ["packages/cloud-client/**"],
-      "lanes": ["cloud-client"]
     }
   ],
   "jobs": {
@@ -547,38 +481,6 @@
     "secret-scan": ["commit-range-secrets"]
   },
   "checks": {
-    "local-untouched": {
-      "when": {
-        "always": true,
-        "full": true,
-        "any_lanes": []
-      },
-      "execution_group": "scope-core",
-      "commands": ["node scripts/ci/local-untouched.mjs"],
-      "runs_elsewhere": ".github/workflows/ci.yml:local-untouched (advisory until the owner requires it)"
-    },
-    "cloud-chaos": {
-      "when": {
-        "always": false,
-        "full": true,
-        "any_lanes": ["cloud-chaos"]
-      },
-      "execution_group": "control-plane-chaos",
-      "commands": ["pnpm --dir apps/control-plane exec vitest run src/chaos"],
-      "runs_elsewhere": ".github/workflows/ci.yml:cloud-chaos (advisory until the owner requires it)"
-    },
-    "cloud-load-scale": {
-      "when": {
-        "always": false,
-        "full": true,
-        "any_lanes": ["cloud-scale"]
-      },
-      "execution_group": "control-plane-load-scale",
-      "commands": [
-        "pnpm --dir apps/control-plane exec vitest run --glob 'src/load-sim/*.scale.test.ts'"
-      ],
-      "runs_elsewhere": ".github/workflows/ci.yml:cloud-scale (advisory until the owner requires it)"
-    },
     "cloud-v2-worker": {
       "when": {
         "always": false,
@@ -592,16 +494,6 @@
         "pnpm --filter @zeros/cloud-worker run test"
       ],
       "runs_elsewhere": ".github/workflows/ci.yml:cloud-v2-worker (Node 24, the worker's runtime)"
-    },
-    "cloud-client-sdk": {
-      "when": {
-        "always": false,
-        "full": true,
-        "any_lanes": ["cloud-client"]
-      },
-      "execution_group": "cloud-client",
-      "commands": ["pnpm --dir packages/cloud-client test"],
-      "runs_elsewhere": ".github/workflows/ci.yml:cloud-client (advisory until the owner requires it)"
     },
     "tracked-secrets": {
       "when": {
@@ -858,7 +750,6 @@
         "pnpm codex:smoke",
         "pnpm check:codex-pin",
         "pnpm check:codex-coverage",
-        "pnpm check:runtime-skew",
         "pnpm check:runtime-pins"
       ]
     },
@@ -1073,50 +964,6 @@
       ],
       "lane": "macos",
       "runs_elsewhere": ".github/workflows/scheduled.yml:macos packaging proof; the macos job floor also selects source-sync verification."
-    },
-    "cloud-runner": {
-      "when": {
-        "always": false,
-        "full": true,
-        "any_lanes": [
-          "cloud-runtime",
-          "desktop-engine",
-          "protocol",
-          "design-containment",
-          "dependencies-toolchain",
-          "packaging"
-        ]
-      },
-      "execution_group": "cloud-runner",
-      "commands": [
-        "pnpm check:runtime-pins",
-        "pnpm agents:smoke:offline",
-        "pnpm check:preview-browser",
-        "pnpm --dir apps/control-plane typecheck"
-      ],
-      "runs_elsewhere": ".github/workflows/cloud-runner-qualification.yml"
-    },
-    "linux-runtime-bundle": {
-      "when": {
-        "always": false,
-        "full": true,
-        "any_lanes": [
-          "cloud-runtime",
-          "desktop-engine",
-          "protocol",
-          "design-containment",
-          "model-catalogs",
-          "packaging",
-          "dependencies-toolchain",
-          "smoke-harness"
-        ]
-      },
-      "execution_group": "cloud-runner",
-      "commands": [
-        "bash scripts/ci/with-userns.sh pnpm cloud:runtime-bundle:build --out-dir <temporary> --source-commit <head_sha>"
-      ],
-      "lane": "runtime-bundle",
-      "runs_elsewhere": ".github/workflows/release-alpha.yml:runtime-build"
     },
     "composer-critical": {
       "when": {

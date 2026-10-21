@@ -1,7 +1,7 @@
 import { railwayDevClient, listRailwayEnvironments } from "./railway.mjs";
 import { planetScaleDevClient } from "./planetscale.mjs";
 import { hostedCloudflareClient } from "./hosted-cloudflare.mjs";
-import { devBoatClient } from "./hosted-image.mjs";
+import { devBoatClient } from "./boat.mjs";
 
 /** Page exhaustion, not a first-page absence, defines a complete inventory. */
 export async function numberedInventory(read, select) {

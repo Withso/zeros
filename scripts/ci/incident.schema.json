@@ -24,11 +24,21 @@
     "controller_evidence"
   ],
   "properties": {
-    "schema": { "const": "zeros.ci-failure/v1" },
-    "signature": { "$ref": "#/$defs/signature" },
-    "signature_version": { "const": 1 },
-    "repository": { "const": "Withso/zeros" },
-    "incident_kind": { "const": "postmerge_full_ci" },
+    "schema": {
+      "const": "zeros.ci-failure/v1"
+    },
+    "signature": {
+      "$ref": "#/$defs/signature"
+    },
+    "signature_version": {
+      "const": 1
+    },
+    "repository": {
+      "const": "Withso/zeros"
+    },
+    "incident_kind": {
+      "const": "postmerge_full_ci"
+    },
     "state": {
       "enum": [
         "awaiting_agent",
@@ -40,22 +50,42 @@
     },
     "claimed_by": {
       "anyOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["id", "login", "head_sha"],
+          "required": [
+            "id",
+            "login",
+            "head_sha"
+          ],
           "properties": {
-            "id": { "$ref": "#/$defs/id" },
-            "login": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,39}$" },
-            "head_sha": { "$ref": "#/$defs/sha" }
+            "id": {
+              "$ref": "#/$defs/id"
+            },
+            "login": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]{1,39}$"
+            },
+            "head_sha": {
+              "$ref": "#/$defs/sha"
+            }
           }
         }
       ]
     },
-    "base_branch": { "const": "main" },
-    "branch": { "type": "string", "pattern": "^ci-fix/[a-f0-9]{64}$" },
-    "first_failure": { "$ref": "#/$defs/occurrence" },
+    "base_branch": {
+      "const": "main"
+    },
+    "branch": {
+      "type": "string",
+      "pattern": "^ci-fix/[a-f0-9]{64}$"
+    },
+    "first_failure": {
+      "$ref": "#/$defs/occurrence"
+    },
     "latest_failure": {
       "type": "object",
       "additionalProperties": false,
@@ -76,14 +106,30 @@
         "last_green_sha"
       ],
       "properties": {
-        "sha": { "$ref": "#/$defs/sha" },
-        "ref": { "const": "refs/heads/main" },
-        "workflow_id": { "$ref": "#/$defs/id" },
-        "workflow_path": { "const": ".github/workflows/preflight.yml" },
-        "workflow_name": { "const": "Preflight" },
-        "event": { "const": "push" },
-        "run_id": { "$ref": "#/$defs/id" },
-        "attempt": { "$ref": "#/$defs/attempt" },
+        "sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "ref": {
+          "const": "refs/heads/main"
+        },
+        "workflow_id": {
+          "$ref": "#/$defs/id"
+        },
+        "workflow_path": {
+          "const": ".github/workflows/preflight.yml"
+        },
+        "workflow_name": {
+          "const": "Preflight"
+        },
+        "event": {
+          "const": "push"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "attempt": {
+          "$ref": "#/$defs/attempt"
+        },
         "run_url": {
           "type": "string",
           "pattern": "^https://github\\.com/Withso/zeros/actions/runs/[1-9][0-9]{0,19}$"
@@ -91,19 +137,36 @@
         "retry": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["automatic_budget", "used", "attempts", "result"],
+          "required": [
+            "automatic_budget",
+            "used",
+            "attempts",
+            "result"
+          ],
           "properties": {
-            "automatic_budget": { "const": 1 },
-            "used": { "type": "integer", "minimum": 0, "maximum": 1 },
+            "automatic_budget": {
+              "const": 1
+            },
+            "used": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1
+            },
             "attempts": {
               "type": "array",
               "minItems": 1,
               "maxItems": 100,
               "uniqueItems": true,
-              "items": { "$ref": "#/$defs/attempt" }
+              "items": {
+                "$ref": "#/$defs/attempt"
+              }
             },
             "result": {
-              "enum": ["not_eligible", "not_attempted", "persistent_failure"]
+              "enum": [
+                "not_eligible",
+                "not_attempted",
+                "persistent_failure"
+              ]
             }
           }
         },
@@ -127,17 +190,31 @@
               "reproduction"
             ],
             "properties": {
-              "id": { "$ref": "#/$defs/id" },
-              "lane": { "$ref": "#/$defs/lane" },
-              "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "lane": {
+                "$ref": "#/$defs/lane"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
               "matrix": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "shard": { "type": "integer", "minimum": 1, "maximum": 3 }
+                  "shard": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3
+                  }
                 }
               },
-              "conclusion": { "$ref": "#/$defs/failure" },
+              "conclusion": {
+                "$ref": "#/$defs/failure"
+              },
               "steps": {
                 "type": "array",
                 "minItems": 1,
@@ -145,7 +222,12 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["number", "key", "name", "conclusion"],
+                  "required": [
+                    "number",
+                    "key",
+                    "name",
+                    "conclusion"
+                  ],
                   "properties": {
                     "number": {
                       "type": "integer",
@@ -161,21 +243,37 @@
                       "minLength": 1,
                       "maxLength": 100
                     },
-                    "conclusion": { "$ref": "#/$defs/failure" }
+                    "conclusion": {
+                      "$ref": "#/$defs/failure"
+                    }
                   }
                 }
               },
-              "diagnostic_key": { "type": "null" },
-              "redacted_excerpt": { "type": "null" },
+              "diagnostic_key": {
+                "type": "null"
+              },
+              "redacted_excerpt": {
+                "type": "null"
+              },
               "excerpt_omission_reason": {
                 "const": "no_safe_allowlisted_excerpt"
               },
               "reproduction": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["platform", "command_id", "display_command"],
+                "required": [
+                  "platform",
+                  "command_id",
+                  "display_command"
+                ],
                 "properties": {
-                  "platform": { "enum": ["linux", "macos", "unknown"] },
+                  "platform": {
+                    "enum": [
+                      "linux",
+                      "macos",
+                      "unknown"
+                    ]
+                  },
                   "command_id": {
                     "enum": [
                       "composer-shard",
@@ -205,21 +303,42 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["number", "url", "evidence_kind", "confidence"],
+            "required": [
+              "number",
+              "url",
+              "evidence_kind",
+              "confidence"
+            ],
             "properties": {
-              "number": { "type": "integer", "minimum": 1 },
+              "number": {
+                "type": "integer",
+                "minimum": 1
+              },
               "url": {
                 "type": "string",
                 "pattern": "^https://github\\.com/Withso/zeros/pull/[1-9][0-9]*$"
               },
-              "evidence_kind": { "const": "commit_association" },
-              "confidence": { "const": "possible" }
+              "evidence_kind": {
+                "const": "commit_association"
+              },
+              "confidence": {
+                "const": "possible"
+              }
             }
           }
         },
-        "culprit_confidence": { "const": "unknown" },
+        "culprit_confidence": {
+          "const": "unknown"
+        },
         "last_green_sha": {
-          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/sha" }]
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha"
+            }
+          ]
         }
       }
     },
@@ -228,38 +347,76 @@
       "minItems": 1,
       "maxItems": 32,
       "uniqueItems": true,
-      "items": { "$ref": "#/$defs/occurrence" }
+      "items": {
+        "$ref": "#/$defs/occurrence"
+      }
     },
-    "required_lanes": { "$ref": "#/$defs/lanes" },
-    "required_ci_additions": { "$ref": "#/$defs/additions" },
+    "required_lanes": {
+      "$ref": "#/$defs/lanes"
+    },
+    "required_ci_additions": {
+      "$ref": "#/$defs/additions"
+    },
     "marker_path": {
       "type": "string",
       "pattern": "^\\.github/ci-incidents/[a-f0-9]{64}\\.json$"
     },
-    "repair_generation": { "const": 1 },
+    "repair_generation": {
+      "const": 1
+    },
     "resolved_by": {
       "anyOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["sha", "run_id", "attempt", "reason"],
+          "required": [
+            "sha",
+            "run_id",
+            "attempt",
+            "reason"
+          ],
           "properties": {
-            "sha": { "$ref": "#/$defs/sha" },
-            "run_id": { "$ref": "#/$defs/id" },
-            "attempt": { "$ref": "#/$defs/attempt" },
-            "reason": { "const": "current_main_full_preflight_green" }
+            "sha": {
+              "$ref": "#/$defs/sha"
+            },
+            "run_id": {
+              "$ref": "#/$defs/id"
+            },
+            "attempt": {
+              "$ref": "#/$defs/attempt"
+            },
+            "reason": {
+              "const": "current_main_full_preflight_green"
+            }
           }
         }
       ]
     },
-    "controller_evidence": { "$ref": "#/$defs/evidence" }
+    "controller_evidence": {
+      "$ref": "#/$defs/evidence"
+    }
   },
   "$defs": {
-    "id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
-    "sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
-    "signature": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "attempt": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "id": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
     "failure": {
       "enum": [
         "failure",
@@ -289,22 +446,40 @@
       "minItems": 1,
       "maxItems": 9,
       "uniqueItems": true,
-      "items": { "$ref": "#/$defs/lane" }
+      "items": {
+        "$ref": "#/$defs/lane"
+      }
     },
     "additions": {
       "type": "array",
       "maxItems": 3,
       "uniqueItems": true,
-      "items": { "enum": ["ci:ui-smoke", "ci:macos", "ci:control-plane-db"] }
+      "items": {
+        "enum": [
+          "ci:ui-smoke",
+          "ci:macos",
+          "ci:control-plane-db"
+        ]
+      }
     },
     "occurrence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sha", "run_id", "attempt"],
+      "required": [
+        "sha",
+        "run_id",
+        "attempt"
+      ],
       "properties": {
-        "sha": { "$ref": "#/$defs/sha" },
-        "run_id": { "$ref": "#/$defs/id" },
-        "attempt": { "$ref": "#/$defs/attempt" }
+        "sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "attempt": {
+          "$ref": "#/$defs/attempt"
+        }
       }
     },
     "evidence": {
@@ -318,39 +493,22 @@
         "payload_sha256"
       ],
       "properties": {
-        "run_id": { "$ref": "#/$defs/id" },
-        "attempt": { "$ref": "#/$defs/attempt" },
-        "artifact_id": { "$ref": "#/$defs/id" },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "attempt": {
+          "$ref": "#/$defs/attempt"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/id"
+        },
         "artifact_digest": {
           "type": "string",
           "pattern": "^sha256:[a-f0-9]{64}$"
         },
-        "payload_sha256": { "$ref": "#/$defs/signature" }
-      }
-    },
-    "hourly_marker": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema", "signature", "signature_version", "repository", "incident_kind", "base_branch", "source", "required_lanes"],
-      "properties": {
-        "schema": { "const": "zeros.ci-failure/v1" },
-        "signature": { "$ref": "#/$defs/signature" },
-        "signature_version": { "const": 1 },
-        "repository": { "const": "Withso/zeros" },
-        "incident_kind": { "const": "hourly_zeros_dev" },
-        "base_branch": { "const": "main" },
-        "source": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["sha", "run_id", "attempt", "workflow_path"],
-          "properties": {
-            "sha": { "$ref": "#/$defs/sha" },
-            "run_id": { "$ref": "#/$defs/id" },
-            "attempt": { "$ref": "#/$defs/attempt" },
-            "workflow_path": { "const": ".github/workflows/zeros-dev-e2e.yml" }
-          }
-        },
-        "required_lanes": { "type": "array", "const": ["cloud-runtime"], "items": { "type": "string", "const": "cloud-runtime" } }
+        "payload_sha256": {
+          "$ref": "#/$defs/signature"
+        }
       }
     },
     "marker": {
@@ -371,18 +529,43 @@
         "controller_evidence"
       ],
       "properties": {
-        "schema": { "const": "zeros.ci-failure/v1" },
-        "signature": { "$ref": "#/$defs/signature" },
-        "signature_version": { "const": 1 },
-        "repository": { "const": "Withso/zeros" },
-        "incident_kind": { "const": "postmerge_full_ci" },
-        "base_branch": { "const": "main" },
-        "branch": { "type": "string", "pattern": "^ci-fix/[a-f0-9]{64}$" },
-        "first_failure": { "$ref": "#/$defs/occurrence" },
-        "source": { "$ref": "#/$defs/occurrence" },
-        "required_lanes": { "$ref": "#/$defs/lanes" },
-        "required_ci_additions": { "$ref": "#/$defs/additions" },
-        "controller_evidence": { "$ref": "#/$defs/evidence" }
+        "schema": {
+          "const": "zeros.ci-failure/v1"
+        },
+        "signature": {
+          "$ref": "#/$defs/signature"
+        },
+        "signature_version": {
+          "const": 1
+        },
+        "repository": {
+          "const": "Withso/zeros"
+        },
+        "incident_kind": {
+          "const": "postmerge_full_ci"
+        },
+        "base_branch": {
+          "const": "main"
+        },
+        "branch": {
+          "type": "string",
+          "pattern": "^ci-fix/[a-f0-9]{64}$"
+        },
+        "first_failure": {
+          "$ref": "#/$defs/occurrence"
+        },
+        "source": {
+          "$ref": "#/$defs/occurrence"
+        },
+        "required_lanes": {
+          "$ref": "#/$defs/lanes"
+        },
+        "required_ci_additions": {
+          "$ref": "#/$defs/additions"
+        },
+        "controller_evidence": {
+          "$ref": "#/$defs/evidence"
+        }
       }
     }
   }

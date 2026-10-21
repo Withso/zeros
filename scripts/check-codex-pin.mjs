@@ -90,7 +90,7 @@ if (!generatedLicense.includes("Apache License") || !generatedNotice.includes("O
 }
 
 const keeperDeclared=JSON.parse(readOrDie("apps/control-plane/package.json","control-plane manifest","restore the control-plane package manifest")).dependencies?.["@openai/codex"];
-const keeperPin=/CODEX_AUTH_RUNTIME_VERSION\s*=\s*"([^"]+)"/.exec(readOrDie("apps/control-plane/src/cloud-workspaces/codex-auth-cache.ts","native auth keeper pin","restore the qualified native auth keeper"))?.[1];
+const keeperPin=/CODEX_AUTH_RUNTIME_VERSION\s*=\s*"([^"]+)"/.exec(readOrDie("apps/control-plane/src/agent-credentials/codex-auth-cache.ts","native auth keeper pin","restore the qualified native auth keeper"))?.[1];
 // The auth-only keeper has an independent qualification pin. Its version is
 // authenticated cache data (AAD) and constrained by the database schema, so a
 // desktop model/protocol upgrade must not implicitly invalidate stored logins.

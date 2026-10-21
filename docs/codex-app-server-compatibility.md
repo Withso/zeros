@@ -42,7 +42,8 @@ cache authentication and a database constraint. `check:codex-pin` checks that
 package against `CODEX_AUTH_RUNTIME_VERSION`, not the desktop protocol version;
 Renovate excludes it from routine agent upgrades. A keeper upgrade requires an
 explicit cache/schema migration and native renewal qualification. See
-[cloud agent authentication](cloud-workspace/agent-authentication-and-language-tools.md#codex-subscription-renewal).
+the retained renewal implementation in
+`apps/control-plane/src/agent-credentials/codex-auth-renewal.ts`.
 
 ## Compatibility classifications
 
@@ -142,8 +143,8 @@ Regression entry points are `thread-notifications.test.ts`,
 replay, history, parent/child lifetime, Personal local, organization-local,
 organization-cloud and owner switching. Browser fixtures exercise both themes.
 These simulations and the Linux native launch smoke do not establish packaged
-macOS or deployed cloud-runtime qualification. Cloud generations retain their
-runtime pin until explicitly upgraded; waking/restarting does not upgrade them.
+macOS or deployed cloud-runtime qualification. Cloud v2 uses the worker version
+selected by the control plane at boot.
 
 ### 0.161.0 compatibility
 

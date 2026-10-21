@@ -6,12 +6,12 @@ const workflow = (name: string): any => load(readFileSync(`.github/workflows/${n
 const commands = (job: any) => job.steps?.map((step: any) => step.run ?? "").join("\n") ?? "";
 
 describe("concurrent Alpha preparation and serialized publication", () => {
-  it("starts both exact-source builds independently of CI and any publication lock", () => {
+  it("starts the exact-source desktop build independently of CI and any publication lock", () => {
     const parent = workflow("release-alpha");
     expect(parent.name).toBe("Release (alpha)");
     expect(parent.on).toEqual({ push: { branches: ["main"] } });
     expect(parent.concurrency).toBeUndefined();
-    for (const id of ["metadata", "build", "runtime-build"]) {
+    for (const id of ["metadata", "build"]) {
       expect(parent.jobs[id].needs).toBe(id === "build" ? "metadata" : undefined);
       expect(parent.jobs[id].concurrency).toBeUndefined();
       expect(parent.jobs[id].permissions).toEqual({ contents: "read" });
@@ -28,15 +28,15 @@ describe("concurrent Alpha preparation and serialized publication", () => {
     expect(publication.uses).toBe("./.github/workflows/alpha-publication.yml");
     expect(publication.name).toBe("Alpha publication");
     expect(publication.concurrency).toEqual({ group: "release-alpha", "cancel-in-progress": false });
-    expect(publication.permissions).toEqual({ contents: "write", actions: "read", "id-token": "write" });
+    expect(publication.permissions).toEqual({ contents: "write", actions: "read" });
     expect(called.on).toHaveProperty("workflow_call");
     expect(called.on.workflow_dispatch).toBeUndefined();
     expect(called.concurrency).toBeUndefined();
-    expect(Object.keys(called.jobs).sort()).toEqual(["entry", "hosted", "publish", "runtime-publish"]);
+    expect(Object.keys(called.jobs).sort()).toEqual(["entry", "hosted", "publish"]);
     expect(called.jobs.hosted.needs).toBe("entry");
     expect(called.jobs.hosted.uses).toBe("./.github/workflows/hosted-promotion.yml");
-    for (const id of ["publish", "runtime-publish"]) expect(called.jobs[id].needs).toEqual(["entry", "hosted"]);
-    expect(Object.keys(parent.jobs).sort()).toEqual(["build", "ci", "metadata", "publication", "runtime-build"]);
+    for (const id of ["publish"]) expect(called.jobs[id].needs).toEqual(["entry", "hosted"]);
+    expect(Object.keys(parent.jobs).sort()).toEqual(["build", "ci", "metadata", "publication"]);
   });
   it("freezes the original computed full version outside the lock and passes it to signing and every mutation checkpoint", () => {
     const parent = workflow("release-alpha"), metadata = parent.jobs.metadata, called = workflow("alpha-publication");
@@ -53,14 +53,10 @@ describe("concurrent Alpha preparation and serialized publication", () => {
     expect(commands(parent.jobs.build)).not.toContain("node scripts/compute-version.mjs");
     expect(called.on.workflow_call.inputs.alpha_prepared_version).toEqual({ required: true, type: "string" });
     expect(called.jobs.hosted.with.alpha_prepared_version).toBe("${{ inputs.alpha_prepared_version }}");
-    for (const id of ["entry", "publish", "runtime-publish"]) expect(called.jobs[id].env.ALPHA_PREPARED_VERSION).toBe("${{ inputs.alpha_prepared_version }}");
-    const hosted = workflow("hosted-promotion"), worker = workflow("cloud-worker-promotion");
+    for (const id of ["entry", "publish"]) expect(called.jobs[id].env.ALPHA_PREPARED_VERSION).toBe("${{ inputs.alpha_prepared_version }}");
+    const hosted = workflow("hosted-promotion");
     expect(hosted.on.workflow_call.inputs.alpha_prepared_version).toMatchObject({ default: "", type: "string" });
     for (const id of ["guard", "services", "promote"]) expect(hosted.jobs[id].env.ALPHA_PREPARED_VERSION).toBe("${{ inputs.alpha_prepared_version }}");
-    expect(hosted.jobs.worker.with.alpha_prepared_version).toBe("${{ inputs.alpha_prepared_version }}");
-    expect(worker.on.workflow_call.inputs.alpha_prepared_version).toMatchObject({ default: "", type: "string" });
-    expect(worker.on.workflow_dispatch.inputs.alpha_prepared_version).toBeUndefined();
-    expect(worker.jobs.worker.env.ALPHA_PREPARED_VERSION).toBe("${{ inputs.alpha_prepared_version }}");
     expect(JSON.stringify(called)).not.toContain("scripts/compute-version.mjs");
   });
   it("revalidates source, CI, admission and publication order inside the lock before provider access", () => {
@@ -75,7 +71,7 @@ describe("concurrent Alpha preparation and serialized publication", () => {
     expect(workflow("release-alpha").jobs.ci.outputs.ready).toBe("${{ steps.barrier.outputs.ready }}");
     expect(commands(workflow("release-alpha").jobs.ci)).toContain("ci-cli.ts --wait");
   });
-  it.each([["publish", "desktop", "zeros-alpha-arm64-build"], ["runtime-publish", "runtime", "zeros-alpha-runtime-build"]])(
+  it.each([["publish", "desktop", "zeros-alpha-arm64-build"]])(
     "waits for the same-run %s producer after hosted success and before its artifact download", (id, kind, artifact) => {
       const publisher = workflow("alpha-publication").jobs[id], steps = publisher.steps;
       const wait = steps.findIndex((step: any) => step.run?.includes(`alpha-build-cli.ts --wait ${kind}`));
@@ -87,26 +83,13 @@ describe("concurrent Alpha preparation and serialized publication", () => {
       expect(steps[download].with["run-id"]).toBe("${{ github.run_id }}");
       expect(steps[download].with["merge-multiple"]).toBe(true);
       expect(steps[download].with.name).toBeUndefined();
-      const producer = kind === "desktop" ? workflow("release-alpha").jobs.build : workflow("cloud-runtime-bundle-build").jobs.build;
+      const producer = workflow("release-alpha").jobs.build;
       const upload = producer.steps.find((step: any) => step.uses?.startsWith("actions/upload-artifact@"));
-      if (kind === "desktop") expect(upload.with.name).toBe(`${artifact}-\${{ github.sha }}`);
-      else {
-        expect(workflow("release-alpha").jobs["runtime-build"].uses).toBe("./.github/workflows/cloud-runtime-bundle-build.yml");
-        expect(workflow("cloud-runtime-bundle-build").on.workflow_call.inputs.artifact_name.default).toBe(artifact);
-        expect(upload.with.name).toBe("${{ inputs.artifact_name }}-${{ github.sha }}");
-      }
+      expect(upload.with.name).toBe(`${artifact}-\${{ github.sha }}`);
       expect(publisher.environment).toBe("alpha");
       expect(publisher.permissions.actions).toBe("read");
     });
-  it("revalidates runtime producer, artifact ID and current attempt after download and before OIDC publication", () => {
-    const publisher = workflow("alpha-publication").jobs["runtime-publish"], steps = publisher.steps;
-    const download = steps.findIndex((step: any) => step.uses?.startsWith("actions/download-artifact@"));
-    const verification = steps.findIndex((step: any) => step.run?.includes("alpha-build-cli.ts --verify-producer runtime"));
-    expect(verification).toBeGreaterThan(download);
-    const publish = commands(publisher);
-    expect(publish.indexOf("--verify-producer runtime")).toBeLessThan(publish.indexOf("ci-cli.ts --verify"));
-    expect(publish.indexOf("ci-cli.ts --verify")).toBeLessThan(publish.indexOf("runtime-bundle/publish.ts"));
-  });
+
   it("uses protected signed metadata for version and baked capability without broadening signing permissions", () => {
     const parent = workflow("release-alpha"), build = parent.jobs.build, publish = workflow("alpha-publication").jobs.publish;
     const metadata = build.steps.find((step: any) => step.name === "Write signed Alpha build metadata");
@@ -121,7 +104,7 @@ describe("concurrent Alpha preparation and serialized publication", () => {
     expect(writer.env.VERSION).toBe("${{ steps.metadata.outputs.version }}");
     expect(writer.env.BUILD_CLOUD_ENABLED).toBe("${{ steps.metadata.outputs.cloud_enabled }}");
     expect(publish.permissions).toEqual({ contents: "write", actions: "read" });
-    expect(workflow("alpha-publication").jobs["runtime-publish"].permissions).toEqual({ "id-token": "write", contents: "read", actions: "read" });
+    expect(JSON.stringify(workflow("alpha-publication"))).not.toContain("id-token");
   });
   it.each([["release-beta", "beta"], ["release", "production"]])("retains %s channel locking and full CI", (name, channel) => {
     const parsed = workflow(name);

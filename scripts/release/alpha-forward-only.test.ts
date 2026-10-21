@@ -109,7 +109,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
 
 describe("Alpha publication transaction entry", () => {
   it.each(["admitted", "enabled", undefined, "disabled", "invalid"])("fences the prepared full version before entry or downstream writes with flag %s", async flag => {
-    for (const job of ["entry", "guard", "services", "worker", "promote", "publish", "runtime-publish"]) {
+    for (const job of ["entry", "guard", "services", "promote", "publish"]) {
       const test = fixture({ GITHUB_JOB: job, GITHUB_RUN_NUMBER: "402", ALPHA_PREPARED_VERSION: "1.0.0-alpha.402", ZEROS_ALPHA_FORWARD_ONLY: flag });
       test.state.parent.run_number = 402;
       test.state.ledgerValue = { version: 1, channel: "alpha", releases: [
@@ -147,7 +147,7 @@ describe("Alpha publication transaction entry", () => {
     expect(providers).not.toHaveBeenCalled();
   });
   it.each([undefined, "disabled", "invalid"])("refuses a carried downstream entry after publication order advances with flag %s", async flag => {
-    for (const job of ["guard", "services", "worker", "promote", "publish", "runtime-publish"]) {
+    for (const job of ["guard", "services", "promote", "publish"]) {
       const test = fixture({ GITHUB_JOB: "entry", ZEROS_ALPHA_FORWARD_ONLY: flag });
       test.state.ledgerValue = { version: 1, channel: "alpha", releases: [
         { version: "0.1.0-alpha.149", sourceSha, publishedAt: "2026-10-01T00:00:00.000Z" },
@@ -182,7 +182,7 @@ describe("Alpha publication transaction entry", () => {
     await expect(test.client.assertCurrent()).resolves.toBeUndefined();
     expect(test.requests).toEqual(["https://api.github.com/commits/main"]);
   });
-  it.each(["guard", "services", "worker", "promote", "publish", "runtime-publish"])(
+  it.each(["guard", "services", "promote", "publish"])(
     "revalidates admitted-mode destinations at a carried %s checkpoint after another candidate publishes", async job => {
       const test = fixture({ GITHUB_JOB: job, GITHUB_RUN_ATTEMPT: "2" }); test.state.parent.run_attempt = 2;
       test.state.head = descendant; test.state.api = descendant;
@@ -242,7 +242,7 @@ describe("automatic Alpha admitted freshness", () => {
     expect(test.command).not.toHaveBeenCalled();
   });
 
-  it.each(["guard", "services", "worker", "promote", "publish", "runtime-publish"])(
+  it.each(["guard", "services", "promote", "publish"])(
     "allows descendant main advancement at the automatic %s checkpoint", async job => {
       const test = fixture({ GITHUB_JOB: job }); test.state.head = descendant;
       await expect(test.client.assertCurrent()).resolves.toBeUndefined();
@@ -274,8 +274,8 @@ describe("automatic Alpha admitted freshness", () => {
       await expect(test.client.assertCurrent()).rejects.toThrow(/admission/i);
     });
 
-  it("keeps the nested worker on Alpha fast evidence and admitted ancestry", async () => {
-    const test = fixture({ GITHUB_JOB: "worker" }); test.state.head = descendant;
+  it("keeps hosted services on Alpha fast evidence and admitted ancestry", async () => {
+    const test = fixture({ GITHUB_JOB: "services" }); test.state.head = descendant;
     await expect(test.client.assertRequiredChecks()).resolves.toBeUndefined();
     await expect(test.client.assertCurrent()).resolves.toBeUndefined();
     expect(test.requests.some(route => route.includes("head_sha=") && route.includes("event=push"))).toBe(true);
@@ -291,7 +291,7 @@ describe("automatic Alpha admitted freshness", () => {
 
 describe("Stage 2 automatic Alpha admission", () => {
   const destinations = ["api", "app", "ops", "tag", "ledger"] as const;
-  it.each(["ci", "guard", "services", "worker", "promote", "publish", "runtime-publish"])(
+  it.each(["ci", "guard", "services", "promote", "publish"])(
     "accepts an unready 503 identity at the automatic %s barrier or checkpoint", async job => {
       const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: job });
       test.state.head = descendant; test.state.identityStatus = 503; test.state.unready = true;
@@ -305,7 +305,7 @@ describe("Stage 2 automatic Alpha admission", () => {
       expect(calls[0][1]).toMatchObject({ method: "GET", credentials: "omit", redirect: "error", cache: "no-store" });
     });
 
-  it.each(["ci", "guard", "services", "worker", "promote", "publish", "runtime-publish"])(
+  it.each(["ci", "guard", "services", "promote", "publish"])(
     "accepts a 503 unknown cloud health state at the automatic %s barrier or checkpoint", async job => {
       const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: job });
       test.state.head = descendant; test.state.identityStatus = 503; test.state.unready = true;
@@ -348,16 +348,13 @@ describe("Stage 2 automatic Alpha admission", () => {
     await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
   });
 
-  it.each(["newer API", "newer worker", "missing active worker", "invalid worker"])(
+  it.each(["newer API"])(
     "refuses a 503 identity with a %s source", async failure => {
       const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
       test.state.identityStatus = 503; test.state.unready = true; test.state.cloudEnabled = true;
       test.state.worker = { provider: "boat", imageRef: `boat:fixture@sha256:${"e".repeat(64)}`, sourceSha: ancestor,
         architecture: "linux/amd64", storageMiB: 4096 };
       if (failure === "newer API") test.state.api = descendant;
-      if (failure === "newer worker") test.state.worker.sourceSha = descendant;
-      if (failure === "missing active worker") test.state.worker = null;
-      if (failure === "invalid worker") test.state.worker.imageRef = "invalid";
       await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
     });
 
@@ -460,40 +457,33 @@ describe("Stage 2 automatic Alpha admission", () => {
   });
 
   it("waits out the parallel desktop publisher replacing the ledger asset", async () => {
-    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "runtime-publish" });
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "publish" });
     test.state.ledgerAssetMissing = 2;
     await expect(test.client.assertCurrent()).resolves.toBeUndefined();
     expect(test.sleeps.length).toBeGreaterThanOrEqual(2);
   });
 
   it("still refuses a ledger asset that stays missing", async () => {
-    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "runtime-publish" });
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "publish" });
     test.state.ledgerAssetMissing = 1_000;
     await expect(test.client.assertCurrent()).rejects.toThrow("Alpha live release ledger is unavailable; forward-only admission refused");
     expect(test.sleeps.length).toBeLessThanOrEqual(10);
   });
 
   it("allows its parallel desktop publisher to advance the ledger before the tag", async () => {
-    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "runtime-publish" });
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "publish" });
     test.state.head = descendant; test.state.ledger = sourceSha;
     await expect(test.client.assertCurrent()).resolves.toBeUndefined();
     test.state.ledger = descendant;
     await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(PromotionError);
   });
 
-  it("refuses a newer live worker while preserving the explicit cloud-disabled null identity", async () => {
-    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
-    await expect(test.client.assertCurrent()).resolves.toBeUndefined();
-    test.state.worker = { provider: "boat", imageRef: `boat:fixture@sha256:${"e".repeat(64)}`, sourceSha: descendant,
-      architecture: "linux/amd64", storageMiB: 4096 };
-    await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(PromotionError);
-  });
-
-  it("refuses an unknown active worker rather than inventing a disabled frontier", async () => {
+  it("does not gate v2 publication on retired worker image identity", async () => {
     const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
     test.state.cloudEnabled = true;
-    await expect(test.client.assertCurrent()).rejects.toThrow(/worker identity is unavailable/);
+    await expect(test.client.assertCurrent()).resolves.toBeUndefined();
   });
+
 });
 
 describe("forward-only channel and operation invariance", () => {
@@ -519,7 +509,7 @@ describe("forward-only channel and operation invariance", () => {
     expect(test.requests[0]).toBe("https://api.github.com/actions/runs/300");
   });
 
-  it.each(["cloud-worker-promotion", "controlled-cutover", "staff-owner-bootstrap", "manual-alpha"])(
+  it.each(["controlled-cutover", "staff-owner-bootstrap", "manual-alpha"])(
     "keeps %s strict even with forged opt-in flags", async workflow => {
       const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled",
         GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/${workflow}.yml@refs/heads/main` }); test.state.head = descendant;

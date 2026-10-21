@@ -75,7 +75,7 @@ Preload obtains that decision directly from main before the renderer starts.
 Packaged Alpha/Beta/Production and full Dev retain their login boundary; Vite
 variables and renderer/process arguments cannot enable Local admission.
 
-Account/organization/cloud requests, account security monitoring, cloud replica
+Account/organization/cloud requests, account security monitoring, cloud catalog
 refresh, hosted GitHub App refresh, OAuth deep links and product analytics are
 disabled. Local does not claim any hosted Dev or packaged callback scheme. The
 normal loopback host, origin and per-boot token checks remain in force, as does

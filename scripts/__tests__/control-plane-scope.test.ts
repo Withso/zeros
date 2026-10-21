@@ -94,8 +94,8 @@ describe("control-plane database scope inputs", () => {
     const outside = (await importedRepositoryFiles()).filter(
       (file) => !file.startsWith(PACKAGE),
     );
-    // The admission contracts reach into the desktop clients and protocol.
-    expect(outside).toContain("apps/desktop/src/engine/cloud-runtime-registration.ts");
+    // The standalone control plane must not depend on the desktop engine.
+    expect(outside.some(file => file.startsWith("apps/desktop/"))).toBe(false);
     const required = [
       ...outside,
       ...outside.flatMap(governingConfigs),
@@ -204,7 +204,6 @@ describe("control-plane database scope decision", () => {
         changedFiles: [
           "apps/desktop/src/renderer/app-shell.tsx",
           "apps/desktop/src/engine/git/diff.ts",
-          "packages/protocol/src/design-runtime.ts",
           "docs/ui-interaction-performance.md",
           "apps/control-plane-notes.md",
         ],
@@ -216,9 +215,9 @@ describe("control-plane database scope decision", () => {
   it.each([
     "apps/control-plane/migrations/0105_example.sql",
     "apps/control-plane/pnpm-lock.yaml",
-    "apps/desktop/src/engine/cloud-runtime-registration.ts",
-    "apps/desktop/src/engine/cloud-runtime-retirement.ts",
-    "packages/protocol/src/cloud-actors.ts",
+    "apps/control-plane/src/cloud/lifecycle.ts",
+    "scripts/dev-environment/hosted-fixtures.mjs",
+    "packages/protocol/src/cloud-v2-relay.ts",
     "pnpm-lock.yaml",
     "patches/ssh2@1.17.0.patch",
     "docs/deployment-environments.md",

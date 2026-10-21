@@ -2,7 +2,6 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { describe, expect, it } from "vitest";
-import { buildEngineImage } from "../cloud-workspace-validation/image";
 
 const read = (path: string) => readFileSync(path, "utf8");
 
@@ -652,130 +651,14 @@ describe("repository layout contracts", () => {
     }
   });
 
-  it("keeps cloud validation isolated, private, and fail-closed", () => {
-    expect(existsSync("scripts/cloud-spike")).toBe(false);
-    expect(existsSync("scripts/cloud-workspace-validation/README.md")).toBe(
-      true,
-    );
-
-    const config = read("scripts/cloud-workspace-validation/config.ts");
-    const client = read(
-      "scripts/cloud-workspace-validation/lib/bridge-client.ts",
-    );
-    const image = read("scripts/cloud-workspace-validation/image.ts");
-    const dockerfile = read("scripts/cloud-workspace-validation/Dockerfile");
-    const launcher = read(
-      "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
-    );
-    const attester = read(
-      "scripts/cloud-workspace-validation/sandbox/attest-cloud-worker.mjs",
-    );
-    const admission = read(
-      "scripts/cloud-workspace-validation/sandbox/consume-cloud-admission.mjs",
-    );
-
-    const vmImage = read("scripts/cloud-workspace-validation/lib/vm-image.ts");
-    expect(vmImage).toContain("mode:0o700");
-    expect(vmImage).toContain("mode:0o600");
-    expect(vmImage).toContain("constants.O_NOFOLLOW");
-    expect(client).toContain('"zeros-v1"');
-    expect(client).toContain("zeros-cloud-token.${Buffer.from");
-    expect(client).toContain('source: "browser" as const');
-    expect(client).not.toContain('source: "client"');
-    expect(client).toContain('from "../../../packages/protocol/src/version"');
-    expect(client).not.toMatch(/const PROTOCOL_VERSION\s*=\s*\d/);
-    expect(dockerfile).toContain("&& pnpm rebuild better-sqlite3");
-    expect(dockerfile).not.toContain("pnpm rebuild better-sqlite3 || true");
-    expect(dockerfile).toContain(
-      'if [ "${#ZEROS_REPO_COMMIT}" -ne 40 ] && [ "${#ZEROS_REPO_COMMIT}" -ne 64 ]',
-    );
-    expect(image).toContain("&& pnpm rebuild better-sqlite3`");
-    expect(image).not.toContain("pnpm rebuild better-sqlite3 || true");
-    expect(config).toContain("SANDBOX_ENGINE_DIR = runtimeLayout.engine");
-    expect(config).toContain("SANDBOX_REPO_DIR = runtimeLayout.repository");
-    expect(config).toMatch(/node:22[^"\n]+@sha256:[a-f0-9]{64}/);
-    expect(image).toContain("apparmor bubblewrap ca-certificates");
-    expect(image).toContain('"/etc/zeros/cloud-worker.json"');
-    expect(dockerfile).toContain("bubblewrap");
-    expect(dockerfile).toContain("util-linux");
-    expect(image).toContain("util-linux");
-    expect(dockerfile).toContain(
-      "COPY sandbox/cloud-worker.json /etc/zeros/cloud-worker.json",
-    );
-    expect(dockerfile).toContain(
-      "COPY sandbox/consume-cloud-admission.mjs /opt/zeros-runtime/lib/zeros/consume-cloud-admission.mjs",
-    );
-    expect(dockerfile).not.toContain("prepare-zsr-cgroups");
-    expect(image).not.toContain("prepare-zsr-cgroups");
-    expect(dockerfile).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
-    expect(image).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
-    expect(dockerfile).not.toMatch(/mutagen/i);
-    expect(image).not.toMatch(/mutagen/i);
-    expect(attester).toContain("cloud-worker-admission.json");
-    expect(attester).toContain("verifyCloudV4Installation()");
-    expect(attester).toContain("validateCloudRuntimeMarker(marker)");
-    expect(attester).toContain("resolver.resolve()");
-    expect(attester).toContain("verifyV4Tree(runtime.root)");
-    expect(admission).toContain("renameSync(PROOF, consumed)");
-    expect(admission).toContain("containerInitStartTicks");
-    expect(launcher).toContain("consume-cloud-admission.mjs");
-    expect(launcher).not.toContain(
-      '"$RUNTIME" "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
-    );
-    expect(launcher).toContain(
-      '"$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs"',
-    );
-    expect(launcher).not.toContain('node "$REPO_DIR/dist-engine/cli.js"');
-  });
-
-  it("packages the durable layout and capture worker in both cloud image paths", () => {
-    const dockerfile = read("scripts/cloud-workspace-validation/Dockerfile");
-    const image = read("scripts/cloud-workspace-validation/image.ts");
-    const launcher = read(
-      "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
-    );
-    const layout = JSON.parse(
-      read("scripts/cloud-workspace-validation/sandbox/runtime-layout.json"),
-    );
-    expect(layout.version).toBe(3);
-    for (const field of [
-      "repository",
-      "data",
-      "agentHome",
-      "captureHome",
-      "log",
-    ]) {
-      expect(layout[field]).toMatch(/^\/srv\/zeros\//);
-      expect(dockerfile).toContain(layout[field]);
-    }
-    for (const field of ["logicalRepository", "data", "agentHome", "log"]) {
-      expect(launcher).toContain(layout[field]);
-    }
-    expect(dockerfile).toContain(
-      "COPY sandbox/runtime-layout.json /opt/zeros-runtime/lib/zeros/runtime-layout.json",
-    );
-    expect(image).toContain(
-      '"/opt/zeros-runtime/lib/zeros/runtime-layout.json"',
-    );
-    expect(layout.logicalRepository).toBe("/srv/zeros/workspace");
-    expect(layout.repository).toBe(`${layout.engineFilesRoot}/workspace`);
-    expect(layout.attachmentTemporaryRoot).toBe(
-      `${layout.engineFilesRoot}/attachment-staging`,
-    );
-    for (const source of [dockerfile, buildEngineImage().dockerfile]) {
-      expect(source).toContain("useradd --uid 10003 --gid 10003");
-      expect(source).toMatch(/(?:^|\s)USER=["']?zeros-engine["']?(?:\s|$)/m);
-      expect(source).not.toMatch(/chown[^\n]*1000[124]:1000[124]/);
-      expect(source).toMatch(
-        new RegExp(`chown[^\\n]*10003:10003[^\\n]*${layout.repository}`),
-      );
-      expect(source).toContain("chown -R 10003:10003");
-      expect(source).toContain("chmod 0700 /srv/zeros/state");
-      expect(source).toContain(
-        "install -d -o 10003 -g 10003 -m 0700 /srv/zeros/home/capture",
-      );
-      expect(source).toContain("playwright-core install --with-deps chromium");
-    }
+  it("keeps the standalone cloud worker independent of the retired engine images", () => {
+    expect(existsSync("apps/cloud-worker/package.json")).toBe(true);
+    expect(existsSync("scripts/cloud-workspace-validation")).toBe(false);
+    expect(existsSync("packages/cloud-client")).toBe(false);
+    const rootPackage = JSON.parse(read("package.json"));
+    expect(rootPackage.scripts["typecheck:packages"]).not.toContain("@zeros/cloud-client");
+    expect(read("vitest.config.ts")).not.toContain("packages/cloud-client");
+    expect(read(".github/workflows/ci.yml")).toContain("cloud-v2-worker:");
   });
 
   it("keeps private delivery ledgers out of tracked design references", () => {
@@ -806,87 +689,10 @@ describe("repository layout contracts", () => {
     expect(roadmap).not.toContain("design-open-tasks-consolidated");
   });
 
-  it("keeps cloud workspace guidance current without restoring research dumps", () => {
-    const cloudDocs = "docs/cloud-workspace";
-    const expected = [
-      "README.md",
-      "account-pro-operations.md",
-      "agent-authentication-and-language-tools.md",
-      "agent-connection-health.md",
-      "architecture.md",
-      "authority-cache.md",
-      "capability-actor-sessions.md",
-      "checkpoint-native-format.md",
-      "checkpoint-recovery.md",
-      "client-runtime-contract.md",
-      "compute-credits.md",
-      "computer-environment.md",
-      "computer-named-snapshots.md",
-      "computer-template-builds.md",
-      "computer-template-retention.md",
-      "computer-tools.md",
-      "contracts",
-      "data-and-sync.md",
-      "database-qualification.md",
-      "desktop-diagnostics.md",
-      "engineering-reference.md",
-      "enterprise-and-self-hosting.md",
-      "infrastructure-and-operations.md",
-      "job-queue.md",
-      "lifecycle-diagnostics.md",
-      "live-runtime-updates.md",
-      "load-simulator.md",
-      "local-seams.json",
-      "mcp-and-skills.md",
-      "native-access-acceptance.md",
-      "native-preview-acceptance.md",
-      "organization-setup.md",
-      "pro-backend.md",
-      "product-contract.md",
-      "provider-background-work.md",
-      "provider-contract.md",
-      "qualification-status.md",
-      "realtime.md",
-      "relay-capacity.md",
-      "release-worker-qualification.md",
-      "rollout-flags.md",
-      "runtime-bundles.md",
-      "runtime-images.md",
-      "runtime-lifecycle-acceptance.md",
-      "runtime-rollback-cache.md",
-      "runtime-skew-gate.md",
-      "security.md",
-      "template-forks.md",
-      "wake-performance.md",
-      "warm-pool.md",
-    ];
-
-    expect(readdirSync(cloudDocs).sort()).toEqual(expected);
-    const cloudIndex = read(`${cloudDocs}/README.md`);
-    for (const contract of [
-      "**Boat**",
-      "**v2 Cloud Computer",
-      "**v4 worker runtime pin**",
-      "**actor protocol 2**",
-    ])
-      expect(cloudIndex).toContain(contract);
-    expect(read(`${cloudDocs}/qualification-status.md`)).toContain(
-      "0138_cloud_workspace_ui_metadata.sql",
-    );
-    const followUps = read(`${cloudDocs}/warm-pool.md`);
-    for (const boundary of [
-      "VM durable outbox/inbox",
-      "Resident outbound VM transport",
-      "One multiplexed client↔backend channel",
-      "Incremental durable transcript feed",
-      "Mac send outbox with acks",
-    ])
-      expect(followUps).toContain(boundary);
-    expect(read(`${cloudDocs}/engineering-reference.md`)).toContain(
-      "apps/desktop/src/engine/transport/cloud.ts",
-    );
-    expect(existsSync(`${cloudDocs}/02-how-conductor-does-it.md`)).toBe(false);
-    expect(existsSync(`${cloudDocs}/research`)).toBe(false);
+  it("retires the old cloud guide directory and image workflows", () => {
+    expect(existsSync("docs/cloud-workspace")).toBe(false);
+    for (const workflow of ["cloud-provision", "cloud-worker-promotion", "cloud-runtime-bundle"])
+      expect(existsSync(`.github/workflows/${workflow}.yml`)).toBe(false);
   });
 
   it("keeps public runtime requirements and deployment identifiers explicit", () => {
@@ -970,7 +776,7 @@ describe("repository layout contracts", () => {
     expect(publication).toContain(
       '      - name: Publish rolling "alpha" prerelease',
     );
-    expect(publication.match(/needs: \[entry, hosted\]/g)).toHaveLength(2);
+    expect(publication.match(/needs: \[entry, hosted\]/g)).toHaveLength(1);
     expect(publication).toContain("    needs: entry");
     expect(publication).not.toContain("workflow_dispatch:");
     expect(alpha).not.toContain("pnpm check:zsr");
@@ -992,21 +798,7 @@ describe("repository layout contracts", () => {
         /ZEROS_ALPHA_CI_FAST_PATH|ZEROS_ALPHA_FORWARD_ONLY/,
       );
     }
-    const worker = read(".github/workflows/cloud-worker-promotion.yml");
-    expect(worker).not.toMatch(/vars\.ZEROS_ALPHA_/);
-    const [dispatch, callable] = worker.split("  workflow_call:\n");
-    for (const input of [
-      "alpha_ci_fast_path",
-      "alpha_forward_only",
-      "alpha_prepared_version",
-    ]) {
-      expect(dispatch).not.toContain(`${input}:`);
-      expect(callable).toMatch(
-        new RegExp(
-          `${input}:\\n        description: [^\\n]+\\n        default: ''\\n        type: string`,
-        ),
-      );
-    }
+
   });
 
   it("bakes the default-off desktop cloud capability into every release process", () => {

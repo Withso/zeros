@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
-import { ensureDevRailwayCli, retireHostedAgentSsh, startHostedAgentOverSsh } from "../dev-environment/hosted-agent-ssh.mjs";
+import { ensureDevRailwayCli, retireHostedAgentSsh } from "../dev-environment/railway-tools.mjs";
 import { railwayEnvironmentName } from "../dev-environment/railway.mjs";
 
 function fixture() {
@@ -22,10 +22,7 @@ function fixture() {
   });
   const execute = vi.fn(async (_command, args) => {
     if (args[0] === "--version") return "railway 5.47.1";
-    // The pinned CLI scans only ~/.ssh and the SSH agent, even with --key.
-    // Registration must not depend on scanning or modifying a user's keys.
-    if (args[1] === "keys") throw new Error("Key outside ~/.ssh cannot be discovered");
-    expect(args).toContain("/app/dist/dev-agent-qualification.js"); return '{"started":true}';
+    throw new Error("Unexpected Railway command");
   });
   return { key, lease, execute, request, registered, profile: { railway: { projectId: key.projectId, serviceId: "test-service", protectedEnvironmentIds: ["protected"], apiToken: "private-token-sentinel" } } };
 }
@@ -46,16 +43,7 @@ it("refuses mismatched key material before touching provider access", async () =
   await expect(retireHostedAgentSsh(f.lease, f.profile, f.request)).rejects.toThrow(/ownership/);
   expect(f.request).not.toHaveBeenCalled();
 });
-it("refuses native SSH dispatch before key registration or local transport preparation", async () => {
-  const f = fixture(), directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-ssh-")); f.registered.pop();
-  try {
-    await expect(startHostedAgentOverSsh())
-      .rejects.toMatchObject({ status: 409, code: "release_worker_images_retired" });
-    expect(f.request).not.toHaveBeenCalled(); expect(f.execute).not.toHaveBeenCalled();
-    expect(f.lease.save).not.toHaveBeenCalled(); expect(f.lease.fence).not.toHaveBeenCalled();
-    expect(f.lease.state.resources.agentSsh).toBe(f.key); expect(fs.readdirSync(directory)).toEqual([]);
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
-});
+
 it("does not treat a partial key inventory as proof of deletion", async () => {
   const f = fixture(); f.request.mockResolvedValue({ sshPublicKeys: { edges: [], pageInfo: { hasNextPage: true } } } as any);
   await expect(retireHostedAgentSsh(f.lease, f.profile, f.request)).rejects.toThrow(/incomplete/);
@@ -66,7 +54,6 @@ it("retains an uncertain SSH create after an empty inventory and does not regist
   (f.key as any).create = { version: 1, phase: "uncertain", dispatchedAt: new Date().toISOString() };
   try {
     await expect(retireHostedAgentSsh(f.lease, f.profile, f.request)).rejects.toThrow(/unconfirmed/);
-    await expect(startHostedAgentOverSsh()).rejects.toThrow();
     expect(f.request.mock.calls.filter(([query]) => query.includes("CreateDevSshKey"))).toHaveLength(0);
     expect(f.lease.state.resources.agentSsh).toBe(f.key);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }

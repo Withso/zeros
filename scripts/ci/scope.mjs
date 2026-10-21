@@ -38,8 +38,6 @@ const REQUEST_LANES = Object.freeze({
   "ci:control-plane-db": ["control-plane", "control-plane-db"],
   "ci:packaging": ["packaging"],
   "ci:web": ["web"],
-  "ci:cloud-chaos": ["cloud-chaos"],
-  "ci:cloud-scale": ["cloud-scale"],
 });
 export const CI_LABELS = Object.freeze(Object.keys(REQUEST_LANES).sort());
 
@@ -150,7 +148,6 @@ export function validatePolicy(policy) {
     "control-plane",
     "control-plane-db",
     "macos",
-    "runtime-bundle",
     "packaging",
     "web",
     "ui-smoke",
@@ -287,8 +284,8 @@ export function validatePolicy(policy) {
     );
     if (check.lane !== undefined)
       policyAssert(
-        ["macos", "runtime-bundle"].includes(check.lane),
-        "only macos and runtime-bundle may be derived check lanes.",
+        check.lane === "macos",
+        "only macos may be a derived check lane.",
       );
     if (check.commands.some((command) => command.includes("test:ui-smoke"))) {
       policyAssert(

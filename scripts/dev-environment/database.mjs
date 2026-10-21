@@ -38,7 +38,7 @@ async function execute(request) {
       const c = await runtime.connect();
       try {
         await c.query("BEGIN"); await c.query("SET LOCAL ROLE zeros_app"); await c.query("SELECT set_config('app.system', 'true', true)");
-        const result = await c.query("SELECT count(*)::int AS count FROM cloud_workspaces WHERE status <> 'deleted'");
+        const result = await c.query("SELECT count(*)::int AS count FROM cloud_v2_workspaces WHERE state <> 'deleted'");
         await c.query("ROLLBACK"); return { remainingWorkspaces: result.rows[0].count };
       } finally { c.release(); }
     }

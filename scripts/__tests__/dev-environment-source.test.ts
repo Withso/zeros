@@ -4,8 +4,6 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { captureDevelopmentSource, deployableSourcePath } from "../dev-environment/source.mjs";
-import { cleanCheckoutCommit } from "../cloud-workspace-validation/boat-image/boat-image";
-import { cloudImageSourceIdentity } from "../cloud-workspace-validation/sandbox/image-build-contract.mjs";
 
 const roots: string[] = [];
 afterEach(() => { for (const p of roots.splice(0)) fs.rmSync(p, { recursive: true, force: true }); });
@@ -45,33 +43,28 @@ describe("immutable development candidates", () => {
     expect(() => captureDevelopmentSource(f.root, f.state)).toThrow(/filesystem links/);
   });
 
-  it("keeps dependency links out of the worker kit's clean-source attestation", () => {
+  it("keeps dependency links out of the captured source commit", () => {
     const f = fixture(); f.write(".gitignore", "node_modules/\n");
     f.write("node_modules/tsx/package.json");
     const snapshot = captureDevelopmentSource(f.root, f.state);
     for (const directory of [snapshot.directory, snapshot.worker.directory]) {
       fs.symlinkSync(path.join(f.root, "node_modules"), path.join(directory, "node_modules"), "dir");
-      expect(cleanCheckoutCommit(directory)).toBe(directory === snapshot.directory ? snapshot.commit : snapshot.worker.commit);
+      expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).trim()).toBe(directory === snapshot.directory ? snapshot.commit : snapshot.worker.commit);
       expect(execFileSync("git", ["ls-files", "node_modules"], { cwd: directory, encoding: "utf8" })).toBe("");
     }
   });
 
-  it("includes the engine lifecycle qualifier and neutral search asset in the attested worker source", () => {
-    const f = fixture();
-    f.write("pnpm-lock.yaml");
-    f.write("scripts/stage-ripgrep.mjs", '{"version":"first"}');
-    f.write("scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", "// qualification entrypoint");
-    f.write("scripts/cloud-workspace-validation/sandbox/cloud-worker.json");
-    f.write("scripts/cloud-workspace-validation/sandbox/runtime-layout.json");
+  it("includes the standalone worker and shared protocol in its version digest", () => {
+    const f = fixture(); f.write("apps/cloud-worker/src/worker.ts", "export const worker = 1;");
+    f.write("packages/protocol/src/messages.ts", "export type Message = string;");
     const first = captureDevelopmentSource(f.root, f.state);
-    expect(cloudImageSourceIdentity(first.worker.directory).commit).toBe(first.worker.commit);
-    expect(fs.existsSync(path.join(first.worker.directory, "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs"))).toBe(true);
-    f.write("scripts/stage-ripgrep.mjs", '{"version":"second"}');
+    expect(fs.existsSync(path.join(first.worker.directory, "apps/cloud-worker/src/worker.ts"))).toBe(true);
+    f.write("packages/protocol/src/messages.ts", "export type Message = number;");
     expect(captureDevelopmentSource(f.root, f.state).workerInputsSha256).not.toBe(first.workerInputsSha256);
   });
 
-  it("reuses worker inputs across UI-only edits but includes engine and lockfile changes", () => {
-    const f = fixture(); f.write("apps/desktop/src/engine/main.ts", "export const engine = 1");
+  it("reuses worker inputs across UI-only edits but includes worker and lockfile changes", () => {
+    const f = fixture(); f.write("apps/cloud-worker/src/main.ts", "export const worker = 1");
     f.write("apps/desktop/src/renderer/view.tsx", "export const view = 1");
     const first = captureDevelopmentSource(f.root, f.state);
     f.write("apps/desktop/src/renderer/view.tsx", "export const view = 2");
@@ -80,7 +73,7 @@ describe("immutable development candidates", () => {
     expect(ui.workerInputsSha256).toBe(first.workerInputsSha256);
     expect(ui.deploymentInputsSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(ui.deploymentInputsSha256).toBe(first.deploymentInputsSha256);
-    f.write("apps/desktop/src/engine/main.ts", "export const engine = 2");
+    f.write("apps/cloud-worker/src/main.ts", "export const worker = 2");
     const engine = captureDevelopmentSource(f.root, f.state);
     expect(engine.workerInputsSha256).not.toBe(ui.workerInputsSha256);
     expect(engine.deploymentInputsSha256).not.toBe(ui.deploymentInputsSha256);
@@ -105,18 +98,5 @@ describe("immutable development candidates", () => {
 
   it.each(["../secret.ts", ".npmrc", "apps/control-plane/.npmrc", "apps/.env", "apps/control-plane/node_modules/private.js", "scripts/private.pem", ".context/file.ts", "apps/web/.dev.vars.production", "zeros-dev-env.json", "apps/control-plane/zeros-dev-env.json", "scripts/zeros-dev-env.json"])("excludes private deploy input %s", file => {
     expect(deployableSourcePath(file)).toBe(false);
-  });
-});
-
-describe("worker source closure", () => {
-  it("captures every repository module the Boat image kit imports", async () => {
-    const { workerSourcePath } = await import("../dev-environment/source.mjs");
-    const kit = "scripts/cloud-workspace-validation/boat-image/boat-image.ts";
-    const imports = [...fs.readFileSync(kit, "utf8").matchAll(/from\s+"(\.{1,2}\/[^"]+)"/g)].map(match => {
-      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(kit), match[1]));
-      return [resolved, `${resolved}.ts`, `${resolved}.mjs`, `${resolved}.js`].find(file => fs.existsSync(file)) ?? resolved;
-    });
-    expect(imports.length).toBeGreaterThan(0);
-    expect(imports.filter(file => !workerSourcePath(file))).toEqual([]);
   });
 });

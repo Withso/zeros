@@ -251,7 +251,7 @@ function isDependentVerdict(job, step, jobs) {
         "control-plane-static",
         "secret-scan",
       ].includes(laneForJob(candidate.name)) ||
-      ["scope", "cloud-runner", "runtime-bundle", "codeql"].includes(
+      ["scope", "codeql"].includes(
         candidate.name,
       );
   }

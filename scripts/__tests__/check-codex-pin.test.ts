@@ -16,7 +16,7 @@ function runCheck(overrides: Record<string, string> = {}) {
     [`${generated}/LICENSE`]: "Apache License",
     [`${generated}/NOTICE`]: "OpenAI Codex",
     "apps/control-plane/package.json": JSON.stringify({ dependencies: { "@openai/codex": "0.154.0" } }),
-    "apps/control-plane/src/cloud-workspaces/codex-auth-cache.ts": 'export const CODEX_AUTH_RUNTIME_VERSION="0.154.0";',
+    "apps/control-plane/src/agent-credentials/codex-auth-cache.ts": 'export const CODEX_AUTH_RUNTIME_VERSION="0.154.0";',
     ...overrides,
   };
   try {
@@ -57,7 +57,7 @@ describe("Codex runtime qualification pins", () => {
   it("rejects missing keeper pins rather than comparing two absent values", () => {
     const result = runCheck({
       "apps/control-plane/package.json": "{}",
-      "apps/control-plane/src/cloud-workspaces/codex-auth-cache.ts": "",
+      "apps/control-plane/src/agent-credentials/codex-auth-cache.ts": "",
     });
     expect(result.status).toBe(1);
     expect(result.output).toContain("control-plane native keeper");

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud-workspaces/channel-policy";
+import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud/channel-policy";
 
 export const CHANNELS = {
   alpha: { api: "https://api-alpha.zeros.build", app: "https://app-alpha.zeros.build", ops: "https://ops-alpha.zeros.build", appProject: "zeros-web-alpha", opsProject: "zeros-ops-alpha" },
@@ -18,10 +18,10 @@ export function requireCheck(value: unknown, message: string): asserts value {
 /** Validate the deployed pause after repair deployment. Do not require this
  * from the old API before migrations/deployment can fix its cloud state. */
 export function assertCloudChannelState(channel: Channel, identity: {
-  cloud: { enabled: boolean; state: string }; worker: unknown; workerQualified?: boolean;
+  cloud: { enabled: boolean; state: string };
 }) {
   if (!cloudWorkspaceChannelEnabled(channel)) requireCheck(
-    !identity.cloud.enabled && identity.cloud.state === "disabled" && identity.worker === null && identity.workerQualified !== true,
+    !identity.cloud.enabled && identity.cloud.state === "disabled",
     "Cloud is paused on this channel; the deployed control plane must also be paused",
   );
 }
@@ -54,12 +54,8 @@ export function promotionConfig(env: NodeJS.ProcessEnv, options: { migrations?: 
   requireCheck(env.AUTH_PROVIDER === "workos", "Hosted promotion requires the WorkOS Pages facade");
   requireCheck([undefined, "", "false", "true"].includes(env.ZEROS_CLOUD_WORKSPACES_ENABLED), "Invalid desktop cloud capability");
   const cloudRequired = cloudWorkspaceChannelEnabled(source.channel) && env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true";
-  requireCheck(!cloudRequired || env.CLOUD_WORKSPACE_PROVIDER === "boat", "Cloud releases require an explicit managed provider");
   requireCheck(/^\d+$/.test(env.GITHUB_RUN_ID ?? "") && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? ""), "Run identity is required");
-  // With worker promotion off, a cloud-enabled desktop ships on the API's
-  // current worker state (possibly none or unqualified); hosted services still gate it.
-  const requireQualifiedWorker = cloudRequired && env.ZEROS_WORKER_PROMOTION === "enabled";
-  return { ...source, ...expected, cloudRequired, requireQualifiedWorker, provider: env.CLOUD_WORKSPACE_PROVIDER,
+  return { ...source, ...expected, cloudRequired,
     runId: env.GITHUB_RUN_ID!, runAttempt: env.GITHUB_RUN_ATTEMPT!,
     projectId: env.RAILWAY_PROJECT_ID!, environmentId: env.RAILWAY_ENVIRONMENT_ID!, serviceId: env.RAILWAY_SERVICE_ID!,
     organization: env.PLANETSCALE_ORG!, database: env.PLANETSCALE_DATABASE!, databaseBranch: env.PLANETSCALE_BRANCH!,
@@ -75,43 +71,16 @@ export const MigrationReceipt = z.object({
   controlledApprovals: z.array(migrationName), pendingMigrations: z.array(migrationName), applied: z.array(migrationName),
   ledger: z.enum(["pending", "recorded", "verified"]), role: z.object({ deleted: z.literal(true) }),
 });
-export const WorkerIdentity = z.object({ provider: z.literal("boat"), imageRef: z.string(),
-  sourceSha: z.string().regex(SHA), architecture: z.enum(["linux/amd64", "linux/arm64"]), storageMiB: z.number().int().positive() })
-  .refine(value => /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(value.imageRef));
 // The frontier reader relaxes readiness before deployment; every publication
 // consumer uses the refined ReleaseIdentity below.
 export const ReleaseIdentityBase = z.object({ version: z.literal(1), ready: z.literal(true), sourceSha: z.string().regex(SHA),
   channel: z.enum(["alpha", "beta", "production"]), maintenance: z.literal(false),
   migrations: z.object({ state: z.literal("current"), head: migrationName, expectedHead: migrationName, manifestSha256: z.string().regex(DIGEST) }),
-  cloud: z.object({ enabled: z.boolean(), ready: z.literal(true), state: z.enum(["healthy", "disabled"]),
-    operationalState: z.enum(["healthy", "degraded"]).optional() }), worker: WorkerIdentity.nullable(),
-  // Additive signal: old hosted/Beta receipts remain readable, but cannot
-  // authorize publication of cloud capability without current qualification.
-  workerQualified: z.boolean().optional(),
-  // Boat-accepted deletions of retired allocations never close readiness; the
-  // API reports them as degraded operational health on every channel.
-  deferredReadiness: z.object({ kind: z.literal("retired-boat-deletions") }).strict().optional(),
-  // The expiring Alpha waiver that deferredReadiness replaced. An API deployed
-  // before it can still report one until it expires.
-  alphaReadinessException: z.object({ kind: z.literal("retired-boat-deletions"), expiresAt: z.string().datetime() }).strict().optional(),
+  cloud: z.object({ enabled: z.boolean(), ready: z.literal(true), state: z.enum(["healthy", "disabled"]) }),
+  // These version-1 receipt fields remain readable; v2 does not qualify images.
+  worker: z.unknown().optional(), workerQualified: z.boolean().optional(),
 });
-export function checkDeferredReadiness(value: {
-  channel: string;
-  cloud: { enabled: boolean; ready: boolean; state: string; operationalState?: string };
-  deferredReadiness?: { kind: "retired-boat-deletions" };
-  alphaReadinessException?: { kind: "retired-boat-deletions"; expiresAt: string };
-}, context: z.RefinementCtx) {
-  const { deferredReadiness: deferred, alphaReadinessException: exception } = value;
-  const now = Date.now();
-  const degraded = value.cloud.enabled && value.cloud.ready && value.cloud.state === "healthy" && value.cloud.operationalState === "degraded";
-  const valid = deferred && exception ? false
-    : deferred ? degraded
-    : exception ? degraded && value.channel === "alpha" && Date.parse(exception.expiresAt) > now &&
-      Date.parse(exception.expiresAt) <= now + 72 * 60 * 60_000
-    : value.cloud.operationalState !== "degraded";
-  if (!valid) context.addIssue({ code: z.ZodIssueCode.custom, message: "Degraded cloud readiness requires deferred retired Boat deletions" });
-}
-export const ReleaseIdentity = ReleaseIdentityBase.superRefine(checkDeferredReadiness);
+export const ReleaseIdentity = ReleaseIdentityBase;
 export const WorkOSVerification = z.object({ kind: z.literal("workos-handshake-v1"), surfaces: z.array(z.enum(["app", "ops"])), verifiedAt: z.string().datetime() });
 export const HostedReceipt = z.object({ version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]),
   sourceSha: z.string().regex(SHA), branch: z.string(), repository: z.string(), runId: z.string().regex(/^\d+$/), runAttempt: z.string().regex(/^\d+$/),

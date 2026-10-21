@@ -1,12 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
-import { workerSourcePath } from "../dev-environment/source.mjs";
 import { command, type Command } from "./io";
 import { SHA, requireCheck, type Channel } from "./contracts";
 
 export function classifyChanges(files: string[]) {
-  return { migrations: files.some(file => /^apps\/control-plane\/migrations\/\d{4}_[a-z0-9_]+\.sql$/.test(file)),
-    worker: files.some(file => workerSourcePath(file)) };
+  return { migrations: files.some(file => /^apps\/control-plane\/migrations\/\d{4}_[a-z0-9_]+\.sql$/.test(file)) };
 }
 export async function changedFiles(sourceSha: string, baseSha: string | undefined) {
   requireCheck(SHA.test(sourceSha), "Invalid source SHA");
@@ -19,12 +17,6 @@ export async function changedFiles(sourceSha: string, baseSha: string | undefine
 export async function assertCheckout(sourceSha: string) {
   requireCheck((await command("git", ["rev-parse", "HEAD"])).trim() === sourceSha, "Checkout differs from the event SHA");
   requireCheck(!(await command("git", ["status", "--porcelain", "--untracked-files=normal"])).trim(), "Release checkout must be clean");
-}
-export async function workerInputsSha256(sourceSha: string) {
-  const entries = (await command("git", ["ls-tree", "-rz", sourceSha])).split("\0").filter(Boolean)
-    .filter(row => workerSourcePath(row.slice(row.indexOf("\t") + 1))).sort();
-  requireCheck(entries.length > 0, "Worker input manifest is empty");
-  return createHash("sha256").update(entries.join("\0")).digest("hex");
 }
 export async function channelBaseline(channel: Channel, run: Command = command,
   published?: () => Promise<{ sourceSha: string; runId: string } | null>): Promise<{ tag: string; sourceSha: string; evidence?: string } | null> {

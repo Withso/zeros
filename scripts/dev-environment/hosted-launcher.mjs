@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { NATIVE_AGENT_CANARY_RETIREMENT, refuseRetiredDevNativeCanary } from "./native-agent-retirement.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { workspaceIdentity, developmentHome, privateDirectory, systemEnvironment, acquireWorkspaceLock, withHostedMutation } from "./state.mjs";
@@ -12,25 +11,18 @@ import { run, withDevPortRetry } from "./processes.mjs";
 import { pollProvider } from "./provider-http.mjs";
 import { reconcileHosted } from "./hosted-reconcile.mjs";
 import { hostedDiagnostic, inspectHostedLive } from "./hosted-doctor.mjs";
-import { monitorHostedAgents } from "./hosted-agent-monitor.mjs";
+import { monitorHostedAgents } from "./connection-monitor.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const action = process.argv[2] ?? "start";
 const lifecycle = new AbortController();
-// Native qualification is optional for app/backend launch. Report its closed
-// refusal while allowing those neighboring actions to keep running.
-const monitorAgents = input => monitorHostedAgents(input).catch(error => {
-  if (error?.code !== NATIVE_AGENT_CANARY_RETIREMENT.code) throw error;
-  console.log(`[zeros-dev] ${NATIVE_AGENT_CANARY_RETIREMENT.code}: ${NATIVE_AGENT_CANARY_RETIREMENT.message}`);
-  return { state: "retired" };
-});
+const monitorAgents = monitorHostedAgents;
 let releaseDesktop;
 const cancel = () => lifecycle.abort(new Error("Dev operation interrupted; its receipt was preserved"));
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, cancel);
 
 async function main() {
   if (!["start", "backend", "archive", "doctor", "seed", "agents", "adopt", "reconcile"].includes(action)) throw new Error("Use start, backend, archive, doctor, seed or agents");
-  if (action === "agents") refuseRetiredDevNativeCanary();
   const profile = loadHostedProfile(root), registry = r2Registry(profile.registry);
   const argument = name => process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : undefined;
   const owner = argument("--owner"), generation = argument("--generation");

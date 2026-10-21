@@ -34,7 +34,7 @@ function harness(channel: "alpha" | "beta", sameTag = false) {
   const current = { head: published.head, sha256: "b".repeat(64) };
   const deps = { channelBaseline: baseline, fetch: async () => new Response("missing", { status: 404 }),
     migrationManifest: async (source?: string) => source === snapshot.tagSha ? { head: snapshot.sources[0].head, sha256: "c".repeat(64) } : current,
-    workerInputsSha256: async (_source: string) => "d".repeat(64) };
+  };
   return { snapshot, published, run, job, responses, requests, gitCalls, candidate, deps, baseline, current, client };
 }
 
@@ -72,13 +72,11 @@ describe("V6b existing rolling-tag bootstrap", () => {
     expect(f.requests.some(url => url.includes(`/actions/workflows/release-${channel}.yml/runs?`))).toBe(true);
     expect(f.gitCalls.every(args => ["for-each-ref", "rev-parse"].includes(args[0]))).toBe(true);
   });
-  it("keeps genuinely new schema and cloud worker inputs blocked beyond that publication", async () => {
+  it("keeps new schema changes blocked beyond that publication", async () => {
     const f = harness("beta");
     f.deps.migrationManifest = async source => source === descendant ? { head: "0105_next.sql", sha256: "e".repeat(64) } : f.current;
     expect((await disabledGuard([], { ...f.candidate, sourceSha: descendant }, f.deps)).blocked).toBe(true);
     f.deps.migrationManifest = async () => f.current;
-    f.deps.workerInputsSha256 = async source => source === descendant ? "f".repeat(64) : "d".repeat(64);
-    expect((await disabledGuard([], { ...f.candidate, sourceSha: descendant, cloudEnabled: true }, f.deps)).blocked).toBe(true);
     expect((await disabledGuard([], { ...f.candidate, sourceSha: descendant }, f.deps)).blocked).toBe(false);
   });
   it("requires exact repository, source repository, workflow, event, channel branch and successful publication", async () => {

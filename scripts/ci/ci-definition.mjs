@@ -35,9 +35,6 @@ export const CI_DEFINITION_PATTERNS = Object.freeze([
   "apps/control-plane/pnpm-lock.yaml",
   "apps/web/package.json",
   "apps/web/package-lock.json",
-  // The local-untouched gate trusts the base copy of this manifest; an
-  // unreviewed edit would let the following PR cross a weakened seam.
-  "docs/cloud-workspace/local-seams.json",
 ]);
 
 export function isCiDefinitionPath(file) {

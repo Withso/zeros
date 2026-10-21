@@ -7,7 +7,7 @@ import { hostedCloudflareClient } from "../dev-environment/hosted-cloudflare.mjs
 import { newHostedGeneration, resolveHostedOwner, hostedName } from "../dev-environment/hosted-state.mjs";
 import { derivedWorkspaceIdentity, workspaceIdentity, OWNER_BINDING } from "../dev-environment/state.mjs";
 import { dispatchDevCreate } from "../dev-environment/provider-http.mjs";
-import { reconcileDevImageCreates, deleteDevImages } from "../dev-environment/hosted-image.mjs";
+import { reconcileDevImageCreates, deleteDevImages } from "../dev-environment/retired-resources.mjs";
 import { reserveHostedAdmission, releaseHostedAdmission } from "../dev-environment/hosted-admission.mjs";
 import { reconcileHosted } from "../dev-environment/hosted-reconcile.mjs";
 import { hostedDiagnostic } from "../dev-environment/hosted-doctor.mjs";

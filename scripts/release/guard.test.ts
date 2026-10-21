@@ -1,8 +1,7 @@
-import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 import { describe, expect, it, vi } from "vitest";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { disabledGuard, hostedWorkerPromotionRequired, publicIdentity } from "./guard";
+import { disabledGuard, publicIdentity } from "./guard";
 import { classifyChanges } from "./source";
 import { githubClient, validateBetaReceipt } from "./github";
 const sha = "a".repeat(40);
@@ -24,9 +23,8 @@ describe("rollout and promotion evidence", () => {
     const unchanged = fakeIdentity(null); unchanged.migrationManifest.mockResolvedValue(manifest);
     expect(await disabledGuard(["docs/example.md"], candidate, unchanged)).toMatchObject({ blocked: false, message: expect.stringContaining("DISABLED") });
     expect(await disabledGuard([migrationFile], candidate, fakeIdentity(null))).toMatchObject({ blocked: true, migrations: true });
-    for (const path of ["apps/desktop/src/engine/index.ts", "pnpm-lock.yaml", "scripts/cloud-workspace-validation/config.ts", "packages/protocol/src/index.ts"])
-      expect(classifyChanges([path]).worker).toBe(true);
-    expect(classifyChanges(["apps/desktop/src/renderer/index.tsx"]).worker).toBe(false);
+    expect(classifyChanges([migrationFile]).migrations).toBe(true);
+    expect(classifyChanges(["apps/cloud-worker/src/worker.ts"]).migrations).toBe(false);
   });
   it("accepts only the successful exact-SHA Beta workflow's own receipt", () => {
     expect(validateBetaReceipt(receipt(), run, config, hostedJobs).channel).toBe("beta");
@@ -48,16 +46,15 @@ describe("rollout and promotion evidence", () => {
   });
 });
 
-const candidate = { channel: "alpha" as const, sourceSha: sha, cloudEnabled: false, provider: "boat" };
+const candidate = { channel: "alpha" as const, sourceSha: sha, cloudEnabled: false };
 const migrationFile = "apps/control-plane/migrations/0112_test.sql";
 const workerFile = "apps/desktop/src/engine/index.ts";
 const manifest = { head: "0112_test.sql", sha256: "b".repeat(64) };
 const baselineSha = "1".repeat(40);
 const hostedJobs = [{ run_id: 1, run_attempt: 1, head_sha: sha, name: "Hosted promotion (beta) / Hosted mutation", status: "completed", conclusion: "success",
   steps: [{ name: "Provider preflight and ordered promotion", conclusion: "success" }, { name: "Save success receipt", conclusion: "success" }] }];
-function liveIdentity() { return { ...receipt().backend, channel: "alpha", workerQualified: true,
-  cloud: { enabled: true, ready: true, state: "healthy" },
-  worker: { provider: "boat", imageRef: `boat:zeros-alpha-fixture@sha256:${"c".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 } }; }
+function liveIdentity() { return { ...receipt().backend, channel: "alpha",
+  cloud: { enabled: true, ready: true, state: "healthy" } }; }
 function fakeIdentity(value: unknown, pagesSha?: string, receipt = true) {
   return { fetch: vi.fn<typeof fetch>(async input => String(input).endsWith("/zeros-deployment.json")
       ? Response.json({ version: 1, commitSha: pagesSha ?? (value as { sourceSha?: string } | null)?.sourceSha,
@@ -66,56 +63,22 @@ function fakeIdentity(value: unknown, pagesSha?: string, receipt = true) {
     cutoverReceipt: vi.fn(async () => receipt),
     channelBaseline: async () => ({ tag: "alpha", sourceSha: baselineSha }),
     migrationManifest: vi.fn(async (source?: string) => source === baselineSha ? { head: "0111_test.sql", sha256: "1".repeat(64) } : manifest),
-    workerInputsSha256: vi.fn(async (source: string) => (source === baselineSha ? "f" : "d").repeat(64)) };
+  };
 }
-describe("enabled worker lane selection", () => {
-  it("does not inspect or rebuild a worker when the execution switch is disabled", async () => {
-    const deps = fakeIdentity(null);
-    expect(await hostedWorkerPromotionRequired(false, candidate, deps)).toBe(false);
-    expect(deps.fetch).not.toHaveBeenCalled();
-    expect(deps.workerInputsSha256).not.toHaveBeenCalled();
-  });
-  it.each([null, liveIdentity(), { ...liveIdentity(), workerQualified: false }])("refuses enabled qualification and reuse before any external read", async identity => {
-    const deps = fakeIdentity(identity);
-    await expect(hostedWorkerPromotionRequired(true, candidate, deps)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
-    expect(deps.fetch).not.toHaveBeenCalled(); expect(deps.workerInputsSha256).not.toHaveBeenCalled();
-  });
-});
+
 describe("disabled promotion guard", () => {
   it("allows ordinary engine edits with cloud off and unchanged published schema when the API is absent", async () => {
     const deps = fakeIdentity(null);
     deps.migrationManifest.mockResolvedValue(manifest);
     const result = await disabledGuard([workerFile], candidate, deps);
-    expect(result).toMatchObject({ blocked: false, worker: true });
+    expect(result).toMatchObject({ blocked: false });
     expect(result.message).toContain("cloud-enabled desktop: no");
     expect(result.message).toContain("Legacy desktop publication may proceed");
     expect(deps.fetch).toHaveBeenCalledOnce();
   });
-  it("blocks cloud-enabled engine edits without a qualified matching live worker", async () => {
-    for (const patch of [null, { workerQualified: false }, { workerQualified: undefined }, { worker: null },
-      { ready: false }, { channel: "beta" }, { maintenance: true }, { cloud: { enabled: false, ready: true, state: "disabled" } }]) {
-      const deps = fakeIdentity(patch === null ? null : { ...liveIdentity(), ...patch });
-      expect(await disabledGuard([workerFile], { ...candidate, cloudEnabled: true }, deps)).toMatchObject({ blocked: true, workerVerified: false });
-    }
-  });
-  it("accepts a qualified live worker from the candidate or an identical committed input tree", async () => {
-    for (const sourceSha of [sha, "e".repeat(40)]) {
-      const identity = liveIdentity(); identity.worker.sourceSha = sourceSha;
-      const result = await disabledGuard([workerFile], { ...candidate, cloudEnabled: true }, fakeIdentity(identity));
-      expect(result).toMatchObject({ blocked: false, workerVerified: true });
-    }
-  });
-  it("rejects a different worker provider, changed worker inputs, or unmeasurable worker history", async () => {
-    const identity = liveIdentity(); identity.worker.sourceSha = "e".repeat(40);
-    const different = fakeIdentity(identity);
-    different.workerInputsSha256.mockImplementation(async source => source);
-    expect(await disabledGuard([workerFile], { ...candidate, cloudEnabled: true }, different)).toMatchObject({ blocked: true });
-    const unavailable = fakeIdentity(identity);
-    unavailable.workerInputsSha256.mockRejectedValue(new Error("private-provider-message"));
-    const result = await disabledGuard([workerFile], { ...candidate, cloudEnabled: true }, unavailable);
-    expect(result.blocked).toBe(true); expect(result.message).not.toContain("private-provider-message");
-    expect(await disabledGuard([workerFile], { ...candidate, cloudEnabled: true, provider: "unsupported" }, fakeIdentity(liveIdentity()))).toMatchObject({ blocked: true });
-  });
+
+
+
   it("unblocks a rerun after the exact candidate backend was deployed manually", async () => {
     const identity = liveIdentity(); identity.migrations.manifestSha256 = "f".repeat(64);
     const deps = fakeIdentity(identity), result = await disabledGuard([migrationFile, workerFile], candidate, deps);
@@ -184,10 +147,7 @@ describe("disabled promotion guard", () => {
       expect(result.message).toContain("re-run the failed Release (alpha) workflow");
     }
   });
-  it("does not let migration proof bypass an unqualified worker for a cloud-enabled desktop", async () => {
-    expect(await disabledGuard([migrationFile, workerFile], { ...candidate, cloudEnabled: true },
-      fakeIdentity({ ...liveIdentity(), workerQualified: false }))).toMatchObject({ blocked: true, manualCutoverVerified: true, workerVerified: false });
-  });
+
   it("uses each channel's fixed public origin without provider authority", async () => {
     for (const channel of ["alpha", "beta", "production"] as const) {
       const deps = fakeIdentity({ ...liveIdentity(), channel });
@@ -215,7 +175,6 @@ describe("V6 channel history regressions", () => {
   const old = { head: "0111_test.sql", sha256: "1".repeat(64) };
   function history(schemaChanged = false) {
     return { ...fakeIdentity(null), channelBaseline: async () => ({ tag: "alpha", sourceSha: baseSha }),
-      workerInputsSha256: vi.fn(async (_source: string) => "d".repeat(64)),
       migrationManifest: async (source?: string) => source === baseSha && schemaChanged ? old : manifest };
   }
   it.each([["dispatch", "production"], ["first-push", "beta"]] as const)("allows %s with no endpoint when the published channel schema is unchanged", async (_event, channel) => {
@@ -241,12 +200,7 @@ describe("V6 channel history regressions", () => {
     const deps = history(); deps.fetch.mockResolvedValue(Response.json({ ...liveIdentity(), sourceSha: baseSha, migrations: { ...liveIdentity().migrations, expectedHead: old.head, head: old.head, manifestSha256: old.sha256 } }));
     expect((await disabledGuard([], candidate, deps)).blocked).toBe(true);
   });
-  it("keeps an unresolved worker contract across descendant pushes for cloud-enabled desktops", async () => {
-    const deps = history(); deps.workerInputsSha256.mockImplementation(async source => source === baseSha ? "f".repeat(64) : "d".repeat(64));
-    expect((await disabledGuard([], { ...candidate, cloudEnabled: true }, deps)).blocked).toBe(true);
-    expect((await disabledGuard(["docs/readme.md"], { ...candidate, sourceSha: nextSha, cloudEnabled: true }, deps)).blocked).toBe(true);
-    expect((await disabledGuard([], candidate, deps)).blocked).toBe(false);
-  });
+
   it("accepts Beta's earlier hosted attempt only with that attempt's successful hosted job", () => {
     const jobs = [{ run_id: 1, run_attempt: 1, head_sha: sha, name: "Hosted promotion (beta) / Hosted mutation", status: "completed", conclusion: "success",
       steps: [{ name: "Provider preflight and ordered promotion", conclusion: "success" }, { name: "Save success receipt", conclusion: "success" }] }];

@@ -8,12 +8,12 @@ import { hostedProfileIssues, hostedDesktopEnvironment, hostedWebEnvironment } f
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { devObjectStorage } from "../dev-environment/hosted-storage.mjs";
 import { ensureDevDns, deleteDevPagesAndDns, ensureDevPages } from "../dev-environment/hosted-cloudflare.mjs";
-import { confirmBoatDeletion, assertDevBuilderBudget, deleteDevImages, reconcileRetiredBuilders } from "../dev-environment/hosted-image.mjs";
+import { confirmBoatDeletion, deleteDevImages, reconcileRetiredBuilders } from "../dev-environment/retired-resources.mjs";
 import { unpackDevOperator } from "../dev-environment/operator-artifact.mjs";
 import { sha256 } from "../dev-environment/state.mjs";
 import { acquireWorkspaceLock } from "../dev-environment/state.mjs";
 import { cleanupHostedLocalState } from "../dev-environment/hosted-local.mjs";
-import { hostedServices, hostedDatabaseWorker } from "../dev-environment/hosted-services.mjs";
+import { hostedServices } from "../dev-environment/hosted-services.mjs";
 import { bindFixture } from "../dev-environment/hosted-fixtures.mjs";
 
 const directories: string[] = [];
@@ -35,46 +35,19 @@ function fixture() {
 }
 
 describe("hosted Dev boundaries", () => {
-  it("refuses native agent intent before renewal/operator/SSH while preserving no-fixture connection maintenance", async () => {
+  it("keeps connection maintenance independent of legacy image qualification", async () => {
     const f = fixture(), fetcher = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected provider transport"));
     const services = hostedServices(temporary(), temporary(), f.profile);
     f.state.status = "ready"; f.profile.fixture = {};
     f.profile.connections = { enabled: true };
-    f.state.connectionRegistration = { expiresAt: new Date(Date.now() + 1000).toISOString() };
-    const before = structuredClone(f.state);
     try {
-      await expect(services.agents(f.lease)).rejects.toMatchObject({ status: 409, code: "release_worker_images_retired" });
-      expect(fetcher).not.toHaveBeenCalled(); expect(f.lease.save).not.toHaveBeenCalled();
-      expect(f.lease.fence).not.toHaveBeenCalled(); expect(f.state).toEqual(before);
-      delete f.profile.fixture; delete f.state.connectionRegistration;
       expect(await services.agents(f.lease)).toEqual({ state: "ready" });
       f.state.status = "archiving";
       await expect(services.seed(f.lease)).rejects.toThrow("Launch the Dev environment");
       expect(fetcher).not.toHaveBeenCalled(); expect(f.lease.save).not.toHaveBeenCalled();
     } finally { services.close(); fetcher.mockRestore(); }
   });
-  it("seeds capacity from the matching worker build instead of the first historical image", () => {
-    const previous = { inputsSha256: "a".repeat(64), qualified: true, storageMiB: 2048 };
-    const current = { inputsSha256: "b".repeat(64), qualified: true, storageMiB: 4096 };
-    const state = { source: { workerInputsSha256: previous.inputsSha256 }, resources: { images: [previous, current] } };
-    expect(hostedDatabaseWorker(state, { workerInputsSha256: current.inputsSha256 }, "seed")).toBe(current);
-    expect(hostedDatabaseWorker(state, {}, "seed")).toBe(previous);
-  });
-  it("never grants a fixture from an unqualified or deleted matching image", () => {
-    const input = "a".repeat(64);
-    const state = { source: { workerInputsSha256: input }, resources: { images: [
-      { inputsSha256: input, qualified: false },
-      { inputsSha256: input, qualified: true, deleted: true },
-      { inputsSha256: input, qualified: true, snapshotDeleted: true },
-      { inputsSha256: "b".repeat(64), qualified: true },
-    ] } };
-    expect(() => hostedDatabaseWorker(state, {}, "seed")).toThrow(/matching.*worker/i);
-    expect(() => hostedDatabaseWorker({ resources: state.resources }, {}, "seed")).toThrow(/matching.*worker/i);
-  });
-  it("can drain a partially deployed generation before its final source receipt exists", () => {
-    const worker = { inputsSha256: "a".repeat(64), qualified: true };
-    expect(hostedDatabaseWorker({ resources: { images: [worker] } }, {}, "drain")).toBe(worker);
-  });
+
   it("rejects retired funding before provider preflight and preserves its receipt for archive", async () => {
     const f = fixture(), selected = { workosUserId: "user_test", workosOrganizationId: "org_test",
       expectedEmail: "dev@example.test", expectedOrganizationSlug: "test-org", computeCreditMicroUsd: 1_000_000 };
@@ -101,16 +74,14 @@ describe("hosted Dev boundaries", () => {
     release(); expect(cleanupHostedLocalState(directory, f.state)).toBe(true);
     expect(fs.readdirSync(directory)).toEqual([]);
   });
-  it("stops a builder after its configured meter budget, before another build command", async () => {
-    const f = fixture(), record: any = { maxUsedHours: 3, builder: { id: "bx_23456789" } };
-    const request = vi.fn(async (_method: string, route: string) => route.startsWith("/limits")
-      ? { status: 200, body: { creditUsedSeconds: 10801 } }
-      : { status: 200, body: { operation: { id: "bdop_" + "a".repeat(32), kind: "sandbox", targetId: record.builder.id, status: "completed", completedAt: new Date().toISOString() } } });
-    await expect(assertDevBuilderBudget(f.lease, f.profile, record, request)).rejects.toThrow(/budget/);
-    expect(record.builder.deleted).toBe(true); expect(record.budgetExceeded).toBe(true);
-  });
+
   it("projects public desktop/web fields and never refreshes a workspace contract from Alpha", async () => {
     const f = fixture(); expect(hostedProfileIssues(f.profile)).toEqual([]);
+    const stock = structuredClone(f.profile);
+    delete stock.boat.baseSnapshot;
+    delete stock.boat.secondsPerDollar;
+    delete stock.boat.builderBudgetHours;
+    expect(hostedProfileIssues(stock)).toEqual([]);
     const env = hostedDesktopEnvironment(f.state, f.profile, temporary()), fetchImpl = vi.fn();
     expect(env.ZEROS_DEV_NODE_EXECUTABLE).toBe(process.execPath);
     expect((await ensureDevAuthEnvironment({ processEnv: env, fetchImpl })).source).toBe("workspace");

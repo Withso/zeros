@@ -55,7 +55,7 @@ describe("UI smoke control-plane client identity", () => {
     {
       name: "cloud Create",
       file: folderFixture,
-      url: "https://api.example.test/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspaces/create-options",
+      url: "https://api.example.test/v1/cloud-v2/workspaces?organizationId=11111111-1111-4111-8111-111111111111",
     },
     {
       name: "chat titles",

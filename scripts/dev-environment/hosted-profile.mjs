@@ -59,9 +59,7 @@ export function hostedProfileIssues(p) {
   if (!["alpha", "dev"].includes(w?.environment) || !/^client_[A-Za-z0-9_-]+$/.test(w?.webClientId ?? "") ||
       !/^client_[A-Za-z0-9_-]+$/.test(w?.desktopClientId ?? "") || w.webClientId === w.desktopClientId || !w.apiKey) issues.push("workos: configure distinct Web/Desktop clients and explicitly select alpha to reuse Alpha identity");
   if (!Number.isSafeInteger(g?.appId) || g.appId < 1 || !/^[a-zA-Z0-9-]+$/.test(g?.appSlug ?? "") || !g.clientId || !g.clientSecret || !g.privateKeyBase64) issues.push("github: configure the selected GitHub App and OAuth credentials");
-  if (!b?.apiKey || !b.billingOrg || !b.accountScope || !NAME.test(b.baseSnapshot ?? "") ||
-      !Number.isFinite(b.secondsPerDollar) || b.secondsPerDollar <= 0 ||
-      !Number.isFinite(b.builderBudgetHours) || b.builderBudgetHours <= 0 || b.builderBudgetHours > 2) issues.push("boat: configure API/billing identity, baseSnapshot, secondsPerDollar and builderBudgetHours (0–2 hours)");
+  if (!b?.apiKey || !b.billingOrg || !b.accountScope) issues.push("boat: configure API/billing identity and accountScope");
   if(p.connections && (p.connections.enabled!==true || p.connections.cutover!=="connect-once" || !UUID.test(p.connections.projectId??"") || p.connections.projectId===r?.projectId ||
       Object.keys(p.connections).some(key=>!["enabled","cutover","projectId"].includes(key)))) issues.push("connections: use a separate protected projectId and connect-once cutover; operator secrets cannot enter this profile");
   return [...issues, ...fixtureIssues(p.fixture)];
@@ -95,8 +93,6 @@ export function hostedBackendEnvironment(state, profile, source, _worker, env = 
   if(profile.connections?.enabled && (!state.connectionRegistered || !state.connectionBackendEnvironment)) throw new Error("Register the Dev connection generation before backend deployment");
   return { ...(profile.connections?.enabled?{ZEROS_DEPLOY_ENV:"dev",ZEROS_DEV_CONNECTIONS_ENABLED:"true",...state.connectionBackendEnvironment}:{}), NODE_ENV: "production", HOST: "0.0.0.0", PORT: "3000",
     ZEROS_DEV_ENVIRONMENT: "hosted", ZEROS_DEV_OWNER: state.owner, ZEROS_DEV_GENERATION: state.generation, ZEROS_DEV_RUN_ID: state.runId,
-    ...((state.fixture?.endsAt || state.expiresAt) ? { ZEROS_DEV_ADMISSION_EXPIRES_AT: new Date(Math.min(
-      ...[state.fixture?.endsAt, state.expiresAt].filter(Boolean).map(value => Date.parse(value)))).toISOString() } : {}),
     ZEROS_DEV_DOMAIN: p.domain, ZEROS_DEV_AUTH_ENVIRONMENT: p.authEnvironment,
     ZEROS_DEV_RAILWAY_PROJECT_ID: profile.railway.projectId, ZEROS_DEV_RAILWAY_ENVIRONMENT_ID: state.resources.railway.id,
     ZEROS_DEV_SOURCE_SHA256: source.sourceSha256, ZEROS_DEV_WORKER_INPUTS_SHA256: source.workerInputsSha256,
@@ -110,9 +106,7 @@ export function hostedBackendEnvironment(state, profile, source, _worker, env = 
     GITHUB_APP_CLIENT_ID: profile.github.clientId, GITHUB_APP_CLIENT_SECRET: profile.github.clientSecret,
     GITHUB_APP_PRIVATE_KEY: Buffer.from(profile.github.privateKeyBase64, "base64").toString("utf8"),
     GITHUB_OAUTH_CALLBACK_URL: `${p.apiOrigin}/v1/github/oauth/callback`, GITHUB_COMPLETION_PAGE_URL: `${p.appOrigin}/github/connected`,
-    // Cloud workspace v2. The old cloud stays off; one combined Railway service
-    // serves the API, the worker relay and the lifecycle loop on one origin.
-    CLOUD_WORKSPACES_ENABLED: "false",
+    // One Railway service serves the v2 API, worker relay and lifecycle.
     CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: p.apiOrigin, CLOUD_V2_REALTIME_URL: p.apiOrigin.replace(/^https:/, "wss:"),
     CLOUD_V2_RUNTIME_SHA256: cloudV2Runtime(env), CLOUD_V2_RUNTIME_STORE_ENDPOINT: profile.storage.endpoint,
     CLOUD_V2_RUNTIME_STORE_BUCKET: profile.storage.bucket, CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: profile.storage.accessKeyId,

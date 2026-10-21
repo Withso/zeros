@@ -115,11 +115,6 @@ function fakeGh(snapshot = fixture()) {
       );
     if (args[0] === "api" && args[1].includes("/files?"))
       return json([snapshot.files]);
-    if (
-      args[0] === "api" &&
-      args[1].includes("/actions/workflows/zeros-dev-e2e.yml/runs")
-    )
-      return json({ total_count: 0, workflow_runs: [] });
     if (args[0] === "api" && args[1] === "graphql") {
       if (args.includes("--input")) {
         const payload = JSON.parse(
@@ -553,7 +548,7 @@ describe("immediate-only agent merge", () => {
   });
   it.each([
     "docs/navigation.md",
-    "apps/control-plane/src/cloud-workspaces/routes.ts",
+    "apps/control-plane/src/cloud/routes.ts",
   ])(
     "merges exactly once with a server expected-head guard and confirmed SHA for %s",
     async (filename) => {

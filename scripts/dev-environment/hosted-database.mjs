@@ -1,14 +1,13 @@
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { seedHostedFixture } from "./hosted-fixtures.mjs";
-import { devBoatClient } from "./hosted-image.mjs";
 
 export function validateHostedDatabaseRequest(request) {
   if (!/^[a-f0-9]{24}$/.test(request?.owner ?? "") ||
       !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(request.generation ?? "") ||
-      !["migrate", "seed", "drain", "verify", "repair-runtime-role", "agents-inspect", "agents-enable"].includes(request.action) || !path.isAbsolute(request.buildRoot ?? "")) throw new Error("Invalid hosted Dev database operation");
+      !["migrate", "seed", "drain", "verify", "repair-runtime-role"].includes(request.action) || !path.isAbsolute(request.buildRoot ?? "")) throw new Error("Invalid hosted Dev database operation");
   let target;
-  for (const kind of ["migrate", "seed", "repair-runtime-role", "agents-enable"].includes(request.action) ? ["runtime", "migration"] : ["runtime"]) {
+  for (const kind of ["migrate", "seed", "repair-runtime-role"].includes(request.action) ? ["runtime", "migration"] : ["runtime"]) {
     const role = request.roles?.[kind]; let url;
     try { url = new URL(role?.url); } catch { throw new Error("Missing Dev database role"); }
     if (url.protocol !== "postgresql:" || !url.hostname.endsWith(".pg.psdb.cloud") || url.port !== "5432" || url.pathname !== "/postgres" ||
@@ -42,55 +41,34 @@ export async function repairHostedRuntimeAuthority(migration, request) {
   await grantHostedRuntimeAuthority(migration, request.roles.runtime.baseUsername);
 }
 
-/** The Dev backend is already physically gone. A bound deletion receipt plus
- * a documented irreversible storage stage can outlive this disposable DB in
- * the encrypted registry. This never marks the product journal physically
- * deleted and never accepts a bare 404 as proof. */
-export async function retireHostedWorkerStorage(record, boat) {
-  if (!/^bx_[a-z0-9]+$/.test(record?.resourceId ?? "") || !record.deletionRequestedAt ||
-      !/^bdop_[a-f0-9]{32}$/.test(record.deletionOperationId ?? "")) throw new Error("Missing bound Dev worker deletion receipt");
-  const response = await boat("GET", `/deletion-operations/${record.deletionOperationId}`), operation = response.body?.operation;
-  if (response.status !== 200 || operation?.id !== record.deletionOperationId || operation.targetId !== record.resourceId || operation.kind !== "sandbox") {
-    throw new Error("Dev worker deletion receipt identity changed");
-  }
-  // A just-completed operation is closed by the normal journal on the next
-  // pass. Active provider deletion also remains pending, without a transfer.
-  if (operation.status !== "blocked") return null;
-  if (!["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"].includes(operation.stage) ||
-      operation.stage === "waiting_for_uploads" && !Number.isFinite(Date.parse(operation.expectedBy))) throw new Error("Unknown Dev worker storage retention stage");
-  const sandbox = await boat("GET", `/sandboxes/${record.resourceId}`);
-  if (sandbox.status !== 404) throw new Error("Retired Dev worker is still accessible or its absence is unconfirmed");
-  return { id: record.resourceId, deletionOperationId: record.deletionOperationId, deleteRequested: true,
-    retiredAt: new Date().toISOString(), deletionStage: operation.stage, deletionExpectedBy: operation.expectedBy ?? null };
-}
-
-export async function drainHostedWorkers({ pool, withSystemTx, provider, accountScope, request, retirePending }) {
+/** The backend is stopped and this database's owner marker is verified before
+ * any VM or named snapshot is deleted. Failed provider calls leave its rows
+ * available for the next archive attempt. */
+export async function drainHostedWorkers({ pool, withSystemTx, provider, request }) {
   if (request.backendStopped !== true) throw new Error("The Dev backend must be stopped before draining workers");
   await assertDatabaseOwner(pool, request);
-  // The API has been physically stopped. Supersede dispatchable intents before
-  // asking the normal journal's absence rule to close unallocated generations.
-  await withSystemTx(pool, tx => tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='superseded',
-    completed_at=clock_timestamp(),lease_owner=NULL,lease_expires_at=NULL,updated_at=clock_timestamp()
-    WHERE state NOT IN ('succeeded','failed','superseded')`));
-  const records = await withSystemTx(pool, async tx => (await tx.query(`SELECT provider,account_scope,workspace_id,generation,resource_id
-    FROM cloud_workspace_provider_operations WHERE deleted_at IS NULL AND lost_at IS NULL AND create_closed_at IS NULL
-    ORDER BY workspace_id,generation`)).rows);
-  if (records.some(row => row.provider !== "boat" || row.account_scope !== accountScope)) throw new Error("Dev database contains an unexpected provider account; cleanup stopped");
-  let pending = 0; const retired = [];
-  for (const row of records) {
-    if (!row.resource_id) {
-      if (!await provider.verifyAbsence({ workspaceId: row.workspace_id, generation: row.generation })) pending++;
-    } else {
-      try { await provider.delete(row.resource_id); }
-      catch (error) {
-        if (!["provider_deletion_pending", "provider_deletion_blocked"].includes(error?.code)) throw error;
-        if (!retirePending) { if (error.code === "provider_deletion_blocked") throw error; pending++; continue; }
-        const receipt = await retirePending(row);
-        if (receipt) retired.push(receipt); else pending++;
-      }
-    }
-  }
-  return { complete: pending === 0, pending, ...(retirePending ? { retired } : {}) };
+  const resources = await withSystemTx(pool, async tx => ({
+    workspaces: (await tx.query("SELECT id,state,boat_sandbox_id FROM cloud_v2_workspaces WHERE state<>'deleted' ORDER BY id")).rows,
+    builds: (await tx.query("SELECT id,state,builder_sandbox_id,snapshot_id FROM cloud_v2_computer_builds ORDER BY id")).rows,
+    computers: (await tx.query("SELECT snapshot_name FROM cloud_v2_computers WHERE snapshot_name IS NOT NULL")).rows,
+  }));
+  if (resources.workspaces.some(row => row.state === "creating" && !row.boat_sandbox_id) ||
+      resources.builds.some(row => row.state === "building" && !row.builder_sandbox_id))
+    throw new Error("Dev allocation is unconfirmed; reconcile its provider result before archiving");
+  await withSystemTx(pool, async tx => {
+    await tx.query("DELETE FROM cloud_v2_tokens");
+    await tx.query("UPDATE cloud_v2_workspaces SET worker_token_hash=NULL WHERE state<>'deleted'");
+  });
+  const sandboxes = new Set([...resources.workspaces.map(row => row.boat_sandbox_id), ...resources.builds.map(row => row.builder_sandbox_id)].filter(Boolean));
+  for (const id of sandboxes) await provider.delete(id);
+  const snapshots = new Set([...resources.builds.map(row => row.snapshot_id), ...resources.computers.map(row => row.snapshot_name)].filter(Boolean));
+  for (const name of snapshots) await provider.deleteSnapshot(name);
+  await withSystemTx(pool, async tx => {
+    await tx.query("UPDATE cloud_v2_workspaces SET state='deleted',updated_at=clock_timestamp() WHERE state<>'deleted'");
+    await tx.query("UPDATE cloud_v2_computers SET active_build_id=NULL,snapshot_name=NULL,updated_at=clock_timestamp()");
+    await tx.query("UPDATE cloud_v2_computer_builds SET builder_sandbox_id=NULL,snapshot_id=NULL,state=CASE WHEN state IN ('queued','building') THEN 'cancelled' ELSE state END");
+  });
+  return { complete: true, pending: 0 };
 }
 
 export async function executeHostedDatabase(request) {
@@ -125,7 +103,7 @@ export async function executeHostedDatabase(request) {
     await assertDatabaseOwner(runtime, request);
     // Archive uses the exact previously stored operator artifact. A failed
     // subsequent migration must not prevent physical worker cleanup; the owner
-    // marker and the provider journal remain authoritative for destruction.
+    // marker and recorded resource IDs remain authoritative for destruction.
     if (!["drain", "repair-runtime-role"].includes(request.action)) await verifyMigrations(runtime);
     const authority = await runtime.query("SELECT rolsuper,rolbypassrls,rolcreatedb,rolcreaterole,pg_has_role(current_user,'postgres','MEMBER') AS admin,has_schema_privilege(current_user,'public','CREATE') AS ddl FROM pg_roles WHERE rolname=current_user");
     if (authority.rows.length !== 1 || Object.values(authority.rows[0]).some(Boolean)) throw new Error("Dev runtime role has elevated database authority");
@@ -136,52 +114,11 @@ export async function executeHostedDatabase(request) {
         return await seedHostedFixture({ runtime, migration, withSystemTx, module, request });
       } finally { await migration.end(); }
     }
-    if (["agents-inspect", "agents-enable"].includes(request.action)) {
-      const { inspectDevAgents } = await module("dev-agent-qualification.js");
-      if (request.agentRequest?.owner !== request.owner || request.agentRequest.generation !== request.generation) throw new Error("Dev agent operator identity mismatch");
-      const status = await inspectDevAgents(runtime, request.agentRequest);
-      if (request.action === "agents-inspect") return status;
-      const change = request.agentChange;
-      // inspectDevAgents revalidates this artifact against the exact fixture,
-      // provider account, current base and fresh attestation before any approval.
-      const organizationImage = request.agentRequest.organizationImage;
-      const image = organizationImage ?? request.worker;
-      const artifact = organizationImage && status.organizationImages?.find(row => row.id === organizationImage.id);
-      if (!status.connections?.some(row => row.credentialId === request.agentConnection?.credentialId &&
-          row.credentialRevision === request.agentConnection.credentialRevision && row.connectionRevision === request.agentConnection.connectionRevision) ||
-          change?.actorUserId !== status.actorUserId || change.evidence?.imageRef !== `boat:${image.snapshotId}@sha256:${image.buildSha256}` ||
-          change.evidence?.sourceCommit !== image.sourceCommit || organizationImage &&
-          (!artifact || artifact.contractSha256 !== change.evidence?.runtimeContractSha256)) throw new Error("Dev agent connection or image changed before enablement");
-      const { manageCloudAgentRuntime } = await module("manage-cloud-agent-runtime.js");
-      const migration = createMigrationPool(request.roles.migration.url, { role: "postgres" });
-      try {
-        await assertDatabaseOwner(migration, request);
-        const options = { databaseUrl: request.roles.migration.url, channel: "development" };
-        const plan = await manageCloudAgentRuntime(migration, change, options);
-        return await manageCloudAgentRuntime(migration, change, { ...options, execute: true, approval: plan.planSha256 });
-      } finally { await migration.end(); }
-    }
     if (request.action !== "drain") return { verified: true };
-    const { DatabaseCloudProviderOperationStore } = await module("cloud-workspaces/provider-operation-store.js");
-    const { BoatWorkspaceProvider } = await module("cloud-workspaces/boat-provider.js");
-    const { BoatApiClient } = await module("cloud-workspaces/boat-client.js");
-    const { BoatRuntimeAccessProvider } = await module("cloud-workspaces/boat-runtime-access.js");
-    const { BoatRuntimeEndpointResolver } = await module("cloud-workspaces/boat-runtime-endpoint.js");
-    const operations = new DatabaseCloudProviderOperationStore(runtime, "boat", request.boat.accountScope);
+    const { BoatApiClient } = await module("cloud/boat-client.js");
+    const { BoatCloudV2Compute } = await module("cloud/boat.js");
     const client = new BoatApiClient({ apiKey: request.boat.apiKey, billingOrg: request.boat.billingOrg, timeoutMs: 30_000 });
-    const access = new BoatRuntimeAccessProvider({ pool: runtime, operations, enginePort: 39393,
-      endpoint: new BoatRuntimeEndpointResolver({ client, operations, enginePort: 39393 }) });
-    const provider = new BoatWorkspaceProvider({ apiKey: request.boat.apiKey, billingOrg: request.boat.billingOrg, timeoutMs: 30_000,
-      imageRef: `boat:${request.worker.snapshotId}@sha256:${request.worker.buildSha256}`, qualifiedStorageMiB: request.worker.storageMiB, ttlSeconds: 900,
-      operations, access });
-    return await drainHostedWorkers({ pool: runtime, withSystemTx, provider, accountScope: request.boat.accountScope, request,
-      retirePending: async row => {
-        const record = await operations.get(row.resource_id);
-        if (!record || record.workspaceId !== row.workspace_id || record.generation !== row.generation) throw new Error("Dev worker journal binding changed");
-        const receipt = await retireHostedWorkerStorage(record, devBoatClient(request.boat));
-        return receipt ? { ...receipt, accountScope: request.boat.accountScope, billingOrg: request.boat.billingOrg,
-          devOwner: request.owner, devGeneration: request.generation, workspaceId: row.workspace_id, generation: row.generation } : null;
-      } });
+    return await drainHostedWorkers({ pool: runtime, withSystemTx, provider: new BoatCloudV2Compute(client), request });
   } finally { await runtime.end(); }
 }
 

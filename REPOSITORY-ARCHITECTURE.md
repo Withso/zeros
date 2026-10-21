@@ -210,33 +210,11 @@ mode controls authoring intent independently of tab selection. See the
 
 ## Cloud workspaces and future clients
 
-Cloud execution is Boat-only and requires an immutable saved v2 Cloud Computer
-source, a qualified v4 worker runtime pin and actor protocol 2. The control plane
-owns organization/actor/device authority, generation and allocation journals,
-one durable command queue, receipts, normalized history and encrypted objects.
-The Boat engine owns live Git/Files/Design/native-agent operations with checked
-publication. Desktop routes by exact `cloud://` identity; Electron main owns
-native access, bounded transcript presentation cache and receive-only replicas.
-Personal Local and organization-owned Local remain on the local engine.
-
-Creation, catalog, context/status, sharing and native Terminal/forwarding surfaces
-are implemented. Retired generations retain authorized metadata/history and
-cleanup while refusing new execution with `cloud_workspace_v2_required`. Current
-connections use the authenticated provider-mediated relay plus engine outbound
-HTTP. A VM durable delivery journal, resident outbound stream, multiplexed
-client/backend channel, Mac send outbox and accounted warm pool remain proposed.
-See [cloud architecture](docs/cloud-workspace/architecture.md),
-[engineering reference](docs/cloud-workspace/engineering-reference.md) and
-[follow-ups](docs/cloud-workspace/warm-pool.md).
-
-The protected build/qualification harness lives in
-`scripts/cloud-workspace-validation/`; code presence is not release evidence.
-Alpha operation predates this overhaul. New VM fixes require publication and
-compatible pin adoption; desktop/control-plane deployment alone leaves a pinned
-VM unchanged. Live Alpha, signed macOS, lifecycle/recovery/delete and runtime-skew
-qualification remain explicit in [qualification status](docs/cloud-workspace/qualification-status.md).
-The cloud guides retain current contracts and acceptance procedures; dated
-competitive research and completed implementation diaries are not authoritative.
+`apps/cloud-worker` runs the cloud agents, files, Git and terminals on a Boat VM.
+`apps/control-plane/src/cloud` owns the VM lifecycle, relay, history mirror and
+runtime delivery. The desktop maps native worker paths and IDs to the selected
+`cloud://` workspace. Local Personal and organization-owned Local workspaces
+continue to use the desktop engine. See [Cloud workspaces](docs/cloud-workspaces.md).
 
 As the product is wired into end-user surfaces, use existing boundaries before
 creating new ones:
@@ -244,8 +222,8 @@ creating new ones:
 - External workspace-control APIs belong in `apps/control-plane`.
 - A browser management surface can grow in `apps/web` while it shares that
   deployment; split it only if it becomes independently built/deployed.
-- Desktop remote transport remains in `apps/desktop/src/engine/transport` while
-  it is desktop-owned.
+- Desktop cloud connections remain in the renderer platform bridge; the cloud
+  worker has its own transport and does not import the Local engine.
 - A separately deployed remote execution service should become a new app with
   its own manifest and deployment contract, not a miscellaneous `services/`
   bucket.
@@ -593,13 +571,6 @@ still an active product backlog rather than completed historical research. The
 agent-capability roadmap was restored under its original filename, updated to
 the current `apps/desktop` and `packages/protocol` paths, indexed from
 `docs/README.md`, and protected by the repository-layout regression test.
-
-The former cloud-workspace research pack was not restored verbatim. Its durable
-requirements were rewritten as current product, architecture, data, security,
-operations, enterprise, qualification and engineering-reference documents under
-`docs/cloud-workspace/`. The dated vendor comparisons, generated HTML copies,
-reverse-engineering notes, and obsolete repository paths remain historical and
-non-authoritative.
 
 Existing worktrees that installed dependencies before `packages/core` moved to
 `packages/protocol` must rerun `pnpm install --frozen-lockfile`; otherwise their
