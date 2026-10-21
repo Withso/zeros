@@ -21,7 +21,6 @@ import {
   authenticationTurnOutput,
   authenticationTurnState,
 } from "./auth-prompt-recovery";
-import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import type { ComposerAttachment } from "./composer-attachments";
 import type { ComposerSegment } from "./composer-editor";
 import { pickStartedAt } from "./activity-hud";
@@ -32,7 +31,6 @@ import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
 import type { Turn } from "./turn-grouping";
 import type { AgentMessage, AgentSessionState, AgentTextMessage } from "./use-agent-session";
 
-const NO_EVENTS: AgentMessage[] = [];
 
 /** Handlers shared by every turn. Their identities must not change while the
  *  conversation streams; AgentChat routes each through its newest closure. */
@@ -57,10 +55,8 @@ export interface TranscriptTurnActions {
 export interface TranscriptTurnShared {
   chatId: string | null | undefined;
   folder: string | null | undefined;
-  footerAgentId: string | null | undefined;
   agentDisplayName: string;
   signInAgentId: string | null;
-  cloudAdmissionFailure: AgentSessionState["cloudAdmissionFailure"];
   surfaceActive: boolean;
   deferContent: boolean;
   scrollRoot: HTMLElement | null;
@@ -128,33 +124,20 @@ export const TranscriptTurn = memo(function TranscriptTurn({
 }: TranscriptTurnProps) {
   const { actions, ctx } = shared;
   const prompt = turn.userPrompt;
-  const cloudAdmission = useMemo(
-    () =>
-      cloudAdmissionForTurn({
-        folder: shared.folder,
-        turnId: prompt?.id,
-        recoveryFailure: prompt?.recoveryFailure,
-        current: shared.cloudAdmissionFailure,
-        agentId: shared.signInAgentId,
-      }),
-    [shared.folder, prompt, shared.cloudAdmissionFailure, shared.signInAgentId],
-  );
-  const authState = cloudAdmission
-    ? null
-    : authenticationTurnState({
-        userPrompt: prompt,
-        events: turn.events,
-        failureKind: tail?.failureKind,
-        isTail: isVisualTail,
-        inFlight: turnInFlight,
-        recovered,
-        readOnly: shared.transcriptReadOnly,
-      });
+  const authState = authenticationTurnState({
+    userPrompt: prompt,
+    events: turn.events,
+    failureKind: tail?.failureKind,
+    isTail: isVisualTail,
+    inFlight: turnInFlight,
+    recovered,
+    readOnly: shared.transcriptReadOnly,
+  });
   const authRequired = !shared.transcriptReadOnly && authState === "sign-in";
   const authStopped = authState === "stopped" || authState === "signed-in";
   const visibleEvents = useMemo(
-    () => (cloudAdmission ? NO_EVENTS : authState ? authenticationTurnOutput(turn.events) : turn.events),
-    [cloudAdmission, authState, turn.events],
+    () => (authState ? authenticationTurnOutput(turn.events) : turn.events),
+    [authState, turn.events],
   );
 
   const promptId = prompt?.id;
@@ -255,7 +238,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
             <TurnEventList
               events={visibleEvents}
               usageEvents={turn.providerEvents}
-              failureTurnId={!cloudAdmission && !authRequired && shared.chatId ? turn.recordedTurnId ?? undefined : undefined}
+              failureTurnId={!authRequired && shared.chatId ? turn.recordedTurnId ?? undefined : undefined}
               isActive={isActiveProviderSegment}
               isStreaming={turnInFlight && !authStopped}
               showActivity={isVisualTail}
@@ -283,8 +266,6 @@ export const TranscriptTurn = memo(function TranscriptTurn({
                 shared.chatId &&
                 ownsProviderFooter ? (
                   <TurnFooter
-                    folder={shared.folder}
-                    agentId={shared.footerAgentId}
                     readOnly={shared.readOnly}
                     surfaceActive={shared.surfaceActive}
                     chatId={shared.chatId}

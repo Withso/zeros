@@ -1,8 +1,7 @@
 import { LocalLinksProvider } from "./local-links/provider";
-import { TurnFailureCard } from "./turn-failure-card";
 import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
 import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
-import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
+import { notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
 // AgentChat — messages + tool cards + permission modal + composer
 // ──────────────────────────────────────────────────────────
@@ -17,7 +16,6 @@ import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-s
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
 import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
-import { openCloudAdmissionSettings } from "./cloud-admission-status";
 import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { presentLeadingPrompt } from "./transcript-leading-prompt";
 import React, {
@@ -256,7 +254,7 @@ import {
 } from "./agents-cache";
 import { invalidateCloudAgentRegistry, useWorkspaceAgents } from "./workspace-agent-registry";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { cloudCatalogGeneration } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
 import { isSubscriptionProvider } from "../settings/subscription-connection";
@@ -527,14 +525,6 @@ function AgentChatBody({
         queuedMessages,
       };
     }, [session.messages, session.cwd, session.cloudPromptPending, session.foregroundTurnId]);
-  // A refused prompt may still belong to the queue or the restored draft.
-  // When it has no visible turn footer, the transcript owns its one banner.
-  const detachedCloudAdmission = isCloudWorkspace(chatThread?.folder ?? session.cwd) &&
-    !session.cloudSendWait &&
-    session.cwd === (chatThread?.folder ?? session.cwd) && session.cloudAdmissionFailure &&
-    session.cloudAdmissionFailure.kind !== "unavailable" &&
-    !visibleMessages.some(message => message.kind === "text" && message.role === "user" &&
-      message.id === session.cloudAdmissionFailure?.turnId) ? session.cloudAdmissionFailure : null;
   const livePendingLocalTurnId = usePendingLocalTurnId(chatId);
   const pendingLocalTurnId = readOnly || isCloudWorkspace(session.cwd) && session.cloudPromptPending ? null : livePendingLocalTurnId;
   const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
@@ -935,7 +925,6 @@ function AgentChatBody({
   // composer-draft seeding can read on
   // first render. The original declaration here was removed.)
   const agentsList = useWorkspaceAgents(chatThread?.folder, interactive);
-  const runtimeUpgradeRequired = agentsList?.find(agent => agent.id === (chatThread?.agentId ?? session.agentId))?.runtimeUpgradeRequired === true;
   const agentSessions = useAgentSessions();
   const cloudComputerV2 = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(chatThread?.folder)?.organizationId);
   const retryTurn = useCallback(
@@ -3338,7 +3327,7 @@ function AgentChatBody({
   // reconnects and superseded preparation stay quiet.
   const preparationFailure = !readOnly && session.status === "failed" &&
     session.failure && session.failure.stage !== "prompt" &&
-    !preparationTurnFailure && !detachedCloudAdmission &&
+    !preparationTurnFailure &&
     !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) &&
     session.failure.kind !== "auth-required" &&
     session.failure.kind !== "cloud-credentials-unavailable" &&
@@ -3648,13 +3637,9 @@ function AgentChatBody({
   // explicit user send, never an automatic loop. The Send button keeps its
   // "error" tint (PromptInputSubmit status) so the state still reads.
   const canSend =
-    !runtimeUpgradeRequired &&
     (session.transcriptState === "resident" || cloudComputerV2 && isCloudWorkspace(chatThread?.folder)) &&
     !composerStreaming &&
     composerHasContent;
-  // Keep blocked Send focusable for its tooltip and explicit attempt feedback.
-  // Stop and queued editing retain their existing controls while agents run.
-  const runtimeSendBlocked = runtimeUpgradeRequired && !composerStreaming && !sendPreparing && !editingQueuedId;
 
   // Attach-time staging has normally completed already. Await the final
   // persistence check for every kind before publishing a reference to an agent.
@@ -4204,13 +4189,6 @@ function AgentChatBody({
   ): Promise<void> => {
     if (readOnly || sendInFlightRef.current) return;
     const folder = chatThread?.folder ?? session.cwd;
-    if (runtimeUpgradeRequired) {
-      const target = parseCloudWorkspaceKey(folder);
-      if (chatId && target) notifyAgentSendFailure({ folder, chatId,
-        attemptId: `runtime-upgrade:${chatThread?.agentId ?? session.agentId}:${cloudWorkspaceDocument(target)?.generation.number ?? "unknown"}`,
-        agentId: chatThread?.agentId ?? session.agentId, reason: "runtime_upgrade_required" });
-      return;
-    }
     const attemptId = `send-${crypto.randomUUID()}`;
     sendInFlightRef.current = true;
     const generation = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
@@ -4773,7 +4751,6 @@ function AgentChatBody({
     ],
   );
   const transcriptFolder = chatThread?.folder ?? session.cwd;
-  const transcriptAgentId = chatThread?.agentId ?? session.agentId;
   const transcriptAgentName =
     session.agentName ?? chatThread?.agentName ?? signInAgentId ?? "Agent";
   const transcriptNativeFork =
@@ -4786,10 +4763,8 @@ function AgentChatBody({
     () => ({
       chatId,
       folder: transcriptFolder,
-      footerAgentId: transcriptAgentId,
       agentDisplayName: transcriptAgentName,
       signInAgentId,
-      cloudAdmissionFailure: session.cloudSendWait?.turnId ? null : session.cloudAdmissionFailure,
       surfaceActive,
       deferContent: provisionalTranscript,
       scrollRoot: scrollEl,
@@ -4807,11 +4782,8 @@ function AgentChatBody({
     [
       chatId,
       transcriptFolder,
-      transcriptAgentId,
       transcriptAgentName,
       signInAgentId,
-      session.cloudAdmissionFailure,
-      session.cloudSendWait?.turnId,
       surfaceActive,
       provisionalTranscript,
       scrollEl,
@@ -5111,17 +5083,6 @@ function AgentChatBody({
                 message={preparationFailure.advice ?? preparationFailure.message}
               />
             )}
-            {detachedCloudAdmission && (
-              <TurnFailureCard
-                failure={{ kind: "cloud-admission", message: detachedCloudAdmission.message, newChatAllowed: false }}
-                cloudAdmission={detachedCloudAdmission}
-                folder={chatThread?.folder ?? session.cwd}
-                agentId={detachedCloudAdmission.agentId}
-                readOnly={readOnly || !interactive}
-                onRetry={interactive && queuedMessages.some(message => message.id === detachedCloudAdmission.turnId)
-                  ? () => sendNowQueued(detachedCloudAdmission.turnId) : undefined}
-              />
-            )}
             {/* Checkpoint bottom spacer — see the state comment above.
               -mt-5 cancels the column's gap-5 so the div contributes
               EXACTLY `height` px to scrollHeight (the rail's reach math
@@ -5268,7 +5229,7 @@ function AgentChatBody({
             waiting={isCloudWorkspace(session.cwd) && (session.cloudSendWait?.state === "waiting" || session.cloudPromptPending || queuedMessages.some(message => message.queuedDelivery === "sending"))}
             notSent={isCloudWorkspace(session.cwd) && session.cloudSendWait?.state === "failed"}
             statusMessage={isCloudWorkspace(session.cwd) ? session.cloudSendWait?.state === "failed"
-              ? session.cloudSendWait.message ?? (queuedMessages.some(message => message.id === session.cloudAdmissionFailure?.turnId) ? session.cloudAdmissionFailure?.message : undefined)
+              ? session.cloudSendWait.message
               : session.cloudSendWait?.phase === "starting-workspace" ? "Starting workspace…" : undefined : undefined}
             statusStartedAt={isCloudWorkspace(session.cwd) && session.cloudSendWait?.state === "waiting" && session.cloudSendWait.phase === "starting-workspace"
               ? session.cloudSendWait.startedAt : undefined}
@@ -5276,8 +5237,6 @@ function AgentChatBody({
             onStop={interactive && !readOnly && isCloudWorkspace(session.cwd) &&
                 (session.cloudSendWait?.state === "waiting" || session.cloudPromptPending || queuedMessages.some(message => message.queuedDelivery === "sending"))
               ? () => { void session.cancel(); } : undefined}
-            onReconnect={interactive && !readOnly && isCloudWorkspace(session.cwd) && session.cloudSendWait?.state === "failed" && session.cloudAdmissionFailure?.action === "reconnect"
-              ? () => openCloudAdmissionSettings(session.cwd, session.agentId) : undefined}
             agentName={steeringAgentName}
           />
           {/* Permission card (2026-07-02): the ONE permission gate. While a
@@ -5522,22 +5481,13 @@ function AgentChatBody({
                               ? "Stop agent"
                               : editingQueuedId
                                 ? "Save message"
-                                : runtimeSendBlocked
-                                  ? CLOUD_RUNTIME_UPGRADE_TOOLTIP
-                                  : "Send"
+                                : "Send"
                         }
                         shortcut={
-                          composerStreaming || sendPreparing || runtimeSendBlocked ? undefined : "↵"
+                          composerStreaming || sendPreparing ? undefined : "↵"
                         }
                       >
                         <PromptInputSubmit
-                          aria-disabled={runtimeSendBlocked || undefined}
-                          onClick={(event) => {
-                            if (runtimeSendBlocked) {
-                              event.preventDefault();
-                              void handleSend();
-                            }
-                          }}
                           // `submitted` = this send is parked on a cold
                           // transcript read or a session (re)build with the
                           // text still in the composer. Without it the button
@@ -5559,7 +5509,7 @@ function AgentChatBody({
                                 ? true
                                 : editingQueuedId
                                   ? !queuedEditHasContent
-                                  : !runtimeSendBlocked && !canSend
+                                  : !canSend
                           }
                           className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
                         >

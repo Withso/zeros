@@ -15,7 +15,6 @@ import { CloudSendPreparation } from "../cloud-send-preparation";
 import { cloudQueuedPrompt } from "../cloud-queued-prompt";
 import { isRecoverable } from "../../../platform/bridge/failure";
 import { CloudWorkspaceWakeEndedError } from "../../../state/cloud-workspace-wake";
-import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "../cloud-admission-failure";
 import { isCloudWorkspaceLifecyclePending } from "../../../state/cloud-workspace-catalog";
 import { notifyAgentSendFailure } from "../agent-send-failure-toast";
 import { hasBackgroundAgentWork } from "../background-task-state";
@@ -95,9 +94,8 @@ function harness(cloud = true, status = "stopped", resident = true) {
       store.sessions.chat.messages = store.sessions.chat.messages.map((m: any) => m.id === id ? { ...m, queued: false } : m);
     } },
     chatComposerEnv: () => undefined, chatEnvDriftKey: () => "", CloudSendWaitError, CloudWorkspaceWakeEndedError, isRecoverable,
-    ControlPlaneError: class extends Error {}, classifyCloudAdmissionFailure, cloudAdmissionFailureCode, performance, Date,
+    ControlPlaneError: class extends Error {}, performance, Date,
     notifyAgentSendFailure: failureNotice,
-    reportCloudAgentRuntimeUpgrade: vi.fn(), invalidateCloudAgentRegistry: vi.fn(),
     redactLogSecrets: (s: string) => s, crypto: { randomUUID: () => `message-${++sequence}` },
     capUserAppend: (messages: unknown[], message: unknown) => [...messages, message], evictUnretainedTranscripts: vi.fn(),
     hasPromptAttachmentReferences: () => false, refreshPromptAttachments: vi.fn(), toast: toasts, drainOrDropQueue: vi.fn(), persistAuthPrompt: vi.fn(),
@@ -117,7 +115,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
   let current: any = draft;
   const clear = vi.fn(() => { current = { ...draft, displayText: "", attachments: [], segments: [], json: {} }; });
   const dispatch = vi.fn(), localSend = vi.fn(async () => {}), cloudError = vi.fn();
-  const composer: any = { ...lifecycle, getFollowUpBehavior, hasDesignFrameAttachmentSelection, chatId: "chat", readOnly: false, runtimeUpgradeRequired: false, cloudComputerV2: cloud, chatThread: workspace.chats[0], workspaceProvisioning: false,
+  const composer: any = { ...lifecycle, getFollowUpBehavior, hasDesignFrameAttachmentSelection, chatId: "chat", readOnly: false, cloudComputerV2: cloud, chatThread: workspace.chats[0], workspaceProvisioning: false,
     session: { transcriptState: resident ? "resident" : "loading", status: "reconnecting", agentId: "codex", startSession: vi.fn(async () => {}),
       sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6], args[7], args[8]) : localSend },
     agentSessions: { getSendGeneration: () => cancellation }, cloudWorkspaceDocument: () => doc, parseCloudWorkspaceKey, isCloudWorkspace,
@@ -527,20 +525,6 @@ describe("cloud composer readiness queue", () => {
     await h.send(); h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(encoding.run).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ supportsImage: false }));
   });
-  it.each(["stopped", "ready"])("retains the draft and notifies once without preparing or queueing on a known runtime block in %s", async status => {
-    mocks.failureToast.mockClear();
-    const h = harness(true, status);
-    h.composer.chatId = `runtime-blocked-${status}`;
-    h.composer.runtimeUpgradeRequired = true;
-    h.failureNotice.mockImplementation(notifyAgentSendFailure);
-    await h.send(); await h.send();
-    expect(h.prepare).not.toHaveBeenCalled();
-    expect(h.queue.size).toBe(0); expect(h.delivered).not.toHaveBeenCalled();
-    expect(h.clear).not.toHaveBeenCalled(); expect(h.dispatch).not.toHaveBeenCalled();
-    expect(mocks.failureToast).toHaveBeenCalledExactlyOnceWith("This workspace is on an older runtime", expect.objectContaining({
-      description: "Gets the new cloud runtime the next time this workspace wakes",
-    }));
-  });
   it("keeps an undispatched row editable across N to N+1 and sends it once without a failure toast", async () => {
     const h = harness(); h.prepare.mockRejectedValueOnce(new Error("Connecting"));
     await h.send(); await vi.advanceTimersByTimeAsync(0);
@@ -567,11 +551,6 @@ describe("cloud composer readiness queue", () => {
     h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.delivered).toHaveBeenCalledExactlyOnceWith(row.bubbleId, expect.arrayContaining(["After rollback"]));
     expect(h.failureNotice).not.toHaveBeenCalled(); expect(h.composer.toast.error).not.toHaveBeenCalled();
-  });
-  it("preserves Local sends' existing runtime availability guard", async () => {
-    const h = harness(false); h.composer.runtimeUpgradeRequired = true; await h.send();
-    expect(h.composer.session.sendPrompt).not.toHaveBeenCalled(); expect(h.clear).not.toHaveBeenCalled();
-    expect(h.prepare).not.toHaveBeenCalled(); expect(h.cloudError).not.toHaveBeenCalled();
   });
   it.each(["archived", "deleted", "failed"])("keeps a message queued and reports %s once through the shared toast helper without waking", async status => {
     const h = harness(true, status); await h.send(); await vi.advanceTimersByTimeAsync(0);
@@ -600,22 +579,11 @@ describe("cloud composer readiness queue", () => {
     expect(h.provider.actions.getQueuedDraft("chat", h.queue.get("chat")![0].bubbleId).json).toBe(h.draft.json);
     finalReady.resolve(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).toHaveBeenCalledOnce();
   });
-  it("consumes a closed readiness refusal without errors, then dispatches once", async () => {
-    const h = harness(); h.prepare.mockRejectedValueOnce(new Error("cloud_workspace_not_ready"));
+  it("keeps waiting through a transient preparation error, then dispatches once", async () => {
+    const h = harness(); h.prepare.mockRejectedValueOnce(new Error("Connecting"));
     await h.send(); await vi.advanceTimersByTimeAsync(0);
     expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting"); h.ready();
     await vi.advanceTimersByTimeAsync(2_000); expect(h.delivered).toHaveBeenCalledOnce(); expect(h.toasts.error).not.toHaveBeenCalled();
-  });
-  it("uses AG's human reason for a closed terminal refusal without retrying admission", async () => {
-    const h = harness(); h.prepare.mockRejectedValue(new Error("cloud_agent_credential_expired"));
-    await h.send(); await vi.advanceTimersByTimeAsync(5_000);
-    expect(h.prepare).toHaveBeenCalledOnce(); expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "failed", message: "Your Codex connection expired. Reconnect to continue" });
-    expect(h.store.sessions.chat.cloudAdmissionFailure).toMatchObject({ action: "reconnect", turnId: h.queue.get("chat")![0].bubbleId });
-    expect(h.queue.get("chat")).toHaveLength(1); expect(h.delivered).not.toHaveBeenCalled(); expect(h.toasts.error).not.toHaveBeenCalled();
-    expect(h.store.pendingLocalTurns.chat).toBeUndefined();
-    expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).queuedMessages).toHaveLength(1);
-    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ error: expect.objectContaining({ message: "cloud_agent_credential_expired" }),
-      attemptId: h.queue.get("chat")![0].bubbleId }));
   });
   it("retries a timed-out queued message only through an explicit toast action and keeps its identity", async () => {
     const h = harness(true, "ready"); await h.send(); const id = h.queue.get("chat")![0].bubbleId;

@@ -38,14 +38,6 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   await expect(page.getByRole("radio", { name: "High", exact: true })).toHaveAttribute("aria-checked", "true");
   check("A narrower live ladder never invents a Medium choice", true);
 
-  for (const [version, expected] of [["2.1.288", 1], ["2.1.293", 0]]) {
-    await page.goto(`${modelMenu}?haiku&cloudRuntime=${version}`);
-    await page.getByRole("button", { name: /^Model:/ }).click();
-    await expect(page.locator("[data-cloud-runtime-update-note]")).toHaveCount(expected);
-    if (expected) await expect(page.locator("[data-cloud-runtime-update-note]")).toHaveText("Agents need a runtime update. It installs the next time this workspace wakes.");
-  }
-  check("The selected model's CLI minimum shows the cloud update note to a prompter only on older runtimes", true);
-
   await page.goto(transcript);
   const recovery = page.locator("#claude-transcript-recovery");
   await expect(recovery.locator('[data-authentication-status="signed-in"]')).toHaveText("Signed in");

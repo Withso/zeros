@@ -15,7 +15,6 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
 import {
   clearCloudAgentRegistry,
   hasConfirmedWorkspaceAgents,
-  modelsForWorkspaceAgent,
   useWorkspaceAgents,
   warmCloudAgentRegistry,
   workspaceAgentsSnapshot,
@@ -45,11 +44,6 @@ describe("workspace agent registry", () => {
     expect(agents.map(agent => agent.authenticated)).toEqual([true, true, false]);
     expect(mock.request).toHaveBeenCalledWith({ type: "AGENT_LIST_AGENTS", cwd: a }, 30_000);
     expect(mock.fetch).not.toHaveBeenCalled();
-  });
-  it("offers a cloud agent the same models as the provider catalog", async () => {
-    mock.request.mockResolvedValue({ type: "AGENT_AGENTS_LIST", agents: workerAgents });
-    const [codex] = await warmCloudAgentRegistry(a);
-    expect(modelsForWorkspaceAgent(codex!, null)).toEqual(modelsForAgent("codex", null));
   });
   it("refreshes only the signaled organization while retaining another owner's confirmed discovery", async () => {
     const c = "cloud://44444444-4444-4444-8444-444444444444/55555555-5555-4555-8555-555555555555";
@@ -81,7 +75,7 @@ describe("workspace agent registry", () => {
       }
       renderToStaticMarkup(createElement(LocalComposerRegistry));
       expect(rendered).toBe(local);
-      expect(workspaceAgentsSnapshot(folder)!.filter(isSelectableAgent).map(agent => modelsForWorkspaceAgent(agent, null))).toEqual(models);
+      expect(workspaceAgentsSnapshot(folder)!.filter(isSelectableAgent).map(agent => modelsForAgent(agent.id, null))).toEqual(models);
     }
     clearCloudAgentRegistry();
     expect(workspaceAgentsSnapshot("/local/personal")).toBe(local);

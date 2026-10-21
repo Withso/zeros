@@ -65,6 +65,7 @@ import {
   effectiveEffort,
   effortLabel,
   effortLevelsFor,
+  modelsForAgent,
   resolveModelOption,
   type ModelOption,
 } from "./model-catalog";
@@ -87,7 +88,6 @@ import { useEnabledAgents } from "./enabled-agents";
 import { pickDefaultAgent } from "../settings/default-agent";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 import type { InitializeResponse } from "../../platform/bridge/agent-events";
-import { modelsForWorkspaceAgent, type WorkspaceRegistryAgent } from "./workspace-agent-registry";
 
 /** A resolved agent + model choice. `model` is always concrete here — a row
  *  IS a model. */
@@ -116,14 +116,14 @@ const MODEL_COMMAND_ITEM_STACK =
   "[&_[cmdk-list-sizer]]:flex [&_[cmdk-list-sizer]]:flex-col [&_[cmdk-list-sizer]]:gap-px";
 
 interface AgentGroup {
-  agent: WorkspaceRegistryAgent;
+  agent: BridgeRegistryAgent;
   family: string;
   models: ModelOption[];
 }
 
 /** One flattened, searchable model row. */
 interface Row {
-  agent: WorkspaceRegistryAgent;
+  agent: BridgeRegistryAgent;
   family: string;
   model: ModelOption;
   unavailable?: boolean;
@@ -174,7 +174,7 @@ export function AgentModelMenu({
 }: {
   /** Registry snapshot override (the dispatcher passes its own). When
    *  omitted, the shared agents cache is used (the chat composer). */
-  agents?: WorkspaceRegistryAgent[] | null;
+  agents?: BridgeRegistryAgent[] | null;
   /** Live capability snapshot for the active chat's agent. Other agent groups
    *  have no active session here and intentionally use the curated fallback. */
   initialize?: InitializeResponse | null;
@@ -208,25 +208,21 @@ export function AgentModelMenu({
   useFavoritesVersion();
   useModelPreferencesVersion();
 
-  const registry: WorkspaceRegistryAgent[] | null = agentsProp !== undefined ? agentsProp : snapshot;
+  const registry: BridgeRegistryAgent[] | null = agentsProp !== undefined ? agentsProp : snapshot;
 
   // Resolve the star from the complete workspace registry, just like New Chat.
   // A saved default retains its identity even while its provider needs sign-in.
   const defaultAgent = pickDefaultAgent(registry ?? []);
   const defaultFamily = agentFamily(defaultAgent?.id ?? null);
   const hasSavedDefault = !!getFavoriteModel(defaultAgent?.id);
-  const defaultValue = defaultAgent
-    ? hasSavedDefault ? effectiveFavoriteModel(defaultAgent.id)
-      : modelForNewChat(defaultAgent.id, defaultAgent.cloudModels) ?? effectiveFavoriteModel(defaultAgent.id)
-    : null;
+  const defaultValue = defaultAgent ? modelForNewChat(defaultAgent.id) : null;
   const defaultOption = useMemo(() => defaultAgent && defaultValue
     ? resolveModelOption(defaultAgent.id, defaultValue, defaultAgent.id === value?.agentId ? initialize : null)
     : null, [defaultAgent, defaultValue, value?.agentId, initialize]);
   const defaultModel = defaultOption?.value ?? defaultValue;
 
-  const rowUnavailable = useCallback((agent: WorkspaceRegistryAgent, model: ModelOption) =>
-    !isEnabled(agent.id, agent.beta) || !isSelectableAgent(agent) || model.selectable === false ||
-    (agent.cloudModels !== undefined && !agent.cloudModels.includes(model.value)), [isEnabled]);
+  const rowUnavailable = useCallback((agent: BridgeRegistryAgent, model: ModelOption) =>
+    !isEnabled(agent.id, agent.beta) || !isSelectableAgent(agent) || model.selectable === false, [isEnabled]);
 
   // Only confirmed connections supply selectable models. The chat's persisted
   // identity stays on the trigger while its provider needs configuration.
@@ -236,8 +232,8 @@ export function AgentModelMenu({
       .map((agent) => ({
         agent,
         family: agentFamily(agent.id),
-        models: modelsForWorkspaceAgent(
-          agent,
+        models: modelsForAgent(
+          agent.id,
           agent.id === value?.agentId ? initialize : null,
         ),
       }))
@@ -367,8 +363,6 @@ export function AgentModelMenu({
       groups.find((candidate) => candidate.agent.id === value.agentId) ??
       groups.find((candidate) => candidate.family === currentFamily);
     if (!group) return null;
-    if (group.agent.cloudModels && !group.agent.cloudModels.includes(activeModel) &&
-      !(hasSavedDefault && activeModel === defaultValue)) return null;
     const model = group.models.find((option) => option.value === activeModel) ??
       resolveModelOption(value.agentId, activeModel, initialize) ?? {
         value: activeModel,
@@ -781,9 +775,7 @@ export function AgentModelMenu({
             </Popover>
           ) : (
             <div className="text-fg2 px-3 pb-3 text-xs">
-              {registry?.some(agent => agent.runtimeUpgradeRequired)
-                ? "This workspace gets the new cloud runtime the next time it wakes"
-                : "No connected agents."}
+              No connected agents.
             </div>
           )}
         </Command>
@@ -794,7 +786,7 @@ export function AgentModelMenu({
             </Button>
           </div>
         )}
-        {(groups.length > 0 || !registry?.some(agent => agent.runtimeUpgradeRequired)) && footer}
+        {footer}
       </PopoverContent>
     </Popover>
   );
@@ -848,9 +840,7 @@ function ModelRowDetails({
       </span>
       {row.unavailable && (
         <span data-model-unavailable-reason className="text-fg3 text-xxs">
-          {!isSelectableAgent(row.agent) ? "Connect this agent to use this model."
-            : row.agent.cloudModels !== undefined && !row.agent.cloudModels.includes(row.model.value)
-              ? "Not enabled for this workspace." : "Unavailable for this account."}
+          {!isSelectableAgent(row.agent) ? "Connect this agent to use this model." : "Unavailable for this account."}
         </span>
       )}
     </span>

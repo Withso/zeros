@@ -1,9 +1,6 @@
 export * from "./cloud-workspace-contract";
-import { CloudWorkspaceDocumentSchema, AgentGrantsSchema, CloudAgentBootAvailabilitySchema,
-  type CloudWorkspaceDocument, type CloudAgentBootAvailability } from "./cloud-workspace-contract";
-import { CloudAgentAdmissionError } from "./bridge/cloud-agent-errors";
+import { CloudWorkspaceDocumentSchema, type CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import { z } from "zod";
-import { CloudRuntimeUpgradeAvailabilitySchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
@@ -138,86 +135,6 @@ export async function renameCloudWorkspace(
   return workspace;
 }
 
-
-function runtimeUpgradePath(target: CloudWorkspaceTarget): string {
-  return `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/runtime-upgrade`;
-}
-
-export async function getCloudRuntimeUpgradeAvailability(target: CloudWorkspaceTarget): Promise<CloudRuntimeUpgradeAvailability> {
-  const result = await request(runtimeUpgradePath(target), CloudRuntimeUpgradeAvailabilitySchema);
-  if (result.organizationId !== target.organizationId || result.workspaceId !== target.workspaceId)
-    throw new Error("Cloud runtime details changed workspace identity");
-  return result;
-}
-
-/** Metadata only. Device credentials never become implicit cloud grants. */
-export async function cloudAgentGrant(
-  target: CloudWorkspaceTarget,
-  agentId: string,
-  model: string,
-  selection?: { delegationId: string },
-): Promise<string> {
-  // Local Personal and organization-local use native credentials. Validate
-  // this cloud target before touching session refresh or the control plane.
-  z.string().uuid().parse(target.organizationId);
-  z.string().uuid().parse(target.workspaceId);
-  if (selection) z.string().uuid().parse(selection.delegationId);
-  const epoch = getOrganizationStoreGeneration();
-  const sender = await getSession();
-  if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
-  if (!sender) throw new Error("Sign in to use cloud workspaces");
-  // WorkOS/Auth0 sub is the provider subject, never the CP account UUID.
-  // Legacy sessions lack accountId; resolve it through the same epoch-bound
-  // authenticated request instead of consulting a stale shared /me cache.
-  const senderAccountId = sender.user.accountId !== undefined
-    ? z.string().uuid().parse(sender.user.accountId)
-    : (await request("/v1/me", z.object({ user: z.object({ id: z.string().uuid() }) }))).user.id;
-  if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
-  const delegations = await cloudAgentDelegations(target);
-  if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
-  // CP has authorized every row for this actor, but explicit delegation is
-  // not consent to silently replace the actor's own selected connection.
-  const selected = delegations.filter(row => selection
-    ? row.id === selection.delegationId : row.ownerUserId === senderAccountId);
-  const candidates = selected.filter(
-    (row) => row.kind.startsWith(`${agentId}-`) && row.models.includes(model),
-  );
-  const grant = candidates.find((row) => row.runtimeQualified === true) ?? candidates.find((row) => row.runtimeQualified !== false);
-  if (!candidates.length)
-    throw new CloudAgentAdmissionError(selected.some(row => row.kind.startsWith(`${agentId}-`))
-      ? "cloud_agent_model_not_authorized" : "cloud_agent_credential_required");
-  if (!grant) {
-    if (candidates.some(row => row.runtimeUpgradeRequired)) throw new CloudAgentAdmissionError("cloud_runtime_upgrade_required");
-    throw new Error("This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.");
-  }
-  return grant.id;
-}
-
-/** Passive composer discovery for an activated workspace boot: the funding
- * owner's provider slots this actor may run. Null when the server predates
- * it, so the caller keeps the per-actor legacy discovery. */
-export async function cloudAgentBootAvailability(target: CloudWorkspaceTarget): Promise<CloudAgentBootAvailability | null> {
-  try {
-    return await request(
-      `/v1/cloud-workspaces/${z.string().uuid().parse(target.workspaceId)}/agent-availability`,
-      CloudAgentBootAvailabilitySchema,
-    );
-  } catch (error) {
-    if (error instanceof ControlPlaneError && error.status === 404 && error.code === "not_found") return null;
-    throw error;
-  }
-}
-
-export async function cloudAgentDelegations(target: CloudWorkspaceTarget) {
-  const result = await request(
-    `/v1/cloud-workspaces/${z.string().uuid().parse(target.workspaceId)}/agent-credentials/prepare`,
-    AgentGrantsSchema,
-    { body: {}, idempotencyKey: crypto.randomUUID() },
-  );
-  return result.delegations.filter(
-    (row) => Date.parse(row.expiresAt) > Date.now(),
-  );
-}
 
 function organizationPath(organizationId: string): string {
   return `/v1/organizations/${z.string().uuid().parse(organizationId)}/cloud-workspaces`;

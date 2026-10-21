@@ -1,15 +1,9 @@
 import { toast } from "../../shared/ui/primitives/elements/toast";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
-import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode, cloudAdmissionForTurn } from "./cloud-admission-failure";
-import { openCloudAdmissionSettings } from "./cloud-admission-status";
-import { modelsForAgent } from "./model-catalog";
 import { useSessionsStore } from "./sessions-store";
 import { logEvent } from "../../platform/observability/logging/renderer-log";
 
-export const CLOUD_RUNTIME_UPGRADE_TOOLTIP = "Gets the new cloud runtime the next time this workspace wakes";
-
-/** Closed renderer reasons. Queue readiness maps its terminal causes here;
- * direct sends can instead supply an exact admission code in `error`. */
+/** Closed renderer reasons. Queue readiness maps its terminal causes here. */
 export type AgentSendFailureReason =
   | "queued_timeout"
   | "history_unavailable"
@@ -18,13 +12,6 @@ export type AgentSendFailureReason =
   | "user_stopped"
   | "workspace_archived"
   | "workspace_unavailable"
-  | "runtime_upgrade_required"
-  | "retired_runtime"
-  | "model_not_enabled"
-  | "credential_missing"
-  | "credential_expired_or_revoked"
-  | "credential_refresh_required"
-  | "dispatch_ambiguous"
   | "unknown";
 
 export interface AgentSendFailureInput {
@@ -42,9 +29,6 @@ export interface AgentSendFailureInput {
   /** Explicit per-message retry supplied by the queue owner, never an
    * automatic resend. Only readiness failures offer this action. */
   onRetry?: () => void;
-  /** Optional runtime-owner override; otherwise uses the shared explicit
-   * stop → wake action. Both paths require cloud workspace run access. */
-  onRestartWorkspace?: () => void;
 }
 
 // Event-owned acknowledgements survive chat remounts, reconnects and catalog
@@ -53,33 +37,16 @@ export interface AgentSendFailureInput {
 const notified = new Set<string>();
 const logged = new Set<string>();
 
-function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason | null {
+function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason {
   if (!isCloudWorkspace(input.folder)) return input.reason === "queued_timeout" ? input.reason : "unknown";
-  // The command receipt's exact admission cause wins over a queue/dispatch fallback.
-  const failure = classifyCloudAdmissionFailure({ ...input, error: input.error });
-  switch (failure?.kind) {
-    case "waiting": return input.reason ?? null;
-    case "runtime-upgrade-required": return "runtime_upgrade_required";
-    case "retired-runtime": return "retired_runtime";
-    case "model-not-authorized": return "model_not_enabled";
-    case "credential-required":
-      switch (cloudAdmissionFailureCode(input.error)) {
-        case "cloud_agent_credential_expired":
-        case "cloud_agent_credential_revoked": return "credential_expired_or_revoked";
-        case "cloud_agent_credential_refresh_required": return "credential_refresh_required";
-        default: return "credential_missing";
-      }
-    case "unavailable": return input.reason ?? "dispatch_ambiguous";
-    default: return input.reason ?? "unknown";
-  }
+  return input.reason ?? "unknown";
 }
 
 /** Shared by direct and queued sends. Call only when an explicit attempt
  * fails, never from a render/effect or history hydration. Returns whether a
- * toast was emitted. Waiting leaves the message identity unconsumed. */
+ * toast was emitted. */
 export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
   const reason = sendFailureReason(input);
-  if (reason === null) return false;
   const key = JSON.stringify([input.folder ?? null, input.chatId, input.attemptId]);
   const diagnosticKey = JSON.stringify([input.folder ?? null, input.chatId, input.diagnosticAttemptId ?? input.attemptId]);
   if (isCloudWorkspace(input.folder) && !logged.has(diagnosticKey)) {
@@ -87,20 +54,13 @@ export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
     while (logged.size > 512) logged.delete(logged.values().next().value!);
     // Every explicit Not sent outcome is diagnosable, even when its persistent
     // card suppresses a toast. Never log prompt, path, IDs, credentials or prose.
-    logEvent(reason === "dispatch_ambiguous" ? "agent_send_uncertain" : "agent_send_not_sent", { reason }, ["cloud", "agent"]);
+    logEvent("agent_send_not_sent", { reason }, ["cloud", "agent"]);
   }
-  // Admission is persistent chat state, including when the accepted prompt is
-  // still queued or restored as a draft. Its banner is the sole error surface.
+  // A failed queued send keeps its Not sent card as the sole error surface.
   if (isCloudWorkspace(input.folder)) {
     const slot = useSessionsStore.getState().sessions[input.chatId];
     if (slot?.cwd === input.folder && slot.cloudSendWait?.state === "failed" && slot.cloudSendWait.turnId &&
         slot.messages.some(message => message.id === slot.cloudSendWait?.turnId)) return false;
-    const admission = slot?.cloudAdmissionFailure;
-    if (slot?.cwd === input.folder && admission && admission.code === cloudAdmissionFailureCode(input.error) &&
-        (!input.agentId || admission.agentId === input.agentId) && (!input.model || admission.model === input.model)) {
-      const banner = cloudAdmissionForTurn({ folder: input.folder, turnId: admission.turnId, current: admission });
-      if (banner && banner.kind !== "waiting") return false;
-    }
   }
   if (notified.has(key)) return false;
   notified.add(key);
@@ -108,7 +68,6 @@ export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
   let message = "Message wasn't sent";
   let description: string | undefined = "Review the conversation before retrying.";
   let action: { label: string; onClick: () => void } | undefined;
-  const provider = input.agentId === "codex" ? "Codex" : input.agentId === "claude" ? "Claude Code" : input.agentId === "cursor" ? "Cursor" : "agent";
   switch (reason) {
     case "history_unavailable":
       message = "Couldn't load chat history";
@@ -137,33 +96,6 @@ export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
     case "workspace_unavailable":
       message = "Cloud workspace is unavailable";
       description = "Try sending again when the workspace is ready.";
-      break;
-    case "runtime_upgrade_required":
-      message = "This workspace is on an older runtime";
-      description = CLOUD_RUNTIME_UPGRADE_TOOLTIP;
-      break;
-    case "retired_runtime":
-      message = "This workspace uses a retired cloud runtime";
-      description = "Create a new workspace to send messages.";
-      break;
-    case "model_not_enabled": {
-      const model = input.agentId && input.model ? modelsForAgent(input.agentId, null).find(row => row.value === input.model)?.label : null;
-      message = `${model ?? "The selected model"} isn't enabled for this workspace`;
-      description = undefined;
-      if (input.agentId) action = { label: "Agent settings", onClick: () => openCloudAdmissionSettings(input.folder, input.agentId) };
-      break;
-    }
-    case "credential_missing":
-    case "credential_expired_or_revoked":
-    case "credential_refresh_required":
-      message = reason === "credential_missing" ? `Connect ${provider} to send messages`
-        : reason === "credential_refresh_required" ? `Your ${provider} connection needs to be renewed`
-        : `Reconnect ${provider} to send messages`;
-      description = undefined;
-      if (input.agentId) action = { label: "Reconnect", onClick: () => openCloudAdmissionSettings(input.folder, input.agentId) };
-      break;
-    case "dispatch_ambiguous":
-      message = "Cloud request couldn't be completed";
       break;
   }
   if (input.onRetry && ["queued_timeout", "history_unavailable", "workspace_start_timeout", "workspace_stopped", "workspace_unavailable"].includes(reason)) {

@@ -48,7 +48,7 @@ import {
   type PermissionFeedbackPlacement,
 } from "./permission-feedback-placement";
 import "./composer-pills.css";
-import type { WorkspaceRegistryAgent } from "./workspace-agent-registry";
+import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 
 // Wave 3 close-out (2026-05-16): the in-file useClickAway helper that
 // every pill once shared was deleted. All pills now use shadcn Popover,
@@ -123,7 +123,7 @@ export function ModelPill({
   selectionTiming,
   active = true,
 }: {
-  agents?: WorkspaceRegistryAgent[] | null;
+  agents?: BridgeRegistryAgent[] | null;
   agentId: string | null;
   /** Optional brand-logo URL fallback. Usually unset — AgentIcon prefers
    *  the bundled SVG keyed by agentId (claude/codex/cursor/…). */

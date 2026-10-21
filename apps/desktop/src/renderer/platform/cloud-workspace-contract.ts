@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
-import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
 import { CloudAgentInitialAdoptionsSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudWorkspaceCheckpointRestoreSchema, CloudWorkspaceHistoryRecoverySchema } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { CloudAcceptedLifecycleOperationSchema } from "@zeros/protocol/cloud-final-save";
@@ -87,46 +86,3 @@ export type CloudWorkspaceDocument = z.infer<
   typeof CloudWorkspaceDocumentSchema
 >;
 
-export const AgentGrantsSchema = z.object({
-  delegations: z
-    .array(
-      z.object({
-        id: z.string().uuid(),
-        ownerUserId: z.string().uuid(),
-        kind: z.string(),
-        models: z.array(z.string()),
-        allModels: z.boolean().optional(),
-        expiresAt: z.string().datetime(),
-        runtimeQualified: z.boolean().optional(),
-        runtimeUpgradeRequired: z.boolean().optional(),
-        mcpQualified: z.boolean().optional(),
-        nativeCapabilities: CloudNativeCapabilitiesSchema.optional(),
-      }),
-    )
-    .max(100),
-});
-
-// Forward compatible: an unknown status or code is simply not ready.
-export const CloudAgentBootAvailabilitySchema = z.discriminatedUnion("mode", [
-  z.object({ version: z.literal(1), mode: z.literal("legacy") }),
-  z.object({
-    version: z.literal(1),
-    mode: z.literal("boot-owner-v1"),
-    scope: z.object({
-      generation: z.number().int().positive().safe(),
-      bootId: z.string().uuid(),
-      writerEpoch: z.string().uuid(),
-      fundingOwnerUserId: z.string().uuid(),
-      fundingOwnerEpoch: z.number().int().positive().safe(),
-    }),
-    status: z.string().max(64),
-    providers: z.array(z.object({
-      provider: z.string().max(32),
-      status: z.string().max(32),
-      kind: z.string().max(64).optional(),
-      models: z.array(z.string().max(128)).max(64).optional(),
-      code: z.string().max(128).optional(),
-    })).max(8),
-  }),
-]);
-export type CloudAgentBootAvailability = z.infer<typeof CloudAgentBootAvailabilitySchema>;

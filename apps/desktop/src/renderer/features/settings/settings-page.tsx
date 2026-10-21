@@ -1303,7 +1303,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
     : [];
   const favorite = effectiveFavoriteModel(effectiveAgentId);
   const currentModel = getFavoriteModel(effectiveAgentId) ? favorite
-    : modelForNewChat(effectiveAgentId, effectiveAgent?.cloudModels) ?? favorite ?? agentModels[0]?.value ?? null;
+    : modelForNewChat(effectiveAgentId) ?? favorite ?? agentModels[0]?.value ?? null;
   const currentModelLabel = currentModel
     ? displayModelLabel(
         effectiveAgentId,

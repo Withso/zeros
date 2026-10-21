@@ -34,7 +34,7 @@ export async function runSubscriptionSmoke({ page, check }) {
     "Disconnected providers never reappear as fallback composer models",
     true,
   );
-  await runCloudAgentAccessSmoke({ page, check });
+  await runLocalAgentAccessSmoke({ page, check });
   await page.goto(
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-subscription.html`,
   );
@@ -603,74 +603,17 @@ export async function runQueueSmoke({ page, check }) {
   check("Cloud readiness uses an editable/removable Waiting for agent card, then neutral Not sent rows with retry", true);
 }
 
-/** Production picker/composer with renderer metadata supplied by the fixture. */
-export async function runCloudAgentAccessSmoke({ page, check }) {
+/** Production picker/composer with the Local agent registry. */
+export async function runLocalAgentAccessSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
-  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html?cloudModels`);
-  await page.getByRole("button", { name: /^Model:/ }).click();
-  // Persisted Opus stays on the trigger, but cannot re-enter through the
-  // retired-model fallback after workspace consent is narrowed.
-  await expect(page.getByRole("button", { name: "Browse models", exact: true })).toBeVisible();
-  await page.getByPlaceholder("Search models…").fill("Opus");
-  await expect(page.getByRole("option")).toHaveCount(0);
-  await page.getByPlaceholder("Search models…").fill("Sonnet");
-  await expect(page.getByRole("option")).toHaveCount(1);
-  await page.getByRole("option").click({ position: { x: 8, y: 8 } });
-  await expect(page.getByRole("button", { name: /^Model:.*Sonnet/ })).toBeVisible();
-  check("Cloud menus only offer delegated models, including the selected-row fallback", true);
-
-  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html?runtimeUpgrade`);
-  await page.getByRole("button", { name: /^Model:/ }).click();
-  await expect(page.getByText("This workspace gets the new cloud runtime the next time it wakes", { exact: true })).toBeVisible();
-  await expect(page.getByText("No connected agents.", { exact: true })).toHaveCount(0);
-
-  const preparation = "https://api.example.test/v1/**/agent-credentials/prepare";
-  const runtimeAvailability = "https://api.example.test/v1/**/runtime-upgrade";
-  await page.route(preparation, async route => {
-    const required = await page.evaluate(() => window.composerSendFailureFixture.runtimeRequired);
-    // The harness session's accountId; cloud sends select only the sender's own grant.
-    return route.fulfill({ json: { delegations: [{ id: "33333333-3333-4333-8333-333333333333", kind: "codex-chatgpt",
-      ownerUserId: "11111111-1111-4111-8111-111111111111", models: ["gpt-6.1-sol"], expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: !required, runtimeUpgradeRequired: required }] } });
-  });
-  await page.route(runtimeAvailability, async route => {
-    expect(route.request().method()).toBe("GET");
-    return route.fulfill({ json: await page.evaluate(() => window.composerSendFailureFixture.runtimeAvailability) });
-  });
-  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-composer-send-failures.html?blocked=1`);
-  const composer = page.locator('[data-slot="prompt-input"]:visible').locator("..").locator('[contenteditable="true"]');
-  const send = page.getByRole("button", { name: "Send message", exact: true });
-  await expect(page.locator("[data-cloud-agent-runtime-upgrade]")).toHaveCount(0);
-  await composer.fill("Keep this draft until the runtime is updated");
-  await expect(send).toBeDisabled();
-  await expect(send).toHaveAttribute("aria-disabled", "true");
-  await send.hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Gets the new cloud runtime the next time this workspace wakes");
-  await composer.press("Enter");
-  await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);
-  await expect(page.locator("[data-sonner-toast]")).toContainText("This workspace is on an older runtime");
-  await expect(page.locator("[data-sonner-toast]")).toContainText("Restart this workspace to update its cloud runtime.");
-  await expect(page.locator("[data-sonner-toast]").getByRole("button", { name: "Restart workspace", exact: true })).toBeVisible();
-  await expect(page.locator("[data-sonner-toast]")).not.toContainText("next time");
-  await composer.press("Enter");
-  await expect(composer).toHaveText("Keep this draft until the runtime is updated");
-  await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);
-  await page.evaluate(() => window.composerSendFailureFixture.refresh(false));
-  await expect(send).toBeEnabled();
-  await expect(composer).toHaveText("Keep this draft until the runtime is updated");
-  await page.unroute(preparation);
-  await page.unroute(runtimeAvailability);
-  check("Old cloud runtimes disable Send with a tooltip, notify once on Enter, and preserve the draft through upgrade", true);
-
   await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html`);
   await page.getByRole("button", { name: /^Model:/ }).click();
   await page.getByPlaceholder("Search models…").fill("Opus");
   await expect(page.getByRole("option").first()).toBeVisible();
-  await expect(page.getByText("This workspace gets the new cloud runtime the next time it wakes", { exact: true })).toHaveCount(0);
   await page.evaluate(() => sessionStorage.removeItem("fixture:app-sidebar"));
   await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?conversation`);
   await page.locator('[data-workspace-id="ws-atlanta"]').getByRole("button", { name: /^Open workspace atlanta/ }).click();
   await page.locator(".zeros-agent-surface .composer-pm").first().fill("Local agent draft");
-  await expect(page.locator("[data-cloud-agent-runtime-upgrade]")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
-  check("Local model choices and composer sends remain available after cloud upgrade and consent restrictions", true);
+  check("Local model choices and composer sends remain available", true);
 }

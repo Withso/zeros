@@ -1,5 +1,4 @@
 import { useSyncExternalStore } from "react";
-import type { InitializeResponse } from "../../platform/bridge/agent-events";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import type {
   AgentAgentsListMessage,
@@ -22,26 +21,8 @@ import {
   hasConfirmedAgents,
   useAgentsSnapshot,
 } from "./agents-cache";
-import { modelsForAgent } from "./model-catalog";
 
-/** Renderer metadata from exact-workspace consent, never part of the engine registry. */
-export type WorkspaceRegistryAgent = BridgeRegistryAgent & {
-  cloudModels?: string[];
-  runtimeUpgradeRequired?: boolean;
-};
-
-export function modelsForWorkspaceAgent(
-  agent: WorkspaceRegistryAgent,
-  initialize: InitializeResponse | null,
-) {
-  const models = modelsForAgent(agent.id, initialize);
-  const allowed = agent.cloudModels;
-  return allowed === undefined
-    ? models
-    : models.filter(model => allowed.includes(model.value));
-}
-
-const cache = new KeyedAsyncCache<WorkspaceRegistryAgent[]>(32);
+const cache = new KeyedAsyncCache<BridgeRegistryAgent[]>(32);
 /** One entry per workspace: its worker reports which agents have credentials. */
 function registryKey(target: CloudWorkspaceTarget): string {
   return `${cloudWorkspaceKey(target)}#v2`;
@@ -69,23 +50,9 @@ export function invalidateCloudAgentRegistry(folder: string): void {
   const workspace = cloudWorkspaceKey(target);
   for (const key of cache.keys()) if (key.startsWith(`${workspace}#`)) cache.invalidate(key);
 }
-/** A closed admission denial is authoritative for this workspace/provider.
- * Publish it before returning the draft, then recheck durable discovery (which
- * can also find another MCP-qualified grant). Local registry state is separate. */
-export function reportCloudAgentRuntimeUpgrade(folder: string, agentId: string): void {
-  const target = parseCloudWorkspaceKey(folder);
-  if (!target) return;
-  const key = registryKey(target), agents = cache.getSnapshot(key).data;
-  if (agents) cache.setData(key, agents.map(agent => agent.id === agentId ? {
-    ...agent, runtimeUpgradeRequired: true, authenticated: false, cloudModels: [],
-    runtimeUnavailableReason: "This workspace gets the new cloud runtime the next time it wakes",
-  } : agent));
-  cache.invalidate(key);
-  void warmCloudAgentRegistry(cloudWorkspaceKey(target)).catch(() => { /* Retain the confirmed denial until revalidation succeeds. */ });
-}
 export function workspaceAgentsSnapshot(
   folder?: string | null,
-): WorkspaceRegistryAgent[] | null {
+): BridgeRegistryAgent[] | null {
   const target = parseCloudWorkspaceKey(folder);
   return target
     ? (cache.getSnapshot(registryKey(target)).data ?? null)
@@ -98,7 +65,7 @@ export function hasConfirmedWorkspaceAgents(folder?: string | null): boolean {
 }
 async function readCloudAgentRegistry(
   value: string,
-): Promise<WorkspaceRegistryAgent[]> {
+): Promise<BridgeRegistryAgent[]> {
   const bridge = getActiveBridge();
   if (!bridge) throw new Error("Workspace is disconnected");
   const target = registryTarget(value);
@@ -114,7 +81,7 @@ async function readCloudAgentRegistry(
 }
 export function warmCloudAgentRegistry(
   folder: string,
-): Promise<WorkspaceRegistryAgent[]> {
+): Promise<BridgeRegistryAgent[]> {
   const target = parseCloudWorkspaceKey(folder);
   if (!target)
     return Promise.reject(new Error("Cloud workspace identity is required"));
@@ -126,7 +93,7 @@ export function warmCloudAgentRegistry(
 export function useWorkspaceAgents(
   folder?: string | null,
   active = true,
-): WorkspaceRegistryAgent[] | null {
+): BridgeRegistryAgent[] | null {
   const local = useAgentsSnapshot();
   const target = parseCloudWorkspaceKey(folder);
   // Follows catalog detail publication too, which changes the authority key.
