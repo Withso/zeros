@@ -1,6 +1,7 @@
 export type AgentLogin =
   | { agent: "codex"; token: string }
-  | { agent: "claude"; baseUrl: string; token: string }
+  | { agent: "claude"; oauthToken: string; apiKey?: never }
+  | { agent: "claude"; apiKey: string; oauthToken?: never }
   | { agent: "cursor"; apiKey: string };
 
 const runtimeNames = new Set(["PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR", "SHELL"]);
@@ -15,7 +16,10 @@ export function agentEnvironment(
   const env = workerChildEnvironment(source, git);
   switch (login.agent) {
     case "codex": env.ZEROS_CLOUD_PROXY_TOKEN = login.token; break;
-    case "claude": env.ANTHROPIC_BASE_URL = login.baseUrl; env.ANTHROPIC_AUTH_TOKEN = login.token; break;
+    case "claude":
+      if ("oauthToken" in login) env.CLAUDE_CODE_OAUTH_TOKEN = login.oauthToken;
+      else env.ANTHROPIC_API_KEY = login.apiKey;
+      break;
     case "cursor": env.CURSOR_API_KEY = login.apiKey; break;
   }
   return env;

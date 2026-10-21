@@ -71,6 +71,7 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
 export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
 
 const proxy = z.object({ baseUrl: z.url(), token: z.string().min(16).max(4096), expiresAt: z.number().int() }).strict();
+const secret = z.string().min(16).max(16384);
 
 export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("open"), clientId }).strict(),
@@ -91,7 +92,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     }).strict(),
     agents: z.object({
       codex: proxy.optional(),
-      claude: proxy.optional(),
+      claude: z.union([z.object({ oauthToken: secret }).strict(), z.object({ apiKey: secret }).strict()]).optional(),
       cursor: z.object({ apiKey: z.string().min(1).max(4096) }).strict().optional(),
     }).strict(),
   }).strict(),

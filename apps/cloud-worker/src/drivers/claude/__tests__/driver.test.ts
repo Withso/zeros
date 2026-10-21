@@ -8,7 +8,9 @@ const drivers: ClaudeDriver[] = [];
 afterEach(async () => { for (const driver of drivers.splice(0)) await driver.dispose(); vi.useRealTimers(); });
 function setup() {
   const h = harness();
-  const driver = new ClaudeDriver({ query: h.query, executable: "/fixture/claude", environment: { PATH: "/usr/bin", HOME: "/fixture/home", ZEROS_WORKER_TOKEN: "fixture-worker", CURSOR_API_KEY: "fixture-cursor" }, gitEnvironment: { GIT_ASKPASS: "/fixture/askpass" } });
+  const driver = new ClaudeDriver({ query: h.query, executable: "/fixture/claude", environment: { PATH: "/usr/bin", HOME: "/fixture/home", ZEROS_WORKER_TOKEN: "fixture-worker", CURSOR_API_KEY: "fixture-cursor",
+    CLAUDE_CODE_OAUTH_TOKEN: "fixture-ambient-oauth", ANTHROPIC_API_KEY: "fixture-ambient-api-key", ANTHROPIC_AUTH_TOKEN: "fixture-ambient-auth",
+    ANTHROPIC_BASE_URL: "https://example.invalid", ZEROS_CLOUD_PROXY_TOKEN: "fixture-ambient-proxy" }, gitEnvironment: { GIT_ASKPASS: "/fixture/askpass" } });
   drivers.push(driver); return { driver, ...h };
 }
 
@@ -54,10 +56,16 @@ it("accounts cumulative usage by turn and ignores a replayed result during the n
   const response = await next; expect(response.usage).toMatchObject({ inputTokens: 40, outputTokens: 20 }); expect(response.usage?.totalCostUsd).toBeCloseTo(0.05);
 });
 
-it("allows only its own login and cancels unsupported native questions immediately", async () => {
-  const { driver, queries } = setup(); await driver.open(input); const prompt = driver.prompt(text("hello"));
+const logins = [
+  { login: { oauthToken: "offline-oauth-placeholder" }, name: "CLAUDE_CODE_OAUTH_TOKEN" },
+  { login: { apiKey: "offline-api-key-placeholder" }, name: "ANTHROPIC_API_KEY" },
+];
+
+it.each(logins)("allows only $name and cancels unsupported native questions immediately", async ({ login, name }) => {
+  const { driver, queries } = setup(); await driver.open({ ...input, oauthToken: undefined, ...login }); const prompt = driver.prompt(text("hello"));
   const query = queries[0], sent = await query.read(), options = query.args.options;
-  expect(Object.keys(options.env!).sort()).toEqual(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "GIT_ASKPASS", "HOME", "PATH"]);
+  expect(Object.keys(options.env!).sort()).toEqual([name, "GIT_ASKPASS", "HOME", "PATH"].sort());
+  expect(options.env![name] === (login.oauthToken ?? login.apiKey)).toBe(true);
   expect(await options.onUserDialog!({ dialogKind: "unknown", payload: {} } as never, {} as never)).toEqual({ behavior: "cancelled" });
   expect(await options.onElicitation!({} as never, {} as never)).toEqual({ action: "cancel" });
   query.push(result(sent.uuid)); await prompt;
@@ -111,11 +119,16 @@ it("fails a lost stream and rejects a different native session without replaying
   queries[1].push({ type: "system", subtype: "init", session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }); await mismatch;
 });
 
-it("ends a 401 turn cleanly and redacts its token from events and errors", async () => {
-  const { driver, queries } = setup(); const events: SessionNotification[] = []; driver.onEvent(event => events.push(event)); await driver.open(input);
-  const prompt = driver.prompt(text("hello")), failure = expect(prompt).rejects.toThrow(/401|authentication/i), query = queries[0], sent = await query.read();
-  query.push(result(sent.uuid, { subtype: "error_during_execution", is_error: true, errors: [`401 unauthorized ${input.proxy.token}`] })); await failure;
-  expect(JSON.stringify(events).includes(input.proxy.token)).toBe(false); expect(queries).toHaveLength(1);
+it.each(logins)("ends a 401 turn cleanly and redacts $name from events and errors", async ({ login }) => {
+  const { driver, queries } = setup(); const events: SessionNotification[] = []; driver.onEvent(event => events.push(event));
+  await driver.open({ ...input, oauthToken: undefined, ...login });
+  const failure = driver.prompt(text("hello")).catch((error: unknown) => error), query = queries[0], sent = await query.read();
+  const secret = login.oauthToken ?? login.apiKey;
+  query.push(result(sent.uuid, { subtype: "error_during_execution", is_error: true, errors: [`401 unauthorized ${secret}`] }));
+  const error = await failure;
+  expect(error instanceof Error && /401|authentication/i.test(error.message)).toBe(true);
+  expect(error instanceof Error && error.message.includes(secret)).toBe(false);
+  expect(JSON.stringify(events).includes(secret)).toBe(false); expect(queries).toHaveLength(1);
 });
 
 it("reports background failure and recovery after a completed prompt, and marks lost background work", async () => {
