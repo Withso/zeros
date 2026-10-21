@@ -1,5 +1,4 @@
 import type { ChangesHistory } from "@zeros/protocol/changes-history";
-import type { CloudLifecycleDeferred } from "./cloud-lifecycle-result";
 // ──────────────────────────────────────────────────────────
 // Native bindings — Git, GitHub, detach, and cross-tool IPC
 // ──────────────────────────────────────────────────────────
@@ -954,7 +953,7 @@ export async function workspaceCreateFromBranchStatus(args: {
 export async function workspaceDelete(args: {
   workspaceId: string;
   includeBranch: boolean;
-}): Promise<void | CloudLifecycleDeferred> {
+}): Promise<void> {
   return bridgeWorkspaceDelete(requireBridge("delete the workspace"), args);
 }
 
@@ -1030,7 +1029,7 @@ export interface RestoreResult {
 export async function workspaceArchive(args: {
   workspaceId: string;
   stashUncommitted?: boolean;
-}): Promise<ArchiveResult | CloudLifecycleDeferred> {
+}): Promise<ArchiveResult> {
   return bridgeWorkspaceArchive(requireBridge("archive the workspace"), {
     stashUncommitted: true,
     ...args,

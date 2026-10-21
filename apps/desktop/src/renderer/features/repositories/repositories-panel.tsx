@@ -148,7 +148,6 @@ import { clearChatPaneFolders } from "../../state/chat-panes-store";
 import { clearDashboardRepoFilter } from "../dashboard/preferences";
 import { forgetRepositoryVisibility } from "../dashboard/workspace-visibility";
 import { forgetRepositoryCollapsed } from "../../shell/sidebar-collapsed-repositories";
-import { isCloudLifecycleDeferred } from "../../platform/cloud-lifecycle-result";
 import { folderIsOwnedByProject } from "../../state/workspace-resolution";
 import {
   isInheritedSource,
@@ -2021,8 +2020,7 @@ export function RemoveRepositoryDialog({
       for (const ws of workspaces) {
         if (isLocalMainWorkspace(ws.id)) continue; // never the source checkout
         try {
-          const result = await workspaceDelete({ workspaceId: ws.id, includeBranch: false });
-          if (isCloudLifecycleDeferred(result)) return;
+          await workspaceDelete({ workspaceId: ws.id, includeBranch: false });
         } catch (err) {
           failed.push(ws.branch || ws.id);
           console.warn(

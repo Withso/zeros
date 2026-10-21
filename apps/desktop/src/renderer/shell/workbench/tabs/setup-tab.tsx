@@ -38,7 +38,6 @@ import {
   useReducer,
   useRef,
   useState,
-  useSyncExternalStore,
   type ForwardedRef,
   type ReactNode,
 } from "react";
@@ -72,10 +71,7 @@ import { useThemeId } from "../../../shared/theme/use-theme-variant";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { createTerminalResizeScheduler } from "../../terminal/terminal-resize-scheduler";
 import { isUsableTerminalDimensions } from "../../terminal/terminal-dimensions";
-import { parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
-import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../../state/cloud-workspace-catalog";
-import { WorkbenchEmptyState, useWorkbenchStatusSource } from "../tab-status";
-import { CloudWorkspaceSetupFailure } from "../../conversation/cloud-workspace-setup-failure";
+import { useWorkbenchStatusSource } from "../tab-status";
 import { Stack } from "@/renderer/shared/ui/layout/stack";
 
 /** How often to re-pull the setup buffer while a run is live. The buffer is the
@@ -130,25 +126,9 @@ export const SetupView = forwardRef<
 >(function SetupView({ workspace, visible, onBusyChange }, ref) {
   const openScripts = useOpenScriptsSettings();
   const active = useDocumentActive(visible);
-  const target = parseCloudWorkspaceKey(workspace?.id ?? "");
-  const cloud = target !== null;
-  const subscribe = useCallback((listener: () => void) =>
-    active && cloud ? subscribeCloudWorkspaces(listener) : () => {}, [active, cloud]);
-  const snapshot = () => (target ? cloudWorkspaceDocument(target) : undefined);
-  const failure = useSyncExternalStore(subscribe, snapshot, snapshot)?.setupFailure;
-  const managed = useWorkbenchStatusSource(
-    { error: failure ? "Setup failed" : null, pending: false },
-    workspace?.id,
-  );
+  // The Setup view is one of the workspace's workbench status sources.
+  useWorkbenchStatusSource({ error: null, pending: false }, workspace?.id);
   if (!workspace) return <SetupLoading />;
-  if (failure)
-    return managed ? (
-      <WorkbenchEmptyState type="terminal" />
-    ) : (
-      <div className="flex h-full min-h-0 items-center justify-center p-6">
-        <CloudWorkspaceSetupFailure failure={failure} />
-      </div>
-    );
   return (
     <WorkspaceSetup
       // Remount on workspace switch so the xterm + buffer cursor reset cleanly.

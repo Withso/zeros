@@ -8,7 +8,6 @@ import {
   Terminal,
 } from "lucide-react";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
-import { CLOUD_WORKSPACE_V2_REQUIRED, CLOUD_WORKSPACE_V2_REQUIRED_MESSAGE } from "../../platform/cloud-workspace-execution";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
 import {
   describeConnectionRejection,
@@ -104,21 +103,18 @@ export interface WorkbenchStatus {
   tone: "error" | "pending" | "neutral";
   message: string;
   diagnostic?: string;
-  action?: "Retry" | "Open Setup";
+  action?: "Retry";
   connectionPhase?: "connecting" | "reconnecting";
 }
 
 export interface WorkspaceAvailability {
   cloud: boolean;
-  restarting?: boolean;
-  restartFailed?: boolean;
   state?: string;
   connection: ConnectionStatus;
   since: number;
   previouslyConnected?: boolean;
   rejected?: boolean;
   rejection?: ConnectionRejection;
-  setupFailed?: boolean;
   stopError?: { code: string; message: string } | null;
   canWake?: boolean;
 }
@@ -162,12 +158,6 @@ export function describeWorkspaceAvailability(
   now: number,
 ): WorkbenchStatus | null {
   const workspace = input.cloud ? "cloud workspace" : "Zeros engine";
-  if (input.cloud && input.stopError?.code === CLOUD_WORKSPACE_V2_REQUIRED)
-    return { tone: "error", message: CLOUD_WORKSPACE_V2_REQUIRED_MESSAGE };
-  if (input.cloud && input.restarting)
-    return { tone: "pending", message: "Restarting the cloud workspace…" };
-  if (input.cloud && input.restartFailed)
-    return { tone: "error", message: "Couldn't restart this cloud workspace." };
   switch (input.state) {
     case "creating":
     case "provisioning":
@@ -194,14 +184,10 @@ export function describeWorkspaceAvailability(
     case "error":
       return {
         tone: "error",
-        message: input.setupFailed
-          ? "Setup failed."
-          : `Can't reach the ${workspace}.`,
-        action: input.setupFailed ? "Open Setup" : "Retry",
+        message: `Can't reach the ${workspace}.`,
+        action: "Retry",
       };
   }
-  if (input.setupFailed)
-    return { tone: "error", message: "Setup failed.", action: "Open Setup" };
   if (input.rejection) {
     const copy = describeConnectionRejection(input.rejection);
     return {
@@ -239,7 +225,6 @@ export function describeWorkspaceAvailability(
 /** Compact runtime status uses the same availability decision and calm clock
  * as the workbench banner. It never introduces another connection timer. */
 export function describeWorkspaceRuntimeStatus(input: WorkspaceAvailability, now: number): string {
-  if (input.cloud && input.restarting) return "Restarting…";
   const status = describeWorkspaceAvailability(input, now);
   if (status?.tone === "error") return "Needs attention";
   if (["stopped", "sleeping"].includes(input.state ?? "")) return "Sleeping";

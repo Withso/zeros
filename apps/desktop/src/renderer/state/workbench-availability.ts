@@ -77,7 +77,7 @@ function refreshAvailability(entry: AvailabilityEntry): void {
   const input = entry.value;
   if (
     entry.listeners.size && input.connection !== "connected" &&
-    !input.restarting && !input.rejected && !input.rejection && !input.setupFailed &&
+    !input.rejected && !input.rejection &&
     (!input.state || ["ready", "busy"].includes(input.state))
   ) {
     const elapsed = Date.now() - input.since;
@@ -107,7 +107,7 @@ function frameVisible(folder: string): boolean {
 function reconcileCloudNotice(folder: string, entry: AvailabilityEntry): void {
   const notice = entry.notice;
   if (!notice) return;
-  const shown = !entry.value.restarting && !frameVisible(folder);
+  const shown = !frameVisible(folder);
   if (notice.shown === shown) return;
   notice.shown = shown;
   const id = notice.id;
@@ -215,7 +215,6 @@ function entryFor(folder: string): AvailabilityEntry {
       entry.value.state !== "busy";
     publish({
       state: doc?.status,
-      setupFailed: !!doc?.setupFailure,
       stopError: doc?.error,
       canWake: doc?.capabilities.canWrite,
       ...(becameReady && entry.value.connection !== "connected"
@@ -241,7 +240,7 @@ function entryFor(folder: string): AvailabilityEntry {
           ? { since: Date.now() }
           : {}),
         ...(connection === "connected"
-          ? { rejected: false, rejection: undefined, restartFailed: false }
+          ? { rejected: false, rejection: undefined }
           : {}),
       });
       if (connection === "connected") clearConnectionNotice(entry);
@@ -287,20 +286,17 @@ function entryFor(folder: string): AvailabilityEntry {
 export function recordWorkbenchConnectionFailure(
   folder: string,
   error: unknown,
-  kind: "connect" | "open" | "restart" = "connect",
+  kind: "connect" | "open" = "connect",
 ): void {
   const entry = entryFor(folder);
-  if (entry.value.restarting && kind !== "restart") return;
-  entry.value = { ...entry.value, rejected: true, restartFailed: kind === "restart" };
+  entry.value = { ...entry.value, rejected: true };
   refreshAvailability(entry);
   if (entry.notice?.id !== `cloud-connect:${folder}`)
     clearConnectionNotice(entry);
   entry.notice = {
     id: `cloud-connect:${folder}`,
     headline:
-      kind === "restart"
-        ? "Couldn't restart this cloud workspace"
-        : kind === "connect"
+      kind === "connect"
         ? "Couldn't connect to this cloud workspace"
         : "Couldn't open this cloud workspace",
     description:
@@ -319,7 +315,7 @@ export function clearWorkbenchConnectionFailure(folder: string): void {
   if (!entry) return;
   clearConnectionNotice(entry);
   if (!entry.value.rejected || entry.value.rejection) return;
-  entry.value = { ...entry.value, rejected: false, restartFailed: false };
+  entry.value = { ...entry.value, rejected: false };
   refreshAvailability(entry);
 }
 

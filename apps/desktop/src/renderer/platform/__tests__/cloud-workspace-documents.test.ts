@@ -13,78 +13,17 @@ const document = {
   capabilities: { canWrite: true, canManage: false, canStart: false, startUnavailableReason: "workspace_role_required" },
 };
 
-describe("cloud workspace sharing projection", () => {
-  it("keeps the final-save companion optional and closed, without inventing native support", () => {
-    const acceptedOperation={version:1,id:document.id,kind:"restart",sourceGeneration:1,phase:"saving",state:"pending"};
-    expect(CloudWorkspaceDocumentSchema.parse({...document,lifecycleVersion:1,acceptedOperation})).toMatchObject({lifecycleVersion:1,acceptedOperation});
-    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("lifecycleVersion");
-    const oldReader=CloudWorkspaceDocumentSchema.omit({lifecycleVersion:true,acceptedOperation:true});
-    expect(oldReader.parse({...document,lifecycleVersion:1,acceptedOperation})).toEqual(oldReader.parse(document));
-    for (const change of [{phase:"unknown"},{state:"failed"},{phase:"completed"},{sourceGeneration:0},{token:"rejected"}])
-      expect(CloudWorkspaceDocumentSchema.safeParse({...document,lifecycleVersion:1,acceptedOperation:{...acceptedOperation,...change}}).success).toBe(false);
+describe("cloud workspace document", () => {
+  it("carries the precise edit capability", () => {
+    expect(CloudWorkspaceDocumentSchema.parse({ ...document, capabilities: { ...document.capabilities, canEdit: false } }))
+      .toMatchObject({ capabilities: { canWrite: true, canEdit: false, canManage: false } });
   });
-  it("retains only a closed additive history-gap receipt, never fabricated empty coverage", () => {
-    const historyRecovery = { recoveryId: "88888888-8888-4888-8888-888888888888", code: "history_recovered_with_gap", coverage: "unknown",
-      generation: 1, engineInstanceId: "66666666-6666-4666-8666-666666666666", bootId: "44444444-4444-4444-8444-444444444444",
-      writerEpoch: "55555555-5555-4555-8555-555555555555", completedAt: "2026-10-14T00:00:00Z" };
-    expect(CloudWorkspaceDocumentSchema.parse({ ...document, historyRecovery }).historyRecovery).toEqual(historyRecovery);
-    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("historyRecovery");
-    for (const change of [{ coverage: "empty" }, { code: "history_restored" }, { recoveryId: "foreign" }, { generation: 0 }, { predecessor: {} }])
-      expect(CloudWorkspaceDocumentSchema.safeParse({ ...document, historyRecovery: { ...historyRecovery, ...change } }).success).toBe(false);
+  it("does not infer edit authority from canWrite", () => {
+    expect(CloudWorkspaceDocumentSchema.parse(document).capabilities.canEdit === true).toBe(false);
   });
-  it("retains the additive failed-setup projection without requiring it from older servers", () => {
-    const setupFailure = { code: "setup_image_contract_invalid", hasLog: false };
-    expect(CloudWorkspaceDocumentSchema.parse({ ...document, setupFailure })).toMatchObject({ setupFailure });
-    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("setupFailure");
-  });
-  it("retains role, revision, sharing scope and the precise edit capability", () => {
-    expect(CloudWorkspaceDocumentSchema.parse({ ...document, actorRole: "prompter", sharingMode: "private", accessRevision: 7,
-      capabilities: { ...document.capabilities, canEdit: false } })).toMatchObject({
-      actorRole: "prompter", sharingMode: "private", accessRevision: 7,
-      capabilities: { canWrite: true, canEdit: false, canManage: false },
-    });
-  });
-  it("accepts older servers without inferring edit authority from canWrite", () => {
-    const parsed = CloudWorkspaceDocumentSchema.parse(document);
-    expect(parsed.capabilities.canEdit === true).toBe(false);
-    expect(parsed.actorRole).toBeUndefined();
-  });
-  it("rejects unknown roles and invalid access revisions", () => {
-    expect(CloudWorkspaceDocumentSchema.safeParse({ ...document, actorRole: "admin" }).success).toBe(false);
-    expect(CloudWorkspaceDocumentSchema.safeParse({ ...document, accessRevision: 0 }).success).toBe(false);
-  });
-});
-
-describe("negotiated cloud credential document", () => {
-  const binding = {
-    mode: "boot-owner-v1", fundingScope: "workspace-roles-v1",
-    bootId: "44444444-4444-4444-8444-444444444444", writerEpoch: "55555555-5555-4555-8555-555555555555",
-    fundingOwnerUserId: document.createdBy, fundingOwnerEpoch: 1, generation: 1,
-    engineInstanceId: "66666666-6666-4666-8666-666666666666", status: "owner-changed",
-  };
-
-  it("retains the exact boot owner-transfer state separately from current workspace ownership", () => {
-    expect(CloudWorkspaceDocumentSchema.parse({ ...document, ownerUserId: "77777777-7777-4777-8777-777777777777",
-      agentCredentials: binding })).toMatchObject({ agentCredentials: binding });
-  });
-
-  it("does not infer new-mode funding or a changed card for a legacy document", () => {
-    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("agentCredentials");
-  });
-
-  it.each([
-    { mode: "actor-grant-v1" }, { fundingScope: "owner-only" }, { bootId: "foreign" }, { writerEpoch: "foreign" },
-    { fundingOwnerUserId: "foreign" }, { fundingOwnerEpoch: 0 }, { generation: 0 }, { engineInstanceId: "foreign" },
-    { status: "credentials-changed" }, { material: { apiKey: "synthetic-private-key" } },
-    { cacheRevision: 2 }, { refreshToken: "synthetic-private-refresh" },
-  ])("refuses unbound or private credential document fields %#", patch => {
-    expect(CloudWorkspaceDocumentSchema.safeParse({ ...document, agentCredentials: { ...binding, ...patch } }).success).toBe(false);
-  });
-
-  it("retains only bounded nonsecret initial adoption states with unknown distinct from missing", () => {
-    const initialAdoptions = [{ provider: "claude", status: "missing" }, { provider: "codex", status: "known", adoptionId: binding.bootId },
-      { provider: "cursor", status: "unknown" }];
-    expect(CloudWorkspaceDocumentSchema.parse({ ...document, agentCredentials: { ...binding, status: "current", initialAdoptions } }))
-      .toMatchObject({ agentCredentials: { initialAdoptions } });
+  it("drops fields only the retired v1 control plane sent", () => {
+    const parsed = CloudWorkspaceDocumentSchema.parse({ ...document, lifecycleVersion: 1, sharingMode: "private",
+      setupFailure: { code: "setup_command_failed", hasLog: true }, recovery: null });
+    for (const field of ["lifecycleVersion", "sharingMode", "setupFailure", "recovery"]) expect(parsed).not.toHaveProperty(field);
   });
 });

@@ -20,6 +20,7 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await open();
   await checkLocalTranscriptPaint({ page, check, screenshotDir });
   await checkEmptyChatTranscriptRow({ page, check, harnessBase, screenshotDir });
+  await open();
   await checkOptimisticSendPresentation({ page, check, screenshotDir });
   await open();
   const { checkRunningTurnPresentation } = await import("./ui-smoke-running-turn.mjs");
@@ -30,6 +31,9 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await open();
   const { checkIncrementalTranscriptPresentation } = await import("./ui-smoke-transcript-incremental.mjs");
   await checkIncrementalTranscriptPresentation({ page, check });
+  await open();
+  const { checkInstantCheckpointNavigation } = await import("./ui-smoke-instant-checkpoint.mjs");
+  await checkInstantCheckpointNavigation({ page, check });
   expect(errors).toEqual([]);
 }
 

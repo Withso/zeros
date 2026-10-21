@@ -1,5 +1,5 @@
 export * from "./cloud-workspace-contract";
-import { CloudWorkspaceDocumentSchema, type CloudWorkspaceDocument } from "./cloud-workspace-contract";
+import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import { z } from "zod";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
@@ -12,8 +12,6 @@ import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 import { isFeatureEnabled } from "../config/release-channel";
 import { changeCloudV2Workspace, cloudV2Document, createCloudV2Workspace, getCloudV2Workspace, listCloudV2Workspaces } from "./cloud-v2";
 import { getTeamStoreState } from "../features/team/team-store";
-import { CloudAcceptedLifecycleReceiptSchema, CloudRestartInputSchema,
-  type CloudAcceptedLifecycleReceipt } from "@zeros/protocol/cloud-final-save";
 
 async function readCloudJson(response: Response): Promise<unknown> {
   const reader = response.body?.getReader();
@@ -90,55 +88,6 @@ export async function cloudAccountRequest<T>(
   return schema.parse(body);
 }
 
-const request = cloudAccountRequest;
-
-export const CloudWorkspaceRenameInputSchema = z.object({
-  // Reject controls before whitespace normalization.
-  // eslint-disable-next-line no-control-regex
-  name: z.string().refine(value => !/[\u0000-\u001f\u007f]/.test(value), "Name contains unsupported characters")
-    .transform(value => value.trim()).pipe(z.string().min(1).max(120)),
-  version: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-}).strict();
-
-export const CloudWorkspaceDetectedPortsSchema = z.object({
-  version: z.literal(1), organizationId: z.string().uuid(), workspaceId: z.string().uuid(),
-  generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), status: z.string().min(1).max(64),
-  observedAt: z.string().datetime().nullable(),
-  ports: z.array(z.object({
-    port: z.number().int().min(1024).max(65535), protocol: z.literal("tcp"),
-    processLabel: z.string().max(120).nullable(), health: z.enum(["observed", "healthy", "unhealthy", "closed"]),
-    observedAt: z.string().datetime(), closedAt: z.string().datetime().nullable(),
-  }).strict()).max(128).nullable(),
-}).strict().refine(value => (value.ports === null) === (value.observedAt === null), "Port observation state needs its timestamp");
-export type CloudWorkspaceDetectedPorts = z.infer<typeof CloudWorkspaceDetectedPortsSchema>;
-
-export async function getCloudWorkspaceDetectedPorts(target: CloudWorkspaceTarget, generation: number): Promise<CloudWorkspaceDetectedPorts> {
-  const number = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).parse(generation);
-  const result = await request(`${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/detected-ports?generation=${number}`,
-    CloudWorkspaceDetectedPortsSchema);
-  if (result.organizationId !== target.organizationId || result.workspaceId !== target.workspaceId || result.generation !== number)
-    throw new Error("Cloud port observations changed identity");
-  return result;
-}
-
-export async function renameCloudWorkspace(
-  target: CloudWorkspaceTarget,
-  input: z.infer<typeof CloudWorkspaceRenameInputSchema>,
-  idempotencyKey: string,
-): Promise<CloudWorkspaceDocument> {
-  const body = CloudWorkspaceRenameInputSchema.parse(input);
-  const key = z.string().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/).parse(idempotencyKey);
-  const { workspace } = await request(`${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}`,
-    z.object({ workspace: CloudWorkspaceDocumentSchema }), { body, idempotencyKey: key, method: "PATCH" });
-  if (workspace.organizationId !== target.organizationId || workspace.id !== target.workspaceId)
-    throw new Error("Cloud workspace rename changed identity");
-  return workspace;
-}
-
-
-function organizationPath(organizationId: string): string {
-  return `/v1/organizations/${z.string().uuid().parse(organizationId)}/cloud-workspaces`;
-}
 
 export async function listCloudWorkspaceDocuments(organizationId?: string): Promise<
   CloudWorkspaceDocument[]
@@ -179,66 +128,6 @@ export async function changeCloudWorkspaceLifecycle(
   if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud lifecycle response changed identity");
   // A successful server deletion stays successful if native cleanup fails.
-  return workspace;
-}
-
-export type CloudLifecycleAcceptance = {
-  workspace: CloudWorkspaceDocument;
-  operation: CloudAcceptedLifecycleReceipt;
-};
-const LifecycleAcceptanceSchema = z.object({
-  workspace: CloudWorkspaceDocumentSchema,
-  operation: CloudAcceptedLifecycleReceiptSchema,
-});
-
-function validateLifecycleAcceptance(target: CloudWorkspaceTarget,
-  kind: CloudAcceptedLifecycleReceipt["kind"], result: CloudLifecycleAcceptance): CloudLifecycleAcceptance {
-  if (result.workspace.id !== target.workspaceId || result.workspace.organizationId !== target.organizationId ||
-      result.operation.kind !== kind) throw new Error("Cloud lifecycle response changed identity");
-  return result;
-}
-
-/** Discovery is chosen before sending. An uncertain v1 send never falls back
- * to the legacy path, including when a retry reaches an older CP instance. */
-export async function changeCloudWorkspaceLifecycleWithReceipt(
-  target: CloudWorkspaceTarget, operation: "stop" | "archive" | "delete", idempotencyKey: string,
-): Promise<CloudLifecycleAcceptance> {
-  target = Object.freeze({ ...target });
-  return validateLifecycleAcceptance(target, operation, await request(
-    `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}${operation === "delete" ? "" : `/${operation}`}`,
-    LifecycleAcceptanceSchema, { body: {}, idempotencyKey, method: operation === "delete" ? "DELETE" : "POST" },
-  ));
-}
-
-export async function restartCloudWorkspaceLifecycle(target: CloudWorkspaceTarget,
-  input: z.infer<typeof CloudRestartInputSchema>, idempotencyKey: string,
-): Promise<CloudLifecycleAcceptance> {
-  target = Object.freeze({ ...target });
-  const body = Object.freeze(CloudRestartInputSchema.parse(input));
-  const result = validateLifecycleAcceptance(target, "restart", await request(
-    `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/restart`,
-    LifecycleAcceptanceSchema, { body, idempotencyKey },
-  ));
-  if (result.operation.sourceGeneration !== body.expectedGeneration)
-    throw new Error("Cloud Restart receipt changed its original generation");
-  return result;
-}
-
-export const CloudWorkspaceRecoveryInputSchema = z.object({
-  sourceGeneration: z.number().int().positive(),
-  checkpointId: z.string().uuid(),
-  allowDataLoss: z.boolean().optional(),
-}).strict();
-export type CloudWorkspaceRecoveryInput = z.infer<typeof CloudWorkspaceRecoveryInputSchema>;
-
-export async function recoverCloudWorkspace(target: CloudWorkspaceTarget, input: CloudWorkspaceRecoveryInput, idempotencyKey: string): Promise<CloudWorkspaceDocument> {
-  const { workspace } = await request(
-    `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/generations`,
-    z.object({ workspace: CloudWorkspaceDocumentSchema }),
-    { body: { operation: "recover", ...CloudWorkspaceRecoveryInputSchema.parse(input) }, idempotencyKey },
-  );
-  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
-    throw new Error("Cloud recovery response changed identity");
   return workspace;
 }
 
