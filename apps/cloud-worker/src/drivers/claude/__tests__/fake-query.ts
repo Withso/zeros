@@ -28,7 +28,7 @@ export function harness() {
 }
 
 export const nativeId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-export const input = { sessionId: "execution", nativeSessionId: nativeId, cwd: "/fixture/checkout", model: "claude-sonnet-4-6", proxy: { baseUrl: "http://127.0.0.1:1/anthropic", token: "offline-proxy-placeholder" } };
+export const input = { sessionId: "execution", nativeSessionId: nativeId, cwd: "/fixture/checkout", model: "claude-sonnet-4-6", oauthToken: "offline-oauth-placeholder" };
 export const text = (text: string) => [{ type: "text" as const, text }];
 export const result = (uuid?: string, fields: Record<string, unknown> = {}) => ({ type: "result", subtype: "success", result: "", session_id: nativeId, ...(uuid ? { user_message_uuid: uuid } : {}), ...fields });
 export const tick = () => new Promise<void>(resolve => setImmediate(resolve));

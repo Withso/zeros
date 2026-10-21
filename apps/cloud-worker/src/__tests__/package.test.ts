@@ -2,10 +2,10 @@ import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createReadStream } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
 import { afterAll, beforeAll, expect, it } from "vitest";
@@ -16,14 +16,16 @@ import { repositoryFixture } from "../workspace/__tests__/repository-fixture";
 
 const exec = promisify(execFile);
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
-let directory: string, dist: string;
+let directory: string, dist: string, runtime: string;
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), "worker-package-"));
   const built = join(directory, "build-output"); dist = join(directory, "relocated worker", "worker");
   await exec(process.execPath, [join(packageRoot, "scripts/build.mjs"), "--outdir", built], { cwd: packageRoot, env: workerChildEnvironment(), timeout: 90_000, maxBuffer: 1024 * 1024 });
   // Move out of the build location and away from every repository node_modules.
-  await mkdir(dirname(dist));
-  await rename(built, dist);
+  runtime = join(dirname(dist), "runtime", "a".repeat(64));
+  await mkdir(dirname(runtime), { recursive: true });
+  await rename(built, runtime);
+  await symlink(runtime, dist, "dir");
 }, 100_000);
 afterAll(async () => { if (directory) await rm(directory, { recursive: true, force: true }); });
 
@@ -34,6 +36,7 @@ it("refuses to replace an existing output directory that is not a worker build",
 });
 
 it("ships a relocatable dependency graph and a complete SHA-256 inventory", async () => {
+  expect((await lstat(dist)).isSymbolicLink()).toBe(true); expect(await realpath(dist)).toBe(runtime);
   const manifest = JSON.parse(await readFile(join(dist, "runtime-manifest.json"), "utf8"));
   expect(manifest).toMatchObject({ node: "24", platform: process.platform, arch: process.arch,
     pins: { "@openai/codex": "0.162.1", "@anthropic-ai/claude-agent-sdk": "0.3.296", "@cursor/sdk": "1.0.37", "node-pty": "1.1.0" } });
@@ -59,21 +62,36 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
   expect(files.some(name => name.includes("@cursor/sdk-linux-") && name.endsWith("/rg"))).toBe(true);
 }, 60_000);
 
-it("loads all external SDKs and runs node-pty without the checkout or pnpm store", async () => {
+it("loads pinned binaries and SDKs through the runtime symlink without the checkout or pnpm store", async () => {
   const script = `
     import { createRequire } from 'node:module';
+    import { dirname, join } from 'node:path';
+    import { realpathSync } from 'node:fs';
+    import { fileURLToPath } from 'node:url';
+    import { execFileSync } from 'node:child_process';
+    import assert from 'node:assert/strict';
     const require = createRequire(new URL('./worker.mjs', import.meta.url));
     await import('@anthropic-ai/claude-agent-sdk');
     await import('@cursor/sdk');
-    require.resolve('@openai/codex/package.json');
+    const root = dirname(fileURLToPath(import.meta.url));
+    const codexManifest = require.resolve('@openai/codex/package.json');
+    const codex = join(dirname(codexManifest), 'bin/codex.js');
+    const claudeSdk = require.resolve('@anthropic-ai/claude-agent-sdk');
+    const claude = createRequire(claudeSdk).resolve('@anthropic-ai/claude-agent-sdk-' + process.platform + '-' + process.arch + '/claude');
+    for (const path of [codex, claude, require.resolve('@cursor/sdk')]) assert(realpathSync(path).startsWith(root + '/node_modules/'));
+    assert.equal(require(codexManifest).version, '0.162.1');
+    assert.equal(require(join(dirname(claudeSdk), 'package.json')).version, '0.3.296');
+    assert.equal(require(join(dirname(claude), 'package.json')).version, '0.3.296');
+    assert.match(execFileSync(process.execPath, [codex, '--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }), /0\\.162\\.1/);
+    assert.match(execFileSync(claude, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }), /Claude Code/);
     const pty = require('node-pty').spawn('/bin/sh', ['-c', 'printf WORKER_NATIVE_OK'], {cwd:process.cwd(),env:{PATH:'/usr/bin:/bin'}});
     let output=''; pty.onData(data=>{output+=data});
     pty.onExit(({exitCode})=>{process.exitCode=exitCode===0&&output.includes('WORKER_NATIVE_OK')?0:1;});
   `;
   const path = join(dist, "native-smoke.mjs"); await writeFile(path, script);
-  const result = await exec(process.execPath, [path], { cwd: directory, env: workerChildEnvironment(), timeout: 15_000, maxBuffer: 1024 * 1024 });
+  const result = await exec(process.execPath, [path], { cwd: directory, env: { ...workerChildEnvironment(), HOME: directory }, timeout: 25_000, maxBuffer: 1024 * 1024 });
   expect(result.stderr).toBe(""); await rm(path);
-});
+}, 30_000);
 
 it("boots the relocated Cursor host with its real pinned SDK over IPC without contacting a provider", async () => {
   const child = spawn(process.execPath, [join(dist, "cursor-host.mjs")], { cwd: directory,
@@ -92,15 +110,32 @@ it("boots the relocated Cursor host with its real pinned SDK over IPC without co
   }
 });
 
-it("resolves the executable askpass wrapper after relocation, including spaces", async () => {
-  const broker = new GithubBroker(join(directory, "askpass.sock"), async () => ({ token: "fixture-package-github", expiresAt: Date.now() + 60_000 }));
+it("resolves askpass and gh wrappers through a runtime symlink, including spaces", async () => {
+  let requests = 0;
+  const broker = new GithubBroker(join(directory, "askpass.sock"), async () => { requests++; return { token: "fixture-package-github", expiresAt: Date.now() + 60_000 }; });
   await broker.start();
   try {
     const executable = join(dist, "bin/git-askpass");
     const result = await exec(executable, ["Password for 'https://x-access-token@github.com': "], {
       cwd: directory, env: workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, executable)), timeout: 10_000,
     });
-    expect(result.stdout).toBe("fixture-package-github\n"); expect(result.stderr).toBe("");
+    expect(result.stdout === "fixture-package-github\n").toBe(true); expect(result.stderr).toBe("");
+    const git = spawn("git", ["credential", "fill"], { cwd: directory,
+      env: { ...workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, executable)), HOME: directory }, stdio: ["pipe", "pipe", "pipe"] });
+    let credentials = "", errors = "";
+    git.stdout.on("data", data => { credentials += data; }); git.stderr.on("data", data => { errors += data; });
+    const closed = once(git, "close"); git.stdin.end("protocol=https\nhost=github.com\n\n");
+    const [code] = await closed;
+    expect(code).toBe(0); expect(errors).toBe("");
+    expect(credentials.includes("password=fixture-package-github\n")).toBe(true);
+    expect(credentials.includes("username=x-access-token\n")).toBe(true);
+    // Only the final OS gh process is substituted: test hosts need not install
+    // Boat's /usr/bin/gh, and this smoke must never contact GitHub.
+    const gh = await exec(join(dist, "bin/gh"), ["--version"], {
+      cwd: directory, env: { ...workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, executable)),
+        NODE_OPTIONS: `--import=${new URL("./fixtures/gh-launch.mjs", import.meta.url).href}` }, timeout: 10_000,
+    });
+    expect(gh.stdout.startsWith("gh version ")).toBe(true); expect(gh.stderr).toBe(""); expect(requests).toBe(3);
   } finally { await broker.dispose(); }
 });
 
@@ -152,4 +187,10 @@ it("rejects invalid boot configuration without printing its contents", async () 
     env: { ...workerChildEnvironment(), ZEROS_WORKER_URL: "wss://fixture-login:fixture-secret@example.invalid", ZEROS_WORKSPACE_ID: WORKSPACE_ID }, timeout: 10_000,
   }).then(() => undefined, error => error as { code: number; stderr: string });
   expect(result).toMatchObject({ code: 1, stderr: "cloud-worker invalid-boot-configuration\n" });
+});
+
+it("imports its helpers when the calling process has no file entry", async () => {
+  const source = `await import(${JSON.stringify(pathToFileURL(join(dist, "worker.mjs")).href)}); process.stdout.write('WORKER_IMPORT_OK');`;
+  const result = await exec(process.execPath, ["--input-type=module", "-e", source, "-"], { cwd: directory, env: workerChildEnvironment(), timeout: 10_000 });
+  expect(result.stdout).toBe("WORKER_IMPORT_OK"); expect(result.stderr).toBe("");
 });

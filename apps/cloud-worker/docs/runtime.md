@@ -49,6 +49,13 @@ Offline acceptance uses temporary Git repositories and a fake relay. Live
 provider, Boat, model proxy, and private-GitHub acceptance belongs to the
 integration owner; a Linux test does not establish macOS engine parity.
 
+Claude receives a direct setup OAuth token as `CLAUDE_CODE_OAUTH_TOKEN`, or a
+direct API key as `ANTHROPIC_API_KEY`. Exactly one is added to its allowed child
+environment; no Anthropic proxy variables are set. A full relay config replaces
+the login. Active foreground and background work retain their spawn credential;
+the next idle interaction reopens the query with a changed login and the confirmed
+native conversation id. Codex keeps its proxy token; Cursor keeps its direct key.
+
 Claude uses one pinned SDK query across prompts and drains native background
 output after the foreground result. Native user UUIDs identify turn and steering
 receipts; child and unrelated autonomous results cannot complete a newer send.
@@ -73,11 +80,16 @@ transcript reads settle before turn completion. Usage comes from the native run;
 only an exact run-id billing match supplies cost, with no inferred charges or
 late billing polling.
 
-## Image package
+## Runtime package
 
 Build on Linux with Node 24 LTS, on the same architecture and glibc as the VM:
-`pnpm --filter @zeros/cloud-worker build`. Install the entire `dist/` directory
-as `/opt/zeros/worker`, owned by root. It includes `worker.mjs`, `cursor-host.mjs`, `git-askpass.mjs`,
+`pnpm --filter @zeros/cloud-worker build`. The control plane delivers the entire
+`dist/` archive at boot into root-owned `/opt/zeros/runtime/<sha256>/` and points
+`/opt/zeros/worker` at that directory with a symlink. The runtime remains read-only
+to the worker. Entry-point detection compares canonical paths; bundled helpers
+and native package resolution stay beside that version's real bundle. Build into
+a real staging directory before archiving, rather than through the live symlink.
+The package includes `worker.mjs`, `cursor-host.mjs`, `git-askpass.mjs`,
 `gh.mjs`, executable `bin/gh` and `bin/git-askpass` wrappers, `package.json`,
 `runtime-manifest.json`, license notices and a materialized `node_modules/`.
 There are no links back to the build checkout or pnpm store. The manifest records
@@ -87,7 +99,8 @@ The bundle contains the protocol, WebSocket and terminal-screen libraries.
 External runtime packages are node-pty (including its native addon), Codex
 0.162.1 and its platform binary, Claude Agent SDK 0.3.296 and its platform CLI,
 and Cursor SDK 1.0.37 and its platform binaries. Their runtime dependencies and
-required peer dependencies are included; nothing downloads at startup.
+required peer dependencies are included; provider binaries do not download at
+agent startup.
 
 Boat's stock account is `user`. Run the service as `User=user`, with
 `WorkingDirectory=/home/user` and

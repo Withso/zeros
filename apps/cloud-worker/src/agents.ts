@@ -200,7 +200,8 @@ export class Agents {
       try {
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model,
           nativeSessionId: this.store.metadata(route.chatId)?.nativeSessionId,
-          ...("apiKey" in login ? { apiKey: login.apiKey } : { proxy: { baseUrl: login.baseUrl, token: login.token } }) });
+          ...("oauthToken" in login ? { oauthToken: login.oauthToken } : "apiKey" in login
+            ? { apiKey: login.apiKey } : { proxy: { baseUrl: login.baseUrl, token: login.token } }) });
         if (route.closed) { await driver.dispose(); throw new WorkspaceError("session-expired", "This execution has ended."); }
         if (!native.provisional) await this.store.bind(route.chatId, route.agentId, native.nativeSessionId);
       } catch (error) { route.unsubscribe?.(); await driver.dispose(); route.driver = undefined; throw error; }

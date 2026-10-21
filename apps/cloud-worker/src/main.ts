@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { CloudWorker } from "./worker";
 import { RelayTransport, WORKER_TOKEN_FILE } from "./relay-transport";
@@ -6,7 +6,7 @@ import { RelayTransport, WORKER_TOKEN_FILE } from "./relay-transport";
 export const WORKER_STATE_DIRECTORY = "/home/user/.local/share/zeros/cloud-worker";
 interface BootOptions { url: string; workspaceId: string; tokenFile?: string; directory?: string }
 
-/** The image receives only non-secret boot configuration. Model configuration
+/** The service receives only non-secret boot configuration. Model configuration
  * and the checkout arrive over the authenticated relay after hello. */
 export function readBootEnvironment(environment: NodeJS.ProcessEnv = process.env): BootOptions {
   const url = environment.ZEROS_WORKER_URL, workspaceId = environment.ZEROS_WORKSPACE_ID;
@@ -42,7 +42,15 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
   return { worker, stop };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Node resolves ESM URLs through the version-cache symlink; argv keeps the
+// launch path. Compare canonical paths so the systemd entry actually starts.
+function isEntrypoint(): boolean {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; } // An importer using stdin/eval need not have a file entry.
+}
+
+if (isEntrypoint()) {
   try { startWorker(readBootEnvironment()); }
   catch { process.stderr.write("cloud-worker invalid-boot-configuration\n"); process.exitCode = 1; }
 }

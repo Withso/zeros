@@ -43,14 +43,29 @@ describe("cloud v2 relay contract", () => {
     expect(CloudV2WorkerFrameSchema.safeParse({ t: "request", id, kind: "proxy-token" }).success).toBe(false);
   });
 
-  it("delivers proxy logins with an expiry and a Cursor key, nothing else", () => {
+  it("delivers a Codex proxy login, direct Claude login and Cursor key, nothing else", () => {
     const proxy = { baseUrl: "https://api.zeros.build/v2/cloud/proxy/openai", token: "z".repeat(32), expiresAt: 2 };
     const config = {
       t: "config",
       workspace: { id, organizationId: id, checkoutPath: "/home/user/withso/zeros", repository: "withso/zeros", branch: "zeros/cloud-1", baseBranch: "main" },
-      agents: { codex: proxy, claude: { ...proxy, baseUrl: "https://api.zeros.build/v2/cloud/proxy/anthropic" }, cursor: { apiKey: "key" } },
+      agents: { codex: proxy, claude: { oauthToken: "offline-oauth-placeholder" }, cursor: { apiKey: "key" } },
     };
     expect(CloudV2ControlFrameSchema.parse(config).t).toBe("config");
     expect(CloudV2ControlFrameSchema.safeParse({ ...config, agents: { codex: { ...proxy, refreshToken: "r" } } }).success).toBe(false);
+    expect(CloudV2ControlFrameSchema.safeParse({ ...config, agents: { claude: proxy } }).success).toBe(false);
+    expect(CloudV2ControlFrameSchema.safeParse({ ...config, agents: {} }).success).toBe(true);
+  });
+
+  it.each(["oauthToken", "apiKey"])("accepts only one bounded Claude %s credential", (field) => {
+    const config = {
+      t: "config",
+      workspace: { id, organizationId: id, checkoutPath: "/home/user/fixture/repo", repository: "fixture/repo", branch: "workspace/fixture", baseBranch: "main" },
+    };
+    for (const length of [16, 16384])
+      expect(CloudV2ControlFrameSchema.safeParse({ ...config, agents: { claude: { [field]: "x".repeat(length) } } }).success).toBe(true);
+    for (const length of [0, 15, 16385])
+      expect(CloudV2ControlFrameSchema.safeParse({ ...config, agents: { claude: { [field]: "x".repeat(length) } } }).success).toBe(false);
+    for (const extra of [{ oauthToken: "offline-oauth-placeholder", apiKey: "offline-api-key-placeholder" }, { [field]: "offline-placeholder", baseUrl: "https://example.com" }, {}])
+      expect(CloudV2ControlFrameSchema.safeParse({ ...config, agents: { claude: extra } }).success).toBe(false);
   });
 });

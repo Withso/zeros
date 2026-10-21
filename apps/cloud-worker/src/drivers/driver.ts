@@ -9,8 +9,9 @@ interface DriverSession {
 }
 
 export type DriverOpen = DriverSession & (
-  | { proxy: { baseUrl: string; token: string }; apiKey?: never }
-  | { apiKey: string; proxy?: never }
+  | { proxy: { baseUrl: string; token: string }; apiKey?: never; oauthToken?: never }
+  | { apiKey: string; proxy?: never; oauthToken?: never }
+  | { oauthToken: string; proxy?: never; apiKey?: never }
 );
 
 /** One driver owns one native conversation. Relay/inbox/history are worker-owned. */

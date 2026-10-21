@@ -21,6 +21,9 @@ lines.on("line", async line => {
         send({ type: "control_request", request_id, request: frame.fixtureControl });
         const response = await reply;
         if (response.subtype !== (frame.expectedSubtype ?? "success") || (frame.field && response.response[frame.field] !== frame.expected)) throw new Error("Unexpected fixture control reply");
+      } else if (frame.fixtureEnvironment) {
+        const { present, absent } = frame.fixtureEnvironment;
+        if (present.some(name => !process.env[name]) || absent.some(name => name in process.env)) throw new Error("Unexpected fixture child environment");
       } else send(JSON.parse(JSON.stringify(frame).replaceAll('"@input"', JSON.stringify(message.uuid))));
     }
   }

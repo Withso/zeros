@@ -49,9 +49,7 @@ export class ClaudeDriver implements Driver {
 
   async open(input: DriverOpen): Promise<{ nativeSessionId: string; provisional?: boolean }> {
     if (this.input || this.disposed) throw new Error("Claude driver has already been opened.");
-    if (!input.proxy?.token) throw new Error("Missing Claude proxy configuration.");
-    const url = new URL(input.proxy.baseUrl);
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("Invalid Claude proxy URL.");
+    if (input.proxy || !!input.oauthToken === !!input.apiKey) throw new Error("Provide one Claude OAuth token or API key.");
     if (input.nativeSessionId && !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(input.nativeSessionId)) throw new Error("Invalid Claude session id.");
     this.input = input; this.nativeSessionId = input.nativeSessionId ?? randomUUID(); this.resumed = !!input.nativeSessionId; this.model = input.model;
     this.mapper = new ClaudeStreamTranslator({ sessionId: input.sessionId, streamPartials: true, emit: event => this.emit(event) });
@@ -125,7 +123,7 @@ export class ClaudeDriver implements Driver {
     const options: Options = {
       cwd: session.cwd, ...(this.model ? { model: this.model } : {}),
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
-      env: agentEnvironment({ agent: "claude", ...session.proxy! }, this.options.environment, this.options.gitEnvironment),
+      env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, this.options.gitEnvironment),
       permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
       includePartialMessages: true, persistSession: true, settingSources: ["user", "project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code" },
@@ -251,7 +249,7 @@ export class ClaudeDriver implements Driver {
       severity: recovered ? "warning" : "error", recoverable: recovered, code, message, ...(failureKind ? { failureKind } : {}) } });
   }
   private redact(message: string): string {
-    const token = this.input?.proxy?.token;
+    const token = this.input?.oauthToken ?? this.input?.apiKey;
     return token ? message.split(token).join("[redacted]").split(JSON.stringify(token).slice(1, -1)).join("[redacted]") : message;
   }
   private error(error: unknown): Error { return new Error(this.redact(error instanceof Error ? error.message : typeof error === "string" ? error : "Claude request failed.")); }
