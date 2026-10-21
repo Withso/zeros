@@ -15,6 +15,8 @@ export const CLOUD_V2_IDLE_STOP_MS = 10 * 60_000;
 /** Boat's stock image runs commands as its one user, `user`. The worker and
  * agents run as that user too, so its credential lives in its config dir. */
 export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token";
+/** Non-secret boot settings for the worker's systemd unit (EnvironmentFile). */
+export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
 export type CloudV2LifecycleDeps = {
   store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince">;
@@ -33,15 +35,21 @@ function errorCode(error: unknown): string {
   return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "provider_request_failed";
 }
 
-/** Writes the worker credential owner-only. The value is a single-quoted base64
- * literal the shell never expands. */
-export function deliverWorkerTokenCommand(token: string): string {
+/** Writes the worker credential and its boot settings owner-only, then starts
+ * the worker if it is not running. Values are single-quoted base64 literals the
+ * shell never expands. Boat's sandbox environment does not reach systemd, so
+ * the boot settings travel with the credential. */
+export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Record<string, string>> = {}): string {
   if (!/^zw2w_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("Invalid worker token");
-  const encoded = Buffer.from(token, "utf8").toString("base64");
+  for (const [name, value] of Object.entries(bootEnv))
+    if (!/^ZEROS_[A-Z0-9_]{1,64}$/.test(name) || !/^[\x21-\x7e]{1,2048}$/.test(value)) throw new Error("Invalid worker boot setting");
+  const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
   const dir = CLOUD_V2_WORKER_TOKEN_PATH.slice(0, CLOUD_V2_WORKER_TOKEN_PATH.lastIndexOf("/"));
+  const envFile = Object.entries(bootEnv).map(([name, value]) => `${name}=${value}\n`).join("");
   return `umask 077 && mkdir -p ${dir} && chmod 700 ${dir} && ` +
-    `printf %s '${encoded}' | base64 -d > ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp && ` +
-    `mv -f ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp ${CLOUD_V2_WORKER_TOKEN_PATH}`;
+    `printf %s '${b64(envFile)}' | base64 -d > ${CLOUD_V2_WORKER_ENV_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_ENV_PATH}.tmp ${CLOUD_V2_WORKER_ENV_PATH} && ` +
+    `printf %s '${b64(token)}' | base64 -d > ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp ${CLOUD_V2_WORKER_TOKEN_PATH} && ` +
+    `(sudo -n systemctl restart zeros-worker.service || true)`;
 }
 
 export class CloudV2Lifecycle {
@@ -103,7 +111,7 @@ export class CloudV2Lifecycle {
           }));
           await store.defer(workspace.id, "creating", 0, { boatSandboxId: sandboxId });
         }
-        await this.deliverToken(workspace.id, sandboxId);
+        await this.deliverToken(workspace, sandboxId);
         await store.defer(workspace.id, "creating", HELLO_POLL_MS);
         return;
       }
@@ -111,7 +119,7 @@ export class CloudV2Lifecycle {
         if (!workspace.boatSandboxId) throw Object.assign(new Error("missing sandbox"), { code: "sandbox_missing" });
         // Resume is idempotent; repeating it while the worker boots is harmless.
         if (workspace.attempts === 1 || workspace.attempts % 4 === 0) await compute.resume(workspace.boatSandboxId);
-        if (workspace.attempts === 1) await this.deliverToken(workspace.id, workspace.boatSandboxId);
+        if (workspace.attempts === 1) await this.deliverToken(workspace, workspace.boatSandboxId);
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
       }
@@ -130,9 +138,9 @@ export class CloudV2Lifecycle {
     }
   }
 
-  private async deliverToken(workspaceId: string, sandboxId: string): Promise<void> {
-    const token = await this.deps.store.rotateWorkerToken(workspaceId);
-    const result = await this.deps.compute.exec(sandboxId, deliverWorkerTokenCommand(token), 30);
+  private async deliverToken(workspace: CloudV2Workspace, sandboxId: string): Promise<void> {
+    const token = await this.deps.store.rotateWorkerToken(workspace.id);
+    const result = await this.deps.compute.exec(sandboxId, deliverWorkerTokenCommand(token, this.deps.bootEnv(workspace)), 30);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });
   }
 }
