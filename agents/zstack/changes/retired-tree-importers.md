@@ -10,3 +10,11 @@ After deleting a directory, grep for its path across `scripts/`, `agents/`,
 `.github/` and the docs. Then run the whole `scripts/__tests__` suite with the CI
 umask (`umask 022`). The fix made zstack's drivers Local-only and documented
 the gate0 probe in their place (`tools.md`, `zstack-verify`).
+
+The same applies to a shared wire. Removing the cloud Design mapping from
+`cloud-runtime-wire.ts` broke 23 tests in `design-catalog-read-adapter.test.ts`,
+a suite outside the edited directories. Its fixture defaulted to the cloud
+placement, so generic adapter checks were running through the cloud mapping. The
+targeted run missed it; the full `pnpm test:git` caught it. After changing a
+wire consumed across features, run the whole root suite. A test whose subject
+is not placement-specific should default to a Local placement.
