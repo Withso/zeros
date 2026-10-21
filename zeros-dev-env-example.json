@@ -53,10 +53,7 @@
     "apiKey": "YOUR_BOAT_SERVICE_API_KEY",
     "billingOrg": "YOUR_BOAT_BILLING_ORGANIZATION",
     "accountScope": "YOUR_QUALIFIED_BOAT_ACCOUNT_SCOPE",
-    "baseSnapshot": "your-existing-qualified-snapshot",
-    "protectedSnapshots": ["your-release-snapshot"],
-    "secondsPerDollar": "YOUR_VERIFIED_NUMERIC_BOAT_COMPUTE_CONVERSION_RATE",
-    "builderBudgetHours": 1
+    "protectedSnapshots": ["your-release-snapshot"]
   },
   "admission": {
     "maxActiveGenerations": 4,

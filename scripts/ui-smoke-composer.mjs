@@ -155,7 +155,6 @@ const vite = spawn(
     env: {
       ...process.env,
       VITE_CONTROL_PLANE_URL: "https://api.example.test",
-      VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "preview.example.test",
     },
     detached: true,
   },

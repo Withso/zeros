@@ -19,7 +19,6 @@ export const GATES = Object.freeze([
   "cursor:smoke",
   "cursor:smoke:electron",
   "test:adapters",
-  "check:runtime-skew",
   "agent-runtime:surfaces",
 ]);
 

@@ -169,8 +169,9 @@ its CLI or app would: instruction files, rules, skills, hooks, plugins and MCP
 servers declared in the provider's local settings. Zeros MCP, imported MCP and
 Zeros skills are injected alongside them. Provider and organization disable
 policies remain in force; Zeros does not rewrite the user's native
-configuration files. Restricted actors and cloud executions keep only their
-admitted configuration.
+configuration files. Restricted Local actors keep only their admitted
+configuration. Cloud v2 has separate provider drivers; these Local adapter
+settings do not establish cloud support.
 
 - Claude Code chats use `settingSources: ["user", "project", "local"]` with
   non-strict MCP, so CLAUDE.md, `.claude/rules/`, skills, hooks, plugins and
@@ -180,8 +181,7 @@ admitted configuration.
   `instructionFiles` option to `claude-md-and-agents-md` as a flag setting;
   Claude honors that option in user, flag and policy settings, never in a
   repository's own settings files. Restricted actors use `settingSources: []`
-  with strict MCP configuration. A cloud execution uses its lease's sources:
-  `["user"]` for a customized lease, otherwise none.
+  with strict MCP configuration.
   Claude Code's **bundled** skills are separate from those filesystem settings
   sources: the runtime supplies them in every case. Zeros
   reads the supported command list and skill names over the control connection
@@ -196,8 +196,7 @@ admitted configuration.
   plugins and MCP declared in Cursor's own settings, alongside inline Zeros
   MCP. The source selection is captured at admission and reused for prewarm,
   create, resume, fallback, and mode rebuild, because it keys the SDK's
-  executor cache. Restricted actors and the host account opt-out use `[]`; a
-  cloud execution uses its lease's sources. Dashboard
+  executor cache. Restricted actors and the host account opt-out use `[]`. Dashboard
   account MCP is a **Cursor-hosted agent** capability; subscription sign-in
   does not deliver it to SDK local mode, including local mode inside a Zeros
   cloud workspace. Zeros does not silently transfer chats to Cursor hosting.

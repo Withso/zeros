@@ -216,9 +216,9 @@ email, ID spelling, or another account's missing memberships. Historical IDs
 whose classification was already lost require explicit recovery evidence; do
 not broadly adopt every unmatched local organization into Personal.
 
-Cloud provisioning is not implemented by this hierarchy change. When it ships,
-the create path must reject Personal before dispatch and re-authorize the
-organization, membership, capability, plan, and quota on the server.
+Cloud v2 creation rejects Personal and checks organization membership, the
+cloud entitlement and the creator on the server. See
+[Cloud workspaces](cloud-workspaces.md) for the current runtime boundary.
 
 ### Local and cloud are execution modes, not movable containers
 
@@ -230,11 +230,12 @@ collaboration semantics:
   uncommitted files, and existence are not uploaded merely because the user is
   viewing it under a Pro/Business organization context;
 - a cloud workspace is a server record with an immutable Zeros ID,
-  `organization_id`, `team_id`, creator, repository binding, generation,
-  policy, and provider resource. Authorized team members can discover it; and
+  organization, creator, repository, branch and provider resource. Cloud v2
+  has no team or replica layer; authorization remains server-owned; and
 - switching the UI organization never retargets either kind of workspace.
 
-Use explicit copy-like workflows instead:
+Future copy workflows must remain explicit; these are requirements, not
+currently implemented cloud v2 operations:
 
 1. **Create cloud from local.** Reauthorize the destination organization/team,
    plan, seat, repository, quota, and actor role. Create a new cloud workspace

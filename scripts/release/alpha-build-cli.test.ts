@@ -37,13 +37,11 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-function buildAPI(kind: "desktop" | "runtime") {
-  const steps = kind === "desktop"
-    ? ["Compute alpha version", "Record the baked cloud capability", "Verify installer + updater signatures", "Write signed Alpha build metadata", "Save signed Alpha artifacts"]
-    : ["Build and verify the exact-source runtime", "Save runtime bundle outputs"];
+function buildAPI(kind: "desktop") {
+  const steps = ["Compute alpha version", "Record the baked cloud capability", "Verify installer + updater signatures", "Write signed Alpha build metadata", "Save signed Alpha artifacts"];
   const state = { parent: { ...parent }, artifactId: 500 };
   const producer = { id: 400, run_id: 300, run_attempt: 1, head_sha: sourceSha, head_branch: "main",
-    name: kind === "desktop" ? "Build + sign Alpha (macOS arm64 · NOT notarized)" : "Build Linux runtime bundle",
+    name: "Build + sign Alpha (macOS arm64 · NOT notarized)",
     status: "completed", conclusion: "success", steps: steps.map(name => ({ name, status: "completed", conclusion: "success" })) };
   mocked.json.mockImplementation(async (url: string, init: RequestInit) => {
     expect(url).toMatch(new RegExp(`^https://api\\.github\\.com/repos/${repository}/actions/runs/300(?:/|$)`));
@@ -52,7 +50,7 @@ function buildAPI(kind: "desktop" | "runtime") {
     if (route === "/actions/runs/300") return state.parent;
     if (/^\/actions\/runs\/300\/attempts\/[12]\/jobs\?per_page=100&page=1$/.test(route)) return { total_count: 1, jobs: [producer] };
     if (route === "/actions/runs/300/artifacts?per_page=100") return { total_count: 1, artifacts: [{ id: state.artifactId,
-      name: `${kind === "desktop" ? "zeros-alpha-arm64-build" : "zeros-alpha-runtime-build"}-${sourceSha}`,
+      name: `zeros-alpha-arm64-build-${sourceSha}`,
       expired: false, workflow_run: { id: 300, head_sha: sourceSha, head_branch: "main" } }] };
     throw new Error("Unrecognized synthetic producer read");
   });
@@ -63,14 +61,14 @@ async function run(mode: string, kind?: string) {
   vi.resetModules();
   await import("./alpha-build-cli");
 }
-async function wait(kind: "desktop" | "runtime") {
+async function wait(kind: "desktop") {
   await run("--wait", kind);
   await vi.waitFor(() => expect(console.log).toHaveBeenCalledWith(`Alpha ${kind} producer and same-run artifact verified.`));
   return JSON.parse(await readFile(`.context/release/alpha-${kind}-producer.json`, "utf8"));
 }
 
 describe("Alpha producer CLI handoff", () => {
-  it.each(["desktop", "runtime"] as const)("emits only the authenticated %s artifact ID and persists carried producer proof", async kind => {
+  it.each(["desktop"] as const)("emits only the authenticated %s artifact ID and persists carried producer proof", async kind => {
     buildAPI(kind);
     expect(await wait(kind)).toMatchObject({ kind, runId: "300", runAttempt: "2", producerId: 400, producerAttempt: 1, artifactId: 500 });
     expect(await readFile("output", "utf8")).toBe("artifact_id=500\n");
@@ -95,11 +93,11 @@ describe("Alpha producer CLI handoff", () => {
     expect(process.exitCode).toBe(1);
     expect(await readFile("output", "utf8")).toBe("artifact_id=500\n");
   });
-  it.each(["artifact", "attempt"])("refuses runtime %s replacement between download and publication", async boundary => {
-    const state = buildAPI("runtime"); await wait("runtime");
+  it.each(["artifact", "attempt"])("refuses desktop %s replacement between download and publication", async boundary => {
+    const state = buildAPI("desktop"); await wait("desktop");
     if (boundary === "artifact") state.artifactId = 501;
     else state.parent.run_attempt = 3;
-    await run("--verify-producer", "runtime");
+    await run("--verify-producer", "desktop");
     await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
     expect(process.exitCode).toBe(1);
     expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("revalidated after download"));

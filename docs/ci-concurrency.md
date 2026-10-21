@@ -9,12 +9,6 @@ Release-branch pushes and merge-group events keep their own per-ref groups and
 cancel their own superseded runs. They do not share main's groups. Pull-request
 CI retains per-PR cancellation and its existing job-selection behavior.
 
-Cloud Runner Qualification also uses an independent, non-cancelling
-`cloud-runner-main-${{ github.run_id }}` group for every main push. Its PR and
-merge-group runs retain their existing per-ref cancellation. The isolated
-BuildKit builder still limits memory to 4 GiB with swap disabled, CPU to two
-cores and internal parallelism to two; those limits protect each runner's
-resources.
 Workflow Checks runs actionlint on every main push, with no push path filter,
 and keeps its unfiltered PR and merge-group triggers.
 
@@ -63,9 +57,7 @@ matrices and asserts that no Preflight or CI job has job-level concurrency or
 `max-parallel` caps. CI/Preflight workload parity remains covered by
 `scripts/__tests__/ci-workflow-parity.test.ts`.
 
-The concurrency suite also verifies independent main Cloud Runner Qualification
-runs, its retained PR/merge-group cancellation and BuildKit limits, and
-Workflow Checks' unfiltered main trigger.
+The concurrency suite also verifies Workflow Checks' unfiltered main trigger.
 
 `pnpm check:actions` runs the parsed-YAML validator before actionlint. The
 validator allows `queue` only on the manual Concurrency Canary job, whose one

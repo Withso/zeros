@@ -1,9 +1,6 @@
-import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import { assertCloudChannelState, CHANNELS, HostedReceipt, ReleaseIdentity, requireCheck, type Channel, type Surface } from "./contracts";
 
-type Candidate = { channel: Channel; sourceSha: string; branch: string; repository: string; runId: string; cloudRequired: boolean;
-  /** False while worker promotion is off: cloud ships on the API's current worker state. */
-  requireQualifiedWorker: boolean; provider?: string };
+type Candidate = { channel: Channel; sourceSha: string; branch: string; repository: string; runId: string; cloudRequired: boolean };
 
 /** The signed build baked its cloud capability in at compile time. A protected
  * variable changed before a publication retry must not reinterpret it. */
@@ -13,7 +10,6 @@ export function assertBuildCapability(built: string | undefined, cloudRequired: 
 export async function publicationGate(config: Candidate, deps: {
   receipt(): Promise<unknown>; identity(): Promise<unknown>; page(surface: Surface): Promise<unknown>;
 }) {
-  if (config.requireQualifiedWorker) refuseRetiredWorkerPromotion();
   // The adapter authenticates artifact/job provenance; repeat source/run
   // binding here so a caller cannot accidentally pass another release's proof.
   const parsed = HostedReceipt.safeParse(await deps.receipt());
@@ -28,8 +24,7 @@ export async function publicationGate(config: Candidate, deps: {
   assertCloudChannelState(config.channel, identity);
   requireCheck(identity.channel === config.channel && identity.sourceSha === config.sourceSha && expected.sourceSha === config.sourceSha &&
     identity.migrations.head === expected.migrations.head && identity.migrations.expectedHead === expected.migrations.expectedHead &&
-    identity.migrations.manifestSha256 === expected.migrations.manifestSha256 && identity.cloud.enabled === expected.cloud.enabled &&
-    JSON.stringify(identity.worker) === JSON.stringify(expected.worker), "Channel state superseded the hosted receipt; desktop publication refused");
+    identity.migrations.manifestSha256 === expected.migrations.manifestSha256 && identity.cloud.enabled === expected.cloud.enabled, "Channel state superseded the hosted receipt; desktop publication refused");
   const surfaces: Surface[] = CHANNELS[config.channel].ops ? ["app", "ops"] : ["app"];
   requireCheck(receipt.pages.length === surfaces.length && surfaces.every(surface => receipt.pages.some(page => page.surface === surface)), "Hosted receipt lacks a Pages surface");
   for (const surface of surfaces) {

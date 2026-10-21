@@ -13,14 +13,10 @@
 `styles/Artifacts/Designs/`. This Markdown checklist is authoritative; the former
 consolidated private delivery ledger is not a dependency of this roadmap.
 
-**Cloud scope (2026-10-08):** checked native capabilities below do not by themselves
-qualify a cloud runtime. Cloud keeps actor-bound native execution and the shared
-adapters, with exclusive MCP, bounded repository instruction/config projections
-and explicit permission intent. Raw project/plugin sources, native browser and
-additional host directories remain restricted; cloud project approvals are
-session-only until safe actor-scoped persistence exists. See
-[cloud native configuration](cloud-workspace/agent-authentication-and-language-tools.md#repository-instructions-and-configuration)
-and [source-mode/provider qualification](cloud-workspace/qualification-status.md#source-mode-agent-harness).
+**Cloud scope (2026-10-21):** checked Local capabilities below do not by themselves
+establish support in the standalone cloud worker. It implements provider drivers
+and shared transcript events; Design, browser and simulators are unavailable.
+See [Cloud workspaces](cloud-workspaces.md) for the supported cloud surface.
 
 ---
 

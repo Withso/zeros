@@ -95,13 +95,6 @@ export const scenarioRegistry = [
     780,
   ),
   fresh(
-    "cloud-workspace",
-    "cloud-workspace",
-    "runCloudWorkspaceSmoke",
-    900,
-    650,
-  ),
-  fresh(
     "workbench-status",
     "workbench-status",
     "runWorkbenchStatusSmoke",
@@ -109,24 +102,6 @@ export const scenarioRegistry = [
     650,
   ),
   fresh("simulator-tab", "simulator-tab", "runSimulatorTabSmoke", 900, 760),
-  fresh("cloud-replica", "cloud-replicas", "runCloudReplicaSmoke", 1100, 850),
-  fresh("cloud-preview", "cloud-previews", "runCloudPreviewSmoke", 900, 650),
-  fresh("cloud-design-assets", "cloud-design-assets", "runCloudDesignAssetsSmoke", 900, 650),
-  fresh("cloud-terminal", "cloud-terminal", "runCloudTerminalSmoke", 1100, 780),
-  fresh("cloud-settings", "cloud-settings", "runCloudSettingsSmoke", 1000, 850),
-  fresh("cloud-design-directories", "cloud-design-directories", "runCloudDesignDirectoriesSmoke", 1100, 850),
-  {
-    ...fresh(
-      "cloud-computer-v2",
-      "cloud-computer-v2",
-      "runCloudComputerV2Smoke",
-      1100,
-      900,
-    ),
-    // The base case and every regression profile form one unit; each needs a
-    // fresh page/context, as in the original loop.
-    regressions: "cloudComputerV2ReviewRegressions",
-  },
   fresh("context-gauge", "context-gauge", "runContextGaugeSmoke"),
   fresh("claude-runtime-ui", "claude-runtime-ui", "runClaudeRuntimeUiSmoke", 1280, 950),
   fresh("codex-runtime-ui", "codex-runtime-ui", "runCodexRuntimeUiSmoke", 1280, 950),

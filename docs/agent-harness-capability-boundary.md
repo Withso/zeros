@@ -11,7 +11,7 @@ the current harnesses already provide. It does not require a Zeros-owned agent
 harness, and it does not reduce all providers to their lowest common feature
 set.
 
-## Engine contract
+## Local engine contract
 
 Required lifecycle operations (`initialize`, create, resume, prompt, cancel,
 list resumable sessions, and dispose) remain on `AgentAdapter`. Optional product
@@ -38,24 +38,14 @@ Zeros-owned input, output, authorization, timeout, cancellation, redaction, and
 error semantics. Its adapter may then translate that operation to each
 provider's native protocol.
 
-Cloud uses these same adapters after durable actor/model/key/cwd admission and
-an engine-owned process-group lifetime. The cloud engine, providers and tools run
-as one non-root `zeros-engine` user (10003) in the real checkout, without an agent
-sandbox. Agents can read engine data and other-conversation state on their VM;
-per-conversation directories separate state, not authority between agents.
-Repository config cannot replace provider
-authority or the protected launch environment; admitted MCP is exclusive even
-at startup. Bounded engine-read instruction/config projections preserve native
-tools while raw project/plugin sources stay restricted. Cloud approvals are
-session-only unless engine-owned actor-scoped persistence is proved; explicit
-Ask/Plan wins. Local Personal and organization-local retain their native path.
-Legacy cloud validates its real execution lease; activated boot mode captures
-the owner's selection and independently confirmed actor/context under a local
-session lifetime. Exact warm reuse and native-write reservations are engine
-authority, never adapter telemetry or receipt inference. See
-[boot funding and trust](cloud-workspace/agent-authentication-and-language-tools.md#negotiated-boot-funding).
-See [cloud native configuration](cloud-workspace/agent-authentication-and-language-tools.md#repository-instructions-and-configuration)
-and [qualification limits](cloud-workspace/qualification-status.md#source-mode-agent-harness).
+Cloud uses the standalone worker in `apps/cloud-worker`, with provider drivers
+and shared protocol transcript folding. Shipped worker code does not import the
+Local engine. The workspace VM is its isolation boundary: agents, tools and
+terminals run as the stock non-root user in the real checkout. Each agent child
+receives an allowlisted environment and only its own provider credential.
+Design, browser and simulator capabilities are unavailable. See
+[Cloud workspaces](cloud-workspaces.md) for the current runtime and credential
+boundary.
 
 ## Turn failure and explicit recovery
 
@@ -80,11 +70,6 @@ catalog before any output. Expired conversations and transport interruptions
 retain their existing session recovery. Unknown errors preserve the provider
 explanation without guessing a sign-in remedy. Typed failures also
 outrank legacy authentication notices after reload and during prompt replay.
-
-Typed cloud admission/startup/renewal causes also survive adapter and gateway
-classification and cleanup. Their closed stage/category codes restore safe
-guidance from receipts without provider bodies or stderr. See
-[cloud command failures](cloud-workspace/lifecycle-diagnostics.md#agent-command-failures).
 
 The engine persists a terminal `error_notice` with optional `turnFailure`
 identity before publishing the failed turn. The renderer displays its reason
@@ -267,15 +252,6 @@ Serialized compatibility remains additive. Existing provider bindings and
 conversation records are not renamed or rewritten merely to match an upstream
 provider vocabulary.
 
-Cloud command permission selection is part of the immutable queued prompt.
-The shared composer carries its exact native mode (including Claude Accept
-Edits versus Auto), and the admitted VM environment forwards that bounded value
-without inheriting arbitrary desktop environment variables. New and resumed
-native executions start in that mode before any prompt runs. Legacy commands
-without the field recover the saved chat choice. The conversation response
-advertises `permissionModeVersion: 1`; clients omit the additive field for older
-workers during a rolling update.
-
 Claude preferences use the same renderer cache and acknowledged agent-preference
 outbox as model selections. `claude-idle-compaction-enabled` mirrors the user
 TOML leaf `models.claude_code.idle_compaction_enabled`, defaulting to false for
@@ -285,32 +261,6 @@ through its inline `Settings`: Off sets `idleCompaction: false`; On omits it at
 query creation and clears a live override with `null`. A true SDK value cannot
 force-enable native compaction.
 
-Cloud queued prompts retain a strict optional `claudePreferences` object with
-`autoMemoryEnabled` and `idleCompactionEnabled`. The admitted command supplies
-both cold session settings and retained-process updates, through the legacy
-queue and the boot-owner local queue alike; the control-plane local-command
-mirror accepts the same strict object. Another actor's or device's later
-selection cannot alter an accepted command. Legacy payloads
-keep auto memory On and idle compaction Off. Workers advertise
-`claudePreferencesVersion: 1`, and clients emit the additive payload/request
-fields only after that capability is confirmed. The worker's control-plane
-request uses `x-zeros-claude-preferences: 1`. Responses to older workers and
-attachments omit only the new preference field, preserving the durable payload
-and the existing native-command compatibility projection. Older pinned workers
-retain their legacy behavior until a runtime upgrade.
-
-Roll out the control-plane schema before publishing workers that advertise
-this capability. Older control planes reject the new strict payload field;
-the worker capability only negotiates desktop/worker compatibility.
-
-The optional task run/type/ownership fields and negotiated Claude preferences
-are additive compatibility extensions. They retain protocol version 20;
-`check:protocol` reports the source change advisory until a protocol-changing
-release is required.
-
-Between cloud commands, changing the permission picker records the next command's
-selection. During a live turn, the provider must acknowledge the change. The
-Codex VM wrapper retains the native approval/sandbox policy while fixing the
-execution environment and workspace roots. Cursor retains its native Auto-review
-flag on create, resume and prewarm. Mode failure handling is scoped to the current
-chat, execution and request so an old rejection cannot overwrite a newer choice.
+Cloud v2 uses its own Driver contract and full VM permissions. Native questions
+or approvals must settle without leaving a turn blocked. The retired command
+queue and preference-negotiation headers are no longer used.

@@ -19,7 +19,7 @@ async function main() {
   if (mode === "--record" && kind === undefined) {
     const metadata = createAlphaBuildMetadata(env);
     await writeFile("release/alpha-build-metadata.json", `${JSON.stringify(metadata, null, 2)}\n`);
-  } else if (mode === "--wait" && (kind === "desktop" || kind === "runtime")) {
+  } else if (mode === "--wait" && kind === "desktop") {
     console.log(`Waiting up to 45 minutes for this run's exact-source Alpha ${kind} producer.`);
     const proof = await waitForAlphaBuild(kind, env, read);
     await mkdir(".context/release", { recursive: true, mode: 0o700 });
@@ -27,7 +27,7 @@ async function main() {
     requireCheck(env.GITHUB_OUTPUT, "Alpha build readiness requires an artifact output destination");
     await appendFile(env.GITHUB_OUTPUT, `artifact_id=${proof.artifactId}\n`);
     console.log(`Alpha ${kind} producer and same-run artifact verified.`);
-  } else if (mode === "--verify-producer" && (kind === "desktop" || kind === "runtime")) {
+  } else if (mode === "--verify-producer" && kind === "desktop") {
     const proof = await validateAlphaProducerProof(await readBounded(`.context/release/alpha-${kind}-producer.json`), env, read);
     requireCheck(proof.kind === kind, "Alpha build producer proof belongs to another artifact kind");
     console.log(`Alpha ${kind} producer, immutable artifact and current parent attempt revalidated after download.`);
@@ -41,7 +41,7 @@ async function main() {
     requireCheck(env.GITHUB_OUTPUT, "Alpha metadata verification requires a publication output destination");
     await appendFile(env.GITHUB_OUTPUT, `version=${metadata.releaseVersion}\ncloud_enabled=${metadata.cloudEnabled}\n`);
     console.log("Alpha signed-build source, producing attempt, version and baked cloud capability verified.");
-  } else throw new PromotionError("Usage: alpha-build-cli.ts --record|--wait desktop|--wait runtime|--verify-producer desktop|--verify-producer runtime|--verify-metadata");
+  } else throw new PromotionError("Usage: alpha-build-cli.ts --record|--wait desktop|--verify-producer desktop|--verify-metadata");
 }
 
 void main().catch(error => {

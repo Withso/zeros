@@ -1,14 +1,13 @@
-import { refuseRetiredWorkerPromotion } from "./worker-retirement";
-import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud-workspaces/channel-policy";
+import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud/channel-policy";
 import { appendFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { CHANNELS, ReleaseIdentity, releaseSource, promotionConfig, PromotionError, type Channel } from "./contracts";
-import { channelBaseline, migrationManifest, workerInputsSha256 } from "./source";
+import { channelBaseline, migrationManifest } from "./source";
 import { githubClient } from "./github";
 
 type DisabledCandidate = { channel: Channel; sourceSha: string; cloudEnabled: boolean; provider?: string; repository?: string; branch?: string };
-type GuardDependencies = { fetch?: typeof fetch; channelBaseline?: typeof channelBaseline; migrationManifest?: typeof migrationManifest; workerInputsSha256?: typeof workerInputsSha256;
+type GuardDependencies = { fetch?: typeof fetch; channelBaseline?: typeof channelBaseline; migrationManifest?: typeof migrationManifest;
   cutoverReceipt?: (channel: Channel, sourceSha: string, manifestSha256: string) => Promise<boolean> };
 
 /** One anonymous, bounded read; the rollout switch must not need provider
@@ -57,11 +56,6 @@ export async function publicPagesSource(origin: string, surface: "app" | "ops", 
   } catch { return null; } finally { clearTimeout(timer); }
 }
 
-export async function hostedWorkerPromotionRequired(enabled: boolean, candidate: Pick<DisabledCandidate, "channel" | "sourceSha" | "provider">, _deps: GuardDependencies = {}) {
-  if (!enabled || !cloudWorkspaceChannelEnabled(candidate.channel)) return false;
-  refuseRetiredWorkerPromotion();
-}
-
 function manualCutoverSteps(candidate: DisabledCandidate) {
   const database = `zeros-control-plane-${candidate.channel}`;
   return `Owner steps: dispatch controlled-cutover.yml for ${candidate.channel} from ${candidate.branch || "the release branch"} at ${candidate.sourceSha}, ` +
@@ -103,51 +97,34 @@ export async function disabledGuard(_files: string[], candidate: DisabledCandida
     } catch { receiptVerified = false; }
   }
   const manualCutoverVerified = identityMatches && pagesVerified && receiptVerified;
-  let workerChanged = true, workerVerified = false;
-  const hash = deps.workerInputsSha256 ?? workerInputsSha256;
-  if (baseline) { try { workerChanged = await hash(baseline.sourceSha) !== await hash(candidate.sourceSha); } catch { /* Unknown is changed. */ } }
-  if (identity?.cloud.enabled && identity.cloud.state === "healthy" && identity.workerQualified === true && identity.worker?.provider === (candidate.provider || "boat")) {
-    try {
-      workerVerified = identity.worker.sourceSha === candidate.sourceSha ||
-        await hash(identity.worker.sourceSha) === await hash(candidate.sourceSha);
-    } catch { /* Unavailable history is not qualification; never print child diagnostics. */ }
-  }
   const migrations = observed.present ? !manualCutoverVerified : !previous || previous.sha256 !== manifest.sha256;
-  const needsWorker = candidate.cloudEnabled && (observed.present || workerChanged);
-  const changes = { migrations, worker: workerChanged };
-  const blocked = migrations && !manualCutoverVerified || needsWorker && !workerVerified;
+  const blocked = migrations && !manualCutoverVerified;
   const notes = ["Hosted promotion is DISABLED.",
     `Channel baseline: ${baseline ? `${baseline.tag} at ${baseline.sourceSha}` : "unavailable"}; live identity: ${observed.present ? "authoritative" : "unavailable"}.`,
-    `Migration changes: ${changes.migrations ? "yes" : "no"}; worker input changes: ${changes.worker ? "yes" : "no"}; cloud-enabled desktop: ${candidate.cloudEnabled ? "yes" : "no"}.`,
+    `Migration changes: ${migrations ? "yes" : "no"}; cloud-enabled desktop: ${candidate.cloudEnabled ? "yes" : "no"}.`,
     "This guard performed no backend, database, worker, or Pages mutations."];
   if (baseline?.evidence) notes.push(baseline.evidence);
   if (!baseline) notes.push("Published baseline unavailable: require the channel tag and retained successful release publish-step evidence (GitHub actions:read), or verify manual cutover through live identity.");
   if (manualCutoverVerified) notes.push("manual cutover verified by the public release identity; this is not a hosted success receipt or backup audit.");
   if (identityMatches && !pagesVerified) notes.push("The API reports the cutover, but the channel's Pages do not serve its commit yet; finish the cutover's Pages upload before publication.");
   if (identityMatches && pagesVerified && !receiptVerified) notes.push(`No successful controlled-cutover receipt exists for ${identity!.sourceSha}; run or finish controlled-cutover.yml for this channel before publication.`);
-  if (changes.migrations && !manualCutoverVerified) notes.push("Candidate migration cutover is not verified. Without a published channel baseline or matching live identity, publication is blocked.", manualCutoverSteps(candidate));
-  if (changes.worker && !candidate.cloudEnabled) notes.push("Worker input changes are warning-only because this desktop builds with cloud disabled.");
-  if (workerVerified) notes.push("Qualified live worker identity matches the candidate's committed worker inputs.");
-  if (needsWorker && !workerVerified) notes.push("Cloud-enabled desktop requires a qualified matching live worker: build and natively qualify the candidate image, apply cloud-runtime:manage plan then execute with the same owner login, select the complete worker tuple, deploy the backend, verify public readiness, and rerun this workflow.");
+  if (migrations && !manualCutoverVerified) notes.push("Candidate migration cutover is not verified. Without a published channel baseline or matching live identity, publication is blocked.", manualCutoverSteps(candidate));
   notes.push(blocked ? "Desktop publication is blocked." : "Legacy desktop publication may proceed; hosted promotion remains disabled.");
-  return { ...changes, blocked, manualCutoverVerified, workerVerified, message: notes.join(" ") };
+  return { migrations, blocked, manualCutoverVerified, message: notes.join(" ") };
 }
 async function main() {
   const source = releaseSource(process.env);
   const cloudChannel = cloudWorkspaceChannelEnabled(source.channel);
-  if (cloudChannel && process.env.ZEROS_WORKER_PROMOTION === "enabled") refuseRetiredWorkerPromotion();
   const enabled = process.env.ZEROS_HOSTED_PROMOTION === "enabled";
   if (enabled) promotionConfig(process.env); // Missing authority is a failure, never a silent skip.
-  const workerRequired = enabled && await hostedWorkerPromotionRequired(process.env.ZEROS_WORKER_PROMOTION === "enabled", {
-    ...source, provider: process.env.CLOUD_WORKSPACE_PROVIDER,
-  });
+
   const result = enabled ? { blocked: false, message: "Hosted promotion enabled; required secret names and target identities are present." }
     : await disabledGuard([], {
-      ...source, cloudEnabled: cloudChannel && process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true", provider: process.env.CLOUD_WORKSPACE_PROVIDER,
+      ...source, cloudEnabled: cloudChannel && process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true",
     });
   console.log(`::${result.blocked ? "error" : enabled ? "notice" : "warning"}::${result.message}`);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${result.message}\n`);
-  if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `enabled=${enabled}\nworker_enabled=${workerRequired}\n`);
+  if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `enabled=${enabled}\n`);
   if (result.blocked) process.exitCode = 1;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main().catch(error => {

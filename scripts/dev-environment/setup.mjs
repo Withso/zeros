@@ -8,7 +8,7 @@ import { developmentProfilePath, profileExists } from "./profile-path.mjs";
 import { hostedProfilePath } from "./hosted-profile.mjs";
 import { importDevelopmentProfile, inspectDevelopmentProfile } from "./setup-profile.mjs";
 import { developmentHome, privateDirectory, systemEnvironment, writePrivateFile } from "./state.mjs";
-import { ensureDevRailwayCli, RAILWAY_CLI_VERSION } from "./hosted-agent-ssh.mjs";
+import { ensureDevRailwayCli, RAILWAY_CLI_VERSION } from "./railway-tools.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);

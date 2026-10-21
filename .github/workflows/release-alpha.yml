@@ -133,16 +133,6 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  runtime-build:
-    name: Build Linux runtime bundle
-    # Read-only exact-source build: it starts with the run instead of waiting
-    # for the CI barrier. Publication still needs this job and hosted promotion,
-    # which itself needs the barrier.
-    if: github.event.repository.fork == false
-    permissions:
-      contents: read
-    uses: ./.github/workflows/cloud-runtime-bundle-build.yml
-
   build:
     name: Build + sign Alpha (macOS arm64 · NOT notarized)
     needs: metadata
@@ -172,7 +162,6 @@ jobs:
       # Protected release capability, baked into both Electron main and the
       # packaged engine. Unset environments remain explicitly fail-closed.
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'boat' }}
 
     steps:
       - name: Require signing credentials
@@ -264,8 +253,6 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
-          VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: ${{ vars.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES }}
-          VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: ${{ vars.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 }}
           AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
           AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
           AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
@@ -277,8 +264,6 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
-          VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: ${{ vars.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES }}
-          VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: ${{ vars.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 }}
           AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
           AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
           AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
@@ -378,7 +363,6 @@ jobs:
     permissions:
       contents: write
       actions: read
-      id-token: write
     uses: ./.github/workflows/alpha-publication.yml
     with:
       alpha_prepared_version: ${{ needs.metadata.outputs.version }}

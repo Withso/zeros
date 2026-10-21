@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CHANNELS, PromotionError, ReleaseIdentity, ReleaseIdentityBase, SHA, checkDeferredReadiness, requireCheck } from "./contracts";
+import { CHANNELS, PromotionError, ReleaseIdentity, ReleaseIdentityBase, SHA, requireCheck } from "./contracts";
 import { buildReleaseLedger, previousReleaseLedger, ReleaseLedger } from "./release-ledger";
 
 type Read = (route: string) => Promise<any>;
@@ -89,7 +89,7 @@ function requireDestination(condition: unknown, reason: string): asserts conditi
 const AlphaFrontierIdentity = ReleaseIdentityBase.extend({ ready: z.boolean(),
   cloud: ReleaseIdentityBase.shape.cloud.extend({ ready: z.boolean(),
     state: z.enum(["healthy", "disabled", "unready", "unknown"]) }),
-}).superRefine(checkDeferredReadiness);
+});
 
 export async function alphaFrontierIdentity(fetcher: typeof fetch = fetch) {
   const controller = new AbortController();
@@ -162,8 +162,6 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
     throw new AlphaAdmissionRejectedError("Alpha live destination identity is unavailable; forward-only admission refused");
   });
   requireDestination(identity, "Alpha live API/schema identity is unavailable; forward-only admission refused");
-  requireDestination(!identity.cloud.enabled || identity.worker,
-    "Alpha active worker identity is unavailable; forward-only admission refused");
   requireDestination(app && ops, "Alpha live Pages identity is unavailable; forward-only admission refused");
   const parsed = ReleaseLedger.safeParse(previous);
   requireDestination(parsed.success && parsed.data.channel === "alpha" && parsed.data.releases.length > 0,
@@ -173,11 +171,11 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
   // or malformed ledgers are unknown, never fabricated genesis frontiers.
   try { buildReleaseLedger("alpha", parsed.data, entry); }
   catch { throw new AlphaAdmissionRejectedError("Alpha live release ledger is invalid; forward-only admission refused"); }
-  const sources = [identity.sourceSha, app, ops, tag, entry.sourceSha, ...(identity.worker ? [identity.worker.sourceSha] : [])];
+  const sources = [identity.sourceSha, app, ops, tag, entry.sourceSha];
   const accepted = await Promise.all(sources.map(source => ancestor(source, candidate.sourceSha)));
   if (accepted.some(value => !value)) throw new AlphaAdmissionRejectedError();
-  // Feed assets precede the tag update. The same admitted parent's parallel
-  // runtime publisher can observe that intermediate write; both identities
+  // Feed assets precede the tag update. A publication checkpoint can
+  // observe that intermediate write; both identities
   // must still be <= X and at least one must identify this admitted X.
   const aligned = tag === entry.sourceSha || env.GITHUB_JOB !== "ci" && (tag === candidate.sourceSha || entry.sourceSha === candidate.sourceSha);
   if (!aligned && env.GITHUB_JOB === "ci") throw new AlphaPublicationPendingError(tag, entry.sourceSha);

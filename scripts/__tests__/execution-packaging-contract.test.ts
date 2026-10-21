@@ -9,8 +9,6 @@ const read = (file: string) => readFileSync(path.join(root, file), "utf8");
 const workflows = [
   "ci",
   "preflight",
-  "cloud-runtime-bundle-build",
-  "cloud-runner-qualification",
   "release-alpha",
   "release-beta",
   "release",
@@ -91,18 +89,6 @@ describe("VM execution and neutral packaging contracts", () => {
     expect(wrapper).toContain('sudo sysctl -q -w "$KEY=$restriction"');
     expect(wrapper).toContain("apparmor_parser --replace --skip-cache");
     expect(wrapper).toContain('"$@"');
-  });
-
-  it("uses the real closure tools for Linux bundle construction and retains preview browser checks", () => {
-    const bundle = read(".github/workflows/cloud-runtime-bundle-build.yml");
-    expect(bundle).toContain("./.github/actions/runtime-closure-tools");
-    expect(bundle).toContain(
-      "bash scripts/ci/with-userns.sh pnpm cloud:runtime-bundle:build",
-    );
-    expect(bundle).toContain("--source-commit");
-    const runner = read(".github/workflows/cloud-runner-qualification.yml");
-    expect(runner).toContain("pnpm agents:smoke:offline");
-    expect(runner).toContain("pnpm check:preview-browser");
   });
 
   it("packages the original Host supervisor and neutral pinned ripgrep, keeping provider assets", () => {

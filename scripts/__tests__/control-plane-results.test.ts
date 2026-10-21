@@ -159,7 +159,7 @@ describe("control-plane results", () => {
     const files = listControlPlaneTestFiles();
     const database = databaseBackedTestFiles(files);
     expect(files).toContain("src/migrations.test.ts");
-    expect(files).toContain("src/cloud-workspaces/reconciler.integration.test.ts");
+    expect(files).toContain("src/cloud/store.integration.test.ts");
     expect(database.has("src/migrations.test.ts")).toBe(true);
     expect(database.has("src/test-database.integration.test.ts")).toBe(true);
     expect(database.has("src/auth.test.ts")).toBe(false);

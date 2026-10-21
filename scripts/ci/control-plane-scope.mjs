@@ -9,9 +9,8 @@
 // a change touches none of their inputs. The typecheck and dependency audit
 // still run on every change.
 //
-// The inputs are more than apps/control-plane/: the admission contracts import
-// the real desktop engine clients and protocol schemas through the root package
-// graph, and migrate.test.ts reads two operator documents.
+// The inputs include the shared protocol parity tests, model catalog and Dev
+// provisioning helpers, plus migration operator documentation.
 // scripts/__tests__/control-plane-scope.test.ts derives the actual import
 // closure of every control-plane source and test file and fails if a file it
 // reaches is missing below, so the list cannot silently fall behind.
@@ -33,69 +32,10 @@ import { pathToFileURL } from "node:url";
 export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   // The service: source, tests, migrations, lockfile and Vitest config.
   "apps/control-plane/",
-  // Desktop clients and protocol schemas the admission contracts import.
-  "apps/desktop/electron/cloud-workspace-access-client.ts",
-  "apps/desktop/electron/cloud-workspace-detected-ports.ts",
-  "apps/desktop/electron/tsconfig.json",
-  "apps/desktop/src/engine/agents/cloud-actor-authority.ts",
-  "apps/desktop/src/engine/agents/cloud-mcp.ts",
-  "apps/desktop/src/engine/agents/containment/cloud-engine-startup-failure.mjs",
-  "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
-  "apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs",
-  "apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime.ts",
-  "apps/desktop/src/engine/agents/cloud-accepted-work-authority.ts",
-  "apps/desktop/src/engine/cloud-accepted-work-client.ts",
-  "apps/desktop/src/engine/cloud-accepted-work-ledger.ts",
-  "apps/desktop/src/engine/cloud-agent-execution-client.ts",
-  "apps/desktop/src/engine/cloud-capability-auth.ts",
-  "apps/desktop/src/engine/cloud-capability-verifier.ts",
-  "apps/desktop/src/engine/cloud-command-client.ts",
-  "apps/desktop/src/engine/cloud-event-client.ts",
-  "apps/desktop/src/engine/cloud-event-runtime.ts",
-  "apps/desktop/src/engine/cloud-local-command-mirror.ts",
-  "apps/desktop/src/engine/cloud-local-command-queue.ts",
-  "apps/desktop/src/engine/cloud-local-command-queue-control-client.ts",
-  "apps/desktop/src/engine/cloud-local-command-queue-events.ts",
-  "apps/desktop/src/engine/cloud-local-command-queue-history.ts",
-  "apps/desktop/src/engine/cloud-local-command-queue-history-rebuild.ts",
-  "apps/desktop/src/engine/cloud-local-command-queue-start-fences.ts",
-  "apps/desktop/src/engine/db/migrations.ts",
-  "apps/desktop/src/engine/db/sqlite.ts",
-  "apps/desktop/src/engine/cloud-github-write-client.ts",
-  "apps/desktop/src/engine/cloud-github-read-client.ts",
-  "apps/desktop/src/engine/cloud-runtime-registration.ts",
-  "apps/desktop/src/engine/cloud-runtime-retirement.ts",
-  "apps/desktop/src/engine/git/github-native-client.ts",
-  "apps/desktop/src/engine/git/github-native-desktop.ts",
-  "apps/desktop/src/renderer/platform/bridge/cloud-runtime-access-error.ts",
-  "packages/protocol/package.json",
-  "packages/protocol/tsconfig.json",
-  "packages/protocol/src/cloud-accepted-work.ts",
-  "packages/protocol/src/cloud-accepted-work-client.ts",
-  "packages/protocol/src/cloud-actors.ts",
-  "packages/protocol/src/cloud-agent-bootstrap.ts",
-  "packages/protocol/src/cloud-agent-execution.ts",
-  "packages/protocol/src/cloud-bridge-diagnostics.ts",
-  "packages/protocol/src/cloud-build-qualification.ts",
-  "packages/protocol/src/cloud-commands.ts",
-  "packages/protocol/src/cloud-capabilities.ts",
-  "packages/protocol/src/cloud-capability-sessions.ts",
-  "packages/protocol/src/cloud-checkpoint-history.ts",
-  "packages/protocol/src/cloud-coordinator.ts",
-  "packages/protocol/src/cloud-computer-tools.ts",
-  "packages/protocol/src/cloud-computer-v2.ts",
-  "packages/protocol/src/cloud-customization.ts",
-  "packages/protocol/src/cloud-events.ts",
-  "packages/protocol/src/cloud-execution-authority.ts",
-  "packages/protocol/src/cloud-final-save.ts",
-  "packages/protocol/src/cloud-local-mirror.ts",
-  "packages/protocol/src/cloud-runtime-bundle.ts",
-  "packages/protocol/src/cloud-runtime-connection.ts",
-  "packages/protocol/src/cloud-runtime-lifecycle.ts",
-  "packages/protocol/src/containment.ts",
-  "packages/protocol/src/github-auth.ts",
-  "packages/protocol/src/messages.ts",
-  // Dev provisioning/qualification modules the Dev integration suites import.
+  // Contract parity tests and the shared model catalog.
+  "packages/protocol/",
+  "catalogs/models-v1.json",
+  // Dev provisioning modules used by the integration suites.
   "scripts/dev-environment/",
   // The root package graph those imports resolve and transform through.
   "package.json",
@@ -104,10 +44,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "pnpm-workspace.yaml",
   "tsconfig.json",
   // Operator documents migrate.test.ts checks for complete approval commands.
-  "docs/cloud-workspace/infrastructure-and-operations.md",
   "docs/deployment-environments.md",
-  // Loaded at run time by the live setup qualification.
-  "scripts/cloud-workspace-validation/",
   // This gate itself.
   ".github/workflows/preflight.yml",
   "scripts/ci/control-plane-results.mjs",

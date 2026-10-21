@@ -63,15 +63,6 @@ export function validateServicesReceipt(receipt: unknown, run: any, config: Pick
   assertArtifactJob(run, attempt, config, jobs, "Hosted services", ["Promote services and verify WorkOS", "Save services receipt"]);
   return value;
 }
-export async function validateWorkerArtifact(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[]) {
-  assertArtifactRun(run, config, channel);
-  const { WorkerReceipt, validateWorkerReceipt } = await import("./worker");
-  const parsed = WorkerReceipt.parse(receipt), attempt = Number(parsed.runAttempt);
-  requireCheck(Number.isSafeInteger(attempt) && attempt > 0 && attempt <= run.run_attempt, "Worker artifact attempt is invalid");
-  const value = validateWorkerReceipt(parsed, { ...config, channel, runId: String(run.id), runAttempt: parsed.runAttempt });
-  assertArtifactJob(run, attempt, config, jobs, "worker", ["Worker plan or guarded execution", "Save success receipt"]);
-  return value;
-}
 export function githubClient(config: Pick<PromotionConfig, "repository" | "sourceSha" | "branch">, env: NodeJS.ProcessEnv,
   options: { fetch?: typeof fetch; command?: Command; sleep?: (milliseconds: number) => Promise<void> } = {}) {
   const json = jsonClient(options.fetch), runCommand = options.command ?? command;
@@ -110,9 +101,9 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       await assertAlphaAdmission(config, env, read, JSON.parse(bytes.toString("utf8")));
     } finally { await rm(directory, { force: true, recursive: true }); }
   }
-  async function receiptForRun(run: any, channel: Channel, requireOverallSuccess: boolean, kind: "hosted" | "services" | "worker" = "hosted") {
+  async function receiptForRun(run: any, channel: Channel, requireOverallSuccess: boolean, kind: "hosted" | "services" = "hosted") {
     requireCheck(Number.isSafeInteger(run.id), "Invalid hosted workflow run");
-    const name = `${kind === "services" ? "hosted-services" : kind === "worker" ? "worker-promotion" : "hosted-promotion"}-${channel}-${config.sourceSha}`;
+    const name = `${kind === "services" ? "hosted-services" : "hosted-promotion"}-${channel}-${config.sourceSha}`;
     const list = await read(`/actions/runs/${run.id}/artifacts?per_page=100`);
     const artifact = list.artifacts?.find((item: any) => item.name === name && item.expired === false && item.workflow_run?.head_sha === config.sourceSha);
     if (!artifact) return null;
@@ -120,9 +111,9 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
     try {
       await runCommand("gh", ["run", "download", String(run.id), "--repo", config.repository, "--name", name, "--dir", directory],
         { env: { PATH: env.PATH, HOME: env.HOME, GH_TOKEN: env.GH_TOKEN }, timeout: 60_000 });
-      const bytes = await readFile(path.join(directory, kind === "services" ? "hosted-services.json" : kind === "worker" ? "worker-receipt.json" : "hosted-receipt.json"));
+      const bytes = await readFile(path.join(directory, kind === "services" ? "hosted-services.json" : "hosted-receipt.json"));
       requireCheck(bytes.length <= 64 * 1024, "Hosted receipt exceeds its size bound");
-      const parser = kind === "services" ? HostedServicesReceipt : kind === "worker" ? (await import("./worker")).WorkerReceipt : HostedReceipt;
+      const parser = kind === "services" ? HostedServicesReceipt : HostedReceipt;
       const receipt = parser.parse(JSON.parse(bytes.toString("utf8"))), attempt = Number(receipt.runAttempt);
       requireCheck(Number.isSafeInteger(attempt) && attempt > 0 && attempt <= run.run_attempt, "Invalid receipt attempt");
       const jobs: any[] = [];
@@ -131,7 +122,6 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
         requireCheck(Array.isArray(result.jobs), "Hosted job evidence is unavailable");
         jobs.push(...result.jobs);
         if (result.jobs.length < 100) return kind === "services" ? validateServicesReceipt(receipt, run, config, channel, jobs)
-          : kind === "worker" ? await validateWorkerArtifact(receipt, run, config, channel, jobs)
           : validateHostedReceipt(receipt, run, config, channel, jobs, requireOverallSuccess);
       }
       throw new Error("Hosted job evidence exceeds its bound");
@@ -255,7 +245,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       if (env.GITHUB_JOB !== "ci") {
         // Admission is immutable for this source/run/attempt. Keep its proof
         // within this client; CI, parent identity, main and destinations still
-        // revalidate at every checkpoint, including the worker's hot loop.
+        // revalidate at every publication checkpoint.
         const key = JSON.stringify([config.repository, config.sourceSha, env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT]);
         if (admissionProof?.key !== key) admissionProof = { key, confirmed: ownAlphaAdmission() };
         await admissionProof.confirmed;
@@ -299,14 +289,6 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       requireCheck(String(run.id) === runId, "Services run identity mismatch");
       const receipt = await receiptForRun(run, channel, false, "services");
       requireCheck(receipt, "Current run has no trusted services receipt");
-      return receipt;
-    },
-    async ownWorkerReceipt(channel: Channel, runId: string) {
-      requireCheck(/^[1-9]\d*$/.test(runId), "Invalid worker run identity");
-      const run = await read(`/actions/runs/${runId}`);
-      requireCheck(String(run.id) === runId, "Worker run identity mismatch");
-      const receipt = await receiptForRun(run, channel, false, "worker");
-      requireCheck(receipt, "Current run has no trusted worker success receipt");
       return receipt;
     },
     async betaReceipt() {

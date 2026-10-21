@@ -13,11 +13,9 @@ green resolution requires full evidence at the current main head. Historical
 pending runs replaced under the previous coalescing policy completed as
 `cancelled` with no jobs and never open an incident.
 
-Cloud Runner Qualification also retains a full independent run for every main
-push, with its existing BuildKit resource limits. Workflow Checks runs
-actionlint on every main push. Recovery continues to observe Preflight only;
-these companion checks keep their own identities and do not change incident
-eligibility or PR job selection.
+Workflow Checks runs actionlint on every main push. Recovery continues to
+observe Preflight only; this companion check keeps its own identity and does
+not change incident eligibility or PR job selection.
 
 ## Modes
 

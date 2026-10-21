@@ -11,7 +11,6 @@ import {
   validateSmokePartition,
 } from "../ui-smoke/scenarios.mjs";
 import { checkPageErrors, runSmokeScenarios } from "../ui-smoke/runner.mjs";
-import { cloudComputerV2ReviewRegressions } from "../ui-smoke-cloud-computer-v2.mjs";
 
 // Frozen from the serial runner, including the design-workspace dispatcher's
 // children. Core's later phases stay after file-prefetch in the execution plan.
@@ -24,16 +23,8 @@ const originalOrder = [
   "create-composer",
   "create-source-immediate-escape",
   "create-source-tooltip-escape",
-  "cloud-workspace",
   "workbench-status",
   "simulator-tab",
-  "cloud-replica",
-  "cloud-preview",
-  "cloud-design-assets",
-  "cloud-terminal",
-  "cloud-settings",
-  "cloud-design-directories",
-  "cloud-computer-v2",
   "context-gauge",
   "claude-runtime-ui",
   "codex-runtime-ui",
@@ -281,9 +272,7 @@ function fakeRun(shard?: number, crashId?: string) {
         return page;
       },
       loadModule: async (specifier) => {
-        const exports: Record<string, unknown> = {
-          cloudComputerV2ReviewRegressions,
-        };
+        const exports: Record<string, unknown> = {};
         for (const scenario of scenarioRegistry.filter(
           (entry) => entry.module === specifier,
         )) {
@@ -323,7 +312,7 @@ describe("UI smoke independent execution", () => {
     }
   });
 
-  it("preserves full-run page sharing and every Cloud Computer regression profile", async () => {
+  it("preserves full-run page sharing", async () => {
     const fixture = fakeRun();
     fixture.check.mockImplementation((name) => {
       if (name === "no uncaught page errors") {
@@ -349,16 +338,6 @@ describe("UI smoke independent execution", () => {
       height: 700,
     });
     expect(pageFor("composer-editor").route).not.toHaveBeenCalled();
-    const computer = fixture.calls.filter(
-      (call) => call.id === "cloud-computer-v2",
-    );
-    expect(computer.map((call) => call.regression)).toEqual([
-      undefined,
-      ...cloudComputerV2ReviewRegressions,
-    ]);
-    expect(new Set(computer.map((call) => call.page)).size).toBe(
-      computer.length,
-    );
     for (const page of fixture.pages) expect(page.close).toHaveBeenCalledOnce();
   });
 
@@ -370,11 +349,7 @@ describe("UI smoke independent execution", () => {
       const steps = fixture.calls.map(({ id, phase }) =>
         phase ? { id, phase } : { id },
       );
-      const expectedSteps = selectScenarioSteps(shard).flatMap((step) =>
-        step.id === "cloud-computer-v2"
-          ? Array(1 + cloudComputerV2ReviewRegressions.length).fill(step)
-          : [step],
-      );
+      const expectedSteps = selectScenarioSteps(shard);
       expect(steps).toEqual(expectedSteps);
       const owners = new Map<(typeof fixture.pages)[number], string>();
       for (const call of fixture.calls) {

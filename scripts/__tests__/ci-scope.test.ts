@@ -242,8 +242,8 @@ describe("CI scope globs", () => {
 
 describe("CI scope path ownership", () => {
   it.each([
-    "apps/control-plane/src/cloud-workspace-channels.json",
-    "apps/control-plane/src/cloud-workspaces/channel-policy.ts",
+    "apps/control-plane/src/cloud/channels.json",
+    "apps/control-plane/src/cloud/channel-policy.ts",
     "apps/desktop/shared/cloud-workspace-channel.ts",
     "scripts/release/channel-policy.mjs",
   ])("checks every shared cloud channel policy consumer for %s", (file) => {
@@ -285,7 +285,7 @@ describe("CI scope path ownership", () => {
     );
     expect(renderer.full).toBe(false);
     expect(renderer.lanes["desktop-engine"]).toBe(false);
-    expect(renderer.lanes["runtime-bundle"]).toBe(true);
+    expect(renderer.lanes["cloud-runtime"]).toBe(true);
     expect(selected(decide([change("styles/zeros-tokens.css")]))).toEqual([
       "desktop-renderer",
       "marketing",
@@ -333,10 +333,10 @@ describe("CI scope path ownership", () => {
       expect(decide([change(file)]).lanes["control-plane-db"], file).toBe(true);
     }
     expect(
-      decide([change("packages/protocol/src/design-runtime.ts")]).lanes[
+      decide([change("packages/protocol/src/cloud-v2-relay.ts")]).lanes[
         "control-plane-db"
       ],
-    ).toBe(false);
+    ).toBe(true);
     expect(
       decide([change("apps/desktop/src/engine/git/diff.ts")]).lanes[
         "control-plane-db"
@@ -360,14 +360,13 @@ describe("CI scope path ownership", () => {
     "scripts/ui-smoke-new-harness.ts",
     "apps/desktop/src/renderer/harnesses/harness-tools.tsx",
   ])(
-    "selects the Linux runtime bundle for %s without composer smoke",
+    "selects smoke-harness checks for %s without full composer smoke",
     (file) => {
       const decision = decide([change(file)]);
       expect(decision.full).toBe(false);
       expect(decision.lanes["smoke-harness"]).toBe(true);
-      expect(decision.lanes["runtime-bundle"]).toBe(true);
       expect(decision.lanes["ui-smoke"]).toBe(false);
-      expect(selectChecks(POLICY, decision)).toContain("linux-runtime-bundle");
+      expect(selectChecks(POLICY, decision)).toContain("root-vitest");
       expect(selectChecks(POLICY, decision)).not.toContain("composer-full");
     },
   );
@@ -443,8 +442,6 @@ describe("CI scope additive requests", () => {
     ["ci:control-plane-db", "control-plane-db"],
     ["ci:packaging", "packaging"],
     ["ci:web", "web"],
-    ["ci:cloud-chaos", "cloud-chaos"],
-    ["ci:cloud-scale", "cloud-scale"],
   ])("adds %s without removing floor lanes", (label, lane) => {
     const changes = [change("apps/desktop/src/renderer/app-shell.tsx")];
     const floor = decide(changes);

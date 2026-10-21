@@ -127,7 +127,6 @@ jobs:
       ZEROS_CHANNEL: beta
       # The checked-in channel policy below overrides stale cloud opt-ins.
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'boat' }}
 
     steps:
       - name: Require signing credentials
@@ -257,8 +256,6 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
-          VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: ${{ vars.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES }}
-          VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: ${{ vars.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 }}
           AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
           AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
           AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
@@ -270,8 +267,6 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
-          VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: ${{ vars.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES }}
-          VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: ${{ vars.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 }}
           AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
           AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
           AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
@@ -366,9 +361,7 @@ jobs:
       RELEASE_SHA: ${{ github.sha }}
       RELEASE_BRANCH: ${{ github.ref_name }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
-      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'boat' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

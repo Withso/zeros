@@ -17,19 +17,18 @@ another Railway environment or PlanetScale branch.
 For account-free native UI/local feature testing, use
 [`pnpm electron:local`](local-development.md). It is a separate macOS launcher
 with isolated checkout profiles and no hosted provisioning. The Dev commands
-below retain hosted app setup. The v3 native agent canary is retired; its
-explicit command refuses before preparing provider or account authority.
+below retain hosted app setup.
 
 | Command | Behavior |
 | --- | --- |
 | `bash scripts/setup-zeros-dev.sh --profile /path/to/zeros-dev-env.json` | Install tools/dependencies on a Mac and securely import the portable profile |
 | `pnpm dev:setup --check` | Check installed tools and profile format without provisioning or changing files |
-| `pnpm dev:agents` | Refuse retired native qualification before profile, lease, allocation or credential preparation |
-| `pnpm dev:agents --retry` | Return the same retirement refusal; no new native attempt or credential dispatch |
+| `pnpm dev:agents` | Maintain the configured Dev credential references |
+| `pnpm dev:agents --retry` | Retry Dev credential-reference maintenance |
 | `pnpm electron:dev` | Reconcile hosted services, then build and watch the isolated macOS desktop |
 | `pnpm electron:run` | Same provisioning, then run the desktop without source watchers |
-| `pnpm dev:backend` | Reconcile/deploy the current source from macOS or Linux; report retirement of a configured native monitor |
-| `pnpm dev:backend --once` | Deploy once and report any retired native-canary intent, then exit |
+| `pnpm dev:backend` | Reconcile/deploy the current source from macOS or Linux; maintain configured credential references |
+| `pnpm dev:backend --once` | Deploy once, maintain credential references, then exit |
 | `pnpm dev:doctor` | Read the encrypted environment receipt without provisioning |
 | `pnpm dev:doctor --all --live` | Inventory current and archived owners; read live health, image, role and service evidence without mutations |
 | `pnpm dev:adopt --owner OWNER --generation UUID` | Authenticate an existing receipt and explicitly bind this checkout without renaming live resource keys |
@@ -303,11 +302,11 @@ Launch performs the following:
    protected environments. Capture tracked and untracked nonignored source into
    a private clean commit, leaving the user's index and branch unchanged. Run the
    normal secret scanner over the complete captured source.
-2. Reserve account/owner generation capacity, then a builder and snapshot slot
-   through the shared account CAS ledger before allocating a builder. Build/qualify
-   a worker through the release Boat image kit, including native
-   attestation and sanitation. Canonical engine/build/dependency inputs determine
-   reuse; a renderer-only change does not build another VM in that generation.
+2. Reserve account/owner generation capacity. Configure the previously published
+   standalone worker using `ZEROS_CLOUD_V2_RUNTIME_SHA256`; the control plane
+   delivers that version at VM boot. Publish it separately with the control
+   plane's `cloud-v2:publish-runtime` command. Cloud Computer builds use Boat's
+   stock image.
 3. Create an empty disposable PostgreSQL 18 branch inside the configured logical
    database. It copies no Alpha schema or data. Create a short-lived migration
    role and a separate runtime role; run the release migrations as stable owner
@@ -338,7 +337,7 @@ normal API startup is verify-only. Object encryption keys and storage prefixes
 are generated per environment. The prefix covers objects and tombstones.
 
 See [PlanetScale PostgreSQL branching](https://planetscale.com/docs/postgres/branching)
-and the repository's [database qualification](cloud-workspace/database-qualification.md).
+for the provider database contract.
 An unchanged healthy launch reuses its generation. A stopped deployment is
 reconciled without replacing the database. Failed readiness never launches the
 new desktop against a stale backend.
@@ -363,12 +362,11 @@ after shutdown without applying new migrations.
 
 During a running session, renderer edits use Vite hot reload once they reach the
 Mac checkout; no Git commit is needed. Electron and engine edits rebuild and may
-restart their processes. Backend and worker edits require another launcher run
-to deploy or qualify them. An existing cloud workspace keeps its immutable
-worker image; publishing a new image does not hot-patch its running agent engine.
-First provisioning or a changed worker image can take
-several minutes; this is not a fixed five-minute delay on every launch. Startup
-messages distinguish verifying/reusing resources from creating them.
+restart their processes. Backend edits require another launcher run to deploy
+the captured source. Worker edits also require publishing a new runtime and
+updating `ZEROS_CLOUD_V2_RUNTIME_SHA256` before that run. See
+[Cloud workspaces](cloud-workspaces.md) for runtime caching and VM lifecycle.
+
 
 Organization memberships, workspace metadata and cloud chat data belong to this
 Dev generation's disposable database branch. The logical PlanetScale database
@@ -381,7 +379,7 @@ a fresh generation with empty Dev data.
 
 ## Explicit cloud test fixture
 
-A fresh database has no paid cloud entitlement or compute funding. Sign in through
+A fresh database has no organization cloud entitlement. Sign in through
 the real WorkOS flow and join/select a collaborative test Organization. Personal
 remains ineligible. Optionally add this object to the private profile:
 
@@ -399,42 +397,21 @@ The running Dev launcher prepares this fixture after normal sign-in;
 `pnpm dev:seed` also remains available for an explicit preparation or repair.
 It resolves only that active authenticated member and Organization in this
 generation, verifies email/slug, and uses the existing
-operator utilities to grant Dev platform-owner authority and one
-workspace/running-workspace quota. That active role supplies the audited
-complimentary Pro entitlement. The release allowance issuer supplies the initial
-ordinary **500 compute hours per monthly period** receipt, priced with the
-configured worker rate. For example, `secondsPerDollar: 100000` gives $18 of
-initial ledger credit; this is spending authority, not a purchase or free
-provider usage. An active platform owner or developer with a current staff
-benefit has no monthly machine-hour allowance cap: audited, user-owned ledger
-extensions fund only the exact finite lease demand beyond the ordinary receipt.
-Ordinary nonstaff Pro retains its 500-hour cap. Staff revocation, suspension or
-deletion prevents further staff-demand funding, including with separately paid
-Pro. Normal lease TTL, metering, provider wallet/admission and quota/resource
-limits still apply. Retrying fixture preparation reuses the existing monthly
-receipt; it never issues it twice. Monthly receipts retain their normal renewal
-behavior until the disposable environment is archived.
+operator utility to grant Dev platform-owner authority. That active role supplies
+the audited complimentary Pro entitlement. The organization must also have
+`cloud_workspaces_allowed`; the verified bootstrap below can establish it for a
+new test organization. The retained `computeAllowance: "pro-monthly"` field is a
+profile compatibility marker: v2 creates no compute-credit ledger or leases.
 
-The base example provisions infrastructure only. Add and verify the optional
-member/Organization fixture above to prepare the verified test organization.
-Its v3 native-canary intent now refuses before allocation, lease writes, credential
-renewal or transport. App/backend launch reports that refusal while continuing
-its other operations. No-fixture connection authority maintenance remains
-available. Follow-up: **re-qualify Dev native agent canary on v4**.
+The selected fixture is bound to its generation and expires after seven days
+for further fixture seeding. Archive/Run creates a fresh generation. The old
+native-canary and lease-TTL qualification paths have been removed. Worker
+runtime delivery and provider checks are separate from fixture preparation.
 
-The selected fixture is bound to its generation and must be refreshed after
-seven days through Archive/Run. Changing its identity or funding model also
-requires a fresh generation. Archive starts provider cleanup immediately.
-Backend admission rejects worker creation, wake and TTL renewal at expiry, even
-if the launcher is offline; the requested TTL must fit before that deadline.
-
-The retired `computeCreditMicroUsd` fixture created organization-scoped pilot
-credit. New workspaces use individual Pro funding, so that credit conflicts with
-the current monthly issuer. Old profiles remain readable for Doctor/Archive,
-but Run/Seed fail before granting or allocating anything new. After reviewing
-the standard allowance, archive with the original profile, replace that field
-with `"computeAllowance": "pro-monthly"`, and launch a fresh generation. The
-launcher never silently raises the old budget or rewrites its funding history.
+Old profiles with `computeCreditMicroUsd` remain readable for Doctor/Archive.
+Run/Seed refuse those retired credit fixtures. Archive using the original
+profile, then select the supported fixture shape in a fresh generation; the
+launcher never changes an old profile's authority in place.
 
 With the optional fixture configured, deployment reapplies it idempotently when
 its identity has already arrived through normal authentication. On a fresh DB,
@@ -462,12 +439,9 @@ is not shutdown evidence. Crashed deployments can restart, so they also require
 removal. Every shutdown observation rechecks that the environment contains only
 the recorded Dev service. See [Railway deployment removal](https://docs.railway.com/deployments/deployment-actions#remove).
 
-Local image-kit recovery files are keyed by Dev generation as well as source
-inputs. A remote Archive can leave another device's cache behind; fresh Run
-must allocate a new builder instead of adopting that retired generation's
-files. Pending builds from older cache layouts restore their relative recovery
-files from the authenticated encrypted registry receipt. Older local directories
-remain untouched until their normal local cleanup can run safely.
+Encrypted receipts from the retired image builder remain readable for cleanup.
+Archive retires only resources identified by those receipts; a fresh Run uses
+the published v2 runtime and does not rebuild or adopt a legacy image kit.
 
 `dev:archive` starts cleanup immediately, with no 24-hour grace period:
 
@@ -711,128 +685,3 @@ connections service and GC service there before installing either. These guards
 supplement the existing exact owner/generation/account/actor checks. They do not
 give a connection hook authority over a shared service. The lifecycle exposes
 `lifecycleHooks` (`beforeDeploy` and `archive`) for separate integrations.
-
-### Hosted scheduled job (read-only during retirement)
-
-`scripts/dev-environment/hosted-gc.mjs` is the same plan/apply library used by the
-CLI and `scripts/dev-environment/gc-cron.mjs`. Install a separate protected Railway
-operations service with `scripts/dev-environment/gc-railway.toml`: every fifteen
-minutes it starts one pass and exits, with no restart loop. Railway cron skips a
-new scheduled run if the previous process is still running; registry CAS leases
-also fence overlapping manual/scheduled attempts. See
-[Railway cron jobs](https://docs.railway.com/cron-jobs).
-
-Do not enable scheduled apply during retirement. `ZEROS_DEV_GC_APPLY=1` is
-refused on Linux; only the owner runs reviewed cleanup on the Mac. An existing
-read-only schedule remains an inventory operation.
-
-Build the job from a reviewed operational-code artifact, independent of any
-disposable workspace. Include `scripts/dev-environment/`, the referenced
-`scripts/dev-auth-profile.mjs`, root locked dependencies (including esbuild), and
-the locked `apps/control-plane` dependency graph/package metadata used by the R2
-adapters. Preserve that relative layout. It needs Node 22.18+ in the 22.x line,
-outbound provider API access and private temporary disk. Archive uses each
-generation's retained operator bundle; it does not compile its checkout or
-require the original desktop/node_modules. Legacy version 1 operators require
-separate restoration of their original dependencies.
-
-Mount a user-owned `0600` Dev operations profile and set the absolute
-`ZEROS_DEV_GC_PROFILE_PATH`. Use the original provider containers/registry key
-with provider credentials scoped to Dev operations, and explicitly protect the
-job and connections service. Do not embed a profile in the runtime artifact.
-Run first with `ZEROS_DEV_GC_APPLY` unset to collect sanitized JSON plans. After
-reviewing ownership and protected IDs, `ZEROS_DEV_GC_APPLY=1` enables apply.
-Nothing in repository setup creates or deploys this scheduler.
-
-A pass handles at most 32 owners, ten minutes total and one minute per owner;
-oldest attempted owners go first so a stuck owner cannot starve the rest. Archive
-records intent/stops compute before the bounded retention pass. Retention checks
-at most 16 receipts in 15 seconds, with capped backoff and retained attempts,
-provider stages and deadlines. Alert on nonzero exit, unconfirmed/deferred
-owners, quarantined inventory and breached retention deadlines. Resume the same
-library after an outage; never erase receipts to get a green schedule. Named
-snapshot retirement still does not promise immediate physical storage erasure.
-
-### Runtime qualification
-
-Provisioning is lazy on first Dev launch. `clusterSize: "development"` explicitly
-selects PlanetScale's empty development-branch flow (PS-DEV) without a cluster SKU
-override. Ordinary SKUs, including PS-5, create production-class branches and are
-rejected before allocation. The returned branch must still be nonproduction and
-match its exact ownership receipt. See [PlanetScale branch types](https://planetscale.com/docs/postgres/branching).
-A generation reuses its attested worker across renderer/backend changes. New
-generations attest their own image; there is no cross-checkout shared-image cache.
-The builder checks the configured organization meter before each build step and
-stops/deletes at the threshold, with a provider TTL as fallback. Other concurrent
-builds share that meter, and API outages can delay enforcement; it is not a hard
-invoice cap. Archive removes all owned resources that the APIs permit immediately.
-
-The shared Dev v3 native agent canary is retired because its baked
-`--qualify-agent` runner is no longer supported. Its direct allocation/readiness/
-start entry points, hosted coordinator, SSH operator and explicit `pnpm dev:agents`
-command return `release_worker_images_retired` (409) with the fixed message:
-`v3 release worker images are retired; v4 runtime bundles are the supported artifact`.
-Refusal precedes provider budget reads, builder allocation, admission reservations,
-lease/dispatch writes, credential or connection renewal, SSH registration,
-commands and private uploads. Optional monitoring reports retirement without
-stopping app/backend launch; no-fixture connection maintenance remains available.
-
-Already-started native attempts can still be polled without redispatching
-credentials, including historical hosted SSH jobs saved as `starting` or
-`running` for that exact image without the native transport's dispatch marker.
-Archive/reconcile retain the exact recorded owner, original create
-body and idempotency key, deletion operation, physical or pending-storage proof,
-SSH key cleanup and immutable receipt/evidence readers. An unknown or expired
-create cannot be replaced with a new intent. Historical v3 evidence does not
-authorize a fresh canary or approval.
-
-Worker image attestation establishes machine provenance; it does not enable
-provider credentials. Supported product cloud execution still requires the v2
-Computer source, qualified v4 worker and actor protocol2. The shared Dev image
-kit and independent flat OCI publication are separate follow-ups; they are not
-qualified v4 runtimes by changing a marker. **Re-qualify Dev native agent canary
-on v4** before restoring native qualification. Release channels use the
-[runtime qualification procedure](cloud-workspace/agent-authentication-and-language-tools.md#runtime-qualification-and-activation).
-
-No agent credentials are copied from another database or stored in the portable
-profile. Normal WorkOS sign-in and GitHub/agent account consent remain required.
-Historical native evidence keeps its exact image, model, kind, isolation, MCP,
-stop/revocation and independent Codex renewal checks; these readers remain
-available for audit and cleanup.
-
-Connection reuse across disposable Dev databases is implemented as optional
-**connect-once** mode; see [Persistent Dev connections](dev-connections.md). It
-requires separate protected operator provisioning and live acceptance. Without
-this opt-in, provider connections remain local to each disposable generation.
-Restored references still require normal sign-in, current consent/repository
-access and exact-image agent qualification. Never copy refresh-token caches
-between generations or into Alpha/Beta/Production.
-
-The pinned Railway CLI (5.47.1) and existing SSH-key cleanup remain available.
-Recorded temporary SSH keys stay in the encrypted ownership receipt until exact
-provider removal is confirmed; Archive/reconcile can finish an interrupted
-removal from another machine. New native SSH dispatch refuses before key
-registration, local transport files or backend credential preparation.
-`pnpm dev:doctor` still reports recorded native test phases and pending storage
-receipts. Archive can retire recorded canary VMs without waiting for a paid turn.
-
-This setup tests the same application, hosting providers, migrations, privilege
-boundaries as releases. Native Dev qualification remains retired until its
-v4 follow-up is qualified. It does not prove
-production scaling, replica behavior, failover or upgrades from existing customer
-data. Query correctness, indexes and migrations can be exercised against real
-PlanetScale PostgreSQL, but performance conclusions require representative data,
-load, instance size and topology. Release permissions, domains, signing,
-notarization and updates also need checks in their destination environment.
-Promoting the same tested source minimizes drift; Dev success is evidence, not
-a guarantee of release success. Those checks require the intended topology and
-an upgrade fixture. See
-[PlanetScale development environments](https://planetscale.com/docs/postgres/development-environments).
-
-Before rollout, qualify first launch, sign-in, GitHub authorization, test fixture,
-cloud creation, streaming/stop/resume, file browsing/editing, terminal routing,
-Changes, Review/PR, reconnect and local/cloud switching. Then archive, verify the
-provider inventories and relaunch to confirm fresh data. Repeat concurrent
-launch/archive and interrupted-create recovery across Mac/cloud copies. Promote
-the same tested source and migrations through Alpha, Beta and Production with
-each environment's own configuration and release gates.

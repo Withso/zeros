@@ -2,40 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { releaseEnvironmentErrors } from "../release-environment";
 
-function knownHostsDocument(host = "ssh.fixture.test"): string {
-  const algorithm = Buffer.from("ssh-ed25519", "ascii");
-  const key = Buffer.alloc(4 + algorithm.length + 4 + 32);
-  key.writeUInt32BE(algorithm.length, 0);
-  algorithm.copy(key, 4);
-  key.writeUInt32BE(32, 4 + algorithm.length);
-  Buffer.alloc(32, 7).copy(key, 8 + algorithm.length);
-  return Buffer.from(
-    `${host} ssh-ed25519 ${key.toString("base64")}\n`,
-    "utf8",
-  ).toString("base64url");
-}
-
 describe("desktop release environment routing", () => {
-  it("validates supplied preview suffixes even when cloud is off", () => {
-    expect(releaseEnvironmentErrors("alpha", {
-      VITE_APP_BASE_URL: "https://app-alpha.zeros.build", VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build", AUTH_PROVIDER: "auth0",
-      VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "https://preview.example.test",
-    })).toContain("VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES must contain 1-8 exact lowercase DNS suffixes");
-  });
-  it("allows Boat without previews or gateway pins while validating supplied configuration", () => {
-    const env = {
-      VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
-      VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
-      AUTH_PROVIDER: "auth0",
-      ZEROS_CLOUD_WORKSPACES_ENABLED: "true",
-      CLOUD_WORKSPACE_PROVIDER: "boat",
-      VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "preview.example.com",
-    };
-    expect(releaseEnvironmentErrors("alpha", env)).toEqual([]);
-    expect(releaseEnvironmentErrors("alpha", { ...env, CLOUD_WORKSPACE_PROVIDER: "unknown" })).toContain("CLOUD_WORKSPACE_PROVIDER must be boat");
-    expect(releaseEnvironmentErrors("alpha", { ...env, VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "" })).toEqual([]);
-    expect(releaseEnvironmentErrors("alpha", { ...env, VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: "invalid" })).toHaveLength(1);
-  });
   it("accepts each channel's exact hosted origins", () => {
     for (const [environment, app, api, ref] of [
       [
@@ -161,41 +128,4 @@ describe("desktop release environment routing", () => {
     );
   });
 
-  it("validates optional previews and gateway pins before enabling cloud", () => {
-    const enabled = {
-      VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
-      VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
-      AUTH_PROVIDER: "auth0",
-      ZEROS_CLOUD_WORKSPACES_ENABLED: "true",
-    };
-
-    expect(releaseEnvironmentErrors("alpha", enabled)).toEqual([]);
-    expect(
-      releaseEnvironmentErrors("alpha", {
-        ...enabled,
-        VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES:
-          "https://cloud-preview.example.com",
-        VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: "not-base64",
-      }),
-    ).toEqual([
-      "VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES must contain 1-8 exact lowercase DNS suffixes",
-      "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 must be canonical base64url for a valid OpenSSH known_hosts document covering every allowed SSH host",
-    ]);
-    expect(
-      releaseEnvironmentErrors("alpha", {
-        ...enabled,
-        VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "cloud-preview.example.com",
-        VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: knownHostsDocument(),
-      }),
-    ).toEqual([]);
-    expect(
-      releaseEnvironmentErrors("alpha", {
-        ...enabled,
-        VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "cloud-preview.example.com",
-        VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: "not-base64",
-      }),
-    ).toContain(
-      "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 must be canonical base64url for a valid OpenSSH known_hosts document covering every allowed SSH host",
-    );
-  });
 });

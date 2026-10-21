@@ -1,31 +1,14 @@
 # Workspace code review
 
-The engine owns durable workspace discussions in SQLite. Migration 40 adds
+The Local engine owns durable workspace discussions in SQLite. Migration 40 adds
 threads, immutable comments and retry receipts; legacy `diff_comments` remain
 unchanged. The same `WORKSPACE_REQUEST` API serves local desktop and authorized
 remote clients. Renderer storage is not the discussion's source of truth.
 
-Persistence follows the owning engine database and survives database reopen or
-engine restart. Cloud review records also survive allocation replacement through
-the existing `CloudWorkspaceRecordRuntime`. The `metadata` domain uses the
-`code-review-v1:` entity prefix, with separate versioned documents for threads,
-ordered comments and retry receipts. Each document binds the canonical workspace
-and organization; restore verifies the registered checkout and remaps records
-to its local routing ID. Original anchors, IDs, author snapshots, resolution
-state, thread versions and receipt fingerprints survive this remapping.
-
-Thread headers publish after their children. The header's comment count and
-version identify the last complete capture when an upload spans several bounded
-appends. Replacement restores that committed history and retires incomplete
-upload children before new replies can reuse their sequence positions. Existing
-512 KiB document, 2 MiB batch, paged response and projection cache bounds remain
-in force. Filesystem checkpoints continue to exclude private SQLite files.
-
-Capture and restore apply private/sensitive-path, alias and nested-owner policy
-without reading or modifying source contents. Protected local anchors stay in
-SQLite and are excluded from cloud capture. Already durable anchors that become
-unreadable remain in the cloud record, with import blocked until their path is
-allowed again. Ordinary deleted/historical paths can still restore.
+Persistence follows the owning Local engine database and survives database
+reopen or engine restart. Cloud v2 does not implement `codeReview.*`; it returns
+`CLOUD_V2_UNSUPPORTED`. The retired cloud record-capture and restore mechanism
+has been removed.
 
 `@zeros/protocol/code-review` defines the public schemas. An anchor contains a
 normalized workspace-relative `path`, `side` (`old`, `new`, or `file`), inclusive
@@ -46,8 +29,8 @@ The registered workspace is exact, including synthetic `local-main` and
 registered repository roots without workspace rows. Neither a thread ID nor a
 cursor grants access to another owner. Paths reject traversal, file/directory
 aliases, dangling symlinks, private metadata, directories and nested owners.
-Remote restrictions and qualified cloud file/role policies also apply. Missing
-authority metadata fails the read instead of publishing an empty snapshot.
+Remote restrictions also apply. Missing authority metadata fails the read
+instead of publishing an empty snapshot.
 Comment operations never modify source, stage changes, accept a patch or bypass
 Design authoring policy. Git review decisions/conflict saves are separate APIs
 with their own source guards and content checks.
@@ -62,8 +45,8 @@ without repeating a mutation; conflicting reuse returns
 `CODE_REVIEW_RETRY_CONFLICT`. Author snapshots, original anchors and comment
 order/IDs remain immutable across database reopen.
 New receipt fingerprints omit the local routing ID because the receipt key
-already scopes workspace and actor; cloud restore can therefore remap the owner
-without repeating a write. Existing persisted fingerprints remain readable.
+already scopes workspace and actor. Existing persisted fingerprints remain
+readable.
 
 Reads have a 512 KiB JSON budget and bounded SQL row reads. `limit` defaults to
 50 thread chunks and cannot exceed 100; a chunk fetches at most 64 comment rows
@@ -96,8 +79,8 @@ to satisfy a response limit.
 
 Public inputs reject actor/profile fields. Human identity derives from verified
 transport admission or the verified local owner. Signed account profile names
-are used when available; current cloud admissions supply account IDs but no
-profile names, so their authors receive stable distinct Reviewer labels. The
+are used when available; an admitted actor without a profile receives a stable
+Reviewer label. The
 list's `viewerActorId` lets the UI display You for matching authors. Anonymous
 local work shares one persisted device identity; separate anonymous humans on
 that device cannot be distinguished. Profile changes do not rewrite old author
@@ -120,15 +103,4 @@ no native/preload fallback is added. UI caches must retain the last confirmed
 exact-owner snapshot on refresh or failure and expose remaining history.
 
 Scoped agent tools commit to the same SQLite tables and publish the same change
-event as human comments. Their success acknowledges the engine write; it does
-not wait for a cloud HTTP capture. Cloud registration restores records before
-readiness, and accepted heartbeats invoke the existing durable-record sync.
-Queued agent command settlement waits for any prior capture and a fresh sync
-before acknowledging the terminal command receipt. Final lifecycle checkpoints
-pause admission, retire running providers and await record synchronization before
-the filesystem checkpoint. This final boundary uses `flush`, which first drains
-an active heartbeat capture and then captures fresh state after quiescence;
-ordinary heartbeat `synchronize` calls can still share an active capture. These
-existing triggers capture agent review writes
-without adding a scheduler or service; an abrupt VM loss can still lose writes
-made since the last completed durable sync.
+event as human comments. Their success acknowledges the Local engine write.
