@@ -45,7 +45,7 @@ function request(
   };
 }
 
-function fakeBoundary(backend: "none" | "cloud-worker") {
+function fakeBoundary(backend: "none") {
   const prepared = { generation: `${backend}-generation` } as PreparedBoundary;
   const boundary = {
     backend,

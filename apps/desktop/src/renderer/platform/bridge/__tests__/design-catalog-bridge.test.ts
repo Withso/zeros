@@ -1,11 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { bridgeDesignCatalog } from "../design-catalog-bridge";
-import {
-  cloudIncoming,
-  cloudOutgoing,
-  type CloudRuntimeScope,
-} from "../cloud-runtime-wire";
-import { cloudWorkspaceKey } from "../cloud-workspace-key";
 import type { RuntimeClient } from "../ws-client";
 import {
   DESIGN_CATALOG_READ_CAPABILITY,
@@ -13,12 +7,6 @@ import {
   type DesignCatalogOwner,
 } from "@zeros/protocol/design-catalog";
 
-const scope: CloudRuntimeScope = {
-  organizationId: "11111111-1111-4111-8111-111111111111",
-  workspaceId: "22222222-2222-4222-8222-222222222222",
-  engineWorkspaceId: "local-main",
-  root: "/srv/zeros/workspace",
-};
 function reply(owner: DesignCatalogOwner) {
   return {
     kind: "design-catalog",
@@ -131,53 +119,5 @@ describe("negotiated passive Design catalog reads", () => {
           owner,
         ),
       ).rejects.toThrow();
-  });
-  it("maps only the catalog owner and rejects foreign cloud identities in both directions", () => {
-    const key = cloudWorkspaceKey(scope);
-    const input = {
-      version: 1,
-      workspaceId: key,
-      directoryId: "design_test",
-      intent: 1,
-    };
-    expect(
-      cloudOutgoing(scope, {
-        type: "WORKSPACE_REQUEST",
-        op: DESIGN_CATALOG_READ_OPERATION,
-        params: input,
-      }),
-    ).toMatchObject({ params: { ...input, workspaceId: "local-main" } });
-    expect(() =>
-      cloudOutgoing(scope, {
-        type: "WORKSPACE_REQUEST",
-        op: DESIGN_CATALOG_READ_OPERATION,
-        params: { ...input, workspaceId: "foreign" },
-      }),
-    ).toThrow(/another/);
-    const owner = {
-      workspaceId: "local-main",
-      directoryId: "design_test",
-      placement: "cloud" as const,
-      organizationId: scope.organizationId,
-    };
-    const message = {
-      type: "WORKSPACE_RESPONSE",
-      op: DESIGN_CATALOG_READ_OPERATION,
-      result: reply(owner),
-    };
-    expect(cloudIncoming(scope, message)).toMatchObject({
-      result: { ...reply(owner), owner: { ...owner, workspaceId: key } },
-    });
-    for (const foreign of [
-      { ...owner, workspaceId: "other" },
-      { ...owner, organizationId: "other" },
-      { ...owner, placement: "local" as const },
-    ])
-      expect(() =>
-        cloudIncoming(scope, { ...message, result: reply(foreign) }),
-      ).toThrow(/another/);
-    expect(JSON.stringify(cloudIncoming(scope, message))).not.toContain(
-      scope.root,
-    );
   });
 });

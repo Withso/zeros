@@ -4306,7 +4306,6 @@ export class ZerosEngine {
               url: opened.url,
               admissionUrl: opened.admissionUrl,
               expiresAt: opened.expiresAt,
-              ...(opened.nativeTarget ? { nativeTarget: opened.nativeTarget } : {}),
             }),
           );
           return;

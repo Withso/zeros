@@ -4,7 +4,7 @@ import { AgentGateway } from "../gateway";
 import type { AgentAdapter } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
-function fixture(backend: "zeros-srt" | "cloud-worker") {
+function fixture(backend: "zeros-srt") {
   let resolve!: () => void, reject!: (reason: unknown) => void;
   const pending = new Promise<void>((nextResolve, nextReject) => {
     resolve = nextResolve;
@@ -27,7 +27,7 @@ function fixture(backend: "zeros-srt" | "cloud-worker") {
   return { gateway, order, warmDispose, retire, resolve, reject };
 }
 
-describe.each(["zeros-srt", "cloud-worker"] as const)("gateway disposal order (%s)", (backend) => {
+describe.each(["zeros-srt"] as const)("gateway disposal order (%s)", (backend) => {
   it("awaits pending warm disposal before retiring utilities and adapters", async () => {
     const f = fixture(backend);
     const disposing = f.gateway.dispose();

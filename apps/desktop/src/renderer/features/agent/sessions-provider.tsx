@@ -4897,7 +4897,6 @@ export function AgentSessionsProvider({
         url: response.url,
         admissionUrl: response.admissionUrl,
         expiresAt: response.expiresAt,
-        ...(response.nativeTarget ? { nativeTarget: response.nativeTarget } : {}),
       };
     },
     [bridge, getStore],

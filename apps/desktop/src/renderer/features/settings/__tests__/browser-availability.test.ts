@@ -12,26 +12,18 @@ vi.mock("../../../shared/ui/primitives/elements", () => ({ toast: { error: vi.fn
 vi.mock("../agent-control-rollout", () => ({ useAgentControlFeatureActive: () => state.zerosBrowser }));
 import { BrowserUsePanel } from "../browser-use-panel";
 import { NativeBrowserAvailability } from "../../agent/native-browser-availability";
-import type { CloudBrowserCapability } from "@zeros/protocol/containment";
 
 beforeEach(() => { state.zerosBrowser = true; state.organization = { id: "org-a", isPersonal: false }; state.selected = "org-a"; state.workspace = { path: "cloud://org-a/workspace", organizationId: "org-a", placement: "cloud" }; vi.clearAllMocks(); });
 describe("native browser availability rendering", () => {
-  it("shares unavailable, disabled and ready presentation without conflating provider scopes", () => {
-    const scope = { version: 1, provider: "codex", credentialKind: "codex-chatgpt", runtimeProfile: "zeros-cloud-worker-v3" } as const;
-    for (const capability of [undefined, null, { ...scope, state: "ready", qualifiedVersion: "browser-v1", version: 99 } as unknown as CloudBrowserCapability]) {
-      expect(renderToStaticMarkup(createElement(NativeBrowserAvailability, { provider: "codex", capability }))).toContain("Native browser is unavailable in cloud workspaces.");
-    }
-    const ready = { ...scope, state: "ready", qualifiedVersion: "browser-v1" } as const;
-    expect(renderToStaticMarkup(createElement(NativeBrowserAvailability, { provider: "codex", capability: ready }))).toContain("Native browser is ready.");
-    expect(renderToStaticMarkup(createElement(NativeBrowserAvailability, { provider: "codex", capability: { ...scope, state: "disabled" } }))).toContain("Native browser is disabled.");
-    expect(renderToStaticMarkup(createElement(NativeBrowserAvailability, { provider: "claude", capability: ready }))).toContain("Chrome integration requires a direct Claude login");
-    expect(renderToStaticMarkup(createElement(NativeBrowserAvailability, { provider: "cursor" }))).toContain("Cursor does not expose a native browser integration.");
+  it("states that cloud workspaces have no browser for every provider", () => {
+    for (const provider of ["codex", "claude", "cursor"])
+      expect(renderToStaticMarkup(createElement(NativeBrowserAvailability, { provider }))).toBe(
+        '<span class="text-fg2 text-xs">Native browser is unavailable in cloud workspaces.</span>');
+    expect(renderToStaticMarkup(createElement(NativeBrowserAvailability, { provider: "other" }))).toBe("");
   });
   it("shows the cloud provider limits without reading Local settings or offering installation", () => {
     const html = renderToStaticMarkup(createElement(BrowserUsePanel));
     expect(html).toContain("Native browser is unavailable in cloud workspaces.");
-    expect(html).toContain("The official browser runtime is not available for Linux VMs.");
-    expect(html).toContain("Chrome integration requires a direct Claude login, not an API key or setup token.");
     expect(html).not.toContain("Get extension");
     expect(html).not.toContain('role="switch"');
     expect(state.read).not.toHaveBeenCalled();
@@ -116,8 +108,9 @@ describe("native browser availability rendering", () => {
     expect(html).not.toContain('id="browser-use-show-agent-cursor"');
   });
 
-  it("lists Cursor's cloud browser limits beside Codex and Claude", () => {
+  it("lists Cursor beside Codex and Claude in the cloud browser limits", () => {
     const html = renderToStaticMarkup(createElement(BrowserUsePanel));
-    expect(html).toContain("Cursor does not expose a native browser integration.");
+    expect(html.match(/Native browser is unavailable in cloud workspaces\./g)).toHaveLength(3);
+    expect(html).toContain("Cursor");
   });
 });

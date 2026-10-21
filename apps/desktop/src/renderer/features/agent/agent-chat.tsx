@@ -5419,7 +5419,6 @@ function AgentChatBody({
                       <ComposerTools
                         ownerId={chatId}
                         cloudWorkspace={isCloudWorkspace(chatThread?.folder)}
-                        browserCapability={session.boundary?.browser}
                         agentId={session.agentId ?? chatThread?.agentId ?? null}
                         sessionId={session.executionId}
                         workspaceId={session.cwd ?? chatThread?.folder ?? null}

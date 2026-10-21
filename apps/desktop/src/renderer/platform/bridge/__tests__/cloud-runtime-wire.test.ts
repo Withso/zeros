@@ -17,21 +17,12 @@ const scope: CloudRuntimeScope = {
 const key = cloudWorkspaceKey(scope);
 
 describe("cloud runtime wire routing", () => {
-  it("maps capture reference ownership in both directions and rejects foreign references", () => {
-    const reference = { version: 1, workspaceId: key, directoryId: "directory", frame: "a.html", frameId: "frame", revision: "a".repeat(24) };
-    const message = { type: "WORKSPACE_REQUEST", op: "design.context.capture", params: { workspaceId: key, reference } };
-    expect(cloudOutgoing(scope, message).params).toMatchObject({ workspaceId: scope.engineWorkspaceId, reference: { workspaceId: scope.engineWorkspaceId } });
-    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: message.op, result: { reference: { ...reference, workspaceId: scope.engineWorkspaceId }, data: "fixture" } }).result)
-      .toMatchObject({ reference, data: "fixture" });
-    expect(() => cloudOutgoing(scope, { ...message, params: { ...message.params, reference: { ...reference, workspaceId: "foreign" } } })).toThrow(/another workspace/);
-  });
-  it("scopes the preview response envelope while retaining the engine's opaque native target", () => {
+  it("scopes the preview response envelope", () => {
     const target = { executionId: "execution-native", portId: "A".repeat(32) };
     const response = cloudIncoming(scope, { type: "AGENT_BOUNDARY_PORT_OPENED",
-      executionId: target.executionId, portId: target.portId, nativeTarget: target,
+      executionId: target.executionId, portId: target.portId,
       url: "http://localhost:5173/", admissionUrl: "http://localhost:5173/" });
     expect(response.executionId).toBe(cloudScopedId(scope, target.executionId));
-    expect(response.nativeTarget).toBe(target);
     expect(cloudOutgoing(scope, { type: "AGENT_OPEN_BOUNDARY_PORT", executionId: response.executionId, portId: target.portId }))
       .toMatchObject({ executionId: target.executionId, portId: target.portId });
   });

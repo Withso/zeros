@@ -21,16 +21,9 @@ export function cloudProviderDisconnectTarget(organizationId: string, provider: 
   return cloudCredentialRemovalTargetSchema.parse({ kind: "disconnect-provider", organizationId, provider,
     expectedConnectionRevision: connection.revision });
 }
-type CloudProviderAccess = {
-  compute: { fingerprint: string; trust: "zeros-managed" | "compute-administrator" };
-  delegations: { id: string; kind: string; ownerUserId: string; models: string[]; allModels?: boolean; expiresAt: string }[];
-};
 export const cloudProviderCredentialsCache = new KeyedAsyncCache<
   CloudProviderCredential[]
 >(16);
-export const cloudProviderAccessCache = new KeyedAsyncCache<
-  CloudProviderAccess
->(32);
 const organizationConnections = z.object({
   credentials: z.array(credential).max(100),
   connections: z
@@ -53,8 +46,6 @@ export const cloudOrganizationConnectionsCache = new KeyedAsyncCache<
 export function clearCloudProviderConnections(): void {
   for (const key of cloudProviderCredentialsCache.keys())
     cloudProviderCredentialsCache.forget(key);
-  for (const key of cloudProviderAccessCache.keys())
-    cloudProviderAccessCache.forget(key);
   for (const key of cloudOrganizationConnectionsCache.keys())
     cloudOrganizationConnectionsCache.forget(key);
 }
@@ -128,36 +119,3 @@ export const removeCloudOrganizationCredential = (
     z.object({ removed: z.boolean() }),
     { method: "DELETE", body: {}, idempotencyKey: crypto.randomUUID() },
   );
-
-export function authorizeCloudProvider(input: {
-  id: string;
-  credentialId: string;
-  expectedRevision: number;
-  workspaceId: string;
-  granteeUserId: string;
-  models: string[];
-  allModels?: boolean;
-  expiresAt: string;
-  computeConsent: CloudProviderAccess["compute"];
-}) {
-  return cloudAccountRequest(
-    "/v1/cloud-agent-credentials/delegations",
-    z.object({ delegation: z.object({ id: z.string().uuid() }) }),
-    {
-      body: input,
-      idempotencyKey: input.id,
-    },
-  );
-}
-
-export function disconnectCloudProvider(delegationId: string) {
-  return cloudAccountRequest(
-    `/v1/cloud-agent-credentials/delegations/${z.string().uuid().parse(delegationId)}`,
-    z.object({ revoked: z.boolean() }),
-    {
-      method: "DELETE",
-      body: {},
-      idempotencyKey: crypto.randomUUID(),
-    },
-  );
-}

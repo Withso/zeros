@@ -110,13 +110,6 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
     } finally { vi.unstubAllEnvs(); }
   });
 
-  it("does not install an agent proxy from the readable old cloud backend", () => {
-    const wrapSpawn = vi.fn(request => ({ ...request }));
-    const boundary = { status: { backend: "cloud-worker" }, wrapSpawn, trackProcess: vi.fn() } as unknown as PreparedBoundary;
-    spawnSubprocessTransport({ executionBoundary: boundary, cwd: "/fixture/workspace", env: { HOME: "/fixture/home" } });
-    expect(wrapSpawn.mock.calls[0]![0].env).toEqual({ HOME: "/fixture/home" });
-  });
-
   it("runs a session host through its prepared boundary with no ambient authority", () => {
     const stopAndProve = vi.fn(async () => undefined);
     const tracked = {

@@ -34,11 +34,6 @@ describe("execution boundary status contract", () => {
         status: { backend: "zeros-srt", state: "ready" },
       }),
     ).toBe(true);
-    expect(
-      hasKernelExecutionBoundary({
-        status: { backend: "cloud-worker", state: "ready" },
-      }),
-    ).toBe(false);
     expect(hasKernelExecutionBoundary({ status: { backend: "provider-native", state: "ready" } })).toBe(true);
     expect(hasKernelExecutionBoundary(undefined)).toBe(false);
   });

@@ -15,7 +15,7 @@ import { classifyRpcError } from "../../../platform/bridge/failure";
 
 const CHAT = "11111111-1111-4111-8111-111111111111";
 const CLOUD = "cloud://22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333";
-const REVOKED = { version: 1, actor: "agent-code", backend: "cloud-worker", state: "revoked", checkedAt: 42,
+const REVOKED = { version: 1, actor: "agent-code", backend: "zeros-srt", state: "revoked", checkedAt: 42,
   designProtection: { required: false, enforced: false, protectedDirectoryCount: 0 },
   parity: { level: "full", restrictions: [] } } as const;
 

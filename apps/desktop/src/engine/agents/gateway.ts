@@ -3492,7 +3492,7 @@ export class AgentGateway {
     }
     let gateway = previews.get(portId);
     if (!gateway) {
-      gateway = this.previewGatewayFactory.open(target, { executionId, portId });
+      gateway = this.previewGatewayFactory.open(target);
       previews.set(portId, gateway);
       void gateway.catch(() => {
         if (previews?.get(portId) === gateway) previews.delete(portId);
