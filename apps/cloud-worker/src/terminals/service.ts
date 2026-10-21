@@ -31,7 +31,7 @@ interface Session extends PtyTerminalInfo {
   cols: number; rows: number; owner?: AppClient;
   subscribers: Set<AppClient>; disposers: Array<{ dispose(): void }>;
   tail: Promise<void>; pendingBytes: number; paused: boolean; removed: boolean;
-  attachments: number; hasOutput: boolean; exitPublished: boolean;
+  attachments: number; hasOutput: boolean; exitPublished: boolean; lastActivityAt: number;
   exit?: { exitCode: number; signal?: number }; retirement?: Promise<void>;
 }
 interface Pending { owner?: AppClient; cancelled: boolean; promise: Promise<Session> }
@@ -53,7 +53,7 @@ export class Terminals {
   private disposed = false;
   constructor(private readonly scope: WorkspaceScope, private readonly options: Options = {}) { this.files = new CheckedFiles(scope); }
 
-  get busy(): boolean { return this.pending.size > 0 || [...this.sessions.values()].some(session => !session.exit); }
+  get busy(): boolean { return this.pending.size > 0 || [...this.sessions.values()].some(session => !session.exit && Date.now() - session.lastActivityAt < 10 * 60_000); }
 
   async handle(client: AppClient, frame: BridgeMessage): Promise<void> {
     if (this.disposed || this.retiredClients.has(client)) return;
@@ -80,7 +80,7 @@ export class Terminals {
       }
       case "PTY_WRITE": {
         const session = this.access(client, frame.sessionId);
-        if (session && !session.exit) try { session.native.write(frame.data); } catch { /* Exit owns the final status. */ }
+        if (session && !session.exit && frame.data) try { session.native.write(frame.data); this.activity(session); } catch { /* Exit owns the final status. */ }
         return;
       }
       case "PTY_RESIZE": {
@@ -178,7 +178,7 @@ export class Terminals {
       const session: Session = { sessionId: message.sessionId, workspaceId: this.scope.workspace.id, cwd, createdAt: Date.now(), cols, rows,
         native, descriptor, mirror: this.options.mirror?.(cols, rows) ?? new TerminalMirror(cols, rows), owner: pending.owner,
         subscribers: new Set(), disposers: [], tail: Promise.resolve(), pendingBytes: 0, paused: false, removed: false,
-        attachments: 0, hasOutput: false, exitPublished: false };
+        attachments: 0, hasOutput: false, exitPublished: false, lastActivityAt: Date.now() };
       session.disposers.push(native.onData(data => this.data(session, data)), native.onExit(exit => this.exited(session, exit)));
       this.sessions.set(session.sessionId, session);
       if (pending.cancelled || this.disposed) { await this.retire(session, true); return session; }
@@ -192,6 +192,7 @@ export class Terminals {
 
   private data(session: Session, data: string): void {
     if (session.removed || session.exit || !data) return;
+    this.activity(session);
     const bytes = Buffer.byteLength(data); session.pendingBytes += bytes;
     if (!session.paused && session.pendingBytes >= 256 * 1024) { session.paused = true; try { session.native.pause(); } catch { /* Exit may have won. */ } }
     void this.enqueue(session, async () => {
@@ -206,6 +207,8 @@ export class Terminals {
       }
     });
   }
+
+  private activity(session: Session): void { session.lastActivityAt = Date.now(); this.options.activity?.(); }
 
   private exited(session: Session, exit: { exitCode: number; signal?: number }): void {
     if (session.exit) return;

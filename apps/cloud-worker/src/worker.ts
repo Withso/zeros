@@ -6,6 +6,7 @@ import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
 import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { Agents, type AppClient, type DriverFactories } from "./agents";
 import { CodexDriver } from "./drivers/codex/driver";
+import { ClaudeDriver } from "./drivers/claude/driver";
 import { SessionStore } from "./sessions/session-store";
 import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
@@ -60,7 +61,7 @@ export class CloudWorker {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    this.heartbeat = setInterval(() => { if (this.agents?.busy || this.terminals?.busy) void this.reportIdle(true); }, 55_000);
+    this.heartbeat = setInterval(() => { void this.reportIdle(Boolean(this.agents?.busy || this.terminals?.busy)); }, 55_000);
     this.heartbeat.unref?.();
     this.options.transport.start({
       open: async () => {
@@ -178,7 +179,9 @@ export class CloudWorker {
         run: commandRunner(scope.root, this.gitEnvironment), ...this.options.workspaceServices, publish: (frame) => { void this.broadcast(frame); },
       });
       this.scope = scope; this.store = store;
-      this.agents = new Agents(store, scope, this.options.drivers ?? { codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }) }, config,
+      this.agents = new Agents(store, scope, this.options.drivers ?? {
+        codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
+      }, config,
         (frame) => this.broadcast(frame), () => { void this.reportIdle(); });
       this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId));

@@ -187,6 +187,11 @@ export class Agents {
           route.background = notification.update; this.activity();
         }
         route.events = route.events.then(async () => {
+          if (notification.update.sessionUpdate === "provider_binding_update") {
+            const binding = notification.update.providerBinding;
+            if (binding.providerId !== route.agentId || binding.kind !== "native") throw new Error("Invalid native provider binding.");
+            await this.store.bind(route.chatId, route.agentId, binding.resumeId);
+          }
           await this.store.fold(route.chatId, notification);
           await this.update(route, notification);
         }).catch(async () => { await this.stop(route); });
@@ -197,7 +202,7 @@ export class Agents {
           nativeSessionId: this.store.metadata(route.chatId)?.nativeSessionId,
           ...("apiKey" in login ? { apiKey: login.apiKey } : { proxy: { baseUrl: login.baseUrl, token: login.token } }) });
         if (route.closed) { await driver.dispose(); throw new WorkspaceError("session-expired", "This execution has ended."); }
-        await this.store.bind(route.chatId, route.agentId, native.nativeSessionId);
+        if (!native.provisional) await this.store.bind(route.chatId, route.agentId, native.nativeSessionId);
       } catch (error) { route.unsubscribe?.(); await driver.dispose(); route.driver = undefined; throw error; }
     })();
     try { await route.opening; } finally { route.opening = undefined; }
@@ -323,7 +328,7 @@ export class Agents {
       ...(receipt.turnId ? { turnId: receipt.turnId } : {}) }));
   }
 
-  private hasBackground(route: Runtime): boolean { return !!route.background && (route.background.tasks.length > 0 || route.background.activity != null); }
+  private hasBackground(route: Runtime): boolean { return !!route.background && (route.background.tasks.length > 0 || (!!route.background.activity && route.background.activity.state !== "idle")); }
   private update(route: Runtime, notification: SessionNotification): Promise<void> {
     return this.broadcast(createMessage({ type: "AGENT_SESSION_UPDATE", source: "engine", agentId: route.agentId, executionId: route.id, chatId: route.chatId, notification }));
   }

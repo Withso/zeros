@@ -15,7 +15,9 @@ export type DriverOpen = DriverSession & (
 
 /** One driver owns one native conversation. Relay/inbox/history are worker-owned. */
 export interface Driver {
-  open(input: DriverOpen): Promise<{ nativeSessionId: string }>;
+  /** A reserved native UUID is not yet evidence that a resumable conversation
+   * exists. Provisional drivers confirm it via provider_binding_update. */
+  open(input: DriverOpen): Promise<{ nativeSessionId: string; provisional?: boolean }>;
   prompt(content: ContentBlock[]): Promise<PromptResponse>;
   steer(content: ContentBlock[]): Promise<SteerOutcome>;
   setModel(model: string): Promise<void>;

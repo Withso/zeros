@@ -1,6 +1,6 @@
 import { symlink } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { BridgeMessage } from "@zeros/protocol/messages";
 import type { AppClient } from "../../agents";
 import { browserFrame } from "../../__tests__/worker-fixtures";
@@ -10,7 +10,7 @@ import { TerminalMirror } from "../mirror";
 import { TerminalMirror as LocalMirror } from "../../../../desktop/src/engine/pty/mirror";
 
 const services: Terminals[] = [];
-afterEach(async () => { for (const service of services.splice(0)) await service.dispose(); });
+afterEach(async () => { for (const service of services.splice(0)) await service.dispose(); vi.useRealTimers(); });
 const frame = (type: string, fields: Record<string, unknown> = {}) => browserFrame(type, fields) as unknown as BridgeMessage;
 function client(id: string) {
   const frames: BridgeMessage[] = [];
@@ -58,6 +58,21 @@ it("shares one shell, survives detach, and reattaches with a screen snapshot", a
   if (created?.type !== "PTY_CREATED") throw new Error("Missing create reply");
   expect(created.replay).not.toContain("old frame"); expect(spawns).toBe(1); expect(notices.some(message => message.type === "PTY_TERMINALS_CHANGED")).toBe(true);
   await service.handle(again.client, frame("PTY_WRITE", { sessionId: "shared", data: "pwd\n" })); expect(native.written).toEqual(["pwd\n"]);
+});
+
+it("lets a quiet shell become idle after ten minutes and wakes on native input or output", async () => {
+  const { scope } = await repositoryFixture(); const native = new FakeProcess();
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  const service = new Terminals(scope, { spawn: async () => native }); services.push(service);
+  const a = client("a"); await service.handle(a.client, frame("PTY_CREATE", { sessionId: "quiet" }));
+  native.emit("$ "); await service.flush(); service.detach(a.client);
+  vi.setSystemTime(new Date("2026-01-01T00:09:59Z")); expect(service.busy).toBe(true);
+  vi.setSystemTime(new Date("2026-01-01T00:10:00Z")); expect(service.busy).toBe(false); expect(native.killed).toBe(false);
+  native.emit("background log\r\n"); await service.flush(); expect(service.busy).toBe(true);
+  vi.setSystemTime(new Date("2026-01-01T00:20:00Z")); expect(service.busy).toBe(false);
+  const b = client("b"); await service.handle(b.client, frame("PTY_CREATE", { sessionId: "quiet" }));
+  expect(service.busy).toBe(false);
+  await service.handle(b.client, frame("PTY_WRITE", { sessionId: "quiet", data: "pwd\n" })); expect(service.busy).toBe(true);
 });
 
 it("orders snapshot and concurrent live bytes without replaying or dropping a chunk", async () => {

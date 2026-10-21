@@ -2,9 +2,25 @@ import { afterEach, expect, it, vi } from "vitest";
 import { CloudWorker } from "../../worker";
 import { CLIENT_A, CLIENT_B, FakeRelay, browserFrame, config } from "../../__tests__/worker-fixtures";
 import { repositoryFixture } from "../../workspace/__tests__/repository-fixture";
+import { Terminals } from "../service";
 
 const workers: CloudWorker[] = [];
-afterEach(async () => { for (const worker of workers.splice(0)) await worker.dispose(); vi.useRealTimers(); });
+afterEach(async () => { for (const worker of workers.splice(0)) await worker.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+it("reports idle once when terminal activity expires between heartbeats", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  let active = true;
+  vi.spyOn(Terminals.prototype, "busy", "get").mockImplementation(() => active);
+  const { scope, state } = await repositoryFixture(), relay = new FakeRelay();
+  const worker = new CloudWorker({ directory: state, transport: relay, prepareCheckout: async () => {} }); workers.push(worker); worker.start();
+  await relay.receive({ ...config, workspace: scope.workspace });
+  expect(relay.frames.filter(frame => frame.t === "idle").at(-1)).toEqual({ t: "idle", idle: false });
+  active = false; await vi.advanceTimersByTimeAsync(55_000);
+  expect(relay.frames.filter(frame => frame.t === "idle").at(-1)).toEqual({ t: "idle", idle: true });
+  const count = relay.frames.filter(frame => frame.t === "idle").length;
+  await vi.advanceTimersByTimeAsync(55_000);
+  expect(relay.frames.filter(frame => frame.t === "idle")).toHaveLength(count);
+});
 
 it("keeps one native shell across relay reconnect and reports terminal activity", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });

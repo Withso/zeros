@@ -35,8 +35,10 @@ runtime variables and GitHub broker wiring.
 Reattach uses the same xterm resolved-screen serializer as Local. A per-shell
 queue orders screen snapshots, subscriptions and live bytes, with native output
 paused at 256 KiB pending and resumed below 128 KiB. Terminal dimensions and
-registry size are bounded. Open shells keep the worker active, including while
-no app is connected; activity is reported again every 55 seconds.
+registry size are bounded. Pending starts and input/output within the last ten
+minutes keep terminals active, including while no app is connected. Quiet shells
+survive detach without preventing idle-stop. The 55-second heartbeat repeats
+active status and announces idle once when activity expires.
 
 Unsupported operations always return `CLOUD_V2_UNSUPPORTED`. The explicit lists
 in `workspace/chat-service.ts` and `workspace/git.ts` have regression tests.
@@ -46,6 +48,17 @@ and turn checkpoint history are deferred. No request is silently acknowledged.
 Offline acceptance uses temporary Git repositories and a fake relay. Live
 provider, Boat, model proxy, and private-GitHub acceptance belongs to the
 integration owner; a Linux test does not establish macOS engine parity.
+
+Claude uses one pinned SDK query across prompts and drains native background
+output after the foreground result. Native user UUIDs identify turn and steering
+receipts; child and unrelated autonomous results cannot complete a newer send.
+Stop discards unpulled input, marks unacknowledged delivery uncertain and retires
+the query. The next explicit prompt resumes its native conversation. Model
+changes use SDK control. Full VM permissions bypass interactive approvals;
+unsupported questions and elicitation requests receive immediate cancellation.
+Native failures end the turn without an automatic prompt retry. A reserved
+Claude UUID is provisional until model content or a successful root result
+confirms its native binding; opening a view cannot create a false resume target.
 
 ## Image package
 
