@@ -248,9 +248,10 @@ function ActiveDispatcherPage({
   const base = needsGitSetup
     ? null
     : sourceForProject(sourceSelection, selectedProject);
-  const canCreateDesign = designWorkspaceCreationAvailable;
-  const mode: WorkspaceMode = canCreateDesign ? requestedMode : "code";
   const cloud = useCloudCreate(selectedProject, base, active, computerSource);
+  // Cloud workspaces have no Design for now; only Local creates Design workspaces.
+  const canCreateDesign = designWorkspaceCreationAvailable && !(cloud.organization && !cloud.organization.isPersonal);
+  const mode: WorkspaceMode = canCreateDesign ? requestedMode : "code";
   const computerReadKey = cloud.computerOwner && cloud.computerRepository
     ? computerSourceReadKey(cloud.computerOwner, cloud.computerRepository) : null;
   // Ownership selects the backend synchronously; an unavailable cloud backend

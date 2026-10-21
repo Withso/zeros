@@ -5469,7 +5469,7 @@ function AgentChatBody({
                         onAttachTranscript={openTranscriptPicker}
                         onLinkWorkspace={openWorkspacePicker}
                         onIntent={warmTranscriptPicker}
-                        onDesign={chatId && capabilitiesBridge ? enterDesignMode : undefined}
+                        onDesign={chatId && capabilitiesBridge && !isCloudWorkspace(chatThread?.folder ?? session.cwd) ? enterDesignMode : undefined}
                         designSelected={chatThread?.composerMode === "design"}
                       />
                       {chatThread?.composerMode === "design" && <ComposerDesignTag onRemove={leaveDesignMode} />}

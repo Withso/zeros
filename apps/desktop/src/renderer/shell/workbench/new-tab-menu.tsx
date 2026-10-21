@@ -204,8 +204,9 @@ export function WorkbenchNewTabMenu({
     close();
   };
 
-  // Simulators run on this Mac, so cloud workspaces don't offer them.
+  // Simulators run on this Mac, and cloud workspaces have no browser for now.
   const simulatorsAvailable = simulatorsActive && !isCloudWorkspace(scope);
+  const browserAvailable = !isCloudWorkspace(scope);
   /** Open a Simulator tab, reusing one that has no device yet. */
   const addSimulator = (platform: SimulatorPlatform) => {
     const blank = reusableSimulatorTab(tabs, platform);
@@ -289,10 +290,12 @@ export function WorkbenchNewTabMenu({
                   <File className="size-3.5" />
                   <span>File</span>
                 </CommandItem>
-                <CommandItem value="new-browser" onSelect={() => addBrowser()}>
-                  <Globe className="size-3.5" />
-                  <span>Browser</span>
-                </CommandItem>
+                {browserAvailable && (
+                  <CommandItem value="new-browser" onSelect={() => addBrowser()}>
+                    <Globe className="size-3.5" />
+                    <span>Browser</span>
+                  </CommandItem>
+                )}
                 <CommandItem
                   value="new-terminal"
                   onSelect={() => {
@@ -333,7 +336,7 @@ export function WorkbenchNewTabMenu({
               </CommandGroup>
             )}
 
-            {searching && directUrl && (
+            {searching && browserAvailable && directUrl && (
               <CommandGroup heading="Browser">
                 <CommandItem
                   value={`url:${directUrl}`}
@@ -360,7 +363,7 @@ export function WorkbenchNewTabMenu({
               />
             )}
 
-            {searching && browserResults.length > 0 && (
+            {searching && browserAvailable && browserResults.length > 0 && (
               <CommandGroup heading="Recently browsed">
                 {browserResults.map((entry) => (
                   <CommandItem
