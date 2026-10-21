@@ -38,6 +38,7 @@ d("cloud v2 Cloud Computer builds", () => {
       stop: vi.fn(async () => {}),
       delete: vi.fn(async () => {}),
       exec: vi.fn(async (_id: string, command: string) => ({ exitCode: 0, stdout: command.includes("rev-parse") ? `Cloning\n${commit}\n` : "installed", timedOut: false })),
+      execLong: vi.fn(async (_id: string, command: string) => ({ exitCode: 0, stdout: command.includes("rev-parse") ? `Cloning\n${commit}\n` : "installed", timedOut: false })),
       saveSnapshot: vi.fn(async () => {}),
       deleteSnapshot: vi.fn(async () => {}),
     };
@@ -61,7 +62,7 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview.builds[0]).toMatchObject({ state: "succeeded", version: 1 });
     expect(overview.builds[0]!.recipe.repositories[0]!.commit).toBe(commit);
     expect(await new CloudV2Store(pool).installedRepositories(org)).toEqual(["withso/zeros"]);
-    const cloneCommand = vi.mocked(boat.exec).mock.calls[0]![1];
+    const cloneCommand = vi.mocked(boat.execLong).mock.calls[0]![1];
     expect(cloneCommand).not.toContain("ghs_token");
 
     vi.mocked(boat.create).mockResolvedValueOnce({ sandboxId: "bx_build2" });
@@ -78,7 +79,7 @@ d("cloud v2 Cloud Computer builds", () => {
 
   it("records a failed setup without touching the live snapshot", async () => {
     const boat = compute();
-    vi.mocked(boat.exec).mockResolvedValueOnce({ exitCode: 0, stdout: commit, timedOut: false })
+    vi.mocked(boat.execLong).mockResolvedValueOnce({ exitCode: 0, stdout: commit, timedOut: false })
       .mockResolvedValueOnce({ exitCode: 1, stdout: "ERR! missing", timedOut: false });
     const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", cloneToken: async () => "ghs_token" });
     const build = await computers.enqueue(org, admin, recipe);

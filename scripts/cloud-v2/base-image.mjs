@@ -46,8 +46,28 @@ async function call(method, route, body, headers = {}) {
 const quote = value => `'${String(value).replace(/'/g, "'\\''")}'`;
 const log = message => console.log(`[cloud-v2-base] ${message}`);
 
-async function exec(sandboxId, label, command, timeoutSeconds = 900) {
-  const result = await call("POST", `/sandboxes/${sandboxId}/commands`, { command: `bash -lc ${quote(command)}`, timeoutSeconds });
+/** Boat accepts at most ~10 minutes per command; longer steps run detached
+ * and are polled. The detached script records its own exit status. */
+async function exec(sandboxId, label, command, timeoutSeconds = 300) {
+  const direct = async (text, seconds) => call("POST", `/sandboxes/${sandboxId}/commands`, { command: text, timeoutSeconds: Math.min(seconds, 600) });
+  let result;
+  if (timeoutSeconds <= 570) result = await direct(`bash -lc ${quote(command)}`, timeoutSeconds);
+  else {
+    const job = `/tmp/zeros-base-${Date.now().toString(36)}`;
+    const script = Buffer.from(`(\n${command}\n)\necho $? > ${job}.exit\n`, "utf8").toString("base64");
+    await direct(`printf %s '${script}' | base64 -d > ${job}.sh && { setsid nohup bash -l ${job}.sh > ${job}.log 2>&1 < /dev/null & } ; echo started`, 30);
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 10_000));
+      const state = String((await direct(`if [ -f ${job}.exit ]; then cat ${job}.exit; else echo running; fi`, 30)).stdout ?? "").trim();
+      if (state !== "running") {
+        const output = await direct(`tail -c 65536 ${job}.log; rm -f ${job}.sh ${job}.exit ${job}.log`, 30);
+        result = { exitCode: /^\d+$/.test(state) ? Number(state) : -1, stdout: output.stdout, timedOut: false };
+        break;
+      }
+      if (Date.now() >= deadline) { result = { exitCode: -1, stdout: "", timedOut: true }; break; }
+    }
+  }
   const tail = String(result.stdout ?? "").split("\n").slice(-12).join("\n");
   if (result.exitCode !== 0 || result.timedOut) throw new Error(`${label} failed (exit ${result.exitCode}${result.timedOut ? ", timed out" : ""})\n${tail}`);
   log(`${label}: ok`);
@@ -87,7 +107,7 @@ async function main() {
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
   const node = (await exec(sandboxId, "check stock tools",
-    "set -e; sudo -n true; node -e 'if (+process.versions.node.split(\".\")[0] < 24) process.exit(1)'; command -v node git gh rg; id -un")).trim();
+    "set -e; sudo -n true; node -e 'if (+process.versions.node.split(\".\")[0] < 24) process.exit(1)'; command -v node git gh rg; id -un", 60)).trim();
   log(node.split("\n").join(" "));
   const auth = Buffer.from(`x-access-token:${githubToken}`).toString("base64");
   await exec(sandboxId, "fetch source", [

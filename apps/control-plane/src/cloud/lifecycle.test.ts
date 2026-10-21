@@ -21,6 +21,7 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
     stop: vi.fn(async () => {}),
     delete: vi.fn(async () => {}),
     exec: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })),
+    execLong: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })),
     saveSnapshot: vi.fn(async () => {}),
     deleteSnapshot: vi.fn(async () => {}),
   };

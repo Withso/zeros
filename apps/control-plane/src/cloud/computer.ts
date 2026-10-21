@@ -197,7 +197,7 @@ export class CloudV2ComputerBuilder {
       const dir = `/home/user/${entry.repository}`;
       const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
       // The token stays in a per-command header; the saved remote URL carries none.
-      const clone = await compute.exec(sandboxId, asZeros([
+      const clone = await compute.execLong(sandboxId, asZeros([
         "set -e",
         `mkdir -p ${shellQuote(dir.slice(0, dir.lastIndexOf("/")))}`,
         `git -c ${shellQuote(`http.extraHeader=Authorization: Basic ${auth}`)} clone ${entry.ref ? `--branch ${shellQuote(entry.ref)} ` : ""}` +
@@ -209,7 +209,7 @@ export class CloudV2ComputerBuilder {
       if (clone.exitCode !== 0) throw Object.assign(new Error("clone failed"), { code: "computer_clone_failed" });
       const commit = clone.stdout.trim().split("\n").pop() ?? "";
       if (entry.setup) {
-        const setup = await compute.exec(sandboxId, `${asZeros([`cd ${shellQuote(dir)}`, entry.setup])} 2>&1`, 1800);
+        const setup = await compute.execLong(sandboxId, `${asZeros([`cd ${shellQuote(dir)}`, entry.setup])} 2>&1`, 3600);
         await log(setup.stdout.slice(-64 * 1024) + `\n[zeros] setup ${entry.repository}: exit ${setup.exitCode}\n`);
         if (setup.exitCode !== 0) throw Object.assign(new Error("setup failed"), { code: "computer_setup_failed" });
       }

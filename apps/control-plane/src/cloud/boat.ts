@@ -10,6 +10,9 @@ const LEASE_SECONDS = 24 * 60 * 60;
 
 export type CloudV2CommandResult = { exitCode: number; stdout: string; timedOut: boolean };
 
+/** Boat's command endpoint accepts at most about ten minutes per command. */
+export const BOAT_MAX_COMMAND_SECONDS = 600;
+
 export interface CloudV2Compute {
   /** Idempotent per key: a retry after a lost reply returns the same sandbox. */
   create(input: { key: string; from: string; name: string; env: Record<string, string> }): Promise<{ sandboxId: string }>;
@@ -18,6 +21,8 @@ export interface CloudV2Compute {
   /** Succeeds when the sandbox is already gone. */
   delete(sandboxId: string): Promise<void>;
   exec(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
+  /** Runs past the per-command limit: starts a detached job, then polls it. */
+  execLong(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
   /** Saves a stopped sandbox's disk under a name; a later name replaces it. */
   saveSnapshot(sandboxId: string, name: string): Promise<void>;
   deleteSnapshot(name: string): Promise<void>;
@@ -75,10 +80,36 @@ export class BoatCloudV2Compute implements CloudV2Compute {
   async exec(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult> {
     const reply = Command.parse(await this.client.request(`/sandboxes/${this.id(sandboxId)}/commands`, {
       method: "POST",
-      body: { command, timeoutSeconds },
-      timeoutMs: (timeoutSeconds + 30) * 1000,
+      body: { command, timeoutSeconds: Math.min(timeoutSeconds, BOAT_MAX_COMMAND_SECONDS) },
+      timeoutMs: (Math.min(timeoutSeconds, BOAT_MAX_COMMAND_SECONDS) + 30) * 1000,
     }));
     return { exitCode: reply.exitCode ?? -1, stdout: reply.stdout ?? "", timedOut: reply.timedOut === true };
+  }
+
+  async execLong(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult> {
+    if (timeoutSeconds <= BOAT_MAX_COMMAND_SECONDS - 30) return this.exec(sandboxId, command, timeoutSeconds);
+    const job = `/tmp/zeros-job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    // The detached script records its own exit status, so it survives the
+    // launching command's session ending.
+    const script = `(\n${command}\n)\necho $? > ${job}.exit\n`;
+    const encoded = Buffer.from(script, "utf8").toString("base64");
+    const started = await this.exec(sandboxId,
+      `printf %s '${encoded}' | base64 -d > ${job}.sh && { setsid nohup bash ${job}.sh > ${job}.log 2>&1 < /dev/null & } ; echo started`, 30);
+    if (started.exitCode !== 0) return started;
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      const poll = await this.exec(sandboxId, `if [ -f ${job}.exit ]; then cat ${job}.exit; else echo running; fi`, 30);
+      const state = poll.stdout.trim();
+      if (state !== "running") {
+        const output = await this.exec(sandboxId, `tail -c 262144 ${job}.log; rm -f ${job}.sh ${job}.exit ${job}.log`, 30);
+        return { exitCode: /^\d+$/.test(state) ? Number(state) : -1, stdout: output.stdout, timedOut: false };
+      }
+      if (Date.now() >= deadline) {
+        await this.exec(sandboxId, `pkill -f ${job}.sh || true`, 30).catch(() => {});
+        return { exitCode: -1, stdout: "", timedOut: true };
+      }
+    }
   }
 
   async saveSnapshot(sandboxId: string, name: string): Promise<void> {
