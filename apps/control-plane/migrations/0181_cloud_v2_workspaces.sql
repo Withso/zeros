@@ -48,9 +48,14 @@ CREATE TABLE cloud_v2_workspaces (
   worker_token_hash bytea UNIQUE CHECK (worker_token_hash IS NULL OR octet_length(worker_token_hash) = 32),
   error_code text CHECK (error_code IS NULL OR char_length(error_code) <= 64),
   active_at timestamptz,
+  -- Lifecycle retries for the transitional states; reset on every state change.
+  attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  next_attempt_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+CREATE INDEX cloud_v2_workspaces_pending ON cloud_v2_workspaces (next_attempt_at)
+  WHERE state IN ('creating','starting','stopping','deleting');
 CREATE INDEX cloud_v2_workspaces_creator ON cloud_v2_workspaces (org_id, creator_user_id, created_at DESC)
   WHERE state <> 'deleted';
 

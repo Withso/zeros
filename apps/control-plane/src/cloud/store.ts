@@ -70,12 +70,10 @@ async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promi
 export class CloudV2Store {
   constructor(private readonly pool: pg.Pool) {}
 
-  /** Returns the worker token once; only its hash is stored. */
   async createWorkspace(input: {
     id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
     computerBuildId: string | null;
-  }): Promise<{ workspace: CloudV2Workspace; workerToken: string }> {
-    const worker = newCloudV2Token("worker");
+  }): Promise<CloudV2Workspace> {
     const row = await withSystemTx(this.pool, async tx => {
       const member = await tx.query(
         `SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
@@ -84,14 +82,13 @@ export class CloudV2Store {
       );
       if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
       return (await tx.query<Row>(
-        `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, state,
-           computer_build_id, worker_token_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7, $8) RETURNING ${COLUMNS}`,
+        `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, state, computer_build_id)
+         VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7) RETURNING ${COLUMNS}`,
         [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
-          input.computerBuildId, worker.hash],
+          input.computerBuildId],
       )).rows[0]!;
     });
-    return { workspace: workspace(row), workerToken: worker.token };
+    return workspace(row);
   }
 
   async get(id: string, userId: string): Promise<CloudV2Workspace> {
@@ -117,7 +114,7 @@ export class CloudV2Store {
          boat_sandbox_id = CASE WHEN $4::boolean THEN $5 ELSE boat_sandbox_id END,
          error_code = CASE WHEN $6::boolean THEN $7 ELSE error_code END,
          worker_token_hash = CASE WHEN $3 = 'deleted' THEN NULL ELSE worker_token_hash END,
-         updated_at = clock_timestamp()
+         attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
        WHERE id = $1 AND state = ANY($2::text[]) RETURNING ${COLUMNS}`,
       [id, from, to, patch.boatSandboxId !== undefined, patch.boatSandboxId ?? null,
         patch.errorCode !== undefined, patch.errorCode ?? null],
@@ -185,6 +182,59 @@ export class CloudV2Store {
       [hashCloudV2Token(token)],
     ));
     return rows[0] ? workspace(rows[0]) : null;
+  }
+
+  /** Leases up to `limit` workspaces in a transitional state to one lifecycle
+   * worker. A crashed worker's lease simply expires. */
+  async claimPending(limit: number, leaseMs: number): Promise<(CloudV2Workspace & { attempts: number })[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { attempts: number }>(
+      `UPDATE cloud_v2_workspaces w SET attempts = w.attempts + 1,
+         next_attempt_at = clock_timestamp() + make_interval(secs => $2::double precision / 1000)
+       WHERE w.id IN (
+         SELECT id FROM cloud_v2_workspaces
+         WHERE state IN ('creating','starting','stopping','deleting')
+           AND coalesce(next_attempt_at, '-infinity') <= clock_timestamp()
+         ORDER BY coalesce(next_attempt_at, updated_at) LIMIT $1 FOR UPDATE SKIP LOCKED)
+       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, w.attempts`,
+      [limit, leaseMs],
+    ));
+    return rows.map(row => ({ ...workspace(row), attempts: row.attempts }));
+  }
+
+  /** Waits for an outside event (the worker's hello) without counting a failure. */
+  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string } = {}): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET next_attempt_at = clock_timestamp() + make_interval(secs => $3::double precision / 1000),
+         boat_sandbox_id = coalesce($4, boat_sandbox_id), updated_at = clock_timestamp()
+       WHERE id = $1 AND state = $2`,
+      [id, state, ms, patch.boatSandboxId ?? null],
+    ));
+  }
+
+  /** Replaces the worker credential; the plaintext goes only to the VM. */
+  async rotateWorkerToken(id: string): Promise<string> {
+    const worker = newCloudV2Token("worker");
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET worker_token_hash = $2 WHERE id = $1 AND state NOT IN ('deleting','deleted')`,
+      [id, worker.hash],
+    ));
+    return worker.token;
+  }
+
+  async computerSnapshot(organizationId: string): Promise<string | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
+      `SELECT snapshot_name FROM cloud_v2_computers WHERE org_id = $1`, [organizationId]));
+    return rows[0]?.snapshot_name ?? null;
+  }
+
+  /** Revokes a stopped or deleted workspace's tokens; deletion also drops its history. */
+  async revoke(id: string, history: boolean): Promise<void> {
+    await withSystemTx(this.pool, async tx => {
+      await tx.query(`DELETE FROM cloud_v2_tokens WHERE workspace_id = $1`, [id]);
+      if (!history) return;
+      await tx.query(`DELETE FROM cloud_v2_messages WHERE workspace_id = $1`, [id]);
+      await tx.query(`DELETE FROM cloud_v2_chats WHERE workspace_id = $1`, [id]);
+    });
   }
 
   /** Mirror of the worker's history; the same rows Local persists. */

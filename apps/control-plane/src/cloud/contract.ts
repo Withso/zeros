@@ -62,7 +62,7 @@ export type CloudV2ControlFrame =
   | { t: "frame"; clientId: string; frame: unknown }
   | {
       t: "config";
-      workspace: { id: string; organizationId: string; checkoutPath: string; repository: string };
+      workspace: { id: string; organizationId: string; checkoutPath: string; repository: string; branch: string; baseBranch: string };
       agents: { codex?: CloudV2Proxy; claude?: CloudV2Proxy; cursor?: { apiKey: string } };
     }
   | { t: "reply"; id: string; token: string; expiresAt: number }

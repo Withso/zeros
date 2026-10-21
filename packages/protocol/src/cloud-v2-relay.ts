@@ -85,6 +85,9 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       organizationId: z.uuid(),
       checkoutPath: z.string().min(1).max(1024),
       repository: z.string().min(1).max(512),
+      /** The workspace branch; created from `baseBranch` on first boot. */
+      branch: z.string().min(1).max(255),
+      baseBranch: z.string().min(1).max(255),
     }).strict(),
     agents: z.object({
       codex: proxy.optional(),

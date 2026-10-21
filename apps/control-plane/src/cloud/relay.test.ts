@@ -51,7 +51,7 @@ describe("cloud v2 relay", () => {
       },
       config: vi.fn(async ws => ({
         t: "config" as const,
-        workspace: { id: ws.id, organizationId: ws.organizationId, checkoutPath: "/home/zeros/workspace", repository: ws.repository },
+        workspace: { id: ws.id, organizationId: ws.organizationId, checkoutPath: "/home/zeros/o/r", repository: ws.repository, branch: ws.branch, baseBranch: "main" },
         agents: {},
       })),
       githubToken: vi.fn(async () => ({ token: "ghs_test", expiresAt: 1 })),

@@ -45,7 +45,7 @@ describe("cloud v2 relay contract", () => {
     const proxy = { baseUrl: "https://api.zeros.build/v2/cloud/proxy/openai", token: "z".repeat(32), expiresAt: 2 };
     const config = {
       t: "config",
-      workspace: { id, organizationId: id, checkoutPath: "/home/zeros/workspace", repository: "withso/zeros" },
+      workspace: { id, organizationId: id, checkoutPath: "/home/zeros/withso/zeros", repository: "withso/zeros", branch: "zeros/cloud-1", baseBranch: "main" },
       agents: { codex: proxy, claude: { ...proxy, baseUrl: "https://api.zeros.build/v2/cloud/proxy/anthropic" }, cursor: { apiKey: "key" } },
     };
     expect(CloudV2ControlFrameSchema.parse(config).t).toBe("config");
