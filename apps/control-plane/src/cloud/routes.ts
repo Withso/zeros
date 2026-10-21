@@ -29,8 +29,6 @@ const CreateSchema = z.object({
 export type CloudV2RouteDeps = {
   store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "transition" | "issueToken" | "listChats" | "windowMessages">;
   computers: Pick<CloudV2Computers, "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
-  /** Boat named snapshot of the Zeros v2 base image; builds start from it. */
-  baseSnapshot: string | null;
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly string[] | null>;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
@@ -154,11 +152,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   app.post("/v1/cloud-v2/organizations/:org/computer/builds", json, async c => {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
-    if (!deps.baseSnapshot) throw new HttpError(409, "computer_base_unavailable", "Cloud Computer builds are not configured");
     const parsed = BuildSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer build");
     const build = await deps.computers.enqueue(organizationId, c.get("user").id,
-      { base: deps.baseSnapshot, repositories: parsed.data.repositories });
+      { repositories: parsed.data.repositories });
     return c.json({ build }, 202);
   });
 

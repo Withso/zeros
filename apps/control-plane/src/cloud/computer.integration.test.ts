@@ -29,7 +29,8 @@ d("cloud v2 Cloud Computer builds", () => {
     await pool.query(`INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'owner'), ($1, $3, 'member')`, [org, admin, member]);
   });
 
-  const recipe = { base: "zeros-v2-base-1", repositories: [{ repository: "withso/zeros", setup: "pnpm install" }] };
+  const recipe = { repositories: [{ repository: "withso/zeros", setup: "pnpm install" }] };
+  const runtime = { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" };
 
   function compute(): CloudV2Compute {
     return {
@@ -54,9 +55,12 @@ d("cloud v2 Cloud Computer builds", () => {
 
   it("builds, pins commits, goes live as the one named snapshot and retires the previous one", async () => {
     const boat = compute();
-    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", cloneToken: async () => "ghs_token" });
-    await computers.enqueue(org, admin, recipe);
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
+    const first = await computers.enqueue(org, admin, recipe);
     await builder.tick();
+    // Builds start from Boat's stock image and cache the current runtime first.
+    expect(boat.create).toHaveBeenCalledWith({ key: first.id, name: `zeros-alpha-build-${first.id.slice(0, 8)}`, env: {} });
+    expect(vi.mocked(boat.exec).mock.calls[0]![1]).toContain(`/opt/zeros/runtime/${"b".repeat(64)}`);
     let overview = await computers.overview(org);
     expect(overview.snapshotName).toBe(cloudV2SnapshotName("alpha", org, 1));
     expect(overview.builds[0]).toMatchObject({ state: "succeeded", version: 1 });
@@ -85,7 +89,7 @@ d("cloud v2 Cloud Computer builds", () => {
     const boat = compute();
     vi.mocked(boat.execLong).mockResolvedValueOnce({ exitCode: 0, stdout: commit, timedOut: false })
       .mockResolvedValueOnce({ exitCode: 1, stdout: "ERR! missing", timedOut: false });
-    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", cloneToken: async () => "ghs_token" });
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
     const build = await computers.enqueue(org, admin, recipe);
     await builder.tick();
     const overview = await computers.overview(org);
@@ -98,7 +102,7 @@ d("cloud v2 Cloud Computer builds", () => {
 
   it("fails a build whose server stopped mid-build, removes its builder and accepts a new build", async () => {
     const boat = compute();
-    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", cloneToken: async () => "ghs_token" });
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
     const lost = await computers.enqueue(org, admin, recipe);
     await computers.claim();
     await computers.update(lost.id, { builderSandboxId: "bx_lost1" });

@@ -39,25 +39,17 @@ describe("cloud v2 model proxy", () => {
     expect([...headers.values()].join()).not.toContain(token);
   });
 
-  it("uses a Claude setup token with the OAuth beta and an API key without it", async () => {
-    const oauth = setup({ claude: { kind: "claude-setup-token", accessToken: secret("sk-ant-oat01") } });
-    await oauth.app.request("/v2/cloud/proxy/anthropic/v1/messages", { method: "POST", headers: { authorization: `Bearer ${token}`, "anthropic-beta": "a,b" }, body: "{}" });
-    const [url, init] = oauth.fetch.mock.calls[0]!;
-    expect(url).toBe("https://api.anthropic.com/v1/messages");
-    expect(new Headers(init.headers).get("anthropic-beta")).toBe("a,b,oauth-2025-04-20");
-    expect(new Headers(init.headers).get("authorization")).toBe(`Bearer ${secret("sk-ant-oat01")}`);
-    const key = setup({ claude: { kind: "claude-api-key", apiKey: secret("sk-ant-api") } });
-    await key.app.request("/v2/cloud/proxy/anthropic/v1/messages", { method: "POST", headers: { "x-api-key": token }, body: "{}" });
-    const headers = new Headers(key.fetch.mock.calls[0]![1].headers);
-    expect(headers.get("x-api-key")).toBe(secret("sk-ant-api"));
-    expect(headers.get("authorization")).toBeNull();
+  it("proxies only Codex; Claude runs with its own credential on the VM", async () => {
+    const { app, fetch } = setup({ claude: { kind: "claude-setup-token", accessToken: secret("sk-ant-oat01") } });
+    const response = await app.request("/v2/cloud/proxy/anthropic/v1/messages", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" });
+    expect(response.status).toBe(404);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("refuses bad tokens, missing or expired logins and path tricks without calling upstream", async () => {
     const { app, fetch } = setup({ codex: { kind: "codex-chatgpt", accessToken: secret("t"), accountId: "a", expiresAt: 1_000_000 } });
     expect((await app.request("/v2/cloud/proxy/openai/responses", { headers: { authorization: "Bearer zw2p_bad" } })).status).toBe(401);
     expect((await app.request("/v2/cloud/proxy/openai/responses", { headers: { authorization: `Bearer ${token}` } })).status).toBe(401);
-    expect((await app.request("/v2/cloud/proxy/anthropic/v1/messages", { headers: { authorization: `Bearer ${token}` } })).status).toBe(401);
     expect((await app.request("/v2/cloud/proxy/other/x", { headers: { authorization: `Bearer ${token}` } })).status).toBe(404);
     expect(fetch).not.toHaveBeenCalled();
   });

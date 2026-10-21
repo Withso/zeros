@@ -80,10 +80,13 @@ export function hostedDesktopEnvironment(state, profile, directory) {
     VITE_APP_BASE_URL: p.appOrigin, VITE_CONTROL_PLANE_URL: p.apiOrigin, ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
 }
 
-/** Cloud workspace v2 base image: the Boat named snapshot Cloud Computer
- * builds start from. Without one, Dev runs with builds disabled. */
-const cloudV2BaseSnapshot = env => /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(env.ZEROS_CLOUD_V2_BASE_SNAPSHOT ?? "")
-  ? env.ZEROS_CLOUD_V2_BASE_SNAPSHOT : undefined;
+/** Cloud workspace v2 worker runtime, published into this Dev's storage by
+ * `pnpm --dir apps/control-plane cloud-v2:publish-runtime`. VMs download it. */
+function cloudV2Runtime(env) {
+  if (!/^[0-9a-f]{64}$/.test(env.ZEROS_CLOUD_V2_RUNTIME_SHA256 ?? ""))
+    throw new Error("Set ZEROS_CLOUD_V2_RUNTIME_SHA256 to a runtime published with cloud-v2:publish-runtime");
+  return env.ZEROS_CLOUD_V2_RUNTIME_SHA256;
+}
 
 export function hostedBackendEnvironment(state, profile, source, _worker, env = process.env) {
   const p = hostedPublicProfile(state, profile), roles = state.resources.planetscale?.roles;
@@ -111,7 +114,9 @@ export function hostedBackendEnvironment(state, profile, source, _worker, env = 
     // serves the API, the worker relay and the lifecycle loop on one origin.
     CLOUD_WORKSPACES_ENABLED: "false",
     CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: p.apiOrigin, CLOUD_V2_REALTIME_URL: p.apiOrigin.replace(/^https:/, "wss:"),
-    ...(cloudV2BaseSnapshot(env) ? { CLOUD_V2_BASE_SNAPSHOT: cloudV2BaseSnapshot(env) } : {}),
+    CLOUD_V2_RUNTIME_SHA256: cloudV2Runtime(env), CLOUD_V2_RUNTIME_STORE_ENDPOINT: profile.storage.endpoint,
+    CLOUD_V2_RUNTIME_STORE_BUCKET: profile.storage.bucket, CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: profile.storage.accessKeyId,
+    CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: profile.storage.secretAccessKey,
     BOAT_API_KEY: profile.boat.apiKey, BOAT_BILLING_ORG: profile.boat.billingOrg,
     // The agent login vault, unchanged from the previous cloud.
     CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"),

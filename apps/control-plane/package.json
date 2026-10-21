@@ -11,6 +11,7 @@
   },
   "scripts": {
     "smoke:chat-titles": "tsx src/chat-titles-smoke.ts",
+    "cloud-v2:publish-runtime": "tsx src/cloud/publish-runtime.ts",
     "auth:probe": "tsx src/auth-contract-probe.ts",
     "cloud-entitlement:manage": "tsx src/manage-cloud-workspace-entitlement.ts",
     "cloud-rollout-flag:manage": "tsx src/manage-cloud-rollout-flag.ts",

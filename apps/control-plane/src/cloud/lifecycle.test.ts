@@ -5,6 +5,7 @@ import type { CloudV2Workspace } from "./store.js";
 
 const NOW = Date.parse("2026-10-21T12:00:00Z");
 const token = `zw2w_${"a".repeat(43)}`;
+const runtime = `/opt/zeros/runtime/${"b".repeat(64)}`;
 
 function workspace(state: CloudV2Workspace["state"], extra: Partial<CloudV2Workspace> = {}): CloudV2Workspace & { attempts: number } {
   return {
@@ -35,7 +36,8 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
     idleSince: vi.fn(async () => options.idle ?? []),
   };
   const lifecycle = new CloudV2Lifecycle({
-    store, compute, now: () => NOW,
+    store, compute, now: () => NOW, sleep: async () => {},
+    runtime: { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" },
     bootEnv: ws => ({ ZEROS_WORKER_URL: "wss://relay/v2/cloud/worker", ZEROS_WORKSPACE_ID: ws.id }),
     sandboxName: ws => `zeros-alpha-${ws.id.slice(0, 8)}`,
   });
@@ -52,6 +54,9 @@ describe("cloud v2 lifecycle", () => {
     });
     expect(JSON.stringify(vi.mocked(compute.create).mock.calls)).not.toContain(token);
     expect(vi.mocked(compute.exec).mock.calls[0]![0]).toBe("bx_new1");
+    // The runtime the control plane names is installed before the worker starts.
+    expect(vi.mocked(compute.exec).mock.calls[0]![1]).toContain(runtime);
+    expect(vi.mocked(compute.exec).mock.calls[1]![1]).toContain(Buffer.from(token).toString("base64"));
     expect(store.defer).toHaveBeenLastCalledWith(expect.any(String), "creating", 30_000);
   });
 
@@ -95,13 +100,23 @@ describe("cloud v2 lifecycle", () => {
     const fresh = setup([workspace("starting", { boatSandboxId: "bx_abc1", updatedAt: new Date(NOW - 5_000).toISOString() })]);
     await fresh.lifecycle.tick();
     expect(fresh.compute.resume).toHaveBeenCalledWith("bx_abc1");
-    expect(fresh.compute.exec).not.toHaveBeenCalled();
+    // Only the runtime check runs: an unchanged runtime leaves the worker alone.
+    expect(fresh.compute.exec).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fresh.compute.exec).mock.calls[0]![1]).toContain(runtime);
     expect(fresh.store.defer).toHaveBeenLastCalledWith(expect.any(String), "starting", 30_000);
     // A first delivery that failed while the VM restored is retried, never dropped.
     const slow = setup([workspace("starting", { boatSandboxId: "bx_abc1", attempts: 3, updatedAt: new Date(NOW - 45_000).toISOString() })]);
     await slow.lifecycle.tick();
     expect(slow.compute.resume).toHaveBeenCalledWith("bx_abc1");
-    expect(slow.compute.exec).toHaveBeenCalledTimes(1);
+    expect(slow.compute.exec).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a command while a resumed VM is still restoring", async () => {
+    const restoring = setup([workspace("starting", { boatSandboxId: "bx_abc1", updatedAt: new Date(NOW - 5_000).toISOString() })]);
+    vi.mocked(restoring.compute.exec).mockRejectedValueOnce(Object.assign(new Error("restoring"), { code: "provider_request_failed" }));
+    await restoring.lifecycle.tick();
+    expect(restoring.compute.exec).toHaveBeenCalledTimes(2);
+    expect(restoring.store.defer).toHaveBeenLastCalledWith(expect.any(String), "starting", 30_000);
   });
 
   it("fails a wake that never reconnects, and a start without a VM at once", async () => {

@@ -3,7 +3,8 @@
 // repeats it: creation uses the workspace id as Boat's idempotency key, and
 // the worker credential is delivered by command after boot, never in the
 // sandbox definition, so it can be rotated on any retry.
-import type { CloudV2Compute } from "./boat.js";
+import type { CloudV2Compute, CloudV2CommandResult } from "./boat.js";
+import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 
 const BATCH = 10;
@@ -23,12 +24,15 @@ export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 export type CloudV2LifecycleDeps = {
   store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince">;
   compute: CloudV2Compute;
+  /** The worker runtime every VM must run; installed on create and on wake. */
+  runtime: CloudV2Runtime;
   /** Non-secret boot settings, e.g. the relay URL and workspace id. */
   bootEnv(workspace: CloudV2Workspace): Record<string, string>;
   sandboxName(workspace: CloudV2Workspace): string;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void> };
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
   logger?: Pick<Console, "warn">;
 };
 
@@ -113,6 +117,7 @@ export class CloudV2Lifecycle {
           }));
           await store.defer(workspace.id, "creating", 0, { boatSandboxId: sandboxId });
         }
+        await this.ensureRuntime(sandboxId);
         await this.deliverToken(workspace, sandboxId);
         await store.defer(workspace.id, "creating", HELLO_POLL_MS);
         return;
@@ -130,6 +135,8 @@ export class CloudV2Lifecycle {
         // Resume is idempotent. The resumed worker reconnects with the
         // credential it kept; only one that has not gets a fresh credential.
         await compute.resume(workspace.boatSandboxId);
+        // A runtime shipped while the VM slept is installed now.
+        await this.ensureRuntime(workspace.boatSandboxId);
         if (waking >= HELLO_POLL_MS) await this.deliverToken(workspace, workspace.boatSandboxId);
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
@@ -151,7 +158,26 @@ export class CloudV2Lifecycle {
 
   private async deliverToken(workspace: CloudV2Workspace, sandboxId: string): Promise<void> {
     const token = await this.deps.store.rotateWorkerToken(workspace.id);
-    const result = await this.deps.compute.exec(sandboxId, deliverWorkerTokenCommand(token, this.deps.bootEnv(workspace)), 30);
+    const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, this.deps.bootEnv(workspace)), 30);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });
+  }
+
+  /** Quick when the VM already has the runtime; otherwise downloads it. */
+  private async ensureRuntime(sandboxId: string): Promise<void> {
+    const { runtime } = this.deps;
+    const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url() }), 300);
+    if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
+  }
+
+  /** A VM that has just started or resumed can refuse commands for a few seconds. */
+  private async execWhenReady(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.deps.compute.exec(sandboxId, command, timeoutSeconds);
+      } catch (error) {
+        if (attempt >= 6) throw error;
+        await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(2_000);
+      }
+    }
   }
 }

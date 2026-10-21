@@ -385,8 +385,8 @@ export type CloudV2Config = {
   apiUrl: string;
   /** wss:// origin of the realtime service; workers and the app connect here. */
   realtimeUrl: string;
-  /** Boat named snapshot of the Zeros v2 base image; null disables builds. */
-  baseSnapshot: string | null;
+  /** The worker runtime every VM runs, by sha256, and where it is stored. */
+  runtime: { sha256: string; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
 };
 
 function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
@@ -408,12 +408,23 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
       throw new Error(`Invalid environment: ${name} must be a ${protocol}// origin`);
     return url.origin;
   };
+  const sha256 = env.CLOUD_V2_RUNTIME_SHA256?.trim() ?? "";
+  if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error("Invalid environment: CLOUD_V2_RUNTIME_SHA256 must name a published worker runtime");
+  const required = (name: string) => {
+    const value = env[name]?.trim();
+    if (!value) throw new Error(`Invalid environment: CLOUD_V2_ENABLED requires ${name}`);
+    return value;
+  };
+  const endpoint = required("CLOUD_V2_RUNTIME_STORE_ENDPOINT");
+  if (!endpoint.startsWith("https://")) throw new Error("Invalid environment: CLOUD_V2_RUNTIME_STORE_ENDPOINT must be https");
   return {
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
-    baseSnapshot: /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(env.CLOUD_V2_BASE_SNAPSHOT?.trim() ?? "")
-      ? env.CLOUD_V2_BASE_SNAPSHOT!.trim() : null,
+    runtime: { sha256, store: {
+      endpoint, bucket: required("CLOUD_V2_RUNTIME_STORE_BUCKET"),
+      accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY"),
+    } },
   };
 }
 

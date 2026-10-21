@@ -17,7 +17,8 @@ const NamedSnapshot = z.object({ snapshot: z.object({ status: z.string() }).pass
 
 export interface CloudV2Compute {
   /** Idempotent per key: a retry after a lost reply returns the same sandbox. */
-  create(input: { key: string; from: string; name: string; env: Record<string, string> }): Promise<{ sandboxId: string }>;
+  /** From a named snapshot, or Boat's stock image without `from`. */
+  create(input: { key: string; from?: string; name: string; env: Record<string, string> }): Promise<{ sandboxId: string }>;
   resume(sandboxId: string): Promise<void>;
   stop(sandboxId: string): Promise<void>;
   /** Succeeds when the sandbox is already gone. */
@@ -49,14 +50,14 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     private readonly sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
   ) {}
 
-  async create(input: { key: string; from: string; name: string; env: Record<string, string> }) {
-    if (!SNAPSHOT_NAME.test(input.from)) throw new Error("Invalid Boat snapshot name");
+  async create(input: { key: string; from?: string; name: string; env: Record<string, string> }) {
+    if (input.from !== undefined && !SNAPSHOT_NAME.test(input.from)) throw new Error("Invalid Boat snapshot name");
     const reply = await this.client.request("/sandboxes", {
       method: "POST",
       idempotencyKey: input.key,
       body: {
         type: this.machineType,
-        from: input.from,
+        ...(input.from ? { from: input.from } : {}),
         name: input.name,
         ttlSeconds: LEASE_SECONDS,
         env: input.env,

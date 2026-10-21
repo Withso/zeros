@@ -8,6 +8,7 @@ import { z } from "zod";
 import { withSystemTx } from "../db.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2Compute } from "./boat.js";
+import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 60_000;
@@ -15,8 +16,6 @@ const HEARTBEAT_MS = 60_000;
 const INTERRUPTED_AFTER = "5 minutes";
 const repository = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(200);
 export const CloudV2RecipeSchema = z.object({
-  /** Boat named snapshot of the Zeros v2 base image. */
-  base: z.string().regex(/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/),
   repositories: z.array(z.object({
     repository,
     /** Branch or tag to clone; a rebuild pins `commit` instead. */
@@ -184,6 +183,8 @@ export class CloudV2ComputerBuilder {
     computers: CloudV2Computers;
     compute: CloudV2Compute;
     channel: string;
+    /** The worker runtime cached into every build. */
+    runtime: CloudV2Runtime;
     /** A short-lived GitHub token able to clone one repository. */
     cloneToken(organizationId: string, userId: string, repository: string): Promise<string>;
     logger?: Pick<Console, "warn">;
@@ -210,8 +211,9 @@ export class CloudV2ComputerBuilder {
   private async run(job: CloudV2Build): Promise<void> {
     const { compute, computers } = this.deps;
     const log = (text: string) => computers.append(job.id, text);
-    await log(`[zeros] building Cloud Computer v${job.version} from ${job.recipe.base}\n`);
-    const { sandboxId } = await compute.create({ key: job.id, from: job.recipe.base, name: `zeros-${this.deps.channel}-build-${job.id.slice(0, 8)}`, env: {} });
+    await log(`[zeros] building Cloud Computer v${job.version}\n`);
+    // Boat's stock image plus the current runtime; repositories go on top.
+    const { sandboxId } = await compute.create({ key: job.id, name: `zeros-${this.deps.channel}-build-${job.id.slice(0, 8)}`, env: {} });
     await computers.update(job.id, { builderSandboxId: sandboxId });
     // The named snapshot is an independent copy of the disk, so the builder
     // goes as soon as the build ends, whether it succeeded or not.
@@ -225,6 +227,10 @@ export class CloudV2ComputerBuilder {
   private async install(job: CloudV2Build, sandboxId: string): Promise<void> {
     const { compute, computers } = this.deps;
     const log = (text: string) => computers.append(job.id, text);
+    const { runtime } = this.deps;
+    const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url() }), 300);
+    if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
+    await log(`[zeros] runtime ${runtime.sha256.slice(0, 12)} installed\n`);
     const pinned: CloudV2Recipe["repositories"] = [];
     for (const entry of job.recipe.repositories) {
       if (!job.createdBy) throw Object.assign(new Error("no creator"), { code: "computer_build_creator_missing" });

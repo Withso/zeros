@@ -133,7 +133,7 @@ export const CloudV2RepositorySchema = z.object({
 });
 export const CloudV2BuildSchema = z.object({
   id: uuid, organizationId: uuid, version: z.number().int().positive(),
-  recipe: z.object({ base: z.string(), repositories: z.array(CloudV2RepositorySchema), rebuiltFrom: z.number().int().optional() }),
+  recipe: z.object({ repositories: z.array(CloudV2RepositorySchema), rebuiltFrom: z.number().int().optional() }),
   state: z.enum(["queued", "building", "succeeded", "failed", "cancelled"]),
   snapshotId: z.string().nullable(), errorCode: z.string().nullable(),
   createdAt: z.string(), startedAt: z.string().nullable(), finishedAt: z.string().nullable(),

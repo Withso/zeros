@@ -7,6 +7,7 @@ import type { Config } from "../config.js";
 import { HttpError } from "../authz.js";
 import { BoatApiClient } from "../cloud-workspaces/boat-client.js";
 import { cloudAgentCredentialKeys } from "../cloud-workspaces/agent-credentials.js";
+import type { CloudAgentCredentialMaterial } from "../cloud-workspaces/agent-credential-envelope.js";
 import { createCloudV2AgentLogins, type CloudV2AgentLogins } from "./agent-logins.js";
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
@@ -15,6 +16,7 @@ import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./gith
 import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
+import { cloudV2Runtime } from "./runtime.js";
 import type { CloudV2RouteDeps } from "./routes.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
 
@@ -23,6 +25,20 @@ const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 export const CLOUD_V2_HOME = "/home/user";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
+type Login = CloudAgentCredentialMaterial | null | undefined;
+
+/** As in Conductor: Claude and Cursor run with the organization's own
+ * credential on the VM; Codex reaches the model through our proxy, because a
+ * ChatGPT login's refresh token must stay with us. */
+export async function cloudV2AgentConfig(logins: { codex?: Login; claude?: Login; cursor?: Login }, proxyBase: string,
+  proxy: () => Promise<{ token: string; expiresAt: number }>): Promise<ConfigFrame["agents"]> {
+  const agents: ConfigFrame["agents"] = {};
+  if (logins.codex?.kind === "codex-chatgpt" || logins.codex?.kind === "codex-api-key") agents.codex = { baseUrl: `${proxyBase}/openai`, ...(await proxy()) };
+  if (logins.claude?.kind === "claude-setup-token") agents.claude = { oauthToken: logins.claude.accessToken };
+  else if (logins.claude?.kind === "claude-api-key") agents.claude = { apiKey: logins.claude.apiKey };
+  if (logins.cursor?.kind === "cursor-api-key") agents.cursor = { apiKey: logins.cursor.apiKey };
+  return agents;
+}
 
 /** Bridge history reads answered from the mirror while the VM is stopped. */
 export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "windowMessages">,
@@ -66,10 +82,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       logins(workspace.creatorUserId, workspace.organizationId, "claude"),
       logins(workspace.creatorUserId, workspace.organizationId, "cursor"),
     ]);
-    const agents: ConfigFrame["agents"] = {};
-    if (codex) agents.codex = { baseUrl: `${proxyBase}/openai`, ...(await proxy()) };
-    if (claude) agents.claude = { baseUrl: `${proxyBase}/anthropic`, ...(await proxy()) };
-    if (cursor?.kind === "cursor-api-key") agents.cursor = { apiKey: cursor.apiKey };
+    const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
     return {
       t: "config",
       workspace: {
@@ -83,7 +96,6 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const routes: CloudV2RouteDeps = {
     store,
     computers,
-    baseSnapshot: v2.baseSnapshot,
     installedRepositories: organizationId => store.installedRepositories(organizationId),
     bridgeBaseUrl: v2.realtimeUrl,
   };
@@ -96,8 +108,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     answerOffline: (workspace, frame) => answerCloudV2Offline(store, workspace, frame),
     logger: console,
   }) : null;
+  const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
   const builder = roles.lifecycle && repositoryToken ? new CloudV2ComputerBuilder({
-    computers, compute, channel: config.deploymentChannel,
+    computers, compute, channel: config.deploymentChannel, runtime,
     cloneToken: async (organizationId, userId, repository) => (await repositoryToken(organizationId, userId, repository)).token,
     logger: console,
   }) : null;
@@ -105,6 +118,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     ...(builder ? { builds: builder } : {}),
     store,
     compute,
+    runtime,
     bootEnv: workspace => ({ ZEROS_WORKER_URL: `${v2.realtimeUrl}/v2/cloud/worker`, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: workspace => `zeros-${config.deploymentChannel}-ws-${workspace.id.slice(0, 8)}`,
     logger: console,
