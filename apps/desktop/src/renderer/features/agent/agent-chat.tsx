@@ -16,7 +16,6 @@ import { notifyAgentSendFailure } from "./agent-send-failure-toast";
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
 import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
-import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { presentLeadingPrompt } from "./transcript-leading-prompt";
 import React, {
   useCallback,
@@ -1312,13 +1311,6 @@ function AgentChatBody({
       ? (s.sessions[chatId]?.transcriptState ?? "resident") === "resident"
       : true,
   );
-  const transcriptCatchingUp = useSessionsStore((s) => {
-    const head = chatId ? s.cloudHistoryRestoreHeads[chatId] : undefined;
-    // Native rows can be resident while the current FULL head is incomplete.
-    // Residency describes paintable rows, not confirmed history coverage.
-    return !!chatId && !!s.sessions[chatId] &&
-      !!head && !head.head?.deleted && !cloudHistoryFenceHasTranscript(head);
-  });
   // Which turn (if any) this renderer has an unsettled prompt for. The tail's
   // liveness is derived from this rather than from session status, so a chat
   // being REOPENED — a tab switch, a workspace switch, an app reload, all of
@@ -1988,7 +1980,6 @@ function AgentChatBody({
   // locally stateful and the dialog still opens from the exact-key cache.
   const transcriptRowLive =
     emptyStateReady &&
-    !transcriptCatchingUp &&
     session.messages.length === 0 &&
     !session.error &&
     !!chatThread?.folder;
@@ -1998,7 +1989,6 @@ function AgentChatBody({
     hasMessages: session.messages.length > 0,
     hasTranscript: session.hasTranscript,
     resident: session.transcriptState === "resident",
-    incomplete: transcriptCatchingUp,
   });
   const transcriptLoadingVisible = transcriptHistoryStatus === "loading";
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
@@ -4980,13 +4970,11 @@ function AgentChatBody({
               session shows its own failure UI and provenance would read as
               reassurance the user shouldn't take. */}
             {readOnly &&
-              !transcriptCatchingUp &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 && (
                 <p className="text-fg2 text-sm">No chat history.</p>
               )}
             {!readOnly &&
-              !transcriptCatchingUp &&
               emptyStateReady &&
               session.messages.length === 0 &&
               !session.error && (

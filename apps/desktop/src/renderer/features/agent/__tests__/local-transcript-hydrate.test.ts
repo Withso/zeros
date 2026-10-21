@@ -9,9 +9,8 @@ import { cloudScopedId, isCloudWorkspace, parseCloudScopedId } from "../../../pl
 import { BLANK, mergeWindowedTail, useSessionsStore } from "../sessions-store";
 import { reconcileHistoryMessages } from "../history-message-identity";
 import { messageSnapshotsEqual, retainMessageReferences } from "../message-persistence-tracker";
-import { canApplyTranscriptRead, isCurrentTranscriptRequest, releaseTranscriptRequest, NativeTranscriptSnapshots, hasTranscriptPresentation } from "../transcript-retention";
+import { canApplyTranscriptRead, isCurrentTranscriptRequest, releaseTranscriptRequest, hasTranscriptPresentation } from "../transcript-retention";
 import type { AgentMessage, AgentTextMessage } from "../use-agent-session";
-import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch } from "../../../platform/cloud-transcript-cache-contract";
 import { isLocalTranscriptChat, localTranscriptCache } from "../../../state/local-transcript-cache";
 import { consumeFreshCloudChat } from "../fresh-cloud-chats";
 import { markFreshLocalChat, paintLocalTranscriptFromMemory, presentCachedLocalTranscript, presentKnownEmptyLocalTranscript, rememberLocalTranscript, takeFreshLocalChat } from "../local-transcript-presentation";
@@ -51,9 +50,8 @@ function harness(connected = true) {
     reconcileHistoryMessages, messageSnapshotsEqual, retainMessageReferences, isCurrentTranscriptRequest, releaseTranscriptRequest,
     canApplyTranscriptRead, mergeWindowedTail, canBackgroundSyncCloudWorkspace: () => true, reconcileInFlightRef: { current: new Map() },
     getStore: useSessionsStore.getState, bridge: { status: connected ? "connected" : "connecting" }, reconcileChatMessages: vi.fn(async () => {}),
-    persistMessageWindow: read, cloudHistoryRestoreHead: () => undefined, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch,
-    cloudHasNativeTranscript: () => false, hydrateCloudSendRef: { current: vi.fn() }, reconcileChatMessagesRef: { current: vi.fn() },
-    nativeTranscriptSnapshotsRef: { current: new NativeTranscriptSnapshots() }, hydrateInFlightRef: { current: requests },
+    persistMessageWindow: read, hydrateCloudSendRef: { current: vi.fn() }, reconcileChatMessagesRef: { current: vi.fn() },
+    hydrateInFlightRef: { current: requests },
     pendingHydratesRef: { current: pendingHydrates }, localTranscriptCache, presentCachedLocalTranscript, takeFreshLocalChat,
     presentKnownEmptyLocalTranscript, consumeFreshCloudChat,
   };

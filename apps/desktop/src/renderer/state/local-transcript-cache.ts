@@ -17,8 +17,7 @@
 // provisional `transcriptPresentation` while the authoritative engine window
 // loads; it never grants a send, a queue drain, an edit or a completion, and
 // the engine's window replaces it (keeping unchanged message references).
-// Cloud chats never enter this cache: they have their own restore-head-fenced
-// cache (cloud-transcript-cache.ts).
+// Cloud chats never enter this cache; they read history from their worker.
 //
 // Writes are coalesced per chat and serialized off the interaction path; a
 // streaming turn is written once it settles, never per chunk.

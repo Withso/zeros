@@ -61,15 +61,7 @@ describe("Codex 0.162 transcript across owners and placements", () => {
     const group = slot().messages.find((message) => message.kind === "tool" && message.toolKind === "subagent")!;
 
     const saved = slot().messages.map((message) => ({ msgId: message.id, kind: message.kind, payload: JSON.stringify(message), createdAt: message.createdAt }));
-    if (current.scope) {
-      const mapped = cloudIncoming(current.scope, { cloudSnapshot: {
-        version: 1, conversationId: "chat", agentId: "codex", executionId: "run", session: null, initialize: null,
-        messages: saved, activeTurn: { turnId: "turn", startedAt: 1000 }, latestTurn: null, permissions: [], questions: [],
-      } });
-      useSessionsStore.getState().installCloudSnapshot(current.chatId, mapped.cloudSnapshot as Parameters<ReturnType<typeof useSessionsStore.getState>["installCloudSnapshot"]>[1]);
-    } else {
-      useSessionsStore.getState().setSession(current.chatId, { ...slot(), messages: saved.map((row) => JSON.parse(row.payload)) });
-    }
+    useSessionsStore.getState().setSession(current.chatId, { ...slot(), messages: saved.map((row) => JSON.parse(row.payload)) });
     expect(slot().messages.find((message) => message.id === report.id)).toMatchObject({ phase: "partial_answer", text: "First finding." });
     expect(slot().messages.find((message) => message.id === group.id)).toMatchObject({ rawInput: { model: "gpt-6.1-sol", reasoningEffort: "max" } });
     expect(slot()).toMatchObject({ status: "streaming", activeTurnStartedAt: 1000 });

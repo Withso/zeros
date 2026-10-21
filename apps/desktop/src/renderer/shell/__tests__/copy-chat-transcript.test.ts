@@ -63,14 +63,6 @@ beforeEach(() => {
 });
 
 describe("copyChatTranscript", () => {
-  it("refuses a copy whose exact history receipt retired before consumption", async () => {
-    mocks.loadFullTranscript.mockResolvedValue({ ...loaded(conversation(), false), partialCloudHistory: true, isCurrent: () => false });
-    await copyChatTranscript("c1", "full", {});
-    expect(mocks.copyToClipboardWithFallback).not.toHaveBeenCalled();
-    expect(mocks.toast.info).toHaveBeenCalledWith(expect.stringMatching(/changed/),
-      expect.objectContaining({ action: expect.objectContaining({ label: "Retry" }) }));
-  });
-
   it("writes the formatted transcript and reports success", async () => {
     mocks.loadFullTranscript.mockResolvedValue(loaded(conversation()));
 

@@ -258,14 +258,6 @@ export function cloudIncoming(
     out.notification = mapFields(scope, record(message.notification), "in");
   if (message.request)
     out.request = mapFields(scope, record(message.request), "in");
-  if (message.cloudSnapshot) {
-    const snapshot = record(message.cloudSnapshot);
-    out.cloudSnapshot = { ...mapFields(scope, snapshot, "in"),
-      ...(snapshot.latestTurn ? { latestTurn: mapFields(scope, record(snapshot.latestTurn), "in") } : {}),
-      permissions: (Array.isArray(snapshot.permissions) ? snapshot.permissions : []).map(item => ({ ...record(item), request: mapFields(scope, record(record(item).request), "in") })),
-      questions: (Array.isArray(snapshot.questions) ? snapshot.questions : []).map(item => ({ ...record(item), request: mapFields(scope, record(record(item).request), "in") })),
-    };
-  }
   if (Array.isArray(message.chatIds))
     out.chatIds = message.chatIds.map((id) => cloudScopedId(scope, String(id)));
   if (Array.isArray(message.terminals))

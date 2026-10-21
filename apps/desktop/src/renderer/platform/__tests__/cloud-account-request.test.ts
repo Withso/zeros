@@ -43,7 +43,7 @@ describe("cloud request account boundaries", () => {
     state.session.mockResolvedValue(session);
     const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };
     const archivedAt = "2026-10-05T00:00:00.000Z";
-    for (const [state, mark, status] of [["stopped", archivedAt, "archived"], ["stopping", archivedAt, "stopping"],
+    for (const [state, mark, status] of [["stopped", archivedAt, "archived"], ["failed", archivedAt, "archived"], ["stopping", archivedAt, "stopping"],
       ["stopped", null, "stopped"], ["running", null, "ready"]] as const) {
       vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...v2Workspace(id, state), archivedAt: mark } })));
       expect((await getCloudWorkspaceDocument(target)).status).toBe(status);

@@ -36,26 +36,6 @@ function harness(cloud = true) {
 }
 afterEach(() => vi.useRealTimers());
 describe("production cloud decision replies", () => {
-  it("discards only the restoring conversation's buffered controls before atomic snapshot publication", () => {
-    const own = cloudScopedId(target, "conversation:chat"), other = cloudScopedId(target, "conversation:other");
-    const buffers = { updateBuffer: [{ sessionId: own }, { sessionId: other }], permBuffer: [{ request: { sessionId: own } }, { request: { sessionId: other } }],
-      questionBuffer: [{ request: { sessionId: own } }, { request: { sessionId: other } }],
-      permissionSettledBuffer: [{ permissionId: "old", sessionId: own }, { permissionId: "other", sessionId: other }],
-      questionSettledBuffer: [{ questionId: "old", chatId }, { questionId: "other", chatId: "other" }] };
-    const install = vi.fn(() => {
-      expect(buffers.permissionSettledBuffer).toEqual([{ permissionId: "other", sessionId: other }]);
-      expect(buffers.questionSettledBuffer).toEqual([{ questionId: "other", chatId: "other" }]);
-    });
-    const context: Record<string, unknown> = { ...buffers, cloudSessionMetadata: () => null,
-      useSessionsStore: { getState: () => ({ sessions: {}, executionToChatId: {}, installCloudSnapshot: install }) } };
-    vm.runInNewContext(ts.transpileModule(`globalThis.install = ${callbacks.admissionMetadata}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
-    (context.install as (frame: unknown) => void)({ type: "AGENT_SESSION_CREATED", session: { sessionId: own },
-      cloudSnapshot: { version: 1, conversationId: chatId, executionId: null, agentId: "claude", messages: [], initialize: null, activeTurn: null, permissions: [], questions: [] } });
-    expect(install).toHaveBeenCalledOnce();
-    expect(buffers.updateBuffer).toEqual([{ sessionId: other }]);
-    expect(buffers.permBuffer).toEqual([{ request: { sessionId: other } }]);
-    expect(buffers.questionBuffer).toEqual([{ request: { sessionId: other } }]);
-  });
   it("sends plan/permission decisions to the owning chat and exact native execution", () => {
     const f = harness(); f.permission(chatId, { outcome: { outcome: "selected", optionId: "approve-plan" } });
     expect(f.send).toHaveBeenCalledWith(expect.objectContaining({ type: "AGENT_PERMISSION_RESPONSE", chatId, executionId }));

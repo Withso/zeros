@@ -55,7 +55,8 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     createdBy: workspace.creatorUserId,
     ownerUserId: workspace.creatorUserId,
     placement: "cloud",
-    status: workspace.archivedAt && workspace.state === "stopped" ? "archived" : STATUS[workspace.state],
+    // Archiving a failed workspace marks it without a stop; both read as archived.
+    status: workspace.archivedAt && (workspace.state === "stopped" || workspace.state === "failed") ? "archived" : STATUS[workspace.state],
     capabilities: {
       canWrite: true, canEdit: true, canManage: true,
       canStart: workspace.state === "stopped",

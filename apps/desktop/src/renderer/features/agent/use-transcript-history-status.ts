@@ -12,14 +12,12 @@ export function useTranscriptHistoryStatus({
   hasMessages,
   hasTranscript,
   resident,
-  incomplete,
 }: {
   identity: string;
   active: boolean;
   hasMessages: boolean;
   hasTranscript: boolean;
   resident: boolean;
-  incomplete: boolean;
 }): HistoryStatus {
   const visible = useDocumentActive(active);
   const pending = !resident && !hasMessages && hasTranscript;
@@ -35,7 +33,7 @@ export function useTranscriptHistoryStatus({
     }
     // Retain the original observation time across hide/reveal, but no timer.
     // A late read cannot restart the loading animation on each tab switch.
-    if (!visible || !pending || incomplete) {
+    if (!visible || !pending) {
       publish("none");
       return;
     }
@@ -55,9 +53,8 @@ export function useTranscriptHistoryStatus({
       retired = true;
       clearTimeout(timer);
     };
-  }, [identity, visible, pending, incomplete]);
+  }, [identity, visible, pending]);
 
   if (!visible || hasMessages) return "none";
-  if (incomplete && !(resident && !hasTranscript)) return "unavailable";
   return pending && presentation.identity === identity ? presentation.status : "none";
 }

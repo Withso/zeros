@@ -76,10 +76,6 @@ export async function copyChatTranscript(
       return;
     }
     const { messages, complete } = loaded;
-    if (loaded.isCurrent?.() === false) {
-      toast.info("This conversation changed while copying. Try again.", { action: { label: "Retry", onClick: () => { void copyChatTranscript(chatId, mode, meta); } } });
-      return;
-    }
     if (messages.length === 0) {
       if (complete) toast.info("This chat has no messages yet.");
       else toast.info("This conversation is still syncing.", { action: { label: "Retry", onClick: () => { void copyChatTranscript(chatId, mode, meta); } } });

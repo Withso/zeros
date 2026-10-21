@@ -77,10 +77,7 @@ import type { ChatEffort } from "../../state/store";
 import { sameProviderBinding } from "@zeros/protocol/identities";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
-import type { CloudConversationSnapshot } from "@zeros/protocol/cloud-events";
-import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, cachedTranscriptPresentationContinues,
-  type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
+import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -349,7 +346,6 @@ export const BLANK: AgentSessionState = {
 
 export interface SessionsStoreState {
   sessions: Record<string, AgentSessionState>;
-  cloudHistoryRestoreHeads: Record<string, CloudHistoryRestoreFence>;
   warmAgentIds: Set<string>;
   /** executionId → chatId reverse index. Updated atomically with `sessions`
    *  so bridge dispatch stays O(1) and never reads a half-applied state. */
@@ -460,10 +456,8 @@ export interface SessionsStoreState {
   /** Local transcript content already grouped by one provider flush. Controls
    * and cloud notifications keep their individual, ordered reducer path. */
   applyBridgeTranscriptUpdates: (notifications: readonly SessionNotification[]) => void;
-  installCloudSnapshot: (chatId: string, snapshot: CloudConversationSnapshot, metadata?: Partial<AgentSessionState>) => void;
   /** CP restore state only; a separately proved live/native snapshot keeps its
    * own transcript lineage. This does not settle or cancel any native turn. */
-  applyCloudHistoryRestoreHead: (chatId: string, fence: CloudHistoryRestoreFence, preserveNativeSnapshot?: boolean, authenticated?: boolean) => void;
 
   /** Permission requests are routed through the request's sessionId. */
   applyBridgePermissionRequest: (
@@ -587,7 +581,6 @@ function reduceTranscriptUpdate(state: SessionsStoreState, chatId: string, notif
 
 export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   sessions: {},
-  cloudHistoryRestoreHeads: {},
   warmAgentIds: new Set(),
   executionToChatId: {},
   scrollPositions: {},
@@ -934,7 +927,6 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         sessions: next,
         executionToChatId: rebuildIndex(next),
         scrollPositions: nextScroll,
-        cloudHistoryRestoreHeads: Object.fromEntries(Object.entries(state.cloudHistoryRestoreHeads).filter(([id]) => id !== chatId)),
         cancellingChats: nextCancelling,
         pendingLocalTurns: withoutPendingLocalTurn(
           state.pendingLocalTurns,
@@ -958,7 +950,6 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   clearAll: () => {
     set({
       sessions: {},
-      cloudHistoryRestoreHeads: {},
       warmAgentIds: new Set(),
       executionToChatId: {},
       scrollPositions: {},
@@ -1406,90 +1397,6 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
 
     // Everything else → feed to the messages reducer.
     set((state) => reduceTranscriptUpdate(state, chatId, notification));
-  },
-
-  applyCloudHistoryRestoreHead: (chatId, input, preserveNativeSnapshot = false, authenticated = false) => {
-    const chat = parseCloudScopedId(chatId), parsed = CloudHistoryRestoreFenceSchema.safeParse(input);
-    if (!chat || !parsed.success) return;
-    const fence = parsed.data;
-    if (chat.id !== fence.conversationId || chat.organizationId !== fence.projection.organizationId ||
-        chat.workspaceId !== fence.projection.workspaceId) return;
-    set(state => {
-      const slot = state.sessions[chatId], cwd = parseCloudWorkspaceKey(slot?.cwd);
-      if (!slot || slot.cwd && (!cwd || cwd.organizationId !== chat.organizationId || cwd.workspaceId !== chat.workspaceId)) return state;
-      const previous = state.cloudHistoryRestoreHeads[chatId];
-      if (previous && !cloudHistoryFenceCanAdvance(previous, fence)) return state;
-      const unchanged = !!previous && cloudHistoryFencesMatch(previous, fence);
-      if (unchanged && preserveNativeSnapshot) return state;
-      const heads = { ...state.cloudHistoryRestoreHeads, [chatId]: fence };
-      if (preserveNativeSnapshot) return { cloudHistoryRestoreHeads: heads,
-        ...(slot.transcriptPresentation ? { sessions: { ...state.sessions, [chatId]: { ...slot, transcriptPresentation: null } } } : {}) };
-      const presentation = slot.transcriptPresentation;
-      if (!slot.transcriptDirty && slot.status !== "streaming" && presentation?.restoreHead &&
-          (authenticated || cloudHistoryFencesMatch(presentation.restoreHead, fence)) &&
-          cachedTranscriptPresentationContinues(presentation, fence)) {
-        if (unchanged && cloudHistoryFencesMatch(presentation.restoreHead, fence)) return state;
-        return { cloudHistoryRestoreHeads: heads, sessions: { ...state.sessions, [chatId]: { ...slot,
-          transcriptState: "loading", transcriptPresentation: { ...presentation, restoreHead: fence },
-        } } };
-      }
-      const pending = state.pendingLocalTurns[chatId];
-      const messages = slot.messages.filter(message => message.id === pending || message.kind === "text" && message.queued);
-      const deleted = fence.head?.deleted === true;
-      if (unchanged && messages.length === slot.messages.length && slot.transcriptState === (deleted ? "resident" : "loading")) return state;
-      return { cloudHistoryRestoreHeads: heads, sessions: { ...state.sessions, [chatId]: { ...slot, messages,
-        historyExpanded: false, transcriptState: deleted ? "resident" : "loading",
-        transcriptPresentation: null,
-        transcriptDirty: false, hasTranscript: deleted ? hasDurableMessages(messages) : !cloudHistoryFenceHasTranscript(fence) || hasDurableMessages(messages),
-      } } };
-    });
-  },
-
-  installCloudSnapshot: (chatId, snapshot, metadata = {}) => {
-    let installed = false;
-    set(state => {
-      const slot = state.sessions[chatId];
-      if (!slot || !isCloudWorkspace(slot.cwd) || snapshot.conversationId !== chatId || slot.agentId !== snapshot.agentId) return state;
-      const windowed = snapshot.messages.flatMap(row => {
-        try {
-          const message = JSON.parse(row.payload) as AgentMessage;
-          return message.id === row.msgId && message.kind === row.kind ? [message] : [];
-        } catch { return []; }
-      });
-      const pendingId = state.pendingLocalTurns[chatId];
-      const optimistic = slot.messages.filter(message => !windowed.some(saved => saved.id === message.id) &&
-        (message.kind === "text" && message.queued || message.id === pendingId));
-      const head = state.cloudHistoryRestoreHeads[chatId];
-      const awaitingHistory = windowed.length === 0 && (head
-        ? !head.head?.deleted && !cloudHistoryFenceHasTranscript(head)
-        : slot.transcriptState !== "resident" && slot.hasTranscript);
-      // Session controls may be available before restored history. An empty
-      // snapshot without a complete head cannot clear the last confirmed rows;
-      // authoritative edit/delete heads have already fenced those rows above.
-      const restored = windowed.length || !head || awaitingHistory ? mergeWindowedTail(slot.messages, windowed) : [];
-      const additional = optimistic.filter(message => !restored.some(saved => saved.id === message.id));
-      const messages = capMessages(additional.length ? [...restored, ...additional] : restored);
-      const permissions = snapshot.permissions.reduce<PendingPermission[]>((queue, item) => queuePermission(queue, item), []);
-      const terminal = snapshot.latestTurn;
-      const newerPending = pendingId && pendingId !== terminal?.turnId && pendingId !== snapshot.activeTurn?.turnId;
-      const failure = !newerPending && !snapshot.activeTurn && terminal?.status === "failed"
-        ? terminal.failure ?? { kind: "protocol-error" as const, stage: "prompt" as const, message: terminal.error ?? "The cloud turn failed.", agentId: snapshot.agentId }
-        : null;
-      const next = settleCloudStop(slot, { ...slot, ...metadata, messages, hasTranscript: awaitingHistory || hasDurableMessages(messages),
-        transcriptState: awaitingHistory ? "loading" : "resident",
-        transcriptPresentation: awaitingHistory ? slot.transcriptPresentation : null,
-        transcriptDirty: false, pendingPermissions: permissions, pendingPermission: permissions[0] ?? null, pendingQuestions: snapshot.questions,
-        status: snapshot.activeTurn || newerPending ? "streaming" : failure ? "failed" : "ready", failure, error: failure?.message ?? null,
-        foregroundTurnId: newerPending ? pendingId : snapshot.activeTurn?.turnId ?? terminal?.turnId ?? slot.foregroundTurnId,
-        ...(slot.cloudPromptPending && !newerPending ? { cloudPromptPending: false } : {}),
-        activeTurnStartedAt: newerPending ? slot.activeTurnStartedAt : snapshot.activeTurn?.startedAt ?? null,
-        lastStopReason: newerPending ? slot.lastStopReason : snapshot.activeTurn ? null : terminal?.stopReason ?? (terminal?.status === "cancelled" ? "cancelled" : null),
-      });
-      installed = true;
-      return { pendingLocalTurns: !snapshot.activeTurn && terminal?.turnId === pendingId ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId) : state.pendingLocalTurns,
-        ...retiredCloudStop(state, chatId, slot, next), sessions: { ...state.sessions, [chatId]: next } };
-    });
-    if (installed && snapshot.latestTurn) turnRowCache.invalidate(turnRowKey(chatId, snapshot.latestTurn.turnId));
   },
 
   applyBridgePermissionRequest: (agentId, permissionId, request) => {

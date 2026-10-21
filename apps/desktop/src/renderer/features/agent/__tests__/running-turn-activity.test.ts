@@ -57,22 +57,6 @@ describe("the whole foreground turn owns its working indication", () => {
     },
   );
 
-  it.each(cases.filter(input => input.owner === "cloud"))("keeps a snapshot-adopted $agentId turn running when an older terminal event arrives", input => {
-    open(input);
-    store().installCloudSnapshot(input.chat, { version: 1, conversationId: input.chat, agentId: input.agentId,
-      executionId: cloudScopedId(target, "native"), session: null, initialize: null,
-      messages: store().sessions[input.chat].messages.map(message => ({ msgId: message.id, kind: message.kind,
-        payload: JSON.stringify(message), createdAt: message.createdAt })),
-      activeTurn: { turnId: "current", startedAt: 2_000 }, latestTurn: null, permissions: [], questions: [],
-    });
-    const current = store().sessions[input.chat];
-    turn(input, "older", "completed", 1_000);
-    expect(store().sessions[input.chat]).toBe(current);
-    expect(chatWorkingActivity(store().sessions[input.chat])).toBe("running");
-    turn(input, "current", "completed");
-    expect(chatWorkingActivity(store().sessions[input.chat])).toBeNull();
-  });
-
   it.each(cases)("does not resurrect $owner / $agentId's stopped or cold turn on reopen", input => {
     open(input);
     turn(input, "current", "running");

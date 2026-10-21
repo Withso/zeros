@@ -332,16 +332,12 @@ describe("cloud Stop renderer lifetime", () => {
     expect(h.sendQueueRef.current.get(CHAT)).toEqual([h.followUp]);
   });
 
-  it.each(["snapshot", "reattachment", "running event"])("keeps the unconfirmed Stop error through a passive %s", async source => {
+  it.each(["reattachment", "running event"])("keeps the unconfirmed Stop error through a passive %s", async source => {
     const h = harness(), pending = h.cancel();
     h.gate.reject(new Error("transport lost")); await pending;
     const original = h.slot().cloudStop, error = h.slot().error, failure = h.slot().failure;
     const store = useSessionsStore.getState();
-    if (source === "snapshot") store.installCloudSnapshot(CHAT, {
-      version: 1, conversationId: CHAT, agentId: "codex", executionId: "execution-1", session: null, initialize: null,
-      activeTurn: null, messages: [], permissions: [], questions: [],
-    });
-    else if (source === "reattachment") store.setSession(CHAT, { ...BLANK, agentId: "codex", cwd: CLOUD, status: "warming" });
+    if (source === "reattachment") store.setSession(CHAT, { ...BLANK, agentId: "codex", cwd: CLOUD, status: "warming" });
     else store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "running", startedAt: 42 } });
     expect(h.slot().cloudStop).toBe(original);
     expect(h.slot().error).toBe(error); expect(h.slot().failure).toBe(failure);
@@ -479,15 +475,9 @@ describe("cloud Stop renderer lifetime", () => {
     expect(h.slot().cloudStop).toBeUndefined();
   });
 
-  it.each(["snapshot", "turn event"])("keeps the Stop clock until retirement despite a terminal %s", async source => {
+  it("keeps the Stop clock until retirement despite a terminal turn event", async () => {
     const h = harness(), pending = h.cancel(), store = useSessionsStore.getState();
-    if (source === "snapshot") store.installCloudSnapshot(CHAT, {
-      version: 1, conversationId: CHAT, agentId: "codex", executionId: "execution-1", session: null, initialize: null,
-      activeTurn: null, messages: [], permissions: [], questions: [],
-      latestTurn: { commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", conversationId: CHAT, executionId: "execution-1",
-        turnId: "turn-1", agentId: "codex", status: "cancelled", stopReason: "cancelled" },
-    });
-    else store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "cancelled", startedAt: 42 } });
+    store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "cancelled", startedAt: 42 } });
     expect(h.slot().activeTurnStartedAt).toBe(42);
     expect(showsStop(h.slot())).toBe(true);
     h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } }); await pending;

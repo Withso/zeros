@@ -28,9 +28,6 @@ import {
   readAgentAttachmentFile,
 } from "./attachment-file-reader";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
-import { parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
-import { readCloudTranscriptWithCachedPaint } from "../../platform/cloud-transcript-cache";
-import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import {
@@ -120,15 +117,12 @@ export async function windowMessages(
   chatId: string,
   limit: number,
   before?: number,
-  onCached?: (messages: AgentMessage[]) => void,
 ): Promise<AgentMessage[]> {
-  return (await windowMessagesSnapshot(chatId, limit, before, onCached ? page => onCached(page.messages) : undefined)).messages;
+  return (await windowMessagesSnapshot(chatId, limit, before)).messages;
 }
 
-export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "source" | "turnOpening"> & {
+export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "turnOpening"> & {
   messages: AgentMessage[];
-  source: MessageWindowSnapshot["source"] | "cache";
-  nativeObservation?: true;
   /** Local only: the opening prompt of the turn the window starts inside. */
   leadingPrompt?: AgentTextMessage;
 };
@@ -149,18 +143,9 @@ export async function windowMessagesSnapshot(
   chatId: string,
   limit: number,
   before?: number,
-  onCached?: (page: AgentMessageWindow) => void,
 ): Promise<AgentMessageWindow> {
   const bridge = requireBridge("load the chat transcript");
-  const target = parseCloudScopedId(chatId);
-  const canPaintCached = !!target && before === undefined && !!onCached;
-  const page = await readCloudTranscriptWithCachedPaint(chatId,
-    () => bridgeMessageWindowSnapshot(bridge, chatId, limit, before),
-    canPaintCached ? window => onCached!({ source: "cache", restoreHead: window.restoreHead, nativeObservation: window.nativeObservation,
-      messages: window.messages.map(fromPersistedMessage).filter((message): message is AgentMessage => message !== null) }) : undefined,
-    page => page.messages.length === 0 && (page.source === "control-plane" && !page.restoreHead ||
-      !!page.restoreHead && !page.restoreHead.head?.deleted && !cloudHistoryFenceHasTranscript(page.restoreHead)),
-  );
+  const page = await bridgeMessageWindowSnapshot(bridge, chatId, limit, before);
   const { turnOpening, ...rest } = page;
   const messages = page.messages
     .map(fromPersistedMessage)
@@ -247,7 +232,6 @@ export interface LoadedTranscript {
   /** False when a bound stopped the walk before the start of history, so the
    *  caller can say the copy is partial instead of reporting it complete. */
   complete: boolean;
-  isCurrent?: () => boolean;
 }
 
 /** A chat's persisted transcript, oldest-first — for "copy transcript", which
