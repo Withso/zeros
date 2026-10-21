@@ -12,7 +12,7 @@ const VERSION = pkg.version;
 // extraResources). See electron-builder.yml.
 export default defineConfig([
   {
-    entry: { cli: "apps/desktop/src/cli.ts", "resident-pty": "apps/desktop/src/engine/pty/resident-main.ts" },
+    entry: { cli: "apps/desktop/src/cli.ts" },
     format: ["cjs"],
     dts: false,
     splitting: false,
