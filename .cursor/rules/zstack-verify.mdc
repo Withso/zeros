@@ -67,7 +67,8 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --api "$ZEROS_GATE0_API_URL" --runt
 ```
 
 - Run it only with the task's Alpha authorization, against a deployed Dev
-  backend whose `CLOUD_V2_RUNTIME_SHA256` matches `--runtime`.
+  backend whose `CLOUD_V2_RUNTIME_SHA256` matches `--runtime` (`pnpm dev:backend`
+  takes it from `ZEROS_CLOUD_V2_RUNTIME_SHA256`).
 - It creates one disposable workspace from the existing Cloud Computer. It
   runs native Claude, Codex and Cursor turns, plus terminal, file and Git
   round trips. It reads the mirrored history while the VM is stopped, wakes
