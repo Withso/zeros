@@ -104,15 +104,6 @@ export class CloudV2Relay {
     this.rooms.clear();
   }
 
-  /** Disconnects everything for a workspace that is stopping or deleted. */
-  evict(workspaceId: string): void {
-    const room = this.rooms.get(workspaceId);
-    if (!room) return;
-    room.worker?.close(4001, "workspace_stopped");
-    for (const client of room.clients.values()) client.close(4001, "workspace_stopped");
-    this.rooms.delete(workspaceId);
-  }
-
   private room(workspace: CloudV2Workspace): Room {
     let room = this.rooms.get(workspace.id);
     if (!room) {
@@ -252,6 +243,12 @@ export class CloudV2Relay {
 
   private attachApp(workspace: CloudV2Workspace, ws: WebSocket): void {
     const room = this.room(workspace);
+    // A stopped VM's socket can look open until the next ping; never relay into it.
+    if (room.worker && (workspace.state === "stopping" || workspace.state === "stopped")) {
+      room.worker.terminate();
+      room.worker = null;
+      room.ready = false;
+    }
     if (!room.worker) room.workspace = workspace;
     const clientId = randomUUID();
     this.watch(ws);
@@ -280,6 +277,8 @@ export class CloudV2Relay {
     if (room.ready) { send(room.worker, { t: "frame", clientId, frame }); return; }
     const queue = room.queued.get(clientId) ?? [];
     if (queue.length >= MAX_QUEUED_FRAMES) { ws.close(1013, "workspace_starting"); return; }
+    // Work for a VM that went away while this app stayed connected starts it.
+    if (!queue.length) void this.deps.wake(room.workspace).catch(() => {});
     queue.push(frame);
     room.queued.set(clientId, queue);
   }

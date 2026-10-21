@@ -139,6 +139,30 @@ describe("cloud v2 relay", () => {
     expect(state).toBe("stopped");
   });
 
+  it("drops a worker left over from before a stop when an app connects, then answers from the mirror", async () => {
+    const w = await worker();
+    const dropped = new Promise<void>(resolve => w.once("close", () => resolve()));
+    state = "stopped";
+    vi.mocked(deps.answerOffline).mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", requestId: "r3", result: [] });
+    const a = await app();
+    await dropped;
+    expect(deps.wake).toHaveBeenCalledTimes(1);
+    const reply = nextMessage(a);
+    a.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "r3", op: "chats.list" }));
+    expect(await reply).toMatchObject({ requestId: "r3" });
+  });
+
+  it("wakes the workspace when a connected app sends work after its worker went away", async () => {
+    const w = await worker();
+    const a = await app();
+    await vi.waitFor(() => expect(deps.store.transition).toHaveBeenCalled());
+    w.close();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    state = "stopped";
+    a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "p2" }));
+    await vi.waitFor(() => expect(deps.wake).toHaveBeenCalledTimes(1));
+  });
+
   it("answers history reads from the mirror while the worker is away", async () => {
     vi.mocked(deps.answerOffline).mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", requestId: "r2", result: { chats: [] } });
     const a = await app();

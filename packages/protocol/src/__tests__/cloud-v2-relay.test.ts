@@ -20,8 +20,10 @@ describe("cloud v2 relay contract", () => {
 
   it("forwards bridge frames opaquely and allows a broadcast target", () => {
     const frame = { type: "AGENT_SESSION_UPDATE", sessionId: "s", notification: {} };
-    expect(CloudV2WorkerFrameSchema.parse({ t: "frame", clientId: "*", frame }).frame).toEqual(frame);
-    expect(CloudV2ControlFrameSchema.parse({ t: "frame", clientId: id, frame }).frame).toEqual(frame);
+    const up = CloudV2WorkerFrameSchema.parse({ t: "frame", clientId: "*", frame });
+    const down = CloudV2ControlFrameSchema.parse({ t: "frame", clientId: id, frame });
+    expect(up.t === "frame" && up.frame).toEqual(frame);
+    expect(down.t === "frame" && down.frame).toEqual(frame);
     expect(CloudV2ControlFrameSchema.safeParse({ t: "frame", clientId: "*", frame }).success).toBe(false);
   });
 

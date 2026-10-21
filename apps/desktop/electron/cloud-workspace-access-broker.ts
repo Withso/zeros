@@ -116,7 +116,7 @@ function sameRuntimeIdentity(a: CloudWorkspaceRuntimeIdentity, b: CloudWorkspace
 const CONTROL_PLANE_PREFERENCE_MS = 5 * 60_000;
 const MAX_CONTROL_PLANE_PREFERENCES = 64;
 function actorBootRouteKey(target: CloudWorkspaceRuntimeConnectionTarget): string | null {
-  const scope = target.channel === "electron-ssh-tunnel" ? undefined : target.bootScope;
+  const scope = "bootScope" in target ? target.bootScope : undefined;
   return scope ? JSON.stringify([target.organizationId, target.workspaceId, target.generation, target.authorityEpoch,
     target.engineInstanceId, scope.bootId, scope.writerEpoch, scope.fundingOwnerUserId, scope.fundingOwnerEpoch]) : null;
 }
@@ -1096,15 +1096,15 @@ export class CloudWorkspaceAccessBroker {
     if (!result.success)
       throw new CloudWorkspaceAccessClientError(201,"bad_response","The cloud workspace control plane returned invalid runtime access");
     const value = result.data;
-    if (value.channel !== "electron-ssh-tunnel" && value.bootScope) Object.freeze(value.bootScope);
+    if ("bootScope" in value && value.bootScope) Object.freeze(value.bootScope);
     return Object.freeze(value);
   }
 
   private assertSameActorBoot(previous:CloudWorkspaceRuntimeConnectionTarget,next:CloudWorkspaceRuntimeConnectionTarget):void {
-    const oldScope = previous.channel === "electron-ssh-tunnel" ? undefined : previous.bootScope;
-    if (!oldScope) return; // Existing legacy actor refresh keeps its contract.
-    const scope = next.channel === "electron-ssh-tunnel" ? undefined : next.bootScope;
-    if (!scope || previous.authorityEpoch !== next.authorityEpoch || previous.cloudToken === next.cloudToken ||
+    const oldScope = "bootScope" in previous ? previous.bootScope : undefined;
+    if (!oldScope || !("cloudToken" in previous)) return; // Existing legacy actor refresh keeps its contract.
+    const scope = "bootScope" in next ? next.bootScope : undefined;
+    if (!scope || !("cloudToken" in next) || previous.authorityEpoch !== next.authorityEpoch || previous.cloudToken === next.cloudToken ||
         scope.organizationId !== oldScope.organizationId || scope.workspaceId !== oldScope.workspaceId ||
         scope.generation !== oldScope.generation || scope.engineInstanceId !== oldScope.engineInstanceId ||
         scope.bootId !== oldScope.bootId || scope.writerEpoch !== oldScope.writerEpoch ||

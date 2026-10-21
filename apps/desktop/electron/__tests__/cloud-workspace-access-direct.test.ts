@@ -41,7 +41,7 @@ describe("Electron direct provider connection ownership", () => {
   });
   it("retains immutable boot identity inside the published native handle", async () => {
     const f = setup(), connection = await f.broker.openRuntime(target);
-    if (connection.channel === "electron-ssh-tunnel") throw new Error("Expected boot-bound actor transport");
+    if (!("bootScope" in connection)) throw new Error("Expected boot-bound actor transport");
     expect(Object.isFrozen(connection)).toBe(true); expect(Object.isFrozen(connection.bootScope)).toBe(true);
   });
   it("mints a fresh same-boot CP fallback without reusing the one-use grant or an inline URL", async () => {
@@ -51,6 +51,7 @@ describe("Electron direct provider connection ownership", () => {
       directProviderVersion: 1, connectionChannel: "control-plane-websocket" }, { assertCurrent: expect.any(Function) });
     expect(next).toMatchObject({ channel: "control-plane-websocket", runtimeId: first.runtimeId, connectionSequence: 2,
       url: bridgeUrl, cloudToken: nextToken, bootScope });
+    if (!("cloudToken" in next) || !("cloudToken" in first)) throw new Error("Expected control-plane grants");
     expect(next.cloudToken).not.toBe(first.cloudToken); expect(f.forbidden).not.toHaveBeenCalled();
     expect(f.revokeEngineAdmission).toHaveBeenCalledExactlyOnceWith("synthetic-account-token", { ...target, grantToken: firstToken });
   });
