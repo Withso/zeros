@@ -150,7 +150,7 @@ import {
   waitForPendingTextAttachmentDeliveries,
 } from "./composer-text-attachment-delivery";
 import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
-import { admitTranscriptFork, buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
+import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
   composerCardDock,
@@ -393,8 +393,8 @@ function AgentChatBody({
   // confirms it (e.g. right after a restart), never a blank pane.
   const emptyStateReady = session.transcriptState === "resident" ||
     provisionalTranscript && session.transcriptPresentation?.empty === true && session.messages.length === 0;
-  const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
-  const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
+  // Cloud agents expose no native goals.
+  const goalsAvailable = !isCloudWorkspace(chatThread?.folder);
   const browserConfirmation = useBrowserConfirmation(chatId);
   const agentControlConfirmation = useAgentControlConfirmation(chatId);
   const workflows = session.workflows;
@@ -1869,7 +1869,6 @@ function AgentChatBody({
     attachmentImagesActive: interactive,
     originUrl: composerOriginUrl,
     availableCommands: session.availableCommands,
-    cloudNativeCapabilities,
     placeholder: resolveComposerPlaceholder(conversationStarted),
     onSubmit: () => submitRef.current(),
     onEscape: () => queueKeysRef.current.escape(),
@@ -2201,7 +2200,7 @@ function AgentChatBody({
   );
 
   const forkToNewTab = useCallback(
-    (throughMessageId: string, promptFallback: string, native=false) => {
+    (throughMessageId: string, promptFallback: string) => {
       if (!chatThread) return;
       const transcript = readForkTranscript(throughMessageId, promptFallback);
       if (!transcript) return;
@@ -2226,11 +2225,6 @@ function AgentChatBody({
           if (snapshot.count === 0) {
             throw new Error("The selected turn has no concise transcript.");
           }
-          if(isCloudWorkspace(chatThread.folder)) {
-            if(!capabilitiesBridge)throw new Error("Cloud connection is unavailable");
-            await admitTranscriptFork(chatThread,fresh,capabilitiesBridge.request.bind(capabilitiesBridge),native);
-            if(native || !useWorkspaceStore.getState().chats.some(candidate=>candidate.id===fresh.id))return;
-          }
           deliverTextAttachmentToChat(
             fresh.id,
             buildForkTranscriptAttachment({
@@ -2254,7 +2248,7 @@ function AgentChatBody({
         });
       trackPendingTextAttachmentDelivery(fresh.id, delivery);
     },
-    [chatThread, dispatch, readForkTranscript,capabilitiesBridge],
+    [chatThread, dispatch, readForkTranscript],
   );
 
   /** Second click on a pill whose read hasn't landed. Marks the in-flight
@@ -4743,10 +4737,6 @@ function AgentChatBody({
   const transcriptFolder = chatThread?.folder ?? session.cwd;
   const transcriptAgentName =
     session.agentName ?? chatThread?.agentName ?? signInAgentId ?? "Agent";
-  const transcriptNativeFork =
-    isCloudWorkspace(chatThread?.folder) &&
-    chatThread?.agentId === "codex" &&
-    cloudNativeCapabilities?.nativeFork === true;
   const transcriptHasChatThread = !!chatThread;
   const transcriptDesignRole = session.agentRole === "design";
   const transcriptShared = useMemo<TranscriptTurnShared>(
@@ -4763,7 +4753,6 @@ function AgentChatBody({
       interactive,
       hasChatThread: transcriptHasChatThread,
       designRole: transcriptDesignRole,
-      nativeFork: transcriptNativeFork,
       setEditingMessageId,
       setActivePromptEl,
       ctx: transcriptCtx,
@@ -4782,7 +4771,6 @@ function AgentChatBody({
       interactive,
       transcriptHasChatThread,
       transcriptDesignRole,
-      transcriptNativeFork,
       setEditingMessageId,
       setActivePromptEl,
       transcriptCtx,

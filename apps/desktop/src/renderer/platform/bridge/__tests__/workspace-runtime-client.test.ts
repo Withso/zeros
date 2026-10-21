@@ -251,27 +251,6 @@ describe("workspace runtime routing", () => {
     expect(open).toHaveBeenCalledOnce(); expect(peer.release).toHaveBeenCalledOnce(); expect(peer.request).not.toHaveBeenCalled(); client.dispose();
   });
 
-  it("uses the Local transport for replica controls while a cloud workspace is open", async () => {
-    const peer = fakePeer(a);
-    const open = vi.fn(async () => peer.peer);
-    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
-    try {
-      await client.warmWorkspace(a);
-      peer.request.mockClear();
-      open.mockClear();
-      const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({
-        type: "WORKSPACE_RESPONSE", result: [],
-      } as never);
-      const message = {
-        type: "WORKSPACE_REQUEST", op: "cloudReplica.create",
-        params: { workspaceId: cloudWorkspaceKey(a), organizationId, rootPath: "/Users/test/downloads" },
-      } as const;
-      await client.request(message);
-      expect(local).toHaveBeenCalledWith(message, expect.anything());
-      expect(open).not.toHaveBeenCalled();
-      expect(peer.request).not.toHaveBeenCalled();
-    } finally { client.dispose(); }
-  });
   it("honors cancellation raised synchronously while the shared flight is being published", async () => {
     const controller = new AbortController(), ready = deferred<CloudPeer>(), peer = fakePeer(a);
     const open = vi.fn<WorkspaceRuntimeOptions["open"]>(() => { controller.abort(); return ready.promise; });

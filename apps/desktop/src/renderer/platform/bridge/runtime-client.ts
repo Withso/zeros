@@ -111,9 +111,8 @@ const CLOUD_CONTROL_REQUESTS = new Set(["AGENT_CANCEL", "AGENT_STOP_BACKGROUND_T
   "AGENT_CLOSE_SESSION", "AGENT_PERMISSION_RESPONSE", "AGENT_QUESTION_RESPONSE"]);
 const DIAGNOSTIC_REQUEST_TYPES = new Set(["WORKSPACE_REQUEST", "PTY_LIST", "PTY_CREATE", "PTY_WRITE", "PTY_KILL",
   "AGENT_LIST_AGENTS", "AGENT_INIT_AGENT", "AGENT_NEW_SESSION", "AGENT_LOAD_SESSION", "AGENT_PROMPT", ...CLOUD_CONTROL_REQUESTS]);
-const DIAGNOSTIC_OPERATIONS = new Set(["workspace.list", "workspace.get", "workspace.lifecycleStatus", "github.nativeGrant",
-  "cloudEvents.request", "cloudCommands.request", "cloudCommands.conversation", "cloudCommands.createConversation", "cloudCommands.setMode",
-  "cloudActions.request", "cloudLsp.request", "chats.list", "chats.replaceAll", "messages.window", "messages.windowOlder",
+const DIAGNOSTIC_OPERATIONS = new Set(["workspace.list", "workspace.get", "workspace.lifecycleStatus",
+  "chats.list", "chats.replaceAll", "messages.window", "messages.windowOlder",
   "git.status", "git.diff", "git.log", "git.reviewHunks", "file.read", "file.list", "design.status"]);
 type CloudDiagnosticEvent = "close" | "request_failed" | "reconnect" | "connect" | "ready" | "rejection";
 /** Secret-free connection identity attached to cloud bridge diagnostics. */

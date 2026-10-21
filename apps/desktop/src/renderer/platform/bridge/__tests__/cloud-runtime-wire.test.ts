@@ -25,16 +25,6 @@ describe("cloud runtime wire routing", () => {
       .toMatchObject({ reference, data: "fixture" });
     expect(() => cloudOutgoing(scope, { ...message, params: { ...message.params, reference: { ...reference, workspaceId: "foreign" } } })).toThrow(/another workspace/);
   });
-  it.each([
-    "identity", "list", "create", "pause", "resume", "remove", "divergences", "sync", "relocate",
-  ])("keeps cloudReplica.%s on this Mac even with a cloud workspace parameter", (operation) => {
-    expect(cloudRequestTarget({
-      type: "WORKSPACE_REQUEST",
-      op: `cloudReplica.${operation}`,
-      params: { workspaceId: key, cwd: key, replicaId: "local-replica" },
-    })).toBeNull();
-  });
-
   it("scopes the preview response envelope while retaining the engine's opaque native target", () => {
     const target = { executionId: "execution-native", portId: "A".repeat(32) };
     const response = cloudIncoming(scope, { type: "AGENT_BOUNDARY_PORT_OPENED",

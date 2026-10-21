@@ -44,7 +44,7 @@ export interface TranscriptTurnActions {
   retryTurn: (prompt: AgentTextMessage, events: AgentMessage[], newChat: boolean) => Promise<void>;
   warmRetryTranscript: (prompt: AgentTextMessage, events: AgentMessage[]) => void;
   continueTurn: () => void;
-  forkToNewTab: (messageId: string, text: string, nativeFork: boolean) => void;
+  forkToNewTab: (messageId: string, text: string) => void;
   warmForkToNewTab: (messageId: string, text: string) => void;
   signIn: () => void;
   stopWorkflow?: (taskId: string) => void;
@@ -66,7 +66,6 @@ export interface TranscriptTurnShared {
   hasChatThread: boolean;
   designRole: boolean;
   /** Codex in a cloud workspace whose runtime can fork natively. */
-  nativeFork: boolean;
   setEditingMessageId: (id: string | null) => void;
   setActivePromptEl: (element: HTMLDivElement | null) => void;
   /** Renderer context without per-message streaming fields; TurnEventList
@@ -163,10 +162,9 @@ export const TranscriptTurn = memo(function TranscriptTurn({
     () => actions.retryTurn(prompt!, providerEvents, true),
     [actions, prompt, providerEvents],
   );
-  const nativeFork = shared.nativeFork && isVisualTail;
   const fork = useCallback(
-    () => actions.forkToNewTab(promptId!, promptText!, nativeFork),
-    [actions, promptId, promptText, nativeFork],
+    () => actions.forkToNewTab(promptId!, promptText!),
+    [actions, promptId, promptText],
   );
   const forkIntent = useCallback(
     () => actions.warmForkToNewTab(promptId!, promptText!),
