@@ -83,6 +83,10 @@ export class SessionStore {
   private readonly sessions = new Map<string, SessionData>();
   private readonly pending = new Map<string, Promise<unknown>>();
   private readonly listeners = new Set<(change: SessionChange) => void>();
+  private readonly dirty = new Set<string>();
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly writeFailures = new Map<string, unknown>();
+  private readonly errorListeners = new Set<(chatId: string) => void>();
 
   private constructor(private readonly directory: string, readonly workspaceKey: string) {}
 
@@ -126,6 +130,27 @@ export class SessionStore {
   snapshot(chatId: string): SessionData | undefined {
     const value = this.sessions.get(chatId);
     return value ? structuredClone(value) : undefined;
+  }
+
+  /** Routing reads must not clone the transcript on every prompt or event. */
+  metadata(chatId: string): Pick<SessionData, "chat" | "nativeSessionId" | "paused"> | undefined {
+    const value = this.sessions.get(chatId);
+    return value ? structuredClone({ chat: value.chat, nativeSessionId: value.nativeSessionId, paused: value.paused }) : undefined;
+  }
+
+  history(chatId: string): readonly CloudV2MessageRow[] { return this.sessions.get(chatId)?.rows ?? []; }
+
+  hasQueued(chatId: string): boolean {
+    const value = this.sessions.get(chatId);
+    return !!value?.chat && !value.paused && value.inbox.some((entry) => entry.state === "queued");
+  }
+
+  receipt(chatId: string, requestId: string): InboxEntry | undefined {
+    return structuredClone(this.sessions.get(chatId)?.inbox.find((entry) => entry.requestId === requestId));
+  }
+
+  steerReceipt(chatId: string, executionId: string, attemptId: string): SteerReceipt | undefined {
+    return structuredClone(this.sessions.get(chatId)?.steers.find((entry) => entry.executionId === executionId && entry.attemptId === attemptId));
   }
 
   list(): { chats: ChatRow[]; chatDeletions: string[] } {
@@ -199,12 +224,35 @@ export class SessionStore {
   }
 
   async fold(chatId: string, notification: SessionNotification): Promise<void> {
-    await this.update(chatId, (draft) => {
-      const previous = draft.messages;
+    await this.serialize(chatId, () => {
+      const current = this.sessions.get(chatId);
+      if (!current) throw new Error("Unknown chat.");
+      if (!current.chat) throw new Error("Cloud conversation was deleted.");
+      if (this.writeFailures.has(chatId)) throw new Error("Cannot save this conversation.");
+      const previous = current.messages;
       const folded = applyUpdate(previous, notification);
-      draft.messages = folded;
+      if (folded === previous) return;
       const unchanged = new Set(previous);
-      upsertRows(draft.rows, folded.filter((message) => !unchanged.has(message)).map(persisted));
+      const changed = folded.filter((message) => !unchanged.has(message)).map(persisted);
+      if (!changed.length) return;
+      // Keep immutable message objects and row payload strings shared. A token
+      // must not clone or JSON-encode all earlier turns in a long conversation.
+      const rows = current.rows.slice();
+      upsertRows(rows, changed);
+      this.sessions.set(chatId, { ...current, messages: folded, rows });
+      this.dirty.add(chatId);
+      if (!this.timers.has(chatId)) {
+        const timer = setTimeout(() => {
+          this.timers.delete(chatId);
+          void this.flushChat(chatId).catch((error: unknown) => {
+            this.writeFailures.set(chatId, error);
+            for (const listener of this.errorListeners) listener(chatId);
+          });
+        }, 250);
+        timer.unref?.();
+        this.timers.set(chatId, timer);
+      }
+      for (const listener of this.listeners) listener(structuredClone({ chatId, rows: changed }));
     });
   }
 
@@ -255,10 +303,30 @@ export class SessionStore {
 
   async update(chatId: string, edit: (draft: SessionData) => void): Promise<void> { await this.change(chatId, edit); }
   onChange(listener: (change: SessionChange) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-  async flush(): Promise<void> { await Promise.all(this.pending.values()); }
+  onError(listener: (chatId: string) => void): () => void { this.errorListeners.add(listener); return () => this.errorListeners.delete(listener); }
+  async flush(): Promise<void> {
+    await Promise.all(this.pending.values());
+    await Promise.all([...this.dirty].map((chatId) => this.flushChat(chatId)));
+    if (this.writeFailures.size) throw new Error("Cannot save this conversation.");
+  }
+
+  private async flushChat(chatId: string): Promise<void> {
+    await this.serialize(chatId, async () => {
+      this.clearTimer(chatId);
+      if (!this.dirty.has(chatId)) return;
+      await this.save(this.sessions.get(chatId)!);
+      this.dirty.delete(chatId);
+      this.writeFailures.delete(chatId);
+    });
+  }
+
+  private clearTimer(chatId: string): void {
+    clearTimeout(this.timers.get(chatId));
+    this.timers.delete(chatId);
+  }
 
   private change<T>(chatId: string, edit: (draft: SessionData) => T, initial?: ChatRow | null, allowDeleted = false): Promise<T> {
-    const operation = (this.pending.get(chatId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    return this.serialize(chatId, async () => {
       const previous = this.sessions.get(chatId);
       if (previous?.chat === null && !allowDeleted) throw new Error("Cloud conversation was deleted.");
       if (!previous && initial === undefined) throw new Error("Unknown chat.");
@@ -268,6 +336,9 @@ export class SessionStore {
       const result = edit(draft);
       if (JSON.stringify(draft) === JSON.stringify(previous)) return structuredClone(result);
       await this.save(draft);
+      this.clearTimer(chatId);
+      this.dirty.delete(chatId);
+      this.writeFailures.delete(chatId);
       this.sessions.set(chatId, draft);
       const oldRows = new Map(previous?.rows.map((row) => [row.msgId, row]));
       const changed = draft.rows.filter((row) => JSON.stringify(oldRows.get(row.msgId)) !== JSON.stringify(row));
@@ -277,6 +348,10 @@ export class SessionStore {
       }));
       return structuredClone(result);
     });
+  }
+
+  private serialize<T>(chatId: string, action: () => T | Promise<T>): Promise<T> {
+    const operation = (this.pending.get(chatId) ?? Promise.resolve()).catch(() => {}).then(action);
     this.pending.set(chatId, operation);
     // Observe rejections for the event-stream callers; the returned operation
     // still rejects to its owner. A failed write never publishes a new snapshot.

@@ -428,16 +428,31 @@ importers:
 
   apps/cloud-worker:
     dependencies:
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: 0.3.296
+        version: 0.3.296(@anthropic-ai/sdk@0.100.1(zod@4.3.6))(@modelcontextprotocol/sdk@1.32.1(zod@4.3.6))(zod@4.3.6)
+      '@cursor/sdk':
+        specifier: 1.0.37
+        version: 1.0.37
       '@openai/codex':
         specifier: 0.162.1
         version: 0.162.1
       '@zeros/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      node-pty:
+        specifier: ^1.1.0
+        version: 1.1.0
+      ws:
+        specifier: ^8.21.2
+        version: 8.21.2
     devDependencies:
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.39
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       typescript:
         specifier: 5.9.3
         version: 5.9.3

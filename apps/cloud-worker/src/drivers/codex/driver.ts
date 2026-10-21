@@ -53,6 +53,7 @@ export class CodexDriver implements Driver {
 
   async open(input: DriverOpen): Promise<{ nativeSessionId: string }> {
     if (this.state !== "new") throw new Error("Codex driver has already been opened.");
+    if (!input.proxy) throw new Error("Missing Codex proxy configuration.");
     const proxy = new URL(input.proxy.baseUrl);
     if (!["https:", "http:"].includes(proxy.protocol) || proxy.username || proxy.password || proxy.search || proxy.hash)
       throw new Error("Invalid Codex proxy URL.");
@@ -258,7 +259,7 @@ export class CodexDriver implements Driver {
     if (this.state !== "ready" || !this.rpc || !this.nativeSessionId) throw new Error("Codex driver is not ready.");
   }
   private redact(message: string): string {
-    const token = this.input?.proxy.token;
+    const token = this.input?.proxy?.token;
     return token ? message.split(token).join("[redacted]").split(JSON.stringify(token).slice(1, -1)).join("[redacted]") : message;
   }
   private error(error: unknown): Error { return new Error(this.redact(error instanceof Error ? error.message : "Codex request failed.")); }
