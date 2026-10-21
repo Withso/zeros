@@ -166,6 +166,7 @@ END $$;`],
     "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_initial_delete_capture_source(uuid,boolean),guard_cloud_initial_delete_capture(),
   require_cloud_initial_delete_capture(),admit_cloud_initial_delete_capture(uuid,bytea,boolean) FROM PUBLIC;`],
   },
+  "0180_cloud_initial_delete_periodic_checkpoint.sql": {},
   "0178_cloud_owner_existing_delete.sql": {},
   "0177_cloud_owner_discard_delete.sql": {
     "new-table-privileges": ["REVOKE ALL ON cloud_workspace_owner_delete_receipts,cloud_workspace_owner_delete_dispositions FROM PUBLIC,zeros_app;"],
@@ -291,6 +292,8 @@ const ownerDeleteDigests: Record<string,string> = {
 
 // One first-source completion retains the complete pre-binding recovery.
 const initialDeleteSourceDigest = "73ff2ed9852c36aff906dc03c688e7bb1036d83db04c7f533f88979b22916a5b";
+// Only durable periodic checkpoints from the same engine may precede the first capture.
+const initialDeletePeriodicSourceDigest = "d4e1a6ee0a5346f91b6c9765f9449406f982464235ff7c9cc2cf7e4752fe249a";
 
 // Exact additions retain prior save proof and physical-purge authority.
 const ownerExistingDeleteDigests: Record<string,string> = {
@@ -399,6 +402,8 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
         createHash("sha256").update(statement).digest("hex") === ownerDeleteDigests[rule]) ||
       (file === "0179_cloud_initial_delete_capture.sql" && rule === "initial-delete-source" &&
         createHash("sha256").update(statement).digest("hex") === initialDeleteSourceDigest) ||
+      (file === "0180_cloud_initial_delete_periodic_checkpoint.sql" && rule === "initial-delete-periodic-source" &&
+        createHash("sha256").update(statement).digest("hex") === initialDeletePeriodicSourceDigest) ||
       (file === "0178_cloud_owner_existing_delete.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
