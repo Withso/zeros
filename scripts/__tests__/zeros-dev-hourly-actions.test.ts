@@ -278,6 +278,28 @@ describe("hourly Actions predecessor and gate policy", () => {
     expect(decideHourlyGate(snapshot, true, Date.parse("2026-10-14T00:38:00Z")))
       .toMatchObject({ allowed: conclusion === "success", code: conclusion === "success" ? "hourly_green" : "hourly_failed" });
   });
+  it("reads every history page before proving the hourly gate was never activated", async () => {
+    // Live shape after 100 runs: only infrastructure greens and skipped or red
+    // runs exist, so admission stays not-live instead of failing closed.
+    const history = Array.from({ length: 104 }, (_, index) => run(104 - index, { event: "workflow_dispatch", conclusion: "failure" }));
+    const page = (url: string) => {
+      const number = Number(new URL(url, "https://api.github.com").searchParams.get("page") ?? "1");
+      return { total_count: history.length, workflow_runs: history.slice((number - 1) * 100, number * 100) };
+    };
+    const f = { get: vi.fn(async (url: string) => url.includes("status=success") ? { total_count: 0, workflow_runs: [] }
+      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob({ name: "infrastructure", conclusion: "failure" })] } : page(url)) };
+    const snapshot = await hourlySnapshot(f);
+    expect(snapshot).toMatchObject({ activated: false, latest: null });
+    expect(decideHourlyGate(snapshot, true)).toMatchObject({ allowed: true, code: "hourly_not_live" });
+    expect(f.get.mock.calls.some(([url]) => String(url).includes("page=2"))).toBe(true);
+  });
+  it("still fails closed when history pages do not add up to the reported total", async () => {
+    const history = Array.from({ length: 100 }, (_, index) => run(104 - index, { event: "workflow_dispatch", conclusion: "failure" }));
+    const f = { get: vi.fn(async (url: string) => url.includes("status=success") ? { total_count: 0, workflow_runs: [] }
+      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob({ name: "infrastructure", conclusion: "failure" })] }
+      : url.includes("page=2") ? { total_count: 104, workflow_runs: [] } : { total_count: 104, workflow_runs: history }) };
+    await expect(hourlySnapshot(f)).rejects.toThrow("zeros_dev_artifact_invalid");
+  });
   it("refuses a foreign completed attempt behind an active rerun", async () => {
     const f = { get: vi.fn(async (url: string) => url.includes("status=success") ? { total_count: 1, workflow_runs: [run(1)] }
       : url.endsWith("/attempts/1") ? run(17, { head_sha: "b".repeat(40) })
