@@ -39,7 +39,7 @@ d("cloud v2 Cloud Computer builds", () => {
       stop: vi.fn(async () => {}),
       delete: vi.fn(async () => {}),
       exec: vi.fn(async (_id: string, command: string) => ({ exitCode: 0, stdout: command.includes("rev-parse") ? `Cloning\n${commit}\n` : "installed", timedOut: false })),
-      execLong: vi.fn(async (_id: string, command: string) => ({ exitCode: 0, stdout: command.includes("rev-parse") ? `Cloning\n${commit}\n` : "installed", timedOut: false })),
+      execLong: vi.fn(async (_id: string, command: string) => ({ exitCode: 0, stdout: command.includes("rev-parse") ? `Cloning\nzeros-build-branch=master\n${commit}\n` : "installed", timedOut: false })),
       saveSnapshot: vi.fn(async () => {}),
       deleteSnapshot: vi.fn(async () => {}),
     };
@@ -53,6 +53,25 @@ d("cloud v2 Cloud Computer builds", () => {
     await expect(computers.enqueue(org, admin, recipe)).rejects.toMatchObject({ code: "computer_build_in_progress" });
   });
 
+  it("allows ordinary members to read the Computer's repositories", async () => {
+    await expect(computers.requireMember(org, member)).resolves.toBeUndefined();
+    await expect(computers.requireMember(org, randomUUID())).rejects.toMatchObject({ status: 404 });
+  });
+
+  it.each(["disabled", "deleted"])("hides a %s organization from members", async state => {
+    const column = { disabled: "cloud_workspaces_allowed = false", deleted: "deleted_at = now()" }[state]!;
+    await pool.query(`UPDATE organizations SET ${column} WHERE id = $1`, [org]);
+    await expect(computers.requireMember(org, member)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("keeps Personal organizations outside cloud even when the user is a member", async () => {
+    const personal = randomUUID();
+    await pool.query(`INSERT INTO organizations (id, slug, name, created_by, is_personal, cloud_workspaces_allowed)
+      VALUES ($1, $2, 'Personal', $3, true, false)`, [personal, `personal-${personal}`, member]);
+    await pool.query(`INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'owner')`, [personal, member]);
+    await expect(computers.requireMember(personal, member)).rejects.toMatchObject({ status: 404 });
+  });
+
   it("builds, pins commits, goes live as the one named snapshot and retires the previous one", async () => {
     const boat = compute();
     const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
@@ -64,8 +83,8 @@ d("cloud v2 Cloud Computer builds", () => {
     let overview = await computers.overview(org);
     expect(overview.snapshotName).toBe(cloudV2SnapshotName("alpha", org, 1));
     expect(overview.builds[0]).toMatchObject({ state: "succeeded", version: 1 });
-    expect(overview.builds[0]!.recipe.repositories[0]!.commit).toBe(commit);
-    expect(await new CloudV2Store(pool).installedRepositories(org)).toEqual(["withso/zeros"]);
+    expect(overview.builds[0]!.recipe.repositories[0]).toMatchObject({ commit, branch: "master" });
+    expect(await new CloudV2Store(pool).installedRepositories(org)).toEqual([{ repository: "withso/zeros", defaultBranch: "master" }]);
     const cloneCommand = vi.mocked(boat.execLong).mock.calls[0]![1];
     expect(cloneCommand).not.toContain("ghs_token");
     // A named snapshot is an independent copy: the builder goes as soon as it is ready.
@@ -80,9 +99,30 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview.snapshotName).toBe(cloudV2SnapshotName("alpha", org, 2));
     expect(overview.builds[0]!.recipe).toMatchObject({ rebuiltFrom: 1 });
     expect(overview.builds[0]!.recipe.repositories[0]!.commit).toBe(commit);
+    const rebuildClone = vi.mocked(boat.execLong).mock.calls.find(([, command]) => command.includes("checkout --detach"))![1];
+    expect(rebuildClone.indexOf("symbolic-ref --quiet --short HEAD")).toBeGreaterThan(0);
+    expect(rebuildClone.indexOf("symbolic-ref --quiet --short HEAD")).toBeLessThan(rebuildClone.indexOf("checkout --detach"));
     expect(boat.deleteSnapshot).toHaveBeenCalledWith(cloudV2SnapshotName("alpha", org, 1));
     expect(boat.delete).toHaveBeenLastCalledWith("bx_build2");
     expect(overview.builds[1]).toMatchObject({ state: "succeeded", snapshotId: null });
+  });
+
+  it("uses the recipe ref before the recorded branch and returns null before a successful activation", async () => {
+    const store = new CloudV2Store(pool);
+    expect(await store.installedRepositories(org)).toBeNull();
+    const queued = await computers.enqueue(org, admin, { repositories: [
+      { repository: "example/explicit", ref: "release/stable", branch: "master" },
+      { repository: "example/cloned", branch: "master" },
+      { repository: "example/legacy" },
+    ] });
+    await computers.claim();
+    expect(await store.installedRepositories(org)).toBeNull();
+    await computers.activate(queued.id, "test-snapshot");
+    expect(await store.installedRepositories(org)).toEqual([
+      { repository: "example/explicit", defaultBranch: "release/stable" },
+      { repository: "example/cloned", defaultBranch: "master" },
+      { repository: "example/legacy", defaultBranch: null },
+    ]);
   });
 
   it("records a failed setup without touching the live snapshot", async () => {
