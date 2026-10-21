@@ -17,6 +17,7 @@ export type CommandRunner = (program: "git" | "gh", args: string[], options?: Co
 export function commandRunner(cwd: string, wiring: NodeJS.ProcessEnv = {}): CommandRunner {
   return (program, args, options = {}) => new Promise((resolve, reject) => {
     const env = workerChildEnvironment(undefined, wiring);
+    env.GIT_TERMINAL_PROMPT = "0"; env.GIT_EDITOR = "true";
     if (options.readOnly) env.GIT_OPTIONAL_LOCKS = "0";
     const child = execFile(program, args, { cwd, env, encoding: "utf8", timeout: options.timeout ?? 30_000,
       maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024 }, (error, stdout) => {

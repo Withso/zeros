@@ -4,7 +4,7 @@ import WebSocket from "ws";
 import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import type { Transport, TransportHandlers } from "./transport";
 
-export const WORKER_TOKEN_FILE = "/home/zeros/.config/zeros/worker-token";
+export const WORKER_TOKEN_FILE = "/home/user/.config/zeros/worker-token";
 export type RelayStatus = "credential-unavailable" | "connected" | "disconnected" | "superseded" | "stopped" | "protocol-error";
 interface RelayOptions {
   url: string;

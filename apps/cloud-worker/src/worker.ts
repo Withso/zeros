@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
@@ -12,13 +13,16 @@ import { ChatService } from "./workspace/chat-service";
 import { prepareCheckout } from "./workspace/checkout";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
+import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
+import { commandRunner } from "./workspace/commands";
 
 interface WorkerOptions {
   directory: string;
   workspaceId?: string;
   transport: Transport;
   drivers?: DriverFactories;
-  prepareCheckout?: (workspace: WorkerConfig["workspace"]) => Promise<void>;
+  prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv) => Promise<void>;
+  gitAskpassPath?: string;
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
 }
@@ -34,6 +38,9 @@ export class CloudWorker {
   private chats?: ChatService;
   private history?: HistoryMirror;
   private workspace?: WorkspaceService;
+  private readonly tokens: GithubTokens;
+  private readonly github: GithubBroker;
+  private readonly gitEnvironment: NodeJS.ProcessEnv;
   private configuring: Promise<void> = Promise.resolve();
   private online = false;
   private disposed = false;
@@ -42,7 +49,11 @@ export class CloudWorker {
   private heartbeat?: ReturnType<typeof setInterval>;
   private unsubscribers: Array<() => void> = [];
 
-  constructor(private readonly options: WorkerOptions) {}
+  constructor(private readonly options: WorkerOptions) {
+    this.tokens = new GithubTokens(frame => this.send(frame));
+    this.github = new GithubBroker(join(options.directory, "github.sock"), () => this.tokens.get(), () => this.workspace?.githubChanged());
+    this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
+  }
 
   start(): void {
     if (this.started || this.disposed) return;
@@ -52,12 +63,12 @@ export class CloudWorker {
     this.options.transport.start({
       open: async () => {
         if (this.disposed) return;
-        this.online = true; this.idle = undefined;
+        this.online = true; this.idle = undefined; this.tokens.connect();
         await this.send({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.0.0",
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"] } });
       },
       frame: (raw) => this.receive(raw),
-      close: () => { this.online = false; this.clients.clear(); this.history?.disconnect(); },
+      close: () => { this.online = false; this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); },
     });
   }
 
@@ -73,7 +84,7 @@ export class CloudWorker {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true; clearInterval(this.heartbeat);
+    this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect();
     await this.configuring.catch(() => {});
     await this.workspace?.dispose();
     await this.agents?.dispose();
@@ -81,6 +92,7 @@ export class CloudWorker {
     await this.history?.flush();
     for (const unsubscribe of this.unsubscribers) unsubscribe();
     await this.history?.dispose();
+    await this.github.dispose();
     await this.options.transport.dispose();
   }
 
@@ -94,7 +106,9 @@ export class CloudWorker {
       await this.configuring.catch(() => { this.options.onError?.("configuration"); });
       return;
     }
-    if (message.t === "reply" || message.t === "refusal") return;
+    // Checkout preparation can be waiting for this reply. Never queue control
+    // replies behind configuration or behind ordinary app work.
+    if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
     if (message.t === "close") { this.clients.delete(message.clientId); return; }
     if (message.t === "open") {
       const client: Client = { id: message.clientId, rejected: false, send: async (frame) => {
@@ -141,16 +155,17 @@ export class CloudWorker {
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
     if (!this.scope) {
-      await (this.options.prepareCheckout ?? prepareCheckout)(config.workspace);
+      await this.github.start(); this.tokens.invalidate();
+      await (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment);
       const store = await SessionStore.open(join(this.options.directory, "sessions"), scope.key);
       // Earlier worker snapshots stored a cloud key in chat metadata. Native
       // bridge rows must round-trip through the renderer's existing mapper.
       for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
       this.workspace = await WorkspaceService.open(scope, this.options.directory, {
-        ...this.options.workspaceServices, publish: (frame) => { void this.broadcast(frame); },
+        run: commandRunner(scope.root, this.gitEnvironment), ...this.options.workspaceServices, publish: (frame) => { void this.broadcast(frame); },
       });
       this.scope = scope; this.store = store;
-      this.agents = new Agents(store, scope, this.options.drivers ?? { codex: () => new CodexDriver() }, config,
+      this.agents = new Agents(store, scope, this.options.drivers ?? { codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }) }, config,
         (frame) => this.broadcast(frame), () => { void this.reportIdle(); });
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId));
       this.history = new HistoryMirror(store, this.options.transport);
@@ -160,7 +175,7 @@ export class CloudWorker {
       }), store.onError((chatId) => {
         this.options.onError?.("storage"); void this.agents!.closeChat(chatId).catch(() => {});
       }));
-    } else { await this.workspace!.configure(config.workspace); this.agents!.configure(config); }
+    } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); this.agents!.configure(config); }
     this.history!.connect();
     await this.reportIdle(true);
   }

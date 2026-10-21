@@ -33,3 +33,35 @@ and turn checkpoint history are deferred. No request is silently acknowledged.
 Offline acceptance uses temporary Git repositories and a fake relay. Live
 provider, Boat, model proxy, and private-GitHub acceptance belongs to the
 integration owner; a Linux test does not establish macOS engine parity.
+
+## Image package
+
+Build on Linux with Node 24 LTS, on the same architecture and glibc as the VM:
+`pnpm --filter @zeros/cloud-worker build`. Install the entire `dist/` directory
+as `/opt/zeros/worker`, owned by root. It includes `worker.mjs`, `git-askpass.mjs`,
+`gh.mjs`, executable `bin/gh` and `bin/git-askpass` wrappers, `package.json`,
+`runtime-manifest.json`, license notices and a materialized `node_modules/`.
+There are no links back to the build checkout or pnpm store. The manifest records
+the exact runtime pins, dependency versions and SHA-256 of every shipped file.
+
+The bundle contains the protocol, WebSocket and terminal-screen libraries.
+External runtime packages are node-pty (including its native addon), Codex
+0.162.1 and its platform binary, Claude Agent SDK 0.3.296 and its platform CLI,
+and Cursor SDK 1.0.37 and its platform binaries. Their runtime dependencies and
+required peer dependencies are included; nothing downloads at startup.
+
+Boat's stock account is `user`. Run the service as `User=user`, with
+`WorkingDirectory=/home/user` and
+`ExecStart=/usr/bin/env node /opt/zeros/worker/worker.mjs`.
+Put `/opt/zeros/worker/bin` first on PATH for the service and login shells.
+The two non-secret boot variables are `ZEROS_WORKER_URL` and
+`ZEROS_WORKSPACE_ID`. The worker waits for the owned 0600 token file at
+`/home/user/.config/zeros/worker-token` and rereads it for every connection.
+State is under `/home/user/.local/share/zeros/cloud-worker`; the checkout is
+the absolute path from the relay config. Service logs contain status codes only.
+
+Git HTTPS askpass and the gh wrapper obtain short-lived GitHub tokens from the
+private worker Unix socket. Tokens stay in process memory; persistent Git
+credential helpers are disabled. A token refusal or a failed command is surfaced
+without replaying the Git mutation. Successful gh PR mutations invalidate cached
+workspace PR metadata. The real gh executable is `/usr/bin/gh`.
