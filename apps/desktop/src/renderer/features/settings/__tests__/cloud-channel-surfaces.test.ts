@@ -31,7 +31,7 @@ vi.mock("../internal-features", async original => ({
 }));
 vi.mock("../../team/organization-switcher", () => ({ OrganizationSwitcher: () => null }));
 vi.mock("../../team/join-team-dialog", () => ({ JoinTeamDialog: () => null }));
-vi.mock("../cloud-computer-v2-panel", () => ({ CloudComputerV2Panel: () => { state.cloudPanel(); return "cloud-computer-fixture"; } }));
+vi.mock("../cloud-computer-panel", () => ({ CloudComputerPanel: () => { state.cloudPanel(); return "cloud-computer-fixture"; } }));
 vi.mock("../cloud-customization-panel", () => ({ CloudMcpPanel: () => { state.cloudPanel(); return "cloud-mcp-fixture"; },
   CloudSkillsPanel: () => { state.cloudPanel(); return "cloud-skills-fixture"; } }));
 vi.mock("../cloud-github-section", () => ({ CloudGithubSection: () => { state.cloudPanel(); return "cloud-github-fixture"; } }));

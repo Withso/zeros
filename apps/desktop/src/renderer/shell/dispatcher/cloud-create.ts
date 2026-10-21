@@ -7,7 +7,7 @@ import {
   useTeams,
 } from "../../features/team/team-store";
 import { canCreateWorkspaceIn } from "../../features/team/organization-capabilities";
-import { cloudWorkspaceCapability } from "../../platform/cloud-workspace-access";
+import { cloudWorkspaceCapability } from "../../platform/cloud-capability";
 import {
   getCloudWorkspaceCreateOptions,
   type CloudWorkspaceCreateOptions,

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   RuntimeClient,
-  cloudRuntimeWebSocketProtocols,
   describeConnectionRejection,
   isRejectionRetryableAfterEngineRestart,
   parseInboundBridgeWebSocketFrame,
@@ -14,12 +13,12 @@ const RUNTIME_ID = "11111111-1111-4111-8111-111111111111";
 const ORGANIZATION_ID = "22222222-2222-4222-8222-222222222222";
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const ENGINE_INSTANCE_ID = "44444444-4444-4444-8444-444444444444";
-const CLOUD_TOKEN = `zws_${"a".repeat(43)}`;
+const ticket = (fill: string) => `ticket.zw2c_${fill.repeat(43)}`;
 
 function cloudTarget(now: number) {
   return {
     kind: "cloud" as const,
-    channel: "electron-ssh-tunnel" as const,
+    channel: "v2-websocket" as const,
     runtimeId: RUNTIME_ID,
     organizationId: ORGANIZATION_ID,
     workspaceId: WORKSPACE_ID,
@@ -27,52 +26,37 @@ function cloudTarget(now: number) {
     authorityEpoch: 11,
     engineInstanceId: ENGINE_INSTANCE_ID,
     connectionSequence: 1,
-    url: "ws://127.0.0.1:54173/ws",
-    cloudToken: CLOUD_TOKEN,
+    url: `wss://api.zeros.test/v2/cloud/workspaces/${WORKSPACE_ID}/bridge`,
+    protocols: ["zeros.cloud.v2", ticket("a")] as ["zeros.cloud.v2", string],
     expiresAt: now + 60_000,
   };
 }
 
 describe("qualified cloud runtime connection target", () => {
-  it("accepts actor v2 only at the configured control-plane bridge",()=>{
-    vi.stubEnv("VITE_CONTROL_PLANE_URL","https://api.zeros.test");
-    try {
-      const now=1_800_000_000_000,target={...cloudTarget(now),channel:"control-plane-websocket",url:"wss://api.zeros.test/v1/cloud-workspaces/bridge",cloudToken:`zwa_${"b".repeat(43)}`};
-      expect(parseRuntimeConnectionTarget(target,now)).toEqual(target);
-      expect(cloudRuntimeWebSocketProtocols(target.cloudToken)[0]).toBe("zeros-v1");
-      for(const url of ["wss://provider.test/v1/cloud-workspaces/bridge",target.url+"?token=leak","ws://api.zeros.test/v1/cloud-workspaces/bridge"])
-        expect(()=>parseRuntimeConnectionTarget({...target,url},now)).toThrow();
-      expect(()=>parseRuntimeConnectionTarget({...target,cloudToken:CLOUD_TOKEN},now)).toThrow();
-    }finally{vi.unstubAllEnvs();}
-  });
-
-  it("uses an exact Electron loopback tunnel and a subprotocol bearer", () => {
+  it("offers the one-use ticket as a subprotocol, never in the URL", () => {
     const now = 1_800_000_000_000;
     const target = parseRuntimeConnectionTarget(cloudTarget(now), now);
-    if (target.kind !== "cloud" || target.channel !== "electron-ssh-tunnel") throw new Error("expected cloud tunnel target");
     expect(target).toEqual(cloudTarget(now));
-    const protocols = cloudRuntimeWebSocketProtocols(target.cloudToken);
-    expect(protocols[0]).toBe("zeros-v1");
-    expect(protocols.join(",")).not.toContain(target.cloudToken);
+    if (target.kind !== "cloud") throw new Error("expected a cloud target");
     expect(new URL(target.url).search).toBe("");
   });
 
   it.each([
     {
       ...cloudTarget(1_800_000_000_000),
-      url: "ws://engine.example/ws",
+      url: `ws://engine.example/v2/cloud/workspaces/${WORKSPACE_ID}/bridge`,
     },
     {
       ...cloudTarget(1_800_000_000_000),
-      url: "ws://127.0.0.1:54173/ws?token=leak",
+      url: `wss://api.zeros.test/v2/cloud/workspaces/${WORKSPACE_ID}/bridge?ticket=leak`,
     },
     {
       ...cloudTarget(1_800_000_000_000),
-      url: "ws://127.0.0.1:54173/not-ws",
+      url: "wss://api.zeros.test/v1/cloud-workspaces/bridge",
     },
     {
       ...cloudTarget(1_800_000_000_000),
-      cloudToken: "short",
+      protocols: ["zeros.cloud.v2", "ticket.short"],
     },
     {
       ...cloudTarget(1_800_000_000_000),
@@ -120,7 +104,7 @@ describe("qualified cloud runtime connection target", () => {
     const refresh = vi.fn(async () => ({
       ...first,
       connectionSequence: 2,
-      cloudToken: `zws_${"b".repeat(43)}`,
+      protocols: ["zeros.cloud.v2", ticket("b")] as ["zeros.cloud.v2", string],
       expiresAt: now + 120_000,
     }));
     const client = new RuntimeClient(first, {
@@ -137,7 +121,7 @@ describe("qualified cloud runtime connection target", () => {
     expect(internals.connectionTarget).toMatchObject({
       runtimeId: RUNTIME_ID,
       connectionSequence: 2,
-      cloudToken: `zws_${"b".repeat(43)}`,
+      protocols: ["zeros.cloud.v2", ticket("b")] as ["zeros.cloud.v2", string],
     });
     expect(refresh).toHaveBeenCalledWith(first);
     client.dispose();

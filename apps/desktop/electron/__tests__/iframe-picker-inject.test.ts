@@ -19,11 +19,6 @@ vi.mock("../iframe-favicon", () => ({
   iframeFaviconNavigationDisposition: vi.fn(() => "keep"),
   resolveIframeFaviconDataUrl: vi.fn(async () => null),
 }));
-vi.mock("../cloud-workspace-access-runtime", () => ({
-  disposeCloudWorkspaceAccessBroker: vi.fn(async () => undefined),
-  getCloudWorkspaceAccessBroker: vi.fn(),
-  revokeCloudWorkspacePreviewFrame: vi.fn(async () => true),
-}));
 
 import {
   registerIframePickerCommands,
@@ -94,18 +89,16 @@ beforeEach(() => {
 });
 
 describe("Design Mode picker injection (Gate A)", () => {
-  it("injects into external https, Local loopback and cloud preview Browser frames", async () => {
+  it("injects into external https and Local loopback Browser frames", async () => {
     const { win, frames } = makeWindow([
       { name: "zeros-browser-external", url: "https://www.apple.com/" },
       { name: "zeros-browser-local", url: "http://localhost:3000/" },
-      { name: "zeros-browser-cloud", url: "https://p-3000-abc.preview.example.test/" },
     ]);
     registerIframePickerCommands({ mainWindow: win as never });
     expect(await reinjectBrowserPicker(win as never)).toBe(true);
     expect(injectedFrames(frames)).toEqual([
       "zeros-browser-external",
       "zeros-browser-local",
-      "zeros-browser-cloud",
     ]);
   });
 

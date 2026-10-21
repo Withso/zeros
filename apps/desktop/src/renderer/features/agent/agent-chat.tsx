@@ -1,4 +1,3 @@
-import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
 import { LocalLinksProvider } from "./local-links/provider";
 import { TurnFailureCard } from "./turn-failure-card";
 import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
@@ -17,13 +16,10 @@ import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-s
 
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
-import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-cloud-transcript-latency";
 import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
 import { openCloudAdmissionSettings } from "./cloud-admission-status";
 import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
-import { hasTranscriptPresentation } from "./transcript-retention";
 import { presentLeadingPrompt } from "./transcript-leading-prompt";
-import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
 import React, {
   useCallback,
   useEffect,
@@ -33,7 +29,7 @@ import React, {
   useState,
 } from "react";
 import { useOpenChatPreviewInWorkbench } from "@/renderer/shell/workbench/use-open-browser";
-import { workspacePreviewAvailable, warmCloudPreviewContext } from "../../platform/cloud-workspace-access";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 import { useOpenChatFileInWorkbench, warmChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
 import { chatFileOpenCwd } from "@/renderer/shell/workbench/direct-file-open";
 import {
@@ -201,7 +197,6 @@ import {
 } from "./session-tools-cache";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
-import { cloudRuntimeUpgradeComposerContext } from "./cloud-runtime-upgrade-link";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
@@ -1328,9 +1323,6 @@ function AgentChatBody({
       ? (s.sessions[chatId]?.transcriptState ?? "resident") === "resident"
       : true,
   );
-  const transcriptPaintReady = useSessionsStore((s) =>
-    !!chatId && hasTranscriptPresentation(s.sessions[chatId]),
-  );
   const transcriptCatchingUp = useSessionsStore((s) => {
     const head = chatId ? s.cloudHistoryRestoreHeads[chatId] : undefined;
     // Native rows can be resident while the current FULL head is incomplete.
@@ -1338,8 +1330,6 @@ function AgentChatBody({
     return !!chatId && !!s.sessions[chatId] &&
       !!head && !head.head?.deleted && !cloudHistoryFenceHasTranscript(head);
   });
-  useCloudTranscriptLatency(chatThread?.folder ?? session.cwd, chatId, surfaceActive,
-    transcriptPaintReady, hasSessionMessages);
   // Which turn (if any) this renderer has an unsettled prompt for. The tail's
   // liveness is derived from this rather than from session status, so a chat
   // being REOPENED — a tab switch, a workspace switch, an app reload, all of
@@ -1479,7 +1469,6 @@ function AgentChatBody({
       <>
         <ModelPill
           agents={agentsList}
-          {...cloudRuntimeUpgradeComposerContext(chatThread.folder, interactive)}
           agentId={chatThread.agentId}
           initialize={session.initialize}
           value={chatThread.model}
@@ -1560,10 +1549,7 @@ function AgentChatBody({
   const cloudPreviewsEnabled = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(chatThread?.folder)?.organizationId);
   const cloudCanEdit = useCloudWorkspaceCanEdit(chatThread?.folder);
   const cloudPreviewsActive = cloudPreviewsEnabled && cloudCanEdit;
-  const warmBoundaryPreview = useCallback(() => {
-    if (interactive && cloudPreviewsActive && isCloudWorkspace(chatThread?.folder))
-      void warmCloudPreviewContext().catch(() => undefined);
-  }, [interactive, cloudPreviewsActive, chatThread?.folder]);
+  const warmBoundaryPreview = useCallback(() => {}, []);
   const openBoundaryPreview = useCallback(
     (port: ExecutionBoundaryPortStatus) => {
       if (!workspacePreviewAvailable(chatThread?.folder ?? "")) return;
@@ -2026,7 +2012,6 @@ function AgentChatBody({
     incomplete: transcriptCatchingUp,
   });
   const transcriptLoadingVisible = transcriptHistoryStatus === "loading";
-  useCloudTranscriptLoading(chatThread?.folder ?? session.cwd, chatId, transcriptLoadingVisible);
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
     useChatTranscriptSummaries(
       chatThread?.folder,
@@ -4228,15 +4213,10 @@ function AgentChatBody({
     }
     const attemptId = `send-${crypto.randomUUID()}`;
     sendInFlightRef.current = true;
-    // Queueing behind a streaming turn cannot own that turn's next chunk.
-    const cancelLatency = chatId && session.status !== "streaming"
-      ? startCloudSubmitSpan(chatId) : undefined;
     const generation = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
     try {
-      const submitted = await runSend(override, extras, recordActivity);
-      if (!submitted) cancelLatency?.();
+      await runSend(override, extras, recordActivity);
     } catch (error) {
-      cancelLatency?.();
       if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return;
       if (chatId && isCloudWorkspace(folder)) {
         notifyAgentSendFailure({ folder, chatId, attemptId, agentId: chatThread?.agentId ?? session.agentId, model: chatThread?.model, error });
@@ -5232,7 +5212,6 @@ function AgentChatBody({
           the message bubbles at every width. */}
         {readOnly ? composerReplacement : (
         <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-0.5 border-t-0 bg-transparent px-7 pt-0 pb-4">
-          <CloudAgentCredentialCards folder={chatThread?.folder} chatId={chatId} active={interactive} />
           {/* The composer remains enabled when isErrorState is set:
             sending from an error state is the retry affordance (see canSend);
             only the Send button keeps its "error" tint. */}

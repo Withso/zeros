@@ -1,14 +1,7 @@
-import { CloudAgentBootIdentitySchema, type CloudAgentBootConversation } from "@zeros/protocol/cloud-agent-bootstrap";
 import type { BridgeMessage } from "./messages";
-import { WORKSPACE_RESOURCE_USAGE_CAPABILITY } from "@zeros/protocol/workspace-resource-usage";
-import { isCloudGithubWriteOperation } from "@zeros/protocol/github-auth";
 import { RuntimeClient, type ConnectionStatus } from "./ws-client";
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
-import { retryableCloudStopError, type CloudAgentConnection, type CloudConversationAttachment, type CloudCommandStop, type CloudCommandObservation } from "./cloud-agent-connection";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
-import { CloudHistoryRestoreTracker, type CloudHistoryRestoreTicket } from "../../state/cloud-transcript-cache";
-import { CloudHistoryRestoreMetadataSchema, type CloudHistoryRestoreMetadata, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
-import { installCloudHistoryRestoreMetadata, captureCloudHistoryRestoreRead, assertCloudHistoryRestoreResult, cacheNativeCloudTranscriptWindow } from "../cloud-transcript-cache";
 import type { CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
 import { relativeWorkspaceFilePath } from "../workspace-file-path";
 import {
@@ -30,9 +23,6 @@ import {
 type Message = Partial<BridgeMessage> & { type: string };
 /** Renderer-only refresh ownership; never sent to an engine. */
 export type ChatSnapshotRefresh = "all" | "local" | "retained" | readonly string[];
-/** Renderer-only receipt captured from the actual read, never inferred from
- * whichever peer happens to be connected when an outer await completes. */
-export type CloudHistoryReadReceipt = { source: "native" | "control-plane"; isCurrent: () => boolean };
 type RequestOptions = Exclude<
   Parameters<RuntimeClient["request"]>[1],
   number | undefined
@@ -45,17 +35,6 @@ export interface CloudPeer {
   /** Native admission's exact generation; renderer-only, never inferred from
    * a catalog update that can race the connection's final reply. */
   generation?: number;
-  agents?: CloudAgentConnection;
-  events?: Pick<RuntimeClient, "on">;
-  /** Serialize explicit work with idle capture and revalidate the admission.
-   * False means the drain retired this connection and a fresh one is needed. */
-  prepareForRun?: (signal: AbortSignal, reason?: "interaction", wakeIntent?: CloudWorkspaceWakeIntent) => Promise<boolean>;
-}
-export interface CloudResourceUsageConnection extends CloudWorkspaceTarget {
-  generation: number;
-  engineInstanceId: string;
-  authorityEpoch: number;
-  admissionId: string;
 }
 export interface WorkspaceRuntimeOptions {
   open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean; reason?: "interaction"; wakeIntent?: CloudWorkspaceWakeIntent }) => Promise<CloudPeer>;
@@ -71,12 +50,6 @@ export interface WorkspaceRuntimeOptions {
   manage?: (target: CloudWorkspaceTarget, op: string, params?: WireRecord) => Promise<WireRecord>;
   /** Authorized database reads that do not require a worker connection. */
   readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<WireRecord>;
-  /** Desktop durable cache: checkpoint passive projections at turn/departure boundaries. */
-  checkpointHistory?: boolean;
-  /** Passive authenticated head publications, including before a later page or
-   * optional disk write fails. No connection/wake/recovery is opened here. */
-  onHistoryRestoreHead?: (listener: (chatId: string, head: CloudHistoryRestoreFence) => void) => () => void;
-  prepareGithubWrite?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<string>;
 }
 interface WakeOwner { account: string; generation: number; stopVersion: number; lifecyclePending?: boolean; retargetVersion?: number }
 class CloudAdmissionGenerationChangedError extends Error {
@@ -99,7 +72,6 @@ interface PeerEntry extends CloudPeer {
   epoch: number;
   identity: string;
   snapshotRevision: number;
-  attachments?: readonly CloudConversationAttachment[];
 }
 interface LocalListEntry {
   result?: WireRecord;
@@ -134,10 +106,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private readonly peers = new Map<string, PeerEntry>();
   private readonly opening = new Map<string, OpeningPeer>();
   private readonly refusedAdmissions = new Map<string, RefusedAdmission>();
-  private readonly commandStops = new WeakMap<CloudCommandStop, Promise<BridgeMessage>>();
-  private readonly stoppingCommands = new Set<AbortController>();
-  private readonly commandPrompts = new WeakMap<CloudCommandObservation, Promise<BridgeMessage>>();
-  private readonly observingCommands = new Set<AbortController>();
   private readonly speculative = new Map<string, ReturnType<typeof setTimeout>>();
   private ongoingOpens = 0;
   private readonly historyIntents = new Map<string, number>();
@@ -154,31 +122,15 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   });
   private readonly historyWorkspaces = new Map<string, CloudWorkspaceTarget>();
   private readonly historyWarmups = new Map<string, Promise<WireRecord>>();
-  private readonly projectionCheckpoints = new Map<string, { until: number; pending: boolean }>();
   private localEpoch = 0;
   private readonly localLists = new Map<string, LocalListEntry>();
   private readonly cloudRepositorySlugs = new Set<string>();
   private sawCloudCatalog = false;
   private readonly stopLocalStatus: () => void;
   private readonly stopLocalChanges: () => void;
-  private readonly historyRestore = new CloudHistoryRestoreTracker();
-  private readonly historyReadReceipts = new WeakMap<object, CloudHistoryReadReceipt>();
-  private readonly nativeHistoryRestore = new CloudHistoryRestoreTracker();
-  private readonly stopHistoryRestore: () => void;
 
   constructor(private readonly routing: WorkspaceRuntimeOptions) {
     super({ kind: "local" });
-    this.historyRestore.setAccount(String(this.accountEpoch));
-    this.nativeHistoryRestore.setAccount(String(this.accountEpoch));
-    this.stopHistoryRestore = routing.onHistoryRestoreHead?.((chatId, fence) => {
-      const target = parseCloudScopedId(chatId);
-      if (!target || this.closed || this.routing.canAccess?.(target) === false) return;
-      const ticket = this.captureHistoryRestore(target);
-      if (!ticket) return;
-      const metadata = CloudHistoryRestoreMetadataSchema.parse({ projection: fence.projection,
-        historyHeads: fence.head ? [fence.head] : [] });
-      this.installHistoryRestore(target, ticket, metadata, [target.id]);
-    }) ?? (() => {});
     this.stopLocalStatus = super.onStatusChange(() => { this.localEpoch++; });
     // Subscribe directly to the Local transport before consumer subscriptions.
     // Renderer snapshot publications use emit(), so cannot invalidate themselves.
@@ -203,8 +155,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const confirmed = new Map([...this.peers.values()]
       .filter(entry => entry.hasChatSnapshot && (!this.routing.canAccess || this.routing.canAccess(entry.scope)))
       .map(entry => [cloudWorkspaceKey(entry.scope), entry.snapshot]));
+    // The control plane's mirror covers only workspaces without a live worker.
     if (this.routing.readHistory) for (const [key, target] of this.historyWorkspaces) {
-      if (this.routing.canAccess && !this.routing.canAccess(target)) continue;
+      if (confirmed.has(key) || this.routing.canAccess && !this.routing.canAccess(target)) continue;
       const data = this.history.peekSnapshot(this.historyKey(target, "chats.list", {})).data;
       if (data) confirmed.set(key, data);
     }
@@ -391,16 +344,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     } catch { return null; }
   }
 
-  /** Presence is receive-only lifecycle evidence on an existing admission.
-   * Never open/refresh a peer or enqueue across a disconnected transport. */
-  sendWorkspacePresence(target: CloudWorkspaceTarget, present: boolean): boolean {
-    const peer = this.peers.get(cloudWorkspaceKey(target));
-    if (this.closed || !peer || peer.retired || peer.identity !== this.identity(target) ||
-        peer.client.status !== "connected" || this.routing.canAccess?.(target) === false) return false;
-    void peer.client.request({ type: "WORKSPACE_REQUEST", op: "cloudPresence.update", params: { present } }, 5_000).catch(() => {});
-    return true;
-  }
-
   /** Explicit navigation and message preparation share one wake/admission.
    * Each caller owns cancellation; a navigation away cannot cancel a send. */
   async openWorkspace(target: CloudWorkspaceTarget, options?: { signal?: AbortSignal; reason?: "interaction"; wakeIntent?: CloudWorkspaceWakeIntent }): Promise<void> {
@@ -529,81 +472,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private historyKey(target: CloudWorkspaceTarget, op: string, params: WireRecord): string {
     return `${cloudWorkspaceKey(target)}\0${this.identity(target)}\0${op}\0${JSON.stringify(params)}`;
   }
-  private captureHistoryRestore(target: CloudWorkspaceTarget): CloudHistoryRestoreTicket | null {
-    return this.historyRestore.capture({ accountId: String(this.accountEpoch),
-      organizationId: target.organizationId, workspaceId: target.workspaceId });
-  }
-  private historyMetadata(value: WireRecord): CloudHistoryRestoreMetadata | null {
-    return value.projection === undefined && value.historyHeads === undefined ? null
-      : CloudHistoryRestoreMetadataSchema.parse({ projection: value.projection, historyHeads: value.historyHeads });
-  }
-  private historyConversations(op: string, params: WireRecord, value: WireRecord): string[] {
-    const ids = new Set<string>();
-    const add = (id: unknown) => {
-      const scoped = parseCloudScopedId(id);
-      if (scoped) ids.add(scoped.id);
-    };
-    add(params.chatId);
-    if (op === "chats.list") {
-      for (const row of Array.isArray(value.chats) ? value.chats : []) add(record(row).id);
-      for (const id of Array.isArray(value.chatDeletions) ? value.chatDeletions : []) add(id);
-    }
-    if (op === "messages.search") for (const row of Array.isArray(value.hits) ? value.hits : []) add(record(row).chatId);
-    return [...ids];
-  }
-  private installHistoryRestore(target: CloudWorkspaceTarget, ticket: CloudHistoryRestoreTicket,
-    metadata: CloudHistoryRestoreMetadata, conversations: readonly string[]): void {
-    const changed = this.historyRestore.install(ticket, metadata, conversations);
-    if (!changed.length) return;
-    const ids = new Set(changed.map(head => head.conversationId)), prefix = `${cloudWorkspaceKey(target)}\0`;
-    for (const key of this.history.keys()) {
-      if (!key.startsWith(prefix)) continue;
-      const parts = key.split("\0");
-      // A proven live engine is a separate lineage. CP restore revisions cannot
-      // retire its native transcript or stream merely because they are larger.
-      if (parts.slice(4).some(part => part.startsWith("runtime:"))) continue;
-      const op = parts[2], params = record(JSON.parse(parts[3] ?? "{}"));
-      const chat = parseCloudScopedId(params.chatId);
-      if (op === "chats.list" || op === "messages.search" && (!chat || ids.has(chat.id)) || chat && ids.has(chat.id))
-        this.history.forget(key);
-    }
-    this.changed(cloudWorkspaceKey(target), ["chats", "messages"]);
-  }
-
-  private captureNativeHistoryRestore(entry: PeerEntry): CloudHistoryRestoreTicket | null {
-    return this.nativeHistoryRestore.capture({ accountId: String(this.accountEpoch),
-      organizationId: entry.scope.organizationId, workspaceId: entry.scope.workspaceId });
-  }
-  private installNativeHistoryRestore(entry: PeerEntry, ticket: CloudHistoryRestoreTicket,
-    metadata: CloudHistoryRestoreMetadata, conversations: readonly string[]): void {
-    this.assertCurrent(entry);
-    const binding = this.cloudAgentBootBinding(cloudWorkspaceKey(entry.scope));
-    if (!binding || (["organizationId", "workspaceId", "generation", "engineInstanceId", "bootId", "writerEpoch",
-      "fundingOwnerUserId", "fundingOwnerEpoch"] as const).some(key => binding[key] !== metadata.projection[key]) ||
-        metadata.historyHeads.some(head => !conversations.includes(head.conversationId)))
-      throw new Error("Live cloud restore belongs to another admitted writer or page.");
-    const changed = this.nativeHistoryRestore.install(ticket, metadata, conversations);
-    this.nativeHistoryRestore.assertResult(ticket, metadata, conversations);
-    if (changed.length) {
-      const ids = new Set(changed.map(head => head.conversationId)), prefix = `${cloudWorkspaceKey(entry.scope)}\0`;
-      for (const key of this.history.keys()) {
-        if (!key.startsWith(prefix)) continue;
-        const parts = key.split("\0"), op = parts[2], params = record(JSON.parse(parts[3] ?? "{}"));
-        const chat = parseCloudScopedId(params.chatId);
-        if (op === "chats.list" || op === "messages.search" && (!chat || ids.has(chat.id)) || chat && ids.has(chat.id)) this.history.forget(key);
-      }
-    }
-    // The independently verified live binding installs memory/disk/visible
-    // fences synchronously before the optional durable-cache I/O awaits.
-    // CP projection revisions and VM record/event cursors remain independent.
-    const cacheTicket = captureCloudHistoryRestoreRead(entry.scope);
-    void installCloudHistoryRestoreMetadata(entry.scope, metadata, conversations, cacheTicket, "native").catch(() => {});
-    // Optional disk persistence may fail later. Original head validation must
-    // still succeed synchronously before a snapshot or page can be forwarded.
-    assertCloudHistoryRestoreResult(cacheTicket, metadata, conversations);
-  }
-
-  private async readHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord, copyProjection = false): Promise<WireRecord> {
+  private async readHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<WireRecord> {
     const epoch = this.accountEpoch;
     const identity = this.identity(target);
     const assertAccess = () => {
@@ -611,19 +480,15 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         throw new Error("Cloud history access changed");
     };
     assertAccess();
-    const restoreRead = this.captureHistoryRestore(target);
     const key = cloudWorkspaceKey(target);
     const attached = this.peers.get(key);
-    const peer = !copyProjection && attached && (op === "messages.window" || op === "messages.windowOlder" || this.cloudAgentBootBinding(key)) &&
-      attached.identity === identity && !attached.retired && attached.client.status === "connected"
+    // A connected worker has the newest history, including a turn still
+    // streaming; the control plane's mirror serves a stopped VM. Separate cache
+    // identities keep a cold mirror read from overwriting streamed text.
+    const peer = attached && attached.identity === identity && !attached.retired && attached.client.status === "connected"
       ? attached : undefined;
-    const nativeRead = peer ? this.captureNativeHistoryRestore(peer) : null;
-    const globalNativeRead = peer ? captureCloudHistoryRestoreRead(target) : null;
-    // Cloud-owned records remain readable without a worker. An already attached
-    // worker has the newer normalized transcript while its cloud projection is
-    // committing a turn; never overwrite streamed text with that older copy.
-    // Separate cache identities also prevent a cold read from winning on attach.
-    const cacheKey = this.historyKey(target, op, params) + (peer ? `\0runtime:${peer.runtimeId}` : copyProjection ? "\0copy-projection" : "");
+    const rows = op === "chats.list" ? "chats" : op === "messages.search" ? "hits" : "messages";
+    const cacheKey = this.historyKey(target, op, params) + (peer ? `\0runtime:${peer.runtimeId}` : "");
     const snapshot = await this.history.load(cacheKey, async () => {
       assertAccess();
       let result: WireRecord;
@@ -633,149 +498,30 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           type: "WORKSPACE_REQUEST", op, params,
         }) as Message);
         this.assertCurrent(peer);
-        const rows = op === "chats.list" ? "chats" : op === "messages.search" ? "hits" : "messages";
         if (response.type !== "WORKSPACE_RESPONSE" || !Array.isArray(record(record(response).result)[rows]))
           throw cloudHistoryReadError(response, "Could not read the current cloud transcript");
         result = record(cloudIncoming(peer.scope, response as unknown as WireRecord).result);
-        const metadata = this.historyMetadata(result);
-        if (metadata && nativeRead) this.installNativeHistoryRestore(peer, nativeRead, metadata, this.historyConversations(op, params, result));
-        else if (this.cloudAgentBootBinding(key)) throw new Error("Live cloud restore is missing its current head.");
-      } else {
-        result = await this.routing.readHistory!(target, op, params);
-        const metadata = this.historyMetadata(result);
-        if (metadata && restoreRead) this.installHistoryRestore(target, restoreRead, metadata, this.historyConversations(op, params, result));
-      }
+      } else result = await this.routing.readHistory!(target, op, params);
       assertAccess();
       if (op === "chats.list") {
         const previous = this.history.peekSnapshot(this.historyKey(target, op, params)).data;
-        if (previous && !this.historyMetadata(result) && !this.historyMetadata(previous) &&
-            typeof result.revision === "number" && previous.revision === result.revision) return previous;
         if (previous && JSON.stringify(previous) === JSON.stringify(result)) return previous;
       }
       return result;
     }, { maxAgeMs: (this.historyIntents.get(cacheKey) ?? -1) >= performance.now() ? 15_000 : 1000 });
     assertAccess();
-    if (peer && nativeRead) {
-      this.assertCurrent(peer);
-      const metadata = this.historyMetadata(snapshot);
-      if (metadata) this.nativeHistoryRestore.assertResult(nativeRead, metadata, this.historyConversations(op, params, snapshot));
-      else if (this.cloudAgentBootBinding(key)) throw new Error("Live cloud restore is missing its current head.");
-      // Cached pages and shared flights may skip the loader's publication.
-      // Recheck their original global head before returning any native rows.
-      assertCloudHistoryRestoreResult(globalNativeRead, metadata, this.historyConversations(op, params, snapshot));
-      if (metadata && this.history.peekSnapshot(cacheKey).data !== snapshot) this.history.setData(cacheKey, snapshot);
-    }
-    if (!peer && restoreRead) {
-      const metadata = this.historyMetadata(snapshot);
-      // KeyedAsyncCache fences replacement, but still returns a retired
-      // fetch's value to its caller. Check its exact immutable head again here.
-      this.historyRestore.assertResult(restoreRead, metadata, this.historyConversations(op, params, snapshot));
-      if (metadata && this.history.peekSnapshot(cacheKey).data !== snapshot) this.history.setData(cacheKey, snapshot);
-    }
-    // A cold projection may finish after a user attaches the newer runtime.
-    // Reuse that peer; never open/wake one to reconcile a passive history read.
+    // A cold mirror read may finish after the worker attaches; reuse that peer,
+    // never open or wake one to reconcile a passive history read.
     const currentPeer = this.peers.get(key);
-    if (!peer && !copyProjection && (op === "messages.window" || op === "messages.windowOlder" || this.cloudAgentBootBinding(key)) && currentPeer &&
-        currentPeer.identity === identity && !currentPeer.retired && currentPeer.client.status === "connected")
+    if (!peer && currentPeer && currentPeer.identity === identity && !currentPeer.retired &&
+        currentPeer.client.status === "connected")
       return this.readHistory(target, op, params);
     if (op === "chats.list") {
       this.historyWorkspaces.delete(key);
       this.historyWorkspaces.set(key, target);
       while (this.historyWorkspaces.size > 32) this.historyWorkspaces.delete(this.historyWorkspaces.keys().next().value!);
     }
-    const receipt: CloudHistoryReadReceipt = { source: peer ? "native" : "control-plane", isCurrent: () => {
-      try {
-        assertAccess();
-        const metadata = this.historyMetadata(snapshot), conversations = this.historyConversations(op, params, snapshot);
-        if (peer && nativeRead) {
-          this.assertCurrent(peer);
-          if (peer.client.status !== "connected") return false;
-          this.nativeHistoryRestore.assertResult(nativeRead, metadata, conversations);
-          assertCloudHistoryRestoreResult(globalNativeRead, metadata, conversations);
-        } else if (restoreRead) {
-          this.historyRestore.assertResult(restoreRead, metadata, conversations);
-          const nextPeer = this.peers.get(key);
-          if (!copyProjection && nextPeer && nextPeer.identity === identity && !nextPeer.retired && nextPeer.client.status === "connected") return false;
-        }
-        return true;
-      } catch { return false; }
-    } };
-    this.historyReadReceipts.set(snapshot, receipt);
-    if (receipt.source === "native" && op === "messages.window" && params.before === undefined && params.limit === 200 && typeof params.chatId === "string")
-      cacheNativeCloudTranscriptWindow(params.chatId, snapshot,
-        () => receipt.isCurrent() && this.history.peekSnapshot(cacheKey).data === snapshot);
     return snapshot;
-  }
-
-  cloudHistoryReadReceipt(snapshot: object): CloudHistoryReadReceipt | undefined {
-    return this.historyReadReceipts.get(snapshot);
-  }
-
-  /** Copy alone may use a positively identified partial CP window after a
-   * native read exhausts its bound. This never populates the native cache or
-   * supplies history to Send, restore or transcript attachment. */
-  async readCloudCopyWindow(chatId: string, limit: number): Promise<{ result: WireRecord; partial: boolean }> {
-    const target = parseCloudScopedId(chatId);
-    if (!target || !this.routing.readHistory) throw new Error("Cloud transcript copy is unavailable");
-    const epoch = this.accountEpoch, identity = this.identity(target);
-    const peer = this.peers.get(cloudWorkspaceKey(target));
-    const current = () => {
-      if (this.closed || epoch !== this.accountEpoch || identity !== this.identity(target) ||
-          this.routing.canAccess?.(target) === false || peer && this.peers.get(cloudWorkspaceKey(target)) !== peer)
-        throw new Error("Cloud history access changed");
-    };
-    current();
-    let result: WireRecord, partial = false;
-    try { result = await this.readHistory(target, "messages.window", { chatId, limit }); }
-    catch (error) {
-      current();
-      const conflict = (error as { name?: string; code?: string })?.name === "WorkspaceOpError" &&
-        (error as { code?: string }).code === "command_conflict";
-      const unavailable = error instanceof CloudRuntimeAccessError && error.category === "transient" ||
-        error instanceof Error && ["Request timeout: WORKSPACE_REQUEST", "Request timeout: WORKSPACE_REQUEST (reconnecting)",
-          "Request timeout: engine disconnected"].includes(error.message);
-      if (!conflict && !unavailable) throw error;
-      result = await this.readHistory(target, "messages.window", { chatId, limit }, true);
-      partial = true;
-    }
-    current();
-    const receipt = this.historyReadReceipts.get(result);
-    const copyResult = { ...result };
-    if (receipt) this.historyReadReceipts.set(copyResult, { source: receipt.source, isCurrent: () => {
-      try { current(); return receipt.isCurrent(); } catch { return false; }
-    } });
-    return { result: copyResult, partial };
-  }
-
-  /** Passive CP checkpoint; call only for a terminal turn or chat departure.
-   * It never connects, wakes, or delays the authoritative native response. */
-  checkpointCloudTranscript(chatId: string): void {
-    if (!this.routing.checkpointHistory || !this.routing.readHistory || this.closed) return;
-    let target: ReturnType<typeof parseCloudScopedId>;
-    try { target = parseCloudScopedId(chatId); } catch { return; }
-    if (!target || this.routing.canAccess && !this.routing.canAccess(target)) return;
-    const epoch = this.accountEpoch, identity = this.identity(target);
-    const params = { chatId, limit: 200 };
-    const key = `${this.historyKey(target, "messages.window", params)}\0projection-checkpoint`;
-    const attemptKey = JSON.stringify([epoch, cloudWorkspaceKey(target), target.id]);
-    const now = performance.now();
-    // Attempt timestamps are separate from payload retention/invalidation:
-    // DB_CHANGED, generation changes, failures and eviction cannot reset it.
-    for (const [oldKey, attempt] of this.projectionCheckpoints)
-      if (!attempt.pending && attempt.until <= now) this.projectionCheckpoints.delete(oldKey);
-    if (this.projectionCheckpoints.has(attemptKey) || this.projectionCheckpoints.size >= 64) return;
-    const attempt = { until: now + 30_000, pending: true };
-    this.projectionCheckpoints.set(attemptKey, attempt);
-    const assertAccess = () => {
-      if (this.closed || epoch !== this.accountEpoch || identity !== this.identity(target) ||
-          this.routing.canAccess && !this.routing.canAccess(target)) throw new Error("Cloud history access changed");
-    };
-    void this.history.load(key, async () => {
-      assertAccess();
-      const result = await this.routing.readHistory!(target, "messages.window", params);
-      assertAccess();
-      return result;
-    }, { force: true }).catch(() => {}).finally(() => { attempt.pending = false; });
   }
 
   private invalidateHistory(target: CloudWorkspaceTarget): void {
@@ -789,15 +535,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       this.peers.get(cloudWorkspaceKey(target))?.hasChatSnapshot === true);
   }
 
-  hasCloudMessageSnapshot(chatId: string, limit: number): boolean {
-    const target = parseCloudScopedId(chatId);
-    if (!target || this.closed || this.routing.canAccess && !this.routing.canAccess(target)) return false;
-    const entry = this.peers.get(cloudWorkspaceKey(target));
-    const peer = entry && entry.identity === this.identity(target) && !entry.retired && entry.client.status === "connected" ? entry : null;
-    const key = this.historyKey(target, "messages.window", { chatId, limit }) + (peer ? `\0runtime:${peer.runtimeId}` : "");
-    return this.history.peekSnapshot(key).data !== undefined;
-  }
-
   /** Existing current peer only. CP mirror revisions and disk cache cannot
    * prove this native transcript lineage, and this never opens a connection. */
   hasCloudNativeTranscript(chatId: string, executionId: string | null | undefined, limit: number): boolean {
@@ -805,9 +542,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (!target || this.closed || this.routing.canAccess && !this.routing.canAccess(target)) return false;
     const entry = this.peers.get(cloudWorkspaceKey(target));
     if (!entry || entry.retired || entry.identity !== this.identity(target) || entry.client.status !== "connected") return false;
-    const execution = executionId ? parseCloudScopedId(executionId) : null;
-    if (execution && execution.organizationId === target.organizationId && execution.workspaceId === target.workspaceId &&
-        entry.agents?.hasCurrentExecution(target.id, execution.id)) return true;
+    void executionId;
     const key = this.historyKey(target, "messages.window", { chatId, limit }) + `\0runtime:${entry.runtimeId}`;
     return this.history.peekSnapshot(key).data !== undefined;
   }
@@ -819,59 +554,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (this.opening.has(key)) return "connecting";
     const entry = this.peers.get(key);
     return entry && !entry.retired ? entry.client.status : "disconnected";
-  }
-
-  /** Cached presentation identity from a connected, actor-confirmed peer.
-   * Does not open, wake, read CP state, or authorize an agent command. */
-  cloudAgentBootBinding(folder: string): CloudAgentBootConversation | null {
-    const target = parseCloudWorkspaceKey(folder);
-    if (!target || this.closed || this.routing.canAccess?.(target) === false) return null;
-    const entry = this.peers.get(cloudWorkspaceKey(target));
-    if (!entry || entry.retired || entry.epoch !== this.accountEpoch || entry.identity !== this.identity(target) ||
-        entry.client.status !== "connected") return null;
-    const binding = entry.client.activatedCloudAgentBootBinding;
-    const identity = entry.client.executionIdentity;
-    if (!binding || !identity || identity.kind !== "cloud" || !identity.bootScope ||
-        binding.organizationId !== target.organizationId || binding.workspaceId !== target.workspaceId ||
-        binding.authorityEpoch !== identity.authorityEpoch ||
-        Object.entries(identity.bootScope).some(([key, value]) => binding[key as keyof CloudAgentBootConversation] !== value)) return null;
-    return binding;
-  }
-
-  /** Safe metadata from an already admitted peer. Does not connect or adopt. */
-  cloudResourceUsageConnection(folder: string): CloudResourceUsageConnection | null {
-    const target = parseCloudWorkspaceKey(folder);
-    if (!target) return null;
-    const entry = this.peers.get(cloudWorkspaceKey(target));
-    if (!entry || entry.retired || entry.epoch !== this.accountEpoch || !entry.runtimeId ||
-        entry.identity !== this.identity(target) || this.routing.canAccess?.(target) === false) return null;
-    const identity = entry.client.executionIdentity;
-    if (identity?.kind !== "cloud" || identity.organizationId !== target.organizationId ||
-        identity.workspaceId !== target.workspaceId || entry.generation !== identity.generation) return null;
-    return { organizationId: target.organizationId, workspaceId: target.workspaceId,
-      generation: identity.generation, engineInstanceId: identity.engineInstanceId,
-      authorityEpoch: identity.authorityEpoch, admissionId: entry.runtimeId };
-  }
-
-  async requestCloudResourceUsage(target: CloudWorkspaceTarget, expected: CloudResourceUsageConnection): Promise<BridgeMessage | null> {
-    const key = cloudWorkspaceKey(target);
-    const entry = this.peers.get(key);
-    const assertConnected = () => {
-      if (!entry || entry.client.status !== "connected") throw new Error("Cloud workspace is disconnected");
-      this.assertCurrent(entry);
-      const current = this.cloudResourceUsageConnection(key);
-      if (!current || (["organizationId", "workspaceId", "generation", "engineInstanceId", "authorityEpoch", "admissionId"] as const)
-        .some(field => current[field] !== expected[field]))
-        throw new Error("Cloud resource usage admission changed");
-    };
-    assertConnected();
-    if (!entry!.client.supportsEngineCapability(WORKSPACE_RESOURCE_USAGE_CAPABILITY)) return null;
-    const response = await entry!.client.requestConnected(cloudOutgoing(entry!.scope, {
-      type: "WORKSPACE_REQUEST", op: "workspace.resourceUsage",
-      params: { workspaceId: key, generation: expected.generation, engineInstanceId: expected.engineInstanceId },
-    }) as Message, 5000);
-    assertConnected();
-    return cloudIncoming(entry!.scope, response as unknown as WireRecord) as unknown as BridgeMessage;
   }
 
   private passivePeer(target: CloudWorkspaceTarget): PeerEntry | null {
@@ -948,7 +630,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (entry.unsubscribers.has(type)) return;
     entry.unsubscribers.set(
       type,
-      (entry.events ?? entry.client).on(type, (message) => {
+      entry.client.on(type, (message) => {
         if (
           entry.retired ||
           entry.identity !== this.identity(entry.scope) ||
@@ -959,25 +641,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         if (this.routing.canAccess && !this.routing.canAccess(entry.scope))
           return;
         const wire = message as unknown as WireRecord;
-        const restoreValue = type === "DB_CHANGED" ? wire.cloudHistoryRestore : record(wire.cloudSnapshot).historyRestore;
-        if (restoreValue !== undefined) {
-          try {
-            const metadata = CloudHistoryRestoreMetadataSchema.parse(restoreValue), ticket = this.captureNativeHistoryRestore(entry);
-            const ids = type === "DB_CHANGED" ? (Array.isArray(wire.chatIds) ? wire.chatIds.filter((id): id is string => typeof id === "string") : [])
-              : typeof record(wire.cloudSnapshot).conversationId === "string" ? [record(wire.cloudSnapshot).conversationId as string] : [];
-            if (!ticket) return;
-            this.installNativeHistoryRestore(entry, ticket, metadata, ids);
-          } catch { return; }
-        }
-        if (type === "CLOUD_AGENT_CREDENTIAL_USED") {
-          const binding = this.cloudAgentBootBinding(cloudWorkspaceKey(entry.scope));
-          const use = record(wire.use), source = record(use.scope);
-          const scope = CloudAgentBootIdentitySchema.safeParse(source);
-          const identity = entry.client.executionIdentity;
-          if (!binding || !scope.success || identity?.kind !== "cloud" || !identity.bootScope ||
-              Object.entries(source).some(([key, value]) => binding[key as keyof CloudAgentBootConversation] !== value)) return;
-        }
-
         if (type === "DB_CHANGED") {
           this.invalidateHistory(entry.scope);
           if (this.routing.readHistory && Array.isArray(wire.kinds) && wire.kinds.includes("chats"))
@@ -991,8 +654,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           !wire.executionId
         )
           return;
-        const incoming = entry.agents ? entry.agents.incoming(wire) : wire;
-        if (incoming) this.emit(type, cloudIncoming(entry.scope, incoming));
+        this.emit(type, cloudIncoming(entry.scope, wire));
       }),
     );
   }
@@ -1037,8 +699,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     // New work obtains fresh authority once per exact workspace. Preserve the
     // confirmed snapshot while retiring its transport; never replay a request
     // whose previous connection may already have executed it.
-    const reusable = connected && wake && existing.prepareForRun ? existing : undefined;
-    if (existing && !reusable) this.retirePeer(existing);
+    if (existing) this.retirePeer(existing);
     const epoch = this.accountEpoch;
     const controller = new AbortController();
     const rememberRefusal = (error: unknown) => {
@@ -1059,16 +720,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     this.ongoingOpens++;
     let opening: Promise<CloudPeer>;
     try {
-      opening = reusable
-        ? reusable.prepareForRun!(controller.signal, reason, wakeIntent).then(ready => {
-            if (controller.signal.aborted) throw new Error("Cloud workspace open cancelled");
-            if (ready && !reusable.retired && reusable.client.status === "connected") return reusable;
-            this.retirePeer(reusable);
-            // Preparation already crossed the capture barrier. Re-admit only;
-            // a newer Stop must win instead of triggering another wake.
-            return this.routing.open(target, { signal: controller.signal });
-          })
-        : this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true, wakeIntent, ...(reason ? { reason } : {}) } : {}) });
+      opening = this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true, wakeIntent, ...(reason ? { reason } : {}) } : {}) });
     }
     catch (error) { this.ongoingOpens--; rememberRefusal(error); return Promise.reject(error); }
     const flight = opening
@@ -1078,7 +730,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       })
       .then(async (opened) => {
         if (owner && opened.generation !== undefined && opened.generation !== this.routing.wakeOwner?.(target)?.generation) {
-          if (opened === reusable) this.retirePeer(reusable); else opened.release();
+          opened.release();
           throw new CloudAdmissionGenerationChangedError(opened.generation);
         }
         if (wake && this.continuesWake(target, owner)) identity = this.identity(target);
@@ -1089,15 +741,13 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           this.closed ||
           (this.routing.canAccess && !this.routing.canAccess(target))
         ) {
-          if (opened !== reusable) opened.release();
+          opened.release();
           throw new Error("Cloud account changed while connecting");
         }
-        if (opened === reusable) { this.assertCurrent(reusable); this.refusedAdmissions.delete(key); return reusable; }
         if (cloudWorkspaceKey(opened.scope) !== key) {
           opened.release();
           throw new Error("Cloud connection returned a different workspace");
         }
-        opened.agents?.restoreAttachments(existing?.attachments ?? []);
         const entry: PeerEntry = {
           ...opened,
           epoch,
@@ -1139,7 +789,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         this.refusedAdmissions.delete(key);
         this.changed(key);
         this.workspaceStatusChanged(key);
-        void entry.agents?.refreshAttachments();
         return entry;
       })
       .finally(() => {
@@ -1165,32 +814,24 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private async readChats(entry: PeerEntry, warming?: Promise<WireRecord>): Promise<WireRecord> {
     this.assertCurrent(entry);
     const revision = ++entry.snapshotRevision;
-    if (this.routing.readHistory && !this.cloudAgentBootBinding(cloudWorkspaceKey(entry.scope))) {
-      const snapshot = await (warming ?? this.readHistory(entry.scope, "chats.list", {}));
-      this.assertCurrent(entry);
-      if (revision === entry.snapshotRevision) {
-        entry.snapshot = snapshot;
-        entry.hasChatSnapshot = true;
-      }
-      return entry.snapshot;
+    let snapshot: WireRecord;
+    if (entry.client.status !== "connected" && this.routing.readHistory) {
+      snapshot = await (warming ?? this.readHistory(entry.scope, "chats.list", {}));
+    } else {
+      const response = await this.readNativeHistory(entry, {
+        type: "WORKSPACE_REQUEST",
+        op: "chats.list",
+        params: {},
+      } as Message);
+      if (response.type !== "WORKSPACE_RESPONSE" ||
+          !Array.isArray(record(record(response).result).chats))
+        throw cloudHistoryReadError(response, "Could not read cloud conversations");
+      if (entry.epoch !== this.accountEpoch)
+        throw new Error("Cloud account changed");
+      snapshot = record(cloudIncoming(entry.scope, response as unknown as WireRecord).result);
     }
-    const response = await this.readNativeHistory(entry, {
-      type: "WORKSPACE_REQUEST",
-      op: "chats.list",
-      params: {},
-    } as Message);
-    if (response.type !== "WORKSPACE_RESPONSE" ||
-        !Array.isArray(record(record(response).result).chats))
-      throw cloudHistoryReadError(response, "Could not read cloud conversations");
-    if (entry.epoch !== this.accountEpoch)
-      throw new Error("Cloud account changed");
     this.assertCurrent(entry);
-    const next = cloudIncoming(entry.scope, response as unknown as WireRecord);
-    const metadata = this.historyMetadata(record(next.result)), ticket = this.captureNativeHistoryRestore(entry);
-    if (metadata && ticket) this.installNativeHistoryRestore(entry, ticket, metadata, this.historyConversations("chats.list", {}, record(next.result)));
-    else if (this.cloudAgentBootBinding(cloudWorkspaceKey(entry.scope))) throw new Error("Live cloud restore is missing its current head.");
     if (revision === entry.snapshotRevision) {
-      const snapshot = record(next.result);
       if (JSON.stringify(entry.snapshot) !== JSON.stringify(snapshot)) entry.snapshot = snapshot;
       entry.hasChatSnapshot = true;
     }
@@ -1249,27 +890,16 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         } as unknown as BridgeMessage;
     }
     this.claimPeer(cloudWorkspaceKey(target));
-    if (message.type === "AGENT_CANCEL") return this.observeCloudStop(target, message, options);
-    if (message.type === "AGENT_PROMPT") return this.observeCloudPrompt(target, message, options);
     const entry = await this.peer(target);
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed before dispatch");
     this.assertCurrent(entry);
     const native = cloudOutgoing(entry.scope, message as unknown as WireRecord);
-    if (native.type === "WORKSPACE_REQUEST" && isCloudGithubWriteOperation(native.op)) {
-      if (!this.routing.prepareGithubWrite) throw new Error("GitHub write authorization is unavailable. Reconnect and try again.");
-      const grant = await this.routing.prepareGithubWrite({ organizationId: target.organizationId, workspaceId: target.workspaceId }, native.op, record(native.params));
-      if (entry.epoch !== this.accountEpoch) throw new Error("Cloud account changed before dispatch");
-      this.assertCurrent(entry);
-      if (typeof options !== "number" && options.signal?.aborted) throw new Error("GitHub write was canceled before dispatch");
-      native.params = { ...record(native.params), $cloudGithubWriteGrant: grant };
-    }
-    const adapted = await entry.agents?.request(native, options);
     const historyRead = native.type === "WORKSPACE_REQUEST" &&
       ["chats.list", "messages.window", "messages.windowOlder", "messages.search"].includes(String(native.op));
-    const response = adapted ?? (historyRead
-      ? await this.readNativeHistory(entry, (entry.agents?.outgoing(native) ?? native) as Message, options)
-      : await entry.client.request((entry.agents?.outgoing(native) ?? native) as Message, options));
+    const response = historyRead
+      ? await this.readNativeHistory(entry, native as Message, options)
+      : await entry.client.request(native as Message, options);
     if (message.type === "WORKSPACE_REQUEST") {
       const op = String((message as unknown as WireRecord).op);
       if (op.startsWith("chats.") || op.startsWith("messages.")) this.invalidateHistory(target);
@@ -1277,198 +907,14 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed before the response arrived");
     this.assertCurrent(entry);
-    const mapped = entry.agents ? entry.agents.incoming(response as unknown as WireRecord) : response as unknown as WireRecord;
-    if (!mapped) throw new Error("Cloud execution changed before the response arrived");
-    const incoming = cloudIncoming(entry.scope, mapped);
-    if (["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"].includes(String(incoming.type)) && typeof incoming.chatId === "string")
-      this.checkpointCloudTranscript(incoming.chatId);
-    return incoming as unknown as BridgeMessage;
+    return cloudIncoming(entry.scope, response as unknown as WireRecord) as unknown as BridgeMessage;
   }
 
-  /** Explicit Retry first recovers an unconfirmed original command. A retained
-   * terminal receipt permits a separate user attempt; missing ownership never
-   * permits an implicit send, grant, Resume or wake. */
-  async recoverCloudPrompt(chatId: string, turnId: string, agentId: string): Promise<BridgeMessage | null> {
-    const target = parseCloudScopedId(chatId);
-    if (!target) throw new Error("Cloud command owner is unavailable");
-    const message = { type: "AGENT_PROMPT" as const, chatId, userMessageId: turnId, agentId, prompt: [] };
-    let knownTerminal = false;
-    const response = await this.observeCloudPrompt(target, message, { timeoutMs: 0 }, true,
-      command => { knownTerminal = command.terminal === "failed" || command.terminal === "cancelled"; });
-    // A successful result only reconciles stale UI. Even a known failed or
-    // cancelled result must be read under current custody before a separate
-    // explicit attempt is allowed. The initial connection shares the bound.
-    return knownTerminal && (response.type === "AGENT_PROMPT_FAILED" ||
-      response.type === "AGENT_PROMPT_COMPLETE" && response.stopReason === "cancelled") ? null : response;
-  }
-
-  private observeCloudPrompt(target: CloudWorkspaceTarget, message: Message,
-    options: number | RequestOptions, recoveryOnly = false,
-    retained?: (command: CloudCommandObservation) => void): Promise<BridgeMessage> {
-    const signal = typeof options === "object" ? options.signal : undefined;
-    if (signal?.aborted) return Promise.reject(signal.reason);
-    const first = this.peers.get(cloudWorkspaceKey(target));
-    let command = first && !first.retired
-      ? first.agents?.preparePrompt(cloudOutgoing(first.scope, message as WireRecord), recoveryOnly) : undefined;
-    if (command) retained?.(command);
-    const existing = command && this.commandPrompts.get(command);
-    if (existing) return existing;
-    const epoch = this.accountEpoch, identity = this.identity(target), controller = new AbortController();
-    const current = () => !this.closed && epoch === this.accountEpoch && identity === this.identity(target) &&
-      this.routing.canAccess?.(target) !== false && !controller.signal.aborted;
-    const abort = () => controller.abort(signal?.reason ?? new Error("Cloud command observation ended"));
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
-    // Bound silence, not the lifetime of healthy accepted work. Each exact
-    // authenticated receipt resets this budget, including a queued receipt.
-    let timer: ReturnType<typeof setTimeout> | undefined, finished = false;
-    const observed = () => {
-      if (finished || !current()) return;
-      clearTimeout(timer);
-      timer = setTimeout(() => controller.abort(Object.assign(
-        new Error("The cloud command outcome is unknown. Reconnect to check its original result."),
-        { code: "cloud_command_uncertain" })), 60_000);
-    };
-    observed();
-    let rejectAborted!: (error: unknown) => void;
-    const aborted = new Promise<never>((_, reject) => { rejectAborted = reject; });
-    void aborted.catch(() => {});
-    const abortedNow = () => rejectAborted(controller.signal.reason);
-    controller.signal.addEventListener("abort", abortedNow, { once: true });
-    if (controller.signal.aborted) abortedNow();
-    this.observingCommands.add(controller);
-    let flight!: Promise<BridgeMessage>;
-    flight = (async (): Promise<BridgeMessage> => {
-      let entry = first;
-      for (;;) {
-        controller.signal.throwIfAborted();
-        if (!current()) throw new Error("Cloud account or workspace changed before command recovery");
-        try {
-          entry = await Promise.race([this.peer(target), aborted]);
-          if (!current()) throw new Error("Cloud account or workspace changed before command recovery");
-          this.assertCurrent(entry);
-          const native = cloudOutgoing(entry.scope, message as WireRecord);
-          if (!command) {
-            command = entry.agents?.preparePrompt(native, recoveryOnly);
-            if (command) {
-              retained?.(command);
-              const pending = this.commandPrompts.get(command);
-              if (pending && pending !== flight) return await Promise.race([pending, aborted]);
-              this.commandPrompts.set(command, flight);
-            }
-          }
-          if (recoveryOnly && !command) throw new Error("Reopen this cloud chat to check its original command");
-          const response = await Promise.race([command && entry.agents
-            ? entry.agents.continuePrompt(command, native, controller.signal, observed)
-            : (async () => {
-              const requestOptions = { ...(typeof options === "object" ? options : { timeoutMs: options }), signal: controller.signal };
-              return await entry!.agents?.request(native, requestOptions) ?? await entry!.client.request(native as Message, requestOptions);
-            })(), aborted]);
-          if (!current()) throw new Error("Cloud account or workspace changed before command recovery");
-          this.assertCurrent(entry);
-          const mapped = entry.agents ? entry.agents.incoming(response as unknown as WireRecord) : response as unknown as WireRecord;
-          if (!mapped) throw new Error("Cloud execution changed before the response arrived");
-          const incoming = cloudIncoming(entry.scope, mapped);
-          if (typeof incoming.chatId === "string") this.checkpointCloudTranscript(incoming.chatId);
-          return incoming as unknown as BridgeMessage;
-        } catch (error) {
-          if (!current() || !command?.submitted || !(retryableCloudStopError(error) ||
-              error instanceof Error && error.message === "command_not_found" ||
-              error instanceof CloudRuntimeAccessError && error.category === "transient")) throw error;
-          if (entry && entry.client.status !== "connected") this.retirePeer(entry);
-        }
-        await new Promise<void>(resolve => {
-          const done = () => { clearTimeout(delay); controller.signal.removeEventListener("abort", done); resolve(); };
-          const delay = setTimeout(done, 1000);
-          controller.signal.addEventListener("abort", done, { once: true });
-          if (controller.signal.aborted) done();
-        });
-      }
-    })().finally(() => {
-      finished = true; clearTimeout(timer); signal?.removeEventListener("abort", abort);
-      controller.signal.removeEventListener("abort", abortedNow);
-      this.observingCommands.delete(controller);
-      if (command && this.commandPrompts.get(command) === flight) this.commandPrompts.delete(command);
-    });
-    if (command) this.commandPrompts.set(command, flight);
-    return flight;
-  }
-
-  private observeCloudStop(target: CloudWorkspaceTarget, message: Message,
-    options: number | RequestOptions): Promise<BridgeMessage> {
-    const signal = typeof options === "object" ? options.signal : undefined;
-    if (signal?.aborted) return Promise.reject(signal.reason);
-    const first = this.peers.get(cloudWorkspaceKey(target));
-    // Fence this send intent synchronously when its receipt owner is retained.
-    // A disconnected peer is then free to retire with this Stop attached.
-    let stop = first && !first.retired ? first.agents?.prepareStop(cloudOutgoing(first.scope, message as WireRecord)) : undefined;
-    const existing = stop && this.commandStops.get(stop);
-    if (existing) return existing;
-    const epoch = this.accountEpoch, identity = this.identity(target), controller = new AbortController();
-    const requestedTimeout = typeof options === "number" ? options : options.timeoutMs;
-    const deadline = Date.now() + Math.min(60_000, requestedTimeout && requestedTimeout > 0 ? requestedTimeout : 60_000);
-    const abort = () => controller.abort(signal?.reason ?? new Error("Cloud Stop observation ended"));
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
-    const timer = setTimeout(() => controller.abort(new Error("Stop could not be confirmed. Reconnect to check this turn.")), Math.max(0, deadline - Date.now()));
-    const current = () => !this.closed && epoch === this.accountEpoch && identity === this.identity(target) &&
-      this.routing.canAccess?.(target) !== false && !controller.signal.aborted;
-    let rejectAborted!: (error: unknown) => void;
-    const aborted = new Promise<never>((_, reject) => { rejectAborted = reject; });
-    void aborted.catch(() => {});
-    const abortedNow = () => rejectAborted(controller.signal.reason);
-    controller.signal.addEventListener("abort", abortedNow, { once: true });
-    if (controller.signal.aborted) abortedNow();
-    this.stoppingCommands.add(controller);
-    let flight!: Promise<BridgeMessage>;
-    flight = (async (): Promise<BridgeMessage> => {
-      let entry = first;
-      for (;;) {
-        controller.signal.throwIfAborted();
-        if (!current()) throw new Error("Cloud account or workspace changed before Stop confirmation");
-        try {
-          entry = await Promise.race([this.peer(target), aborted]);
-          if (!current()) throw new Error("Cloud account or workspace changed before Stop confirmation");
-          this.assertCurrent(entry);
-          const native = cloudOutgoing(entry.scope, message as WireRecord);
-          if (!stop) {
-            stop = entry.agents?.prepareStop(native);
-            if (stop) {
-              const pending = this.commandStops.get(stop);
-              if (pending && pending !== flight) return await Promise.race([pending, aborted]);
-              this.commandStops.set(stop, flight);
-            }
-          }
-          const response = await Promise.race([stop && entry.agents
-            ? entry.agents.continueStop(stop, deadline, controller.signal, current)
-            : (async () => {
-              const requestOptions = { timeoutMs: Math.max(1, deadline - Date.now()), signal: controller.signal };
-              return await entry!.agents?.request(native, requestOptions) ?? await entry!.client.request(native as Message, requestOptions);
-            })(), aborted]);
-          if (!current()) throw new Error("Cloud account or workspace changed before Stop confirmation");
-          this.assertCurrent(entry);
-          if (response) return cloudIncoming(entry.scope, response as unknown as WireRecord) as unknown as BridgeMessage;
-        } catch (error) {
-          if (!current() || !(retryableCloudStopError(error) || error instanceof CloudRuntimeAccessError && error.category === "transient")) throw error;
-          // Opening is passive and the adapter rechecks the exact engine,
-          // boot, writer and command before replaying this same Stop operation.
-          if (entry && entry.client.status !== "connected") this.retirePeer(entry);
-        }
-        await new Promise<void>(resolve => {
-          const done = () => { clearTimeout(delay); controller.signal.removeEventListener("abort", done); resolve(); };
-          const delay = setTimeout(done, 1000);
-          controller.signal.addEventListener("abort", done, { once: true });
-          if (controller.signal.aborted) done();
-        });
-      }
-    })().finally(() => {
-      clearTimeout(timer); signal?.removeEventListener("abort", abort);
-      controller.signal.removeEventListener("abort", abortedNow);
-      this.stoppingCommands.delete(controller);
-      if (stop && this.commandStops.get(stop) === flight) this.commandStops.delete(stop);
-    });
-    if (stop) this.commandStops.set(stop, flight);
-    return flight;
+  /** The worker keeps one live turn per chat and reattaches it on load, so
+   * there is no separate command receipt to recover: Retry is a new attempt. */
+  async recoverCloudPrompt(chatId: string, _turnId: string, _agentId: string): Promise<BridgeMessage | null> {
+    if (!parseCloudScopedId(chatId)) throw new Error("Cloud command owner is unavailable");
+    return null;
   }
 
   override async request<T extends BridgeMessage = BridgeMessage>(
@@ -1537,16 +983,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       } as unknown as T;
     }
     const target = cloudRequestTarget(wire);
-    if (wire.type === "WORKSPACE_REQUEST" && wire.op === "workspace.resourceUsage") {
-      if (!target) throw new Error("Resource usage requires a cloud workspace");
-      const expected = this.cloudResourceUsageConnection(cloudWorkspaceKey(target));
-      if (!expected) throw new Error("Cloud workspace is disconnected");
-      if (params.generation !== expected.generation || params.engineInstanceId !== expected.engineInstanceId)
-        throw new Error("Cloud resource usage generation changed");
-      return (await this.requestCloudResourceUsage(target, expected) ?? {
-        type: "WORKSPACE_RESPONSE", op: wire.op, result: null,
-      }) as T;
-    }
     if (
       target &&
       wire.type === "WORKSPACE_REQUEST" &&
@@ -1588,16 +1024,14 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       );
     this.assertCurrent(entry);
     if (message.type === "AGENT_CANCEL") throw new Error("Cloud Stop requires an acknowledged request");
-    const native = cloudOutgoing(entry.scope, message as unknown as WireRecord);
-    if (entry.agents?.send(native)) return;
-    entry.client.send((entry.agents?.outgoing(native) ?? native) as Message);
+    entry.client.send(cloudOutgoing(entry.scope, message as unknown as WireRecord) as Message);
   }
 
   override on(
     type: string,
     handler: (message: BridgeMessage) => void,
   ): () => void {
-    const offLocal = type === "CLOUD_AGENT_CREDENTIAL_USED" ? () => {} : super.on(type, handler);
+    const offLocal = super.on(type, handler);
     const set = this.routedHandlers.get(type) ?? new Set();
     set.add(handler);
     this.routedHandlers.set(type, set);
@@ -1617,7 +1051,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private retirePeer(entry: PeerEntry): void {
     if (entry.retired) return;
     entry.retired = true;
-    entry.attachments = entry.agents?.snapshotAttachments();
     entry.stopStatus();
     for (const off of entry.unsubscribers.values()) off();
     entry.unsubscribers.clear();
@@ -1633,10 +1066,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   clearCloudConnections(): void {
     this.accountEpoch++;
-    for (const controller of this.observingCommands) controller.abort(new Error("Cloud account changed before command recovery"));
-    for (const controller of this.stoppingCommands) controller.abort(new Error("Cloud account changed before Stop confirmation"));
-    this.historyRestore.setAccount(String(this.accountEpoch));
-    this.nativeHistoryRestore.setAccount(String(this.accountEpoch));
     this.cloudRepositorySlugs.clear();
     this.sawCloudCatalog = false;
     for (const pending of this.opening.values()) pending.controller.abort();
@@ -1647,7 +1076,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     this.refusedAdmissions.clear();
     this.historyWarmups.clear();
     this.historyIntents.clear();
-    this.projectionCheckpoints.clear();
     for (const key of this.history.keys()) this.history.forget(key);
     this.historyWorkspaces.clear();
   }
@@ -1703,20 +1131,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     for (const key of this.speculative.keys()) this.discardSpeculative(key);
   }
 
-  override retireCloudRuntime(runtimeId: string): void {
-    super.retireCloudRuntime(runtimeId);
-    for (const [key, entry] of this.peers) {
-      // Closing our old connection also emits this native acknowledgement.
-      // Its already inert snapshot may still be needed during revalidation.
-      if (entry.runtimeId === runtimeId && !entry.retired) {
-        // Retain exact-workspace selection/history, with the transport and
-        // credentials disposed. A later request must acquire fresh admission.
-        this.retirePeer(entry);
-        this.workspaceStatusChanged(key);
-      }
-    }
-  }
-
   override signalOwnerSignedOut(): void {
     this.clearCloudConnections();
     super.signalOwnerSignedOut();
@@ -1725,7 +1139,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     this.closed = true;
     this.stopLocalStatus();
     this.stopLocalChanges();
-    this.stopHistoryRestore();
     this.clearCloudConnections();
     super.dispose();
   }

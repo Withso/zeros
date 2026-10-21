@@ -12,10 +12,6 @@ import {
   ControlPlaneError,
 } from "../features/team/control-plane";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
-import { getActiveBridge } from "./bridge/active-bridge";
-import { WorkspaceRuntimeClient, type CloudResourceUsageConnection } from "./bridge/workspace-runtime-client";
-import { bridgeWorkspaceResourceUsage } from "./bridge/workspace-bridge";
-import { forgetCloudWorkspacePortForwarding } from "./cloud-workspace-access";
 import { isFeatureEnabled } from "../config/release-channel";
 import { changeCloudV2Workspace, cloudV2Document, createCloudV2Workspace, getCloudV2Workspace, listCloudV2Workspaces } from "./cloud-v2";
 import { getTeamStoreState } from "../features/team/team-store";
@@ -142,11 +138,6 @@ export async function renameCloudWorkspace(
   return workspace;
 }
 
-export async function getCloudWorkspaceResourceUsage(target: CloudWorkspaceTarget, connection: CloudResourceUsageConnection) {
-  const bridge = getActiveBridge();
-  if (!(bridge instanceof WorkspaceRuntimeClient)) throw new Error("Cloud workspace is disconnected");
-  return bridgeWorkspaceResourceUsage(bridge, target, connection);
-}
 
 function runtimeUpgradePath(target: CloudWorkspaceTarget): string {
   return `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/runtime-upgrade`;
@@ -271,7 +262,6 @@ export async function changeCloudWorkspaceLifecycle(
   if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud lifecycle response changed identity");
   // A successful server deletion stays successful if native cleanup fails.
-  if (operation === "delete") await forgetCloudWorkspacePortForwarding(target).catch(() => undefined);
   return workspace;
 }
 

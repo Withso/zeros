@@ -18,7 +18,6 @@ import {
   cloudWorkspaceDocument,
   subscribeCloudWorkspaces,
 } from "./cloud-workspace-catalog";
-import { cloudWorkspaceRestartPhase, subscribeCloudWorkspaceRestarts } from "./cloud-workspace-restart-status";
 import {
   describeWorkspaceAvailability,
   WORKBENCH_RECONNECT_ERROR_MS,
@@ -224,12 +223,6 @@ function entryFor(folder: string): AvailabilityEntry {
         : {}),
     });
   };
-  const restartChanged = () => {
-    const restarting = !!target && cloudWorkspaceRestartPhase(owner) !== null;
-    const ended = entry.value.restarting && !restarting;
-    publish({ restarting, ...(ended ? { since: Date.now() } : {}) });
-    reconcileCloudNotice(owner, entry);
-  };
   const attach = () => {
     offStatus();
     offRejected();
@@ -270,19 +263,14 @@ function entryFor(folder: string): AvailabilityEntry {
   };
   attach();
   catalogChanged();
-  restartChanged();
   const offBridge = onActiveBridgeChange(attach);
-  const offCatalog = target
-    ? subscribeCloudWorkspaces(() => { catalogChanged(); restartChanged(); })
-    : () => {};
-  const offRestart = target ? subscribeCloudWorkspaceRestarts(restartChanged, { observeCatalog: false }) : () => {};
+  const offCatalog = target ? subscribeCloudWorkspaces(catalogChanged) : () => {};
   entry.stop = () => {
     clearTimeout(entry.timer);
     offStatus();
     offRejected();
     offBridge();
     offCatalog();
-    offRestart();
     clearConnectionNotice(entry);
   };
   // Passive subscriptions keep timestamps across hidden-tab activation. They

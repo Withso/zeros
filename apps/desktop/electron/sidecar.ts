@@ -85,15 +85,6 @@ import {
   stripWorkOSApiKeys,
 } from "./desktop-engine-auth-config";
 import { desktopAuthConfig } from "./workos-desktop-config";
-import {
-  cloudReplicaSessionControlLine,
-  handleCloudReplicaEngineControl,
-} from "./cloud-replica-host-runtime";
-import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
-import {
-  CloudReplicaSessionWriter,
-  seedCloudReplicaSessionToEngineIfEnabled,
-} from "./cloud-replica-session-lifecycle";
 
 // Resolve lazily: main.ts imports this module before its body seeds the release
 // channel baked into a packaged build. Every actual sidecar operation runs after
@@ -139,24 +130,6 @@ const state: SidecarStateShape = {
   healthActivity: null,
   watchdogTimer: null,
 };
-
-const cloudReplicaSessionWriter = new CloudReplicaSessionWriter<ChildProcess>({
-  createLine: cloudReplicaSessionControlLine,
-  signedOutLine: `${JSON.stringify({
-    type: "host.cloudReplicaSession",
-    session: null,
-  })}\n`,
-  getTarget: () => {
-    const child = state.child;
-    return child && !child.killed && child.stdin?.writable ? child : null;
-  },
-  write: (child, line) => {
-    child.stdin!.write(line);
-  },
-  onWarning: (reason) => {
-    console.warn(`[cloud-replica] session update failed (${reason})`);
-  },
-});
 
 /** Current engine child identity for read-only diagnostics. Null while the
  * sidecar is stopped or between crash-recovery generations. */
@@ -1581,44 +1554,16 @@ async function doSpawnEngine(
       ) {
         return;
       }
-      void handleCloudReplicaEngineControl(
-        controlValue,
-        (responseLine) => {
-          if (
-            state.child === child &&
-            child.stdin &&
-            child.stdin.writable &&
-            !child.killed
-          ) {
-            child.stdin.write(responseLine);
-          }
-        },
-        undefined,
-        () => {
-          if (state.child !== child || child.killed || !child.stdin?.writable) {
-            return Promise.resolve();
-          }
-          return pushCloudReplicaSessionToEngine();
-        },
-      )
-        .then((handled) => {
-          if (handled) return;
-          const snapshot = parseVaultControl(line);
-          if (!snapshot) return;
-          try {
-            setSecret(MCP_VAULT_ACCOUNT, JSON.stringify(snapshot));
-          } catch (err) {
-            console.warn(
-              "[Zeros] MCP vault persist failed:",
-              err instanceof Error ? err.message : String(err),
-            );
-          }
-        })
-        .catch(() => {
-          console.warn(
-            "[cloud-replica] engine control failed (handler_failed)",
-          );
-        });
+      const snapshot = parseVaultControl(line);
+      if (!snapshot) return;
+      try {
+        setSecret(MCP_VAULT_ACCOUNT, JSON.stringify(snapshot));
+      } catch (err) {
+        console.warn(
+          "[Zeros] MCP vault persist failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     },
     false,
   );
@@ -1711,13 +1656,6 @@ async function doSpawnEngine(
   void pushGithubCredentialToEngine();
   void pushProviderCredentialsToEngine().catch(() => {});
   void pushAgentControlAvailabilityToEngine().catch(() => {});
-
-  // Seed only the short-lived WorkOS bearer and public device identity. The
-  // Ed25519 private key remains in Electron safeStorage; signing requests make
-  // the reverse trip over fd 3 and return over this same stdin pipe.
-  seedCloudReplicaSessionToEngineIfEnabled({
-    push: pushCloudReplicaSessionToEngine,
-  });
 
   // Seed the engine's OAuth token vault from the durable store (safeStorage) so
   // the MCP gateway restores its sign-ins without re-auth. Pushed on stdin
@@ -1939,19 +1877,6 @@ export async function pushAgentControlAvailabilityToEngine(): Promise<void> {
       `${JSON.stringify({ type: "host.agentControlAvailability", requestId, availability })}\n`,
     );
   });
-}
-
-/** Refresh/clear the engine's in-memory cloud-replica session over the private
- * parent pipe. Never place this bearer in argv, env, renderer IPC, or logs. */
-export function pushCloudReplicaSessionToEngine(): Promise<void> {
-  if (!cloudWorkspaceDesktopCapabilityEnabled()) {
-    cloudReplicaSessionWriter.invalidate();
-    return Promise.resolve();
-  }
-  // push() advances its generation before starting any asynchronous auth or
-  // safeStorage read. Auth-change callers can therefore invalidate an older
-  // bearer immediately, before awaiting unrelated work.
-  return cloudReplicaSessionWriter.push();
 }
 
 /** Seed the engine's MCP OAuth token vault from the durable store (safeStorage)

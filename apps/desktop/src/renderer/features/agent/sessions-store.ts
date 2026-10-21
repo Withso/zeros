@@ -1,4 +1,3 @@
-import { cloudAgentCredentialEntry, cloudAgentCredentialEntryUse, cloudAgentCredentialSnapshot, sameCloudAgentBootBinding, type CloudAgentCredentialEntry } from "./cloud-agent-credential-selectors";
 import { trackAgentTurnUsage } from "@/renderer/platform/observability/analytics/agent-events";
 import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
 // ──────────────────────────────────────────────────────────
@@ -351,10 +350,6 @@ export const BLANK: AgentSessionState = {
 export interface SessionsStoreState {
   sessions: Record<string, AgentSessionState>;
   cloudHistoryRestoreHeads: Record<string, CloudHistoryRestoreFence>;
-  cloudAgentCredentials: Record<string, CloudAgentCredentialEntry>;
-  installCloudAgentBootBinding(chatId: string, binding: unknown): boolean;
-  applyCloudAgentCredentialUse(chatId: string, message: unknown, binding: unknown): boolean;
-  installCloudAgentCredentialUses(chatId: string, binding: unknown, uses: unknown): boolean;
   warmAgentIds: Set<string>;
   /** executionId → chatId reverse index. Updated atomically with `sessions`
    *  so bridge dispatch stays O(1) and never reads a half-applied state. */
@@ -593,33 +588,6 @@ function reduceTranscriptUpdate(state: SessionsStoreState, chatId: string, notif
 export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   sessions: {},
   cloudHistoryRestoreHeads: {},
-  cloudAgentCredentials: {},
-  installCloudAgentBootBinding: (chatId, binding) => {
-    const previous = get().cloudAgentCredentials[chatId];
-    if (!previous && Object.keys(get().cloudAgentCredentials).length >= 512) return false;
-    const entry = cloudAgentCredentialEntry(chatId, binding, previous);
-    if (!entry) return false;
-    if (entry !== previous) set(state => ({ cloudAgentCredentials: { ...state.cloudAgentCredentials, [chatId]: entry } }));
-    return true;
-  },
-  applyCloudAgentCredentialUse: (chatId, message, binding) => {
-    const previous = get().cloudAgentCredentials[chatId];
-    if (!previous) return false;
-    const current = cloudAgentCredentialEntry(chatId, binding);
-    if (!current || !sameCloudAgentBootBinding(previous.binding, current.binding)) return false;
-    const entry = cloudAgentCredentialEntryUse(previous, (message as { use?: unknown } | null)?.use);
-    if (entry === previous) return false;
-    set(state => ({ cloudAgentCredentials: { ...state.cloudAgentCredentials, [chatId]: entry } }));
-    return true;
-  },
-  installCloudAgentCredentialUses: (chatId, binding, uses) => {
-    const previous = get().cloudAgentCredentials[chatId];
-    if (!previous && Object.keys(get().cloudAgentCredentials).length >= 512) return false;
-    const entry = cloudAgentCredentialSnapshot(chatId, binding, uses, previous);
-    if (!entry) return false;
-    if (entry !== previous) set(state => ({ cloudAgentCredentials: { ...state.cloudAgentCredentials, [chatId]: entry } }));
-    return true;
-  },
   warmAgentIds: new Set(),
   executionToChatId: {},
   scrollPositions: {},
@@ -954,7 +922,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       scrollPersistTimers.delete(chatId);
     }
     set((state) => {
-      if (!(chatId in state.sessions) && !(chatId in state.cloudAgentCredentials)) return state;
+      if (!(chatId in state.sessions)) return state;
       const next = { ...state.sessions };
       delete next[chatId];
       const nextScroll = { ...state.scrollPositions };
@@ -964,7 +932,6 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         : state.cancellingChats;
       return {
         sessions: next,
-        cloudAgentCredentials: Object.fromEntries(Object.entries(state.cloudAgentCredentials).filter(([id]) => id !== chatId)),
         executionToChatId: rebuildIndex(next),
         scrollPositions: nextScroll,
         cloudHistoryRestoreHeads: Object.fromEntries(Object.entries(state.cloudHistoryRestoreHeads).filter(([id]) => id !== chatId)),
@@ -992,7 +959,6 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     set({
       sessions: {},
       cloudHistoryRestoreHeads: {},
-      cloudAgentCredentials: {},
       warmAgentIds: new Set(),
       executionToChatId: {},
       scrollPositions: {},

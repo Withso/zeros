@@ -26,7 +26,7 @@ import {
   isRejectionRetryableAfterEngineRestart,
   type ConnectionStatus,
 } from "./ws-client";
-import { getActiveBridge, setActiveBridge, wireCloudRuntimeRetirement } from "./active-bridge";
+import { getActiveBridge, setActiveBridge } from "./active-bridge";
 import { wireGithubCredentialWriteback } from "./github-token-sync";
 import { nativeListen, useNativeRuntime } from "../runtime";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
@@ -111,12 +111,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     // forceReconnect for in-place project swaps; we reuse the same
     // path for watchdog respawns.
     let offRestart: (() => void) | undefined;
-    let offCloudRetired: (() => void) | undefined;
     let restartListenerClosed = false;
-    void wireCloudRuntimeRetirement(client).then((off) => {
-      if (restartListenerClosed) off();
-      else offCloudRetired = off;
-    }).catch(() => undefined);
     void nativeListen("engine-restarted", () => {
       console.log("[Zeros] engine restarted by watchdog — reconnecting");
       // A respawn replaces the engine PROCESS, so a rejection latched against
@@ -148,7 +143,6 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     return () => {
       restartListenerClosed = true;
       if (offRestart) offRestart();
-      if (offCloudRetired) offCloudRetired();
       offCredentialWriteback();
       offConnectionNotice();
       // React StrictMode replays passive setup immediately after cleanup. The

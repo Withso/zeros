@@ -24,12 +24,8 @@ import { ControlPlaneError } from "../features/team/control-plane";
 import type { Project } from "./projects-store";
 import { clearCloudComposerPrs } from "./read-caches";
 import { cloudWorkspaceExecutionRefusal } from "../platform/cloud-workspace-execution";
-import { forgetCloudHistoryRecoveryDismissals } from "./cloud-history-recovery-dismissal";
-import { CloudSdkStreamPayloadSchema, type CloudSdkStreamPayload } from "../../../shared/cloud-sdk-stream-contract";
-import { cloudWorkspaceLifecycleStreamCovered, subscribeCloudWorkspacePollCoverage } from "./cloud-workspace-catalog-polling";
 import { CloudAcceptedLifecycleReceiptSchema, type CloudAcceptedLifecycleReceipt } from "@zeros/protocol/cloud-final-save";
 import { isCloudLifecycleDeferred, type CloudLifecycleDeferred } from "../platform/cloud-lifecycle-result";
-import { forgetCloudWorkspacePortForwarding } from "../platform/cloud-workspace-access";
 
 export type CloudLifecycleObservation = CloudWorkspaceDocument | CloudLifecycleDeferred;
 
@@ -49,9 +45,6 @@ export const isCloudWorkspaceLifecyclePending = (doc: Pick<CloudWorkspaceDocumen
   !!doc && !doc.error && ["stopping", "waking", "provisioning", "setting_up"].includes(doc.status);
 let inflight: Promise<CloudWorkspaceCatalogSnapshot | null> | null = null;
 let inflightScope: string | undefined;
-let streamSequence = 0, streamReadFence = 0;
-const streamTombstones = new Map<string, { sequence: number; version: number }>();
-const MAX_STREAM_TOMBSTONES = 2_000;
 let catalogReadGeneration = 0;
 // Read provenance follows the published object without retaining removed owners.
 const detailCatalogGenerations = new WeakMap<CloudWorkspaceDocument, number>();
@@ -97,12 +90,8 @@ const engineRows = new Map<string, Workspace>();
 
 function publishDocument(doc: CloudWorkspaceDocument): void {
   const key = cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id });
-  if (!canReadCloudWorkspace(doc)) forgetCloudHistoryRecoveryDismissals([key]);
   const previous = cloudWorkspaceDetails.peekSnapshot(key).data;
   if (previous && JSON.stringify(previous) === JSON.stringify(doc)) return;
-  if (doc.status === "deleted" && doc.acceptedOperation?.kind === "delete" && doc.acceptedOperation.state === "completed" &&
-      (previous?.acceptedOperation?.id !== doc.acceptedOperation.id || previous.acceptedOperation.state !== "completed"))
-    void forgetCloudWorkspacePortForwarding({organizationId:doc.organizationId,workspaceId:doc.id}).catch(() => undefined);
   cloudWorkspaceDetails.setData(key, doc);
 }
 
@@ -302,35 +291,6 @@ export function acceptCloudWorkspaceDocument(
   rebuild(true);
 }
 
-/** Ordered S3 catalog events. Equal document versions can change access;
- * the catalog watermark is deliberately not used to discard any event. */
-export function applyCloudWorkspaceStreamCatalog(
-  frame: Extract<CloudSdkStreamPayload, { t: "catalog.changed" }>, account = epoch,
-): boolean {
-  if (account !== epoch) return false;
-  const parsed = CloudSdkStreamPayloadSchema.parse(frame);
-  if (parsed.t !== "catalog.changed") return false;
-  const { d } = parsed, previous = documents.find(row => row.id === d.workspaceId), tombstone = streamTombstones.get(d.workspaceId);
-  if ((previous?.version ?? -1) > d.version || (tombstone?.version ?? -1) > d.version) return true;
-  if (d.op === "upsert") {
-    if (previous && previous.organizationId !== d.workspace!.organizationId) return false;
-    streamTombstones.delete(d.workspaceId);
-    acceptCloudWorkspaceDocument(d.workspace!); return true;
-  }
-  streamTombstones.set(d.workspaceId, { sequence: ++streamSequence, version: d.version });
-  documents = documents.filter(row => row.id !== d.workspaceId);
-  for (const key of new Set([...detailOwnerGenerations.keys(), ...cloudWorkspaceDetails.keys()])) {
-    if (parseCloudWorkspaceKey(key)?.workspaceId !== d.workspaceId) continue;
-    detailOwnerGenerations.delete(key); cloudWorkspaceDetails.forget(key); engineRows.delete(key);
-    forgetCloudHistoryRecoveryDismissals([key]);
-  }
-  if (previous) rebuild(true);
-  if (streamTombstones.size <= MAX_STREAM_TOMBSTONES) return true;
-  // Refuse every older aggregate/detail completion before bounding metadata.
-  // The stream owner reconnects for a fresh snapshot after this false result.
-  streamReadFence++; streamTombstones.clear(); catalogConfirmed = false;
-  return false;
-}
 
 export function acceptCloudEngineWorkspace(
   target: CloudWorkspaceTarget,
@@ -355,15 +315,14 @@ async function readCatalog(fetchSnapshot: () => Promise<CloudWorkspaceCatalogSna
     return readCatalog(fetchSnapshot, organizations);
   }
   const version = epoch;
-  const fence = streamReadFence, removedBefore = streamSequence;
   const readGeneration = ++catalogReadGeneration;
   const before = documents;
   const flight = fetchSnapshot()
     .then((snapshot) => {
-      if (version !== epoch || fence !== streamReadFence) return null;
+      if (version !== epoch) return null;
       if (organizations && snapshot.workspaces.some(row => !organizations.has(row.organizationId)))
         throw new Error("Cloud catalog returned another organization");
-      const next = snapshot.workspaces.filter(row => (streamTombstones.get(row.id)?.sequence ?? 0) <= removedBefore);
+      const next = snapshot.workspaces;
       // A create or detail refresh may win while the aggregate list is in flight.
       const changed = documents.filter(
         (row) => before.find((old) => old.id === row.id) !== row,
@@ -466,7 +425,7 @@ export async function refreshCloudWorkspace(
   target: CloudWorkspaceTarget,
 ): Promise<CloudWorkspaceDocument> {
   const version = epoch;
-  const fence = streamReadFence, original = cloudWorkspaceDocument(target);
+  const original = cloudWorkspaceDocument(target);
   const readGeneration = catalogReadGeneration;
   const generation = cloudWorkspaceDocument(target)?.generation.number;
   const owner = cloudWorkspaceKey(target);
@@ -477,7 +436,7 @@ export async function refreshCloudWorkspace(
   if (detailReads.size >= 128) throw new Error("Too many cloud catalog reads");
   detailOwnerGenerations.set(owner, ownerGeneration);
   const flight = getCloudWorkspaceDocument(target).then(doc => {
-    if (version !== epoch || fence !== streamReadFence) throw new Error("Cloud account changed");
+    if (version !== epoch) throw new Error("Cloud account changed");
     if (detailOwnerGenerations.get(owner) !== ownerGeneration)
       throw new Error("Cloud workspace was removed while loading details");
     if (doc.id !== target.workspaceId || doc.organizationId !== target.organizationId)
@@ -502,7 +461,6 @@ export async function refreshCloudWorkspace(
 export function clearCloudWorkspaceCatalog(): void {
   clearCloudComposerPrs();
   epoch++;
-  streamReadFence++; streamSequence = 0; streamTombstones.clear();
   catalogConfirmed = false;
   inflight = null;
   inflightScope = undefined;
@@ -557,8 +515,8 @@ export function waitForAcceptedCloudWorkspaceLifecycle(target: CloudWorkspaceTar
     let settled = false, reading = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let safety: ReturnType<typeof setTimeout> | undefined;
-    let off = () => {}, offCoverage = () => {};
-    const cleanup = () => { settled = true; clearTimeout(timer); clearTimeout(safety); off(); offCoverage(); };
+    let off = () => {};
+    const cleanup = () => { settled = true; clearTimeout(timer); clearTimeout(safety); off(); };
     const finish = (result: CloudLifecycleObservation) => { if (!settled) { cleanup(); resolve(result); } };
     const observe = () => {
       if (settled) return;
@@ -588,11 +546,10 @@ export function waitForAcceptedCloudWorkspaceLifecycle(target: CloudWorkspaceTar
     };
     const poll = () => {
       if (settled) return;
-      if (cloudWorkspaceLifecycleStreamCovered(target.organizationId)) { clearTimeout(timer); timer = undefined; return; }
       if (reading || timer !== undefined) return;
       timer = setTimeout(() => {
         timer = undefined; observe();
-        if (settled || cloudWorkspaceLifecycleStreamCovered(target.organizationId)) return;
+        if (settled) return;
         reading = true;
         // The shared exact-owner read fences late publication. A transient read
         // failure cannot turn an accepted background save into a user failure.
@@ -602,7 +559,6 @@ export function waitForAcceptedCloudWorkspaceLifecycle(target: CloudWorkspaceTar
       }, 1_000);
     };
     off = subscribeCloudWorkspaces(observe);
-    offCoverage = subscribeCloudWorkspacePollCoverage(() => { observe(); poll(); });
     safety = setTimeout(() => {
       observe(); finish({ kind: "background_pending", operationId: receipt.id });
     }, Math.max(0, 60_000 - (performance.now() - scope.startedAt)));
@@ -731,7 +687,6 @@ export async function waitForCloudWorkspaceLifecycle(
       clearTimeout(timer);
       clearTimeout(safety);
       off();
-      offCoverage();
     };
     const fail = (error: unknown) => {
       if (settled) return;
@@ -755,15 +710,11 @@ export async function waitForCloudWorkspaceLifecycle(
     };
     const poll = () => {
       if (settled) return;
-      if (cloudWorkspaceLifecycleStreamCovered(target.organizationId)) {
-        clearTimeout(timer); timer = undefined; return;
-      }
       if (reading || timer !== undefined) return;
       timer = setTimeout(() => {
         timer = undefined;
         observe();
         if (settled) return;
-        if (cloudWorkspaceLifecycleStreamCovered(target.organizationId)) return;
         reading = true;
         void refreshCloudWorkspace(target).then(() => {
           reading = false;
@@ -774,7 +725,6 @@ export async function waitForCloudWorkspaceLifecycle(
     };
     // Exact catalog events can finish even while the fallback read is hung.
     const off = subscribeCloudWorkspaces(observe);
-    const offCoverage = subscribeCloudWorkspacePollCoverage(() => { observe(); poll(); });
     safety = setTimeout(() => fail(new Error(
       "The cloud workspace operation is still running. Its status will update when it finishes.",
     )), 60_000);

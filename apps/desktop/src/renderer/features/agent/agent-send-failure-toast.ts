@@ -1,8 +1,5 @@
 import { toast } from "../../shared/ui/primitives/elements/toast";
-import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
-import { cloudWorkspaceRestartVisible, restartCloudWorkspace } from "../../state/cloud-workspace-restart";
-import { hasCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode, cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { openCloudAdmissionSettings } from "./cloud-admission-status";
 import { modelsForAgent } from "./model-catalog";
@@ -77,25 +74,6 @@ function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason
   }
 }
 
-function runtimeRestartAction(input: AgentSendFailureInput) {
-  const target = parseCloudWorkspaceKey(input.folder);
-  if (!target) return undefined;
-  const canRestart = () => {
-    const workspace = cloudWorkspaceDocument(target);
-    return hasCloudWorkspaceAccountAccess(target.organizationId) && workspace?.capabilities.canWrite &&
-      cloudWorkspaceRestartVisible(input.folder!, workspace);
-  };
-  if (!canRestart()) return undefined;
-  const account = cloudCatalogGeneration();
-  const onRestartWorkspace = input.onRestartWorkspace ?? (() => {
-    // The shared restart owner presents lifecycle failures once.
-    void restartCloudWorkspace(target).catch(() => {});
-  });
-  return { label: "Restart workspace", onClick: () => {
-    if (account === cloudCatalogGeneration() && canRestart()) onRestartWorkspace();
-  } };
-}
-
 /** Shared by direct and queued sends. Call only when an explicit attempt
  * fails, never from a render/effect or history hydration. Returns whether a
  * toast was emitted. Waiting leaves the message identity unconsumed. */
@@ -162,8 +140,7 @@ export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
       break;
     case "runtime_upgrade_required":
       message = "This workspace is on an older runtime";
-      action = runtimeRestartAction(input);
-      description = action ? "Restart this workspace to update its cloud runtime." : CLOUD_RUNTIME_UPGRADE_TOOLTIP;
+      description = CLOUD_RUNTIME_UPGRADE_TOOLTIP;
       break;
     case "retired_runtime":
       message = "This workspace uses a retired cloud runtime";

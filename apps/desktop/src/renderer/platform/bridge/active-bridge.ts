@@ -24,17 +24,7 @@ import type {
   RuntimeConnectionTarget,
 } from "./ws-client";
 
-import { nativeListen } from "../runtime";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
-
-/** Main emits the payload directly. Exact runtime IDs keep late retirement
- * notifications from affecting a replacement account's connection. */
-export function wireCloudRuntimeRetirement(client: RuntimeClient): Promise<() => void> {
-  return nativeListen<{ runtimeIds: string[] }>("cloud-workspace-access-retired", (event) => {
-    if (!Array.isArray(event?.runtimeIds) || event.runtimeIds.length > 64) return;
-    for (const id of event.runtimeIds) if (typeof id === "string") client.retireCloudRuntime(id);
-  });
-}
 
 let active: RuntimeClient | null = null;
 type ActiveBridgeListener = (client: RuntimeClient | null) => void;

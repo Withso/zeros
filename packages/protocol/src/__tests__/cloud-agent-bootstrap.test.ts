@@ -56,12 +56,6 @@ describe("negotiated current boot credential contract", () => {
       { ...response, providers: f.response.providers }, { ...response, material: f.provider.material }])
       expect(bootstrap.CloudAgentBootActivateResponseSchema.safeParse(changed).success).toBe(false);
   });
-
-  it("exports the separately owned direct connection contract through the protocol package", async () => {
-    const connection = await import("@zeros/protocol/cloud-runtime-connection");
-    expect(connection.isCloudDirectProviderUrl("wss://test-resource-50000.on.boat.dev/ws", 50000)).toBe(true);
-    expect(connection.isCloudDirectProviderUrl("https://test-resource-50000.on.boat.dev/ws", 50000)).toBe(false);
-  });
   it("accepts only engine scope on bootstrap input; CP selects all funding identity", () => {
     const f = fixture();
     const request = { version: 1, mode: "boot-owner-v1", organizationId: f.scope.organizationId,

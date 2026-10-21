@@ -20,10 +20,8 @@ import type {
 // ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
-import type { CloudResourceUsageConnection } from "./workspace-runtime-client";
-import { parseCloudScopedId, type CloudWorkspaceTarget } from "./cloud-workspace-key";
-import { CloudHistoryRestoreMetadataSchema, cloudHistoryFenceHasTranscript, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
-import { WorkspaceResourceUsageSchema, type WorkspaceResourceUsage } from "@zeros/protocol/workspace-resource-usage";
+import { parseCloudScopedId } from "./cloud-workspace-key";
+import { cloudHistoryFenceHasTranscript, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
 import type {
@@ -171,22 +169,6 @@ export async function workspaceOp(
   return resp.result;
 }
 
-export async function bridgeWorkspaceResourceUsage(
-  bridge: WorkspaceRuntimeClient,
-  target: CloudWorkspaceTarget,
-  connection: CloudResourceUsageConnection,
-): Promise<WorkspaceResourceUsage | null> {
-  const response = await bridge.requestCloudResourceUsage(target, connection) as WorkspaceResponseLike | WorkspaceErrorLike | null;
-  if (response === null) return null;
-  if (response.type === "WORKSPACE_ERROR") throw new WorkspaceOpError(response);
-  if (response.type !== "WORKSPACE_RESPONSE" || response.op !== "workspace.resourceUsage")
-    throw new Error("Cloud returned an invalid resource usage response");
-  const sample = WorkspaceResourceUsageSchema.parse(response.result);
-  if (sample.organizationId !== target.organizationId || sample.workspaceId !== target.workspaceId ||
-      sample.generation !== connection.generation || sample.engineInstanceId !== connection.engineInstanceId)
-    throw new Error("Cloud resource usage changed runtime identity");
-  return sample;
-}
 
 // ── Turns (v13: footer / per-turn changes / reset) ──────────
 
@@ -847,23 +829,11 @@ function readableMessageRows(page: MessageWindowSnapshot): PersistedMessageWire[
   return page.messages;
 }
 
-function messageWindowSnapshot(bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
+function messageWindowSnapshot(_bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
   const target = parseCloudScopedId(chatId);
-  const receipt = target && r && bridge instanceof WorkspaceRuntimeClient ? bridge.cloudHistoryReadReceipt(r) : undefined;
-  let restoreHead: CloudHistoryRestoreFence | undefined;
-  if (target && receipt && (r?.projection !== undefined || r?.historyHeads !== undefined)) {
-    const metadata = CloudHistoryRestoreMetadataSchema.parse({ projection: r?.projection, historyHeads: r?.historyHeads });
-    if (metadata.projection.organizationId !== target.organizationId || metadata.projection.workspaceId !== target.workspaceId)
-      throw new Error("Cloud transcript page belongs to another workspace.");
-    restoreHead = { projection: metadata.projection, conversationId: target.id,
-      head: metadata.historyHeads.find(head => head.conversationId === target.id) ?? null };
-  }
-  // Cloud history keeps its own projection contract; only a Local window may
-  // carry a turn opening.
+  // Only a Local window may carry a turn opening.
   const turnOpening = target ? undefined : persistedMessageWire(r?.turnOpening);
-  return { messages: r?.messages ?? [], source: receipt?.source ?? (target ? "unknown" : "local"),
-    ...(restoreHead ? { restoreHead } : {}), ...(receipt ? { isCurrent: receipt.isCurrent } : {}),
-    ...(turnOpening ? { turnOpening } : {}) };
+  return { messages: r?.messages ?? [], source: target ? "unknown" : "local", ...(turnOpening ? { turnOpening } : {}) };
 }
 
 export async function bridgeMessageWindowSnapshot(
@@ -884,16 +854,6 @@ export async function bridgeMessageWindowSnapshot(
     timeoutMs,
   )) as MessageWindowResponse;
   return messageWindowSnapshot(bridge, chatId, r);
-}
-
-/** Explicit copy/export presentation; it cannot establish transcript authority. */
-export async function bridgeCloudCopyWindow(bridge: WorkspaceRuntimeClient, chatId: string, limit: number): Promise<MessageWindowSnapshot & { partial: boolean }> {
-  const { result, partial } = await bridge.readCloudCopyWindow(chatId, limit);
-  const page = messageWindowSnapshot(bridge, chatId, result);
-  if (page.isCurrent?.() === false)
-    throw Object.assign(new Error("Cloud history changed while copying"), { code: "cloud_history_changed" });
-  return { ...page, partial: !page.restoreHead?.head?.deleted && (partial || !!(page.restoreHead &&
-    !cloudHistoryFenceHasTranscript(page.restoreHead) && (page.source !== "native" || page.messages.length === 0))) };
 }
 
 export async function bridgeMessageWindowOlder(

@@ -48,8 +48,7 @@ import {
   type PermissionFeedbackPlacement,
 } from "./permission-feedback-placement";
 import "./composer-pills.css";
-import { useCloudRuntimeUpgradeLink } from "./cloud-runtime-upgrade-link";
-import { cloudModelRuntimeUpgradeRequired, type WorkspaceRegistryAgent } from "./workspace-agent-registry";
+import type { WorkspaceRegistryAgent } from "./workspace-agent-registry";
 
 // Wave 3 close-out (2026-05-16): the in-file useClickAway helper that
 // every pill once shared was deleted. All pills now use shadcn Popover,
@@ -122,9 +121,7 @@ export function ModelPill({
   onSelectAgentModel,
   redirectCrossAgent,
   selectionTiming,
-  workspaceFolder,
   active = true,
-  runtimeUpgradeRequiredForAgents = false,
 }: {
   agents?: WorkspaceRegistryAgent[] | null;
   agentId: string | null;
@@ -147,10 +144,7 @@ export function ModelPill({
    *  agents' models then show a ↗ in the dropdown ("opens a new chat"). */
   redirectCrossAgent?: boolean;
   selectionTiming?: "next-message";
-  workspaceFolder?: string;
   active?: boolean;
-  /** Optional stable reason supplied by cloud agent discovery. */
-  runtimeUpgradeRequiredForAgents?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // Close while the host composer is concealed (see ComposerConcealedContext).
@@ -175,8 +169,6 @@ export function ModelPill({
   const current =
     models.find((m) => m.value === value) ??
     resolveModelOption(agentId, value ?? null, initialize);
-  const runtimeUpgradeLink = useCloudRuntimeUpgradeLink(workspaceFolder, active && !concealed,
-    runtimeUpgradeRequiredForAgents || cloudModelRuntimeUpgradeRequired(workspaceFolder, agents?.find(agent => agent.id === agentId), current));
   const activeValue = current?.value ?? value ?? null;
   const displayLabel = configuredModelLabelParts(
     agentId,
@@ -201,7 +193,6 @@ export function ModelPill({
       onOpenChange={setOpen}
       redirectCrossAgent={redirectCrossAgent}
       selectionTiming={selectionTiming}
-      footer={runtimeUpgradeLink}
       onConfigure={onConfigure}
       onSelect={(sel) => {
         if (agentFamily(sel.agentId) === agentFamily(agentId)) {

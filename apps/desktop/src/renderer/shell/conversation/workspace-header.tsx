@@ -9,8 +9,6 @@ import { useWorkspaceStore } from "../../state/workspace-store";
 import { PanelHeader, Tooltip } from "../../shared/ui/primitives";
 import { workspaceLabel } from "../workspace-tabs";
 import { CloudWorkspaceDetails } from "./cloud-workspace-details";
-import { CloudWorkspaceSharePopover } from "./cloud-workspace-sharing-controls";
-import { CloudWorkspacePortsPopover } from "./cloud-workspace-ports-popover";
 
 export function ConversationWorkspaceHeader({ workspace, ...props }: {
   workspace: Workspace | null;
@@ -48,11 +46,7 @@ function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0]
   const subscribe = useCallback((listener: () => void) => active ? subscribeCloudWorkspaces(listener) : () => {}, [active]);
   const read = () => cloudWorkspaceDocument(target);
   const workspace = useSyncExternalStore(subscribe, read, read);
-  return <WorkspaceHeaderView {...props} name={workspace?.name ?? props.name} icon={<CloudWorkspaceDetails folder={folder} />}
-    actions={!props.readOnly && workspace && <>
-      <CloudWorkspaceSharePopover workspace={workspace} active={active} />
-      <CloudWorkspacePortsPopover workspace={workspace} active={active} onRevealWorkbench={props.onRevealWorkbench} />
-    </>} />;
+  return <WorkspaceHeaderView {...props} name={workspace?.name ?? props.name} icon={<CloudWorkspaceDetails folder={folder} />} />;
 }
 
 export function WorkspaceHeaderView({ name, icon, actions, readOnly, windowControlsInset, trailing }: {

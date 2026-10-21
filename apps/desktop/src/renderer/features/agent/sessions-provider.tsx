@@ -1,4 +1,3 @@
-import { wireCloudAgentCredentialState } from "./cloud-agent-credential-selectors";
 import { PermissionModeChanges } from "./permission-mode-change";
 import { awaitComposerMode } from "./composer-mode";
 import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPrompt } from "./local-prompt-recovery";
@@ -149,7 +148,6 @@ import {
 import { legacyProviderBinding, sameProviderBinding } from "@zeros/protocol/identities";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import { synthesizeReplayPrompt } from "./replay";
-import { startCloudSubmitSpan, finishCloudFirstText } from "../../state/cloud-workspace-latency";
 import { activeProviderTurnId } from "./turn-grouping";
 import {
   AuthPromptRecovery,
@@ -508,7 +506,6 @@ export function AgentSessionsProvider({
   // Helper: snapshot the store. Used inside async actions to bypass
   // React's closure capture problem (state read pre-await is stale).
   const getStore = useSessionsStore.getState;
-  useEffect(() => bridge ? wireCloudAgentCredentialState(bridge, getStore) : undefined, [bridge, getStore]);
 
   // Turn-state pushes can settle a prompt that began before this renderer was
   // loaded. The local send promise/finally does not exist in that case, so the
@@ -1103,10 +1100,6 @@ export function AgentSessionsProvider({
       // no-ops after the first chunk and when no turn is armed, so it's one
       // event per turn. (Load-replay content events already returned above.)
       if (chatId) {
-        const slot = state.sessions[chatId];
-        if (slot?.status === "streaming" && (slot.executionId ?? slot.sessionId) === sourceExecution &&
-            msg.notification.update.sessionUpdate === "agent_message_chunk")
-          finishCloudFirstText(chatId, msg.notification.update);
         promptActivityRef.current.get(chatId)?.();
         const su = (msg.notification.update as { sessionUpdate?: string })
           .sessionUpdate;
@@ -2838,7 +2831,6 @@ export function AgentSessionsProvider({
         }
       }
       sendingChatsRef.current.add(chatId);
-      const cancelLatency = startCloudSubmitSpan(chatId);
       let sentUserMessageId: string | null = null;
       let promptDiagnostics: {
         promptId: string;
@@ -4105,7 +4097,6 @@ export function AgentSessionsProvider({
           });
         }
       } finally {
-        cancelLatency?.();
         const terminalSlot = getStore().sessions[chatId];
         let ownsTerminalSlot = ownsPromptTurn();
         // Includes model refusals. Refresh only metadata; queued sends and the

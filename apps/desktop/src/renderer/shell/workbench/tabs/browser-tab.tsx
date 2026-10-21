@@ -32,7 +32,6 @@ import type { BrowserAppearance } from "@zeros/protocol/browser-tools";
 import { workspacePreviewAvailable } from "../../../platform/cloud-workspace-access";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { useCloudWorkspaceAccountAccess } from "../../../features/team/cloud-workspace-account-access";
-import { useCloudPreviewAdmission } from "../../../features/browser/use-cloud-preview-admission";
 import {
   ChevronLeft,
   ChevronRight,
@@ -750,7 +749,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const safeTabUrl = normalizeBrowserUrl(tab.url ?? "") ?? "";
   const cloudBrowser = isCloudWorkspace(scope ?? "");
   const nativeCloudPreview = cloudBrowser && Boolean(tab.previewSource || isLoopbackUrl(safeTabUrl));
-  const [cloudNavigationVersion, setCloudNavigationVersion] = useState(0);
+  const [, setCloudNavigationVersion] = useState(0);
   // Chromium history contains volatile grant origins. Cloud toolbar history
   // instead retains logical URLs and opaque owners, then re-admits each entry.
   const logicalHistory = useRef<{
@@ -864,33 +863,14 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     },
     "preview-renewal",
   );
-  const [previewFrameMounted, setPreviewFrameMounted] = useState(false);
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const attachWebviewFrame = webview.ref;
   const attachPreviewFrame = useCallback((node: HTMLIFrameElement | null) => {
     previewFrameRef.current = node;
     attachWebviewFrame(node);
-    setPreviewFrameMounted(Boolean(node));
   }, [attachWebviewFrame]);
   const replacePreviewUrl = webview.replace;
   const navigateFrame = webview.navigate;
-  const navigateCloudPreview = useCallback((input: Parameters<typeof stagePreviewNavigation>[1]) => {
-    const staged = stagePreviewNavigation(tab.id, input);
-    setPreviewRuntime({ origin: staged.runtimeOrigin, expiresAt: staged.expiresAt, volatileOrigin: staged.volatileOrigin });
-    consumePreviewNavigation(tab.id);
-    return replacePreviewUrl(input.admissionUrl, input.native ? { preserveFrame: true } : undefined);
-  }, [tab.id, replacePreviewUrl]);
-  useCloudPreviewAdmission({
-    scope: nativeCloudPreview ? (scope ?? "") : "",
-    url: safeTabUrl,
-    frameName,
-    active: live,
-    ready: electron && previewFrameMounted,
-    source: tab.previewSource,
-    agentPreview: Boolean(tab.previewSource),
-    navigate: navigateCloudPreview,
-    navigationVersion: cloudNavigationVersion,
-  });
   const navigateLogicalCloud = useCallback(
     (url: string, source: WorkbenchTab["previewSource"], record = true) => {
       if (!previewAvailable && isLoopbackUrl(url)) return;

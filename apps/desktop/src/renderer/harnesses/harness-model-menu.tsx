@@ -285,7 +285,6 @@ async function main() {
                   agents={registryOverride}
                   agentId={agentId}
                   initialize={initialize}
-                  workspaceFolder={cloudFolder}
                   value={value}
                   effort={configuration.effort}
                   fast={configuration.fast}

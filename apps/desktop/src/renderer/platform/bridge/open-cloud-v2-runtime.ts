@@ -4,7 +4,7 @@
 // UI needs no cloud-only agent, history or event layer.
 import type { CloudV2ConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
 import { connectCloudV2Workspace } from "../cloud-v2";
-import { acceptCloudEngineWorkspace, cloudCatalogGeneration } from "../../state/cloud-workspace-catalog";
+import { acceptCloudEngineWorkspace, cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import type { CloudWorkspaceTarget } from "./cloud-workspace-key";
 import { RuntimeClient } from "./ws-client";
 import type { CloudPeer } from "./workspace-runtime-client";
@@ -44,10 +44,15 @@ function connected(client: RuntimeClient, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** Connecting starts a stopped VM, so only an explicit open may do that.
+ * Passive warm-ups (hover, a retained tab) leave it stopped; its history is
+ * read from the control plane meanwhile. */
 export async function openCloudV2Runtime(
   target: CloudWorkspaceTarget,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; wake?: boolean },
 ): Promise<CloudPeer> {
+  if (!options?.wake && ["stopped", "failed"].includes(cloudWorkspaceDocument(target)?.status ?? ""))
+    throw new Error("The cloud workspace is stopped");
   const account = cloudCatalogGeneration();
   const assertAccount = () => {
     if (options?.signal?.aborted) throw new Error("Cloud connection cancelled");
