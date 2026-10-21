@@ -86,14 +86,6 @@ export const CloudWorkspaceDocumentSchema = z.object({
 export type CloudWorkspaceDocument = z.infer<
   typeof CloudWorkspaceDocumentSchema
 >;
-export const OptionsSchema = z.object({
-  configured: z.boolean(),
-  repository: z.object({ owner: z.string(), name: z.string(), defaultBranch: z.string() }).optional(),
-  installations: z
-    .array(z.object({ id: z.string().uuid(), accountLogin: z.string() }))
-    .max(100),
-});
-export type CloudWorkspaceCreateOptions = z.infer<typeof OptionsSchema>;
 
 export const AgentGrantsSchema = z.object({
   delegations: z

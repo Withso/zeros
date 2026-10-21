@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, RefreshCw, Search } from "lucide-react";
-import type { CloudComputerV2ActiveRepository } from "@zeros/protocol/cloud-computer-v2";
+import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 import { Button, GithubIcon } from "../../shared/ui";
 import { Tooltip } from "../../shared/ui/primitives";
 import {
@@ -31,14 +31,13 @@ import type { DispatcherBase } from "./dispatcher-source";
 
 export function computerSourceReadKey(
   owner: string,
-  repository: CloudComputerV2ActiveRepository,
+  repository: CloudComputerRepository,
 ): string {
   return JSON.stringify([
     ...(JSON.parse(owner) as [string, string]),
     repository.id,
     repository.owner,
     repository.name,
-    repository.installationId,
   ]);
 }
 function repositoryForKey(key: string) {
@@ -80,6 +79,17 @@ export function computerBranchBase(name: string): DispatcherBase {
     source: "github",
   };
 }
+/** A cloud workspace starts at the pull request's head branch. */
+export function computerPrBase(row: { number: number; title: string; url: string; headBranch: string }): DispatcherBase {
+  return {
+    kind: "pr",
+    branch: `refs/heads/${row.headBranch}`,
+    label: `#${row.number} · ${row.title}`,
+    source: "github",
+    prNumber: row.number,
+    prUrl: row.url,
+  };
+}
 const EMPTY_BRANCHES: GithubBranch[] = [];
 const EMPTY_REMOTE_BASE = computerBranchBase("");
 export function computerBranchRows(
@@ -101,7 +111,7 @@ export function CloudComputerSourcePicker({
   disabled,
 }: {
   readKey: string | null;
-  repository: CloudComputerV2ActiveRepository | null;
+  repository: CloudComputerRepository | null;
   defaultBranch: string | null;
   value: DispatcherBase | null;
   onChange: (base: DispatcherBase | null) => void;
@@ -286,14 +296,7 @@ export function CloudComputerSourcePicker({
               >
                 <BaseList
                   rows={prRows.map((row) => {
-                    const base: DispatcherBase = {
-                      kind: "pr",
-                      branch: `refs/pull/${row.number}/head`,
-                      label: `#${row.number} · ${row.title}`,
-                      source: "github",
-                      prNumber: row.number,
-                      prUrl: row.url,
-                    };
+                    const base = computerPrBase(row);
                     return {
                       base,
                       selected: selected?.prNumber === row.number,

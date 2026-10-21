@@ -239,8 +239,7 @@ describe("cloud request account boundaries", () => {
     await expect(createCloudWorkspaceDocument({
       organizationId: "11111111-1111-4111-8111-111111111111",
       idempotencyKey: "workspace-intent",
-      repository: { forge: "github.com", owner: "example", name: "repository", revision: "main",
-        githubInstallationId: "22222222-2222-4222-8222-222222222222" },
+      repository: { owner: "example", name: "repository" },
     })).rejects.toMatchObject({ code: "github_cloud_source_authorization_required" });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(state.source).not.toHaveBeenCalled();

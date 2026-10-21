@@ -21,6 +21,14 @@ const STATE_LABEL: Record<CloudV2Build["state"], string> = {
 };
 type Draft = { repository: string; ref: string; setup: string };
 
+const computerKey = (userId: string, organizationId: string) => JSON.stringify([userId, organizationId]);
+/** Intent warming for the Settings entry; only owners and admins can read it. */
+export function prefetchCloudComputer(userId: string, organization: { id: string; isPersonal: boolean; role?: string }): void {
+  if (organization.isPersonal || (organization.role !== "owner" && organization.role !== "admin")) return;
+  void computers.load(computerKey(userId, organization.id), () => getCloudV2Computer(organization.id), { maxAgeMs: 30_000 })
+    .catch(() => undefined);
+}
+
 function message(error: unknown): string {
   if (error instanceof ControlPlaneError) return error.message;
   return "The Cloud Computer request failed. Try again.";
@@ -38,7 +46,7 @@ export function CloudComputerPanel({ surfaceActive = true }: { surfaceActive?: b
 function CloudComputerScope({ userId, organizationId, canManage, active }: {
   userId: string; organizationId: string; canManage: boolean; active: boolean;
 }) {
-  const key = JSON.stringify([userId, organizationId]);
+  const key = computerKey(userId, organizationId);
   const computer = useCachedRead(computers, canManage ? key : null, () => getCloudV2Computer(organizationId),
     { enabled: active, maxAgeMs: 30_000 });
   const latest = computer.data?.builds[0];

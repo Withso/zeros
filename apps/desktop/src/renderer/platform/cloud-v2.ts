@@ -93,10 +93,25 @@ export async function getCloudV2Workspace(target: CloudWorkspaceTarget): Promise
   return workspace;
 }
 
+/** The control plane's branch rule, minus full refs: the worker creates the
+ * workspace branch from origin/<baseBranch>, so only a plain name works. */
+const BASE_BRANCH = /^(?!-)(?!refs\/)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+$/;
+export function isCloudV2BaseBranch(value: string): boolean {
+  return value.length <= 255 && BASE_BRANCH.test(value);
+}
+
+/** Without a base branch the server uses the branch its Cloud Computer installed. */
 export async function createCloudV2Workspace(input: {
-  organizationId: string; repository: string; baseBranch: string; name?: string;
-}): Promise<CloudV2Workspace> {
-  return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body: input, idempotencyKey: key() })).workspace;
+  organizationId: string; repository: string; baseBranch?: string; name?: string;
+}, idempotencyKey: string = key()): Promise<CloudV2Workspace> {
+  if (input.baseBranch !== undefined && !isCloudV2BaseBranch(input.baseBranch))
+    throw new Error("Choose a branch from GitHub for this cloud workspace.");
+  const body = {
+    organizationId: uuid.parse(input.organizationId), repository: input.repository,
+    ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
+    ...(input.name ? { name: input.name } : {}),
+  };
+  return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body, idempotencyKey })).workspace;
 }
 
 export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "delete"): Promise<CloudV2Workspace> {
@@ -140,6 +155,26 @@ export const CloudV2BuildSchema = z.object({
 }).passthrough();
 export type CloudV2Build = z.infer<typeof CloudV2BuildSchema>;
 const ComputerSchema = z.object({ activeBuildId: uuid.nullable(), snapshotName: z.string().nullable(), builds: z.array(CloudV2BuildSchema) });
+
+/** A repository on the organization's live Cloud Computer. `id` is the
+ * lowercase owner/name, which stays the same across builds. */
+export type CloudV2InstalledRepository = { id: string; owner: string; name: string; defaultBranch: string | null };
+const InstalledSchema = z.object({
+  repositories: z.array(z.object({
+    repository: CloudV2RepositorySchema.shape.repository.max(200),
+    defaultBranch: z.string().min(1).max(255).nullable().optional(),
+  }).passthrough()).max(200).nullable(),
+});
+
+/** Readable by every member; null until the organization has a live build. */
+export async function getCloudV2InstalledRepositories(organizationId: string): Promise<CloudV2InstalledRepository[] | null> {
+  const { repositories } = await cloudAccountRequest(
+    `/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories`, InstalledSchema);
+  return repositories?.map(row => {
+    const [owner, name] = row.repository.split("/") as [string, string];
+    return { id: row.repository.toLowerCase(), owner, name, defaultBranch: row.defaultBranch ?? null };
+  }) ?? null;
+}
 
 export async function getCloudV2Computer(organizationId: string) {
   return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer`, ComputerSchema);

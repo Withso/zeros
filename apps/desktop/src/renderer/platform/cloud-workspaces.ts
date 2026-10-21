@@ -1,6 +1,6 @@
 export * from "./cloud-workspace-contract";
-import { CloudWorkspaceDocumentSchema, OptionsSchema, AgentGrantsSchema, CloudAgentBootAvailabilitySchema,
-  type CloudWorkspaceDocument, type CloudWorkspaceCreateOptions, type CloudAgentBootAvailability } from "./cloud-workspace-contract";
+import { CloudWorkspaceDocumentSchema, AgentGrantsSchema, CloudAgentBootAvailabilitySchema,
+  type CloudWorkspaceDocument, type CloudAgentBootAvailability } from "./cloud-workspace-contract";
 import { CloudAgentAdmissionError } from "./bridge/cloud-agent-errors";
 import { z } from "zod";
 import { CloudRuntimeUpgradeAvailabilitySchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
@@ -325,29 +325,12 @@ export async function recoverCloudWorkspace(target: CloudWorkspaceTarget, input:
   return workspace;
 }
 
-export async function getCloudWorkspaceCreateOptions(
-  organizationId: string,
-  owner: string,
-  repository?: string,
-): Promise<CloudWorkspaceCreateOptions> {
-  return request(
-    `${organizationPath(organizationId)}/create-options?owner=${encodeURIComponent(owner)}${repository ? `&repository=${encodeURIComponent(repository)}` : ""}&cloudComputerV2=true`,
-    OptionsSchema,
-  );
-}
-
 export async function createCloudWorkspaceDocument(input: {
   organizationId: string;
   name?: string;
-  teamId?: string;
-  cloudComputerBuild?: { id: string; version: number };
-  repository: {
-    forge: "github.com";
-    owner: string;
-    name: string;
-    revision: string;
-    githubInstallationId: string;
-  };
+  repository: { owner: string; name: string };
+  /** A plain branch name; omitted, the server uses its Cloud Computer's branch. */
+  baseBranch?: string;
   idempotencyKey: string;
 }): Promise<CloudWorkspaceDocument> {
   const epoch = getOrganizationStoreGeneration();
@@ -356,9 +339,9 @@ export async function createCloudWorkspaceDocument(input: {
   const workspace = await createCloudV2Workspace({
     organizationId: input.organizationId,
     repository: `${input.repository.owner}/${input.repository.name}`,
-    baseBranch: input.repository.revision,
+    ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
     ...(input.name ? { name: input.name } : {}),
-  });
+  }, input.idempotencyKey);
   if (epoch !== getOrganizationStoreGeneration())
     throw new Error("Your account changed while creating the cloud workspace");
   if (workspace.organizationId !== input.organizationId)

@@ -248,7 +248,7 @@ function ActiveDispatcherPage({
   const base = needsGitSetup
     ? null
     : sourceForProject(sourceSelection, selectedProject);
-  const cloud = useCloudCreate(selectedProject, base, active, computerSource);
+  const cloud = useCloudCreate(active, computerSource);
   // Cloud workspaces have no Design for now; only Local creates Design workspaces.
   const canCreateDesign = designWorkspaceCreationAvailable && !(cloud.organization && !cloud.organization.isPersonal);
   const mode: WorkspaceMode = canCreateDesign ? requestedMode : "code";
@@ -261,8 +261,7 @@ function ActiveDispatcherPage({
   const placementReason = placement === "cloud" ? cloud.reason : null;
 
   const handleCreateCloud = async (payload?: DispatcherCreatePayload) => {
-    const project = selectedProject;
-    if (!active || (!project && !cloud.computerRepository) || cloud.reason || !cloud.organization || createInFlight.current) return;
+    if (!active || !cloud.computerRepository || cloud.reason || !cloud.organization || createInFlight.current) return;
     const currentOrganization = getActiveOrganizationSnapshot();
     if (currentOrganization?.id !== cloud.organization.id || !canCreateWorkspaceIn(currentOrganization, "cloud")) return;
     const creationGeneration = getOrganizationStoreGeneration();
@@ -286,7 +285,7 @@ function ActiveDispatcherPage({
       markWorkspaceSettling(folder);
       if (createMode === "design") registerCloudDesignCreation(folder);
       cloudCreateIntent.current = null;
-      const createdProject = cloud.computerMode ? cloudProjectForFolder(folder) : project;
+      const createdProject = cloudProjectForFolder(folder);
       notifyWorkspacesChanged(createdProject?.repoSlug);
       // Creation remains owned by the organization captured at submission.
       // A late confirmation must not pull Personal (or another organization)
@@ -302,8 +301,8 @@ function ActiveDispatcherPage({
       if (payload) createDispatcherChat({ dispatch, repoRoot, folder, payload, validationPending: true });
       else spawnPreparedDefaultChat({ folder, repoRoot, dispatch });
     } catch (error) {
-      if (cloud.computerMode && (creationGeneration !== getOrganizationStoreGeneration() || !cloud.isCurrentComputerSource(cloud.sourceOwner))) return;
-      const changed = cloud.computerMode ? cloud.recoverComputerError(error, cloud.sourceOwner) : null;
+      if (creationGeneration !== getOrganizationStoreGeneration() || !cloud.isCurrentComputerSource(cloud.sourceOwner)) return;
+      const changed = cloud.recoverComputerError(error, cloud.sourceOwner);
       if (changed && cloud.computerOwner) {
         cloudCreateIntent.current = null;
         setComputerCreateNotice({ owner: cloud.computerOwner, message: changed });
@@ -599,10 +598,8 @@ function ActiveDispatcherPage({
               onOpenChange={setProjectMenuOpen}
               disabled={busy || designBusy}
               onSelect={cloud.selectComputerRepository}
-              warm={repository => { if (active && cloud.computerOwner) {
-                cloud.warmComputerRepository(repository);
-                warmComputerSources(computerSourceReadKey(cloud.computerOwner, repository));
-              } }}
+              warm={repository => { if (active && cloud.computerOwner)
+                warmComputerSources(computerSourceReadKey(cloud.computerOwner, repository)); }}
             /> : (
             <DropdownMenu
               open={active && projectMenuOpen}

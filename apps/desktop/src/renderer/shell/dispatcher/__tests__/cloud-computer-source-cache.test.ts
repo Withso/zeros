@@ -4,7 +4,7 @@ import {
   computerUser,
   deferred,
   otherComputerOrg,
-} from "../../../features/settings/__tests__/cloud-computer-v2-fixtures";
+} from "./cloud-computer-fixtures";
 import type { GithubBranch } from "../../../platform/git";
 const transport = vi.hoisted(() => ({ branches: vi.fn(), prs: vi.fn() }));
 vi.mock("../../../platform/git", () => ({
@@ -23,12 +23,7 @@ import {
   readComputerPrs,
   warmComputerSources,
 } from "../cloud-computer-source";
-const repository = {
-  id: "123",
-  owner: "example",
-  name: "project",
-  installationId: computerOrg,
-};
+const repository = { id: "example/project", owner: "example", name: "project", defaultBranch: "main" };
 const key = computerSourceReadKey(
   JSON.stringify([computerUser, computerOrg]),
   repository,
@@ -102,7 +97,7 @@ describe("checkout-free source caches", () => {
     for (let i = 0; i < 35; i++) {
       const next = computerSourceReadKey(
         JSON.stringify([computerUser, computerOrg]),
-        { ...repository, id: String(i + 1000) },
+        { ...repository, id: `example/project-${i}` },
       );
       await computerBranchesCache.load(next, () => readComputerBranches(next));
       await computerPrsCache.load(next, () => readComputerPrs(next));
@@ -110,7 +105,7 @@ describe("checkout-free source caches", () => {
     expect(computerBranchesCache.keys()).toHaveLength(32);
     expect(computerPrsCache.keys()).toHaveLength(32);
   });
-  it("shows the create-options default even outside the first GitHub page, within the row bound", () => {
+  it("shows the Cloud Computer default even outside the first GitHub page, within the row bound", () => {
     const rows = computerBranchRows(
       Array.from({ length: 100 }, (_, i) => ({
         name: `branch-${i}`,

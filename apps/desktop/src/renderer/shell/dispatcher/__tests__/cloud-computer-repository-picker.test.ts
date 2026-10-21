@@ -41,12 +41,7 @@ beforeEach(() => {
 });
 describe("Cloud Computer project picker", () => {
   it("renders active repository names and only the Add repository Settings action", () => {
-    const repository = {
-      id: "123",
-      owner: "example",
-      name: "project",
-      installationId: "11111111-1111-4111-8111-111111111111",
-    };
+    const repository = { id: "example/project", owner: "example", name: "project", defaultBranch: "main" };
     const select = vi.fn();
     const html = renderToStaticMarkup(
       createElement(CloudComputerRepositoryPicker, {
@@ -70,7 +65,7 @@ describe("Cloud Computer project picker", () => {
     ])
       expect(html).not.toContain(label);
     state.items[0]();
-    expect(select).toHaveBeenCalledWith("123");
+    expect(select).toHaveBeenCalledWith("example/project");
     state.items[1]();
     expect(state.navigate).toHaveBeenCalledWith("cloud-computer");
     expect(state.dispatch).toHaveBeenCalledWith({

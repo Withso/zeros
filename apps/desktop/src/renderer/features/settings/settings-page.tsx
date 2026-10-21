@@ -1,7 +1,4 @@
-import { CloudComputerPanel } from "./cloud-computer-panel";
-import { prefetchCloudComputerV2 } from "./cloud-computer-v2-client";
-import { CloudMcpPanel, CloudSkillsPanel } from "./cloud-customization-panel";
-import { prefetchCloudCustomization } from "./cloud-customization-client";
+import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
 import { CloudGithubSection } from "./cloud-github-section";
 // ──────────────────────────────────────────────────────────
 // Settings page — sidebar + per-section panel
@@ -215,8 +212,6 @@ type SectionId =
   | "git"
   | "repos"
   | "cloud-computer"
-  | "cloud-mcp"
-  | "cloud-skills"
   | "integrations"
   | "account"
   | "experimental"
@@ -263,8 +258,6 @@ const SECTIONS: SectionDef[] = [
     Panel: ModelsPanel,
   },
   { id: "cloud-computer", label: "Cloud Computer", icon: Box, Panel: CloudComputerPanel },
-  { id: "cloud-mcp", label: "MCP servers", icon: Blocks, Panel: CloudMcpPanel },
-  { id: "cloud-skills", label: "Skills", icon: Blocks, Panel: CloudSkillsPanel },
   {
     id: "providers",
     label: "Agents",
@@ -367,7 +360,7 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   },
   {
     label: "Agents",
-    ids: ["models", "providers", "cloud-mcp", "cloud-skills", "browser-use", "computer-use", "simulators", "terminal-agents"],
+    ids: ["models", "providers", "browser-use", "computer-use", "simulators", "terminal-agents"],
   },
   { label: "Workspace", ids: ["cloud-computer", "environment", "git"] },
 ];
@@ -657,8 +650,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
           // Chrome setup is reachable for every owner. BrowserUsePanel,
           // ComputerUsePanel and SimulatorsPanel select device controls or
           // cloud guidance from the workspace placement.
-          (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills", "browser-use", "computer-use", "simulators"].includes(s.id)) &&
-          (cloudEnabled || !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id)) &&
+          (local ? s.id !== "cloud-computer" : ["providers", "integrations", "cloud-computer", "browser-use", "computer-use", "simulators"].includes(s.id)) &&
+          (cloudEnabled || s.id !== "cloud-computer") &&
           (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
           (s.id !== "computer-use" || computerUseActive) &&
           (s.id !== "simulators" || simulatorsActive) &&
@@ -791,9 +784,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                           section.id === "integrations"
                             ? prefetchGithubAuthSnapshot
                             : section.id === "cloud-computer" && organization && me
-                              ? () => prefetchCloudComputerV2(me.user.id, organization.id)
-                            : (section.id === "cloud-mcp" || section.id === "cloud-skills") && organization && me
-                              ? () => prefetchCloudCustomization(me.user.id, organization.id)
+                              ? () => prefetchCloudComputer(me.user.id, organization)
                             : undefined
                         }
                       />

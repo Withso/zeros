@@ -1,79 +1,33 @@
 import { describe, expect, it } from "vitest";
-import {
-  cloudSourceRevision,
-  cloudSourceRepositoryReason,
-} from "../cloud-create";
+import { cloudSourceBaseBranch } from "../cloud-create";
+import { computerBranchBase, computerPrBase } from "../cloud-computer-source";
 
+// The v2 worker creates the workspace branch with
+// `git switch -c <branch> origin/<baseBranch>`: only a plain branch name works.
 describe("cloud creation source", () => {
-  it("never sends a local tracking namespace to the cloud GitHub resolver", () => {
-    expect(
-      cloudSourceRevision(
-        {
-          kind: "branch",
-          branch: "refs/remotes/origin/feature/ui",
-          source: "github",
-          label: "feature/ui",
-        },
-        null,
-      ),
-    ).toEqual({ revision: "refs/heads/feature/ui", reason: null });
+  it("sends a picked remote branch as its plain name", () => {
+    expect(cloudSourceBaseBranch(computerBranchBase("feature/ui"))).toEqual({ baseBranch: "feature/ui", reason: null });
+  });
+  it("strips any remote tracking namespace", () => {
+    expect(cloudSourceBaseBranch({ kind: "branch", branch: "refs/remotes/origin/feature/ui", source: "github", label: "feature/ui" }))
+      .toEqual({ baseBranch: "feature/ui", reason: null });
+  });
+  it("starts a pull request's workspace from its head branch", () => {
+    const base = computerPrBase({ number: 42, title: "Fix", url: "https://github.com/example/project/pull/42", headBranch: "fix/login" });
+    expect(base).toMatchObject({ kind: "pr", prNumber: 42 });
+    expect(cloudSourceBaseBranch(base)).toEqual({ baseBranch: "fix/login", reason: null });
+  });
+  it("leaves the default to the server when nothing is picked", () => {
+    expect(cloudSourceBaseBranch(null)).toEqual({ baseBranch: null, reason: null });
   });
   it("requires an explicit remote source for a local-only selection", () => {
-    expect(
-      cloudSourceRevision(
-        {
-          kind: "branch",
-          branch: "refs/heads/private",
-          source: "local",
-          label: "private",
-        },
-        "main",
-      ).revision,
-    ).toBeNull();
+    const result = cloudSourceBaseBranch({ kind: "branch", branch: "refs/heads/private", source: "local", label: "private" });
+    expect(result.baseBranch).toBeNull();
+    expect(result.reason).toContain("Push local-only work");
   });
-  it("keeps a selected pull-request head and an unknown default distinct", () => {
-    expect(
-      cloudSourceRevision(
-        {
-          kind: "pr",
-          source: "github",
-          label: "PR",
-          branch: "fork-branch",
-          prNumber: 42,
-        },
-        "main",
-      ).revision,
-    ).toBe("refs/pull/42/head");
-    expect(cloudSourceRevision(null, null).revision).toBeNull();
-    expect(cloudSourceRevision(null, "trunk").revision).toBe(
-      "refs/heads/trunk",
-    );
-  });
-  it("does not resolve a fork remote's branch against the origin repository", () => {
-    const base = {
-      kind: "branch",
-      source: "github",
-      label: "main",
-      branch: "refs/remotes/fork/main",
-    } as const;
-    const remotes = [
-      { name: "fork", url: "git@github.com:fork/repo.git", isGitHub: true },
-    ];
-    expect(
-      cloudSourceRepositoryReason(
-        base,
-        remotes,
-        null,
-        "https://github.com/origin/repo.git",
-      ),
-    ).toContain("different repository");
-    expect(
-      cloudSourceRepositoryReason(
-        base,
-        remotes,
-        null,
-        "https://github.com/fork/repo.git",
-      ),
-    ).toBeNull();
+  it("refuses a ref the worker cannot switch to", () => {
+    const result = cloudSourceBaseBranch({ kind: "pr", branch: "refs/pull/7/head", source: "github", label: "#7", prNumber: 7 });
+    expect(result.baseBranch).toBeNull();
+    expect(result.reason).not.toBeNull();
   });
 });
