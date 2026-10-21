@@ -834,6 +834,10 @@ export class CloudWorkspaceOperationsWorker {
          WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM workspace_record_heads
          WHERE workspace_id = $1 AND org_id = $2`,
+        // Retention removed the revision FK; deleting the content head no
+        // longer cascades to the current file descriptors.
+        `DELETE FROM workspace_file_entries
+         WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM workspace_content_heads
          WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM workspace_fork_import_entries

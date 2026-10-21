@@ -1,0 +1,9 @@
+{
+  "id": "initial-setup-delete-first-capture",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:685",
+  "symptom": "An ordinary Delete accepted before the first engine registration never requested a final capture after setup became ready, leaving the original Delete blocked.",
+  "rule": "Complete only the exact first live source under a retained receipt; preserve failure and retry history and require real capture proof before dispatch. Test the actual recovery worker after setup readiness.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/initial-setup-delete.integration.test.ts"
+}

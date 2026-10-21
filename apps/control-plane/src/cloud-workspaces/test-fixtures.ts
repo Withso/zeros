@@ -284,7 +284,7 @@ export async function seedSupportedCloudWorkspaceGeneration(tx: Tx, input: {
 
 export async function seedReadyCloudWorkspace(
   pool: pg.Pool,
-  options: {ownerUserId?:string; runtimeV4?: boolean; supportedGeneration?: boolean; persistedProvider?: string; persistedSandboxClass?: "container" | "linux-vm";
+  options: {ownerUserId?:string; runtimeV4?: boolean; supportedGeneration?: boolean; persistedProvider?: string; persistedSandboxClass?: "container" | "linux-vm"; setupPending?: boolean;
     computerSource?: Pick<Parameters<typeof seedComputerTemplate>[1], "installationId" | "repositories">} = {},
 ): Promise<ReadyCloudWorkspaceFixture> {
   const userId = options.ownerUserId ?? randomUUID();
@@ -380,7 +380,7 @@ export async function seedReadyCloudWorkspace(
          status, desired_state
        ) VALUES (
          $1, $2, $3, $4, 'Durable Workspace', 'github.com', 'withso',
-         'zeros', 'main', $5, $4, $4, 'ready', 'running'
+         'zeros', 'main', $5, $4, $4, '${options.setupPending ? "setting_up" : "ready"}', 'running'
        )`,
       [workspaceId, organizationId, teamId, userId, repositoryId],
     );
@@ -493,8 +493,9 @@ export async function seedReadyCloudWorkspace(
          state, bridge_token_hash, heartbeat_token_hash, registered_at,
          last_heartbeat_at, lease_expires_at
          ${runtime ? ", actor_protocol_version, agent_customization_version, runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version, runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id" : ""}
-       ) VALUES ($1, $2, 1, $3, $4, $5, 1, $6, $9, 'ready', $7, $8,
-                 now(), now(), now() + interval '10 minutes' ${runtime ? ", 2, 3, $10,$11,$12,$13,$14,$15,$16,$17,$18" : ""})`,
+       ) VALUES ($1, $2, 1, $3, $4, $5, 1, $6, $9, '${options.setupPending ? "starting" : "ready"}', $7,
+                 CASE WHEN ${options.setupPending === true} THEN NULL ELSE $8::bytea END,
+                 ${options.setupPending ? "NULL, NULL, NULL" : "now(), now(), now() + interval '10 minutes'"} ${runtime ? ", 2, 3, $10,$11,$12,$13,$14,$15,$16,$17,$18" : ""})`,
       [
         engineInstanceId,
         workspaceId,

@@ -251,6 +251,29 @@ changed registrations, unproved current Deletes, unresolved dispatches and
 cross-generation history remain blocked. The deployed SQL gates and migration
 0171 are unchanged.
 
+For a generation-1 owner Delete accepted before initial registration, migration
+`0179_cloud_initial_delete_capture.sql` admits the first live source once. Setup
+readiness and the recovery worker share the same SQL predicate. The first exact
+engine, boot and active writer must retain the initial setup, owner, authority,
+runtime and allocation pins, with no earlier capture, custody, proof, replacement
+or provider dispatch. A reserved writer is insufficient. An append-only receipt
+retains the complete recovery before source completion, including its original
+failure/retry clocks; source drift at commit rolls back both receipt and request.
+The first `before_delete` request uses the original Delete. Normal capture, seal,
+checkpoint proof, provider completion and physical erasure still follow.
+
+The private rescue command is
+`pnpm --dir apps/control-plane cloud-initial-delete-capture:manage`. It requires
+the migration/table owner through `DATABASE_URL` and `DATABASE_MIGRATION_ROLE`,
+an active platform owner, exact organization/workspace owner and native source
+pins in a regular owned mode-0600 file selected by
+`CONTROL_PLANE_INITIAL_DELETE_REQUEST_FILE`. Development and Alpha are admitted;
+`RAILWAY_ENVIRONMENT_NAME` must match the request. Plan rolls back. Execute adds
+`--execute` with `CONTROL_PLANE_INITIAL_DELETE_APPROVAL` from that exact plan.
+A committed receipt replays the same capture ID, including after purge. A new
+login requires a fresh plan/approval, not a replacement Delete. `capture_queued`
+is admission only; it does not claim save proof or deletion completion.
+
 The native companion uses `x-zeros-final-save-version: 1` alongside committed
 local-command negotiation for an exact qualified runtime registration. Its
 closed report endpoint is `/internal/v1/cloud-workspaces/engine/final-save`;
@@ -684,6 +707,12 @@ shell with that deployment's `DATABASE_URL`. Production is refused. The command
 requests the server's normal deletion lifecycle by default; workers retire provider
 resources and finish durable-data deletion. Never delete the provider sandbox
 directly while its workspace row still references it.
+
+Physical record purge explicitly deletes the workspace's mutable file entries
+by both workspace and organization, inside the existing provider/object/hold
+authorization and final lease checks. Their revision FK was removed by retention,
+so deleting content heads alone does not erase file paths and descriptors. This
+change does not backfill workspaces whose erasure already completed.
 
 Set `CONTROL_PLANE_CLOUD_DELETION_CHANNEL`, `ORGANIZATION_ID`,
 `EXPECTED_ORGANIZATION_SLUG`, `ACTOR_USER_ID`, `WORKSPACE_IDS`, `APPROVAL_ID` and

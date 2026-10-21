@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/cloud-workspaces/final-save-service.ts",
+  "before": "SELECT admit_cloud_initial_delete_capture($1,NULL,$2) AS request_id",
+  "after": "SELECT NULL::uuid AS request_id WHERE $1::uuid IS NOT NULL AND $2::boolean IS NOT NULL"
+}

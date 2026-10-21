@@ -231,6 +231,11 @@ export async function runFinalSaveRecovery(pool: pg.Pool, workspaceId: string | 
       ORDER BY next_attempt_at,lifecycle_intent_id LIMIT 8 FOR UPDATE`, [candidate.workspace_id, candidate.org_id]);
     for (const candidate of rows.rows) {
       await ensureFinalSaveRecovery(tx, candidate.lifecycle_intent_id);
+      // Initial setup may have registered its first native source since Delete
+      // admission. The SQL receipt preserves that unbound snapshot and queues
+      // the first real capture; it does not make the Delete dispatchable.
+      if (!candidate.current_request_id && (await tx.query<{ request_id:string|null }>(
+        "SELECT admit_cloud_initial_delete_capture($1,NULL,$2) AS request_id", [candidate.lifecycle_intent_id,workosEnabled])).rows[0]?.request_id) continue;
       const row = (await recoveryRow(tx, candidate.lifecycle_intent_id))!;
       if ((await tx.query<{ adopted: boolean }>("SELECT adopt_cloud_unstarted_candidate_cleanup($1) AS adopted", [row.lifecycle_intent_id])).rows[0]?.adopted) continue;
       if (await resolveHistoricalFinalSaveForErasure(tx, row.lifecycle_intent_id)) continue;

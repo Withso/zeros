@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import pg from "pg";
 import {
@@ -36,6 +36,8 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
 import { CloudWorkspaceLinuxSetupExecutor, type CloudWorkspaceSetupAdmissionBroker } from "./linux-setup-executor.js";
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
 import { consumeCloudWorkspaceGrant } from "./grants.js";
+import { requestCloudWorkspaceDeletion } from "./routes.js";
+import { reserveLocalCloudCommandWriter, activateLocalCloudCommandWriter } from "./commands.js";
 import { CloudProviderError, type CloudWorkspaceCommandRunner } from "./provider.js";
 import { parseCloudWorkspaceSetupRequest, redactCloudWorkspaceSetupHookLog } from "../../../../scripts/cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 vi.mock("../../../../scripts/cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async original => ({
@@ -484,6 +486,68 @@ d("cloud workspace setup worker", () => {
     });
     return result;
   };
+
+  it.each([true, false])("queues the pending Delete's first capture at real setup publication only for an active writer (%s)", async activate => {
+    const seeded = await seedSetup(), createId = randomUUID(), leaseId = randomUUID();
+    await withSystemTx(pool, async tx => {
+      await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
+        (id,workspace_id,org_id,generation,requested_by,operation,state,completed_at,idempotency_key,request_sha256)
+        VALUES($1::uuid,$2,$3,1,$4,'create','succeeded',now(),$1::text,digest($1::text,'sha256'))`,
+      [createId, seeded.workspaceId, organizationId, ownerId]);
+      await tx.query(`INSERT INTO managed_compute_allocation_leases
+        (id,workspace_id,org_id,generation,billing_epoch,user_id,lifecycle_intent_id,provider,provider_resource_id,
+         policy_id,seconds_per_dollar,weight_numerator,weight_denominator,ttl_seconds,state,funded_until,provider_expires_at)
+        VALUES($1,$2,$3,1,1,$4,$5,'boat',$6,'fixture',1000,1,1,600,'active',now()+interval '10 minutes',now()+interval '9 minutes')`,
+      [leaseId, seeded.workspaceId, organizationId, ownerId, createId, `sandbox-${seeded.workspaceId}`]);
+    });
+    let deleteId = "", original: unknown, engineId = "";
+    const execute = vi.fn(async (execution: CloudWorkspaceSetupExecution) => {
+      const accepted = await withSystemTx(pool, tx => requestCloudWorkspaceDeletion(tx, { workspaceId: seeded.workspaceId,
+        organizationId, actorUserId: ownerId, idempotencyKey: randomUUID() }));
+      deleteId = accepted.intent.id;
+      original = (await pool.query("SELECT to_jsonb(r) AS value FROM cloud_workspace_final_save_recoveries r WHERE lifecycle_intent_id=$1", [deleteId])).rows[0].value;
+      expect(original).toMatchObject({ engine_instance_id: null, registered_at: null, runtime_id: null, current_request_id: null });
+      const result = await registeredSuccessfulSetup(execution, "first setup complete");
+      engineId = result.readiness.engine.instanceId;
+      const heartbeatToken = `zwh_${randomBytes(32).toString("base64url")}`, bindingId = randomUUID();
+      await withSystemTx(pool, async tx => {
+        await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [organizationId]);
+        await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [seeded.workspaceId]);
+        await tx.query("UPDATE cloud_workspace_engine_instances SET final_save_version=1,cloud_local_commands_version=1,heartbeat_token_hash=$2 WHERE id=$1",
+          [engineId, createHash("sha256").update(heartbeatToken).digest()]);
+        const scope = { workspaceId: seeded.workspaceId, organizationId, generation: 1, engineInstanceId: engineId, heartbeatToken };
+        const bootId = (await tx.query("SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [engineId])).rows[0].runtime_boot_id as string;
+        const writerEpoch = await reserveLocalCloudCommandWriter(tx, scope, bootId, ownerId, 1);
+        await tx.query(`INSERT INTO cloud_agent_boot_bindings(id,workspace_id,org_id,generation,engine_instance_id,boot_id,writer_epoch,
+          funding_owner_user_id,funding_owner_epoch,credentials_initialized,initial_adoptions)
+          VALUES($1,$2,$3,1,$4,$5,$6,$7,1,true,
+            '[{"provider":"claude","status":"missing"},{"provider":"codex","status":"missing"},{"provider":"cursor","status":"missing"}]')`,
+        [bindingId, seeded.workspaceId, organizationId, engineId, bootId, writerEpoch, ownerId]);
+        if (activate) {
+          await activateLocalCloudCommandWriter(tx, scope, { bootId, writerEpoch });
+          await tx.query("UPDATE cloud_workspaces SET agent_command_mode='boot-owner-v1',agent_boot_id=$2 WHERE id=$1", [seeded.workspaceId, bindingId]);
+        }
+      });
+      return result;
+    });
+    expect(await worker({ execute }).runOnce()).toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+    await expect(execute.mock.results[0]!.value).resolves.toMatchObject({ readiness: { version: 1 } });
+    expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1", [seeded.workspaceId])).rows[0].status).toBe("ready");
+    const receipts = (await pool.query("SELECT original_recovery,bound_recovery,capture_request_id FROM cloud_workspace_initial_delete_captures WHERE lifecycle_intent_id=$1", [deleteId])).rows;
+    if (activate) {
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0].original_recovery).toEqual(original);
+      expect(receipts[0].bound_recovery).toMatchObject({ engine_instance_id: engineId, original_request_id: null, current_request_id: null });
+      expect((await pool.query("SELECT id,reason,state FROM workspace_checkpoint_requests WHERE lifecycle_intent_id=$1", [deleteId])).rows)
+        .toEqual([{ id: receipts[0].capture_request_id, reason: "before_delete", state: "queued" }]);
+    } else {
+      expect(receipts).toEqual([]);
+      expect((await pool.query("SELECT to_jsonb(r) AS value FROM cloud_workspace_final_save_recoveries r WHERE lifecycle_intent_id=$1", [deleteId])).rows[0].value).toEqual(original);
+    }
+    expect((await pool.query("SELECT state,attempt_count,dispatched_at FROM cloud_workspace_lifecycle_intents WHERE id=$1", [deleteId])).rows[0])
+      .toEqual({ state: "queued", attempt_count: 0, dispatched_at: null });
+  });
 
   const installerSuccess = { schema: "zeros.diagnostic/v1", component: "installer", stage: "done", ok: true,
     exitCode: 0, timedOut: false, failedChecks: [] };

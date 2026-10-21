@@ -1081,6 +1081,8 @@ export class CloudWorkspaceSetupWorker {
          WHERE id = $1`,
         [setup.workspaceId],
       );
+      await tx.query(`SELECT admit_cloud_initial_delete_capture(accepted_lifecycle_intent_id,NULL,$3)
+        FROM cloud_workspaces WHERE id=$1 AND org_id=$2 AND current_generation=1`, [setup.workspaceId,setup.organizationId,this.workosEnabled]);
       await audit(
         tx,
         setup.organizationId,
