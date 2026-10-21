@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-// Mirrored in the standalone control plane. These are behavioral build
-// evidence, never bearer authority or a substitute for a fresh boot witness.
+// Legacy desktop build evidence; never bearer authority or a substitute
+// for a fresh boot witness.
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const uuid = z.string().uuid();
 const revision = z.number().int().positive().safe();

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Mirrored by the independently deployed control plane's Zod 3 contract.
+// Legacy desktop Computer contract; unrelated to the cloud-v2 relay.
 export const CLOUD_COMPUTER_V2_MAX_SCRIPT_BYTES = 16_384;
 export const CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES = 8_192;
 export const CLOUD_COMPUTER_V2_MAX_LOG_BYTES = 1_048_576;

@@ -1,18 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import * as protocol from "../cloud-build-qualification.js";
-import * as controlPlane from "../../../../apps/control-plane/src/cloud-workspaces/computer-build-qualification-contract.js";
 import { RuntimeInstallInputSchema } from "../cloud-runtime-bundle.js";
-import { RuntimeInstallInputSchema as CpInstall } from "../../../../apps/control-plane/src/cloud-workspaces/runtime-contract.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/cloud-build-qualification.valid.json", import.meta.url), "utf8"));
 const snapshot = { name: "zeros-alpha-computer-v1", snapshotId: "fixture_snapshot", treeSha256: "d".repeat(64) };
 const selected = { mode: "build", qualificationId: "55555555-5555-4555-8555-555555555555",
   evidenceSha256: "e".repeat(64), evidence: fixture, snapshot };
 
-describe.each([["protocol", protocol], ["control plane", controlPlane]] as const)("%s build qualification reader", (_name, reader) => {
+describe("build qualification reader", () => {
   it("requires complete closed functional results and exact build identities", () => {
-    const schema = reader.CloudComputerBuildQualificationSchema;
+    const schema = protocol.CloudComputerBuildQualificationSchema;
     expect(schema.safeParse(fixture).success).toBe(true);
     const mutate = (change: (value: typeof fixture) => void) => {
       const value = structuredClone(fixture); change(value);
@@ -39,7 +37,7 @@ describe.each([["protocol", protocol], ["control plane", controlPlane]] as const
   });
 
   it("keeps full qualification explicit and never parses an incomplete selected proof as full", () => {
-    const schema = reader.CloudComputerQualificationSelectionSchema;
+    const schema = protocol.CloudComputerQualificationSelectionSchema;
     expect(schema.parse({ mode: "full" })).toEqual({ mode: "full" });
     expect(schema.safeParse(selected).success).toBe(true);
     for (const value of [{ mode: "build" }, { ...selected, evidence: null }, { ...selected, mode: "future" },
@@ -49,30 +47,27 @@ describe.each([["protocol", protocol], ["control plane", controlPlane]] as const
 
   it("canonicalizes the complete evidence independently of JSON key insertion order", () => {
     const reversed = Object.fromEntries(Object.entries(fixture).reverse());
-    expect(reader.canonicalBuildQualification(fixture)).toBe(reader.canonicalBuildQualification(reversed));
-    expect(reader.canonicalBuildQualification(fixture)).toBe(protocol.canonicalBuildQualification(fixture));
+    expect(protocol.canonicalBuildQualification(fixture)).toBe(protocol.canonicalBuildQualification(reversed));
   });
 
   it("canonicalizes absent optional producer fields exactly like their wire encoding", () => {
     const produced = { ...fixture, policy: { ...fixture.policy, runnerVersion: undefined },
       results: { ...fixture.results, runner: undefined } };
-    const encoded = reader.canonicalBuildQualification(produced);
-    expect(encoded).toBe(reader.canonicalBuildQualification(JSON.parse(JSON.stringify(produced))));
+    const encoded = protocol.canonicalBuildQualification(produced);
+    expect(encoded).toBe(protocol.canonicalBuildQualification(JSON.parse(JSON.stringify(produced))));
     expect(JSON.parse(encoded)).toEqual(fixture);
   });
 });
 
 it("adds an optional private installer reader without changing legacy encodings or the byte bound", () => {
   const input = JSON.parse(readFileSync(new URL("./fixtures/cloud-runtime/install.valid-workspace.json", import.meta.url), "utf8"));
-  for (const schema of [RuntimeInstallInputSchema, CpInstall]) {
-    expect(schema.parse(input)).toEqual(input);
-    expect(schema.safeParse({ ...input, buildQualification: { mode: "full" } }).success).toBe(true);
-    const runtime = { ...input.runtime, ...fixture.runtime };
-    delete runtime.installerReceiptSha256;
-    const fast = { ...input, runtime, buildQualification: selected };
-    expect(schema.safeParse(fast).success).toBe(true);
-    expect(schema.safeParse({ ...fast, runtime: { ...runtime, archiveSha256: "0".repeat(64) } }).success).toBe(false);
-    expect(schema.safeParse({ ...fast, setup: "a".repeat(64 * 1024) }).success).toBe(false);
-    expect(schema.safeParse({ ...input, buildQualification: { mode: "build" } }).success).toBe(false);
-  }
+  expect(RuntimeInstallInputSchema.parse(input)).toEqual(input);
+  expect(RuntimeInstallInputSchema.safeParse({ ...input, buildQualification: { mode: "full" } }).success).toBe(true);
+  const runtime = { ...input.runtime, ...fixture.runtime };
+  delete runtime.installerReceiptSha256;
+  const fast = { ...input, runtime, buildQualification: selected };
+  expect(RuntimeInstallInputSchema.safeParse(fast).success).toBe(true);
+  expect(RuntimeInstallInputSchema.safeParse({ ...fast, runtime: { ...runtime, archiveSha256: "0".repeat(64) } }).success).toBe(false);
+  expect(RuntimeInstallInputSchema.safeParse({ ...fast, setup: "a".repeat(64 * 1024) }).success).toBe(false);
+  expect(RuntimeInstallInputSchema.safeParse({ ...input, buildQualification: { mode: "build" } }).success).toBe(false);
 });

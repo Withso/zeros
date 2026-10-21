@@ -155,8 +155,10 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
     workspace = parse(WorkspaceReply, await request(base, "create", "POST", { organizationId: options.organizationId, repository: options.repository, name }), "create").workspace;
     await waitState("running"); log("create passed");
     bridge = await connect();
-    const list = parse(z.object({ workspaces: z.array(WorkspaceSchema.extend({ path: z.string().startsWith("/") })) }), await bridge.op("workspace.list", { withChanges: true }), "workspace_list");
-    requireCheck(list.workspaces.length === 1 && list.workspaces[0]?.id === workspace.id && list.workspaces[0]?.branch === workspace.branch, "workspace_identity");
+    const nativeRow = WorkspaceSchema.pick({ id: true, branch: true, baseBranch: true }).extend({ path: z.string().startsWith("/") });
+    const list = parse(z.object({ workspaces: z.array(nativeRow) }), await bridge.op("workspace.list", { withChanges: true }), "workspace_list");
+    requireCheck(list.workspaces.length === 1 && list.workspaces[0]?.id === workspace.id && list.workspaces[0]?.branch === workspace.branch &&
+      list.workspaces[0]?.baseBranch === workspace.baseBranch, "workspace_identity");
     const root = list.workspaces[0]!.path;
     const scope = { workspaceId: workspace.id, cwd: root };
     log("connect passed");

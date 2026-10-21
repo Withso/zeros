@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import * as wire from "../cloud-computer-v2";
-import * as backend from "../../../../apps/control-plane/src/cloud-workspaces/computer-v2-contract";
 import { parseBridgeMessage } from "../schemas";
 
 describe("Cloud Computer v2 request contracts", () => {
@@ -21,14 +20,12 @@ describe("Cloud Computer v2 request contracts", () => {
     [{ ...checkout, kind: "pull_request" }, false],
     [{ ...checkout, headBranch: null }, false],
     [{ ...checkout, token: "untrusted-extra-field" }, false],
-  ])("keeps accepted checkout metadata in parity (%#)", (input, accepted) => {
+  ])("validates checkout metadata (%#)", (input, accepted) => {
     expect(wire.CloudWorkspaceCheckoutSourceSchema.safeParse(input).success).toBe(accepted);
-    expect(backend.CloudWorkspaceCheckoutSourceSchema.safeParse(input).success).toBe(accepted);
   });
-  it.each(["ZEROS_INTERNAL_TOKEN", "ZEROS_GIT_AUTH_TOKEN", "NODE_REPL_EXTERNAL_MODULE", "BASHOPTS", "SHELLOPTS", "PROMPT_COMMAND", "SSH_ASKPASS", "EDITOR", "VISUAL", "PAGER", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "NODE_TLS_REJECT_UNAUTHORIZED"])("rejects execution control name %s in both draft validators", name => {
+  it.each(["ZEROS_INTERNAL_TOKEN", "ZEROS_GIT_AUTH_TOKEN", "NODE_REPL_EXTERNAL_MODULE", "BASHOPTS", "SHELLOPTS", "PROMPT_COMMAND", "SSH_ASKPASS", "EDITOR", "VISUAL", "PAGER", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "NODE_TLS_REJECT_UNAUTHORIZED"])("rejects execution control name %s in draft environments", name => {
     const operation={op:"set",name,value:"synthetic-value"};
     expect(wire.CloudComputerV2EnvironmentOperationSchema.safeParse(operation).success).toBe(false);
-    expect(backend.CloudComputerV2EnvironmentOperationSchema.safeParse(operation).success).toBe(false);
   });
   it.each([
     [{expectedSettingsVersion:0,operationId:randomUUID(),script:"",timeoutSeconds:900},true],
@@ -36,9 +33,8 @@ describe("Cloud Computer v2 request contracts", () => {
     [{expectedSettingsVersion:0,operationId:randomUUID(),script:"é".repeat(8193),timeoutSeconds:900},false],
     [{expectedSettingsVersion:0,operationId:randomUUID(),script:"true",timeoutSeconds:901},false],
     [{expectedSettingsVersion:0,operationId:randomUUID(),script:"true",timeoutSeconds:1,values:{}},false],
-  ])("keeps the narrow repository setup contract in parity (%#)",(input,accepted)=>{
+  ])("validates the narrow repository setup contract (%#)",(input,accepted)=>{
     expect(wire.CloudComputerV2RepositorySetupSchema.safeParse(input).success).toBe(accepted);
-    expect(backend.CloudComputerV2RepositorySetupSchema.safeParse(input).success).toBe(accepted);
   });
   const draft = { repositories: [], installScript: "", timeoutSeconds: 900 };
   const repository = {
@@ -182,48 +178,26 @@ describe("Cloud Computer v2 request contracts", () => {
       false,
     ],
   ])(
-    "keeps %s validation aligned across deployments",
+    "validates %s",
     (schema, input, valid) => {
       const publicResult = wire[
         schema as keyof typeof wire
       ] as typeof wire.CloudComputerV2SaveDraftSchema;
-      const serverResult = backend[
-        schema as keyof typeof backend
-      ] as typeof backend.CloudComputerV2SaveDraftSchema;
       expect(publicResult.safeParse(input).success).toBe(valid);
-      expect(serverResult.safeParse(input).success).toBe(valid);
-      if (valid)
-        expect(publicResult.parse(input)).toEqual(serverResult.parse(input));
     },
   );
-  it("uses the same closed worker states and limits", () => {
-    expect(wire.CloudComputerV2BuildStateSchema.options).toEqual(
-      backend.CloudComputerV2BuildStateSchema.options,
-    );
-    expect(wire.CloudComputerV2BuildStageSchema.options).toEqual(
-      backend.CloudComputerV2BuildStageSchema.options,
-    );
-    expect(wire.CloudComputerV2BuildErrorSchema.options).toEqual(
-      backend.CloudComputerV2BuildErrorSchema.options,
-    );
-    expect(wire.CLOUD_COMPUTER_V2_MAX_LOG_BYTES).toBe(
-      backend.CLOUD_COMPUTER_V2_MAX_LOG_BYTES,
-    );
-  });
 });
 
 describe("active Cloud Computer repository metadata", () => {
-  it("accepts only the active create identity on both protocol boundaries", () => {
+  it("accepts only the active create identity", () => {
     const repository = { id: "123", owner: "example", name: "project", installationId: randomUUID() };
-    for (const schema of [wire.CloudComputerV2ActiveRepositorySchema, backend.CloudComputerV2ActiveRepositorySchema]) {
-      expect(schema.parse(repository)).toEqual(repository);
-      expect(schema.safeParse({ ...repository, requestedRef: "main" }).success).toBe(false);
-      expect(schema.safeParse({ ...repository, installationId: "invalid" }).success).toBe(false);
-    }
+    expect(wire.CloudComputerV2ActiveRepositorySchema.parse(repository)).toEqual(repository);
+    expect(wire.CloudComputerV2ActiveRepositorySchema.safeParse({ ...repository, requestedRef: "main" }).success).toBe(false);
+    expect(wire.CloudComputerV2ActiveRepositorySchema.safeParse({ ...repository, installationId: "invalid" }).success).toBe(false);
   });
 });
 
-describe("Cloud Computer runtime observation parity", () => {
+describe("Cloud Computer runtime observations", () => {
   const proof = { buildId: randomUUID(), version: 1, runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base",
     selected: { runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base", sourceCommit: "b".repeat(40), qualificationMode: "smoke" } };
   it.each([
@@ -232,10 +206,7 @@ describe("Cloud Computer runtime observation parity", () => {
     [{ ...proof, selected: { ...proof.selected, qualificationMode: "bypass" } }, false],
     [{ ...proof, selected: { ...proof.selected, sourceCommit: "foreign" } }, false],
     [{ ...proof, log: "private-provider-output" }, false],
-  ])("keeps the separate strict observation response aligned (%#)", (value, valid) => {
-    const client = wire.CloudComputerV2BuildRuntimeSchema.safeParse(value);
-    const server = backend.CloudComputerV2BuildRuntimeSchema.safeParse(value);
-    expect(client.success).toBe(valid); expect(server.success).toBe(valid);
-    if (client.success && server.success) expect(client.data).toEqual(server.data);
+  ])("validates the strict observation response (%#)", (value, valid) => {
+    expect(wire.CloudComputerV2BuildRuntimeSchema.safeParse(value).success).toBe(valid);
   });
 });

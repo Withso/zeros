@@ -45,8 +45,8 @@ These instructions apply to the entire repository. Read and follow
   repaired in shared Files or normal source tools. Saving never stages or commits.
   Local managed Git integrates Code and Design together; conflicts pause the
   canvas until shared source resolution/continue or abort completes. Provider
-  permissions and Plan remain unchanged. Cloud agents author Design the same
-  way in their VM checkout; the Design API is an optional helper in both.
+  permissions and Plan remain unchanged. These Design features are available
+  in Local workspaces; cloud v2 exposes no Design authoring, preview or capture.
 - Commit each Design folder with its `meta/design.toml`, `meta/canvas.json`,
   `rules.md`, page folders and referenced source. Authorized managed Git
   operations may include both Code and Design. Saving never implicitly stages
@@ -56,15 +56,19 @@ These instructions apply to the entire repository. Read and follow
   `.zeros/design-dir.toml`, `.zeros/design/` metadata and `.zeros-canvas.json`
   remain readable. Explicit Design authoring upgrades them recoverably.
 
-The cloud engine, agents, tools, terminals/SSH/LSP and capture run as one non-root
-user, `zeros-engine` (VM UID/GID 10003), without an agent sandbox, in the real
-checkout with normal VM egress. The VM is the isolation boundary, with one trust
-domain per workspace. Agents can read engine data on their VM, including the
-owner credential vault, VM credential and other conversations. Per-conversation
-HOME/configuration directories provide state separation, not a security boundary.
-Cloud agents author Design natively like Local ones; the shared Files editor still
-leaves Design files read-only for people in a cloud workspace. Local Personal
-and organization-local provider tools, permissions and Host lifecycle stay unchanged.
+Each cloud workspace has one Boat VM. Its standalone worker, agents, tools and
+terminals run as the stock non-root user `user`, in `/home/user/<owner>/<name>`,
+with full permissions inside the VM. The worker dials out to the control-plane
+relay and never imports the Local engine runtime. The VM is the isolation
+boundary; session directories and child environment allowlists do not isolate
+agents from other sessions or credentials delivered to that VM. Claude and
+Cursor receive their selected credentials; Codex uses the control-plane proxy.
+Access is limited to the creator while they remain an organization member.
+Cloud supports chat, files, Git and terminals; Browser, Design and simulators
+are unavailable. Local Personal and organization-local provider tools,
+permissions and Host lifecycle stay unchanged. See
+[docs/cloud-workspaces.md](docs/cloud-workspaces.md) for runtime delivery,
+history, idle stop and wake.
 
 ## Renderer invariants
 

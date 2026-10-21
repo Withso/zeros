@@ -5,7 +5,7 @@ import {
   CloudComputerV2BuildStateSchema,
 } from "./cloud-computer-v2";
 
-// Mirrored by the independently deployed control plane's Zod 3 contract.
+// Legacy desktop tool contract, retained until its engine consumers retire.
 export const CLOUD_COMPUTER_TOOLS_VERSION = 1;
 export const CLOUD_COMPUTER_TOOLS_SERVER = "cloud-computer";
 export const CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES = 8_388_608;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CloudAgentConnectionHealthSchema } from "../cloud-agent-connection-health";
-import { CloudAgentConnectionHealthSchema as Backend } from "../../../../apps/control-plane/src/cloud-workspaces/agent-connection-health-contract";
+import { CloudAgentConnectionHealthSchema as Backend } from "../../../../apps/control-plane/src/agent-credentials/agent-connection-health-contract";
 
 const observedAt="2026-10-15T11:00:00.000Z";
 const ready={version:1,status:"ready",observedAt,selectedCredentialRevision:2,credentialRevision:2,
