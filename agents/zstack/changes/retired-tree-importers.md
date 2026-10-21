@@ -18,3 +18,9 @@ placement, so generic adapter checks were running through the cloud mapping. The
 targeted run missed it; the full `pnpm test:git` caught it. After changing a
 wire consumed across features, run the whole root suite. A test whose subject
 is not placement-specific should default to a Local placement.
+
+Bundle entries break in the same way. `tsup.config.ts` still listed the
+deleted resident terminal host, so CI's `build` job failed at
+`pnpm build:engine`. Neither typecheck nor any test loads tsup entries. After
+removing an engine entry point, run `pnpm build:engine` and
+`pnpm electron:compile` locally.
