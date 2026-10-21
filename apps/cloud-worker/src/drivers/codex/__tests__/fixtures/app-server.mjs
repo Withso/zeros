@@ -64,6 +64,11 @@ input.on("line", async (line) => {
         }
         return;
       }
+      if (mode === "configuration") {
+        text(JSON.stringify({ worker: "ZEROS_WORKER_TOKEN" in process.env, cursor: "CURSOR_API_KEY" in process.env, claude: "ANTHROPIC_AUTH_TOKEN" in process.env, own: !!process.env.ZEROS_CLOUD_PROXY_TOKEN, tokenInArgs: process.argv.some((arg) => arg.includes(process.env.ZEROS_CLOUD_PROXY_TOKEN)) }));
+        complete();
+        return;
+      }
       if (["wait", "slow-ack", "ignore-interrupt"].includes(mode)) { text("working"); return; }
       if (mode === "foreign") {
         text("foreign", "other-chat", "other-turn");
