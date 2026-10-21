@@ -49,7 +49,7 @@ describe("cloud v2 lifecycle", () => {
     const { lifecycle, compute, store } = setup([workspace("creating")]);
     await lifecycle.tick();
     expect(compute.create).toHaveBeenCalledWith({
-      key: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", from: "cv2-alpha-org-1", name: "zeros-alpha-6f2b7c1e",
+      key: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", from: "cv2-alpha-org-1", name: "zeros-alpha-6f2b7c1e", // gitleaks:allow
       env: { ZEROS_WORKER_URL: "wss://relay/v2/cloud/worker", ZEROS_WORKSPACE_ID: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11" },
     });
     expect(JSON.stringify(vi.mocked(compute.create).mock.calls)).not.toContain(token);

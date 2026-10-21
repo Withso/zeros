@@ -20,3 +20,5 @@ d3a6ad6ded51c245086eb7588efbf998f4f19ce5:apps/desktop/src/engine/agents/containm
 3900c2641d30f87c31c35870e10b680f3c155437:apps/desktop/electron/__tests__/simulator-android-sdk.test.ts:generic-api-key:261
 # Synthetic Boat adapter fixture, not a credential; the successor carries gitleaks:allow.
 6a82b66efa9e56f8cdaf6ff90be9a9f04b4caa66:apps/control-plane/src/manage-cloud-owner-existing-delete-w3-loss.integration.test.ts:generic-api-key:40
+# Synthetic cloud v2 workspace UUID used as the Boat idempotency key, not a credential; HEAD carries gitleaks:allow.
+e669c8ac65057e8bfd8087c2837143f352467f74:apps/control-plane/src/cloud/lifecycle.test.ts:generic-api-key:49
