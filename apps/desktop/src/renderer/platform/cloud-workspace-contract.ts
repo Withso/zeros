@@ -1,8 +1,6 @@
 import { z } from "zod";
 
 // Pure response schemas shared by desktop and the Alpha Linux harness.
-export const CloudWorkspaceActorRoleSchema = z.enum(["viewer", "prompter", "developer", "manager", "owner"]);
-export type CloudWorkspaceActorRole = z.infer<typeof CloudWorkspaceActorRoleSchema>;
 
 export const CloudWorkspaceDocumentSchema = z.object({
   id: z.string().uuid(),
@@ -11,7 +9,6 @@ export const CloudWorkspaceDocumentSchema = z.object({
   name: z.string().min(1).max(120),
   createdBy: z.string().uuid(),
   ownerUserId: z.string().uuid().optional(),
-  actorRole: CloudWorkspaceActorRoleSchema.nullable().optional(),
   placement: z.literal("cloud"),
   status: z.string().min(1).max(64),
   capabilities: z.object({

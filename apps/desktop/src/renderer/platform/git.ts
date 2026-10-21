@@ -23,8 +23,6 @@ import type {
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
 import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
-import { bridgeCloudDesignUploadAsset, type CloudDesignAssetUploadInput } from "./bridge/design-bridge";
-export type { CloudDesignAssetUploadInput } from "./bridge/design-bridge";
 import type {
   WorkingDirectoriesWire,
   WorkspaceFileListing,
@@ -844,10 +842,6 @@ export async function designInsertAsset(
 
 export async function designStage(workspaceId: string): Promise<{ ok: true }> {
   return bridgeDesignStage(requireBridge("stage designs"), workspaceId);
-}
-
-export async function designUploadAsset(workspaceId: string, input: CloudDesignAssetUploadInput): Promise<DesignMutationReplyWire> {
-  return bridgeCloudDesignUploadAsset(requireBridge("upload a design image"), workspaceId, input);
 }
 
 export async function designSave(workspaceId: string): Promise<{ ok: true }> {

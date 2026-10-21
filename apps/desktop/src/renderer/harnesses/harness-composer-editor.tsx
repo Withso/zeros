@@ -27,7 +27,6 @@ if (cloudTarget) {
     organizationId: cloudTarget.organizationId,
     teamId: cloudTarget.organizationId,
     createdBy: cloudTarget.organizationId,
-    actorRole: "developer",
     name: "Composer fixture",
     placement: "cloud",
     status: "ready",
