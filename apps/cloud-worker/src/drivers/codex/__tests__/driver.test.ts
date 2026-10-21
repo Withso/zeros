@@ -1,0 +1,137 @@
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import type { SessionNotification } from "@zeros/protocol/agent-events";
+import { CodexDriver } from "../driver";
+
+const drivers: CodexDriver[] = [];
+afterEach(async () => { await Promise.all(drivers.splice(0).map((driver) => driver.dispose())); });
+const content = (text: string) => [{ type: "text" as const, text }];
+const openInput = {
+  sessionId: "execution-1", cwd: process.cwd(), model: "fixture-model",
+  proxy: { baseUrl: "http://127.0.0.1:1/v1", token: "offline-placeholder" },
+};
+function setup(options: { requestTimeoutMs?: number; interruptTimeoutMs?: number } = {}) {
+  const driver = new CodexDriver({
+    command: process.execPath,
+    args: [fileURLToPath(new URL("./fixtures/app-server.mjs", import.meta.url))],
+    environment: {},
+    ...options,
+  });
+  drivers.push(driver);
+  const events: SessionNotification[] = [];
+  driver.onEvent((event) => events.push(event));
+  return { driver, events };
+}
+const prose = (events: SessionNotification[]) => events.flatMap(({ update }) =>
+  update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? [update.content.text] : []).join("");
+
+describe("Codex driver with an offline app-server process", () => {
+  it("opens, streams a turn and resumes the same native chat in a new process", async () => {
+    const first = setup();
+    const opened = await first.driver.open(openInput);
+    expect(opened.nativeSessionId).toBe("native-chat");
+    expect(await first.driver.prompt(content("complete"))).toMatchObject({ stopReason: "end_turn" });
+    expect(prose(first.events)).toBe("hello");
+    expect(first.events.every((event) => event.sessionId === "execution-1")).toBe(true);
+    await first.driver.dispose();
+    const second = setup();
+    expect(await second.driver.open({ ...openInput, sessionId: "execution-2", nativeSessionId: opened.nativeSessionId })).toEqual(opened);
+    await second.driver.prompt(content("complete"));
+    expect(second.events.every((event) => event.sessionId === "execution-2")).toBe(true);
+  });
+
+  it("waits past the turn acknowledgement and interrupts the exact native turn", async () => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    let settled = false;
+    const result = driver.prompt(content("wait")).then((value) => { settled = true; return value; });
+    await expect.poll(() => prose(events)).toBe("working");
+    expect(settled).toBe(false);
+    await driver.interrupt();
+    expect(await result).toMatchObject({ stopReason: "cancelled" });
+    expect(await driver.prompt(content("complete"))).toMatchObject({ stopReason: "end_turn" });
+  });
+
+  it("preserves terminal events that arrive before the turn acknowledgement", async () => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    expect(await driver.prompt(content("before-ack"))).toMatchObject({ stopReason: "end_turn" });
+    expect(prose(events)).toBe("early");
+  });
+
+  it("keeps Stop intent until a delayed turn acknowledgement supplies its identity", async () => {
+    const { driver } = setup();
+    await driver.open(openInput);
+    const pending = driver.prompt(content("slow-ack"));
+    await driver.interrupt();
+    expect(await pending).toMatchObject({ stopReason: "cancelled" });
+  });
+
+  it("steers an active turn and does not claim delivery when idle or stopping", async () => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    expect(await driver.steer(content("idle"))).toBe("queued");
+    const pending = driver.prompt(content("wait"));
+    await expect.poll(() => prose(events)).toBe("working");
+    expect(await driver.steer(content(" direction"))).toBe("delivered");
+    await expect.poll(() => prose(events)).toBe("working direction");
+    const stopped = driver.interrupt();
+    expect(await driver.steer(content("too late"))).toBe("queued");
+    await stopped;
+    await pending;
+  });
+
+  it("applies a model change to the next turn", async () => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    await driver.setModel("next-model");
+    const result = await driver.prompt(content("model"));
+    expect(prose(events)).toBe("next-model");
+    expect(result.effectiveModel).toBe("next-model");
+  });
+
+  it("isolates other native threads and retired turns", async () => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    await driver.prompt(content("foreign"));
+    expect(prose(events)).toBe("hello");
+  });
+
+  it("answers unsupported native requests without hanging the turn", async () => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    await driver.prompt(content("requests"));
+    const responses = JSON.parse(prose(events));
+    expect(responses[0]).toEqual({ decision: "decline" });
+    expect(responses[1]).toEqual({ decision: "decline" });
+    expect(responses[2]).toEqual({ answers: {} });
+    expect(responses[3]).toMatchObject({ action: "cancel" });
+    expect(responses[4]).toMatchObject({ code: -32601 });
+  });
+
+  it.each(["crash", "malformed", "no-ack"])("settles a prompt on %s without leaking process output", async (mode) => {
+    const { driver } = setup({ requestTimeoutMs: 500 });
+    await driver.open(openInput);
+    await expect(driver.prompt(content(mode))).rejects.toThrow();
+  });
+
+  it("kills an unresponsive native turn after the interrupt deadline", async () => {
+    const { driver, events } = setup({ interruptTimeoutMs: 150 });
+    await driver.open(openInput);
+    const pending = driver.prompt(content("ignore-interrupt")).catch((error: unknown) => error);
+    await expect.poll(() => prose(events)).toBe("working");
+    await expect(driver.interrupt()).rejects.toThrow(/interrupt/i);
+    expect(await pending).toBeInstanceOf(Error);
+  });
+
+  it("rejects overlapping prompts and settles active work on disposal", async () => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    const pending = driver.prompt(content("wait")).catch((error: unknown) => error);
+    await expect.poll(() => prose(events)).toBe("working");
+    await expect(driver.prompt(content("overlap"))).rejects.toThrow(/active/i);
+    await driver.dispose();
+    expect(await pending).toBeInstanceOf(Error);
+    await expect(driver.prompt(content("after disposal"))).rejects.toThrow();
+  });
+});
