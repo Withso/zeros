@@ -4,6 +4,7 @@ import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/p
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import type { Driver, DriverOpen } from "../driver";
 import { JsonRpcProcess, RpcError } from "../shared/json-rpc-process";
+import { agentEnvironment } from "../shared/agent-environment";
 import { CodexEventMapper } from "./event-mapper";
 
 export const CODEX_VERSION = "0.162.1";
@@ -13,6 +14,7 @@ interface CodexOptions {
   command?: string;
   args?: string[];
   environment?: NodeJS.ProcessEnv;
+  gitEnvironment?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
   interruptTimeoutMs?: number;
 }
@@ -77,7 +79,7 @@ export class CodexDriver implements Driver {
     this.rpc = new JsonRpcProcess({
       command, args: [...args, "app-server", ...Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])],
       cwd: input.cwd,
-      env: { ...(this.options.environment ?? process.env), ZEROS_CLOUD_PROXY_TOKEN: input.proxy.token },
+      env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, this.options.gitEnvironment),
       requestTimeoutMs: this.options.requestTimeoutMs ?? 30_000,
       onNotification: (method, params) => this.notification(method, params),
       onRequest: (method) => this.nativeRequest(method),

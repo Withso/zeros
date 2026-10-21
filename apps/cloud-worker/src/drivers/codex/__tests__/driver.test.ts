@@ -10,7 +10,7 @@ const openInput = {
   sessionId: "execution-1", cwd: process.cwd(), model: "fixture-model",
   proxy: { baseUrl: "http://127.0.0.1:1/v1", token: "offline-placeholder" },
 };
-function setup(options: { requestTimeoutMs?: number; interruptTimeoutMs?: number } = {}) {
+function setup(options: { requestTimeoutMs?: number; interruptTimeoutMs?: number; environment?: NodeJS.ProcessEnv } = {}) {
   const driver = new CodexDriver({
     command: process.execPath,
     args: [fileURLToPath(new URL("./fixtures/app-server.mjs", import.meta.url))],
@@ -26,6 +26,15 @@ const prose = (events: SessionNotification[]) => events.flatMap(({ update }) =>
   update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? [update.content.text] : []).join("");
 
 describe("Codex driver with an offline app-server process", () => {
+  it("keeps worker and other-agent credentials out of the native process", async () => {
+    const { driver, events } = setup({ environment: {
+      ZEROS_WORKER_TOKEN: "fixture-worker", CURSOR_API_KEY: "fixture-cursor", ANTHROPIC_AUTH_TOKEN: "fixture-claude",
+    } });
+    await driver.open(openInput);
+    await driver.prompt(content("configuration"));
+    expect(JSON.parse(prose(events))).toEqual({ worker: false, cursor: false, claude: false, own: true, tokenInArgs: false });
+  });
+
   it("opens, streams a turn and resumes the same native chat in a new process", async () => {
     const first = setup();
     const opened = await first.driver.open(openInput);

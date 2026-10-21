@@ -1,9 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SessionNotification } from "@zeros/protocol/agent-events";
+import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 import { CodexEventMapper } from "../event-mapper";
 import { CodexDriver } from "../driver";
 import { streams } from "./fixtures/streams";
+import { SessionStore } from "../../../sessions/session-store";
 
 const ids = vi.hoisted(() => ({ next: 0 }));
 vi.mock("node:crypto", async (original) => ({
@@ -35,6 +40,7 @@ describe("Codex native → canonical event parity", () => {
     });
 
     it(`driver stream: ${fixture.name}`, async () => {
+      const directory = await mkdtemp(join(tmpdir(), "zeros-worker-parity-"));
       ids.next = 0;
       const expected: SessionNotification[] = [];
       const local = new CodexAppServerTranslator({ sessionId: "execution", emit: (event: SessionNotification) => expected.push(event) });
@@ -53,7 +59,21 @@ describe("Codex native → canonical event parity", () => {
         await expect.poll(() => actual).toEqual(JSON.parse(JSON.stringify(expected)));
         if (local.terminalError) expect(result).toBeInstanceOf(Error);
         else expect(result).toMatchObject({ stopReason: local.stopReason });
-      } finally { await driver.dispose(); }
+        // Check the durable consumer too: authoritative replacements and late
+        // terminal repairs must survive the same shared fold and disk reload.
+        vi.spyOn(Date, "now").mockReturnValue(1000);
+        let random = 0;
+        vi.spyOn(Math, "random").mockImplementation(() => ++random / 1000);
+        const wanted = expected.reduce<AgentMessage[]>((messages, event) => applyUpdate(messages, event), []);
+        random = 0;
+        const store = await SessionStore.open(directory, "parity-workspace");
+        await store.upsert({ id: "chat", folder: "parity-workspace", agentId: "codex" });
+        for (const event of actual) await store.fold("chat", event);
+        const reloaded = await SessionStore.open(directory, "parity-workspace");
+        expect(reloaded.window("chat").messages).toEqual(wanted.map((message) => ({
+          msgId: message.id, kind: message.kind, payload: JSON.stringify(message), createdAt: message.createdAt,
+        })));
+      } finally { await driver.dispose(); await rm(directory, { recursive: true, force: true }); }
     });
   }
 });
