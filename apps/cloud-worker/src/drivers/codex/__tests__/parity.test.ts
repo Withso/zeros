@@ -69,6 +69,7 @@ describe("Codex native → canonical event parity", () => {
         const store = await SessionStore.open(directory, "parity-workspace");
         await store.upsert({ id: "chat", folder: "parity-workspace", agentId: "codex" });
         for (const event of actual) await store.fold("chat", event);
+        await store.flush();
         const reloaded = await SessionStore.open(directory, "parity-workspace");
         expect(reloaded.window("chat").messages).toEqual(wanted.map((message) => ({
           msgId: message.id, kind: message.kind, payload: JSON.stringify(message), createdAt: message.createdAt,

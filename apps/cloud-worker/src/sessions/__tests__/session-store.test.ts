@@ -8,11 +8,16 @@ import { SessionStore } from "../session-store";
 
 const workspace = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const directories: string[] = [];
-afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+const stores: SessionStore[] = [];
+afterEach(async () => {
+  await Promise.all(stores.splice(0).map((store) => store.flush()));
+  await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
 async function setup() {
   const directory = await mkdtemp(join(tmpdir(), "zeros-worker-store-"));
   directories.push(directory);
   const store = await SessionStore.open(directory, workspace);
+  stores.push(store);
   await store.upsert({ id: "chat", folder: workspace, agentId: "codex", title: "Original", createdAt: 42 });
   return { directory, store };
 }
@@ -139,5 +144,37 @@ describe("durable per-chat sessions", () => {
     expect(JSON.parse(store.window("chat").messages[0].payload).text).toBe("replacement");
     await expect(store.importMessages("chat", Array(5001).fill(row("a", "agent")))).rejects.toThrow("5000");
     await expect(store.importMessages("unknown", [row("a", "agent")])).rejects.toThrow("Unknown chat");
+  });
+
+  it("coalesces a 5000-row chat's stream at 250 ms and flushes immediately at turn end", async () => {
+    const { store, directory } = await setup();
+    await store.enqueue("chat", prompt("large"));
+    await store.claim("chat");
+    await store.importMessages("chat", Array.from({ length: 5000 }, (_, i) => row(`large-${i}`, "agent", { text: "x".repeat(1024) })));
+    const save = vi.spyOn(store as unknown as { save(data: unknown): Promise<void> }, "save");
+    const stringify = vi.spyOn(JSON, "stringify");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const chunk = () => store.fold("chat", { sessionId: "exec", update: { sessionUpdate: "agent_message_chunk", messageId: "stream", content: { type: "text", text: "delta" } } });
+      await chunk();
+      expect(save.mock.calls.length).toBe(0);
+      for (let i = 0; i < 99; i++) await chunk();
+      // Neither an unchanged history nor its payload strings are reserialized
+      // per token. Only the growing row is folded and encoded during a burst.
+      expect(stringify.mock.calls.some(([value]) => value && typeof value === "object" && "rows" in value)).toBe(false);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(save.mock.calls.length).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await store.flush();
+      expect(save).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 10; i++) await chunk();
+      await store.finish("chat", "large", { stopReason: "end_turn" });
+      expect(save).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(save).toHaveBeenCalledTimes(2);
+      const reopened = await SessionStore.open(directory, workspace);
+      expect(reopened.snapshot("chat")?.rows).toHaveLength(5002);
+      expect(JSON.parse(reopened.window("chat", 1).messages.at(-1)!.payload).text).toBe("delta".repeat(110));
+    } finally { vi.useRealTimers(); }
   });
 });
