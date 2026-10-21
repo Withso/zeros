@@ -22,6 +22,8 @@ export const CLOUD_V2_WORKER_PATH = "/v2/cloud/worker";
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
 const BRIDGE_PATH = /^\/v2\/cloud\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/bridge$/;
 const HELLO_TIMEOUT_MS = 10_000;
+/** Proxy tokens live 24 h; a fresh config every 12 h keeps active turns covered. */
+const CONFIG_REFRESH_MS = 12 * 60 * 60_000;
 const PING_INTERVAL_MS = 30_000;
 const ACTIVE_WRITE_INTERVAL_MS = 30_000;
 /** Frames an app may send while its workspace wakes; more closes the socket. */
@@ -191,6 +193,11 @@ export class CloudV2Relay {
     }
     if (room.worker !== ws) return;
     room.ready = true;
+    const refresh = setInterval(() => {
+      void this.deps.config(room.workspace).then(config => send(ws, config), () => ws.close(1011, "config_unavailable"));
+    }, CONFIG_REFRESH_MS);
+    refresh.unref();
+    ws.once("close", () => clearInterval(refresh));
     for (const [clientId, client] of room.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
       send(ws, { t: "open", clientId });

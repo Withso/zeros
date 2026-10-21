@@ -13,7 +13,7 @@ const capabilities = { design: false, browser: false, simulators: false, termina
 
 function workspace(state: CloudV2Workspace["state"]): CloudV2Workspace {
   return {
-    id: workspaceId, organizationId: workspaceId, creatorUserId: workspaceId, name: "w", repository: "o/r", branch: "main",
+    id: workspaceId, organizationId: workspaceId, creatorUserId: workspaceId, name: "w", repository: "o/r", branch: "main", baseBranch: "main",
     state, boatSandboxId: "bx_1", computerBuildId: null, errorCode: null, activeAt: null,
     createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
   };

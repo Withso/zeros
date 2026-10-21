@@ -375,7 +375,43 @@ export type Config = {
   /** Metadata for release identity; workspace selection is owned separately. */
   cloudWorkspaceNewRuntimeProfile?: "v4";
   cloudWorkspaceResumeExistingEnabled?: boolean;
+  /** Cloud workspace v2: Boat VMs run by a small worker. Null unless enabled. */
+  cloudV2?: CloudV2Config | null;
 };
+
+export type CloudV2Config = {
+  boat: { apiKey: string; billingOrg?: string };
+  /** https:// origin of the API service; agents reach the model proxy here. */
+  apiUrl: string;
+  /** wss:// origin of the realtime service; workers and the app connect here. */
+  realtimeUrl: string;
+};
+
+function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
+  const enabled = env.CLOUD_V2_ENABLED?.trim().toLowerCase();
+  if (enabled !== "true") {
+    if (enabled && enabled !== "false") throw new Error("Invalid environment: CLOUD_V2_ENABLED must be true or false");
+    return null;
+  }
+  const apiKey = env.BOAT_API_KEY?.trim();
+  if (!apiKey) throw new Error("Invalid environment: CLOUD_V2_ENABLED requires BOAT_API_KEY");
+  const billingOrg = env.BOAT_BILLING_ORG?.trim();
+  const origin = (name: string, protocol: "https:" | "wss:") => {
+    const raw = env[name]?.trim();
+    let url: URL;
+    try { url = new URL(raw ?? ""); } catch { throw new Error(`Invalid environment: ${name} must be a ${protocol}// origin`); }
+    const local = protocol === "wss:" ? url.protocol === "ws:" : url.protocol === "http:";
+    if ((url.protocol !== protocol && !(local && ["localhost", "127.0.0.1"].includes(url.hostname))) ||
+        url.pathname !== "/" || url.search || url.hash || url.username || url.password)
+      throw new Error(`Invalid environment: ${name} must be a ${protocol}// origin`);
+    return url.origin;
+  };
+  return {
+    boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
+    apiUrl: origin("CLOUD_V2_API_URL", "https:"),
+    realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
+  };
+}
 
 export type CloudRuntimePublicationConfig = RuntimeOidcConfig & RuntimeArtifactStoreConfig & {
   enabled: boolean;
@@ -1753,5 +1789,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     cloudRuntimePublication: runtime.publication,
     cloudWorkspaceNewRuntimeProfile: runtime.newWorkspaceProfile,
     cloudWorkspaceResumeExistingEnabled: resumeFlag === "true",
+    cloudV2: cloudChannel ? loadCloudV2Config(env) : null,
   };
 }

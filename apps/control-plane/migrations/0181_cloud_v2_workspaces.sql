@@ -42,6 +42,7 @@ CREATE TABLE cloud_v2_workspaces (
   name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 200),
   repository text NOT NULL CHECK (char_length(repository) BETWEEN 3 AND 512),
   branch text NOT NULL CHECK (char_length(branch) BETWEEN 1 AND 255),
+  base_branch text NOT NULL CHECK (char_length(base_branch) BETWEEN 1 AND 255),
   state text NOT NULL CHECK (state IN ('creating','running','stopping','stopped','starting','deleting','deleted','failed')),
   computer_build_id uuid REFERENCES cloud_v2_computer_builds(id),
   boat_sandbox_id text UNIQUE,

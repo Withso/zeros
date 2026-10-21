@@ -1007,7 +1007,7 @@ async function revokeGithubInstallationToken(
   }).catch(() => undefined);
 }
 
-async function mintGithubInstallationToken(
+export async function mintGithubInstallationToken(
   fetchImpl: FetchLike,
   config: GithubBackendConfig,
   input: {

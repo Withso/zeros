@@ -31,7 +31,10 @@ import { DatabaseAcquireTimeoutError } from "./db.js";
 import type { CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
 import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
+import { createHash } from "node:crypto";
 import { createAuthMiddleware } from "./auth.js";
+import { createCloudV2ProxyRoutes, CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./cloud/proxy.js";
+import { createCloudV2Routes, type CloudV2RouteDeps } from "./cloud/routes.js";
 import { rateLimit } from "./ratelimit.js";
 import { clientAddress } from "./client-address.js";
 import { createChatTitleRoutes } from "./chat-titles.js";
@@ -111,6 +114,8 @@ import {
 import { createEngineCapabilityGate, createEngineClientCapabilityGate } from "./cloud-workspaces/capability-service-verifier.js";
 
 export type CreateAppDependencies = {
+  /** Cloud workspace v2: creator routes under /v1 and the worker model proxy. */
+  cloudV2?: { routes: CloudV2RouteDeps; proxy: CloudV2ProxyDeps };
   zerosDevAuth?: ZerosDevAuthDependencies;
   requestCostObserver?: (cost: RequestDatabaseCost) => void | Promise<void>;
   runtimePublication?: RuntimePublicationDependencies;
@@ -273,6 +278,13 @@ export function createApp(
   // CI has its own GitHub Actions issuer and workflow authority. Account JWTs
   // cannot publish artifacts; staff operations remain behind account auth.
   app.route("/", createRuntimePublicationRoutes(config, pool, dependencies.runtimePublication));
+  if (dependencies.cloudV2) {
+    // Workspace proxy tokens, not user sessions, authenticate the model proxy.
+    // Keyed per workspace token: many VMs can share one provider egress address.
+    app.use(`${CLOUD_V2_PROXY_PREFIX}/*`, rateLimit("cloud-v2-proxy", 600, 60_000,
+      c => createHash("sha256").update(c.req.header("authorization") ?? c.req.header("x-api-key") ?? "").digest("base64url")));
+    app.route("/", createCloudV2ProxyRoutes(dependencies.cloudV2.proxy));
+  }
   app.use(`${RUNTIME_STAFF_PATH}/*`, async (c, next) => {
     c.header("Cache-Control", "no-store");
     c.header("Pragma", "no-cache");
@@ -725,6 +737,7 @@ export function createApp(
   );
   if (dependencies.deviceSessions && !pendingMigration) app.route("/", createDeviceSessionRoutes(pool, dependencies.deviceSessions));
   if (dependencies.cloudRuntimeConnect && !pendingMigration) app.route("/", createCloudRuntimeConnectRoutes(dependencies.cloudRuntimeConnect));
+  if (dependencies.cloudV2) app.route("/", createCloudV2Routes(dependencies.cloudV2.routes));
   app.route(
     "/",
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {

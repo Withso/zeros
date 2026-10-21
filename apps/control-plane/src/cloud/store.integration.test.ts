@@ -33,13 +33,14 @@ d("cloud v2 store", () => {
   });
 
   const create = () => store.createWorkspace({
-    id: randomUUID(), organizationId: org, creatorUserId: creator, name: "zeros", repository: "withso/zeros", branch: "main",
+    id: randomUUID(), organizationId: org, creatorUserId: creator, name: "zeros", repository: "withso/zeros", branch: "zeros/w", baseBranch: "main",
     computerBuildId: null,
   });
 
   it("creates a workspace only its creator can read, and returns the worker token once", async () => {
-    const { workspace, workerToken } = await create();
+    const workspace = await create();
     expect(workspace.state).toBe("creating");
+    const workerToken = await store.rotateWorkerToken(workspace.id);
     expect(workerToken).toMatch(/^zw2w_/);
     expect((await store.get(workspace.id, creator)).id).toBe(workspace.id);
     await expect(store.get(workspace.id, member)).rejects.toMatchObject({ status: 404 });
@@ -52,13 +53,14 @@ d("cloud v2 store", () => {
   it("refuses non-members, personal organizations and organizations without cloud", async () => {
     const outsider = await user();
     await expect(store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: outsider, name: "x", repository: "o/r",
-      branch: "main", computerBuildId: null })).rejects.toMatchObject({ status: 404 });
+      branch: "main", baseBranch: "main", computerBuildId: null })).rejects.toMatchObject({ status: 404 });
     await pool.query(`UPDATE organizations SET cloud_workspaces_allowed = false WHERE id = $1`, [org]);
     await expect(create()).rejects.toMatchObject({ status: 404 });
   });
 
   it("moves state only from the expected states and forgets the worker on delete", async () => {
-    const { workspace, workerToken } = await create();
+    const workspace = await create();
+    const workerToken = await store.rotateWorkerToken(workspace.id);
     expect(await store.transition(workspace.id, ["stopped"], "starting")).toBeNull();
     expect((await store.transition(workspace.id, ["creating"], "running", { boatSandboxId: "bx_abc" }))?.boatSandboxId).toBe("bx_abc");
     expect((await store.transition(workspace.id, ["running"], "deleted"))?.state).toBe("deleted");
@@ -67,8 +69,8 @@ d("cloud v2 store", () => {
   });
 
   it("consumes a connect ticket exactly once, and only for its workspace and creator", async () => {
-    const { workspace } = await create();
-    const other = (await create()).workspace;
+    const workspace = await create();
+    const other = await create();
     const { token } = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator, ttlMs: 60_000 });
     expect(await store.consumeConnectTicket(token, other.id)).toBeNull();
     expect(await store.consumeConnectTicket(token, workspace.id)).toEqual({ userId: creator });
@@ -78,7 +80,7 @@ d("cloud v2 store", () => {
   });
 
   it("mirrors chats and rows in Local's order, keeping first-insert position on update", async () => {
-    const { workspace } = await create();
+    const workspace = await create();
     await store.writeHistory(workspace.id, { chats: [{ id: "c1", title: "One" } as { id: string }] });
     const row = (msgId: string, text: string) => ({ msgId, kind: "agent", payload: JSON.stringify({ id: msgId, text }), createdAt: 1 });
     await store.writeHistory(workspace.id, { messages: { chatId: "c1", rows: [row("m1", "a"), row("m2", "b")] } });
@@ -91,7 +93,7 @@ d("cloud v2 store", () => {
   });
 
   it("verifies proxy tokens only while the workspace runs", async () => {
-    const { workspace } = await create();
+    const workspace = await create();
     const { token } = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: 60_000 });
     expect(await store.verifyProxyToken(token)).toBeNull();
     await store.transition(workspace.id, ["creating"], "running");

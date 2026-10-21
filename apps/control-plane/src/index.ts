@@ -9,6 +9,7 @@ import { createCloudComputerRetirementWorker } from "./cloud-workspaces/computer
 // ──────────────────────────────────────────────────────────
 
 import { serve } from "@hono/node-server";
+import { createCloudV2 } from "./cloud/composition.js";
 import {cloudAgentCredentialKeys} from "./cloud-workspaces/agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./cloud-workspaces/agent-executions.js";
 import {DatabaseCloudComputerV2Service} from "./cloud-workspaces/computer-v2.js";
@@ -805,7 +806,16 @@ const cloudGithubWriteCleanup = workerPool && config.github && runtimeReady &&
 let githubWriteCleanup: ReturnType<typeof setInterval> | undefined;
 let githubWriteCleanupPending = Promise.resolve();
 let githubWriteCleanupRunning = false;
+// Cloud workspace v2. The relay needs the single realtime replica; the
+// lifecycle loop runs wherever durable workers run.
+const cloudV2 = createCloudV2(config, workerPool ?? pool, {
+  relay: processRole === "realtime" || processRole === "combined",
+  lifecycle: processRole === "worker" || processRole === "combined",
+});
+const stopCloudV2Lifecycle = runtimeReady && migrationResult.status.state === "current"
+  ? cloudV2?.lifecycle?.start() ?? (async () => {}) : async () => {};
 const app = createApp(config, pool, emailConfig, {
+  ...(cloudV2 && servesHttpApi ? { cloudV2: { routes: cloudV2.routes, proxy: cloudV2.proxy } } : {}),
   runtimePublication: { artifacts: runtimeArtifacts,
     ...(runtimeQualification ? { enqueueSmoke: (id: string) => runtimeQualification.enqueue(id),
       requalify: (id: string) => runtimeQualification.enqueue(id, { force: true }) } : {}) },
@@ -1016,6 +1026,7 @@ void rolloutFlagsStarted?.then(mountDeviceStream);
 rolloutFlagSnapshot?.onChange(mountDeviceStream);
 server.on("upgrade", (request, socket, head) => {
   if (!servesApi || shuttingDown || migrationResult.status.state !== "current") { socket.destroy(); return; }
+  if (cloudV2?.relay?.handleUpgrade(request, socket, head)) return;
   if (cloudEngineUplink?.handleUpgrade(request, socket, head)) return;
   if (deviceStream?.handleUpgrade(request, socket, head)) return;
   if (cloudRuntimeServiceRelay?.handleUpgrade(request, socket, head)) return;
@@ -1030,7 +1041,9 @@ function shutdown(signal: string): void {
   if (githubWriteCleanup) clearInterval(githubWriteCleanup);
   const drainMs = config.shutdownDrainMs ?? 0;
   console.log(`[control-plane] ${signal}; draining${drainMs ? ` sessions over ${drainMs}ms` : ""}`);
+  cloudV2?.relay?.close();
   const backgroundStopped = Promise.allSettled([
+    stopCloudV2Lifecycle(),
     stopCloudWorkerNotifications(),
     stopCloudCheckpointHintNotifications(),
     cloudGithubReads?.close(),

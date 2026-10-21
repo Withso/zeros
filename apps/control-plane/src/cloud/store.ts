@@ -14,6 +14,7 @@ export type CloudV2Workspace = {
   name: string;
   repository: string;
   branch: string;
+  baseBranch: string;
   state: CloudV2WorkspaceState;
   boatSandboxId: string | null;
   computerBuildId: string | null;
@@ -24,12 +25,12 @@ export type CloudV2Workspace = {
 };
 
 type Row = {
-  id: string; org_id: string; creator_user_id: string; name: string; repository: string; branch: string;
+  id: string; org_id: string; creator_user_id: string; name: string; repository: string; branch: string; base_branch: string;
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
   error_code: string | null; active_at: Date | null; created_at: Date; updated_at: Date;
 };
 
-const COLUMNS = `id, org_id, creator_user_id, name, repository, branch, state, boat_sandbox_id,
+const COLUMNS = `id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, created_at, updated_at`;
 
 function workspace(row: Row): CloudV2Workspace {
@@ -40,6 +41,7 @@ function workspace(row: Row): CloudV2Workspace {
     name: row.name,
     repository: row.repository,
     branch: row.branch,
+    baseBranch: row.base_branch,
     state: row.state,
     boatSandboxId: row.boat_sandbox_id,
     computerBuildId: row.computer_build_id,
@@ -72,7 +74,7 @@ export class CloudV2Store {
 
   async createWorkspace(input: {
     id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
-    computerBuildId: string | null;
+    baseBranch: string; computerBuildId: string | null;
   }): Promise<CloudV2Workspace> {
     const row = await withSystemTx(this.pool, async tx => {
       const member = await tx.query(
@@ -82,10 +84,10 @@ export class CloudV2Store {
       );
       if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
       return (await tx.query<Row>(
-        `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, state, computer_build_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7) RETURNING ${COLUMNS}`,
+        `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
         [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
-          input.computerBuildId],
+          input.baseBranch, input.computerBuildId],
       )).rows[0]!;
     });
     return workspace(row);
@@ -225,6 +227,19 @@ export class CloudV2Store {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
       `SELECT snapshot_name FROM cloud_v2_computers WHERE org_id = $1`, [organizationId]));
     return rows[0]?.snapshot_name ?? null;
+  }
+
+  /** Repositories installed on the organization's active Cloud Computer, or
+   * null when it has none yet. */
+  async installedRepositories(organizationId: string): Promise<string[] | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ recipe: { repositories?: { repository?: unknown }[] } }>(
+      `SELECT build.recipe FROM cloud_v2_computers computer
+       JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
+       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded'`,
+      [organizationId],
+    ));
+    if (!rows[0]) return null;
+    return (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [entry.repository] : []);
   }
 
   /** Revokes a stopped or deleted workspace's tokens; deletion also drops its history. */
