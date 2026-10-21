@@ -96,7 +96,7 @@ d("account worker deadline projections and commit hints", () => {
     );
     expect((await read()).commands).toBeLessThanOrEqual(0);
     expect(
-      (await pool.query("SELECT count(*)::int AS n FROM cloud_workspaces"))
+      (await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces"))
         .rows[0].n,
     ).toBe(0);
   });

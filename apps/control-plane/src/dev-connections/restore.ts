@@ -3,7 +3,7 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import { denied, type ConnectionReference } from "./types.js";
 import { ReferenceSchema, type RestoreMapping, type RestorePort } from "./client.js";
-import {serializeCloudAgentCredentialSourceMutation,assertLegacyCloudAgentCredentialMutationAllowed} from "../cloud-workspaces/agent-credential-mutations.js";
+import {serializeCloudAgentCredentialSourceMutation,assertCloudAgentCredentialMutationAllowed} from "../agent-credentials/agent-credential-mutations.js";
 
 /** Same consent fingerprint as the released credential service. Member and
  * identity locks fence a network restore against local authorization changes. */
@@ -23,9 +23,7 @@ export async function invalidateReferences(tx:Tx,generation:string,bindings:stri
   const rows=(await tx.query<{binding_id:string}>(`UPDATE dev_connection_references SET invalidated_at=clock_timestamp()
     WHERE generation_id=$1 AND ($2::uuid[] IS NULL OR binding_id=ANY($2)) RETURNING binding_id`,[generation,bindings])).rows;
   const ids=rows.map(r=>r.binding_id);
-  await tx.query("UPDATE cloud_agent_credential_delegations SET revoked_at=coalesce(revoked_at,now()) WHERE credential_id=ANY($1::uuid[])",[ids]);
   // Engines already validate these short leases and terminate on denial.
-  await tx.query("UPDATE cloud_agent_execution_leases SET released_at=coalesce(released_at,now()) WHERE credential_id=ANY($1::uuid[])",[ids]);
   return ids;
 }
 export class DatabaseDevConnectionRestore implements RestorePort {
@@ -65,7 +63,7 @@ export class DatabaseDevConnectionRestore implements RestorePort {
         if(previous?.removed_at && ref.bindingId!==reattachId)continue;
         if(previous && (previous.removed_at || previous.invalidated_at || previous.fingerprint!==fingerprint ||
           previous.reference.revision!==ref.revision || previous.reference.consentRevision!==ref.consentRevision))
-          await assertLegacyCloudAgentCredentialMutationAllowed(tx,mapping.localUserId,{credentialId:ref.bindingId,organizationId:mapping.localOrganizationId});
+          await assertCloudAgentCredentialMutationAllowed(tx,mapping.localUserId,{credentialId:ref.bindingId,organizationId:mapping.localOrganizationId});
         if(previous?.removed_at)await tx.query("UPDATE dev_connection_references SET removed_at=NULL WHERE binding_id=$1",[ref.bindingId]);
         const existing=(await tx.query<{owner_user_id:string;kind:string;material_mode:string|null}>(`SELECT c.owner_user_id,c.kind,v.material_mode
           FROM cloud_agent_credentials c LEFT JOIN cloud_agent_credential_versions v ON v.credential_id=c.id AND v.version=c.current_version
@@ -81,7 +79,6 @@ export class DatabaseDevConnectionRestore implements RestorePort {
           VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO UPDATE SET revision=cloud_agent_credentials.revision+CASE WHEN $8 THEN 1 ELSE 0 END,
           revoked_at=NULL,last_request_sha256=EXCLUDED.last_request_sha256,updated_at=now() RETURNING revision`,
         [ref.bindingId,mapping.localUserId,ref.kind,`Dev ${ref.kind}`,randomUUID(),hash,ref.connectionMethod,!!changed])).rows[0]!;
-        if(changed)await tx.query("UPDATE cloud_agent_credential_delegations SET revoked_at=coalesce(revoked_at,now()) WHERE credential_id=$1",[ref.bindingId]);
         await tx.query(`INSERT INTO cloud_agent_credential_versions(credential_id,version,material_mode,dev_reference,material_expires_at)
           VALUES($1,1,'dev-reference',$2,$3) ON CONFLICT(credential_id,version) DO UPDATE SET dev_reference=EXCLUDED.dev_reference,material_expires_at=EXCLUDED.material_expires_at
           WHERE cloud_agent_credential_versions.material_mode='dev-reference'`,[ref.bindingId,ref,ref.expiresAt]);

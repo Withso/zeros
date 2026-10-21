@@ -30,6 +30,6 @@ it("gives every application/operator advisory lock a static SQLCommenter purpose
     };
     visit(tree);
   }
-  expect(statements).toBeGreaterThanOrEqual(27);
+  expect(statements).toBeGreaterThanOrEqual(22);
   expect(missing).toEqual([]);
 });

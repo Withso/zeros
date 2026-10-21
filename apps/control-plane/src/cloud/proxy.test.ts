@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CloudAgentCredentialMaterial } from "../cloud-workspaces/agent-credential-envelope.js";
+import type { CloudAgentCredentialMaterial } from "../agent-credentials/agent-credential-envelope.js";
 import { createCloudV2ProxyRoutes } from "./proxy.js";
 import type { CloudV2Workspace } from "./store.js";
 import { newCloudV2Token } from "./tokens.js";

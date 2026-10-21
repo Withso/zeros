@@ -3,13 +3,13 @@
 // cloud v2 only opens the selected, current, unrevoked version.
 import type pg from "pg";
 import { withSystemTx } from "../db.js";
-import { DatabaseCodexAuthRenewal, type CodexCredentialVersion } from "../cloud-workspaces/codex-auth-renewal.js";
+import { DatabaseCodexAuthRenewal, type CodexCredentialVersion } from "../agent-credentials/codex-auth-renewal.js";
 import {
   openCloudAgentCredential,
   type CloudAgentCredentialKeys,
   type CloudAgentCredentialKind,
   type CloudAgentCredentialMaterial,
-} from "../cloud-workspaces/agent-credential-envelope.js";
+} from "../agent-credentials/agent-credential-envelope.js";
 
 export type CloudV2AgentProvider = "codex" | "claude" | "cursor";
 export type CloudV2AgentLogins = (ownerUserId: string, organizationId: string, provider: CloudV2AgentProvider) =>

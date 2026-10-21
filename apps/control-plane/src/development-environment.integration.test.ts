@@ -8,8 +8,6 @@ import { runMigrations } from "./migrate.js";
 import { assertHostedDatabaseOwnership } from "./development-environment.js";
 import { bindFixture, seedHostedFixture } from "../../../scripts/dev-environment/hosted-fixtures.mjs";
 import { grantHostedRuntimeAuthority, repairHostedRuntimeAuthority } from "../../../scripts/dev-environment/hosted-database.mjs";
-import { authorizeCloudWorkspaceOperation } from "./cloud-workspaces/authorization.js";
-import { DatabaseProMonthlyAllowance, readProComputeUsage } from "./cloud-workspaces/pro-allowance.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const database = url ? describe : describe.skip;
@@ -152,8 +150,6 @@ database("hosted Dev database ownership", () => {
       const organizationId = "33333333-3333-4333-8333-333333333333";
       const modules = {
         "manage-staff.js": () => import("./manage-staff.js"),
-        "manage-cloud-workspace-quota.js": () => import("./manage-cloud-workspace-quota.js"),
-        "cloud-workspaces/pro-allowance.js": () => import("./cloud-workspaces/pro-allowance.js"),
       };
       const fixture = bindFixture(identity, { workosUserId: "user_devfixture", workosOrganizationId: "org_devfixture",
         expectedEmail: "dev-fixture@example.test", expectedOrganizationSlug: "dev-fixture", computeAllowance: "pro-monthly", bootstrapOrganization: true });
@@ -163,17 +159,7 @@ database("hosted Dev database ownership", () => {
         request: { ...identity, fixture, fixtureProof, roles: { runtime: { url: connection.toString() }, migration: { url: migrationUrl.toString() } }, worker: { storageMiB: 20480 }, boat: { secondsPerDollar: 100_000 } } };
       await expect(seedHostedFixture(input)).resolves.toEqual({ seeded: true });
       await expect(seedHostedFixture(input)).resolves.toEqual({ seeded: true });
-      const credit = await admin.query("SELECT amount_micro_usd,source_kind FROM managed_compute_funding_receipts");
-      expect(credit.rows).toEqual([{ amount_micro_usd: "18000000", source_kind: "pro_monthly_allowance" }]);
-      expect((await admin.query("SELECT count(*)::int AS n FROM managed_compute_credit_grants")).rows).toEqual([{ n: 0 }]);
-      const allowance = new DatabaseProMonthlyAllowance(runtime, { policyId: "hosted-dev", secondsPerDollar: 100_000 });
-      await expect(allowance.ensure(user.id)).resolves.toMatchObject({ state: "ready", replayed: true });
-      await expect(readProComputeUsage(runtime, user.id)).resolves.toMatchObject({ state: "ready", availablePercent: 100 });
-      const teamId = (await admin.query("SELECT id FROM teams WHERE org_id=$1", [organizationId])).rows[0].id;
-      await expect(withSystemTx(runtime, tx => authorizeCloudWorkspaceOperation(tx, {
-        organizationId, teamId, actorUserId: user.id, billingOwnerUserId: user.id,
-        workosEnabled: true, requireWorkspaceOwner: true,
-      }))).resolves.toMatchObject({ entitlementScope: "account", plan: "pro" });
+      expect((await admin.query("SELECT cloud_workspaces_allowed FROM organizations WHERE id=$1",[organizationId])).rows).toEqual([{cloud_workspaces_allowed:true}]);
       const member = await admin.query("SELECT role,workos_membership_id FROM organization_members WHERE org_id=$1 AND user_id=$2", [organizationId, user.id]);
       expect(member.rows).toEqual([{ role: "owner", workos_membership_id: "om_devfixture" }]);
       expect((await admin.query("SELECT count(*)::int AS n FROM teams WHERE org_id=$1", [organizationId])).rows).toEqual([{ n: 1 }]);

@@ -648,7 +648,7 @@ it('preflights every pending controlled approval before applying the strict migr
 it('keeps every published full migration approval command complete for this artifact',()=>{
   const controlled=LADDER.filter(name=>readFileSync(path.join(MIGRATIONS_DIR,name),'utf8').includes('-- zeros:requires-controlled-downtime'));
   const root=path.resolve(MIGRATIONS_DIR,'../../..');
-  for(const name of ['apps/control-plane/.env.example','apps/control-plane/README.md','docs/deployment-environments.md','docs/cloud-workspace/infrastructure-and-operations.md']){
+  for(const name of ['apps/control-plane/.env.example','apps/control-plane/README.md','docs/deployment-environments.md']){
     const source=readFileSync(path.join(root,name),'utf8');
     const commands=[...source.matchAll(/CONTROL_PLANE_MIGRATION_APPROVALS=([\w.,]+)/g)];
     expect(commands.length,name).toBeGreaterThan(0);

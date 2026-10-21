@@ -86,7 +86,9 @@ database("phase bridge on a real PostgreSQL ledger", () => {
   afterAll(async () => {
     await pool?.end();
     try {
-      await admin?.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      // pool.end() releases clients before PostgreSQL finishes closing their
+      // sockets. FORCE can race that close and emit an unhandled pool error.
+      await admin?.query(`DROP DATABASE IF EXISTS ${name}`);
     } finally {
       await admin?.end();
     }

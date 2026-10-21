@@ -10,7 +10,6 @@ import { DatabaseZerosDevAuthRepository } from "./zeros-dev-auth-repository.js";
 import type { AuthTokenClaims } from "./auth-token-contract.js";
 import { createAuthMiddleware } from "./auth.js";
 import type { Config } from "./config.js";
-import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
 
 const database = process.env.TEST_DATABASE_URL;
 const d = database ? describe : describe.skip;
@@ -62,34 +61,6 @@ d("zeros-dev existing account, audit and shared rate limits", () => {
     await repository.commit(pin, input, token);
     expect((await pool.query("SELECT client_kind,status FROM auth_sessions")).rows).toEqual([{ client_kind: "web", status: "active" }]);
     expect((await pool.query("SELECT subject->>'clientKind' AS kind FROM audit_log WHERE action='zeros_dev.auth_session_issued'")).rows).toEqual([{ kind: "web" }]);
-  });
-
-  it("admits the signed web session through the unchanged device and runtime routes and honors its tombstone", async () => {
-    const input = request(), token = claims();
-    await repository.begin(pin, input, "source"); await repository.commit(pin, input, token);
-    const bearer = await new SignJWT({ sid: token.sessionId, jti: token.tokenId, client_id: auth.webClientId,
-      "https://zeros.build/email": pin.email, "https://zeros.build/email_verified": true })
-      .setProtectedHeader({ alg: "RS256", kid: "fixture" }).setSubject(pin.subject).setIssuedAt().setExpirationTime("5m")
-      .setIssuer(auth.issuer).setAudience(auth.audience).sign(privateKey);
-    const app = new Hono();
-    app.onError((error, c) => c.json({ error: "fixture-route-error" }, "status" in error ? error.status as 401 : 500));
-    app.use("/v1/*", createAuthMiddleware({ auth } as Config, pool));
-    const registerDevice = vi.fn(async () => ({ replayed: false, device: { id: input.device.id } }));
-    const issueActor = vi.fn(async () => ({ token: "synthetic-runtime-admission" }));
-    app.route("/", createCloudWorkspaceRoutes(pool, null, { replicaService: { registerDevice } as never,
-      engineClientAdmissionService: { issueActor } as never }));
-    const headers = { authorization: `Bearer ${bearer}`, "content-type": "application/json", "idempotency-key": randomUUID() };
-    const deviceRequest = () => app.request("/v1/devices", { method: "POST", headers, body: JSON.stringify({ label: "zd-fixture", platform: "linux", publicKey: "a".repeat(43) }) });
-    expect((await deviceRequest()).status).toBe(201);
-    expect(registerDevice).toHaveBeenCalledWith(expect.objectContaining({ accountUserId: pin.accountId }));
-    const workspaceId = randomUUID();
-    expect((await app.request(`/v1/organizations/${pin.organizationId}/cloud-workspaces/${workspaceId}/runtime/admission`, {
-      method: "POST", headers, body: JSON.stringify({ actorProtocolVersion: 2 }) })).status).toBe(201);
-    expect(issueActor).toHaveBeenCalledWith(expect.objectContaining({ actorUserId: pin.accountId, organizationId: pin.organizationId, workspaceId,
-      authenticatedUser: expect.objectContaining({ authentication: expect.objectContaining({ clientKind: "web", sessionId: token.sessionId }) }) }));
-    await repository.revoke(pin, token.sessionId);
-    expect((await deviceRequest()).status).toBe(401);
-    expect(registerDevice).toHaveBeenCalledOnce();
   });
 
   it("allows refresh only for its own issued web session and audits the same SID", async () => {

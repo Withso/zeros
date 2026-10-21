@@ -124,9 +124,7 @@ provider-erasure, funding, or security-event transitions. The service-boot pause
 policies for `0025`, `0060`, and `0061` are separate from the strict migrator's
 complete ten-file approval set. Follow the `0009`
 procedure in
-[`docs/deployment-environments.md`](../../docs/deployment-environments.md) and
-the cloud procedures in
-[`docs/cloud-workspace/infrastructure-and-operations.md`](../../docs/cloud-workspace/infrastructure-and-operations.md);
+[`docs/deployment-environments.md`](../../docs/deployment-environments.md);
 never approve one during a rolling deploy.
 
 The strict operator command never skips an unapproved boundary. From a source
@@ -142,10 +140,7 @@ Automatic service boot has exactly three filename-specific, fail-safe pause
 policies: `0025_cloud_workspace_engine_authority.sql`,
 `0060_cloud_workspace_pending_blob_deletions.sql`, and
 `0061_workos_provider_erasure_fences.sql`. It may stop before any
-boundary and serve the non-cloud control plane only when the resolved cloud
-runtime is disabled (`CLOUD_WORKSPACES_ENABLED=false` and
-`CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`) and no later migration is
-recorded. Deferring `0025` additionally requires every pre-`0025` cloud state
+boundary and serve the non-cloud control plane only while v2 is unavailable and no later migration is recorded. Deferring `0025` additionally requires every pre-`0025` cloud state
 table to be empty. Deferring `0060` from a `0059` ledger permits existing cloud
 state because that is the data the controlled migration must conservatively
 backfill. Deferring `0061` permits existing state, keeps exact active WorkOS
@@ -172,18 +167,16 @@ exposes the incomplete schema explicitly:
 }
 ```
 
-While that state is present, every `/v1/devices`, Organization
-`cloud-workspaces`/`cloud-workspace-management`, and
-`/internal/v1/cloud-workspaces` endpoint returns a non-cacheable `503` with
-`error.code=controlled_migration_pending` before authentication or database
-access. Unrelated APIs remain available.
+While that state is present, the v2 runtime, agent credentials, organization
+agent connections and authentication snapshots/events return a non-cacheable
+`503` with `error.code=controlled_migration_pending` before authentication or
+database access. Unrelated APIs remain available.
 
-If cloud runtime is enabled, the ledger has crossed a missing boundary, or a
-controlled migration (including `0009` or any future marker) has no explicit
-boot-pause policy, startup fails closed. Existing cloud state also prevents the
-special pre-`0025` pause, but is expected for the pre-`0060` and pre-`0061`
-pauses. Follow the exact `0025`, `0060`, and `0061` procedures in
-[`docs/cloud-workspace/infrastructure-and-operations.md`](../../docs/cloud-workspace/infrastructure-and-operations.md).
+If the ledger has crossed a missing boundary or a controlled migration has no
+explicit boot-pause policy, startup fails closed. Run the strict migrator in
+a drained window, with a verified backup, before deploying the runtime that
+requires its schema. Migration 0182 removes the old cloud graph and must deploy
+with the v2-only control plane and desktop.
 
 The current tenant hierarchy is Account → Personal/Organization → Team →
 Member. Personal is permanent and local-only; every tenant currently receives
@@ -445,46 +438,28 @@ Webhooks are unnecessary until a webhook consumer exists. A partial or invalid
 configuration is logged and leaves the GitHub routes unavailable while the
 rest of the control plane remains healthy.
 
-## Gated cloud-workspace lifecycle
+## Cloud workspaces and agent credentials
 
-Cloud workspace lifecycle is a disabled-by-default, pre-production surface.
-Setting a provider key does not enable it: `CLOUD_WORKSPACES_ENABLED=true`, a
-complete exact-pinned cloud block, and a valid GitHub App RSA private key are
-all required at boot. Each approved Organization additionally needs a quota row
-and a durable object-storage limit row created through their respective owner
-commands; neither has a permissive default.
+Cloud v2 uses a small VM worker, the control-plane relay and database history.
+See [cloud workspaces](../../docs/cloud-workspaces.md) for its runtime and
+configuration. Account and organization deletion mark their v2 workspaces
+`deleting`; the lifecycle removes the VMs before final row erasure.
 
-The Phase 5 surface is single-owner even when the Organization has other
-members. Organization membership or administration alone does not authorize a
-member to list, connect to, prompt, copy, synchronize, or manage the owner's
-workspace. Those collaborative permissions belong to Phase 6A.
+Settings → Agents retains `/v1/cloud-agent-credentials/*`, organization agent
+connections and public credential-removal receipts. Workspace delegation and
+private engine boot/control APIs have been removed.
 
-The authenticated Organization surface is:
+The `CLOUD_WORKSPACE_SECRET_KEY_V1`, `CLOUD_WORKSPACE_SECRET_KEYS_JSON`,
+`CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION` and
+`CLOUD_CODEX_REFRESH_FINGERPRINT_*` names are persisted encryption and deployment
+contracts. Keep all readable versions while credentials or restorable backups
+reference them. The selected secret key seals new vault material; the separate
+Codex fingerprint keyring protects renewal replay detection.
 
-| Route                                                   | Purpose                                                          |
-| ------------------------------------------------------- | ---------------------------------------------------------------- |
-| `GET/POST /v1/organizations/:id/cloud-workspaces`       | List owner-authorized workspaces or request an idempotent create |
-| `GET /v1/organizations/:id/cloud-workspaces/:workspace` | Read one owner-authorized workspace                              |
-| `POST .../:workspace/stop`                              | Request a durable stop intent                                    |
-| `POST .../:workspace/wake`                              | Request wake after rechecking current eligibility and quota      |
-| `POST .../:workspace/archive`                           | Request stop-plus-archive reconciliation                         |
-| `DELETE .../:workspace`                                 | Revoke endpoint grants, then request verified deletion           |
+## Organization cloud-entitlement activation
 
-Mutating requests require an `Idempotency-Key`; replaying the same key and
-semantic request returns the original workspace/intent, while reusing it for
-different parameters returns `409`. Public documents contain the stable Zeros
-workspace id, never the Boat resource id. PostgreSQL records the immutable
-image, architecture, source commit, and resource allocation per generation.
-The provider reconciler uses leases, observes before mutating, recovers lost
-create responses, converges drift, and only deletes a managed true orphan after
-repeat observation plus a grace period.
-
-### Organization cloud-entitlement activation
-
-An Organization quota is resource capacity, not billing authority. Never infer
-an entitlement or paid seat from a quota row, and do not activate either with
-ad-hoc SQL. Before provisioning the first quota, use the database-owner command
-to record an explicit current Organization plan and exact active seat set. The
+Use the database-owner command to record an explicit current Organization
+plan and exact active seat set. Never activate either with ad-hoc SQL. The
 Organization must be active, non-Personal, cloud-enabled, linked to one active
 WorkOS Organization, and every requested seat must identify an active member.
 The accountable actor must be an active `platform_owner`.
@@ -529,226 +504,8 @@ Production execution also requires
 and revalidates the Organization, WorkOS link, actor, members, current billing
 source, entitlement, validity, and seats. It refuses to overwrite Stripe,
 contract, or migration authority and writes an immutable
-`cloud_workspace_entitlement_changes` row in the same transaction. After it
-reports `changed`, provision quota separately below. Entitlement activation
-does not create quota or object-storage limits and does not enable either cloud
-feature flag.
-
-### Cloud-workspace quota provisioning
-
-`cloud_workspace_quotas` is an explicit paid-resource admission gate. Never
-create or edit its rows with ad-hoc SQL. Use the database-owner command from a
-controlled Railway shell or equivalent operator workstation, and do not persist
-its one-shot variables on the service. The target Organization must be active,
-non-Personal, cloud-enabled, and have a current cloud entitlement. The
-accountable actor must be an active `platform_owner`.
-
-Set `DATABASE_URL` plus these target-bound inputs:
-
-- `CONTROL_PLANE_CLOUD_QUOTA_CHANNEL` — `development`, `alpha`, `beta`, or
-  `production`; it must match `RAILWAY_ENVIRONMENT_NAME` when present.
-- `CONTROL_PLANE_CLOUD_QUOTA_ORGANIZATION_ID` and
-  `CONTROL_PLANE_CLOUD_QUOTA_EXPECTED_ORGANIZATION_SLUG` — both must resolve to
-  the same exact Organization.
-- `CONTROL_PLANE_CLOUD_QUOTA_ACTOR_USER_ID` — the accountable platform owner's
-  Zeros UUID.
-- `CONTROL_PLANE_CLOUD_QUOTA_MAX_WORKSPACES` and
-  `CONTROL_PLANE_CLOUD_QUOTA_MAX_RUNNING_WORKSPACES` — positive limits, with
-  running no greater than total.
-- `CONTROL_PLANE_CLOUD_QUOTA_MAX_CPU_MILLICORES`,
-  `CONTROL_PLANE_CLOUD_QUOTA_MAX_MEMORY_MIB`, and
-  `CONTROL_PLANE_CLOUD_QUOTA_MAX_STORAGE_MIB` — aggregate limits large enough
-  for current usage and the deployment's pinned per-generation resources.
-- `CONTROL_PLANE_CLOUD_QUOTA_REASON` — a 16–512 character audit reason.
-
-Generate a read-only plan first:
-
-```sh
-# Source checkout
-pnpm --dir apps/control-plane cloud-quota:manage
-
-# Production image (/app)
-node dist/manage-cloud-workspace-quota.js
-```
-
-The command prints an approval string bound to the database fingerprint,
-channel, Organization, actor, current quota, requested quota, and a hash of the
-reason. Copy the exact value into `CONTROL_PLANE_CLOUD_QUOTA_APPROVAL`, then
-execute:
-
-```sh
-# Source checkout
-pnpm --dir apps/control-plane cloud-quota:manage --execute
-
-# Production image (/app)
-node dist/manage-cloud-workspace-quota.js --execute
-```
-
-Production additionally requires
-`CONTROL_PLANE_CLOUD_QUOTA_PRODUCTION_CONFIRMED=true`. Execution re-locks and
-revalidates every fact, rejects a stale plan or a quota below current usage,
-and appends an immutable `cloud_workspace_quota_changes` record in the same
-transaction. Creating a quota does not enable cloud routes or setup execution;
-the two feature gates remain separate release decisions.
-
-### Durable object-storage limit provisioning
-
-`cloud_workspace_object_storage_limits` bounds the coordinator-owned encrypted
-object volume. It is deliberately separate from both
-`cloud_workspace_quotas.max_storage_mib` (sandbox disks) and the storage
-provider's physical volume quota. A missing row rejects new object publication;
-there is no default derived from either provider setting.
-
-The Organization limit counts tenant-deduplicated physical blobs in upload,
-available, quarantine, and deletion states, plus copy-on-write key-rotation
-headroom. The workspace limit counts each unique blob reserved by that
-workspace. Retrying one hash does not charge it twice, while two workspaces that
-share one tenant blob each consume their own logical workspace allowance.
-
-Use the database-owner command from a controlled shell. Set `DATABASE_URL` and:
-
-- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_CHANNEL` — the exact deployment channel,
-  matching `RAILWAY_ENVIRONMENT_NAME` when present;
-- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_ORGANIZATION_ID` and
-  `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_EXPECTED_ORGANIZATION_SLUG` — the same
-  active, non-Personal, cloud-enabled Organization;
-- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_ACTOR_USER_ID` — an active
-  `platform_owner` UUID;
-- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_MAX_ORGANIZATION_BYTES` and
-  `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_MAX_WORKSPACE_BYTES` — positive exact
-  byte counts, not MiB values; the workspace ceiling must not exceed the
-  Organization ceiling; and
-- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_REASON` — a 16–512 character audit
-  reason.
-
-Generate a target-bound read-only plan, copy its approval value into
-`CONTROL_PLANE_CLOUD_OBJECT_STORAGE_APPROVAL`, then execute the same request:
-
-```sh
-# Source checkout
-pnpm --dir apps/control-plane cloud-object-storage:manage
-
-# Production image (/app)
-node dist/manage-cloud-workspace-object-storage.js
-
-# Source checkout
-pnpm --dir apps/control-plane cloud-object-storage:manage --execute
-
-# Production image (/app)
-node dist/manage-cloud-workspace-object-storage.js --execute
-```
-
-Production execution additionally requires
-`CONTROL_PLANE_CLOUD_OBJECT_STORAGE_PRODUCTION_CONFIRMED=true`. Execution locks
-and revalidates the current target, refuses limits below physical or logical
-usage, and appends immutable owner evidence to
-`cloud_workspace_object_storage_limit_changes`. Migration `0055` intentionally
-does not invent rows for existing Organizations: provision reviewed limits
-before re-enabling object-writing clients or the rotation worker. Size the
-provider volume above the aggregate application limits for filesystem metadata,
-temporary publication files, backups, and operational response headroom.
-
-### Object restore window
-
-`CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS` (0–720, default 48) keeps a live
-object for that long after it loses its last reference, so a point-in-time
-database restore still finds every object its rows reference. Match it to the
-database backup retention (48 hours on PlanetScale); zero collects at once.
-Deleted content keeps counting toward the Organization byte limit until it is
-collected. Erasure is never delayed. Key rotation deletes superseded
-ciphertext when the new one is authoritative, so a restore to before a
-rotation finished cannot read the blobs rotated after that point. Take a
-restore point after each rotation completes, and keep the old key while any
-restorable point predates the rotation: blobs not yet rotated at that point
-still need it.
-
-### Terminal object-key rotation recovery
-
-Normal rotation scheduling is insert-only. A terminally failed job is never
-globally or automatically revived: its old target key remains permanently
-fenced, and an operator must queue one exact retry with a fresh target identity.
-Use the database-owner command only after confirming that every API and worker
-replica has the complete readable old-plus-new object keyring, the selected
-current version is the intended target, and the Organization has enough durable
-storage headroom for another copy-on-write attempt.
-
-Set the existing `DATABASE_URL`, `CLOUD_WORKSPACE_OBJECT_KEY_V1` and/or
-`CLOUD_WORKSPACE_OBJECT_KEYS_JSON`, and
-`CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION`, plus these one-shot values in a
-controlled shell (do not persist them on the web service):
-
-- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_CHANNEL`, matching
-  `RAILWAY_ENVIRONMENT_NAME` when present;
-- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_ORGANIZATION_ID` and
-  `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_EXPECTED_ORGANIZATION_SLUG`;
-- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_BLOB_ID` and
-  `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_TARGET_KEY_VERSION`;
-- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_ACTOR_USER_ID`, identifying an active
-  `platform_owner`; and
-- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_REASON`, containing a 16–512 character
-  incident or change reference.
-
-Generate a read-only plan, copy its exact approval value into
-`CONTROL_PLANE_CLOUD_OBJECT_ROTATION_APPROVAL`, then execute the unchanged
-request:
-
-```sh
-# Source checkout
-pnpm --dir apps/control-plane cloud-object-rotation:retry
-pnpm --dir apps/control-plane cloud-object-rotation:retry --execute
-
-# Production image (/app)
-node dist/manage-cloud-workspace-object-rotation.js
-node dist/manage-cloud-workspace-object-rotation.js --execute
-```
-
-Production execution additionally requires
-`CONTROL_PLANE_CLOUD_OBJECT_ROTATION_PRODUCTION_CONFIRMED=true`. The plan is
-bound to the deployment, Organization, actor, blob, target version, reason, and
-the exact locked job/fence snapshot. Execution only resets that one job to
-`queued`, assigns a new unpredictable target key and nonce, and appends
-owner-only evidence; it does not mean rotation has succeeded. Keep both key
-versions deployed and monitor rotation state, deletion-fence state, durable
-storage headroom, and health until the job is `succeeded` and its source key is
-fenced. Retire an old key only after no live blob, pending/failed job, or
-required backup can reference it.
-
-### Secret keyring rotation
-
-`CLOUD_WORKSPACE_SECRET_KEY_V1` remains a compatible single-key deployment.
-For rotation, set `CLOUD_WORKSPACE_SECRET_KEYS_JSON` to every version still
-needed for decryption and set `CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION` to
-the version used for new secret-binding versions and setup material. The
-binding verifier is a contextual HMAC derived from that version's envelope key;
-the database no longer stores a raw value digest that could act as an offline
-dictionary oracle. Migrated bindings have no verifier and are compared only
-after authenticated decryption.
-
-Deploy old and new keys together first, select the new current version, rotate
-bindings, and replace generations so newly emitted setup material uses it.
-Retire an old key only after no retained binding or setup-material row—and no
-backup that must remain restorable—depends on that version. The secret keyring
-and `CLOUD_WORKSPACE_OBJECT_KEYS_JSON` are independent cryptographic domains.
-
-Provider creation queues a setup run and leaves the workspace in `setting_up`
-while `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`. The setup worker,
-workspace-bound admission and engine grant issuer are implemented, but remain
-behind that separate operator gate until the exact Boat image, lifecycle,
-root-coordinator decision, and signed macOS access paths complete protected
-qualification. End-user cloud catalog, creation, details, and management UI is
-also intentionally unwired. Configuration and safe defaults are documented in
-[`.env.example`](.env.example).
-
-### Portable runtime relay capacity
-
-The runtime relay defaults to 64 client↔engine pairs per API process, ten writer
-pairs and ten separately counted Read-only pairs per workspace, a 256 MiB shared
-inbound assembly budget, and a 128 MiB shared outbound reservation budget. The
-64 MiB message ceiling is unchanged; it is not allocated eagerly for every pair.
-Read-only guest assignments remain unlimited, not simultaneous connections.
-See [relay capacity and the opt-in local load harness](../../docs/cloud-workspace/relay-capacity.md)
-for validated environment variables, measurements, 2/8 GiB profiles, headroom and
-the limitations of per-process enforcement.
+`cloud_workspace_entitlement_changes` row in the same transaction. Entitlement activation
+does not enable `CLOUD_V2_ENABLED` or create provider resources.
 
 ## Optional feedback destinations
 
@@ -818,5 +575,5 @@ flows, health checks, guarded migrations and startup ledger verification in a di
 environment.
 
 Individual Pro grants and revocations during the staff pilot use the explicit
-[`account-pro:manage` operator](../../docs/cloud-workspace/account-pro-operations.md).
-They are independent of staff roles, organization activation, and compute credits.
+`pnpm --dir apps/control-plane account-pro:manage` operator command.
+They are independent of staff roles and organization activation.

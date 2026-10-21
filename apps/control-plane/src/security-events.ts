@@ -6,9 +6,7 @@ import { postgresNotificationSubscription, type PostgresNotificationSubscription
 import type { AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { withSystemTx, type Tx } from "./db.js";
-import {publishCloudWorkspaceDirectoryChanges} from "./cloud-workspaces/directory-events.js";
-import { CloudWorkerScheduler } from "./cloud-workspaces/worker-scheduler.js";
-import { readCloudWorkerNextDelay } from "./cloud-workspaces/worker-deadlines.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 
 const EVENT_PAGE_SIZE = 100;
 const HEARTBEAT_MS = 25_000;
@@ -25,7 +23,6 @@ export function publishPendingSecurityEvents(pool:pg.Pool):Promise<number> {
 }
 
 async function publishSecurityEvents(pool: pg.Pool): Promise<number> {
-  await publishCloudWorkspaceDirectoryChanges(pool);
   return withSystemTx(pool, async (tx) => {
     await tx.query("SELECT pg_advisory_xact_lock(1936024437, 1702258030) /*lock_purpose='security-event-publish'*/");
     await tx.query(`WITH expired AS (
@@ -58,7 +55,10 @@ export class SecurityEventPublisher {
   constructor(pool: pg.Pool, logger: Pick<Console, "error"> = console, options: { intervalMs?: number } = {}) {
     this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 60_000, async () => {
       for (let batch = 0; batch < 20 && !this.stopped; batch++) if (!await publishPendingSecurityEvents(pool)) break;
-    }, () => logger.error("[security-events] publication failed"), () => readCloudWorkerNextDelay(pool, "security"),
+    }, () => logger.error("[security-events] publication failed"), () => withSystemTx(pool, async tx => {
+      const row = (await tx.query<{ delay_ms: string | null }>(`SELECT extract(epoch FROM (min(CASE WHEN delivery_sequence IS NULL THEN now() ELSE expires_at END)-now()))*1000 AS delay_ms FROM security_events`)).rows[0];
+      return row?.delay_ms == null ? null : Number(row.delay_ms);
+    }, { consistentRead: true }),
     { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
 
@@ -186,13 +186,6 @@ export async function getSecuritySnapshot(
        ORDER BY o.is_personal DESC, o.created_at, o.id`,
       [user.id],
     );
-    const workspaces = await tx.query<{id:string;org_id:string;role:string;access_revision:string;version:string}>(`SELECT workspace.id,workspace.org_id,workspace.version,
-      cloud_workspace_read_role(workspace.id,$1) AS role,workspace.access_revision
-      FROM cloud_workspaces workspace WHERE workspace.deleted_at IS NULL
-        AND (workspace.owner_user_id=$1 OR workspace.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$1)
-          OR workspace.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()))
-        AND cloud_workspace_read_role(workspace.id,$1) IS NOT NULL
-      ORDER BY workspace.id LIMIT 1001`,[user.id]);
     const maximum = await tx.query<{ cursor: string | number }>(
       `SELECT COALESCE(max(delivery_sequence), 0) AS cursor FROM security_events`,
     );
@@ -214,8 +207,8 @@ export async function getSecuritySnapshot(
         membershipRevision: Number(row.membership_revision),
         dataRevision: Number(row.data_revision),
       })),
-      workspaces: workspaces.rows.slice(0,1000).map(row=>({id:row.id,organizationId:row.org_id,role:row.role,accessRevision:Number(row.access_revision),dataRevision:Number(row.version)})),
-      workspacesTruncated: workspaces.rows.length>1000,
+      workspaces: [],
+      workspacesTruncated: false,
       cursor: Number(maximum.rows[0]?.cursor ?? 0),
       generatedAt: new Date().toISOString(),
     };
@@ -252,7 +245,7 @@ export async function listSecurityEvents(
          AND ($5::boolean OR (e.kind='account.revoked' AND e.user_id=$2)
            OR (e.kind='session.revoked' AND $3::text IS NOT NULL AND e.provider_session_id=$3))
          AND (
-           (e.workspace_id IS NOT NULL AND (e.user_id=$2 OR (e.user_id IS NULL AND cloud_workspace_read_role(e.workspace_id,$2) IS NOT NULL)))
+           (e.workspace_id IS NOT NULL AND e.user_id=$2)
            OR (e.workspace_id IS NULL AND (
            (
              e.kind = 'session.revoked'

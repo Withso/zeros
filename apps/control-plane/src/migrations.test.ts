@@ -34,8 +34,12 @@ import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import {withSystemTx} from "./db.js";
-import { seedReadyCloudWorkspace } from "./cloud-workspaces/test-fixtures.js";
+import {withSystemTx,withUserTx} from "./db.js";
+import { sealCloudAgentCredential, openCloudAgentCredential } from "./agent-credentials/agent-credential-envelope.js";
+import { syntheticCodexCache } from "./agent-credentials/codex-auth-test-fixture.js";
+import { parseCodexNativeCache, sealCodexNativeCache, CODEX_AUTH_RUNTIME_VERSION } from "./agent-credentials/codex-auth-cache.js";
+import { rememberCodexRefreshSeed } from "./agent-credentials/codex-auth-renewal.js";
+import { seedCredentialOwner } from "./agent-credentials/test-fixtures.js";
 import {
   migrationChecksum,
   renamedMigrationAliasesFor,
@@ -247,6 +251,14 @@ d("migration ladder", { timeout: 30_000 }, () => {
     }
   };
 
+  const runLegacyMigrations = async () => {
+    await pool.query("CREATE TABLE IF NOT EXISTS schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())");
+    const applied = new Set((await pool.query<{name:string}>("SELECT name FROM schema_migrations")).rows.map(row=>row.name));
+    const pending = LADDER.filter(file=>file < "0182_" && !applied.has(file));
+    for (const file of pending) await applyAndRecord(file);
+    return pending;
+  };
+
   const seedLegacyCloudTenant = async (input: {
     userId: string;
     organizationId: string;
@@ -375,12 +387,12 @@ d("migration ladder", { timeout: 30_000 }, () => {
     try {
       await client.query("BEGIN");
       await client.query(
-        "CREATE TEMP TABLE cloud_workspace_setup_runs (id uuid)",
+        "CREATE TEMP TABLE cloud_agent_credentials (id uuid)",
       );
       await client.query("SET LOCAL search_path = pg_catalog, public, pg_temp");
       const resolved = await client.query<{ public_wins: boolean }>(
-        `SELECT 'cloud_workspace_setup_runs'::regclass =
-                'public.cloud_workspace_setup_runs'::regclass AS public_wins`,
+        `SELECT 'cloud_agent_credentials'::regclass =
+                'public.cloud_agent_credentials'::regclass AS public_wins`,
       );
       expect(resolved.rows).toEqual([{ public_wins: true }]);
     } finally {
@@ -389,25 +401,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
     }
   });
 
-  it("backfills Pro benefits and missing caps without selecting inherited writers or converting Business history",async()=>{
-    const index=LADDER.indexOf("0101_cloud_workspace_pro_entitlements.sql");
-    await applyThrough(index);
-    const pro=await seedReadyCloudWorkspace(pool,{runtimeV4:false}),business=await seedReadyCloudWorkspace(pool,{ownerUserId:pro.userId,runtimeV4:false});
-    await pool.query("UPDATE workspace_billing_epochs SET entitlement_scope='account',entitlement_plan='pro' WHERE workspace_id=$1",[pro.workspaceId]);
-    await pool.query("UPDATE cloud_workspaces SET single_member_mode=false,sharing_mode='organization' WHERE id IN ($1,$2)",[pro.workspaceId,business.workspaceId]);
-    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1",[pro.organizationId]);
-    await pool.query("INSERT INTO cloud_workspace_object_storage_limits(org_id,max_organization_bytes,max_workspace_bytes) VALUES($1,2000000,1000000) ON CONFLICT(org_id) DO UPDATE SET max_workspace_bytes=1000000",[pro.organizationId]);
-    const history=(await pool.query("SELECT * FROM workspace_billing_epochs ORDER BY workspace_id")).rows;
-    for(const file of LADDER.slice(index))await applyAndRecord(file);
-    expect((await pool.query("SELECT * FROM workspace_billing_epochs ORDER BY workspace_id")).rows).toEqual(history);
-    expect((await pool.query("SELECT pro_sharing_ready FROM cloud_workspaces WHERE id=$1",[pro.workspaceId])).rows[0].pro_sharing_ready).toBe(false);
-    expect((await pool.query("SELECT pro_sharing_ready FROM cloud_workspaces WHERE id=$1",[business.workspaceId])).rows[0].pro_sharing_ready).toBe(true);
-    expect((await pool.query("SELECT slot,user_id FROM cloud_workspace_writer_slots WHERE workspace_id=$1",[pro.workspaceId])).rows).toEqual([{slot:1,user_id:pro.userId}]);
-    expect((await pool.query("SELECT enabled FROM staff_pro_benefit_changes WHERE user_id=$1",[pro.userId])).rows).toEqual([{enabled:true}]);
-    expect((await pool.query("SELECT source FROM account_entitlements WHERE user_id=$1",[pro.userId])).rows[0].source).toBe("operator");
-    expect((await pool.query("SELECT default_policy_version FROM cloud_workspace_quotas WHERE org_id=$1",[pro.organizationId])).rows[0].default_policy_version).toBe("pro-v1");
-    expect((await pool.query("SELECT max_workspace_bytes,default_policy_version FROM cloud_workspace_object_storage_limits WHERE org_id=$1",[pro.organizationId])).rows[0]).toEqual({max_workspace_bytes:"1000000",default_policy_version:null});
-  });
+
 
   it("defers the 0023 lifecycle-intent foreign-key scan to controlled 0025", async () => {
     const boundaryIndex = LADDER.indexOf(
@@ -539,8 +533,16 @@ d("migration ladder", { timeout: 30_000 }, () => {
 
   it("restores deletion verification that a later absent stop result cleared", async () => {
     const repairIndex = LADDER.indexOf("0100_cloud_deletion_verification_repair.sql");
-    await applyThrough(repairIndex);
-    const fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
+    // Build historical rows at their original schema revision, then let the
+    // intervening migrations backfill identity and provider bindings.
+    const identityIndex = LADDER.indexOf("0026_cloud_workspace_identity_and_entitlements.sql");
+    await applyThrough(identityIndex);
+    const fixture = { workspaceId: randomUUID(), organizationId: randomUUID() };
+    await seedLegacyCloudTenant({ userId: randomUUID(), organizationId: fixture.organizationId, teamId: randomUUID(),
+      workspaces: [{ id: fixture.workspaceId, repositoryOwner: "example", repositoryName: "migration" }] });
+    await pool.query(`INSERT INTO cloud_workspace_provider_bindings(workspace_id,generation,org_id,provider,observed_state)
+      VALUES($1,1,$2,'daytona','absent')`, [fixture.workspaceId, fixture.organizationId]);
+    for (const file of LADDER.slice(identityIndex, repairIndex)) await applyAndRecord(file);
     for (const generation of [2, 3, 4]) {
       await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
           provider_connection_id,provider_connection_version,retired_at)
@@ -671,7 +673,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
   });
 
   it("enforces the same 64 MiB file ceiling at every durable storage layer", async () => {
-    await runMigrations(pool);
+    await runLegacyMigrations();
     const constraints = await pool.query<{
       table_name: string;
       definition: string;
@@ -697,7 +699,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
   });
 
   it("enforces file modes and bounded symlink targets in every durable projection", async () => {
-    await runMigrations(pool);
+    await runLegacyMigrations();
     const constraints = await pool.query<{
       constraint_name: string;
       definition: string;
@@ -733,7 +735,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
   });
 
   it("indexes durable path pagination with database-independent byte ordering", async () => {
-    await runMigrations(pool);
+    await runLegacyMigrations();
     const indexes = await pool.query<{ indexname: string; indexdef: string }>(
       `SELECT indexname, indexdef
        FROM pg_indexes
@@ -755,7 +757,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
   });
 
   it("indexes object deletion foreign keys and previously uncovered worker claims", async () => {
-    await runMigrations(pool);
+    await runLegacyMigrations();
     const uncoveredBlobForeignKeys = await pool.query<{ conname: string }>(
       `SELECT constraint_row.conname
        FROM pg_constraint constraint_row
@@ -795,7 +797,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
   });
 
   it("lets retained projections outlive compacted journals without leaving export pins", async () => {
-    await runMigrations(pool);
+    await runLegacyMigrations();
     const columns = await pool.query<{
       table_name: string;
       column_name: string;
@@ -1206,6 +1208,38 @@ d("migration ladder", { timeout: 30_000 }, () => {
     for (const file of LADDER) expect(recorded).toContain(file);
   });
 
+  it("retires the old cloud graph while preserving the vault, Codex seeds, GitHub and v2 history", async () => {
+    await applyThrough(LADDER.indexOf("0182_retire_legacy_cloud.sql"));
+    const owner = await seedCredentialOwner(pool), credentialId = randomUUID(), workspaceId = randomUUID();
+    const key = randomBytes(32).toString("base64url");
+    const cache = syntheticCodexCache(), parsed = parseCodexNativeCache(cache);
+    const identity = { credentialId, ownerUserId: owner.userId, kind: "codex-chatgpt" as const, version: 1, keyVersion: 1 };
+    const encrypted = sealCloudAgentCredential(parsed.material, identity, key);
+    const sealedCache = sealCodexNativeCache(cache, { credentialId, ownerUserId: owner.userId, revision: 1, version: 1, keyVersion: 1 }, key);
+    await pool.query("INSERT INTO cloud_agent_credentials(id,owner_user_id,kind,display_name,last_operation_id,last_request_sha256,connection_method) VALUES($1,$2,'codex-chatgpt','Retained', $3,$4,'account')",[credentialId,owner.userId,randomUUID(),randomBytes(32)]);
+    await pool.query("INSERT INTO cloud_agent_credential_versions(credential_id,version,key_version,nonce,ciphertext,auth_tag,material_expires_at) VALUES($1,1,1,$2,$3,$4,now()+interval '1 hour')",[credentialId,encrypted.nonce,encrypted.ciphertext,encrypted.authTag]);
+    await pool.query("INSERT INTO cloud_agent_credential_organizations(credential_id,owner_user_id,org_id) VALUES($1,$2,$3)",[credentialId,owner.userId,owner.organizationId]);
+    await pool.query("INSERT INTO cloud_codex_auth_caches(credential_id,credential_revision,material_version,runtime_version,binding_sha256,key_version,nonce,ciphertext,auth_tag) VALUES($1,1,1,$2,$3,1,$4,$5,$6)",[credentialId,CODEX_AUTH_RUNTIME_VERSION,parsed.bindingSha256,sealedCache.nonce,sealedCache.ciphertext,sealedCache.authTag]);
+    await withSystemTx(pool,tx=>rememberCodexRefreshSeed(tx,credentialId,cache.tokens.refresh_token,{currentKeyVersion:1,keys:{1:key},refreshFingerprints:{currentKeyVersion:1,keys:{1:randomBytes(32).toString("base64url")}}},true));
+    await pool.query("INSERT INTO github_installations(org_id,github_installation_id,app_variant,account_login,account_type,target_type) VALUES($1,123456,'github.com','fixture','Organization','Organization')",[owner.organizationId]);
+    await pool.query("INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state) VALUES($1,$2,$3,'Retained','o/r','topic','main','stopped')",[workspaceId,owner.organizationId,owner.userId]);
+    await pool.query("INSERT INTO cloud_v2_chats(workspace_id,chat_id,row) VALUES($1,'chat',$2)",[workspaceId,{id:"chat"}]);
+    await pool.query("INSERT INTO cloud_v2_messages(workspace_id,chat_id,msg_id,kind,payload,created_at_ms) VALUES($1,'chat','message','text','retained transcript',1)",[workspaceId]);
+    const tables = ["cloud_agent_credentials","cloud_agent_credential_versions","cloud_agent_credential_organizations","cloud_codex_auth_caches","cloud_codex_refresh_fingerprints","github_installations","cloud_v2_workspaces","cloud_v2_chats","cloud_v2_messages"];
+    const snapshot = async () => Promise.all(tables.map(async table=>JSON.stringify((await pool.query(`SELECT * FROM ${table}`)).rows)));
+    const before = await snapshot();
+    expect(await runMigrations(pool)).toEqual(["0182_retire_legacy_cloud.sql"]);
+    // Compare booleans so failures cannot print synthetic credential material.
+    expect(JSON.stringify(await snapshot()) === JSON.stringify(before)).toBe(true);
+    const material = (await pool.query("SELECT nonce,ciphertext,auth_tag FROM cloud_agent_credential_versions WHERE credential_id=$1",[credentialId])).rows[0];
+    expect(openCloudAgentCredential({nonce:material.nonce,ciphertext:material.ciphertext,authTag:material.auth_tag},identity,{1:key}).kind).toBe("codex-chatgpt");
+    expect((await pool.query("SELECT to_regclass('cloud_workspaces') AS workspace,to_regclass('cloud_agent_credential_delegations') AS delegation,to_regclass('provider_connections') AS provider,to_regclass('control_plane_jobs') AS jobs")).rows[0]).toEqual({workspace:null,delegation:null,provider:null,jobs:null});
+    expect((await pool.query("SELECT 1 FROM pg_proc WHERE proname IN ('cloud_workspace_user_role','cloud_actor_staff_revision','notify_cloud_worker_available')")).rowCount).toBe(0);
+    expect((await withUserTx(pool,owner.userId,tx=>tx.query("SELECT 1 FROM cloud_agent_credential_versions"))).rowCount).toBe(0);
+    expect((await withSystemTx(pool,tx=>tx.query("SELECT 1 FROM cloud_agent_credential_versions"))).rowCount).toBe(1);
+    await withSystemTx(pool,tx=>tx.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2",[owner.organizationId,owner.userId]));
+  });
+
   it("applies the NEWEST migration to a database at the previous revision", async () => {
     // The actual production upgrade path, and the one a fresh-install test
     // cannot see: DDL that is fine against an empty schema can still fail
@@ -1422,7 +1456,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
       ],
     );
 
-    await expect(runMigrations(pool)).resolves.toEqual([
+    await expect(runLegacyMigrations()).resolves.toEqual([
       fenceMigration,
       "0061_workos_provider_erasure_fences.sql",
       "0062_cloud_workspace_entitlement_operations.sql",
@@ -1438,7 +1472,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
       "0072_cloud_workspace_compute_credits.sql",
       "0073_cloud_workspace_compute_leases.sql",
       "0074_cloud_workspace_drift_scheduling.sql",
-      ...LADDER.slice(LADDER.indexOf("0075_security_event_commit_order.sql")),
+      ...LADDER.filter(file=>file < "0182_").slice(LADDER.indexOf("0075_security_event_commit_order.sql")),
     ]);
     await expect(
       pool.query(
@@ -1573,7 +1607,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
       throw error;
     }
 
-    await runMigrations(pool);
+    await runLegacyMigrations();
     const columns = await pool.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = 'public' AND table_name = 'secret_binding_versions'
@@ -1682,7 +1716,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
       throw error;
     }
 
-    await runMigrations(pool);
+    await runLegacyMigrations();
     const result = await pool.query(
       `SELECT ss.repository_forge, ss.repository_owner, ss.repository_name,
               ss.repository_revision, ss.settings_snapshot,
@@ -1798,8 +1832,8 @@ d("migration ladder", { timeout: 30_000 }, () => {
       throw error;
     }
 
-    expect(await runMigrations(pool)).toEqual(
-      LADDER.slice(authorityMigrationIndex),
+    expect(await runLegacyMigrations()).toEqual(
+      LADDER.filter(file=>file < "0182_").slice(authorityMigrationIndex),
     );
     const retired = await pool.query(
       `SELECT revoked_at IS NOT NULL AS revoked,
@@ -1906,7 +1940,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
         [workspaceId],
       );
 
-      migration = runMigrations(pool);
+      migration = runLegacyMigrations();
       await vi.waitFor(
         async () => {
           const waiting = await pool.query<{ count: number }>(
@@ -1942,7 +1976,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
       ).resolves.toMatchObject({ rowCount: 1 });
       await workspaceOwner.query("COMMIT");
       await expect(migration).resolves.toEqual(
-        LADDER.slice(engineAuthorityIndex),
+        LADDER.filter(file=>file < "0182_").slice(engineAuthorityIndex),
       );
     } finally {
       await workspaceOwner.query("ROLLBACK").catch(() => undefined);

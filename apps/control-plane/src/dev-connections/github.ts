@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { boundedJson } from "./http.js";
-import type { CredentialRenewer } from "../cloud-workspaces/codex-auth-keeper.js";
+import type { CredentialRenewer } from "../agent-credentials/codex-auth-keeper.js";
 import {
   denied,
   parse,

@@ -3,6 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 
 import { withSystemTx, type Tx } from "./db.js";
+import { scheduleCloudDeletion } from "./cloud/deletion.js";
 import {
   applyWorkOSIdentityEventInTransaction,
   type WorkOSIdentityEvent,
@@ -18,7 +19,6 @@ import {
   type WorkOSProviderSubject,
 } from "./workos-provider-locks.js";
 import { HttpError } from "./authz.js";
-import { enqueueAuthSessionExpiry } from "./auth-session-proof.js";
 
 export const WORKOS_SYNC_EVENT_NAMES = [
   "user.created",
@@ -218,7 +218,7 @@ async function applySessionEvent(
   );
   const userId = linked.rows[0]?.user_id ?? null;
   if (event.event === "session.created") {
-    const changed = await tx.query<{ id: string; provider_session_proof_version: string; provider_session_expires_at: Date | null }>(
+    await tx.query(
       `INSERT INTO auth_sessions (
          provider_session_id, provider_sub, user_id, client_kind, status,
          provider_session_expires_at, last_provider_event_at
@@ -249,12 +249,6 @@ async function applySessionEvent(
         event.createdAt,
       ],
     );
-    const current = changed.rows[0];
-    // Explicit expiry changes invalidate old proofs/jobs; an omitted field
-    // retains the finite deadline. Legacy rows do not enter expiry scheduling.
-    if (current && Number(current.provider_session_proof_version) > 0 && current.provider_session_expires_at)
-      await enqueueAuthSessionExpiry(tx, { rowId: current.id, proofVersion: Number(current.provider_session_proof_version),
-        expiresAtMs: current.provider_session_expires_at.getTime() });
     return "applied";
   }
 
@@ -401,12 +395,7 @@ async function applyOrganizationEvent(
        WHERE organization_id = $1`,
       [link.organizationId, organization.id, organization.updatedAt],
     );
-    await tx.query(
-      `UPDATE cloud_workspace_endpoint_grants
-       SET revoked_at = COALESCE(revoked_at, now())
-       WHERE org_id = $1 AND revoked_at IS NULL`,
-      [link.organizationId],
-    );
+    await scheduleCloudDeletion(tx, { organizationId: link.organizationId });
     await tx.query(
       `UPDATE invitations SET revoked_at = COALESCE(revoked_at, now())
        WHERE org_id = $1 AND accepted_at IS NULL`,
@@ -502,12 +491,6 @@ async function removeLocalMembership(
      SET authorization_revision = authorization_revision + 1
      WHERE id = $1 RETURNING authorization_revision`,
     [input.organizationId],
-  );
-  await tx.query(
-    `UPDATE cloud_workspace_endpoint_grants
-     SET revoked_at = COALESCE(revoked_at, now())
-     WHERE org_id = $1 AND account_user_id = $2 AND revoked_at IS NULL`,
-    [input.organizationId, input.userId],
   );
   await tx.query(
     `INSERT INTO security_events (

@@ -22,7 +22,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import type { MiddlewareHandler } from "hono";
 import { routePath } from "hono/route";
 import type { RequestDatabaseTiming } from "./database-timing.js";
-import { CloudProviderError } from "./cloud-workspaces/provider.js";
+import { CloudProviderError } from "./cloud/provider-error.js";
 
 /** Every span attribute the control plane may emit, with its value type. A
  * closed list: identifiers, tokens, prompts, payloads, raw paths, query

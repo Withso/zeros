@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { InMemorySpanExporter, type ReadableSpan } from "@opentelemetry/sdk-trace";
-import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
+import { BoatApiClient } from "./cloud/boat-client.js";
 import { recordTransactionTiming, requestTiming } from "./request-timing.js";
 import {
   boatRouteTemplate,

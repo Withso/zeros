@@ -22,7 +22,8 @@ database("stable migration owner with rotating NOINHERIT logins", () => {
       await admin.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
       const emptyPlan = await planMigrations(admin);
       expect(emptyPlan.pendingMigrations.length).toBeGreaterThan(0);
-      expect(emptyPlan.controlledApprovals).toHaveLength(10);
+      expect(emptyPlan.controlledApprovals).toHaveLength(11);
+      expect(emptyPlan.controlledApprovals).toContain("0182_retire_legacy_cloud.sql");
       expect(
         (
           await admin.query(

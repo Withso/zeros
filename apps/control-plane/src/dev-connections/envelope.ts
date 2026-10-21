@@ -4,7 +4,7 @@ import {
   sealCredentialBytes,
   type CloudAgentCredentialEnvelope,
   type CloudAgentCredentialKeys,
-} from "../cloud-workspaces/agent-credential-envelope.js";
+} from "../agent-credentials/agent-credential-envelope.js";
 import { parseMaterial, type DevMaterial } from "./types.js";
 
 export type MaterialBinding = {
