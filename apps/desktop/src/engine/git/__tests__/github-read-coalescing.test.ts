@@ -23,8 +23,6 @@ import {
   getPr, getPrChecks, getPrReviews, resolveGithubWorkspaceRepository,
   setOctokitFactoryForTesting, setTokenStoreForTesting, syncWorkspacePr,
 } from "../github";
-import { runWithGithubReadTransport } from "../github-read-context";
-import { runWithGithubWriteCredential } from "../github-write-context";
 
 function deferred() {
   let resolve!: () => void;
@@ -154,18 +152,4 @@ describe("Local GitHub observation sharing", () => {
     expect(oct.pulls.get).toHaveBeenCalledTimes(2);
   });
 
-  it("leaves scoped cloud credential requests independent", async () => {
-    await runWithGithubWriteCredential({ token: "fixture-proxy", apiBaseUrl: "https://proxy.example.test", gitBaseUrl: "https://git.example.test", owner: "fixture", repository: "repository", expiresAtMs: Date.now() + 60_000 }, () => true,
-      () => Promise.all(Array.from({ length: 3 }, () => getPr({ workspaceId: "one", prNumber: 1 }))));
-    expect(mocks.runFile).toHaveBeenCalledTimes(3);
-    expect(oct.pulls.get).toHaveBeenCalledTimes(3);
-  });
-
-  it("leaves cloud read-transport requests independent", async () => {
-    const request = vi.fn(async () => new Response(JSON.stringify(pr()), { headers: { "content-type": "application/json" } }));
-    await runWithGithubReadTransport(request, () => true,
-      () => Promise.all(Array.from({ length: 3 }, () => getPr({ workspaceId: "one", prNumber: 1 }))));
-    expect(mocks.runFile).toHaveBeenCalledTimes(3);
-    expect(request).toHaveBeenCalledTimes(3);
-  });
 });

@@ -523,14 +523,12 @@ function clampRemoteAdditionalDirectories(
 }
 
 /** Operations that can change Design-owner registration. An external/main
- * owner revokes scoped Design tools on desktop; qualified cloud Code also
- * carries an immutable registered-owner policy. Managed operations narrow
- * revocation to the affected workspace whenever possible. */
+ * owner revokes scoped Design tools. Managed operations narrow revocation to
+ * the affected workspace whenever possible. */
 const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   // These keep the physical project registered but can establish or rename
   // the semantic Design roots consumed by scoped tool admission.
   "design.renameDirectory",
-  "design.createDirectory",
   "design.removeDirectory",
   "design.adoptDirectory",
   "gh.publishRepo",

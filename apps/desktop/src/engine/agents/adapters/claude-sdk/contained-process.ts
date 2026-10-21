@@ -1,7 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Writable } from "node:stream";
-import { isUtf8 } from "node:buffer";
-import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 
 import type {
   SpawnedProcess,
@@ -14,35 +12,6 @@ import type {
 import { localAgentCpuPriority } from "../../containment/agent-cpu-priority";
 
 const NATIVE_INPUT_OBSERVATION_MAX_BYTES = 2 * 1024 * 1024;
-const NATIVE_INPUT_HANDOFF_MAX_BYTES = 64 * 1024 * 1024;
-/** Authority is synchronous and precedes the irreversible transport write.
- * It is separate from passive R7 observations, including when those are off.
- * The pinned SDK writes one complete UTF-8 JSON line per transport call. */
-export function guardClaudeUserMessageWrites(input:Writable,beforeWrite:(uuid:string)=>void):void{
-  const write=input.write;
-  const refused=()=>new CloudCommandFailureError({stage:"validation",category:"access_denied"});
-  input.write=function(this:Writable,...args:unknown[]):boolean{
-    const chunk=args[0];let encoded:string;
-    if(typeof chunk==="string"){
-      if(typeof args[1]==="string"&&!["utf8","utf-8"].includes(args[1]))throw refused();
-      if(Buffer.byteLength(chunk,"utf8")>NATIVE_INPUT_HANDOFF_MAX_BYTES)throw refused();
-      encoded=chunk;
-    }else if(chunk instanceof Uint8Array){
-      if(chunk.byteLength>NATIVE_INPUT_HANDOFF_MAX_BYTES||!isUtf8(chunk))throw refused();
-      encoded=Buffer.from(chunk.buffer,chunk.byteOffset,chunk.byteLength).toString("utf8");
-    }else throw refused();
-    if(!encoded.endsWith("\n"))throw refused();
-    let frame:unknown;
-    try{frame=JSON.parse(encoded);}catch{throw refused();}
-    if(!frame||typeof frame!=="object"||!("type" in frame)||typeof frame.type!=="string")throw refused();
-    if(frame.type==="user"){
-      if(!("uuid" in frame)||typeof frame.uuid!=="string"||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(frame.uuid))throw refused();
-      const result:unknown=beforeWrite(frame.uuid);
-      if(result!==undefined){void Promise.resolve(result).catch(()=>{});throw refused();}
-    }
-    return Reflect.apply(write,this,args) as boolean;
-  } as Writable["write"];
-}
 /** Passive observation of the actual SDK stdin.write call. A successful
  * write may still be buffered; only a later native command receipt proves
  * acceptance. Complete bounded user frames provide their UUID only, with
@@ -134,7 +103,6 @@ export function spawnContainedClaudeProcess(
     onSpawn(process: ContainedClaudeProcess): void;
     onStderr(data: string): void;
     onUserMessageWrite?(uuid: string): void;
-    beforeUserMessageWrite?(uuid:string):void;
     isUserMessageObservationActive?(): boolean;
   },
   executionBoundary?: PreparedBoundary,
@@ -186,7 +154,6 @@ export function spawnContainedClaudeProcess(
   }
   const boundaryProcess = executionBoundary?.trackProcess(child);
   if (callbacks.onUserMessageWrite) observeClaudeUserMessageWrites(child.stdin, callbacks.onUserMessageWrite, callbacks.isUserMessageObservationActive);
-  if(callbacks.beforeUserMessageWrite)guardClaudeUserMessageWrites(child.stdin,callbacks.beforeUserMessageWrite);
 
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (data: string) => callbacks.onStderr(data));

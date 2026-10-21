@@ -411,9 +411,6 @@ export interface CursorSdkSendOptions {
   onStep?: (args: { step: unknown }) => void | Promise<void>;
   onDelta?: (args: { update: unknown }) => void | Promise<void>;
   onNativePromptStage?: (stage: NativePromptStage) => void;
-  /** Engine-owned authority check/mark, synchronous before the irreversible
-   * host write. Unlike observation callbacks, exceptions MUST reject send. */
-  beforeNativeWrite?: () => void;
 }
 
 export interface SdkAgent {

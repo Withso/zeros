@@ -1961,7 +1961,7 @@ export class WorkspaceService {
     const workspaceId = this.codeReviewOwnerForCwd(input.cwd);
     if (!workspaceId) return null;
     const workspace = getWorkspaceById(workspaceId);
-    if (workspace && (workspace.archivedAt != null || (workspace.placement === "cloud"))) return null;
+    if (workspace && (workspace.archivedAt != null || workspace.placement === "cloud")) return null;
     const workspacePath = this.resolveReadCwd(workspaceId, false);
     // An admitted raw repository root may be a compatibility alias of the
     // same owner, but never an unrelated or more-specific workspace.

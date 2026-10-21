@@ -408,7 +408,6 @@ export class CursorHostClient {
     args: unknown,
     timeoutMs = CONTROL_REQUEST_TIMEOUT_MS,
     onWritten?: () => void,
-    beforeNativeWrite?: () => void,
   ): Promise<T> {
     if (!this.ensure()) {
       // Respawn hold-off (crash-loop guard): fail fast without spawning.
@@ -471,7 +470,6 @@ export class CursorHostClient {
       }
       try {
         const line = JSON.stringify({ k: "req", id, op, args });
-        beforeNativeWrite?.();
         if (onWritten) transport.send(line, error => {
           if (!error && this.transport === transport) {
             try { onWritten(); } catch { /* observation is inert */ }
@@ -556,7 +554,7 @@ export class CursorHostClient {
         const runId = String(this.nextRunId++);
         const queue = new AsyncMsgQueue<HostRunQueueItem>();
         this.queues.set(runId, queue);
-        const { onDelta, onStep, onNativePromptStage, beforeNativeWrite, ...wireOptions } = options ?? {};
+        const { onDelta, onStep, onNativePromptStage, ...wireOptions } = options ?? {};
         const observe = (stage: "native_write" | "sdk_run_created") => {
           try { void Promise.resolve(onNativePromptStage?.(stage)).catch(() => {}); } catch { /* observation is inert */ }
         };
@@ -575,7 +573,6 @@ export class CursorHostClient {
             },
             CONTROL_REQUEST_TIMEOUT_MS,
             onNativePromptStage ? () => observe("native_write") : undefined,
-            beforeNativeWrite,
           );
           const transport = this.transport;
           const res = await sending;

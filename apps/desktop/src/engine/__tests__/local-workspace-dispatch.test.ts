@@ -2,11 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
 import type { EngineMessage } from "../types";
 import type { TransportClient } from "../transport/types";
-import {
-  githubReadCanEdit,
-  githubReadTransport,
-} from "../git/github-read-context";
-import { githubWriteCredential } from "../git/github-write-context";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -34,9 +29,6 @@ describe("local sidecar Git dispatch", () => {
       const handle = vi
         .spyOn(state.workspace, "handle")
         .mockImplementation(async () => {
-          expect(githubReadTransport()).toBeUndefined();
-          expect(githubReadCanEdit()).toBeUndefined();
-          expect(githubWriteCredential()).toBeNull();
           return { ok: true };
         });
       const client: TransportClient = {
