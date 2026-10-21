@@ -43,10 +43,11 @@ import {
   type DesignOperation,
 } from "@zeros/design-core";
 import type { DesignAuthoredKeyframes } from "@zeros/design-web";
-import type {
-  DesignRuntimeNodeDetails,
-  DesignRuntimeNodeGeometry,
-  DesignRuntimeTreeNode,
+import {
+  DESIGN_RUNTIME_DOCUMENT_BODY_ID,
+  type DesignRuntimeNodeDetails,
+  type DesignRuntimeNodeGeometry,
+  type DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
@@ -168,7 +169,11 @@ import {
   type DesignGapProperty,
   type DesignSizeBadgeMode,
 } from "./design-layout-tools";
-import { designCanvasDropTargetFrame, transferDesignLayerOnCanvas } from "./design-layout-transfer";
+import {
+  designCanvasFrameAt,
+  transferDesignLayerAtRelease,
+  transferDesignLayerOnCanvas,
+} from "./design-layout-transfer";
 import {
   designLayoutTransform,
   preserveDesignLayoutPins,
@@ -204,6 +209,13 @@ import {
   releaseDesignLayoutToolsLive,
 } from "./state/design-layout-tools-live";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { designBackgroundWork } from "./state/design-background-work";
+import { designPreviewDemandItems, type DesignPreviewLevel } from "./state/design-frame-previews";
+import {
+  useDesignFramePictured,
+  useDesignFramePreviewDemand,
+  useDesignPreviewOwner,
+} from "./state/use-design-frame-previews";
 import {
   clearDesignNodeStylePreviewTransient,
   clearDesignNodeTextPreviewTransient,
@@ -237,6 +249,7 @@ import {
   insertDesignAssetCached,
   renameDesignFrameAndRefresh,
   updateDesignFrameGeometryCached,
+  moveDesignFramesCached,
   updateDesignNodeStylesCached,
   warmDesignFrameDocument,
 } from "./state/design-workspace-cache";
@@ -310,6 +323,8 @@ const MIN_FRAME_WIDTH = 1;
 const MIN_FRAME_HEIGHT = 1;
 const COLD_BUSY_DELAY_MS = 180;
 const MAX_LIVE_DESIGN_FRAMES = 12;
+/** How long a dragged frame rests over another before that one goes live. */
+const DESIGN_NEST_DWELL_MS = 300;
 /** Chromium stops re-rasterizing magnified iframe textures at device fidelity
  * around 600% on Retina displays; viewport tiles take over from there. */
 const HIGH_RESOLUTION_ZOOM_THRESHOLD = 6;
@@ -324,6 +339,7 @@ const EMPTY_NODE_DETAILS: readonly DesignRuntimeNodeDetails[] = Object.freeze(
   [],
 );
 export const EMPTY_NODE_IDS: readonly string[] = Object.freeze([]);
+const EMPTY_CANVAS_FRAMES: readonly DesignCanvasFrameWire[] = Object.freeze([]);
 /** The origin marker keeps a constant screen size, so on a selection only a few
  * marker-widths across it stops reading as a pivot and starts covering the
  * element. Below six times its own hit box — roughly 108 screen pixels, or a
@@ -969,6 +985,21 @@ export function DesignCanvas({
         dy: number;
       }
     | {
+        // Several selected frames; `frame` is the selected one.
+        mode: "frames";
+        frame: DesignCanvasFrameWire;
+        selectionKey: string;
+        members: Array<{
+          file: string;
+          key: string;
+          start: DesignFrameGeometryWire;
+          element: HTMLElement;
+          preview: FrameGeometryPreview;
+        }>;
+        dx: number;
+        dy: number;
+      }
+    | {
         mode: "resize";
         details: DesignRuntimeNodeDetails;
         frame: DesignCanvasFrameWire;
@@ -1002,6 +1033,8 @@ export function DesignCanvas({
     lifetime: number;
     theme: string | null;
     sourceVersion?: string;
+    /** Several selected frames: geometry only, no live document needed. */
+    frames: boolean;
     dx: number;
     dy: number;
     released: boolean;
@@ -1089,15 +1122,46 @@ export function DesignCanvas({
     workspaceId,
     snapshot?.directory,
   );
+  // The frame a drag would nest into is outlined imperatively, so crossing
+  // frames never re-renders the canvas. It goes live only once the pointer
+  // rests on it or the drag releases there, so its drop slot resolves
+  // against its document even while it painted a picture.
+  const [nestLiveFile, setNestLiveFile] = useState<string | null>(null);
+  const nestOutlineRef = useRef<HTMLElement | null>(null);
+  const paintNestTarget = useCallback((file: string | null) => {
+    const element = file
+      ? viewportRef.current?.querySelector<HTMLElement>(`[data-design-frame="${CSS.escape(file)}"]`) ?? null
+      : null;
+    if (nestOutlineRef.current === element) return;
+    nestOutlineRef.current?.removeAttribute("data-design-nest-target");
+    element?.setAttribute("data-design-nest-target", "");
+    nestOutlineRef.current = element;
+  }, []);
+  const showNestTarget = useCallback((file: string | null) => {
+    paintNestTarget(file);
+    setNestLiveFile(file);
+  }, [paintNestTarget]);
   const layersOpenFiles = useMemo(
     () => [
       ...Object.entries(layerDisclosures)
         .filter(([, disclosure]) => disclosure.treeExpanded)
         .map(([file]) => file),
       ...agentDraftFiles,
+      ...(nestLiveFile ? [nestLiveFile] : []),
     ],
-    [agentDraftFiles, layerDisclosures],
+    [agentDraftFiles, layerDisclosures, nestLiveFile],
   );
+  // Saved pictures of this directory's frames. A frame painted no larger
+  // than its picture shows the picture instead of running its document.
+  const previewOwner = useDesignPreviewOwner(workspaceId, snapshot?.directoryId);
+  const pictured = useDesignFramePictured(
+    previewOwner,
+    frameTheme,
+    snapshot?.frames ?? EMPTY_CANVAS_FRAMES,
+    active,
+  );
+  const devicePixelRatio =
+    typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
   const liveFrameFiles = useMemo(() => {
     const previous =
       liveFrameFilesRef.current.owner === liveFrameOwner
@@ -1113,6 +1177,8 @@ export function DesignCanvas({
             selectedFrame: selectedFrame?.file ?? null,
             maxLive: MAX_LIVE_DESIGN_FRAMES,
             requiredFiles: layersOpenFiles,
+            pictured,
+            devicePixelRatio,
           })
         : new Set<string>();
     const files = retainLiveDesignFrameFiles({
@@ -1125,8 +1191,10 @@ export function DesignCanvas({
     return files;
   }, [
     active,
+    devicePixelRatio,
     layersOpenFiles,
     liveFrameOwner,
+    pictured,
     selectedFrame?.file,
     snapshot,
     view,
@@ -1138,6 +1206,34 @@ export function DesignCanvas({
       files: liveFrameFiles,
     };
   }, [liveFrameFiles, liveFrameOwner]);
+  // The pictures this canvas wants, visible ones first; the rest of the page
+  // follows in idle time so zooming out finds them ready.
+  const previewItems = useMemo(
+    () =>
+      snapshot && viewportSize.width > 0 && viewportSize.height > 0
+        ? designPreviewDemandItems({
+            frames: snapshot.frames,
+            view: { zoom: view.zoom, panX: view.panX, panY: view.panY },
+            viewport: viewportSize,
+            devicePixelRatio,
+            live: liveFrameFiles,
+          })
+        : [],
+    [devicePixelRatio, liveFrameFiles, snapshot, view.panX, view.panY, view.zoom, viewportSize],
+  );
+  const previewLevels = useMemo(() => {
+    const levels = new Map<string, DesignPreviewLevel>();
+    for (const item of previewItems) if (!levels.has(item.file)) levels.set(item.file, item.level);
+    return levels;
+  }, [previewItems]);
+  const previewDemand = useMemo(
+    () =>
+      active && previewOwner && !view.codeView && previewItems.length
+        ? { owner: previewOwner, theme: frameTheme, items: previewItems }
+        : null,
+    [active, frameTheme, previewItems, previewOwner, view.codeView],
+  );
+  useDesignFramePreviewDemand(previewDemand);
   const highResolutionTiles = useMemo(() => {
     const result = new Map<string, DesignHighResolutionViewportTile>();
     if (
@@ -2341,6 +2437,64 @@ export function DesignCanvas({
     });
   }, [canvasFoundation.data, selectedFrame, selectedNodeDetails, workspaceId]);
 
+  // Arrow keys on several selected frames move them together, in the nudge
+  // lifecycle of one frame: presses while the key is held land as one canvas
+  // write and one undo step on release; Escape, leaving the window and a page
+  // or selection change restore them; presses during a save wait for it.
+  const nudgeSelectedFrames = useCallback(
+    (files: readonly string[], deltaX: number, deltaY: number): boolean => {
+      const viewport = viewportRef.current;
+      if (!workspaceId || !selectedFrame || !viewport) return false;
+      const selection = designWorkspaceView(workspaceId);
+      const selectionKey = [...files].sort().join("\0");
+      const previous = nudgeGestureRef.current;
+      if (previous && (previous.mode !== "frames" || previous.selectionKey !== selectionKey ||
+        !isCurrentDesignPageOwner(previous.owner) || previous.selectionEvent !== selection.selectionEvent)) {
+        previous.retired = true;
+        return true;
+      }
+      let gesture = previous?.mode === "frames" ? previous : null;
+      if (!gesture) {
+        const confirmed =
+          designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ?? [];
+        const members = files.flatMap((file) => {
+          const frame = confirmed.find((candidate) => candidate.file === file);
+          const element = viewport.querySelector<HTMLElement>(
+            `[data-design-frame="${CSS.escape(file)}"]`,
+          );
+          const key = `${canvasDocumentOwner}\0${file}`;
+          return frame && element && !frameGeometryPreviewsRef.current.has(key)
+            ? [{ file, key, start: frameGeometry(frame), element, preview: { geometry: frameGeometry(frame), settled: false } }]
+            : [];
+        });
+        // A frame not on the canvas, or whose last move is still saving,
+        // keeps the whole selection where it is.
+        if (members.length !== files.length) return true;
+        gesture = {
+          mode: "frames", frame: selectedFrame, selectionKey, members, dx: 0, dy: 0,
+          owner: captureDesignPageOwner(workspaceId), selectionEvent: selection.selectionEvent,
+          lifetime: nudgeLifetimeRef.current, canvasLifetime: canvasLifetimeRef.current, retired: false,
+          runtime: null, runtimeRevision: undefined, theme: selection.activeTheme,
+        };
+      }
+      const current = gesture;
+      current.dx += deltaX;
+      current.dy += deltaY;
+      for (const member of current.members) {
+        member.preview.geometry = {
+          ...member.start,
+          x: Math.max(-DESIGN_FRAME_COORDINATE_LIMIT, Math.min(DESIGN_FRAME_COORDINATE_LIMIT, member.start.x + current.dx)),
+          y: Math.max(-DESIGN_FRAME_COORDINATE_LIMIT, Math.min(DESIGN_FRAME_COORDINATE_LIMIT, member.start.y + current.dy)),
+        };
+        frameGeometryPreviewsRef.current.set(member.key, member.preview);
+        paintFrameGeometry(member.element, member.preview.geometry);
+      }
+      nudgeGestureRef.current = current;
+      return true;
+    },
+    [canvasDocumentOwner, selectedFrame, workspaceId],
+  );
+
   const nudgeSelectedNode = useCallback(
     (deltaX: number, deltaY: number) => {
       if (!workspaceId || !selectedFrame) return false;
@@ -2351,6 +2505,8 @@ export function DesignCanvas({
         const queued = previous && previous.selectionEvent === selection.selectionEvent && previous.lifetime === nudgeLifetimeRef.current && previous.frame === selectedFrame.file && previous.theme === selection.activeTheme && isCurrentDesignPageOwner(previous.owner) ? previous : {
           owner: captureDesignPageOwner(workspaceId), frame: selectedFrame.file,
           selectionEvent: selection.selectionEvent, lifetime: nudgeLifetimeRef.current, theme: selection.activeTheme,
+          frames: selection.selectedTargets.every((target) => !target.nodeId) &&
+            selection.selectedTargets.some((target) => target.frame !== selectedFrame.file),
           dx: 0, dy: 0, released: false,
         };
         queued.dx += deltaX;
@@ -2362,7 +2518,9 @@ export function DesignCanvas({
       const roots = designSelectionMutationTargets(selection.selectedTargets, new Map([[selectedFrame.file, selectedRuntimeTree]]));
       if (!roots.length) return false;
       if (roots.some((target) => target.frame !== selectedFrame.file)) {
-        toast.error("Move layers in one scene at a time", { description: "Cross-scene group movement is not yet atomic; nothing was moved." });
+        if (roots.every((target) => !target.nodeId))
+          return nudgeSelectedFrames(roots.map((target) => target.frame), deltaX, deltaY);
+        toast.error("Move frames or layers, not both", { description: "Select only frames, or layers in one frame, to move them together. Nothing was moved." });
         return true;
       }
       const runtime = designFrameRuntime(workspaceId, selectedFrame.file);
@@ -2468,6 +2626,7 @@ export function DesignCanvas({
       selectedNodeDetailsList,
       selectedRuntimeTree,
       canvasDocumentOwner,
+      nudgeSelectedFrames,
       workspaceId,
     ],
   );
@@ -2546,15 +2705,27 @@ export function DesignCanvas({
       return;
     }
     gesture.retired ||= cancelled || gesture.lifetime !== nudgeLifetimeRef.current || designWorkspaceView(workspaceId).selectionEvent !== gesture.selectionEvent;
+    // Several frames move by canvas geometry alone; one frame's guarded move
+    // and layer edits need the live document they previewed in.
     const isCurrent = () => !gesture.retired && gesture.canvasLifetime === canvasLifetimeRef.current &&
       isCurrentDesignPageOwner(gesture.owner) &&
-      designWorkspaceView(workspaceId).activeTheme === gesture.theme &&
-      gesture.runtime?.isActive?.() === true &&
-      designFrameRuntime(workspaceId, gesture.frame.file) === gesture.runtime &&
-      useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[gesture.frame.file]?.snapshot?.revision === gesture.runtimeRevision;
+      (gesture.mode === "frames" || (
+        designWorkspaceView(workspaceId).activeTheme === gesture.theme &&
+        gesture.runtime?.isActive?.() === true &&
+        designFrameRuntime(workspaceId, gesture.frame.file) === gesture.runtime &&
+        useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[gesture.frame.file]?.snapshot?.revision === gesture.runtimeRevision));
     const frameKey = `${canvasDocumentOwner}\0${gesture.frame.file}`;
     const restore = async () => {
-      if (gesture.mode === "frame") {
+      if (gesture.mode === "frames") {
+        const confirmed = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames;
+        for (const member of gesture.members) {
+          if (frameGeometryPreviewsRef.current.get(member.key) !== member.preview) continue;
+          frameGeometryPreviewsRef.current.delete(member.key);
+          const frame = confirmed?.find((candidate) => candidate.file === member.file);
+          if (member.element.isConnected && isCurrentDesignPageOwner(gesture.owner))
+            paintFrameGeometry(member.element, frame ? frameGeometry(frame) : member.start);
+        }
+      } else if (gesture.mode === "frame") {
         if (frameGeometryPreviewsRef.current.get(frameKey) !== gesture.preview) return;
         frameGeometryPreviewsRef.current.delete(frameKey);
         const confirmed = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((frame) => frame.file === gesture.frame.file);
@@ -2572,6 +2743,15 @@ export function DesignCanvas({
       await gesture.pending;
       if (!isCurrent() || (gesture.mode !== "resize" && gesture.dx === 0 && gesture.dy === 0)) {
         if (isCurrent() && queuedNudgeRef.current) queuedNudgeRef.current.sourceVersion = gesture.frame.sourceVersion;
+        await restore();
+        return;
+      }
+      if (gesture.mode === "frames") {
+        const moved = await moveDesignFramesCached(workspaceId, gesture.members.map((member) => ({
+          frame: member.file, from: member.start, to: member.preview.geometry,
+        })));
+        const queued = queuedNudgeRef.current;
+        if (queued) queued.sourceVersion = moved.frames.find((frame) => frame.file === queued.frame)?.sourceVersion;
         await restore();
         return;
       }
@@ -2611,15 +2791,186 @@ export function DesignCanvas({
       queuedNudgeRef.current = null;
       return;
     }
-    if (designFrameRuntime(workspaceId, queued.frame)?.sourceVersion !== queued.sourceVersion ||
+    if (!queued.frames && (designFrameRuntime(workspaceId, queued.frame)?.sourceVersion !== queued.sourceVersion ||
       (selection.selectedTargets.some((target) => target.nodeId) &&
-        selection.selectedTargets.some((target) => target.nodeId && !selectedNodeDetailsList.some((details) => details.oid === target.nodeId && details.sourceVersion === queued.sourceVersion)))) return;
+        selection.selectedTargets.some((target) => target.nodeId && !selectedNodeDetailsList.some((details) => details.oid === target.nodeId && details.sourceVersion === queued.sourceVersion))))) return;
     queuedNudgeRef.current = null;
     nudgeSelectedNode(queued.dx, queued.dy);
     if (queued.released) finishNodeNudge();
   }, [active, workspaceId, nudgeCommitVersion, selectedFrame, selectedNodeDetailsList, nudgeSelectedNode, finishNodeNudge]);
 
   /** Move/resize previews paint one node; release publishes one engine write. */
+  /** Several selected frames follow the pointer together, snap as one box
+   * and commit in one canvas write and one undo step. */
+  const startFrameGroupMove = useCallback(
+    (event: React.PointerEvent<HTMLElement>, files: readonly string[]) => {
+      const viewport = viewportRef.current;
+      if (!workspaceId || !viewport) return;
+      const confirmed =
+        designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ??
+        snapshot?.frames ??
+        [];
+      const wanted = new Set(files);
+      const members = confirmed
+        .filter((frame) => wanted.has(frame.file))
+        .map((frame) => ({
+          frame,
+          key: `${canvasDocumentOwner}\0${frame.file}`,
+          start: frameGeometry(frame),
+          element: viewport.querySelector<HTMLElement>(
+            `[data-design-frame="${CSS.escape(frame.file)}"]`,
+          ),
+        }));
+      if (members.length < 2 || members.some((member) => !member.element)) return;
+      // A previous move of one of these frames is still being saved; its
+      // confirmed geometry is what this move must start from.
+      if (members.some((member) => frameGeometryPreviewsRef.current.has(member.key))) {
+        toast.error("Wait for the last move to finish", {
+          description: "Nothing was moved.",
+        });
+        return;
+      }
+      const pageOwner = captureDesignPageOwner(workspaceId);
+      const selectionEvent = designWorkspaceView(workspaceId).selectionEvent;
+      const lifetime = ++nudgeLifetimeRef.current;
+      const canvasLifetime = canvasLifetimeRef.current;
+      let completed = false;
+      const ownerIsCurrent = () =>
+        canvasDocumentOwnerRef.current === canvasDocumentOwner &&
+        designWorkspaceView(workspaceId).directoryId === canvasDirectoryId &&
+        isCurrentDesignPageOwner(pageOwner) &&
+        canvasLifetimeRef.current === canvasLifetime &&
+        (completed ||
+          (nudgeLifetimeRef.current === lifetime &&
+            designWorkspaceView(workspaceId).selectionEvent === selectionEvent));
+      const left = Math.min(...members.map((member) => member.start.x));
+      const top = Math.min(...members.map((member) => member.start.y));
+      const box = {
+        x: left,
+        y: top,
+        width: Math.max(...members.map((member) => member.start.x + member.start.w)) - left,
+        height: Math.max(...members.map((member) => member.start.y + member.start.h)) - top,
+      };
+      const peers = confirmed
+        .filter((frame) => !wanted.has(frame.file))
+        .map((frame) => ({ x: frame.x, y: frame.y, width: frame.width, height: frame.height }));
+      const camera = () => wheelViewportRef.current ?? designWorkspaceView(workspaceId);
+      const startWorld = designCanvasPointFromClient(
+        { x: event.clientX, y: event.clientY },
+        viewport.getBoundingClientRect(),
+        camera(),
+      );
+      const grab = { x: startWorld.x - box.x, y: startWorld.y - box.y };
+      let offset = { x: 0, y: 0 };
+      let moved = false;
+      const paintGuides = (guides: { x?: number; y?: number }) => {
+        if (verticalGuideRef.current) {
+          verticalGuideRef.current.style.display = guides.x === undefined ? "none" : "block";
+          if (guides.x !== undefined) verticalGuideRef.current.style.left = `${guides.x}px`;
+        }
+        if (horizontalGuideRef.current) {
+          horizontalGuideRef.current.style.display = guides.y === undefined ? "none" : "block";
+          if (guides.y !== undefined) horizontalGuideRef.current.style.top = `${guides.y}px`;
+        }
+      };
+      const paint = (shift: { x: number; y: number }) => {
+        for (const member of members)
+          paintFrameGeometry(member.element!, {
+            ...member.start,
+            x: member.start.x + shift.x,
+            y: member.start.y + shift.y,
+          });
+      };
+      const move = (pointerEvent: PointerEvent) => {
+        if (!ownerIsCurrent()) return;
+        const zoom = liveDesignZoom();
+        const delta = designMovementDelta(
+          { x: pointerEvent.clientX, y: pointerEvent.clientY },
+          viewport.getBoundingClientRect(),
+          camera(),
+          box,
+          grab,
+        );
+        if (!moved && Math.hypot(delta.x, delta.y) < 3 / zoom) return;
+        moved = true;
+        document.body.style.cursor = "grabbing";
+        const moving = { ...box, x: box.x + delta.x, y: box.y + delta.y };
+        const snapped =
+          pointerEvent.metaKey || pointerEvent.ctrlKey
+            ? { rect: moving, guides: {} }
+            : snapDesignRect(moving, peers, 6 / zoom);
+        paintGuides(snapped.guides);
+        const position = clampDesignRectPosition(snapped.rect, DESIGN_FRAME_COORDINATE_LIMIT);
+        offset = { x: Math.round(position.x - box.x), y: Math.round(position.y - box.y) };
+        paint(offset);
+      };
+      const restore = () => {
+        for (const member of members) {
+          frameGeometryPreviewsRef.current.delete(member.key);
+          if (ownerIsCurrent() && member.element!.isConnected)
+            paintFrameGeometry(member.element!, member.start);
+        }
+      };
+      const cancel = () => {
+        paintGuides({});
+        gestureCancelRef.current = null;
+        restore();
+      };
+      const finish = () => {
+        paintGuides({});
+        gestureCancelRef.current = null;
+        if (!ownerIsCurrent() || !moved || (offset.x === 0 && offset.y === 0)) {
+          restore();
+          return;
+        }
+        completed = true;
+        const moves = members.map((member) => ({
+          frame: member.frame.file,
+          from: member.start,
+          to: { ...member.start, x: member.start.x + offset.x, y: member.start.y + offset.y },
+        }));
+        for (const move of moves)
+          frameGeometryPreviewsRef.current.set(`${canvasDocumentOwner}\0${move.frame}`, {
+            geometry: move.to,
+            settled: false,
+          });
+        const commit = moveDesignFramesCached(workspaceId, moves);
+        savedEditingSession?.retain(commit);
+        void commit
+          .then((next) => {
+            for (const member of members) {
+              frameGeometryPreviewsRef.current.delete(member.key);
+              const saved = next.frames.find((frame) => frame.file === member.frame.file);
+              if (saved && ownerIsCurrent() && member.element!.isConnected)
+                paintFrameGeometry(member.element!, frameGeometry(saved));
+            }
+          })
+          .catch((moveError) => {
+            restore();
+            if (ownerIsCurrent())
+              toast.error("Couldn't move the frames", { description: errorMessage(moveError) });
+          });
+      };
+      gestureCancelRef.current?.();
+      gestureCancelRef.current = beginDesignPointerGesture({
+        target: event.currentTarget,
+        pointerId: event.pointerId,
+        cursor: "default",
+        onMove: move,
+        onFinish: finish,
+        onCancel: cancel,
+      });
+    },
+    [
+      canvasDirectoryId,
+      canvasDocumentOwner,
+      liveDesignZoom,
+      savedEditingSession,
+      snapshot?.frames,
+      workspaceId,
+    ],
+  );
+
   const startFrameGesture = useCallback(
     (
       event: React.PointerEvent<HTMLElement>,
@@ -2648,7 +2999,12 @@ export function DesignCanvas({
       const currentSelection = designWorkspaceView(workspaceId);
       const selectedScene = currentSelection.selectedTargets.some((target) => target.frame === frame.file && !target.nodeId);
       if (mode === "move" && selectedScene && currentSelection.selectedTargets.some((target) => target.frame !== frame.file)) {
-        toast.error("Move one scene at a time", { description: "Cross-scene group movement is not yet atomic; nothing was moved." });
+        // Selected frames move together in one write and one undo step.
+        if (currentSelection.selectedTargets.every((target) => !target.nodeId)) {
+          startFrameGroupMove(event, currentSelection.selectedTargets.map((target) => target.frame));
+          return;
+        }
+        toast.error("Move frames or layers, not both", { description: "Select only frames, or layers in one frame, to move them together. Nothing was moved." });
         return;
       }
       if (selectedScene) useDesignWorkspaceUiStore.getState().setSelectedTargets(workspaceId, currentSelection.selectedTargets, { activeFrame: frame.file });
@@ -2779,6 +3135,47 @@ export function DesignCanvas({
         }
       };
 
+      // As in a design tool, the frame under the pointer is where this one
+      // nests on release; it is outlined while it is. Cmd/Ctrl moves the
+      // frame over others without nesting.
+      const nestable = mode === "move" && frame.kind !== "text" && Boolean(folder);
+      let nestTarget: DesignCanvasFrameWire | undefined;
+      let nestPointer: { x: number; y: number } | null = null;
+      let nestDwell: number | null = null;
+      const trackNestTarget = (pointerEvent: PointerEvent) => {
+        if (!nestable || designWorkspaceView(workspaceId).selectedTargets.length !== 1) return;
+        nestPointer = designCanvasPointFromClient(
+          { x: pointerEvent.clientX, y: pointerEvent.clientY },
+          viewport.getBoundingClientRect(),
+          wheelViewportRef.current ?? designWorkspaceView(workspaceId),
+        );
+        // The confirmed frames now; another frame may have moved meanwhile.
+        const target =
+          pointerEvent.metaKey || pointerEvent.ctrlKey
+            ? undefined
+            : designCanvasFrameAt(
+                frame.file,
+                designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ?? [],
+                nestPointer,
+              );
+        if (target?.file === nestTarget?.file) return;
+        nestTarget = target;
+        paintNestTarget(target?.file ?? null);
+        if (nestDwell !== null) window.clearTimeout(nestDwell);
+        nestDwell = target
+          ? window.setTimeout(() => {
+              nestDwell = null;
+              if (ownerIsCurrent()) setNestLiveFile(target.file);
+            }, DESIGN_NEST_DWELL_MS)
+          : null;
+      };
+      const releaseNestTarget = () => {
+        nestTarget = undefined;
+        if (nestDwell !== null) window.clearTimeout(nestDwell);
+        nestDwell = null;
+        showNestTarget(null);
+      };
+
       const move = (pointerEvent: PointerEvent) => {
         if (!ownerIsCurrent()) return;
         // A trackpad pinch repaints the camera up to 80ms before the store
@@ -2869,16 +3266,25 @@ export function DesignCanvas({
         frameGeometryPreviewsRef.current.set(previewKey, preview);
         paintFrameGeometry(element, latest);
         if (mode !== "move") previewRootSizing(latest);
+        else trackNestTarget(pointerEvent);
       };
 
       const finish = () => {
         paintGuides({});
         gestureCancelRef.current = null;
+        const releasedNestTarget = nestTarget;
+        const releasedNestPointer = nestPointer;
+        if (nestDwell !== null) window.clearTimeout(nestDwell);
+        nestDwell = null;
         if (!ownerIsCurrent()) {
           cancel();
           return;
         }
-        if (!moved) return;
+        if (!moved) {
+          releaseNestTarget();
+          return;
+        }
+        if (releasedNestTarget) setNestLiveFile(releasedNestTarget.file);
         if (
           designGestureRectUnchanged(startRect, latestRawRect) ||
           (latest.x === Math.round(start.x) &&
@@ -2900,45 +3306,55 @@ export function DesignCanvas({
               frame.file
             ]?.snapshot?.frame;
           const currentFrames = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ?? snapshot?.frames ?? [];
+          const nestInto =
+            releasedNestTarget &&
+            currentFrames.find((candidate) => candidate.file === releasedNestTarget.file);
           if (
             mode === "move" &&
             folder &&
-            root?.oid &&
-            !root.oid.startsWith("::") &&
-            designWorkspaceView(workspaceId).selectedTargets.length === 1 &&
-            designCanvasDropTargetFrame(frame.file, currentFrames, {
-              x: latest.x, y: latest.y, width: root.rect.width, height: root.rect.height,
-            })
+            nestInto &&
+            releasedNestPointer &&
+            designWorkspaceView(workspaceId).selectedTargets.length === 1
           ) {
-            const presentation = createDesignDragPresentation(
-              workspaceId,
-              frame,
-              root,
-              element,
-            );
+            // A frame without a seeded root moves whole, by its body.
+            const rootId = root?.oid ?? DESIGN_RUNTIME_DOCUMENT_BODY_ID;
+            const presentation = root
+              ? createDesignDragPresentation(workspaceId, frame, root, element)
+              : null;
             presentation?.paint({
               x: latest.x - frame.x,
               y: latest.y - frame.y,
             });
             try {
-              const measured = await designFrameRuntime(workspaceId, frame.file)?.getNodeDetails(root.oid, undefined, { relocation: true });
+              const measured = await designFrameRuntime(workspaceId, frame.file)?.getNodeDetails(rootId, undefined, { relocation: true });
               if (!ownerIsCurrent()) return acknowledgedFrame;
+              if (!measured)
+                throw new Error("This frame's document is still loading. Try again in a moment.");
               if (
                 await transferDesignLayerOnCanvas({
                   workspaceId,
                   folder,
                   frame: acknowledgedFrame,
-                  details: measured ?? root,
+                  details: measured,
                   frames: currentFrames,
                   origin: { x: latest.x, y: latest.y },
                   detach: false,
                   requireRelocation: true,
+                  destination: nestInto,
+                  pointer: releasedNestPointer,
                   isCurrent: ownerIsCurrent,
                   presented: (target) =>
                     presentation?.handoff(target) ?? Promise.resolve(),
                 })
               )
                 return undefined;
+            } catch (nestError) {
+              // A move never fails because nesting could not: the frame stays
+              // where it was dropped, and the reason is shown.
+              if (ownerIsCurrent())
+                toast.error("Couldn't nest the frame", {
+                  description: `${errorMessage(nestError)} It stays where you dropped it.`,
+                });
             } finally {
               presentation?.remove();
             }
@@ -3012,6 +3428,8 @@ export function DesignCanvas({
         };
         completed = true;
         preview.commit = persist();
+        // The destination stays live until the nest that needed it settles.
+        void preview.commit.finally(releaseNestTarget).catch(() => {});
         savedEditingSession?.retain(preview.commit);
         void preview.commit
           .then((confirmed) => settle(confirmed ? frameGeometry(confirmed) : latest))
@@ -3034,6 +3452,7 @@ export function DesignCanvas({
       };
 
       const cancel = () => {
+        releaseNestTarget();
         if (frameGeometryPreviewsRef.current.get(previewKey) === preview) {
           if (ownerIsCurrent() && previousPreview && !previousPreview.settled)
             frameGeometryPreviewsRef.current.set(previewKey, previousPreview);
@@ -3077,9 +3496,12 @@ export function DesignCanvas({
       canvasDocumentOwner,
       folder,
       liveDesignZoom,
+      paintNestTarget,
       publishSelection,
       savedEditingSession,
+      showNestTarget,
       snapshot?.frames,
+      startFrameGroupMove,
       workspaceId,
     ],
   );
@@ -4016,6 +4438,7 @@ export function DesignCanvas({
       let delta = { x: 0, y: 0 };
       let latestRawBounds = groupBounds;
       let moved = false;
+      let releasePointer = grab;
       const paintGuides = (guides: { x?: number; y?: number }) => {
         if (verticalGuideRef.current) {
           verticalGuideRef.current.style.display =
@@ -4082,6 +4505,7 @@ export function DesignCanvas({
         const rawY = (pointerEvent.clientY - currentBounds.top) / zoom - grab.y;
         if (!moved && Math.hypot(rawX, rawY) < 3 / zoom) return;
         moved = true;
+        releasePointer = { x: grab.x + rawX, y: grab.y + rawY };
         const moving = {
           ...groupBounds,
           x: groupBounds.x + rawX,
@@ -4166,6 +4590,51 @@ export function DesignCanvas({
           restore();
           return;
         }
+        // One layer released outside its frame leaves it, as in a design
+        // tool: over another frame it joins that frame at the pointer, over
+        // empty canvas it becomes a frame of its own.
+        const single =
+          starts.length === 1 && selection.selectedTargets.length === 1
+            ? starts[0]!.details
+            : null;
+        const margin = DESIGN_REPARENT_HYSTERESIS_PIXELS / liveDesignZoom();
+        const releasedCenter = single && {
+          x: single.rect.x + delta.x + single.rect.width / 2,
+          y: single.rect.y + delta.y + single.rect.height / 2,
+        };
+        if (
+          single &&
+          folder &&
+          releasedCenter &&
+          (releasedCenter.x < -margin ||
+            releasedCenter.y < -margin ||
+            releasedCenter.x > frame.width + margin ||
+            releasedCenter.y > frame.height + margin)
+        ) {
+          const pointer = { x: frame.x + releasePointer.x, y: frame.y + releasePointer.y };
+          void (async () => {
+            const measured = await runtime.getNodeDetails(single.oid, undefined, { relocation: true });
+            if (!isCurrent()) return false;
+            return transferDesignLayerAtRelease({
+              workspaceId,
+              folder,
+              frame,
+              details: measured,
+              origin: { x: frame.x + measured.rect.x, y: frame.y + measured.rect.y },
+              pointer,
+              isCurrent,
+              nest: showNestTarget,
+            });
+          })()
+            .then((transferred) => {
+              if (!transferred) restore();
+            })
+            .catch((error) => {
+              restore();
+              toast.error("Couldn't move the layer", { description: errorMessage(error) });
+            });
+          return;
+        }
         const finalUpdates = updates();
         for (const update of finalUpdates) {
           publishDesignGestureLivePreview(
@@ -4226,6 +4695,7 @@ export function DesignCanvas({
       parentOutlineDetails,
       peerGeometryDetails,
       selectedNodeDetailsList,
+      showNestTarget,
       workspaceId,
     ],
   );
@@ -4592,7 +5062,11 @@ export function DesignCanvas({
         if (targets.some((target) => target.frame !== frame.file)) {
           event.preventDefault();
           event.stopPropagation();
-          toast.error("Move layers in one scene at a time", { description: "Cross-scene group movement is not yet atomic; nothing was moved." });
+          if (targets.every((target) => !target.nodeId)) {
+            startFrameGroupMove(event, targets.map((target) => target.frame));
+            return;
+          }
+          toast.error("Move frames or layers, not both", { description: "Select only frames, or layers in one frame, to move them together. Nothing was moved." });
           return;
         }
         const roots = designSelectionMutationTargets(targets, new Map([[frame.file, selectedRuntimeTree]]));
@@ -4706,20 +5180,19 @@ export function DesignCanvas({
               );
             },
             detach: folder
-              ? async (origin, movedDetails, presented, canWrite) => {
-                  return transferDesignLayerOnCanvas({
+              ? (origin, movedDetails, presented, canWrite, pointer) =>
+                  transferDesignLayerAtRelease({
                     workspaceId,
                     folder,
                     frame,
                     details: movedDetails,
-                    frames: snapshot?.frames ?? [],
                     origin: { x: frame.x + origin.x, y: frame.y + origin.y },
-                    detach: true,
+                    pointer: { x: frame.x + pointer.x, y: frame.y + pointer.y },
                     isCurrent: () => nudgeLifetimeRef.current === lifetime,
                     canWrite,
                     presented,
-                  });
-                }
+                    nest: showNestTarget,
+                  })
               : undefined,
             finished: () => {
               gestureCancelRef.current = null;
@@ -5177,10 +5650,11 @@ export function DesignCanvas({
       peerGeometryDetails,
       savedEditingSession,
       selectedNodeDetailsList,
-      snapshot?.frames,
       selectedFrameHasFlow,
+      showNestTarget,
       selectedRuntimeTree,
       startFrameGesture,
+      startFrameGroupMove,
       startNodeGroupMove,
       view.selectedNodeIds,
       workspaceId,
@@ -5227,6 +5701,7 @@ export function DesignCanvas({
         };
         wheelViewportRef.current = latest;
         paintDesignCanvasCamera(worldRef.current, latest, true);
+        designBackgroundWork.touch();
       };
 
       const settle = (viewport: DesignViewport) => {
@@ -6685,6 +7160,8 @@ export function DesignCanvas({
       }
       wheelViewportRef.current = latest;
       paintDesignCanvasCamera(worldRef.current, latest, true);
+      // Optional captures and pictures wait until the camera rests.
+      designBackgroundWork.touch();
       if (wheelSettleTimerRef.current !== null) {
         window.clearTimeout(wheelSettleTimerRef.current);
       }
@@ -6800,6 +7277,8 @@ export function DesignCanvas({
                   }
                 : null;
             const overlayElements = selectedElements;
+            // The frame a drag will nest into is outlined like a selection by
+            // data-design-nest-target, painted outside React (paintNestTarget).
             return (
               <article
                 key={`${workspaceId ?? "pending"}:${frame.file}`}
@@ -7038,6 +7517,8 @@ export function DesignCanvas({
                       inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
                     }
                     designDirectory={snapshot.directory}
+                    previewOwner={previewOwner}
+                    previewLevel={previewLevels.get(frame.file) ?? "overview"}
                   />
                 ) : (
                   <div className="bg-bg2 text-muted-fg flex size-full items-center justify-center text-xs">

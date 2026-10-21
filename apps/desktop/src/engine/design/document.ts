@@ -127,7 +127,7 @@ export { designDirectoryNameFor } from "./directory-registry";
 export { createDesignPage, deleteDesignPage, renameDesignPage } from "./page-lifecycle";
 export { type DesignCanvasFrame,type DesignElementOffset,type DesignFrameChange,type DesignFrameDocument,type DesignFrameGeometry,type DesignFrameRenderIdentity,type DesignFrameRenderSource,type DesignFrameRestorePoint,type DesignFrameSelectionIdentity,type DesignFrameSummary,type DesignFrameTreeNode,type DesignLintReport,type DesignLintSeverity,type DesignLintViolation,type DesignMutationResult,type DesignSourceSpan,type DesignTokenMutationResult,type DesignTokenSummary,type DesignTokensDocument,type DesignWorkspaceSnapshot } from "./document-model";
 export { DESIGN_TOKENS_FILE,DESIGN_TRANSACTION_JOURNAL_FILE,commitDesignWebDocumentState,designTransactionJournalPath,designTransactionRecoveryDirectory,designWebDocumentId,readDesignWebDocumentState,recoverDesignStorageForArchive,recoverPendingDesignTransaction } from "./document-transactions";
-export { captureDesignFrameRestorePoint,createDesignFrame,deleteDesignFrame,duplicateDesignFrame,healDesignOids,listDesignFrames,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
+export { captureDesignFrameRestorePoint,createDesignFrame,deleteDesignFrame,duplicateDesignFrame,healDesignOids,listDesignFrames,moveDesignFrameGeometries,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
 export { stripNonDesignOidsForRender } from "./node-identities";
 export { DesignRenderBudgetError } from "./render-budget";
 export {
@@ -1455,9 +1455,12 @@ async function lintFrame(
     ...knownTokens,
     ...frameCustomPropertyNames(document),
   ]);
-  for (const match of source.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)/g)) {
+  for (const match of source.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(,)?/g)) {
     const token = match[1];
-    if (availableTokens.has(token)) continue;
+    // A fallback marks an optional hook (the app's icons paint with
+    // var(--zeros-fi, var(--zeros-fi-blue))); declaring it would change the
+    // rendering, so only references without one can be unknown tokens.
+    if (match[2] || availableTokens.has(token)) continue;
     violations.push(
       violationAt(
         file,
@@ -1628,6 +1631,19 @@ export async function readDesignThemeNames(
     for (const theme of readDesignThemeCatalog(canvas).themes) themes.add(theme.id);
   }
   return [...themes].sort();
+}
+
+/** The refusal for a theme the canvas Themes control does not offer. */
+export function designUnknownThemeMessage(theme: string, themes: readonly string[]): string {
+  return themes.length
+    ? `Unknown theme ${JSON.stringify(theme)}. Choose one of: ${themes.join(", ")}.`
+    : `Unknown theme ${JSON.stringify(theme)}. This Design directory declares no themes.`;
+}
+
+/** Refuses a theme the canvas Themes control does not offer. */
+export async function assertDesignThemeName(workspacePath: string, theme: string): Promise<void> {
+  const themes = await readDesignThemeNames(workspacePath);
+  if (!themes.includes(theme)) throw new Error(designUnknownThemeMessage(theme, themes));
 }
 
 /** The id of the named default theme, which frames carry when no other theme

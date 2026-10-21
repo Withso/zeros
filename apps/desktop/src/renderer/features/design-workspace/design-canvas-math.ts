@@ -1,4 +1,5 @@
 import { clampDesignZoom } from "./state/design-workspace-ui";
+import { DESIGN_PREVIEW_LEVELS } from "./state/design-frame-previews";
 
 export interface DesignViewport {
   zoom: number;
@@ -1643,8 +1644,17 @@ export function selectLiveDesignFrameFiles(input: {
    * thing that can answer with a tree, so this demand ranks with the selection
    * rather than with distance: an open frame parked off-canvas must not stall. */
   requiredFiles?: readonly string[];
+  /** Frames with a picture of their current generation. One painted no
+   * larger than an overview picture shows that picture instead of a live
+   * document, so a zoomed-out canvas runs no frame documents it need not. */
+  pictured?: ReadonlySet<string>;
+  devicePixelRatio?: number;
 }): ReadonlySet<string> {
   const limit = Math.max(1, Math.floor(input.maxLive));
+  const ratio = input.devicePixelRatio && input.devicePixelRatio > 0 ? input.devicePixelRatio : 1;
+  const pictureSuffices = (frame: DesignCanvasFrameRect) =>
+    input.pictured?.has(frame.file) === true &&
+    Math.max(frame.width, frame.height) * input.view.zoom * ratio <= DESIGN_PREVIEW_LEVELS.overview;
   const worldLeft = -input.view.panX / input.view.zoom;
   const worldTop = -input.view.panY / input.view.zoom;
   const worldWidth = input.viewport.width / input.view.zoom;
@@ -1684,6 +1694,7 @@ export function selectLiveDesignFrameFiles(input: {
   for (const candidate of ranked) {
     if (result.size >= limit) break;
     if (!candidate.near) break;
+    if (pictureSuffices(candidate.frame)) continue;
     result.add(candidate.frame.file);
   }
   return result;

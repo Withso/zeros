@@ -208,6 +208,8 @@ async function main() {
   }
   const workbenchHarness = new URLSearchParams(location.search).has("workbench");
   const selectionReferencesHarness = new URLSearchParams(location.search).has("selectionReferences");
+  // Saved frame pictures are keyed by their Design directory.
+  const picturesHarness = new URLSearchParams(location.search).has("pictures");
   const pagesHarness = new URLSearchParams(location.search).has("pages");
   const workspaceId = pagesHarness ? "ws_design_pages_harness" : "ws_design_harness";
   const workspacePath =
@@ -316,7 +318,7 @@ async function main() {
   }));
   designWorkspaceSnapshotCache.setData(workspaceId, {
     protocolCapability: null,
-    ...(selectionReferencesHarness ? { directoryId: "design_harness", directory: "North One - Design" } : {}),
+    ...(selectionReferencesHarness || picturesHarness ? { directoryId: "design_harness", directory: "North One - Design" } : {}),
     frames: [
       {
         file: "home.html",
@@ -775,6 +777,61 @@ async function main() {
       if (workbenchHarness && message.op === "workspace.list") return { type: "WORKSPACE_RESPONSE", result: { workspaces: message.params?.archived === true ? [] : workspaces } };
       if (workbenchHarness && message.op === "git.status") return { type: "WORKSPACE_RESPONSE", result: { staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null, branch: workspace.branch, upstream: null, ahead: 0, behind: 0 } };
       if (workbenchHarness && message.op === "git.changeCounts") return { type: "WORKSPACE_RESPONSE", result: { all: 0, uncommitted: 0, staged: 0, unstaged: 0 } };
+      if (message.op === "design.preview") {
+        // A capture host stand-in: one flat picture at the requested raster.
+        const params = message.params!;
+        const requests = ((window as typeof window & {
+          __zerosHarnessPreviewRequests?: unknown[];
+        }).__zerosHarnessPreviewRequests ??= []);
+        requests.push({ ...params });
+        const frame = currentWorkspaceSnapshot.frames.find((candidate) => candidate.file === params.frame);
+        if (!frame) throw new Error(`Design frame not found: ${String(params.frame)}`);
+        if (frame.sourceVersion !== params.sourceVersion)
+          return { type: "WORKSPACE_RESPONSE", result: { stale: true, sourceVersion: frame.sourceVersion } };
+        const scale = Math.min(1, Number(params.maxDimension) / Math.max(frame.width, frame.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(frame.width * scale));
+        canvas.height = Math.max(1, Math.round(frame.height * scale));
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = "steelblue";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            sourceVersion: frame.sourceVersion,
+            theme: (params.theme as string | null | undefined) ?? null,
+            mimeType: "image/png",
+            width: canvas.width,
+            height: canvas.height,
+            data: canvas.toDataURL("image/png").slice("data:image/png;base64,".length),
+          },
+        };
+      }
+      if (layoutGestureHarness && message.op === "design.frames.move") {
+        // Several frames in one write: record it and apply every move, as the
+        // engine route does after checking each frame's measured geometry.
+        const moves = (message.params!.moves ?? []) as Array<{
+          frame: string;
+          from: { x: number; y: number; w: number; h: number; z: number };
+          to: { x: number; y: number; w: number; h: number; z: number };
+        }>;
+        const requests = ((window as typeof window & {
+          __zerosHarnessFrameMoves?: unknown[];
+        }).__zerosHarnessFrameMoves ??= []);
+        requests.push(moves);
+        const byFile = new Map(moves.map((move) => [move.frame, move]));
+        currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: currentWorkspaceSnapshot.frames.map((frame) => {
+            const move = byFile.get(frame.file);
+            return move
+              ? { ...frame, x: move.to.x, y: move.to.y, width: move.to.w, height: move.to.h, z: move.to.z }
+              : frame;
+          }),
+        };
+        designShortcutOperations.push("frames:confirmed");
+        return { type: "WORKSPACE_RESPONSE", result: { snapshot: currentWorkspaceSnapshot } };
+      }
       if (layoutGestureHarness && message.op === "design.canvas.update") {
         const params = message.params!;
         designShortcutOperations.push("canvas:waiting");

@@ -65,11 +65,104 @@ describe("bounded source-preserving relocation", () => {
     expect(await captureDesignFrameRestorePoint(workspace, input.frame)).toEqual(before);
   });
 
-  it.each([".parent > .child { color:red }", ".child{width:30vw}"])("refuses unsupported context without changing source or catalog: %s", async (css) => {
+  it.each([
+    ".parent > .child { color:red }",
+    ".child{width:30vw}",
+    "@media (min-width: 700px) { .child { color: red } }",
+    "@keyframes spin { to { rotate: 1turn } } .child{animation: spin 1s infinite}",
+    "svg.icon:not([fill]) { fill: none !important }",
+  ])("moves a layer out of a frame that uses ordinary CSS, reversibly: %s", async (css) => {
     const { before, input } = await fixture(css);
-    await expect(transferDesignNode(workspace, input)).rejects.toThrow(/safely/);
+    const result = await transferDesignNode(workspace, input);
+    expect(await listDesignFrames(workspace)).toHaveLength(2);
+    // The new frame keeps the source's own stylesheet for the moved layer.
+    expect((await captureDesignFrameRestorePoint(workspace, result.frame)).source).toContain(css);
+    await restoreDesignFrameChanges(workspace, result.changes, "undo");
     expect(await captureDesignFrameRestorePoint(workspace, input.frame)).toEqual(before);
     expect(await listDesignFrames(workspace)).toHaveLength(1);
+  });
+
+  it("refuses a component instance inside the moving layer without changing source or catalog", async () => {
+    const { file, input } = await fixture();
+    const source = (await readFile(file, "utf8")).replace('<img data-oid="image"', '<zd-card data-oid="card"></zd-card><img data-oid="image"');
+    await writeFile(file, source);
+    const identity = await readDesignFrameRenderIdentity(workspace, input.frame);
+    await expect(transferDesignNode(workspace, { ...input, sourceVersion: identity.sourceVersion })).rejects.toThrow(/component instance/);
+    expect(await readFile(file, "utf8")).toBe(source);
+    expect(await listDesignFrames(workspace)).toHaveLength(1);
+  });
+
+  it("nests a layer into a frame with different stylesheets, making a static parent positioned", async () => {
+    const { input } = await fixture(".child { border: 1px solid red }");
+    const destination = await createDesignFrame(workspace, { title: "Destination" });
+    const destinationFile = path.join(workspace, DESIGN_DIRECTORY_NAME, destination.file);
+    await writeFile(destinationFile, '<!doctype html><html><head><style>.card{padding:8px}</style></head><body><section data-oid="card" class="card"></section></body></html>');
+    const destinationBefore = await captureDesignFrameRestorePoint(workspace, destination.file);
+    const destinationIdentity = await readDesignFrameRenderIdentity(workspace, destination.file);
+    const result = await transferDesignNode(workspace, {
+      ...input,
+      destinationFrame: destination.file,
+      destinationSourceVersion: destinationIdentity.sourceVersion,
+      parentId: "card",
+      parentStyles: { position: "relative" },
+    });
+    expect(result.frame).toBe(destination.file);
+    const nested = await captureDesignFrameRestorePoint(workspace, destination.file);
+    expect(nested.source).toContain('data-oid="child"');
+    expect(nested.source).toMatch(/data-oid="card"[^>]*style="[^"]*position:\s*relative/);
+    expect(nested.source).toContain(".child { border: 1px solid red }");
+    expect(nested.source).toContain(".card{padding:8px}");
+    await restoreDesignFrameChanges(workspace, result.changes, "undo");
+    expect(await captureDesignFrameRestorePoint(workspace, destination.file)).toEqual(destinationBefore);
+    await expect(transferDesignNode(workspace, {
+      ...input,
+      destinationFrame: destination.file,
+      destinationSourceVersion: destinationIdentity.sourceVersion,
+      parentId: "card",
+      parentStyles: { position: "fixed" } as never,
+    })).rejects.toThrow(/positioned/);
+  });
+
+  it("nests a whole body-rooted frame into another frame and restores both exactly", async () => {
+    const outer = await createDesignFrame(workspace, { title: "Outer" });
+    const inner = await createDesignFrame(workspace, { title: "Inner" });
+    const outerFile = path.join(workspace, DESIGN_DIRECTORY_NAME, outer.file);
+    const innerFile = path.join(workspace, DESIGN_DIRECTORY_NAME, inner.file);
+    await writeFile(outerFile, '<!doctype html><html><head></head><body><main data-oid="board" style="position:relative;width:900px;height:700px"></main></body></html>');
+    await writeFile(innerFile, '<!doctype html><html><head><style>.title{font-weight:600}</style></head><body class="sheet" style="padding:12px"><h1 data-oid="title" class="title">Inner</h1><p data-oid="copy">Body</p></body></html>');
+    const outerBefore = await captureDesignFrameRestorePoint(workspace, outer.file);
+    const innerBefore = await captureDesignFrameRestorePoint(workspace, inner.file);
+    const outerIdentity = await readDesignFrameRenderIdentity(workspace, outer.file);
+    const innerIdentity = await readDesignFrameRenderIdentity(workspace, inner.file);
+    const result = await transferDesignNode(workspace, {
+      frame: inner.file,
+      sourceVersion: innerIdentity.sourceVersion,
+      nodeId: "::zeros-document-body",
+      destinationFrame: outer.file,
+      destinationSourceVersion: outerIdentity.sourceVersion,
+      parentId: "board",
+      relocation: { width: 400, height: 300, matrix: [1, 0, 0, 1, 40, 60], inheritedStyles: { "font-family": "Georgia" } },
+      frameBackground: "snow",
+      geometry: { x: 0, y: 0, w: 400, h: 300, z: 1 },
+    });
+    expect(result.frame).toBe(outer.file);
+    expect(result.nodeId).toMatch(/^frame-[a-f0-9]{8}$/);
+    const nested = await captureDesignFrameRestorePoint(workspace, outer.file);
+    expect(nested.source).toContain(`data-oid="${result.nodeId}" class="sheet"`);
+    expect(nested.source).toContain('data-oid="title"');
+    expect(nested.source).toContain(".title{font-weight:600}");
+    expect(nested.source).toMatch(/background-color:\s*snow/);
+    expect(nested.source).toMatch(/padding:\s*12px/);
+    expect(nested.source).toContain("matrix(1,0,0,1,40,60)");
+    expect(existsSync(innerFile)).toBe(false);
+    expect(await listDesignFrames(workspace)).toHaveLength(1);
+    await restoreDesignFrameChanges(workspace, result.changes, "undo");
+    expect(await captureDesignFrameRestorePoint(workspace, outer.file)).toEqual(outerBefore);
+    expect(await captureDesignFrameRestorePoint(workspace, inner.file)).toEqual(innerBefore);
+    await expect(transferDesignNode(workspace, {
+      frame: inner.file, sourceVersion: innerIdentity.sourceVersion, nodeId: "::zeros-document-body",
+      geometry: { x: 0, y: 0, w: 400, h: 300, z: 1 },
+    })).rejects.toThrow(/whole frame/);
   });
 
   it("does not overwrite a source saved after measurement", async () => {

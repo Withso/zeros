@@ -99,7 +99,14 @@ it("admits the complete runtime appearance through preview, extraction and exact
     });
     const before = await measure();
     expect(details.relocationContext?.unsupported).toEqual([]);
-    expect(Object.keys(details.relocationContext!.inheritedStyles).length).toBeGreaterThanOrEqual(42);
+    // Only what the layer's own context sets beyond its frame's body travels.
+    const parent = await page.evaluate(() => {
+      const style = getComputedStyle(document.querySelector('[data-oid="parent"]')!);
+      return { color: style.color, "font-size": style.fontSize, "border-collapse": style.borderCollapse, "border-spacing": style.borderSpacing };
+    });
+    expect(details.relocationContext!.inheritedStyles).toMatchObject({ ...parent, "--accent": "red" });
+    expect(parent).toMatchObject({ "font-size": "30px", "border-collapse": "collapse", "border-spacing": "20px 15px" });
+    expect(Object.keys(details.relocationContext!.inheritedStyles).length).toBeLessThan(12);
     const relocation = designNodeRelocation(details, { x: 0, y: 0 });
     const styles = designRelocationStyles(relocation);
     expect(Object.keys(styles).length).toBeLessThanOrEqual(64);
@@ -121,9 +128,9 @@ it("admits the complete runtime appearance through preview, extraction and exact
     expect(await page.locator('[data-oid="child"]').evaluate((node) => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y }))).toEqual({ x: 0, y: 0 });
     await restoreDesignFrameChanges(workspace, result.changes, "undo");
     expect(await readFile(file, "utf8")).toBe(source);
-    const excessive = { ...details, relocationContext: { ...details.relocationContext!, inheritedStyles: { ...details.relocationContext!.inheritedStyles, ...Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`--extra-${index}`, "red"])) } } };
-    expect(Object.keys(excessive.relocationContext.inheritedStyles).length).toBeLessThanOrEqual(64);
-    expect(() => designNodeRelocation(excessive, { x: 0, y: 0 })).toThrow(/bounded|64|style/i);
+    const excessive = { ...details, relocationContext: { ...details.relocationContext!, inheritedStyles: { ...details.relocationContext!.inheritedStyles, ...Object.fromEntries(Array.from({ length: 60 }, (_, index) => [`--extra-${index}`, "red"])) } } };
+    // A context beyond the bound carries its first values instead of refusing.
+    expect(Object.keys(designRelocationStyles(designNodeRelocation(excessive, { x: 0, y: 0 }))).length).toBeLessThanOrEqual(64);
     await expect(transferDesignNode(workspace, { frame: frame.file, sourceVersion: identity.sourceVersion, nodeId: "child", relocation: { ...relocation, inheritedStyles: excessive.relocationContext.inheritedStyles }, geometry: { x: 0, y: 0, w: 240, h: 150, z: 1 } })).rejects.toThrow(/bounded|64|style/i);
     expect(await readFile(file, "utf8")).toBe(source);
   } finally {

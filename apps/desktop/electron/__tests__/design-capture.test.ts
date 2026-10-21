@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { DesignCaptureHost } from "../../src/engine/design/capture-service";
-import { designCaptureRequestSchema } from "@zeros/protocol/design-capture";
+import { DESIGN_STATIC_RENDER_SCRIPT, designCaptureRequestSchema } from "@zeros/protocol/design-capture";
 import { startElectronDesignCapture } from "../design-capture";
 
 const mocks = vi.hoisted(() => {
@@ -113,3 +113,15 @@ it("disposes the capture window and rejects late pixels after cancellation", asy
   expect(mocks.destroy).toHaveBeenCalledOnce();
   expect(mocks.partition.clearStorageData).toHaveBeenCalledOnce();
 });
+
+it("stills SMIL timelines, marquees and media before it waits for readiness and captures", async () => {
+  await startElectronDesignCapture();
+  await mocks.render!(input(), new AbortController().signal);
+  const scripts = mocks.contents.executeJavaScript.mock.calls.map(([script]) => script);
+  expect(scripts[0]).toBe(DESIGN_STATIC_RENDER_SCRIPT);
+  expect(scripts).toHaveLength(2);
+  const [first] = mocks.contents.executeJavaScript.mock.invocationCallOrder;
+  const capture = mocks.contents.debugger.sendCommand.mock.calls.findIndex(([method]) => method === "Page.captureScreenshot");
+  expect(first).toBeLessThan(mocks.contents.debugger.sendCommand.mock.invocationCallOrder[capture]!);
+});
+

@@ -704,8 +704,10 @@ response for another theme. An unknown theme fails with the available names
 instead of silently capturing the base theme. `list` and `validate` refuse the
 flag.
 Capture and HTTP preview disable authored animations/transitions to show the
-canvas's default still state. Capture uses light/reduced-motion media emulation;
-the browser preview retains its browser's media preferences.
+canvas's default still state. Both capture hosts also hold SVG SMIL timelines
+at their start and stop marquees and media (`DESIGN_STATIC_RENDER_SCRIPT`), the
+same still state a live canvas frame shows. Capture uses light/reduced-motion
+media emulation; the browser preview retains its browser's media preferences.
 The capture host is the existing qualified native renderer; no browser agent or
 Design MCP is required. Capturing a still image is not visual inspection or an
 application behavior test. CSS animation phase selection is not implemented.
@@ -1955,7 +1957,31 @@ A single layer dragged inside flex/grid changes authored sibling order with an
 insertion marker. Crossing a container boundary changes its parent and resets
 positional pins; a free container uses its local coordinate space. Moving out
 of the document creates a canvas frame, and moving a frame into another transfers
-its subtree. `node.move` preserves exact source spans and stable identities.
+its subtree. As in a design tool, the frame under the pointer is the drop
+target, and it is outlined while a frame drag would nest into it; Cmd/Ctrl
+moves over frames without nesting. A layer released over another frame joins
+it at the pointer, and over empty canvas it becomes a frame. A frame without a
+seeded root nests whole: its body's content moves into one new layer at the
+frame's size, with its body background. A drop target that was painting a
+picture goes live, and release waits up to two seconds for it. A move never
+fails because nesting could not: the frame stays where it was dropped and the
+reason is shown. Several selected frames drag and arrow-nudge together in one
+canvas write and one `geometry` undo step (`design.frames.move`); a selection
+that mixes frames with layers of other frames is refused without writing.
+
+Relocation carries only the inherited values the layer's own context sets
+beyond its frame's base: standard properties unlike the body's and custom
+properties unlike the root's. Directory tokens and imported styles reach every
+frame on their own. The runtime reports the body's values as `baseStyles`; a
+destination frame whose base differs receives those differences, and an
+unmeasured destination receives the whole base. Properties that default to
+currentColor follow `color` instead of being frozen. A static destination
+parent becomes `position: relative` in the same move. Ordinary frame CSS
+(contextual selectors, media queries, viewport units, motion, `!important`),
+ancestor effects, SVG and scroll state never refuse a move; the cascade
+resolves them in the destination as for any layer there. Only a box the
+planner cannot place, or a component instance inside the moving layer, is
+refused. `node.move` preserves exact source spans and stable identities.
 `design.node.transfer` performs the two-document change through the engine's
 Design metadata journal, including geometry and exact structural history.
 Transfers retain local stylesheet dependencies within the Design directory.
@@ -2011,6 +2037,36 @@ capture start. Cached screenshots have a global 24 MiB budget, accounting for en
 strings and decoded pixels, while geometry and layer trees remain retained.
 The 12-frame live-runtime ceiling is a maximum: unused slots do not load distant
 documents. Explicit selection and open Layers trees retain priority.
+
+A frame that is not live paints a saved picture of its source
+(`state/design-frame-previews.ts`). The workspace's capture host renders it
+through `design.preview`, the same renderer as `design capture`, at the frame's
+own canvas size (up to the 16,384 px frame limit; the pixel budget applies to
+the raster) and theme, scaled into an overview (384 px) or detail (1,280 px)
+raster by the frame's painted size times device pixel ratio. A changed frame
+answers `stale` instead of other pixels; a whole-pixel frame is proven by the
+generation the render reports, a fractional one by reading it again. The host
+renders one capture at a time: a preview yields a busy slot and asks again
+later, while explicit captures (`design_capture`, review evidence) wait for it
+with bounded backoff. Pictures are keyed by
+owner scope, workspace, directory, frame, source generation, theme and level.
+They are held as encoded Blobs (WebP where smaller) behind object URLs within
+16 MiB, pinned while shown, and kept in IndexedDB within 48 MiB, one per frame,
+theme and level. A reopened page paints every stored picture before anything
+renders. One picture renders at a time, visible frames first and then the rest
+of the page, after camera and pointer input settle. Each picture renders at
+most once per session, so a page larger than a budget cannot loop. A live
+frame's new generation is pictured only after it stops changing for two
+seconds. A frame painted no larger than its overview picture stays a picture
+instead of running its document. An older picture holds a changed frame's last
+pixels until its new one is ready, so only the selected frame and frames with
+no picture also capture themselves in their own document. Cloud pictures
+belong to the signed-in account (a digest of it), render only while the VM is
+ready or busy, and never wake it. Because each cloud picture starts a capture
+browser on the VM the agents run on, cloud canvases render only frames on or
+within one viewport of the screen (farther ones paint from disk alone), with
+two seconds between pictures. Archive and removal forget a workspace's
+pictures.
 
 A runtime retains up to 64 reversible layout generations, capped at 4 MiB of
 style history. The renderer predicts known layout undo/redo against exact
@@ -2263,7 +2319,9 @@ with separate payloads. A 10k metadata-helper fixture does not prove a registere
 The following Foundation limits are compatibility and denial-of-service
 boundaries, not targets to relax casually:
 
-- textual state: 1,024 files, 2 MiB per file, 16 MiB total;
+- textual state: 2 MiB per file; one frame document (the frame and the files
+  it links) holds at most 1,024 files and 16 MiB. There is no directory-wide
+  size budget;
 - canvas catalog: 1–64 pages, 256 frames directory-wide; one portable page-folder
   segment, 64 characters maximum, and per-page stacking;
 - page view memory: 32 recent pages per workspace, with two retained workspace

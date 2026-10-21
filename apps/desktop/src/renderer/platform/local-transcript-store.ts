@@ -11,6 +11,8 @@
 // state/local-transcript-cache.ts; this file only moves records.
 // ──────────────────────────────────────────────────────────
 
+import { createIndexedDbRecordStore } from "./indexeddb-record-store";
+
 export interface LocalTranscriptRecord {
   chatId: string;
   /** Serialized `{ version, messages, leadingPrompt }`. A string keeps the
@@ -41,22 +43,6 @@ export interface LocalTranscriptStore {
 
 const DATABASE = "zeros:local-transcripts:v1";
 const WINDOWS = "windows";
-const INDEX = "index";
-
-function requestResult<T>(request: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function transactionDone(transaction: IDBTransaction): Promise<void> {
-  return new Promise((resolve, reject) => {
-    transaction.oncomplete = () => resolve();
-    transaction.onabort = () => reject(transaction.error);
-    transaction.onerror = () => reject(transaction.error);
-  });
-}
 
 function isIndexEntry(value: unknown): value is LocalTranscriptIndexEntry {
   const entry = value as Partial<LocalTranscriptIndexEntry> | null;
@@ -71,79 +57,30 @@ function isIndexEntry(value: unknown): value is LocalTranscriptIndexEntry {
   );
 }
 
-/** One long-lived connection: boot reads must not pay an open per chat. A
- * failed open disables the store for the session (the cache degrades to
- * memory-only), and a version change from another window closes it. */
+/** Boot reads must not pay an open per chat: one long-lived connection
+ * (indexeddb-record-store.ts owns its lifecycle). */
 export function createIndexedDbTranscriptStore(
   factory: IDBFactory | undefined = typeof indexedDB === "undefined"
     ? undefined
     : indexedDB,
 ): LocalTranscriptStore | null {
-  if (!factory) return null;
-  let connection: Promise<IDBDatabase | null> | null = null;
-  const database = (): Promise<IDBDatabase | null> => {
-    connection ??= new Promise<IDBDatabase | null>((resolve) => {
-      let open: IDBOpenDBRequest;
-      try {
-        open = factory.open(DATABASE, 1);
-      } catch {
-        resolve(null);
-        return;
-      }
-      open.onupgradeneeded = () => {
-        const db = open.result;
-        if (!db.objectStoreNames.contains(WINDOWS)) db.createObjectStore(WINDOWS, { keyPath: "chatId" });
-        if (!db.objectStoreNames.contains(INDEX)) db.createObjectStore(INDEX, { keyPath: "chatId" });
-      };
-      open.onerror = () => resolve(null);
-      open.onblocked = () => resolve(null);
-      open.onsuccess = () => {
-        const db = open.result;
-        db.onversionchange = () => {
-          db.close();
-          connection = null;
-        };
-        resolve(db);
-      };
-    });
-    return connection;
-  };
-
-  return {
-    async readIndex() {
-      const db = await database();
-      if (!db) return [];
-      const rows = await requestResult(
-        db.transaction(INDEX, "readonly").objectStore(INDEX).getAll(),
-      );
-      return (rows as unknown[]).filter(isIndexEntry);
-    },
-    async read(chatId) {
-      const db = await database();
-      if (!db) return null;
-      const value = (await requestResult(
-        db.transaction(WINDOWS, "readonly").objectStore(WINDOWS).get(chatId),
-      )) as Partial<LocalTranscriptRecord> | undefined;
-      return value && value.chatId === chatId && typeof value.json === "string"
-        ? { chatId, json: value.json }
+  const store = createIndexedDbRecordStore<LocalTranscriptRecord, LocalTranscriptIndexEntry>({
+    factory,
+    database: DATABASE,
+    records: WINDOWS,
+    keyPath: "chatId",
+    isEntry: isIndexEntry,
+    record: (value, chatId) => {
+      const record = value as Partial<LocalTranscriptRecord> | undefined;
+      return record?.chatId === chatId && typeof record.json === "string"
+        ? { chatId, json: record.json }
         : null;
     },
-    async commit(change) {
-      const db = await database();
-      if (!db) return;
-      const transaction = db.transaction([WINDOWS, INDEX], "readwrite");
-      const windows = transaction.objectStore(WINDOWS);
-      const index = transaction.objectStore(INDEX);
-      for (const chatId of change.remove ?? []) {
-        windows.delete(chatId);
-        index.delete(chatId);
-      }
-      for (const { record, entry } of change.put ?? []) {
-        windows.put(record);
-        index.put(entry);
-      }
-      for (const entry of change.touch ?? []) index.put(entry);
-      await transactionDone(transaction);
-    },
+  });
+  if (!store) return null;
+  return {
+    readIndex: () => store.readIndex(),
+    read: async (chatId) => (await store.read([chatId]))[0] ?? null,
+    commit: (change) => store.commit(change),
   };
 }

@@ -21,6 +21,9 @@ const reads=new Set([
   "design.status","design.review.snapshot","design.review.file","design.review.proposal","design.review.evidence",
   "design.projection","design.provenance","design.source","design.context.inspect","design.frames","design.frame",
   "design.snapshot","design.tokens","design.listDirectories","design.previewExistingDirectory",
+  // Canvas previews show saved source a viewer can already read, rendered by
+  // the VM's own bounded capture host; they never change the checkout.
+  "design.preview",
   "context.graph.list","extensions.list","skills.listZeros","workspace.get","workspace.lifecycleStatus",
   "file.ignored","workspace.listWorkingDirectories",
   "git.stashList","git.tagList","git.listAllBranches","cloudCommands.conversation",
@@ -35,7 +38,7 @@ const edits=new Set([
   "design.styleBuilds.presence",
   // Update re-reads sources and runs the same builds as presence.
   "design.styles.refresh",
-  "design.frame.create","design.frame.rename","design.frame.duplicate","design.frame.delete","design.canvas.update",
+  "design.frame.create","design.frame.rename","design.frame.duplicate","design.frame.delete","design.canvas.update","design.frames.move",
   "design.node.styles","design.node.transfer","design.node.text","design.node.html","design.asset.insert","design.asset.upload",
   "design.stage","design.unstage","design.save","design.commit",
   "context.graph.scaffold","skills.saveZeros","skills.removeZeros",

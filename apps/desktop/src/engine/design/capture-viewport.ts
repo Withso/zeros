@@ -6,7 +6,7 @@ import { assertDesignCapturePng } from "./capture-service";
 
 function scaledViewport(input: DesignCaptureRequest) {
   const viewport = input.layoutViewport ?? input;
-  const { scale } = designCaptureRasterSize(viewport);
+  const { scale } = designCaptureRasterSize(viewport, input.maxDimension);
   return {
     x: 0,
     y: 0,

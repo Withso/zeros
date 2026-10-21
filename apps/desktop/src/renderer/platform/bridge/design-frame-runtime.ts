@@ -982,6 +982,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
 
 const connectionsByFrame = new Map<string, DesignRuntimeConnectionImpl>();
 const connectingByFrame = new Map<string, DesignRuntimeConnectionImpl>();
+const readyWaiters = new Map<string, Set<() => void>>();
 
 function frameKey(workspaceId: string, frame: string): string {
   return `${workspaceId}\u0000${frame}`;
@@ -1013,6 +1014,7 @@ export function connectDesignFrameRuntime(
         connectingByFrame.delete(key);
         connectionsByFrame.get(key)?.destroy();
         connectionsByFrame.set(key, connection);
+        for (const waiter of [...(readyWaiters.get(key) ?? [])]) waiter();
         callbacks.onReady?.(capabilities);
       },
     },
@@ -1039,4 +1041,28 @@ export function designFrameRuntime(
   frame: string,
 ): DesignFrameRuntimeConnection | null {
   return connectionsByFrame.get(frameKey(workspaceId, frame)) ?? null;
+}
+
+/** The frame's runtime once its document is ready, or null after
+ * `timeoutMs`. A canvas gesture asks a frame to go live and waits for it. */
+export function waitForDesignFrameRuntime(
+  workspaceId: string,
+  frame: string,
+  timeoutMs: number,
+): Promise<DesignFrameRuntimeConnection | null> {
+  const current = designFrameRuntime(workspaceId, frame);
+  if (current) return Promise.resolve(current);
+  const key = frameKey(workspaceId, frame);
+  return new Promise((resolve) => {
+    let waiters = readyWaiters.get(key);
+    if (!waiters) readyWaiters.set(key, (waiters = new Set()));
+    const settle = () => {
+      clearTimeout(timer);
+      waiters!.delete(settle);
+      if (!waiters!.size) readyWaiters.delete(key);
+      resolve(designFrameRuntime(workspaceId, frame));
+    };
+    const timer = setTimeout(settle, Math.max(0, timeoutMs));
+    waiters.add(settle);
+  });
 }

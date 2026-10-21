@@ -239,7 +239,7 @@ Use the exact command and URL from your context:
 - `preview` returns an HTTP URL for a browser your provider actually offers. Never use `file://`.
 - Add `--revision <rev>` to require the exact revision you validated. URLs expire 30 minutes after the context was issued; ask for fresh context when one expires.
 
-The optional Design API (`design_capabilities`, `design_document_open`, `design_lint`, `design_render`, `design_capture`, `design_transaction_apply`, …) inspects and edits the same files; native authoring, Local or cloud, does not need it.
+The optional Design API (`design_capabilities`, `design_document_open`, `design_lint`, `design_render`, `design_capture`, `design_transaction_apply`, …) inspects and edits the same files; native authoring, Local or cloud, does not need it, and it does not depend on the 30-minute verification URL. `design_capture` takes an optional `theme` (like `--theme`) and defaults `width`/`height` to the frame's canvas size, scaling a frame larger than 2048 × 2048 into one raster as the native capture does.
 
 ## Implementing application code from a frame
 
@@ -250,7 +250,8 @@ A frame is a reference, not code to copy. Implement it with the application's ow
 | Resource | Limit |
 | --- | --- |
 | Pages / frames per directory | 64 / 256 |
-| Text file (HTML, CSS, metadata) | 2 MiB each, 16 MiB total |
+| Text file (HTML, CSS, metadata) | 2 MiB each |
+| One frame and the files it links (tokens, page CSS, components) | 1,024 files, 16 MiB; there is no directory-wide size budget |
 | Stylesheets linked by one frame | 128 |
 | Rendered frame after inlining | 15 MiB, including 12 MiB of images |
 | Style sources | 16 per directory; 32 MiB per file, 64 MiB and 1,024 files per compiled source, 16 MiB of fonts per source. Frames receive only the rules, faces and characters they use. |

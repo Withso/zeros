@@ -896,6 +896,13 @@
   outline-color: var(--design-selection-stroke);
 }
 
+/* The frame a drag would nest into. The attribute is painted outside React
+ * during the drag; the ring matches a selected frame's two screen pixels. */
+[data-design-frame][data-design-nest-target] {
+  outline-color: var(--design-selection-stroke);
+  box-shadow: 0 0 0 calc(2px * var(--design-canvas-inverse-zoom)) var(--design-selection-stroke);
+}
+
 .zd-design-hover-outline {
   outline-color: var(--design-hover-stroke);
 }

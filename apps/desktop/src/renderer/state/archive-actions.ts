@@ -44,6 +44,7 @@ import { clearChatPaneFolders, moveChatPaneFolder } from "./chat-panes-store";
 import { forgetDesignWorkspaceView } from "../features/design-workspace/state/design-workspace-ui";
 import { forgetDesignLayerDisclosure } from "../features/design-workspace/state/design-layer-disclosure";
 import { forgetDesignRuntimeWorkspace } from "../features/design-workspace/state/design-runtime-store";
+import { forgetDesignFramePreviews } from "../features/design-workspace/state/use-design-frame-previews";
 import { forgetDesignReviewCache } from "./read-caches";
 import { forgetDesignWorkspaceBootSnapshot } from "../features/design-workspace/state/design-workspace-boot-cache";
 import { isLocalMainWorkspace } from "./local-main-workspace";
@@ -224,6 +225,8 @@ function detachWorkspaceRuntimeState(
   }
   clearTerminalFolders([workspace.path], project?.id);
   forgetDesignRuntimeWorkspace(workspace.id);
+  // Its frame pictures go from memory and disk; a restore renders them again.
+  forgetDesignFramePreviews([workspace.id]);
   forgetDesignReviewCache(workspace.id);
   // Layer disclosure names runtime nodes that just went away with the frames.
   forgetDesignLayerDisclosure(workspace.id);

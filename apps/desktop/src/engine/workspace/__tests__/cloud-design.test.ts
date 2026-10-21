@@ -14,6 +14,8 @@ import {
   bridgeDesignHistory,
   bridgeDesignInsertAsset,
   bridgeDesignListDirectories,
+  bridgeDesignMoveFrames,
+  bridgeDesignPreview,
   bridgeDesignSave,
   bridgeDesignSnapshot,
   bridgeDesignStyleBuildPresence,
@@ -166,6 +168,45 @@ describe("cloud Design checkout round trips", () => {
     closeState();
     setStateRootForTesting(null);
     await rm(temporary, { recursive: true, force: true });
+  });
+
+  it("lets a viewer preview cloud frames while only an editor moves several frames in one write", async () => {
+    const owner = client("device-owner");
+    const { frame } = await initialize(owner.bridge);
+    const second = await bridgeDesignCreateFrame(owner.bridge, key, "Second frame");
+    // Transport fixture: a PNG header of the requested raster size.
+    const capture = await startDesignCaptureService(async (input) => {
+      const bytes = Buffer.alloc(24);
+      Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
+      bytes.write("IHDR", 12); bytes.writeUInt32BE(input.width, 16); bytes.writeUInt32BE(input.height, 20);
+      return { bytes, renderer: "transport-fixture" };
+    });
+    setDesignCaptureConfig(capture);
+    try {
+      const viewer = client("device-viewer", "viewer").bridge;
+      const snapshot = await bridgeDesignSnapshot(viewer, key);
+      const current = snapshot.frames.find((candidate) => candidate.file === frame.file)!;
+      const preview = await bridgeDesignPreview(viewer, key, {
+        directoryId: snapshot.directoryId!, frame: frame.file, sourceVersion: current.sourceVersion,
+        theme: null, maxDimension: 128,
+      });
+      expect(preview).toMatchObject({ sourceVersion: current.sourceVersion, mimeType: "image/png" });
+      expect(Math.max("width" in preview ? preview.width : 0, "height" in preview ? preview.height : 0)).toBe(128);
+      await expect(bridgeDesignPreview(viewer, key, {
+        directoryId: snapshot.directoryId!, frame: frame.file, sourceVersion: "0".repeat(24), theme: null, maxDimension: 128,
+      })).resolves.toEqual({ stale: true, sourceVersion: current.sourceVersion });
+      const moves = snapshot.frames
+        .filter((candidate) => [frame.file, second.frame.file].includes(candidate.file))
+        .map((candidate) => {
+          const from = { x: candidate.x, y: candidate.y, w: candidate.width, h: candidate.height, z: candidate.z };
+          return { frame: candidate.file, from, to: { ...from, x: from.x + 10 } };
+        });
+      expect(moves).toHaveLength(2);
+      await expect(bridgeDesignMoveFrames(viewer, key, moves)).rejects.toThrow(/actor/);
+      const moved = await bridgeDesignMoveFrames(owner.bridge, key, moves);
+      for (const move of moves)
+        expect(moved.frames.find((candidate) => candidate.file === move.frame)).toMatchObject({ x: move.to.x });
+    } finally { setDesignCaptureConfig(undefined); await capture.stop(); }
   });
 
   it("admits measured movement only for its exact source and scene geometry through the cloud bridge", async () => {

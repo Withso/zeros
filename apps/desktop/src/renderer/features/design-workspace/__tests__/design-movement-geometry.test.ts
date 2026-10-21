@@ -6,6 +6,7 @@ import {
   designNodeRelocation,
   designParentDelta,
   designRelocatedBorderStyles,
+  designSettledRelocation,
 } from "../design-movement-geometry";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
@@ -73,6 +74,41 @@ describe("design movement coordinates", () => {
       ),
     ).toThrow(/appearance/);
   });
+  it("previews a same-frame relocation with every inherited value and saves only what the drop parent would change", () => {
+    // A label taking the body's dark text, dropped into a `.card { color: white }`.
+    const label = {
+      sourceVersion: "a".repeat(24), oid: "label", tag: "span", name: "Label", text: null, selector: "",
+      visible: true, breadcrumb: [], styles: { position: "absolute" },
+      rect: { x: 10, y: 20, width: 100, height: 20 },
+      box: { x: 10, y: 20, width: 100, height: 20, rotation: 0, scaleX: 1, scaleY: 1, originX: 0.5, originY: 0.5 },
+      borderCoordinateSpace: [1, 0, 0, 1, 10, 20],
+      relocationContext: {
+        inheritedStyles: { "font-size": "14px" },
+        baseStyles: { color: "dimgray", "font-family": "Georgia" },
+        rootStyles: {},
+        unsupported: [],
+      },
+    } as DesignRuntimeNodeDetails;
+    const card = {
+      ...label, oid: "card",
+      relocationContext: {
+        inheritedStyles: { color: "white", "--surface": "navy" },
+        baseStyles: { color: "dimgray", "font-family": "Georgia" },
+        rootStyles: { "--surface": "snow" },
+        unsupported: [],
+      },
+    } as DesignRuntimeNodeDetails;
+    const preview = designNodeRelocation(label, { x: 40, y: 60 }, [1, 0, 0, 1, 30, 40], null);
+    expect(preview.inheritedStyles).toEqual({ "font-size": "14px", color: "dimgray", "font-family": "Georgia" });
+    expect(designSettledRelocation(preview, label, card)).toEqual({
+      ...preview,
+      inheritedStyles: { "font-size": "14px", color: "dimgray", "--surface": "snow" },
+    });
+    // An unmeasured parent keeps the preview's complete appearance.
+    expect(designSettledRelocation(preview, label, null)).toBe(preview);
+    expect(designSettledRelocation(preview, label, { ...card, relocationContext: undefined })).toBe(preview);
+  });
+
   it("uses one and eight world pixels, preserving fractional parent offsets and center pins", () => {
     expect(designNudgeStep(false)).toBe(1);
     expect(designNudgeStep(true)).toBe(8);

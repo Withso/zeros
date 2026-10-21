@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DesignHeadlessRenderer } from "@zeros/design-web";
 import {
+  DESIGN_CAPTURE_MAX_DIMENSION,
   DESIGN_CAPTURE_PNG_BYTES,
   DESIGN_CAPTURE_TIMEOUT_MS,
   designCaptureReplySchema,
@@ -8,6 +9,7 @@ import {
 import { assertDesignCapturePng } from "./capture-service";
 import { prepareFrameRenderSource } from "./render-preparation";
 import { readCanvas } from "./document-storage";
+import { assertDesignThemeName } from "./document";
 import { readDesignThemeCatalog } from "./themes";
 import { withDesignTheme } from "./source";
 
@@ -63,10 +65,32 @@ export interface DesignEvidenceRenderer extends DesignHeadlessRenderer {
   ): ReturnType<DesignHeadlessRenderer["render"]>;
 }
 
+function waitForCapacity(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
 export function createDesignCaptureRenderer(
   workspacePath: string,
   config: DesignCaptureConfig | null = resolveDesignCaptureConfig(),
   fetchImpl: typeof fetch = fetch,
+  options: {
+    /** The caller already refused themes the canvas does not offer. */
+    themeChecked?: boolean;
+    /** Wait for a busy capture slot (the default). Background previews pass
+     * false: they yield the slot and ask again on their own schedule. */
+    capacityRetry?: boolean;
+  } = {},
 ): DesignEvidenceRenderer | undefined {
   if (!config) return undefined;
   const renderComposed: NonNullable<
@@ -75,7 +99,23 @@ export function createDesignCaptureRenderer(
     signal?.throwIfAborted();
     const composed = { sanitized: html, sourceVersion };
     const raster = rasterSize ?? viewport;
-    const response = await fetchImpl(`${config.url}/capture`, {
+    const body = JSON.stringify({
+      version: 1,
+      html: composed.sanitized,
+      revision: state.revision,
+      width: raster.width,
+      height: raster.height,
+      ...(raster.width !== viewport.width || raster.height !== viewport.height
+        ? {
+            layoutViewport: { width: viewport.width, height: viewport.height },
+            // A preview raster below the default bound names its bound, so
+            // the host computes the same scale (designCaptureRasterSize).
+            ...(Math.max(raster.width, raster.height) < DESIGN_CAPTURE_MAX_DIMENSION
+              ? { maxDimension: Math.max(raster.width, raster.height) } : {}),
+          } : {}),
+      colorScheme: viewport.colorScheme,
+    });
+    const post = () => fetchImpl(`${config.url}/capture`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${config.token}`,
@@ -86,17 +126,21 @@ export function createDesignCaptureRenderer(
         ...(signal ? [signal] : []),
         AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 1_000),
       ]),
-      body: JSON.stringify({
-        version: 1,
-        html: composed.sanitized,
-        revision: state.revision,
-        width: raster.width,
-        height: raster.height,
-        ...(raster.width !== viewport.width || raster.height !== viewport.height
-          ? { layoutViewport: { width: viewport.width, height: viewport.height } } : {}),
-        colorScheme: viewport.colorScheme,
-      }),
+      body,
     });
+    let response = await post();
+    // The host renders one capture at a time and refuses the rest. A canvas
+    // preview may hold the slot for one render, so an explicit capture waits
+    // for it, bounded by the longest render, instead of failing.
+    for (
+      let delay = 100, deadline = Date.now() + DESIGN_CAPTURE_TIMEOUT_MS;
+      response.status === 429 && options.capacityRetry !== false && Date.now() + delay < deadline;
+      delay = Math.min(delay * 2, 1_000)
+    ) {
+      await response.body?.cancel();
+      await waitForCapacity(delay, signal);
+      response = await post();
+    }
     if (!response.ok) {
       await response.body?.cancel();
       throw new Error(
@@ -161,11 +205,14 @@ export function createDesignCaptureRenderer(
     renderComposed,
     async render(input) {
       input.signal?.throwIfAborted();
-      // API captures use the same default as the canvas. Read the theme and
-      // imported styles from one canvas snapshot; renderComposed callers have
-      // already chosen their theme (for example an explicit CLI preview).
+      // API captures use the same default as the canvas, or a theme the canvas
+      // Themes control offers (as `design capture --theme` does). Read the
+      // theme and imported styles from one canvas snapshot; renderComposed
+      // callers have already chosen their theme (an explicit CLI preview).
       const canvas = await readCanvas(workspacePath).catch(() => undefined);
-      const theme = canvas ? readDesignThemeCatalog(canvas).baseId : null;
+      if (input.theme !== undefined && !options.themeChecked)
+        await assertDesignThemeName(workspacePath, input.theme);
+      const theme = input.theme ?? (canvas ? readDesignThemeCatalog(canvas).baseId : null);
       const composed = await prepareFrameRenderSource(
         workspacePath,
         input.state.files[input.state.entryFile]!,

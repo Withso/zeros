@@ -19,9 +19,11 @@ them.
    `design capture` from the frame context and inspect the PNG yourself.
    Capture both themes: the default is Dark, and `--theme light` captures
    Light the way the canvas Themes menu shows it. `design styles` confirms the
-   imported sources are ready. Existing visual behavior is a
-   contract (RULES.md §3), so implement a visual change only after the user
-   approves the frame.
+   imported sources are ready. The native URL expires after 30 minutes; the
+   Design API's `design_lint` and `design_capture` (with `theme`, at the
+   frame's own size) verify the same revision without it. Existing visual
+   behavior is a contract (RULES.md §3), so implement a visual change only
+   after the user approves the frame.
 4. **Red.** A bug needs a failing test or ui-smoke assertion first; a behavior
    change needs a concrete usage example.
 5. **Implement with the system.** Compose the shared primitives and layout

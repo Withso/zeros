@@ -5,20 +5,41 @@ export interface DesignPreviewImage {
   readonly bitmap?: ImageBitmap;
 }
 
+/** An encoded picture held as a Blob behind an object URL, never base64 in
+ * the JS heap. The browser decodes it when an <img> paints it and keeps those
+ * pixels in its own decode cache, so the pool charges its encoded bytes only. */
+export interface DesignPreviewBlobImage {
+  readonly blob: Blob;
+  readonly url: string;
+  readonly width: number;
+  readonly height: number;
+}
+
+type CachedImage = DesignPreviewImage | DesignPreviewBlobImage;
+
+export interface DesignPreviewCacheEvents<T extends CachedImage> {
+  /** Admission evicted this key to make room (not a replacement or an
+   * invalidation, which the caller asked for). */
+  evicted?(key: string): void;
+  /** An image's resources are released: once evicted or replaced unshown, or
+   * at the final lease of an invalidated one. */
+  disposed?(image: Readonly<T>): void;
+}
+
 export interface DesignPreviewCacheLimits {
   readonly maxEntries: number;
   readonly maxEncodedBytes: number;
   readonly maxDecodedBytes: number;
 }
 
-export interface DesignPreviewLease {
-  readonly image: Readonly<DesignPreviewImage>;
+export interface DesignPreviewLease<T extends CachedImage = DesignPreviewImage> {
+  readonly image: Readonly<T>;
   release(): void;
 }
 
-interface PreviewEntry {
+interface PreviewEntry<T extends CachedImage> {
   key: string;
-  image: Readonly<DesignPreviewImage>;
+  image: Readonly<T>;
   encodedBytes: number;
   decodedBytes: number;
   pins: number;
@@ -33,7 +54,21 @@ const DEFAULT_LIMITS: DesignPreviewCacheLimits = {
 };
 const PNG_PREFIX = "data:image/png;base64,";
 
-function imageCosts(key: string, image: DesignPreviewImage) {
+/** The decoded bitmap a PNG entry owns; a Blob picture owns none. */
+function ownedBitmap(image: Readonly<CachedImage>): ImageBitmap | undefined {
+  return "blob" in image ? undefined : image.bitmap;
+}
+
+function imageCosts(key: string, image: CachedImage) {
+  if ("blob" in image) {
+    return key &&
+      Number.isSafeInteger(image.width) && image.width > 0 &&
+      Number.isSafeInteger(image.height) && image.height > 0 &&
+      typeof image.url === "string" && image.url.length > 0 &&
+      Number.isSafeInteger(image.blob.size) && image.blob.size > 0
+      ? { encodedBytes: image.blob.size, decodedBytes: 0 }
+      : null;
+  }
   if (
     !key ||
     !Number.isSafeInteger(image.width) ||
@@ -85,15 +120,18 @@ function imageCosts(key: string, image: DesignPreviewImage) {
   return { encodedBytes, decodedBytes };
 }
 
-export class DesignPreviewCache {
+export class DesignPreviewCache<T extends CachedImage = DesignPreviewImage> {
   private readonly limits: Readonly<DesignPreviewCacheLimits>;
-  private readonly entries = new Map<string, PreviewEntry>();
-  private readonly retired = new Set<PreviewEntry>();
+  private readonly entries = new Map<string, PreviewEntry<T>>();
+  private readonly retired = new Set<PreviewEntry<T>>();
   private readonly bitmaps = new Set<ImageBitmap>();
   private encodedBytes = 0;
   private decodedBytes = 0;
 
-  constructor(limits: DesignPreviewCacheLimits = DEFAULT_LIMITS) {
+  constructor(
+    limits: DesignPreviewCacheLimits = DEFAULT_LIMITS,
+    private readonly events: DesignPreviewCacheEvents<T> = {},
+  ) {
     if (
       Object.entries(DEFAULT_LIMITS).some(([key, maximum]) => {
         const value = limits[key as keyof DesignPreviewCacheLimits];
@@ -120,7 +158,7 @@ export class DesignPreviewCache {
     return this.entries.has(key);
   }
 
-  put(key: string, image: DesignPreviewImage): boolean {
+  put(key: string, image: T): boolean {
     const costs = imageCosts(key, image);
     if (
       !costs ||
@@ -130,21 +168,25 @@ export class DesignPreviewCache {
     )
       return false;
     const previous = this.entries.get(key);
-    if (image.bitmap && this.bitmaps.has(image.bitmap)) {
+    const bitmap = ownedBitmap(image);
+    if (bitmap && this.bitmaps.has(bitmap)) {
+      const previousImage = previous?.image as Readonly<CachedImage> | undefined;
+      const held = previousImage && !("blob" in previousImage) ? previousImage : undefined;
       if (
-        previous?.image.bitmap !== image.bitmap ||
-        previous.image.dataUrl !== image.dataUrl
+        !previous ||
+        held?.bitmap !== bitmap ||
+        held.dataUrl !== (image as DesignPreviewImage).dataUrl
       )
         return false;
       this.entries.delete(key);
       this.entries.set(key, previous);
       return true;
     }
-    const victims: PreviewEntry[] = [];
+    const victims: PreviewEntry<T>[] = [];
     let count = this.entries.size + this.retired.size + 1;
     let encoded = this.encodedBytes + costs.encodedBytes;
     let decoded = this.decodedBytes + costs.decodedBytes;
-    const reclaim = (entry: PreviewEntry) => {
+    const reclaim = (entry: PreviewEntry<T>) => {
       victims.push(entry);
       count--;
       encoded -= entry.encodedBytes;
@@ -164,33 +206,38 @@ export class DesignPreviewCache {
     for (const entry of victims) {
       this.entries.delete(entry.key);
       this.dispose(entry);
+      if (entry.key !== key) this.events.evicted?.(entry.key);
     }
     if (previous && previous.pins > 0) {
       this.entries.delete(key);
       previous.retired = true;
       this.retired.add(previous);
     }
-    const entry: PreviewEntry = {
+    const entry: PreviewEntry<T> = {
       key,
-      image: Object.freeze({
-        dataUrl: image.dataUrl,
-        width: image.width,
-        height: image.height,
-        ...(image.bitmap ? { bitmap: image.bitmap } : {}),
-      }),
+      image: Object.freeze(
+        "blob" in image
+          ? { blob: image.blob, url: image.url, width: image.width, height: image.height }
+          : {
+              dataUrl: image.dataUrl,
+              width: image.width,
+              height: image.height,
+              ...(image.bitmap ? { bitmap: image.bitmap } : {}),
+            },
+      ) as Readonly<T>,
       ...costs,
       pins: 0,
       retired: false,
       disposed: false,
     };
     this.entries.set(key, entry);
-    if (image.bitmap) this.bitmaps.add(image.bitmap);
+    if (bitmap) this.bitmaps.add(bitmap);
     this.encodedBytes += costs.encodedBytes;
     this.decodedBytes += costs.decodedBytes;
     return true;
   }
 
-  acquire(key: string): DesignPreviewLease | null {
+  acquire(key: string): DesignPreviewLease<T> | null {
     const entry = this.entries.get(key);
     if (!entry) return null;
     this.entries.delete(key);
@@ -221,15 +268,17 @@ export class DesignPreviewCache {
     for (const key of this.entries.keys()) this.invalidate(key);
   }
 
-  private dispose(entry: PreviewEntry): void {
+  private dispose(entry: PreviewEntry<T>): void {
     if (entry.disposed) return;
     entry.disposed = true;
     this.retired.delete(entry);
     this.encodedBytes -= entry.encodedBytes;
     this.decodedBytes -= entry.decodedBytes;
-    if (entry.image.bitmap) {
-      this.bitmaps.delete(entry.image.bitmap);
-      entry.image.bitmap.close();
+    const bitmap = ownedBitmap(entry.image);
+    if (bitmap) {
+      this.bitmaps.delete(bitmap);
+      bitmap.close();
     }
+    this.events.disposed?.(entry.image);
   }
 }

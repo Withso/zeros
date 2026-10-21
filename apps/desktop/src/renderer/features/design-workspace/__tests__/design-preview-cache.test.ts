@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   DesignPreviewCache,
+  type DesignPreviewBlobImage,
   type DesignPreviewImage,
 } from "../state/design-preview-cache";
 import { designPreviewPng } from "./design-preview-fixture";
@@ -267,4 +268,36 @@ describe("design preview cache", () => {
       ).toThrow(RangeError);
     },
   );
+
+  it("holds encoded Blob pictures behind object URLs, charged their encoded bytes", () => {
+    const disposed: string[] = [];
+    const evicted: string[] = [];
+    const cache = new DesignPreviewCache<DesignPreviewBlobImage>(
+      { maxEntries: 10, maxEncodedBytes: 250, maxDecodedBytes: 256 },
+      { evicted: (key) => evicted.push(key), disposed: (picture) => disposed.push(picture.url) },
+    );
+    const picture = (url: string, bytes = 100): DesignPreviewBlobImage =>
+      ({ blob: new Blob([new Uint8Array(bytes)], { type: "image/webp" }), url, width: 1280, height: 800 });
+    // The browser decodes a picture when an <img> paints it, outside this
+    // pool, so a large raster costs only its encoded bytes here.
+    expect(cache.put("a", picture("blob:a"))).toBe(true);
+    expect(cache.getUsage()).toEqual({ entries: 1, encodedBytes: 100, decodedBytes: 0 });
+    const shown = cache.acquire("a")!;
+    expect(shown.image.url).toBe("blob:a");
+    cache.put("b", picture("blob:b"));
+    // c evicts the least recently used unshown picture, b, and reports it.
+    expect(cache.put("c", picture("blob:c"))).toBe(true);
+    expect(evicted).toEqual(["b"]);
+    expect(disposed).toEqual(["blob:b"]);
+    // An invalidated shown picture keeps its URL until its lease releases.
+    cache.invalidate("a");
+    expect(disposed).toEqual(["blob:b"]);
+    shown.release();
+    expect(disposed).toEqual(["blob:b", "blob:a"]);
+    expect(evicted).toEqual(["b"]);
+    // A picture that cannot fit is refused without evicting anything.
+    expect(cache.put("d", picture("blob:d", 300))).toBe(false);
+    expect(cache.has("c")).toBe(true);
+    expect(cache.put("e", { ...picture("blob:e"), width: 0 })).toBe(false);
+  });
 });

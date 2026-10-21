@@ -1237,6 +1237,84 @@ describe("design runtime protocol", () => {
     }
   }, 20_000);
 
+  it("stills SMIL timelines, marquees, media and CSS animations that start after ready", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const result = await page.evaluate(
+        ({ source }) =>
+          new Promise<{
+            smilPaused: boolean;
+            smilTime: number;
+            marqueeStopped: number;
+            mediaPaused: number;
+            lateAnimations: number;
+            lateStarted: boolean;
+          }>((resolve, reject) => {
+            document.head.innerHTML = `<style>
+              @keyframes late-spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+              .late { animation: late-spin 1s linear infinite; }
+            </style>`;
+            document.body.innerHTML =
+              '<svg data-oid="svg" width="100" height="20"><rect data-oid="bar" width="10" height="20"><animate attributeName="x" from="0" to="90" dur="1s" repeatCount="indefinite"/></rect></svg>' +
+              '<marquee data-oid="ticker">Loop</marquee><video data-oid="clip" muted loop></video>' +
+              '<div data-oid="late" style="width:10px;height:10px"></div>';
+            let marqueeStopped = 0;
+            let mediaPaused = 0;
+            const stop = HTMLMarqueeElement.prototype.stop;
+            HTMLMarqueeElement.prototype.stop = function () { marqueeStopped += 1; return stop.call(this); };
+            const pause = HTMLMediaElement.prototype.pause;
+            HTMLMediaElement.prototype.pause = function () { mediaPaused += 1; return pause.call(this); };
+            (window as Window & { __zerosDesignSourceVersion?: string }).__zerosDesignSourceVersion = "8".repeat(24);
+            const channel = new MessageChannel();
+            const timeout = window.setTimeout(() => reject(new Error("motion still guard timed out")), 4_000);
+            channel.port1.onmessage = (event) => {
+              const message = event.data as { type?: string; event?: string };
+              if (message.type !== "event" || message.event !== "ready") return;
+              const svg = document.querySelector("svg") as SVGSVGElement;
+              const late = document.querySelector('[data-oid="late"]') as HTMLElement;
+              let lateStarted = false;
+              late.addEventListener("animationstart", () => { lateStarted = true; });
+              // A hover, :checked or media query state can start an animation
+              // after ready; it must be stilled as it starts.
+              late.classList.add("late");
+              const settle = () => window.setTimeout(() => {
+                if (!lateStarted) { settle(); return; }
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                  window.clearTimeout(timeout);
+                  resolve({
+                    smilPaused: svg.animationsPaused(),
+                    smilTime: svg.getCurrentTime(),
+                    marqueeStopped,
+                    mediaPaused,
+                    lateAnimations: document.getAnimations().length,
+                    lateStarted,
+                  });
+                }));
+              }, 50);
+              settle();
+            };
+            channel.port1.start();
+            new Function(source)();
+            window.postMessage(
+              { protocol: "zeros-design-runtime", version: 2, type: "handshake", sourceVersion: "8".repeat(24) },
+              "*",
+              [channel.port2],
+            );
+          }),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+      expect(result.smilPaused).toBe(true);
+      expect(result.smilTime).toBeCloseTo(0, 1);
+      expect(result.marqueeStopped).toBeGreaterThan(0);
+      expect(result.mediaPaused).toBeGreaterThan(0);
+      expect(result.lateStarted).toBe(true);
+      expect(result.lateAnimations).toBe(0);
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
   it("applies token themes and resolves nested canvas hit modes", async () => {
     const browser = await chromium.launch({ headless: true });
     try {

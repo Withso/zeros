@@ -18,6 +18,11 @@ import type {
   DesignStyleProvenance,
 } from "@zeros/design-web";
 import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
+import {
+  DESIGN_CAPTURE_TIMEOUT_MS,
+  designPreviewReplySchema,
+  type DesignPreviewReply,
+} from "@zeros/protocol/design-capture";
 import { designPageCatalogSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 
 import type { RuntimeClient } from "./ws-client";
@@ -553,6 +558,27 @@ function designMutationReply(
   return reply as DesignMutationReplyWire;
 }
 
+/** One frame's canvas preview, rendered from its saved source by the
+ * workspace's capture host. A stale answer names the saved version. */
+export async function bridgeDesignPreview(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  input: {
+    directoryId: string;
+    frame: string;
+    sourceVersion: string;
+    theme: string | null;
+    maxDimension: number;
+  },
+): Promise<DesignPreviewReply> {
+  // Cover the render deadline and the engine's transport budget.
+  const result = await workspaceOp(bridge, "design.preview", { workspaceId, ...input },
+    DESIGN_CAPTURE_TIMEOUT_MS + 5_000);
+  const reply = designPreviewReplySchema.safeParse(result);
+  if (!reply.success) throw new Error("design.preview: malformed engine response");
+  return reply.data;
+}
+
 export async function bridgeDesignTokens(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -850,6 +876,26 @@ export async function bridgeDesignUpdateCanvas(
   };
 }
 
+/** Several selected canvas frames moved together: one canvas write and one
+ * undo step. Each move names the geometry it was measured at. */
+export async function bridgeDesignMoveFrames(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  moves: readonly {
+    frame: string;
+    from: DesignFrameGeometryWire;
+    to: DesignFrameGeometryWire;
+  }[],
+): Promise<DesignWorkspaceSnapshotWire> {
+  const result = (await workspaceOp(bridge, "design.frames.move", {
+    workspaceId,
+    moves,
+  })) as { snapshot?: DesignWorkspaceSnapshotWire };
+  if (!result?.snapshot || !isDesignWorkspaceSnapshotWire(result.snapshot))
+    throw new Error("design.frames.move: malformed engine response");
+  return normalizeDesignWorkspaceSnapshotPages(result.snapshot);
+}
+
 export async function bridgeDesignDuplicateFrame(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -915,6 +961,10 @@ export interface DesignNodeTransferInput {
   relocation?: DesignRelocation;
   movementGuard?: DesignMovementGuard;
   destinationMovementGuard?: DesignMovementGuard;
+  /** Makes a static destination parent positioned in the same move. */
+  parentStyles?: { position: "relative" };
+  /** A whole body-rooted frame's body background, kept on its new layer. */
+  frameBackground?: string;
   x: number;
   y: number;
   w: number;

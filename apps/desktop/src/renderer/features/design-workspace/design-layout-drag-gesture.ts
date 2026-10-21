@@ -18,7 +18,10 @@ import { createDesignDragPresentation } from "./design-drag-presentation";
 import type { DesignOperation } from "@zeros/design-core";
 import { designBackgroundWork } from "./state/design-background-work";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
-import { DESIGN_MOVE_ACTIVATION_PIXELS } from "./design-movement-geometry";
+import {
+  DESIGN_MOVE_ACTIVATION_PIXELS,
+  designSettledRelocation,
+} from "./design-movement-geometry";
 import {
   captureDesignPageOwner,
   designWorkspaceView,
@@ -53,6 +56,8 @@ export function startDesignLayoutDrag(input: {
     details: DesignRuntimeNodeDetails,
     presented: (frame: DesignCanvasFrameWire) => Promise<void>,
     canWrite: () => boolean,
+    /** The pointer at release, in the source frame's coordinates. */
+    pointer: { x: number; y: number },
   ) => Promise<boolean>;
 }): (() => void) | null {
   const { event, workspaceId } = input;
@@ -479,6 +484,7 @@ export function startDesignLayoutDrag(input: {
           details,
           (target) => presentation?.handoff(target) ?? Promise.resolve(),
           isCurrent,
+          { ...point },
         );
         if (!transferred) await restore();
         else presentation?.remove();
@@ -494,6 +500,13 @@ export function startDesignLayoutDrag(input: {
         return;
       }
       if (drop.relocation) {
+        // The preview carried every inherited value; the saved move keeps
+        // only what the drop parent, measured now, would not give the layer.
+        const parent = await runtime
+          .getNodeDetails(drop.parentId, undefined, { relocation: true })
+          .catch(() => null);
+        assertCurrent();
+        const relocation = designSettledRelocation(drop.relocation, details, parent);
         await transferDesignNodeCached(
           workspaceId,
           {
@@ -505,7 +518,7 @@ export function startDesignLayoutDrag(input: {
             nodeId: details.oid,
             parentId: drop.parentId,
             beforeId: drop.beforeId,
-            relocation: drop.relocation,
+            relocation,
             movementGuard: { sourceVersion, geometry },
             x: frame.x,
             y: frame.y,

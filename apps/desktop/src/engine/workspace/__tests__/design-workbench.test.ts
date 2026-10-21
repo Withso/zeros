@@ -69,6 +69,77 @@ describe("Design in the shared workbench", () => {
     } finally { setDesignCaptureConfig(undefined); await capture.stop(); }
   });
 
+  it("renders a canvas preview of the saved frame through the capture host, refusing stale versions without one", async () => {
+    const service = new WorkspaceService(root, { primaryDesignWorkspace: true });
+    const params = { workspaceId: "local-main" };
+    await service.handle("design.initialize", params);
+    const created = await service.handle("design.frame.create", { ...params, title: "Preview" }) as { frame: { file: string } };
+    const snapshot = await service.handle("design.snapshot", params) as {
+      snapshot: { frames: { file: string; sourceVersion: string; width: number; height: number }[] };
+    };
+    const frame = snapshot.snapshot.frames.find((candidate) => candidate.file === created.frame.file)!;
+    // Transport fixture: a PNG header of the requested raster size.
+    const render = vi.fn(async (input: { width: number; height: number; layoutViewport?: unknown; maxDimension?: number }) => {
+      const bytes = Buffer.alloc(24);
+      Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
+      bytes.write("IHDR", 12); bytes.writeUInt32BE(input.width, 16); bytes.writeUInt32BE(input.height, 20);
+      return { bytes, renderer: "transport-fixture" };
+    });
+    const capture = await startDesignCaptureService(render);
+    setDesignCaptureConfig(capture);
+    const input = { ...params, frame: frame.file, sourceVersion: frame.sourceVersion, theme: null, maxDimension: 256 };
+    try {
+      const result = await service.handle("design.preview", input, { hostLocalResources: false }) as {
+        sourceVersion: string; width: number; height: number; data: string;
+      };
+      const longest = Math.max(frame.width, frame.height);
+      expect(result).toMatchObject({ sourceVersion: frame.sourceVersion, theme: null, mimeType: "image/png",
+        width: Math.round((frame.width * 256) / longest), height: Math.round((frame.height * 256) / longest) });
+      expect(render).toHaveBeenCalledOnce();
+      expect(render.mock.calls[0]![0]).toMatchObject({ layoutViewport: { width: frame.width, height: frame.height }, maxDimension: 256 });
+      expect(JSON.stringify(result)).not.toContain(capture.token);
+      expect(JSON.stringify(result)).not.toContain(root);
+      await expect(service.handle("design.preview", { ...input, sourceVersion: "0".repeat(24) }))
+        .resolves.toEqual({ stale: true, sourceVersion: frame.sourceVersion });
+      await expect(service.handle("design.preview", { ...input, maxDimension: 4096 })).rejects.toThrow();
+      await expect(service.handle("design.preview", { ...input, url: "https://example.test" })).rejects.toThrow();
+      await expect(service.handle("design.preview", { ...input, workspaceId: "unknown" })).rejects.toThrow();
+      expect(render).toHaveBeenCalledOnce();
+    } finally { setDesignCaptureConfig(undefined); await capture.stop(); }
+  });
+
+  it("moves several canvas frames in one write and one undo step, refusing a stale gesture", async () => {
+    const service = new WorkspaceService(root, { primaryDesignWorkspace: true });
+    const params = { workspaceId: "local-main" };
+    await service.handle("design.initialize", params);
+    const files: string[] = [];
+    for (const title of ["Alpha", "Beta", "Gamma"])
+      files.push(((await service.handle("design.frame.create", { ...params, title })) as { frame: { file: string } }).frame.file);
+    type Frames = { snapshot: { frames: { file: string; x: number; y: number; width: number; height: number; z: number }[] } };
+    const geometryOf = (snapshot: Frames, file: string) => {
+      const frame = snapshot.snapshot.frames.find((candidate) => candidate.file === file)!;
+      return { x: frame.x, y: frame.y, w: frame.width, h: frame.height, z: frame.z };
+    };
+    const before = (await service.handle("design.snapshot", params)) as Frames;
+    const moves = files.slice(0, 2).map((file) => {
+      const from = geometryOf(before, file);
+      return { frame: file, from, to: { ...from, x: from.x + 100, y: from.y + 50 } };
+    });
+    const moved = (await service.handle("design.frames.move", { ...params, moves })) as Frames;
+    for (const move of moves) expect(geometryOf(moved, move.frame)).toEqual(move.to);
+    expect(geometryOf(moved, files[2]!)).toEqual(geometryOf(before, files[2]!));
+    // One undo step restores every frame of the move; redo replays it.
+    const undone = (await service.handle("design.history.undo", params)) as Frames;
+    for (const move of moves) expect(geometryOf(undone, move.frame)).toEqual(move.from);
+    const redone = (await service.handle("design.history.redo", params)) as Frames;
+    for (const move of moves) expect(geometryOf(redone, move.frame)).toEqual(move.to);
+    // A gesture measured before that move is stale and moves nothing.
+    await expect(service.handle("design.frames.move", { ...params, moves })).rejects.toThrow(/moved or changed/);
+    const after = (await service.handle("design.snapshot", params)) as Frames;
+    for (const move of moves) expect(geometryOf(after, move.frame)).toEqual(move.to);
+    await expect(service.handle("design.frames.move", { ...params, moves: [moves[0], moves[0]] })).rejects.toThrow();
+  });
+
   it("initializes and edits Design without changing presentation, HEAD or the index", async () => {
     const beforeHead = git(workspace.path, "rev-parse", "HEAD");
     const beforeIndex = git(workspace.path, "write-tree");

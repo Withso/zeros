@@ -7,6 +7,7 @@ const fixture = vi.hoisted(() => {
   return { page, context, browser, launch: vi.fn(async () => browser), png: vi.fn() };
 });
 vi.mock("playwright-core", () => ({ chromium: { launch: fixture.launch } }));
+import { DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
 vi.mock("../capture-service", () => ({ assertDesignCapturePng: fixture.png }));
 const input = { version: 1 as const, html: '<script>unsafe()</script><body onclick="unsafe()">Fixture</body>',
   revision: "revision", width: 1, height: 1, colorScheme: "light" as const };
@@ -39,5 +40,11 @@ describe.runIf(process.platform==="linux")("fixed cloud PNG worker", () => {
     expect(html).not.toMatch(/<script|onclick=/); expect(html).toContain("script-src 'none'");
     expect(fixture.png).toHaveBeenCalledWith(Buffer.from("png-fixture"), 1, 1);
     expect(fixture.context.close).toHaveBeenCalledOnce(); expect(fixture.browser.close).toHaveBeenCalledOnce();
+  });
+  it("stills SMIL timelines, marquees and media before it captures", async () => {
+    const worker = await import("../design-capture-worker");
+    await worker.captureCloudDesignFrame(input);
+    expect(fixture.page.evaluate).toHaveBeenCalledWith(DESIGN_STATIC_RENDER_SCRIPT);
+    expect(fixture.page.evaluate.mock.invocationCallOrder[0]).toBeLessThan(fixture.page.screenshot.mock.invocationCallOrder[0]!);
   });
 });
