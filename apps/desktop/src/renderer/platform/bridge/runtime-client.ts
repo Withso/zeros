@@ -582,7 +582,11 @@ export class RuntimeClient {
         return;
       }
       if (target.channel === "sdk-websocket") sdkTarget = target;
-      else {
+      else if (target.channel === "v2-websocket") {
+        // Cloud v2: the ticket is offered as a subprotocol, never in the URL.
+        wsUrl = target.url;
+        protocols = [...target.protocols];
+      } else {
         wsUrl = target.url;
         protocols = cloudRuntimeWebSocketProtocols(target.cloudToken);
       }
@@ -1550,7 +1554,7 @@ export class RuntimeClient {
             Object.entries(previousBoot).some(([key, value]) => nextBoot[key as keyof CloudAgentBootScope] !== value) ||
             (candidate.channel === "sdk-websocket" || current.channel === "sdk-websocket"
               ? candidate.channel !== current.channel
-              : candidate.cloudToken === current.cloudToken))
+              : "cloudToken" in candidate && "cloudToken" in current && candidate.cloudToken === current.cloudToken))
         ) {
           throw new CloudRuntimeAccessError({ code: "cloud_workspace_access_superseded", status: 409 });
         }

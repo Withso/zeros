@@ -27,7 +27,7 @@ const CreateSchema = z.object({
 }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "transition" | "issueToken">;
+  store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "transition" | "issueToken" | "listChats" | "windowMessages">;
   computers: Pick<CloudV2Computers, "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
   /** Boat named snapshot of the Zeros v2 base image; builds start from it. */
   baseSnapshot: string | null;
@@ -98,6 +98,21 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
       expiresAt: ticket.expiresAt.toISOString(),
     });
+  });
+
+  /** History reads from the control plane's mirror; never wakes the VM. */
+  const HistorySchema = z.object({ op: z.enum(["chats.list", "messages.window"]), params: z.record(z.string(), z.unknown()).default({}) }).strict();
+  app.post("/v1/cloud-v2/workspaces/:id/history", json, async c => {
+    const id = uuid.safeParse(c.req.param("id"));
+    if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
+    const workspace = await deps.store.get(id.data, c.get("user").id);
+    const parsed = HistorySchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Unsupported history read");
+    if (parsed.data.op === "chats.list") return c.json({ result: await deps.store.listChats(workspace.id) });
+    const chatId = z.string().min(1).max(256).safeParse(parsed.data.params.chatId);
+    if (!chatId.success) throw new HttpError(400, "invalid_request", "chatId is required");
+    const limit = z.number().int().min(1).max(1000).catch(200).parse(parsed.data.params.limit);
+    return c.json({ result: { messages: await deps.store.windowMessages(workspace.id, chatId.data, limit) } });
   });
 
   for (const [action, from, to] of [

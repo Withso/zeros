@@ -1,0 +1,155 @@
+// Cloud workspace v2 API. Responses map into the existing CloudWorkspaceDocument
+// so the shared workspace UI renders v2 workspaces without its own copy.
+import { z } from "zod";
+import { cloudAccountRequest } from "./cloud-workspaces";
+import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
+import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
+
+const uuid = z.string().uuid();
+export const CloudV2CapabilitiesSchema = z.object({
+  design: z.literal(false), browser: z.literal(false), simulators: z.literal(false),
+  terminal: z.boolean(), files: z.boolean(), git: z.boolean(),
+  agents: z.array(z.enum(["codex", "claude", "cursor"])),
+});
+export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
+
+export const CloudV2WorkspaceSchema = z.object({
+  id: uuid,
+  organizationId: uuid,
+  creatorUserId: uuid,
+  name: z.string().min(1).max(200),
+  repository: z.string().regex(/^[^/]+\/[^/]+$/),
+  branch: z.string().min(1).max(255),
+  baseBranch: z.string().min(1).max(255),
+  state: z.enum(["creating", "running", "stopping", "stopped", "starting", "deleting", "deleted", "failed"]),
+  errorCode: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  version: z.literal(2),
+  capabilities: CloudV2CapabilitiesSchema,
+}).passthrough();
+export type CloudV2Workspace = z.infer<typeof CloudV2WorkspaceSchema>;
+
+/** The shared UI's existing status vocabulary. */
+const STATUS: Record<CloudV2Workspace["state"], string> = {
+  creating: "provisioning", running: "ready", starting: "waking", stopping: "stopping",
+  stopped: "stopped", deleting: "deleting", deleted: "deleted", failed: "failed",
+};
+
+const ERRORS: Record<string, string> = {
+  cloud_computer_build_required: "Build this organization's Cloud Computer first.",
+  worker_boot_timeout: "The workspace computer did not start in time. Delete it and create a new one.",
+};
+
+export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocument {
+  const [owner, name] = workspace.repository.split("/") as [string, string];
+  const iso = (value: string) => new Date(value).toISOString();
+  return {
+    id: workspace.id,
+    organizationId: workspace.organizationId,
+    // v2 has no team scoping; the organization is its own owner here.
+    teamId: workspace.organizationId,
+    name: workspace.name,
+    createdBy: workspace.creatorUserId,
+    ownerUserId: workspace.creatorUserId,
+    placement: "cloud",
+    status: STATUS[workspace.state],
+    capabilities: {
+      canWrite: true, canEdit: true, canManage: true,
+      canStart: workspace.state === "stopped",
+      startUnavailableReason: workspace.state === "failed" ? "This workspace failed. Create a new one." : null,
+    },
+    repository: { forge: "github.com", owner, name, revision: workspace.baseBranch },
+    generation: {
+      number: 1,
+      architecture: "linux/amd64",
+      resources: { cpuMillicores: 4000, memoryMiB: 8192, storageMiB: 32768 },
+      observedState: workspace.state,
+      lastObservedAt: iso(workspace.updatedAt),
+    },
+    version: 0,
+    error: workspace.errorCode ? { code: workspace.errorCode, message: ERRORS[workspace.errorCode] ?? "This cloud workspace is unavailable." } : null,
+    createdAt: iso(workspace.createdAt),
+    updatedAt: iso(workspace.updatedAt),
+    deletedAt: workspace.state === "deleted" ? iso(workspace.updatedAt) : null,
+  };
+}
+
+const one = z.object({ workspace: CloudV2WorkspaceSchema });
+const key = () => crypto.randomUUID();
+
+export async function listCloudV2Workspaces(organizationId: string): Promise<CloudV2Workspace[]> {
+  const { workspaces } = await cloudAccountRequest(`/v1/cloud-v2/workspaces?organizationId=${uuid.parse(organizationId)}`,
+    z.object({ workspaces: z.array(CloudV2WorkspaceSchema).max(200) }));
+  if (workspaces.some(row => row.organizationId !== organizationId)) throw new Error("Cloud catalog returned another organization");
+  return workspaces;
+}
+
+export async function getCloudV2Workspace(target: CloudWorkspaceTarget): Promise<CloudV2Workspace> {
+  const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}`, one);
+  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
+    throw new Error("Cloud workspace response changed identity");
+  return workspace;
+}
+
+export async function createCloudV2Workspace(input: {
+  organizationId: string; repository: string; baseBranch: string; name?: string;
+}): Promise<CloudV2Workspace> {
+  return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body: input, idempotencyKey: key() })).workspace;
+}
+
+export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "delete"): Promise<CloudV2Workspace> {
+  const id = uuid.parse(target.workspaceId);
+  const { workspace } = action === "delete"
+    ? await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}`, one, { body: {}, idempotencyKey: key(), method: "DELETE" })
+    : await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}/${action}`, one, { body: {}, idempotencyKey: key() });
+  return workspace;
+}
+
+export const CloudV2ConnectSchema = z.object({
+  url: z.string().url(),
+  protocols: z.tuple([z.literal("zeros.cloud.v2"), z.string().regex(/^ticket\.zw2c_[A-Za-z0-9_-]{43}$/)]),
+  expiresAt: z.string(),
+});
+export async function connectCloudV2Workspace(target: CloudWorkspaceTarget) {
+  return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect`, CloudV2ConnectSchema,
+    { body: {}, idempotencyKey: key() });
+}
+
+/** Chat history from the control plane's mirror, readable while the VM sleeps. */
+export async function readCloudV2History(target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const { result } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/history`,
+    z.object({ result: z.record(z.string(), z.unknown()) }), { body: { op, params }, idempotencyKey: key() });
+  return result;
+}
+
+// ── Cloud Computer ──
+export const CloudV2RepositorySchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  ref: z.string().optional(),
+  commit: z.string().optional(),
+  setup: z.string().max(8000).optional(),
+});
+export const CloudV2BuildSchema = z.object({
+  id: uuid, organizationId: uuid, version: z.number().int().positive(),
+  recipe: z.object({ base: z.string(), repositories: z.array(CloudV2RepositorySchema), rebuiltFrom: z.number().int().optional() }),
+  state: z.enum(["queued", "building", "succeeded", "failed", "cancelled"]),
+  snapshotId: z.string().nullable(), errorCode: z.string().nullable(),
+  createdAt: z.string(), startedAt: z.string().nullable(), finishedAt: z.string().nullable(),
+}).passthrough();
+export type CloudV2Build = z.infer<typeof CloudV2BuildSchema>;
+const ComputerSchema = z.object({ activeBuildId: uuid.nullable(), snapshotName: z.string().nullable(), builds: z.array(CloudV2BuildSchema) });
+
+export async function getCloudV2Computer(organizationId: string) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer`, ComputerSchema);
+}
+
+export async function buildCloudV2Computer(organizationId: string, repositories: z.infer<typeof CloudV2RepositorySchema>[]) {
+  return (await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/builds`,
+    z.object({ build: CloudV2BuildSchema }), { body: { repositories }, idempotencyKey: key() })).build;
+}
+
+export async function activateCloudV2Build(organizationId: string, buildId: string) {
+  return (await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/builds/${uuid.parse(buildId)}/activate`,
+    z.object({ build: CloudV2BuildSchema }), { body: {}, idempotencyKey: key() })).build;
+}

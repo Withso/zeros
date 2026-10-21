@@ -94,8 +94,23 @@ export const CloudDirectProviderConnectionTargetSchema = target.extend({
 });
 export type CloudDirectProviderConnectionTarget = z.infer<typeof CloudDirectProviderConnectionTargetSchema>;
 
+/** Cloud workspace v2: the control plane relays this socket to the workspace
+ * worker. The ticket subprotocol is short-lived and refreshed per connection. */
+export const CloudV2ConnectionTargetSchema = target.extend({
+  channel: z.literal('v2-websocket'),
+  protocols: z.tuple([z.literal('zeros.cloud.v2'), z.string().regex(/^ticket\.zw2c_[A-Za-z0-9_-]{43}$/)]),
+}).strict().superRefine((value, context) => {
+  const url = canonicalUrl(value.url);
+  const secure = url?.protocol === 'wss:';
+  const loopback = url?.protocol === 'ws:' && ['127.0.0.1', 'localhost'].includes(url.hostname);
+  if (!url || (!secure && !loopback) || url.pathname !== `/v2/cloud/workspaces/${value.workspaceId}/bridge`)
+    context.addIssue({ code: 'custom', message: 'Cloud v2 connection target is invalid' });
+});
+export type CloudV2ConnectionTarget = z.infer<typeof CloudV2ConnectionTargetSchema>;
+
 export const CloudRuntimeConnectionTargetSchema = z.discriminatedUnion('channel', [
   CloudControlPlaneConnectionTargetSchema, CloudSshConnectionTargetSchema, CloudDirectProviderConnectionTargetSchema,
+  CloudV2ConnectionTargetSchema,
 ]);
 /** Secret-bearing, connection-lifetime-only data. Never persist or use its
  * URL/token as keyed workspace identity. Local owns its existing transport. */
