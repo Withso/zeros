@@ -11,6 +11,7 @@ import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
 import { prepareCheckout } from "./workspace/checkout";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
+import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 
 interface WorkerOptions {
   directory: string;
@@ -18,6 +19,7 @@ interface WorkerOptions {
   transport: Transport;
   drivers?: DriverFactories;
   prepareCheckout?: (workspace: WorkerConfig["workspace"]) => Promise<void>;
+  workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
 }
 interface Client extends AppClient { rejected: boolean }
@@ -31,6 +33,7 @@ export class CloudWorker {
   private agents?: Agents;
   private chats?: ChatService;
   private history?: HistoryMirror;
+  private workspace?: WorkspaceService;
   private configuring: Promise<void> = Promise.resolve();
   private online = false;
   private disposed = false;
@@ -65,12 +68,14 @@ export class CloudWorker {
     await this.agents?.flush();
     await this.store?.flush();
     await this.history?.flush();
+    await this.workspace?.flush();
   }
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true; clearInterval(this.heartbeat);
     await this.configuring.catch(() => {});
+    await this.workspace?.dispose();
     await this.agents?.dispose();
     await this.store?.flush();
     await this.history?.flush();
@@ -85,7 +90,7 @@ export class CloudWorker {
     if (!parsed.success) return;
     const message = parsed.data;
     if (message.t === "config") {
-      this.configuring = this.configuring.then(() => this.configure(message));
+      this.configuring = this.configuring.catch(() => {}).then(() => this.configure(message));
       await this.configuring.catch(() => { this.options.onError?.("configuration"); });
       return;
     }
@@ -121,7 +126,8 @@ export class CloudWorker {
     if (frame.type.startsWith("AGENT_")) return this.agents!.handle(client, frame);
     if (frame.type === "WORKSPACE_REQUEST") {
       try {
-        const result = await this.chats!.handle(frame.op, frame.params ?? {});
+        const service = /^(chats|messages|turns)\./.test(frame.op) ? this.chats! : this.workspace!;
+        const result = await service.handle(frame.op, frame.params ?? {});
         await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
       } catch (error) {
         await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
@@ -140,6 +146,9 @@ export class CloudWorker {
       // Earlier worker snapshots stored a cloud key in chat metadata. Native
       // bridge rows must round-trip through the renderer's existing mapper.
       for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
+      this.workspace = await WorkspaceService.open(scope, this.options.directory, {
+        ...this.options.workspaceServices, publish: (frame) => { void this.broadcast(frame); },
+      });
       this.scope = scope; this.store = store;
       this.agents = new Agents(store, scope, this.options.drivers ?? { codex: () => new CodexDriver() }, config,
         (frame) => this.broadcast(frame), () => { void this.reportIdle(); });
@@ -151,7 +160,7 @@ export class CloudWorker {
       }), store.onError((chatId) => {
         this.options.onError?.("storage"); void this.agents!.closeChat(chatId).catch(() => {});
       }));
-    } else this.agents!.configure(config);
+    } else { await this.workspace!.configure(config.workspace); this.agents!.configure(config); }
     this.history!.connect();
     await this.reportIdle(true);
   }
