@@ -14,7 +14,7 @@ import { ensureRailwayEnvironment, stopRailwayBackend, configureRailwayBackend, 
 import { hostedCloudflareClient, ensureDevPages, ensureDevPagesDomain, ensureDevDns, verifyDevZone, deleteDevPagesAndDns } from "./hosted-cloudflare.mjs";
 import { ensureHostedWebhook, deleteHostedWebhook } from "./hosted-workos.mjs";
 import { hostedBackendEnvironment, hostedWebEnvironment, hostedPublicProfile } from "./hosted-profile.mjs";
-import { ensureDevImage, deleteDevImages, reconcileRetiredBuilders, retireSupersededDevImages, verifyDevImage, devBoatClient } from "./hosted-image.mjs";
+import { deleteDevImages, reconcileRetiredBuilders } from "./hosted-image.mjs";
 import { devObjectStorage } from "./hosted-storage.mjs";
 import { run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { pollProvider } from "./provider-http.mjs";
@@ -23,10 +23,8 @@ import { endpoints, workosClient } from "./workos.mjs";
 import { packDevOperator, unpackDevOperator } from "./operator-artifact.mjs";
 import { assertCurrentFixtureFunding, bindFixture, verifyFixtureMembership } from "./hosted-fixtures.mjs";
 import { bindHostedProfile } from "./hosted-state.mjs";
-import { retireUnfinishedHostedAgents } from "./hosted-agents.mjs";
-import { hostedAgentCanary, hostedAgentRequest } from "./hosted-agent-canary.mjs";
+import { hostedAgentRequest } from "./hosted-agent-canary.mjs";
 import { retireHostedAgentSsh } from "./hosted-agent-ssh.mjs";
-import { inventoryHostedProviders } from "./hosted-inventory.mjs";
 import { reserveHostedAdmission, releaseHostedAdmission } from "./hosted-admission.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -164,30 +162,11 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       }
     },
     captureSource: source,
-    async ensureImage(lease, build) {
-      const existing = lease.state.resources.images?.some(r => r.inputsSha256 === build.workerInputsSha256 && r.qualified && !r.deleted);
-      progress(existing ? "Verifying the existing cloud worker image" : "Building and qualifying the changed cloud worker image; this can take several minutes");
-      if (!existing) {
-        if (!registry) throw new Error("Dev builder allocation requires the account admission registry");
-        // Unfinished checks qualify the image being replaced and hold the
-        // owner's builder slot; retire them, then free superseded images.
-        if ((lease.state.agentQualifications ?? []).some(job => !job.retired))
-          await retireUnfinishedHostedAgents(lease, hostedAgentCanary(lease, profile, undefined, {
-            reserve: () => { throw new Error("A replaced image's checks cannot allocate"); },
-            release: () => releaseHostedAdmission(registry, lease, profile),
-          }));
-        // The deployed image is the fallback for this build. Release its older
-        // rollback image before competing for shared account snapshot capacity.
-        await retireSupersededDevImages(lease, profile, { keepInputs: [lease.state.source?.workerInputsSha256].filter(Boolean), keepRollback: false });
-        const inventory = await inventoryHostedProviders(profile);
-        // An earlier interrupted attempt can leave a never-started builder
-        // reservation; release it before competing for the owner's slot.
-        await releaseHostedAdmission(registry, lease, profile);
-        await reserveHostedAdmission(registry, lease.state, profile, { kind: "builder", inventory,
-          snapshotName: `dev-${lease.state.owner}-${lease.state.generation.slice(0, 8)}-${build.workerInputsSha256.slice(0, 16)}` });
-      }
-      try { return await ensureDevImage(lease, profile, build, directory, objects, { progress }); }
-      finally { if (registry) await releaseHostedAdmission(registry, lease, profile); }
+    // Cloud v2 workspaces fork their organization's Cloud Computer, built from
+    // the v2 base image; Dev no longer builds or qualifies an engine image.
+    async ensureImage() {
+      progress("Cloud v2 needs no prebuilt engine image");
+      return null;
     },
     async ensureDatabase(lease) {
       progress(lease.state.resources.planetscale?.name ? "Reusing this checkout's PlanetScale Dev branch and its data" : "Creating this checkout's disposable PlanetScale Dev branch");
@@ -251,7 +230,6 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       progress("Verifying the deployed owner, generation, source and sign-in routing");
       const state = lease.state, p = hostedPublicProfile(state, profile);
       await verifyPlanetScaleRuntimeRole(lease, profile.planetscale, ps);
-      await verifyDevImage(state.resources.images?.find(image => image.inputsSha256 === build.workerInputsSha256 && !image.deleted), profile, devBoatClient(profile.boat, lease.signal));
       await waitForHttp(`${p.apiOrigin}/healthz`, { signal: lease.signal, timeout: 120_000, accept: async response => {
         if (!response.ok) return false;
         const d = (await response.json()).development;

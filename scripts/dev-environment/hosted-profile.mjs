@@ -80,10 +80,14 @@ export function hostedDesktopEnvironment(state, profile, directory) {
     VITE_APP_BASE_URL: p.appOrigin, VITE_CONTROL_PLANE_URL: p.apiOrigin, ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
 }
 
-export function hostedBackendEnvironment(state, profile, source, worker) {
+/** Cloud workspace v2 base image: the Boat named snapshot Cloud Computer
+ * builds start from. Without one, Dev runs with builds disabled. */
+const cloudV2BaseSnapshot = env => /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(env.ZEROS_CLOUD_V2_BASE_SNAPSHOT ?? "")
+  ? env.ZEROS_CLOUD_V2_BASE_SNAPSHOT : undefined;
+
+export function hostedBackendEnvironment(state, profile, source, _worker, env = process.env) {
   const p = hostedPublicProfile(state, profile), roles = state.resources.planetscale?.roles;
-  if (!roles?.runtime?.url || !state.resources.workos?.secret || !state.runId ||
-      worker.inputsSha256 !== source.workerInputsSha256 || !HEX.test(worker.buildSha256 ?? "")) throw new Error("Dev deployment is missing its database, webhook or qualified matching worker");
+  if (!roles?.runtime?.url || !state.resources.workos?.secret || !state.runId) throw new Error("Dev deployment is missing its database or webhook");
   const url = new URL(roles.runtime.url), key = name => Buffer.from(state.keys[name], "hex").toString("base64url");
   if(profile.connections?.enabled && (!state.connectionRegistered || !state.connectionBackendEnvironment)) throw new Error("Register the Dev connection generation before backend deployment");
   return { ...(profile.connections?.enabled?{ZEROS_DEPLOY_ENV:"dev",ZEROS_DEV_CONNECTIONS_ENABLED:"true",...state.connectionBackendEnvironment}:{}), NODE_ENV: "production", HOST: "0.0.0.0", PORT: "3000",
@@ -103,22 +107,19 @@ export function hostedBackendEnvironment(state, profile, source, worker) {
     GITHUB_APP_CLIENT_ID: profile.github.clientId, GITHUB_APP_CLIENT_SECRET: profile.github.clientSecret,
     GITHUB_APP_PRIVATE_KEY: Buffer.from(profile.github.privateKeyBase64, "base64").toString("utf8"),
     GITHUB_OAUTH_CALLBACK_URL: `${p.apiOrigin}/v1/github/oauth/callback`, GITHUB_COMPLETION_PAGE_URL: `${p.appOrigin}/github/connected`,
-    CLOUD_WORKSPACES_ENABLED: "true", CLOUD_WORKSPACE_PROVIDER: "boat", CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
-    CLOUD_WORKSPACE_CONTROL_PLANE_URL: p.apiOrigin, ZEROS_CLOUD_SOURCE_COMMIT: worker.sourceCommit,
-    BOAT_API_KEY: profile.boat.apiKey, BOAT_ACCOUNT_SCOPE: profile.boat.accountScope, BOAT_BILLING_ORG: profile.boat.billingOrg,
-    BOAT_SNAPSHOT_ID: worker.snapshotId, BOAT_IMAGE_BUILD_SHA256: worker.buildSha256,
-    BOAT_TTL_SECONDS: "900", BOAT_COMPUTE_POLICY_ID: "hosted-dev", BOAT_SECONDS_PER_DOLLAR: String(profile.boat.secondsPerDollar),
-    ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/amd64", CLOUD_WORKSPACE_CPU_MILLICORES: "4000", CLOUD_WORKSPACE_MEMORY_MIB: "8192",
-    CLOUD_WORKSPACE_STORAGE_MIB: String(worker.storageMiB),
-    CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"), CLOUD_WORKSPACE_OBJECT_KEY_V1: key("objects"),
+    // Cloud workspace v2. The old cloud stays off; one combined Railway service
+    // serves the API, the worker relay and the lifecycle loop on one origin.
+    CLOUD_WORKSPACES_ENABLED: "false",
+    CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: p.apiOrigin, CLOUD_V2_REALTIME_URL: p.apiOrigin.replace(/^https:/, "wss:"),
+    ...(cloudV2BaseSnapshot(env) ? { CLOUD_V2_BASE_SNAPSHOT: cloudV2BaseSnapshot(env) } : {}),
+    BOAT_API_KEY: profile.boat.apiKey, BOAT_BILLING_ORG: profile.boat.billingOrg,
+    // The agent login vault, unchanged from the previous cloud.
+    CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"),
     // This generation's separate agent key was reserved in the original Dev
     // receipt. Keep refresh-family fingerprints stable across redeploys and
     // independent of credential encryption key rotation.
     CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON: JSON.stringify({ 1: key("agent") }),
-    CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION: "1",
-    CLOUD_WORKSPACE_OBJECT_STORE_KIND: "s3", CLOUD_WORKSPACE_S3_ENDPOINT: profile.storage.endpoint, CLOUD_WORKSPACE_S3_BUCKET: profile.storage.bucket,
-    CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: profile.storage.accessKeyId, CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: profile.storage.secretAccessKey,
-    CLOUD_WORKSPACE_S3_KEY_PREFIX: `dev/${state.owner}/${state.generation}/` };
+    CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION: "1" };
 }
 
 export function hostedWebEnvironment(state, profile) {
