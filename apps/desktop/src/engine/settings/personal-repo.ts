@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { gitProcessOptions } from "../git/git-execution-identity";
+import { gitProcessOptions } from "../git/git-process-options";
 import { gitProbeFailure } from "../git/git-exec";
 import { isTransientWorktreeRegistryRead } from "../git/worktree-registry";
 import {

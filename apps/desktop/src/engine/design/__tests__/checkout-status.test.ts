@@ -1,13 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-const placement = vi.hoisted(() => ({ cloud: false }));
-vi.mock("../../git/git-execution-identity", async (original) => ({
-  ...(await original<typeof import("../../git/git-execution-identity")>()),
-  gitExecutionIdentity: () => placement.cloud ? { uid: 10003, gid: 10003 } : undefined,
-}));
 import * as commands from "../../git/git-exec";
 import { readDesignCheckoutStatus } from "../checkout-status";
 
@@ -18,7 +13,7 @@ beforeEach(async () => {
   git("init", "-q", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
   await writeFile(path.join(root, "file"), "original\n"); git("add", "."); git("commit", "-qm", "initial");
 });
-afterEach(async () => { placement.cloud = false; vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }); });
 
 describe("Local Design checkout observations", () => {
   it("shares concurrent conflict scans and uses an index fingerprint for warm reads", async () => {
@@ -56,13 +51,5 @@ describe("Local Design checkout observations", () => {
     release(); await pending;
     await readDesignCheckoutStatus(root);
     expect(read).toHaveBeenCalledTimes(2);
-  });
-
-  it("keeps qualified cloud conflict scans uncached", async () => {
-    placement.cloud = true;
-    const read = vi.spyOn(commands, "runGit").mockResolvedValue({ stdout: "", stderr: "" });
-    await Promise.all(Array.from({ length: 4 }, () => readDesignCheckoutStatus(root)));
-    expect(read).toHaveBeenCalledTimes(4);
-    expect(await readFile(path.join(root, "file"), "utf8")).toBe("original\n");
   });
 });

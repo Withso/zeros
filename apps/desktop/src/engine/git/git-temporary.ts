@@ -1,9 +1,6 @@
 import { mkdtemp, open, rm } from "node:fs/promises";
-import { constants } from "node:fs";
-import { gitExecutionIdentity } from "./git-execution-identity";
 
-/** Cloud Git shares the non-root engine and checkout identity.
- * Local Git retains private, same-user temporary storage. */
+/** Git retains private, same-user temporary storage. */
 export async function createGitTemporaryDirectory(prefix: string): Promise<string> {
   return mkdtemp(prefix);
 }
@@ -32,14 +29,8 @@ export async function writeGitTemporaryFile(
 export async function copyGitTemporaryFile(source: string, destination: string): Promise<void> {
   // Opening first pins the complete old/new index through Git's atomic rename.
   // Stream it to bound memory for large repositories.
-  const identity = gitExecutionIdentity();
-  const input = await open(source, identity ? constants.O_RDONLY | constants.O_NOFOLLOW : "r");
+  const input = await open(source, "r");
   try {
-    if (identity) {
-      const stat = await input.stat();
-      if (!stat.isFile() || stat.uid !== identity.uid)
-        throw new Error("Git snapshot source is not owned by the workspace");
-    }
     await writeGitTemporaryFile(destination, input.createReadStream({ autoClose: false }));
   } finally {
     await input.close();

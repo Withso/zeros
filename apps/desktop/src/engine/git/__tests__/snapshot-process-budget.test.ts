@@ -3,11 +3,6 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-const placement = vi.hoisted(() => ({ cloud: false }));
-vi.mock("../git-execution-identity", async (original) => ({
-  ...(await original<typeof import("../git-execution-identity")>()),
-  gitExecutionIdentity: () => placement.cloud ? { uid: process.geteuid!(), gid: process.getegid!() } : undefined,
-}));
 import * as commands from "../git-exec";
 import { snapshotWorkingTree } from "../turns-git";
 
@@ -20,20 +15,19 @@ beforeEach(async () => {
   await Promise.all(Array.from({ length: 400 }, (_, index) => writeFile(path.join(root, "src", `${index}.txt`), `file ${index}\n`)));
   git("add", "."); git("commit", "-qm", "initial");
 });
-afterEach(async () => { placement.cloud = false; vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }); });
 
 describe("snapshot process budget", () => {
-  it.each([false, true])("reuses validated Local snapshot inputs, cloud=%s", async (cloud) => {
-    placement.cloud = cloud;
+  it("reuses validated Local snapshot inputs", async () => {
     const first = await snapshotWorkingTree(root, "refs/zeros/test/first");
     const run = vi.spyOn(commands, "runGit");
     const started = performance.now();
     const next = await snapshotWorkingTree(root, "refs/zeros/test/next");
-    console.info("snapshot process budget", JSON.stringify({ cloud, gitCalls: run.mock.calls.length, elapsedMs: Math.round(performance.now() - started) }));
+    console.info("snapshot process budget", JSON.stringify({ gitCalls: run.mock.calls.length, elapsedMs: Math.round(performance.now() - started) }));
     expect(git("rev-parse", `${next}^{tree}`)).toBe(git("rev-parse", `${first}^{tree}`));
     expect(run.mock.calls.filter(([, args]) => args[0] === "read-tree")).toHaveLength(1);
-    expect(run.mock.calls.filter(([, args]) => args.join(" ") === "rev-parse --verify HEAD")).toHaveLength(cloud ? 2 : 0);
-    expect(run.mock.calls.length).toBeLessThanOrEqual(cloud ? 13 : 11);
+    expect(run.mock.calls.filter(([, args]) => args.join(" ") === "rev-parse --verify HEAD")).toHaveLength(0);
+    expect(run.mock.calls.length).toBeLessThanOrEqual(11);
   });
 
   it.each(["packed", "detached", "linked"])("keeps native snapshot contents for a %s HEAD", async (mode) => {

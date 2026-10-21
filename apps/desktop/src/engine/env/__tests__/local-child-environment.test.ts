@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runFile } from "../../git/git-exec";
-import { gitProcessOptions } from "../../git/git-execution-identity";
+import { gitProcessOptions } from "../../git/git-process-options";
 import { mergeSpawnEnv } from "../../settings/spawn-env";
 import fs from "node:fs";
 import os from "node:os";

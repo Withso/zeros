@@ -16,7 +16,7 @@ import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { accessSync, constants as fsConstants, realpathSync, statSync } from "node:fs";
-import { chmod, chown, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -77,11 +77,6 @@ export interface AmbientGitCredentialOptions {
 
 export interface GitCredentialShellEnvironment {
   env: Record<string, string>;
-}
-
-export interface GitCredentialShellConsumerIdentity {
-  uid: number;
-  gid: number;
 }
 
 let credentialSource: GitCredentialSource | null = null;
@@ -188,7 +183,6 @@ export async function prepareGitCredentialInvocation(
   request: GitCredentialRequest,
   options: {
     ambient?: AmbientGitCredentialOptions;
-    consumerIdentity?: GitCredentialShellConsumerIdentity;
   } = {},
 ): Promise<GitCredentialInvocation | null> {
   const source = credentialSource;
@@ -197,9 +191,6 @@ export async function prepareGitCredentialInvocation(
     (!source.shouldHandle || (await source.shouldHandle(request)));
   if (!sourceOwns && !options.ambient) return null;
   const activeBroker = await ensureBroker();
-  if (options.consumerIdentity) {
-    await activeBroker.grantConsumer(options.consumerIdentity);
-  }
   if (sourceOwns && source) {
     const credentialFingerprint = source.credentialFingerprint
       ? await source.credentialFingerprint(request)
@@ -435,7 +426,6 @@ async function readAmbientGitCredential(
 export async function prepareGitCredentialShellEnvironment(
   contextId: string,
   pathValue: string,
-  consumerIdentity?: GitCredentialShellConsumerIdentity,
 ): Promise<GitCredentialShellEnvironment | null> {
   const request: GitCredentialRequest = {
     contextId,
@@ -449,15 +439,13 @@ export async function prepareGitCredentialShellEnvironment(
   // observe the new selection without being respawned.
   if (!credentialSource?.supports(request)) return null;
   const activeBroker = await ensureBroker();
-  if (consumerIdentity) await activeBroker.grantConsumer(consumerIdentity);
   // A Local engine may itself be started inside a terminal whose PATH already
   // contains a different broker. Never make that shim our "real" executable,
-  // or its inherited ZEROS_REAL_* path would exec itself indefinitely. Keep
-  // the qualified cloud consumer's executable/permission contract unchanged.
-  const shellPath = consumerIdentity ? pathValue : withoutCredentialShimDirectories(pathValue);
-  const realGit = findExecutable("git", shellPath, !consumerIdentity);
+  // or its inherited ZEROS_REAL_* path would exec itself indefinitely.
+  const shellPath = withoutCredentialShimDirectories(pathValue);
+  const realGit = findExecutable("git", shellPath, true);
   if (!realGit) return null;
-  const realGh = findExecutable("gh", shellPath, !consumerIdentity);
+  const realGh = findExecutable("gh", shellPath, true);
   return {
     env: {
       ZEROS_GIT_AUTH_CONTEXT: contextId,
@@ -468,12 +456,9 @@ export async function prepareGitCredentialShellEnvironment(
       ZEROS_GIT_AUTH_ASKPASS: activeBroker.askpassPath,
       ZEROS_REAL_GIT_PATH: realGit,
       // Same-host native shells can prove a hard-killed engine cheaply with
-      // kill(0). A qualified cloud consumer may have another PID namespace,
-      // so it uses the socket health check in the shim instead.
-      ...(!consumerIdentity
-        ? { ZEROS_GIT_AUTH_BROKER_PID: String(process.pid) }
-        : {}),
-      ...(realGh ? { ZEROS_REAL_GH_PATH: realGh } : consumerIdentity ? {} : { ZEROS_REAL_GH_PATH: "" }),
+      // kill(0).
+      ZEROS_GIT_AUTH_BROKER_PID: String(process.pid),
+      ZEROS_REAL_GH_PATH: realGh ?? "",
       PATH: `${activeBroker.helpersDir}${path.delimiter}${shellPath}`,
     },
   };
@@ -492,7 +477,6 @@ export async function closeGitCredentialBrokerForTesting(): Promise<void> {
 }
 
 class GitCredentialBroker {
-  private grantedConsumer: GitCredentialShellConsumerIdentity | null = null;
   private readonly ambientGrants = new Map<
     string,
     {
@@ -508,7 +492,6 @@ class GitCredentialBroker {
     readonly helpersDir: string,
     readonly helperPath: string,
     readonly askpassPath: string,
-    private readonly executablePaths: readonly string[],
   ) {}
 
   invocation(
@@ -581,68 +564,6 @@ class GitCredentialBroker {
       expiresAt: now + 5 * 60_000,
     });
     return this.invocation(request, null, grant);
-  }
-
-  /** Make the broker consumable by the attested cloud worker without making
-   * it worker-owned. The root coordinator remains the owner; the one dedicated
-   * worker group gets traverse/execute access to immutable shims and connect
-   * access to the socket. Contained agents receive a private scratch `/tmp`
-   * and no socket coordinates, so this projection reaches only the explicit
-   * human terminal outside agent containment. */
-  async grantConsumer(
-    identity: GitCredentialShellConsumerIdentity,
-  ): Promise<void> {
-    if (
-      process.platform !== "linux" ||
-      !Number.isSafeInteger(identity.uid) ||
-      identity.uid <= 0 ||
-      !Number.isSafeInteger(identity.gid) ||
-      identity.gid <= 0
-    ) {
-      throw new Error("git credential consumer identity is invalid");
-    }
-    if (this.grantedConsumer) {
-      if (
-        this.grantedConsumer.uid !== identity.uid ||
-        this.grantedConsumer.gid !== identity.gid
-      ) {
-        throw new Error("git credential broker already has another consumer");
-      }
-      return;
-    }
-    const ownerUid = process.geteuid?.();
-    const ownerGid = process.getegid?.();
-    const supplementaryGroups = process.getgroups?.() ?? [];
-    if (
-      ownerUid === undefined ||
-      ownerGid === undefined ||
-      (ownerUid !== 0 &&
-        (identity.uid !== ownerUid ||
-          (identity.gid !== ownerGid &&
-            !supplementaryGroups.includes(identity.gid))))
-    ) {
-      throw new Error("git credential consumer grant requires owner authority");
-    }
-
-    const socketDir = path.dirname(this.socketPath);
-    // Change ownership while both parent directories are still 0700. Only
-    // after every leaf is root/owner-controlled and group-readable do we open
-    // the final traverse bits, avoiding a partially-published projection.
-    for (const candidate of [
-      socketDir,
-      this.socketPath,
-      this.helpersDir,
-      ...this.executablePaths,
-    ]) {
-      await chown(candidate, ownerUid, identity.gid);
-    }
-    await chmod(this.socketPath, 0o660);
-    for (const candidate of this.executablePaths) {
-      await chmod(candidate, 0o750);
-    }
-    await chmod(this.helpersDir, 0o750);
-    await chmod(socketDir, 0o710);
-    this.grantedConsumer = { ...identity };
   }
 
   static async start(): Promise<GitCredentialBroker> {
@@ -825,7 +746,6 @@ class GitCredentialBroker {
       helpersDir,
       helperPath,
       askpassPath,
-      [helperPath, askpassPath, gitShimPath, ghShimPath],
     );
 
     try {

@@ -7,7 +7,6 @@ import { execFile, execFileSync, type ExecFileException } from "node:child_proce
 import {
   accessSync,
   chmodSync,
-  chownSync,
   closeSync,
   constants as fsConstants,
   fstatSync,
@@ -31,10 +30,9 @@ import {
 } from "./credential-broker";
 // Pure leaf module (node:path only) — no cycle back into git/.
 import { pruneLauncherScriptEnv } from "../env/launcher-env";
-import { gitExecutionIdentity, gitProcessOptions } from "./git-execution-identity";
+import { gitProcessOptions } from "./git-process-options";
 import { withoutLocalDevelopment } from "../env/local-development";
 import { currentGitReadLane, type GitReadLane } from "./git-read-lane";
-export { gitExecutionIdentity } from "./git-execution-identity";
 
 const execFileAsync = promisify(execFile);
 
@@ -66,7 +64,7 @@ export function gitProbeFailure(operation: GitProbeOperation, cause: unknown): G
 }
 
 /** Synchronous read probes used while admitting Design transactions. Preserve
- * the qualified Git identity and expected exits without retaining raw errors. */
+ * expected exits without retaining raw errors. */
 export function runGitProbeSync(
   cwd: string,
   operation: Exclude<GitProbeOperation, "policy_config">,
@@ -76,7 +74,7 @@ export function runGitProbeSync(
   if (!cwd) throw new GitError({ code: "VALIDATION_FAILED", message: "Managed Git probe requires a checkout." });
   try {
     const processOptions = gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" });
-    return execFileSync(processOptions.uid === undefined ? engineGitBinary() : "git", ["-c", "core.fsmonitor=false", ...args], {
+    return execFileSync(engineGitBinary(), ["-c", "core.fsmonitor=false", ...args], {
       cwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
@@ -99,10 +97,6 @@ export interface RunFileOptions {
   env?: Record<string, string | undefined>;
   /** Abort the process and its request when the owning capability is revoked. */
   signal?: AbortSignal;
-  /** Run the final child as the qualified cloud worker. The engine remains
-   * root, but filesystem mutations produced on the worker's behalf must keep
-   * the tenant checkout worker-owned. */
-  identity?: { uid: number; gid: number };
 }
 
 export interface RunFileResult {
@@ -131,8 +125,6 @@ interface BunSubprocessRuntime {
       maxBuffer: number;
       timeout?: number;
       killSignal: "SIGKILL";
-      uid?: number;
-      gid?: number;
     },
   ): BunSubprocess;
 }
@@ -199,10 +191,10 @@ export async function runFile(
     opts = { ...opts, env: withoutLocalDevelopment(childEnv) };
   }
   if (path.basename(command) === "git") {
-    const { uid, gid, env } = gitProcessOptions(opts.env, opts.identity);
-    if (uid === undefined && command === "git") {
+    const { env } = gitProcessOptions(opts.env);
+    if (command === "git") {
       // Resolve once per effective PATH, excluding broker scripts and aliases.
-      // Explicit shim paths (shell/credential tests) and cloud keep their path.
+      // Explicit shim paths (shell/credential tests) keep their path.
       const effectivePath = (env.PATH ?? "/usr/bin:/bin").split(path.delimiter)
         .map((directory) => path.resolve(opts.cwd ?? process.cwd(), directory || "."))
         .join(path.delimiter);
@@ -210,8 +202,7 @@ export async function runFile(
     }
     opts = {
       ...opts,
-      ...(uid !== undefined && gid !== undefined ? { identity: { uid, gid } } : {}),
-      env: uid === undefined && isGitObservation(args) ? { ...env, GIT_OPTIONAL_LOCKS: "0" } : env,
+      env: isGitObservation(args) ? { ...env, GIT_OPTIONAL_LOCKS: "0" } : env,
     };
   }
   if (opts.signal?.aborted) {
@@ -236,9 +227,6 @@ export async function runFile(
         maxBuffer: maxBufferBytes,
         ...(opts.timeoutMs && opts.timeoutMs > 0
           ? { timeout: opts.timeoutMs }
-          : {}),
-        ...(opts.identity
-          ? { uid: opts.identity.uid, gid: opts.identity.gid }
           : {}),
         // A timeout is a hard request-path boundary. Git and cleanup hooks do
         // not get to ignore SIGTERM and strand the single engine process.
@@ -305,9 +293,6 @@ export async function runFile(
       : {}),
     ...(opts.env ? { env: opts.env } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
-    ...(opts.identity
-      ? { uid: opts.identity.uid, gid: opts.identity.gid }
-      : {}),
   });
   let inputError: NodeJS.ErrnoException | undefined;
   if (opts.input !== undefined && child.child.stdin) {
@@ -351,9 +336,6 @@ export interface RunGitOptions {
    *  scratch index (so a whole-tree snapshot never disturbs the user's real
    *  staging area) and to stamp a fixed author/committer for commit-tree. */
   env?: Record<string, string | undefined>;
-  /** Qualified uid/gid for a trusted engine operation performed on behalf of
-   * a cloud agent. Local desktop callers omit it and retain same-user parity. */
-  identity?: { uid: number; gid: number };
   /** Revoke an in-flight integration operation with its boundary. */
   signal?: AbortSignal;
   /** This invocation only observes repository state. Git status normally writes
@@ -944,40 +926,13 @@ function assertNoExecutableCommandOptions(
 }
 
 let emptyEngineGitDirectory: string | null = null;
-let emptyEngineGitConsumerGid: number | null = null;
 
-function engineGitEmptyDirectory(identity?: {
-  uid: number;
-  gid: number;
-}): string {
+function engineGitEmptyDirectory(): string {
   if (!emptyEngineGitDirectory) {
     emptyEngineGitDirectory = mkdtempSync(
       path.join(tmpdir(), "zeros-engine-git-empty-"),
     );
     chmodSync(emptyEngineGitDirectory, 0o700);
-  }
-  if (identity && emptyEngineGitConsumerGid !== identity.gid) {
-    if (emptyEngineGitConsumerGid !== null) {
-      throw unsafeGitInvocation(
-        "Engine Git already serves a different cloud worker group.",
-      );
-    }
-    const ownerUid = process.geteuid?.();
-    if (ownerUid !== 0) {
-      if (
-        ownerUid !== identity.uid ||
-        (process.getegid?.() !== identity.gid &&
-          !(process.getgroups?.() ?? []).includes(identity.gid))
-      ) {
-        throw unsafeGitInvocation(
-          "Engine Git cannot grant its policy directory to this worker.",
-        );
-      }
-    } else {
-      chownSync(emptyEngineGitDirectory, 0, identity.gid);
-    }
-    chmodSync(emptyEngineGitDirectory, 0o750);
-    emptyEngineGitConsumerGid = identity.gid;
   }
   return emptyEngineGitDirectory;
 }
@@ -1282,7 +1237,7 @@ function localExecutableSelectionUnchanged(cached: EngineExecutableCacheEntry): 
 }
 
 function engineExecutable(name: string, enginePath = process.env.PATH ?? ""): string {
-  const localGit = name === "git" && !gitExecutionIdentity();
+  const localGit = name === "git";
   if (localGit) enginePath = enginePath.split(path.delimiter).filter(Boolean).map((directory) => path.resolve(directory)).join(path.delimiter);
   const cacheKey = `${name}\0${localGit}\0${enginePath}`;
   const cached = engineExecutableCache.get(cacheKey);
@@ -1530,10 +1485,9 @@ async function engineGitPolicyArgs(
   env: Record<string, string | undefined>,
   command: string,
   allowSsh: boolean,
-  identity?: { uid: number; gid: number },
 ): Promise<string[]> {
   const dynamic = await dynamicEngineGitPolicy(cwd, callerGlobalArgs, env);
-  const empty = engineGitEmptyDirectory(identity);
+  const empty = engineGitEmptyDirectory();
   return configArgs([
     ...dynamic,
     ["commit.gpgSign", "false"],
@@ -1834,8 +1788,6 @@ export async function runGit(
   args: string[],
   opts: RunGitOptions = {},
 ): Promise<RunGitResult> {
-  const identity = gitExecutionIdentity(opts.identity);
-  if (identity) opts = { ...opts, identity };
   // Never run Git with an empty cwd: execFile would silently
   // fall back to process.cwd() (the engine's own root / main repo), so a
   // git op meant for a workspace could mutate the wrong repository.
@@ -1874,7 +1826,6 @@ export async function runGit(
               },
             }
           : {}),
-        ...(opts.identity ? { consumerIdentity: opts.identity } : {}),
       })
     : null;
   try {
@@ -1887,7 +1838,6 @@ export async function runGit(
       baseChildEnv,
       parsedCommand.command,
       networkTarget.transport === "ssh",
-      opts.identity,
     );
     const childArgs = [
       ...parsedCommand.globalArgs,
@@ -1922,7 +1872,6 @@ export async function runGit(
           env: { ...baseChildEnv, ...controlledEnv },
           input: opts.input,
           signal: opts.signal,
-          identity: opts.identity,
         });
         // Some remote helpers have returned exit 0 after their child transport
         // printed a fatal authentication error. Never turn that into a successful
@@ -2017,7 +1966,7 @@ export async function runGitRead(
   // Only summary fan-out uses the bounded lane. Interactive diff/log/history
   // reads must start immediately even when slow background reads fill it.
   const lane = currentGitReadLane();
-  return !lane?.background || gitExecutionIdentity(opts.identity) ? read() : queueLocalGitRead(read, lane, opts.signal);
+  return !lane?.background ? read() : queueLocalGitRead(read, lane, opts.signal);
 }
 
 const LOCAL_GIT_READ_CONCURRENCY = 4;

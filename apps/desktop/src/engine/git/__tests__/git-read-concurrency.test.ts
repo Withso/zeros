@@ -5,7 +5,7 @@ import { withBackgroundGitReads } from "../git-read-lane";
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("Git read concurrency", () => {
-  it.each(["local", "cloud"])("bounds Local process pressure and preserves %s scheduling", async (placement) => {
+  it("bounds Local process pressure", async () => {
     let active = 0;
     let peak = 0;
     const batch: Array<() => void> = [];
@@ -23,11 +23,10 @@ describe("Git read concurrency", () => {
       return { stdout: new Response("").body, stderr: new Response("").body, exited, signalCode: null, killed: false, kill: vi.fn() };
     });
     vi.stubGlobal("Bun", { spawn });
-    const options = placement === "cloud" ? { identity: { uid: process.getuid!(), gid: process.getgid!() } } : {};
-    await withBackgroundGitReads(() => Promise.all(Array.from({ length: 12 }, (_, index) => runGitRead(`/fixture/${placement}-concurrency-${index}`, ["status", "--porcelain"], options))));
+    await withBackgroundGitReads(() => Promise.all(Array.from({ length: 12 }, (_, index) => runGitRead(`/fixture/local-concurrency-${index}`, ["status", "--porcelain"]))));
     expect(spawn.mock.calls.filter(([command]) => command.includes("--no-pager"))).toHaveLength(12);
     expect(active).toBe(0);
-    expect(peak).toBe(placement === "local" ? 4 : 12);
+    expect(peak).toBe(4);
   });
 
   it("removes an aborted queued read without launching its Git process", async () => {

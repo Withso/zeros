@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import { gitExecutionIdentity } from "./git-execution-identity";
 
 // Null means absent; undefined means uncertain. An unreadable loose ref must
 // never fall through to a potentially older packed value.
@@ -24,7 +23,6 @@ async function readMetadata(file: string, limit: number): Promise<string | null 
  * missing refs, reftable and concurrent metadata changes stay native Git reads.
  * No HEAD value is retained between calls. */
 export async function readLocalHead(gitDirectory: string): Promise<string | undefined> {
-  if (gitExecutionIdentity()) return undefined;
   const commonPointer = await readMetadata(path.join(gitDirectory, "commondir"), 4096);
   if (commonPointer === undefined || (commonPointer !== null && (!commonPointer.trim() || commonPointer.includes("\0")))) return undefined;
   const common = commonPointer === null ? gitDirectory : path.resolve(gitDirectory, commonPointer.trim());
