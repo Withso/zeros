@@ -108,6 +108,8 @@ async function main() {
     "sudo -n chown -R root:root /opt/zeros && sudo -n chmod -R a+rX,go-w /opt/zeros",
     `printf %s ${quote(UNIT)} | sudo -n tee /etc/systemd/system/zeros-worker.service >/dev/null`,
     "sudo -n systemctl daemon-reload && sudo -n systemctl enable zeros-worker.service",
+    // Agents' login shells use the same git/gh wrappers as the service.
+    `printf %s ${quote('export PATH="/opt/zeros/worker/bin:$PATH"\n')} | sudo -n tee /etc/profile.d/zeros-worker.sh >/dev/null`,
     // Nothing from the build checkout, package caches or shell history stays.
     "rm -rf /tmp/zeros-src ~/.cache/pnpm ~/.local/share/pnpm ~/.npm && history -c",
   ].join("\n"), 600);
