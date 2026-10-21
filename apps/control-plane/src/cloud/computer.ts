@@ -1,6 +1,6 @@
 // Cloud Computer builds. Each organization has exactly one live Boat named
 // snapshot: its active build, with the org's repositories cloned to
-// /home/zeros/<owner>/<name> and their setup run. Every build is kept here as
+// /home/user/<owner>/<name> and their setup run. Every build is kept here as
 // a recipe; activating an older one rebuilds it at the same commits.
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
@@ -19,7 +19,7 @@ export const CloudV2RecipeSchema = z.object({
     /** Branch or tag to clone; a rebuild pins `commit` instead. */
     ref: z.string().min(1).max(255).optional(),
     commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
-    /** Non-interactive bash run in the checkout as the zeros user, e.g. "pnpm install". */
+    /** Non-interactive bash run in the checkout as the workspace user, e.g. "pnpm install". */
     setup: z.string().max(8_000).optional(),
   }).strict()).min(1).max(10),
   rebuiltFrom: z.number().int().positive().optional(),
@@ -155,9 +155,10 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-/** A non-interactive bash script run as the worker user, like Conductor's setup. */
+/** A non-interactive login bash script, like Conductor's setup. Boat runs
+ * commands as the stock image's user, the same user the worker runs as. */
 function asZeros(lines: readonly string[]): string {
-  return `sudo -u zeros -H bash -lc ${shellQuote(lines.join("\n"))}`;
+  return `bash -lc ${shellQuote(lines.join("\n"))}`;
 }
 
 /** Runs one queued build at a time on Boat. */
@@ -193,7 +194,7 @@ export class CloudV2ComputerBuilder {
     for (const entry of job.recipe.repositories) {
       if (!job.createdBy) throw Object.assign(new Error("no creator"), { code: "computer_build_creator_missing" });
       const token = await this.deps.cloneToken(job.organizationId, job.createdBy, entry.repository);
-      const dir = `/home/zeros/${entry.repository}`;
+      const dir = `/home/user/${entry.repository}`;
       const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
       // The token stays in a per-command header; the saved remote URL carries none.
       const clone = await compute.exec(sandboxId, asZeros([

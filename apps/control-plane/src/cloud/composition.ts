@@ -19,7 +19,8 @@ import type { CloudV2RouteDeps } from "./routes.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
-export const CLOUD_V2_HOME = "/home/zeros";
+/** Boat stock image home; repositories live at <home>/<owner>/<name>. */
+export const CLOUD_V2_HOME = "/home/user";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 

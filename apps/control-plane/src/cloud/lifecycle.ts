@@ -12,9 +12,9 @@ const HELLO_POLL_MS = 15_000;
 const BOOT_DEADLINE_MS = 10 * 60_000;
 const MAX_ATTEMPTS = 8;
 export const CLOUD_V2_IDLE_STOP_MS = 10 * 60_000;
-/** The worker runs as `zeros`; its credential lives in its own config dir. */
-export const CLOUD_V2_WORKER_USER = "zeros";
-export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/zeros/.config/zeros/worker-token";
+/** Boat's stock image runs commands as its one user, `user`. The worker and
+ * agents run as that user too, so its credential lives in its config dir. */
+export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token";
 
 export type CloudV2LifecycleDeps = {
   store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince">;
@@ -33,16 +33,15 @@ function errorCode(error: unknown): string {
   return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "provider_request_failed";
 }
 
-/** Writes the worker credential, owner-only, for the worker user. The value is a
- * single-quoted base64 literal the shell never expands. */
+/** Writes the worker credential owner-only. The value is a single-quoted base64
+ * literal the shell never expands. */
 export function deliverWorkerTokenCommand(token: string): string {
   if (!/^zw2w_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("Invalid worker token");
   const encoded = Buffer.from(token, "utf8").toString("base64");
   const dir = CLOUD_V2_WORKER_TOKEN_PATH.slice(0, CLOUD_V2_WORKER_TOKEN_PATH.lastIndexOf("/"));
-  const user = CLOUD_V2_WORKER_USER;
-  return `umask 077 && install -d -m 700 -o ${user} -g ${user} ${dir} && ` +
+  return `umask 077 && mkdir -p ${dir} && chmod 700 ${dir} && ` +
     `printf %s '${encoded}' | base64 -d > ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp && ` +
-    `chown ${user}:${user} ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp ${CLOUD_V2_WORKER_TOKEN_PATH}`;
+    `mv -f ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp ${CLOUD_V2_WORKER_TOKEN_PATH}`;
 }
 
 export class CloudV2Lifecycle {
