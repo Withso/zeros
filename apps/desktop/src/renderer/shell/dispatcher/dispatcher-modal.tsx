@@ -73,7 +73,6 @@ import { CloudComputerRepositoryPicker } from "./cloud-computer-repository-picke
 import { CloudComputerSourcePicker, computerSourceReadKey, warmComputerSources } from "./cloud-computer-source";
 import type { DispatcherBase } from "./dispatcher-source";
 import { CloudComputerV2CreateNotice } from "../../features/settings/cloud-computer-v2-create-gate";
-import { registerCloudDesignCreation } from "../../state/cloud-creation-mode";
 import { createCloudWorkspaceWithPending } from "../../state/cloud-workspace-create";
 import { cloudProjectForFolder } from "../../state/cloud-workspace-catalog";
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
@@ -283,7 +282,6 @@ function ActiveDispatcherPage({
       if (creationGeneration !== getOrganizationStoreGeneration()) return;
       const folder = cloudWorkspaceKey({ organizationId: document.organizationId, workspaceId: document.id });
       markWorkspaceSettling(folder);
-      if (createMode === "design") registerCloudDesignCreation(folder);
       cloudCreateIntent.current = null;
       const createdProject = cloudProjectForFolder(folder);
       notifyWorkspacesChanged(createdProject?.repoSlug);

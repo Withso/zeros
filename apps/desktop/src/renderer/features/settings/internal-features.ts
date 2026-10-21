@@ -104,7 +104,6 @@ export function useIsInternalUser(): boolean {
  *    (agent-control-rollout.ts). */
 export type InternalFeature =
   | "copyLogs"
-  | "releaseCanaries"
   | AgentControlFeature;
 
 const STORAGE_KEY = "zeros.internalFeatures";
@@ -112,13 +111,11 @@ const STORAGE_KEY = "zeros.internalFeatures";
 // A stored retired key must never read as on.
 const KNOWN: ReadonlySet<string> = new Set<InternalFeature>([
   "copyLogs",
-  "releaseCanaries",
   ...AGENT_CONTROL_FEATURES,
 ]);
 // Staff dogfood these unless they turn them off.
 const ON_BY_DEFAULT: ReadonlySet<string> = new Set<InternalFeature>([
   "copyLogs",
-  "releaseCanaries",
   ...AGENT_CONTROL_FEATURES,
 ]);
 
@@ -194,8 +191,7 @@ export function setInternalFeatureEnabled(
  *  old signature took the session email, which invited exactly the bug it
  *  warned about (a caller caching a stale identity). */
 export function isInternalFeatureActive(feature: InternalFeature): boolean {
-  return isInternalUser() && isInternalFeatureEnabled(feature) &&
-    (feature !== "releaseCanaries" || getTeamStoreState().me?.user.staffRole === "platform_owner");
+  return isInternalUser() && isInternalFeatureEnabled(feature);
 }
 
 // Cross-window sync — Electron devtools-in-a-separate-window and any
@@ -229,9 +225,8 @@ export function useInternalFeature(
  *  flag flips. */
 export function useInternalFeatureActive(feature: InternalFeature): boolean {
   const internalUser = useIsInternalUser();
-  const { me } = useTeams();
   const [on] = useInternalFeature(feature);
-  return internalUser && on && (feature !== "releaseCanaries" || me?.user.staffRole === "platform_owner");
+  return internalUser && on;
 }
 
 subscribePreferenceCache(STORAGE_KEY, () => {

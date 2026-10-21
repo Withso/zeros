@@ -23,8 +23,6 @@ import {
   settingsOwnerKey,
 } from "./settings-scope";
 import { subscribeProviderSettingsTab } from "./settings-navigation";
-import { useInternalFeatureActive } from "./internal-features";
-import { ReleaseCanaryControl } from "./release-canary-control";
 import { connectCloudProviderSignIn } from "./cloud-provider-sign-in";
 import { shellOpenUrl } from "../../platform/app";
 import type { CloudProviderAuthStatus } from "@zeros/protocol/provider-auth";
@@ -72,7 +70,6 @@ export function CloudProviderConnections({
   Tabs: Tabs;
 }) {
   const { me } = useTeams();
-  const canManageReleaseChecks = useInternalFeatureActive("releaseCanaries");
   const owner = settingsOwnerKey(me?.user.id ?? "pending", organizationId);
   const [agentId, setAgentId] = useState(() =>
     readScopedSettingsSelection(owner, "provider", "claude"),
@@ -96,7 +93,6 @@ export function CloudProviderConnections({
           userId={me.user.id}
           agent={agent}
           surfaceActive={surfaceActive}
-          canManageReleaseChecks={canManageReleaseChecks}
         />
       )}
     </div>
@@ -108,13 +104,11 @@ function CloudProviderConnection({
   userId,
   agent,
   surfaceActive,
-  canManageReleaseChecks,
 }: {
   organizationId: string;
   userId: string;
   agent: Provider;
   surfaceActive: boolean;
-  canManageReleaseChecks: boolean;
 }) {
   const key = settingsOwnerKey(userId, organizationId);
   const snapshot = useCachedRead(
@@ -397,8 +391,6 @@ function CloudProviderConnection({
               )}
             </div>
             </div>
-            {canManageReleaseChecks && <ReleaseCanaryControl key={`${credential.id}:${credential.revision}`} userId={userId}
-              organizationId={organizationId} credential={credential} surfaceActive={surfaceActive} />}
           </div>
         );
       })}

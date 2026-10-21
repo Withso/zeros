@@ -2,7 +2,6 @@ import { z } from "zod";
 import { CloudAgentConnectionHealthSchema } from "@zeros/protocol";
 import { cloudAccountRequest } from "../../platform/cloud-workspaces";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
-import { clearReleaseCanaryDesignations } from "./release-canary-designation";
 import { cloudCredentialRemovalTargetSchema } from "./cloud-credential-removal";
 
 const credential = z.object({
@@ -52,7 +51,6 @@ export const cloudOrganizationConnectionsCache = new KeyedAsyncCache<
   z.infer<typeof organizationConnections>
 >(32);
 export function clearCloudProviderConnections(): void {
-  clearReleaseCanaryDesignations();
   for (const key of cloudProviderCredentialsCache.keys())
     cloudProviderCredentialsCache.forget(key);
   for (const key of cloudProviderAccessCache.keys())
