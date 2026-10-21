@@ -80,7 +80,8 @@
     "./reliable": "./src/reliable.ts",
     "./cloud-agent-tools": "./src/cloud-agent-tools.ts",
     "./cloud-lsp": "./src/cloud-lsp.ts",
-    "./cloud-capabilities": "./src/cloud-capabilities.ts"
+    "./cloud-capabilities": "./src/cloud-capabilities.ts",
+    "./cloud-v2-relay": "./src/cloud-v2-relay.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
