@@ -7,7 +7,6 @@ import type {
   PreparedBoundary,
   TerritoryGeneration,
 } from "./types";
-import { isCloudExecutionBoundary } from "./cloud-execution-boundary";
 import { recoverLegacyExecutionProcesses, recoverLegacyMutableState } from "./legacy-execution-recovery";
 
 const EMPTY_RECOVERY: ExecutionBoundaryRecoveryResult = {
@@ -18,8 +17,6 @@ const EMPTY_RECOVERY: ExecutionBoundaryRecoveryResult = {
 };
 export interface RoutingExecutionBoundaryOptions {
   host: ExecutionBoundary;
-  /** Only an original cloud boundary selects cloud placement. */
-  cloud?: ExecutionBoundary;
 }
 
 /** Chooses execution posture per request. The router itself advertises
@@ -31,20 +28,18 @@ export class RoutingExecutionBoundary implements ExecutionBoundary {
   private readonly failedPreparationOwners = new Map<string, ExecutionBoundary>();
 
   constructor(private readonly options: RoutingExecutionBoundaryOptions) {
-    if (options.cloud && !isCloudExecutionBoundary(options.cloud))
-      throw new Error("cloud routing requires the original cloud execution boundary");
-    this.backend = options.cloud?.backend ?? "none";
+    this.backend = "none";
   }
 
   private async select(_request: BoundaryRequest): Promise<ExecutionBoundary> {
-    return this.options.cloud ?? this.options.host;
+    return this.options.host;
   }
 
   async recoverStaleProcesses(): Promise<ExecutionBoundaryRecoveryResult> {
     // Retain ambiguous old holds without invoking their removed helper.
     // Attempt independent Host recovery even when a legacy hold rejects.
     const recoveries = await Promise.allSettled([
-      (this.options.cloud ?? this.options.host).recoverStaleProcesses?.() ??
+      this.options.host.recoverStaleProcesses?.() ??
         Promise.resolve(EMPTY_RECOVERY),
       recoverLegacyExecutionProcesses(),
     ]);
@@ -109,6 +104,5 @@ export class RoutingExecutionBoundary implements ExecutionBoundary {
 
   clearRetirementFailure(generation: TerritoryGeneration): void {
     this.options.host.clearRetirementFailure?.(generation);
-    this.options.cloud?.clearRetirementFailure?.(generation);
   }
 }

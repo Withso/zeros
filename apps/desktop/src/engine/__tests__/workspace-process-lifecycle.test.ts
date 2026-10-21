@@ -2,44 +2,18 @@
 // boundary where setup, run actions, terminals, and agent sessions are brought
 // to rest before a managed checkout can be moved or removed.
 
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { promises as fsPromises } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
 import type { EngineMessage } from "../types";
-import { PTY_AGENT_AUTH_CWD } from "@zeros/protocol/messages";
 import { ZerosEngine } from "../index";
 import type { TransportClient } from "../transport/types";
-import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
-import { testCloudRuntime, testCloudWorker } from "../agents/__tests__/helpers/test-cloud-runtime";
-vi.mock("../agents/containment/cloud-runtime-root.mjs", async original => ({
-  ...await original<typeof import("../agents/containment/cloud-runtime-root.mjs")>(),
-  resolveCloudRuntime: () => testCloudRuntime(),
-}));
-import type { CloudReplicaHostSession } from "../cloud-replica-host-control";
-import { NODE_DESIGN_WATCH_GUARD_FILENAME } from "../agents/containment/design-watch-isolation";
-import type { CloudGitAuthor } from "@zeros/protocol/cloud-agent-execution";
 import * as gitState from "../git/state";
-import type { CloudCheckpointDirective, CloudDurabilityAuthority } from "../cloud-durability-runtime";
 
 interface ReaperInternals {
-  designTerritoryTransitionCallers: Set<Promise<unknown>>;
-  cloudRuntimeCheckpointQuiescing: boolean;
-  cloudWorkspaceMutations: Set<Promise<unknown>>;
-  cloudDurabilityRuntime: { checkpoint: ReturnType<typeof vi.fn> } | null;
-  cloudRecordRuntime: { synchronize: ReturnType<typeof vi.fn>; flush: ReturnType<typeof vi.fn> } | null;
-  handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void>;
-  cloudReplicaRuntime: {
-    updateSession(session: CloudReplicaHostSession | null): Promise<void>;
-  } | null;
-  cloudWorkspaceForkRuntime: {
-    cancelActiveWork(): Promise<void>;
-    wake(): void;
-  } | null;
-  cloudReplicaSessionChain: Promise<void>;
   handleHostControlLine(line: string): void;
   router: {
     register(client: TransportClient): void;
@@ -203,13 +177,7 @@ interface ReaperInternals {
     { token: number; controller: AbortController }
   >;
   workspaceProcessStarts: Map<string, Set<Promise<unknown>>>;
-  globalDesignAuthorityStarts: Set<Promise<unknown>>;
   globalDesignTerritoryTransitionCount: number;
-  cloudWorker: CloudWorkerConfiguration | null;
-  cloudRuntimeRegistration: {
-    gitAuthorRequest(actorSessionId: string): Promise<CloudGitAuthor | null>;
-    agentExecutionRequest?(request: { kind: "terminal-environment"; actorSessionId: string }, signal: AbortSignal): Promise<{ version: 1; environment: null }>;
-  } | null;
   cancelLiveAgentSessions(sessionIds: ReadonlySet<string>): Promise<boolean>;
   workspaceAllowsProcessStart(workspaceId: string | null): boolean;
   assertAgentSessionProcessStartAllowed(
@@ -301,81 +269,7 @@ function client(kind: "local" | "cloud" = "local"): TransportClient {
   };
 }
 
-function qualifiedCloudWorker(): CloudWorkerConfiguration {
-  return { ...testCloudWorker(), uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0 };
-}
-
 describe("workspace process reaper", () => {
-  it("applies consecutive cloud replica sessions in host-control order", async () => {
-    const state = internals(
-      new ZerosEngine({ root: "/tmp/zeros-cloud-session-order", port: 29_894 }),
-    );
-    let releaseFirst!: () => void;
-    const firstGate = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-    const order: string[] = [];
-    let cancellation = 0;
-    state.cloudWorkspaceForkRuntime = {
-      cancelActiveWork: vi.fn(async () => {
-        cancellation += 1;
-        order.push(`cancel:${cancellation}`);
-        if (cancellation === 1) await firstGate;
-      }),
-      wake: vi.fn(() => order.push("wake")),
-    };
-    state.cloudReplicaRuntime = {
-      updateSession: vi.fn(async (session) => {
-        order.push(`update:${session?.accountUserId ?? "none"}`);
-      }),
-    };
-    const session = (accountUserId: string): CloudReplicaHostSession => ({
-      version: 1,
-      accountUserId,
-      accessToken: "header.payload.signature",
-      expiresAtMs: 60_000,
-      baseUrl: "http://127.0.0.1:9999",
-      allowInsecureLoopback: true,
-      device: {
-        deviceId: null,
-        keyVersion: 1,
-        publicKey: "a".repeat(43),
-      },
-    });
-    const firstAccount = "11111111-1111-4111-8111-111111111111";
-    const secondAccount = "22222222-2222-4222-8222-222222222222";
-    try {
-      state.handleHostControlLine(
-        JSON.stringify({
-          type: "host.cloudReplicaSession",
-          session: session(firstAccount),
-        }),
-      );
-      state.handleHostControlLine(
-        JSON.stringify({
-          type: "host.cloudReplicaSession",
-          session: session(secondAccount),
-        }),
-      );
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(order).toEqual(["cancel:1"]);
-
-      releaseFirst();
-      await state.cloudReplicaSessionChain;
-      expect(order).toEqual([
-        "cancel:1",
-        `update:${firstAccount}`,
-        "wake",
-        "cancel:2",
-        `update:${secondAccount}`,
-        "wake",
-      ]);
-    } finally {
-      releaseFirst();
-    }
-  });
 
   it("kills only processes owned by the archived workspace and disposes agents fail-closed", async () => {
     const state = internals(
@@ -700,28 +594,6 @@ describe("actor-scoped Design identity lifecycle", () => {
     expect(state.sessionAgent.has("code-execution")).toBe(true);
   });
 
-  it("does not wait for a native Code start before a local Design-owner update", async () => {
-    const state = internals(
-      new ZerosEngine({ root: "/tmp/zeros-native-code-start", port: 29_947 }),
-    );
-    let releaseCode!: () => void;
-    const codeStart = new Promise<void>((resolve) => {
-      releaseCode = resolve;
-    });
-    state.globalDesignAuthorityStarts.add(codeStart);
-    let mutated = false;
-
-    try {
-      await state.withGlobalDesignTerritoryTransition(async () => {
-        mutated = true;
-      });
-      expect(mutated).toBe(true);
-    } finally {
-      releaseCode();
-      state.globalDesignAuthorityStarts.delete(codeStart);
-    }
-  });
-
   it("rejects the retired Design actor before workspace or provider admission", async () => {
     const state = internals(
       new ZerosEngine({
@@ -804,57 +676,8 @@ describe("actor-scoped Design identity lifecycle", () => {
   });
 });
 describe("workspace terminal start barrier", () => {
-  it("does not inject Design watcher isolation into a local-main terminal", async () => {
-    const base = await mkdtemp(
-      path.join(tmpdir(), "zeros-main-terminal-watch-"),
-    );
-    await mkdir(path.join(base, "Zeros Design"), { recursive: true });
-    const state = internals(new ZerosEngine({ root: base, port: 29_930 }));
-    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue(
-      "local-main",
-    );
-    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(base);
-    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
-    const create = vi.spyOn(state.pty, "create").mockReturnValue({
-      sessionId: "term-main-watch",
-      pid: 123,
-      cwd: base,
-      cols: 80,
-      rows: 24,
-      reattached: false,
-    });
 
-    try {
-      await state.handlePtyCreate(
-        {
-          type: "PTY_CREATE",
-          id: "pty-create-main-watch",
-          source: "browser",
-          timestamp: 1,
-          sessionId: "term-main-watch",
-          workspaceId: "local-main",
-          cwd: base,
-          cols: 80,
-          rows: 24,
-        } as Extract<EngineMessage, { type: "PTY_CREATE" }>,
-        client(),
-      );
-
-      const options = create.mock.calls[0]?.[0] as {
-        env?: Record<string, string>;
-      };
-      expect(options.env?.NODE_OPTIONS ?? "").not.toContain(
-        NODE_DESIGN_WATCH_GUARD_FILENAME,
-      );
-      expect(options.env?.ZEROS_DESIGN_WATCH_IGNORE_FILE).toBeUndefined();
-      expect(options.env?.ZEROS_DESIGN_WATCH_ROOTS_FILE).toBeUndefined();
-      expect(options.env?.WATCHEXEC_IGNORE_FILES).toBeUndefined();
-    } finally {
-      await rm(base, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps a managed local terminal native without watcher interception", async () => {
+  it("spawns a managed local terminal natively", async () => {
     const base = await mkdtemp(path.join(tmpdir(), "zeros-terminal-watch-"));
     const workspace = {
       id: "ws_terminal_watch",
@@ -906,250 +729,13 @@ describe("workspace terminal start barrier", () => {
       );
 
       const options = create.mock.calls[0]?.[0] as {
-        env?: Record<string, string>;
         wrapSpawn?: unknown;
       };
       expect(options.wrapSpawn).toBeUndefined();
-      expect(options.env?.NODE_OPTIONS ?? "").not.toContain(
-        NODE_DESIGN_WATCH_GUARD_FILENAME,
-      );
-      expect(options.env?.ZEROS_DESIGN_WATCH_IGNORE_FILE).toBeUndefined();
-      expect(options.env?.ZEROS_DESIGN_WATCH_ROOTS_FILE).toBeUndefined();
-      expect(options.env?.WATCHEXEC_IGNORE_FILES).toBeUndefined();
     } finally {
       getWorkspace.mockRestore();
       await rm(base, { recursive: true, force: true });
     }
-  });
-
-  it("keeps cloud watcher artifacts private to the engine without reassigning ownership", async () => {
-    const base = await mkdtemp(path.join(tmpdir(), "zeros-cloud-watch-"));
-    const cloudWorker = qualifiedCloudWorker();
-    const workspace = {
-      id: "ws_cloud_terminal_watch",
-      path: path.join(base, "worktree"),
-      repoRoot: path.join(base, "main"),
-      archivedAt: null,
-    };
-    await Promise.all([
-      mkdir(workspace.path, { recursive: true }),
-      mkdir(workspace.repoRoot, { recursive: true }),
-      mkdir(path.join(workspace.path, "Zeros Design"), { recursive: true }),
-    ]);
-    const state = internals(
-      new ZerosEngine({ root: workspace.repoRoot, port: 29_929 }),
-    );
-    state.cloudWorker = cloudWorker;
-    const getWorkspace = vi
-      .spyOn(gitState, "getWorkspaceById")
-      .mockReturnValue(
-        workspace as ReturnType<typeof gitState.getWorkspaceById>,
-      );
-    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue(
-      workspace.id,
-    );
-    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(workspace.path);
-    vi.spyOn(state.pty, "isWithinAllowed").mockReturnValue(true);
-    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
-    vi.spyOn(state, "authorizeRemoteWrite").mockResolvedValue(true);
-    const create = vi.spyOn(state.pty, "create").mockReturnValue({
-      sessionId: "term-cloud-watch",
-      pid: 123,
-      cwd: workspace.path,
-      cols: 80,
-      rows: 24,
-      reattached: false,
-    });
-    let temporaryGuardRoot: string | null = null;
-    const chown = vi.spyOn(fsPromises, "chown");
-
-    try {
-      await state.handlePtyCreate(
-        {
-          type: "PTY_CREATE",
-          id: "pty-create-cloud-watch",
-          source: "browser",
-          timestamp: 1,
-          sessionId: "term-cloud-watch",
-          workspaceId: workspace.id,
-          cwd: workspace.path,
-          cols: 80,
-          rows: 24,
-        } as Extract<EngineMessage, { type: "PTY_CREATE" }>,
-        client("cloud"),
-      );
-
-      const options = create.mock.calls[0]?.[0] as {
-        env?: Record<string, string>;
-        wrapSpawn?: unknown;
-      };
-      expect(options.wrapSpawn).toBeUndefined();
-      const guardPath =
-        options.env?.NODE_OPTIONS?.match(/--require "([^"]+)"/)?.[1];
-      expect(guardPath).toBeTruthy();
-      const fingerprintRoot = path.dirname(guardPath!);
-      temporaryGuardRoot = path.dirname(fingerprintRoot);
-      expect(path.basename(temporaryGuardRoot)).toMatch(
-        /^zeros-terminal-design-watch-/,
-      );
-      const artifactPaths = [
-        guardPath!,
-        options.env?.ZEROS_DESIGN_WATCH_IGNORE_FILE,
-        options.env?.ZEROS_DESIGN_WATCH_ROOTS_FILE,
-      ];
-      expect(artifactPaths.every(Boolean)).toBe(true);
-      for (const artifactPath of artifactPaths) {
-        const metadata = await stat(artifactPath!);
-        expect(metadata.mode & 0o777).toBe(0o600);
-        expect(metadata.uid).toBe(process.geteuid?.());
-      }
-      expect((await stat(fingerprintRoot)).mode & 0o777).toBe(0o700);
-      expect((await stat(temporaryGuardRoot)).mode & 0o777).toBe(0o700);
-      expect(chown).not.toHaveBeenCalled();
-    } finally {
-      getWorkspace.mockRestore();
-      chown.mockRestore();
-      if (temporaryGuardRoot) {
-        await rm(temporaryGuardRoot, { recursive: true, force: true });
-      }
-      await rm(base, { recursive: true, force: true });
-    }
-  });
-
-  it("allows the isolated provider-login PTY only in an attested cloud worker", async () => {
-    const state = internals(
-      new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_902 }),
-    );
-    state.cloudWorker = qualifiedCloudWorker();
-    const authCwd = "/var/lib/zeros/agent-auth";
-    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue(null);
-    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(authCwd);
-    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
-    vi.spyOn(state, "authorizeRemoteWrite").mockResolvedValue(true);
-    const create = vi.spyOn(state.pty, "create").mockReturnValue({
-      sessionId: "cloud-auth",
-      pid: 123,
-      cwd: authCwd,
-      cols: 80,
-      rows: 24,
-      reattached: false,
-    });
-    const remote = client("cloud");
-    await state.handlePtyCreate(
-      {
-        type: "PTY_CREATE",
-        id: "pty-create-cloud-auth",
-        source: "browser",
-        timestamp: 1,
-        sessionId: "cloud-auth",
-        cwd: PTY_AGENT_AUTH_CWD,
-        cols: 800,
-        rows: 50,
-        ephemeral: true,
-      } as Extract<EngineMessage, { type: "PTY_CREATE" }>,
-      remote,
-    );
-
-    const created=create.mock.calls[0]?.[0] as {resolvedCwd?:string;scrubEnv?:boolean}|undefined;
-    expect(created?.resolvedCwd).toBe(authCwd);
-    expect(created?.scrubEnv).toBe(true);
-    expect(remote.send).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "PTY_EXIT" }),
-    );
-  });
-
-  it("keeps provider credentials and arbitrary ambient variables out of qualified human terminals", async () => {
-    const state = internals(
-      new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_901 }),
-    );
-    state.cloudWorker = qualifiedCloudWorker();
-    const folder = "/tmp/zeros-lifecycle-root/worktree";
-    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue("ws_outer");
-    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(folder);
-    vi.spyOn(state.pty, "isWithinAllowed").mockReturnValue(true);
-    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
-    vi.spyOn(state, "authorizeRemoteWrite").mockResolvedValue(true);
-    const create = vi.spyOn(state.pty, "create").mockReturnValue({
-      sessionId: "term-cloud-parity",
-      pid: 123,
-      cwd: folder,
-      cols: 80,
-      rows: 24,
-      reattached: false,
-    });
-    process.env.ANTHROPIC_API_KEY = "cloud-provider-key";
-    process.env.CLOUD_NORMAL_VAR = "normal-worker-value";
-    process.env.ZEROS_CLOUD_TOKEN = "coordinator-secret";
-    try {
-      await state.handlePtyCreate(
-        {
-          type: "PTY_CREATE",
-          id: "pty-create-cloud-parity",
-          source: "browser",
-          timestamp: 1,
-          sessionId: "term-cloud-parity",
-          workspaceId: "ws_outer",
-          cwd: folder,
-          cols: 80,
-          rows: 24,
-        } as Extract<EngineMessage, { type: "PTY_CREATE" }>,
-        client("cloud"),
-      );
-    } finally {
-      delete process.env.ANTHROPIC_API_KEY;
-      delete process.env.CLOUD_NORMAL_VAR;
-      delete process.env.ZEROS_CLOUD_TOKEN;
-    }
-
-    expect((create.mock.calls[0]?.[0] as {scrubEnv?:boolean}|undefined)?.scrubEnv).toBe(true);
-    const env = create.mock.calls[0]?.[0] as { env?: Record<string, string> };
-    expect(env.env?.ZEROS_CLOUD_TOKEN).toBeUndefined();
-    expect(env.env?.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(env.env?.CLOUD_NORMAL_VAR).toBeUndefined();
-    expect(env.env?.FONTCONFIG_FILE).toBe(`${testCloudRuntime().workerRoot}/design-fonts/fonts.conf`);
-    expect(env.env?.GIT_CONFIG_SYSTEM).toBe(`${testCloudRuntime().workerRoot}/gitconfig`);
-    expect(env.env?.GIT_AUTHOR_NAME).toBe("");
-    expect(env.env?.GIT_AUTHOR_EMAIL).toBe("");
-  });
-
-  it.each([false, true])("binds terminal authors to the launching member and rechecks revocation (%s)", async revoked => {
-    const state = internals(new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_932 }));
-    state.cloudWorker = qualifiedCloudWorker();
-    const folder = "/tmp/zeros-lifecycle-root/worktree";
-    const remote: TransportClient = { ...client("cloud"),
-      cloudActor: { sessionId: "member-session", deviceId: "member-device", role: "developer", fingerprint: "a".repeat(64) },
-      authorized: () => live };
-    let live = true;
-    const author = { name: "Test Member", email: "1234+test-member@users.noreply.github.com" };
-    const getAuthor = vi.fn(async () => { if (revoked) live = false; return author; });
-    const terminalEnvironment = vi.fn(async () => ({ version: 1 as const, environment: null }));
-    state.cloudRuntimeRegistration = { gitAuthorRequest: getAuthor, agentExecutionRequest: terminalEnvironment };
-    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue("ws_outer");
-    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(folder);
-    vi.spyOn(state.pty, "isWithinAllowed").mockReturnValue(true);
-    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
-    const created = { sessionId: "member-terminal", pid: 123, cwd: folder, cols: 80, rows: 24, reattached: false };
-    const create = vi.spyOn(state.pty, "create").mockReturnValue(created);
-    const message = { type: "PTY_CREATE", id: "member-terminal-request", source: "browser", timestamp: 1,
-      sessionId: created.sessionId, workspaceId: "ws_outer", cwd: folder, cols: 80, rows: 24 } as Extract<EngineMessage, { type: "PTY_CREATE" }>;
-    await state.handlePtyCreate(message, remote);
-    expect(terminalEnvironment).toHaveBeenCalledWith({ kind: "terminal-environment", actorSessionId: "member-session" }, expect.any(AbortSignal));
-    expect(getAuthor).toHaveBeenCalledWith("member-session");
-    if (revoked) {
-      expect(create).not.toHaveBeenCalled();
-      expect(remote.send).toHaveBeenCalledWith(expect.objectContaining({ type: "PTY_EXIT" }));
-      return;
-    }
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ env: expect.objectContaining({
-      GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email,
-      GIT_COMMITTER_NAME: author.name, GIT_COMMITTER_EMAIL: author.email,
-    }) }));
-    vi.spyOn(state.pty, "has").mockReturnValue(true);
-    create.mockReturnValue({ ...created, reattached: true });
-    await state.handlePtyCreate(message, { ...remote, cloudActor: { ...remote.cloudActor!, sessionId: "another-member" } });
-    expect(getAuthor).toHaveBeenCalledOnce();
-    expect(terminalEnvironment).toHaveBeenCalledOnce();
-    expect(create.mock.calls[1]?.[0]).not.toHaveProperty("env");
   });
 
   it("registers a terminal start before remote authorization yields", async () => {
@@ -1222,7 +808,6 @@ describe("workspace terminal start barrier", () => {
     const pending = state.handlePtyCreate(msg, client("cloud"));
 
     expect(state.workspaceProcessStarts.get("ws_outer")?.size).toBe(1);
-    expect(state.globalDesignAuthorityStarts.size).toBe(0);
 
     await Promise.resolve();
     resolveAuthorization(false);
@@ -1230,86 +815,8 @@ describe("workspace terminal start barrier", () => {
   });
 });
 
-describe("qualified cloud workspace authority", () => {
-  it("excludes a Design directory switch from its own territory drain and broadcasts recognition", async () => {
-    const state = internals(new ZerosEngine({ root: "/tmp/zeros-v2-test-directory-drain", port: 29_903 }));
-    state.cloudWorker = qualifiedCloudWorker();
-    let finish!: () => void;
-    const gate = new Promise<void>(resolve => { finish = resolve; });
-    vi.spyOn(state.workspace, "handle").mockImplementation(async () => { await gate; return { directory: "Brand", directoryId: "design_brand" }; });
-    const remote = client("cloud");
-    state.router.register(remote);
-    const primary = vi.spyOn(gitState, "getWorkspaceById").mockReturnValue({ id: "local-main", path: "/tmp/zeros-v2-test-directory-drain", repoRoot: "/tmp/zeros-v2-test-directory-drain", archivedAt: null } as ReturnType<typeof gitState.getWorkspaceById>);
-    const request = state.handleWorkspaceMessage({ type: "WORKSPACE_REQUEST", id: "select", source: "browser", timestamp: 1, op: "design.selectDirectory", params: { workspaceId: "local-main" } }, remote);
-    try {
-      await vi.waitFor(() => expect(state.designTerritoryTransitionCallers.size).toBe(1));
-    } finally { finish(); await request; primary.mockRestore(); }
-    expect(remote.send).toHaveBeenCalledWith(expect.objectContaining({ type: "DB_CHANGED", kinds: ["workspaces", "settings"], workspaceIds: ["local-main"], designRecognitionChanged: true }));
-    expect(state.designTerritoryTransitionCallers.size).toBe(0);
-  });
-  it("blocks new cloud workspace edits during a final checkpoint while retaining reads", async () => {
-    const state = internals(new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_914 }));
-    state.cloudWorker = qualifiedCloudWorker();state.cloudRuntimeCheckpointQuiescing = true;
-    vi.spyOn(state.workspace,"lifecycleMutationWorkspaceId").mockReturnValue(null);
-    const service=vi.spyOn(state.workspace,"handle").mockResolvedValue({});
-    const remote=client("cloud");
-    for(const op of ["design.initialize","design.frame.create","file.write","chats.upsert"]){
-      await state.handleWorkspaceMessage({type:"WORKSPACE_REQUEST",id:op,source:"browser",timestamp:1,op,params:{workspaceId:"local-main"}},remote);
-      expect(remote.send).toHaveBeenLastCalledWith(expect.objectContaining({type:"WORKSPACE_ERROR",code:"CLOUD_WORKSPACE_CHECKPOINTING"}));
-    }
-    expect(service).not.toHaveBeenCalled();
-    await state.handleWorkspaceMessage({type:"WORKSPACE_REQUEST",id:"read",source:"browser",timestamp:1,op:"design.frames",params:{workspaceId:"local-main"}},remote);
-    expect(service).toHaveBeenCalledOnce();
-  });
-
-  it("drains edits admitted before the checkpoint and existing workspace starts before capture", async () => {
-    const state = internals(new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_915 }));
-    state.cloudWorker=qualifiedCloudWorker();
-    vi.spyOn(state.workspace,"lifecycleMutationWorkspaceId").mockReturnValue(null);
-    let releaseEdit!:()=>void,releaseStart!:()=>void;
-    const edit=new Promise<void>(resolve=>{releaseEdit=resolve;});
-    const start=new Promise<void>(resolve=>{releaseStart=resolve;});
-    vi.spyOn(state.workspace,"handle").mockReturnValue(edit);
-    state.workspaceProcessStarts.set("local-main",new Set([start]));
-    vi.spyOn(state.setup,"stopAllAndProve").mockResolvedValue();
-    vi.spyOn(state.runs,"stopAllAndProve").mockResolvedValue();
-    const checkpoint=vi.fn(async()=>{}),synchronize=vi.fn(async()=>{}),flush=vi.fn(async()=>{});
-    state.cloudDurabilityRuntime={checkpoint};state.cloudRecordRuntime={synchronize,flush};
-    // Explicit final capture owns an existing registration for its complete
-    // drain lifetime. This control isolates the process/edit barrier.
-    Object.assign(state, { running: true, cloudCheckpointProgressUnsupported: true,
-      cloudRuntimeRegistration: { hasRuntimeHandoffAuthority: () => true, supportsFinalSaveRecovery: () => false },
-      cloudRuntimeConfig: { execution: { organizationId: "org", workspaceId: "workspace", generation: 1 }, engine: { instanceId: "engine" } },
-    });
-    const writing=state.handleWorkspaceMessage({type:"WORKSPACE_REQUEST",id:"edit",source:"browser",timestamp:1,op:"design.frame.create",params:{workspaceId:"local-main"}},client("cloud"));
-    const capture=state.handleCloudCheckpointRequest({id:"fixture",reason:"before_stop",deadlineAtMs:Date.now()+30000},{heartbeatEndpoint:"https://example.test/heartbeat",heartbeatToken:"fixture",workspaceId:"workspace",organizationId:"org",generation:1,engineInstanceId:"engine"});
-    try{
-      await new Promise(resolve=>setTimeout(resolve,10));expect(checkpoint).not.toHaveBeenCalled();
-      releaseStart();await new Promise(resolve=>setTimeout(resolve,10));expect(checkpoint).not.toHaveBeenCalled();
-      releaseEdit();await writing;await capture;
-      expect(synchronize).not.toHaveBeenCalled();expect(flush).toHaveBeenCalledOnce();expect(checkpoint).toHaveBeenCalledOnce();
-      expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);expect(state.cloudWorkspaceMutations.size).toBe(0);
-    }finally{releaseStart();releaseEdit();await Promise.allSettled([writing,capture]);}
-  });
-  it("routes secret-free credential invalidation to the qualified cloud owner only", () => {
-    const qualified = internals(
-      new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_904 }),
-    );
-    qualified.cloudWorker = qualifiedCloudWorker();
-    const cloud = client("cloud");
-    qualified.router.register(cloud);
-    qualified.publishGithubCredentialChange({
-      method: "github-app",
-      reason: "credential-invalid",
-    });
-    expect(cloud.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "GITHUB_CREDENTIAL_CHANGED",
-        method: "github-app",
-        reason: "credential-invalid",
-      }),
-    );
-
+describe("GitHub credential invalidation", () => {
+  it("notifies only the local desktop, never a remote relay client", () => {
     const relayHost = internals(
       new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_905 }),
     );
@@ -1324,49 +831,6 @@ describe("qualified cloud workspace authority", () => {
     expect(relay.send).not.toHaveBeenCalled();
     expect(local.send).toHaveBeenCalledWith(
       expect.objectContaining({ type: "GITHUB_CREDENTIAL_CHANGED" }),
-    );
-  });
-
-  it("uses the complete workspace service instead of the retired relay allowlist", async () => {
-    const state = internals(
-      new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_903 }),
-    );
-    state.cloudWorker = qualifiedCloudWorker();
-    const allowed = vi
-      .spyOn(state.workspace, "isRemoteAllowed")
-      .mockReturnValue(false);
-    vi.spyOn(state.workspace, "isWriteOp").mockReturnValue(false);
-    vi.spyOn(state.workspace, "lifecycleMutationWorkspaceId").mockReturnValue(
-      null,
-    );
-    const handle = vi.spyOn(state.workspace, "handle").mockResolvedValue({
-      frames: [],
-    });
-    const remote = client("cloud");
-
-    await state.handleWorkspaceMessage(
-      {
-        type: "WORKSPACE_REQUEST",
-        id: "cloud-design-frames",
-        source: "browser",
-        timestamp: 1,
-        op: "design.frames",
-        params: { workspaceId: "ws_outer" },
-      },
-      remote,
-    );
-
-    expect(allowed).not.toHaveBeenCalled();
-    expect(handle).toHaveBeenCalledWith(
-      "design.frames",
-      { workspaceId: "ws_outer" },
-      { hostLocalResources: false, remote: false, cloudWorker: true },
-    );
-    expect(remote.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "WORKSPACE_RESPONSE",
-        requestId: "cloud-design-frames",
-      }),
     );
   });
 });

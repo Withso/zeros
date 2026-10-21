@@ -2,28 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   dbChangedIncludesOriginator,
-  dbChangedDesignRecognition,
   dbChangedKinds,
   LONG_LIFECYCLE_OPS,
 } from "../change-events";
 
 describe("dbChangedKinds", () => {
-  it("publishes cloud image uploads while preserving Local asset insertion notifications", () => {
-    expect(dbChangedKinds("design.asset.upload", undefined, true)).toEqual(["workspaces"]);
+  it("publishes Local asset insertion notifications", () => {
     expect(dbChangedKinds("design.asset.insert")).toEqual(["workspaces"]);
     expect(dbChangedIncludesOriginator("design.asset.insert")).toBe(false);
-    expect(dbChangedDesignRecognition("design.asset.insert")).toBe(false);
   });
   it.each(["design.renameDirectory", "design.adoptDirectory", "design.removeDirectory"])("preserves Local broadcast behavior for %s", op => {
     expect(dbChangedKinds(op)).toEqual(["workspaces", "settings"]);
     expect(dbChangedIncludesOriginator(op)).toBe(false);
-    expect(dbChangedDesignRecognition(op)).toBe(false);
-  });
-  it.each(["design.createDirectory", "design.selectDirectory"])("publishes %s to workspace and settings observers", op => {
-    expect(dbChangedKinds(op, undefined, true)).toEqual(["workspaces", "settings"]);
-    expect(dbChangedIncludesOriginator(op, true)).toBe(true);
-    expect(dbChangedDesignRecognition(op, true)).toBe(true);
-    expect(dbChangedKinds(op)).toBeNull();
   });
   it("does not invalidate workspace views for a Design dry-run", () => {
     expect(dbChangedKinds("design.transaction.apply", { result: { dryRun: true } })).toBeNull();
@@ -187,18 +177,11 @@ describe("dbChangedKinds", () => {
 });
 
 describe("dbChangedIncludesOriginator", () => {
-  it.each([false, true])(
-    "refreshes the Design initialization caller's Files and Changes (cloud=%s)",
-    (cloudWorker) => {
-      expect(dbChangedKinds("design.initialize", undefined, cloudWorker)).toEqual([
-        "workspaces",
-      ]);
-      expect(dbChangedIncludesOriginator("design.initialize", cloudWorker)).toBe(
-        true,
-      );
-      expect(LONG_LIFECYCLE_OPS.has("design.initialize")).toBe(false);
-    },
-  );
+  it("refreshes the Design initialization caller's Files and Changes", () => {
+    expect(dbChangedKinds("design.initialize")).toEqual(["workspaces"]);
+    expect(dbChangedIncludesOriginator("design.initialize")).toBe(true);
+    expect(LONG_LIFECYCLE_OPS.has("design.initialize")).toBe(false);
+  });
 
   it.each(["settings.write", "settings.writeRaw", "settings.migrateLegacy"])(
     "echoes %s back to the client that wrote it",

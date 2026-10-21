@@ -153,21 +153,6 @@ afterEach(() => {
 });
 
 describe("cursor host — native handle lifetime", () => {
-  it.each(["agent.create","agent.resume"])("installs the workload callback over real stdio for %s",async operation=>{
-    const temporary=await mkdtemp(path.join(os.tmpdir(),"zeros-cursor-cloud-host-"));
-    const calls:unknown[]=[];
-    try{
-      const h=startHost({stateRoot:temporary,onCloudTool:request=>{calls.push(request);return {ok:true,data:{text:"from-workload"}};}});await h.ready();
-      const opts={cwd:"/w/alpha",cloudFixture:true,tools:["shell","task"],agents:[{name:"untrusted"}],
-        local:{settingSources:["project"],dirs:["/private"],customTools:{injected:{}}},zerosWorkloadTools:{inputSchema:{type:"object"}}};
-      const result=await h.req<{agentId:string}>(operation,operation==="agent.resume"?{agentId:"persisted",opts}:opts);
-      const policy=JSON.parse(result.agentId);
-      expect(policy).toMatchObject({tools:["mcp","askQuestion","updateTodos","readTodos"],settingSources:[],customToolNames:["workspace"],
-        response:{isError:false,content:[{type:"text",text:JSON.stringify({ok:true,data:{text:"from-workload"}})}]}});
-      expect(policy.dirs).toBeUndefined();expect(policy.agents).toEqual({});
-      expect(calls).toEqual([{operation:"read",path:"README.md"}]);
-    }finally{host?.dispose();host=null;await rm(temporary,{recursive:true,force:true});}
-  });
   it("rejects a previous host generation's handle after the same conversation resumes", async () => {
     const opts = { cwd: "/w/alpha", handleFixture: true };
     const first = startHost(); await first.ready();

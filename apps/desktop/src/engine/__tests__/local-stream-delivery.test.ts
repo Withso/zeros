@@ -10,7 +10,6 @@ import { createMessage, type EngineMessage } from "../types";
 import type { TransportClient } from "../transport/types";
 
 interface EngineState {
-  cloudWorker: unknown;
   sessionChat: Map<string, string>;
   sessionAgent: Map<string, string>;
   agents: { events: {
@@ -33,7 +32,7 @@ afterEach(() => {
   closeZerosDb(); setZerosDbPathForTesting(null);
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function setup(cloud = false) {
+function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-stream-delivery-")); roots.push(root);
   setZerosDbPathForTesting(path.join(root, "test.db"));
   const engine = new ZerosEngine({ root, port: 0 }) as unknown as EngineState;
@@ -41,7 +40,6 @@ function setup(cloud = false) {
   engine.routeSessionScoped = route;
   engine.scheduleMessagesChanged = vi.fn();
   engine.sessionChat.set("execution", "chat"); engine.sessionAgent.set("execution", "codex");
-  if (cloud) engine.cloudWorker = {};
   const push = (text: string) => engine.agents.events.onSessionUpdate("codex", {
     sessionId: "execution", update: { sessionUpdate: "agent_message_chunk", messageId: "message", content: { type: "text", text } },
   });
@@ -49,13 +47,13 @@ function setup(cloud = false) {
 }
 
 describe("engine Local stream delivery", () => {
-  it.each([false, true])("coalesces Local updates and leaves cloud=%s delivery immediate", (cloud) => {
-    const f = setup(cloud);
+  it("coalesces Local updates", () => {
+    const f = setup();
     f.push("first ");
     for (let index = 0; index < 20; index += 1) f.push("next ");
-    expect(f.route).toHaveBeenCalledTimes(cloud ? 21 : 1);
+    expect(f.route).toHaveBeenCalledTimes(1);
     f.engine.markCancelIntent("execution");
-    expect(f.route).toHaveBeenCalledTimes(cloud ? 21 : 2);
+    expect(f.route).toHaveBeenCalledTimes(2);
     expect(JSON.parse(windowChatMessages("chat", 10)[0]!.payload).text).toBe(`first ${"next ".repeat(20)}`);
   });
 

@@ -1,4 +1,3 @@
-import {resolveCloudRuntime} from "../../../containment/cloud-runtime-root.mjs";
 // ──────────────────────────────────────────────────────────
 // Cursor host client — engine-side driver for the Node @cursor/sdk subprocess
 // ──────────────────────────────────────────────────────────
@@ -40,8 +39,6 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {cloudExecutionLifetime,cloudProviderExecution,type CloudProviderExecution} from "../../../cloud-provider-execution";
-import {cloudCursorRequest} from "./cloud-policy";
 
 import {
   preserveAmbientConfigRoots,
@@ -240,8 +237,7 @@ export class CursorHostClient {
 
   /** @param spawnTransport returns a fresh transport, or null when the host
    *  can't be located/spawned (→ requests fail with an actionable error). */
-  private readonly toolCalls=new Map<string,AbortController>();
-  constructor(private readonly spawnTransport: () => HostTransport | null,private readonly cloud?:CloudProviderExecution) {}
+  constructor(private readonly spawnTransport: () => HostTransport | null) {}
 
   private ensure(): boolean {
     if (this.transport) return true;
@@ -305,21 +301,6 @@ export class CursorHostClient {
     }
     if (!m || typeof m.k !== "string") return;
     switch (m.k) {
-      case "tool":{
-        const id=typeof m.id==="string"&&/^[a-f0-9-]{36}$/.test(m.id)?m.id:null;
-        const transport=this.transport;
-        if(!id||!transport||!this.cloud)return;
-        if(this.toolCalls.has(id)||this.toolCalls.size>=4){transport.send(JSON.stringify({k:"tool_result",id,result:{ok:false,error:"capacity"}}));return;}
-        const controller=new AbortController();this.toolCalls.set(id,controller);
-        const signal=AbortSignal.any([controller.signal,cloudExecutionLifetime(this.cloud).signal,AbortSignal.timeout(310000)]);
-        void this.cloud.tools.call(m.request,signal).catch(()=>({ok:false,error:"unavailable"})).then(result=>{
-          if(this.transport===transport)transport.send(JSON.stringify({k:"tool_result",id,result}));
-        }).catch(()=>{}).finally(()=>{if(this.toolCalls.get(id)===controller)this.toolCalls.delete(id);});
-        return;
-      }
-      case "tool_cancel":{
-        if(typeof m.id==="string")this.toolCalls.get(m.id)?.abort();return;
-      }
       case "ready":
         // Ready-line gate for the crash-loop guard: the host booted far
         // enough to load @cursor/sdk. A death before this line is always an
@@ -368,8 +349,6 @@ export class CursorHostClient {
   /** The host vanished: reject every in-flight request and fail every live run
    *  stream, then reset so the next call respawns. */
   private onExit(): void {
-    for(const call of this.toolCalls.values())call.abort();this.toolCalls.clear();
-    if(this.cloud)void cloudExecutionLifetime(this.cloud).close().catch(()=>{});
     this.transport = null;
     this.buf = "";
     // Crash-loop accounting. A death before the ready line, or within the
@@ -431,11 +410,6 @@ export class CursorHostClient {
     onWritten?: () => void,
     beforeNativeWrite?: () => void,
   ): Promise<T> {
-    if(this.cloud){
-      try{args=cloudCursorRequest(this.cloud,op,args);}
-      catch(error){return Promise.reject(error);}
-      if(op==="run.cancel")for(const call of this.toolCalls.values())call.abort();
-    }
     if (!this.ensure()) {
       // Respawn hold-off (crash-loop guard): fail fast without spawning.
       // Below the loop threshold the rejection stays RECOVERABLE (a blip the
@@ -488,9 +462,6 @@ export class CursorHostClient {
           if (this.pending.get(id) !== pending) return;
           this.pending.delete(id);
           pending.timer = undefined;
-          // A rejected response is not proof that the native operation never
-          // started. Cloud credentials/tools must not outlive a lost handle.
-          if(this.cloud)void cloudExecutionLifetime(this.cloud).close().catch(()=>{});
           reject(
             new Error(
               `cursor host request ${op} timed out after ${timeoutMs}ms`,
@@ -510,14 +481,12 @@ export class CursorHostClient {
       } catch (err) {
         this.pending.delete(id);
         clearPendingTimer(pending);
-        if(this.cloud)void cloudExecutionLifetime(this.cloud).close().catch(()=>{});
         reject(err);
       }
     });
   }
 
   async dispose(): Promise<void> {
-    for(const call of this.toolCalls.values())call.abort();this.toolCalls.clear();
     const t = this.transport;
     this.transport = null;
     for (const p of this.pending.values()) {
@@ -527,8 +496,7 @@ export class CursorHostClient {
     this.pending.clear();
     for (const q of this.queues.values()) q.end();
     this.queues.clear();
-    try{if (t) await t.dispose();}
-    finally{if(this.cloud)await cloudExecutionLifetime(this.cloud).close();}
+    if (t) await t.dispose();
   }
 
   // ── CursorSdkModule proxy ─────────────────────────────────
@@ -806,16 +774,14 @@ export function formatHostStderrLines(chunk: string): string[] {
 export function spawnSubprocessTransport(
   options?: CursorHostSpawnOptions,
 ): HostTransport | null {
-  const cloud=cloudProviderExecution(options?.executionBoundary);
-  const cloudRuntime = cloud ? resolveCloudRuntime() : undefined;
-  const script = cloudRuntime?`${cloudRuntime.workerRoot}/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs`:resolveHostScript();
+  const script = resolveHostScript();
   if (!script) {
     console.error(
       "[cursor-host] cannot locate cursor-host.cjs (set ZEROS_CURSOR_HOST_SCRIPT) — Cursor unavailable",
     );
     return null;
   }
-  const runtime = cloudRuntime?{cmd:cloudRuntime.node,electron:false}:resolveRuntime();
+  const runtime = resolveRuntime();
   const cmd = options ? resolveExecutable(runtime.cmd) : runtime.cmd;
   if (!cmd) {
     console.error(
@@ -832,8 +798,6 @@ export function spawnSubprocessTransport(
         ...(process.env as Record<string, string>),
       });
   if (runtime.electron) env.ELECTRON_RUN_AS_NODE = "1";
-  // A cloud host resolves its SDK beside the verified source script.
-  if (cloudRuntime) delete env.ZEROS_CURSOR_SDK_ENTRY;
 
   // cwd is deliberately a non-repo dir — see resolveHostCwd(). NEVER inherit the
   // engine's cwd here, or a missing per-agent cwd corrupts the Zeros repo.
@@ -928,7 +892,7 @@ export interface CursorHostRuntime {
 export function createCursorHostRuntime(
   options: CursorHostSpawnOptions,
 ): CursorHostRuntime {
-  const client = new CursorHostClient(() => spawnSubprocessTransport(options),cloudProviderExecution(options.executionBoundary)??undefined);
+  const client = new CursorHostClient(() => spawnSubprocessTransport(options));
   return { module: client.module(), dispose: () => client.dispose() };
 }
 

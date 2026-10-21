@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { zerosDataDir } from "../db/paths";
 import { runFile } from "../git/git-exec";
-import { cloudWorkspacePublicationPath } from "../agents/containment/cloud-workspace-paths";
 import {
   recordAttachmentTemporaryDirectory,
   pruneAttachmentTemporaryDirectories,
@@ -82,7 +81,7 @@ async function mountId(directory: string): Promise<string | null> {
 export async function createAttachmentTemporaryDirectory(
   workspaceRoot: string,
 ): Promise<AttachmentTemporaryDirectory> {
-  const workspace = cloudWorkspacePublicationPath(await fs.realpath(workspaceRoot));
+  const workspace = await fs.realpath(workspaceRoot);
   const device = (await fs.stat(workspace)).dev;
   const workspaceMount = await mountId(workspace);
   const dataRoot = zerosDataDir();

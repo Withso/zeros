@@ -50,7 +50,6 @@ import { runGit } from "../git/git-exec";
 import { opSettingsResolve } from "../settings/ops";
 import { designRegistryAtGitRef } from "./metadata-git";
 import { hasInvalidDesignSettings } from "./directory-path";
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
   DESIGN_DIRECTORY_REGISTRY_FILES,
   designDirectoryFromSettings,
@@ -345,7 +344,6 @@ export async function reserveProspectiveDesignDirectory(
     if (aliases.length === 0) {
       try {
         await mkdir(candidate, { mode: 0o700 });
-        publishCloudWorkspacePath(candidate);
       } catch (error: unknown) {
         const code =
           error && typeof error === "object" && "code" in error

@@ -7,13 +7,12 @@ import {
   githubReadTransport,
 } from "../git/github-read-context";
 import { githubWriteCredential } from "../git/github-write-context";
-import { scopedCloudGitAuthorEnvironment } from "../git/cloud-git-author";
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("local sidecar Git dispatch", () => {
   it.each(["git.fetch", "git.pull", "git.push", "gh.prGet", "gh.branchList"])(
-    "keeps %s free of cloud actor, grant and author requirements",
+    "dispatches %s through the ordinary Local workspace handler",
     async (op) => {
       const engine = new ZerosEngine({
         root: "/tmp/zeros-v2-test-local-dispatch",
@@ -38,7 +37,6 @@ describe("local sidecar Git dispatch", () => {
           expect(githubReadTransport()).toBeUndefined();
           expect(githubReadCanEdit()).toBeUndefined();
           expect(githubWriteCredential()).toBeNull();
-          expect(scopedCloudGitAuthorEnvironment()).toEqual({});
           return { ok: true };
         });
       const client: TransportClient = {
@@ -69,7 +67,6 @@ describe("local sidecar Git dispatch", () => {
       expect(handle).toHaveBeenCalledExactlyOnceWith(op, params, {
         hostLocalResources: true,
         remote: false,
-        cloudWorker: false,
       });
       expect(client.send).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({

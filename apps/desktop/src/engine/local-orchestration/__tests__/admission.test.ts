@@ -107,10 +107,8 @@ function managed(id: string, wsPath: string, organizationId: string | null = nul
 }
 
 let open = true;
-let cloud = false;
 const chats = new Map<string, ChatRow>();
 const ports = {
-  isCloudWorker: () => cloud,
   featureOpen: () => open,
   getChat: (id: string) => chats.get(id) ?? null,
   listManagedWorkspaces: () => [managed("ws_1", workspacePath), managed("ws_org", "/tmp/zeros-local-adm/org", "org_1")],
@@ -134,7 +132,6 @@ beforeEach(() => {
   fileRace.at = "";
   fileRace.swaps = 0;
   open = true;
-  cloud = false;
   calls.length = 0;
   chats.clear();
   chats.set("local", chat("local", workspacePath));
@@ -238,9 +235,6 @@ describe("Local CLI admission", () => {
     expect(await admissions.admit(input("missing"))).toBeNull();
     expect(await admissions.admit(input(undefined))).toBeNull();
     open = false;
-    expect(await admissions.admit(input("local"))).toBeNull();
-    open = true;
-    cloud = true;
     expect(await admissions.admit(input("local"))).toBeNull();
     expect(registry.size).toBe(0);
   });

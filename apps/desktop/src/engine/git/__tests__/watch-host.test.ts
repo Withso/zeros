@@ -280,12 +280,11 @@ describe("createLocalWatchHost", () => {
   const env = { ZEROS_PTY_HOST_RUNTIME: process.execPath, ZEROS_WATCH_HOST_SCRIPT: HOST_SCRIPT };
 
   it("serves only a packaged Local engine on macOS with a Node runtime", () => {
-    const packagedMac = createLocalWatchHost({ devRuntime: false, cloudWorker: false, platform: "darwin", env });
+    const packagedMac = createLocalWatchHost({ devRuntime: false, platform: "darwin", env });
     expect(packagedMac).toBeInstanceOf(WatchHostClient);
     packagedMac?.dispose();
-    expect(createLocalWatchHost({ devRuntime: false, cloudWorker: true, platform: "darwin", env })).toBeNull();
-    expect(createLocalWatchHost({ devRuntime: true, cloudWorker: false, platform: "darwin", env })).toBeNull();
-    expect(createLocalWatchHost({ devRuntime: false, cloudWorker: false, platform: "linux", env })).toBeNull();
-    expect(createLocalWatchHost({ devRuntime: false, cloudWorker: false, platform: "darwin", env: {} })).toBeNull();
+    expect(createLocalWatchHost({ devRuntime: true, platform: "darwin", env })).toBeNull();
+    expect(createLocalWatchHost({ devRuntime: false, platform: "linux", env })).toBeNull();
+    expect(createLocalWatchHost({ devRuntime: false, platform: "darwin", env: {} })).toBeNull();
   });
 });

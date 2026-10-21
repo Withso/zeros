@@ -163,14 +163,6 @@ describe("execution-boundary routing", () => {
     host.boundary.prepare.mockRejectedValueOnce(new Error("Host unavailable"));
     await expect(routing.prepare(request("design-agent", true))).rejects.toThrow("Host unavailable");
   });
-  it("selects only the original cloud placement instead of a backend hint", async () => {
-    const host = fakeBoundary("none"), cloud = fakeBoundary("cloud-worker");
-    expect(() => new RoutingExecutionBoundary({ host: host.boundary, cloud: cloud.boundary })).toThrow();
-    seams.cloud.add(cloud.boundary);
-    const routing = new RoutingExecutionBoundary({ host: host.boundary, cloud: cloud.boundary });
-    expect(await routing.prepare(request())).toBe(cloud.prepared);
-    expect(host.boundary.prepare).not.toHaveBeenCalled();
-  });
   it("recovers Host processes and neutral legacy holds before mutable state", async () => {
     const host = fakeBoundary("none"), routing = new RoutingExecutionBoundary({ host: host.boundary });
     await routing.recoverStaleProcesses(); await routing.recoverStaleMutableState();

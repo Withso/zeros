@@ -24,7 +24,6 @@ import {
 } from "../files/file-content-guard";
 import { writeWorkspaceFile } from "../files/write-file";
 import { deleteWorkspaceFileIfUnchanged } from "../files/delete-file-if-unchanged";
-import type { QualifiedCloudFilePolicy } from "../files/cloud-file-policy";
 import { diff, status } from "./diff";
 import { resolveRepoForGitOp } from "./worktree";
 import { inspectApplyPatchPaths } from "./stage";
@@ -37,7 +36,6 @@ export interface GitReviewContext {
   /** Trusted exact root from WorkspaceService.resolveReadCwd, never wire data. */
   cwd: string;
   remote?: boolean;
-  cloudPolicy?: QualifiedCloudFilePolicy;
   /** The existing dispatcher Design guard, in addition to the direct guard. */
   assertSourceWrite?: (
     paths: readonly string[],
@@ -65,10 +63,8 @@ async function contextFor(
 function authorizePath(
   context: GitReviewContext,
   relative: string,
-  write = false,
 ): void {
-  context.cloudPolicy?.assertPath(relative, write);
-  if (context.remote && !context.cloudPolicy && isSensitiveRepoPath(relative))
+  if (context.remote && isSensitiveRepoPath(relative))
     throw invalid(
       "Refusing to review a secret/credential file over a remote connection.",
     );
@@ -79,7 +75,7 @@ async function authorizeWrite(
   path: string,
   prospectiveContent?: string | null,
 ): Promise<void> {
-  authorizePath(context, path, true);
+  authorizePath(context, path);
   await assertReviewSourceWriteAllowed(context.cwd, path, prospectiveContent);
   await context.assertSourceWrite?.([path], "reviewing");
 }

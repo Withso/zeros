@@ -19,7 +19,6 @@ const organizationId = "11111111-1111-4111-8111-111111111111";
 const owners = [
   { name: "Local Personal", placement: "local", organizationId: null },
   { name: "organization local", placement: "local", organizationId },
-  { name: "organization cloud", placement: "cloud", organizationId },
 ] as const;
 
 describe("workspace process ownership and remote folder restrictions", () => {
@@ -45,7 +44,7 @@ describe("workspace process ownership and remote folder restrictions", () => {
   });
 
   it.each(owners)("resolves $name process ownership without hashing unmanaged input", owner => {
-    const service = new WorkspaceService(root, { primaryDesignWorkspace: owner.placement === "cloud" });
+    const service = new WorkspaceService(root);
     const nested = path.join(root, "nested");
     mkdirSync(nested);
     insertWorkspace({ ...service["localMainEntry"](), id: "nested-owner", path: nested,
@@ -75,7 +74,7 @@ describe("workspace process ownership and remote folder restrictions", () => {
   });
 
   it.each(owners)("preserves $name persisted chat folders and workspace keys", owner => {
-    const service = new WorkspaceService(root, { primaryDesignWorkspace: owner.placement === "cloud" });
+    const service = new WorkspaceService(root);
     const nested = path.join(root, "nested");
     mkdirSync(nested);
     insertWorkspace({ ...service["localMainEntry"](), id: "nested-owner", path: nested,
@@ -96,13 +95,13 @@ describe("workspace process ownership and remote folder restrictions", () => {
       expect(getChatLocation(id)).toEqual({ folder, workspaceId });
     }
     // Owner/placement switches re-resolve the same durable folder and IDs.
-    const next = new WorkspaceService(root, { primaryDesignWorkspace: owner.placement !== "cloud" });
+    const next = new WorkspaceService(root);
     expect(next.workspaceIdForCwd(getChat("nested")!.folder)).toBe("nested-owner");
     expect(next.workspaceIdForCwd(getChat("unmanaged-id")!.folder)).toBeNull();
   });
 
   it.each(owners)("keeps $name remote chat restrictions without hashing any folder", async owner => {
-    const service = new WorkspaceService(root, { primaryDesignWorkspace: owner.placement === "cloud" });
+    const service = new WorkspaceService(root);
     const nested = path.join(root, "nested");
     mkdirSync(nested);
     insertWorkspace({ ...service["localMainEntry"](), id: "nested-owner", path: nested,
@@ -147,46 +146,11 @@ describe("workspace process ownership and remote folder restrictions", () => {
     await service.handle("workspace.setRemoteRestricted", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, restricted: true });
     for (const id of ["primary-path", "primary-id"])
       await expect(service.handle("messages.clear", { chatId: id }, { remote: true })).rejects.toThrow(/restricted/i);
-    const next = new WorkspaceService(root, { primaryDesignWorkspace: owner.placement !== "cloud" });
+    const next = new WorkspaceService(root);
     const switched = await next.handle("chats.list", {}, { remote: true }) as { chats: ChatRow[] };
     expect(switched.chats.map(chat => chat.id).sort()).toEqual([
       "empty", "opaque", "remote-empty", "remote-opaque", "remote-unmanaged", "unmanaged",
     ]);
-    expect(createHash).not.toHaveBeenCalled();
-  });
-
-  it("exempts only the cloud primary Design workspace while explicit restrictions still win", async () => {
-    const service = new WorkspaceService(root, { primaryDesignWorkspace: true });
-    insertWorkspace({ ...service["localMainEntry"](), kind: "design", placement: "cloud", organizationId });
-    const nested = path.join(root, "other-design");
-    mkdirSync(nested);
-    insertWorkspace({ ...service["localMainEntry"](), id: "other-design", path: nested,
-      canonicalId: "33333333-3333-4333-8333-333333333333", branch: "other-design",
-      kind: "design", placement: "cloud", organizationId });
-    for (const [id, folder] of [
-      ["primary-path", root], ["primary-id", LOCAL_MAIN_WORKSPACE_ID],
-      ["design-path", nested], ["design-id", "other-design"],
-      ["unmanaged", "/outside/synthetic-native-session/cwd"],
-    ]) await service.handle("chats.upsert", { chat: { id, folder } });
-    vi.mocked(createHash).mockClear();
-
-    const cloud = await service.handle("chats.list", {}, { remote: true }) as { chats: ChatRow[] };
-    expect(cloud.chats.map(chat => chat.id).sort()).toEqual(["primary-id", "primary-path", "unmanaged"]);
-    await expect(service.handle("messages.clear", { chatId: "primary-path" }, { remote: true })).resolves.toEqual({ cleared: 0 });
-    await expect(service.handle("messages.clear", { chatId: "design-path" }, { remote: true })).rejects.toThrow(/restricted/i);
-    await expect(service.handle("chats.upsert", {
-      chat: { id: "design-write", folder: nested },
-    }, { remote: true })).rejects.toThrow(/restricted/i);
-
-    const localPolicy = new WorkspaceService(root);
-    const local = await localPolicy.handle("chats.list", {}, { remote: true }) as { chats: ChatRow[] };
-    expect(local.chats.map(chat => chat.id)).toEqual(["unmanaged"]);
-    await expect(localPolicy.handle("messages.clear", { chatId: "primary-id" }, { remote: true })).rejects.toThrow(/restricted/i);
-    await service.handle("workspace.setRemoteRestricted", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, restricted: true });
-    const restricted = await service.handle("chats.list", {}, { remote: true }) as { chats: ChatRow[] };
-    expect(restricted.chats.map(chat => chat.id)).toEqual(["unmanaged"]);
-    await expect(service.handle("messages.clear", { chatId: "primary-path" }, { remote: true })).rejects.toThrow(/restricted/i);
-    await expect(service.handle("messages.clear", { chatId: "unmanaged" }, { remote: true })).resolves.toEqual({ cleared: 0 });
     expect(createHash).not.toHaveBeenCalled();
   });
 });

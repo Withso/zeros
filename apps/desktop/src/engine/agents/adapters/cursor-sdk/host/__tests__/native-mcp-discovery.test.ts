@@ -1,20 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
-import type { CloudProviderExecution } from "../../../../cloud-provider-execution";
-import { cloudCursorRequest } from "../cloud-policy";
-import { prepareCloudCursorConfigView } from "../../../../containment/cloud-native-boundary";
-import { materializeCloudSkills } from "../../../../cloud-skills";
-import { testCloudRuntime } from "../../../../__tests__/helpers/test-cloud-runtime";
-vi.mock("../../../../containment/cloud-runtime-root.mjs", async original => ({
-  ...await original<typeof import("../../../../containment/cloud-runtime-root.mjs")>(),
-  resolveCloudRuntime: () => testCloudRuntime(),
-}));
+import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const sdk = require.resolve("@cursor/sdk");
@@ -27,21 +17,14 @@ async function fixture() {
   await mkdir(path.join(cwd, ".cursor"), { recursive: true });
   const marker = path.join(home, "unadmitted-marker");
   const server = { command: process.execPath, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)},"started")`] };
-  const run = (options: unknown, engineHome = false) => {
-    let selectedHome = home;
-    if (engineHome) {
-      selectedHome = path.join(root, "engine-home");
-      mkdirSync(selectedHome, { mode: 0o700 });
-      cpSync(path.join(root, "cursor-config"), path.join(selectedHome, ".cursor"), { recursive: true });
-      cpSync(path.join(root, "skills"), path.join(selectedHome, ".cursor/skills"), { recursive: true });
-    }
+  const run = (options: unknown) => {
     // Only the credential-free fixture uses a network namespace. Preserve the
     // engine's actual UID/GID; no agent mount, worker mapping or readonly HOME.
     const child = spawnSync("/usr/bin/setpriv", ["--inh-caps=-all", "--ambient-caps=-all",
       "unshare", "--user", "--map-current-user", "--net", "--",
-      process.execPath, probe, sdk, JSON.stringify(options), engineHome ? "engine-home" : "ordinary",
+      process.execPath, probe, sdk, JSON.stringify(options), "ordinary",
       String(process.getuid!()), String(process.getgid!())], {
-      env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: selectedHome, CURSOR_RIPGREP_PATH: ripgrep },
+      env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: home, CURSOR_RIPGREP_PATH: ripgrep },
       encoding: "utf8", timeout: 15000, maxBuffer: 64 * 1024,
     });
     expect(child.status).toBe(0); expect(child.stdout).toMatch(/native_prewarm_ok$/);
@@ -51,17 +34,6 @@ async function fixture() {
 }
 
 describe.skipIf(process.platform !== "linux")("pinned Cursor native MCP discovery", () => {
-  it("shares engine identity and initializes an ordinary writable provider HOME", async () => {
-    const f = await fixture();
-    try {
-      await prepareCloudCursorConfigView(f.root);
-      await mkdir(path.join(f.root, "history"));
-      await mkdir(path.join(f.root, "skills"));
-      const output = f.run({ cwd: f.cwd, local: { cwd: f.cwd, settingSources: ["user"] }, mcpServers: {} }, true);
-      expect(output).toContain('"sameEngineIdentity":true');
-      expect(output).toContain('"stateWritable":true');
-    } finally { await rm(f.root, { recursive: true, force: true }); }
-  });
 
   it.each(["project", "user", "none"])("records repo instruction sentinels with the %s source", async source => {
     const f = await fixture();
@@ -76,59 +48,12 @@ describe.skipIf(process.platform !== "linux")("pinned Cursor native MCP discover
       expect(output).toContain(`"repoRuleRead":${source === "project"}`);
     } finally { await rm(f.root, { recursive: true, force: true }); }
   });
-  it.each(["empty", "admitted"])("initializes engine-owned user config with the %s MCP snapshot", async snapshot => {
-    const f = await fixture();
-    try {
-      await prepareCloudCursorConfigView(f.root);
-      await mkdir(path.join(f.root, "history"));
-      await materializeCloudSkills(f.root, [{ name: "admitted-skill", description: "Engine-admitted fixture skill", content: "Use only for the synthetic fixture." }]);
-      await writeFile(path.join(f.home, ".cursor/mcp.json"), JSON.stringify({ mcpServers: { excluded: f.server } }));
-      const admittedMarker = path.join(f.home, "admitted-engine-home-marker");
-      const admitted = { command: process.execPath, cwd: f.cwd,
-        args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(admittedMarker)},"started")`] };
-      const stdout = f.run({ cwd: f.cwd, local: { cwd: f.cwd, settingSources: ["user"] }, mcpServers: snapshot === "admitted" ? { admitted } : {} }, true);
-      if (snapshot === "admitted") {
-        expect(stdout).toContain('"skillRead":true');
-        expect(await readFile(admittedMarker, "utf8")).toBe("started");
-      } else await expect(readFile(admittedMarker)).rejects.toMatchObject({ code: "ENOENT" });
-      await expect(readFile(f.marker)).rejects.toMatchObject({ code: "ENOENT" });
-    } finally { await rm(f.root, { recursive: true, force: true }); }
-  });
   it.each(["project", "user"])("proves %s source starts unadmitted native MCP despite an explicit empty snapshot", async source => {
     const f = await fixture();
     try {
       await writeFile(path.join(source === "user" ? f.home : f.cwd, ".cursor/mcp.json"), JSON.stringify({ mcpServers: { excluded: f.server } }));
       f.run({ cwd: f.cwd, local: { cwd: f.cwd, settingSources: [source] }, mcpServers: {} });
       expect(await readFile(f.marker, "utf8")).toBe("started");
-    } finally { await rm(f.root, { recursive: true, force: true }); }
-  });
-
-  it("keeps cloud project discovery off while starting admitted MCP in a nonprimary worktree cwd", async () => {
-    const f = await fixture();
-    try {
-      await writeFile(path.join(f.cwd, ".cursor/mcp.json"), JSON.stringify({ mcpServers: { excluded: f.server } }));
-      const admittedMarker = path.join(f.root, "admitted-marker"), tools = path.join(f.cwd, "tools");
-      await mkdir(tools);
-      const execution = { cwd: f.cwd, model: "qualified-model", lease: { assertLive: vi.fn(), admission: { model: "qualified-model" } },
-        coordinator: { environment: () => ({ CURSOR_API_KEY: "synthetic-admitted-key" }) }, productServers: [],
-        userServers: [{ name: "admitted", transport: "stdio", cwd: tools, command: process.execPath,
-          env: { GIT_EXEC_PATH: "/user/git-exec-trap", FONTCONFIG_FILE: "/user/fontconfig-trap", FONTCONFIG_PATH: "/user/fonts-trap" },
-          args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(admittedMarker)},JSON.stringify({cwd:process.cwd(),assets:Object.fromEntries(['GIT_CONFIG_SYSTEM','GIT_EXEC_PATH','FONTCONFIG_FILE','FONTCONFIG_PATH'].map(name=>[name,process.env[name]||'unset']))}))`] }] } as unknown as CloudProviderExecution;
-      for (const operation of ["platform.prewarm", "agent.create", "agent.resume"]) {
-        const raw = { cwd: "/untrusted-root", local: { settingSources: ["project", "plugins", "all"] }, mcpServers: {} };
-        const request = cloudCursorRequest(execution, operation, operation === "agent.resume" ? { agentId: "saved", opts: raw } : raw) as { opts?: unknown };
-        // Native workspace startup is the side-effecting phase shared by these
-        // three operations; no model turn/provider authentication is claimed.
-        f.run(operation === "agent.resume" ? request.opts : request);
-        const runtime = testCloudRuntime();
-        expect(JSON.parse(await readFile(admittedMarker, "utf8"))).toEqual({ cwd: tools, assets: {
-          GIT_CONFIG_SYSTEM: `${runtime.workerRoot}/gitconfig`, FONTCONFIG_FILE: `${runtime.workerRoot}/design-fonts/fonts.conf`,
-          GIT_EXEC_PATH: `/opt/zeros-infra/.git-exec/${runtime.runtimeId}`,
-          FONTCONFIG_PATH: `${runtime.workerRoot}/design-fonts`,
-        } });
-        await rm(admittedMarker);
-        await expect(readFile(f.marker)).rejects.toMatchObject({ code: "ENOENT" });
-      }
     } finally { await rm(f.root, { recursive: true, force: true }); }
   });
 });

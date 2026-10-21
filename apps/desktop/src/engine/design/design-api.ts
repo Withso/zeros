@@ -14,7 +14,6 @@ import {
 } from "./document";
 import { designDirectoryNameFor, withDesignDirectoryNameLease } from "./directory-registry";
 import { designPagesMigrationGeneration } from "./pages-migration";
-import { currentDesignAssetUpload } from "./asset-upload";
 import { currentDesignMovementGuard } from "./movement-guard";
 
 const MAX_WORKSPACE_DESIGN_APIS = 8;
@@ -85,7 +84,6 @@ export class DesignDraftStore implements DesignDocumentRepository {
         input.state,
         {
           assertAuthorized: this.options.assertAuthorized,
-          asset: currentDesignAssetUpload(),
           movementGuard: currentDesignMovementGuard(
             root,
             frameFromDocumentId(input.documentId),

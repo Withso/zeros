@@ -36,7 +36,6 @@ import { designMetadataIndexPaths } from "../design/metadata-git";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { ensureLocalSettingsIgnored } from "../settings/personal-repo";
 import {
   designDirectoryEntry,
@@ -414,7 +413,6 @@ async function renameDesignDirectoryAdmitted(opts: {
   // `git mv` can move into it.
   const toParent = path.dirname(path.join(opts.repoRoot, ...to.split("/")));
   await mkdir(toParent, { recursive: true });
-  publishCloudWorkspacePath(toParent);
   await runGit(opts.repoRoot, ["mv", "--", from, to]);
   recoverDesignDirectoryRename(opts.repoRoot);
   if (renameSelected) primeDesignDirectoryName(opts.repoRoot, to);

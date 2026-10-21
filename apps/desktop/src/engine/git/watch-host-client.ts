@@ -379,13 +379,12 @@ export function watchHostLaunchFromEnvironment(
  *  watcher they had, and so does an engine started without a Node runtime. */
 export function createLocalWatchHost(context: {
   devRuntime: boolean;
-  cloudWorker: boolean;
   platform: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   /** Called once if the host gives up and every root polls instead. */
   onUnavailable?: () => void;
 }): WatchHostClient | null {
-  if (context.devRuntime || context.cloudWorker || context.platform !== "darwin")
+  if (context.devRuntime || context.platform !== "darwin")
     return null;
   const env = context.env ?? process.env;
   if (!watchHostLaunchFromEnvironment(env)) return null;

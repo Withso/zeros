@@ -11,8 +11,6 @@ import {
   forgetDesignDirectoryName,
 } from "../../design/directory-registry";
 import * as metadata from "../../design/catalog-storage";
-import { cloudActorMaySend } from "../../cloud-actor-policy";
-import type { EngineMessage } from "../../types";
 import {
   designCatalogReplySchema,
   DESIGN_CATALOG_READ_OPERATION,
@@ -148,50 +146,6 @@ describe("Design catalog service authority", () => {
       ).toBe(before);
     },
   );
-  it("requires server connection authority and rejects unqualified remote or foreign cloud roots", async () => {
-    insert(root);
-    await expect(
-      service.handle(DESIGN_CATALOG_READ_OPERATION, params),
-    ).rejects.toThrow(/connection/);
-    expect(
-      await service.handle(DESIGN_CATALOG_READ_OPERATION, params, {
-        catalogAdmission: { ...admission, authorized: () => false },
-      }),
-    ).toMatchObject({ reason: "authority-lost" });
-    await expect(
-      service.handle(DESIGN_CATALOG_READ_OPERATION, params, {
-        remote: true,
-        catalogAdmission: admission,
-      }),
-    ).rejects.toThrow();
-    const cloud = new WorkspaceService(root, { primaryDesignWorkspace: true });
-    const options = {
-      remote: true,
-      cloudWorker: true,
-      cloudActorIdentity: { userId: "user", deviceId: "device" },
-      catalogAdmission: {
-        ...admission,
-        cloudOrganizationId: "organization-cloud",
-      },
-    };
-    await expect(
-      cloud.handle(DESIGN_CATALOG_READ_OPERATION, params, options),
-    ).rejects.toThrow(/primary/);
-    expect(
-      await cloud.handle(
-        DESIGN_CATALOG_READ_OPERATION,
-        { ...params, workspaceId: "local-main" },
-        options,
-      ),
-    ).toMatchObject({
-      status: "ready",
-      owner: {
-        workspaceId: "local-main",
-        placement: "cloud",
-        organizationId: "organization-cloud",
-      },
-    });
-  });
   it("revalidates root replacement and catalog revision on continuation", async () => {
     insert(root);
     const first = designCatalogReplySchema.parse(
@@ -249,26 +203,8 @@ describe("Design catalog service authority", () => {
     release();
     expect(await reading).toMatchObject({ reason: "authority-lost" });
   });
-  it("classifies catalog reads for every cloud read role without authoring or generic remote access", () => {
+  it("classifies catalog reads as non-authoring and not generically remote", () => {
     expect(service.isWriteOp(DESIGN_CATALOG_READ_OPERATION)).toBe(false);
-    for (const role of [
-      "viewer",
-      "prompter",
-      "developer",
-      "manager",
-      "owner",
-    ] as const)
-      expect(
-        cloudActorMaySend(
-          role,
-          {
-            type: "WORKSPACE_REQUEST",
-            op: DESIGN_CATALOG_READ_OPERATION,
-            params,
-          } as unknown as EngineMessage,
-          service,
-        ),
-      ).toBe(true);
     expect(service.isRemoteAllowed(DESIGN_CATALOG_READ_OPERATION)).toBe(false);
   });
 });

@@ -1,7 +1,4 @@
 import { designDirectoryEntry } from "../design/metadata";
-import { z } from "zod";
-import { WorkspaceResourceUsageIdentitySchema, type WorkspaceResourceUsageIdentity } from "@zeros/protocol/workspace-resource-usage";
-import { WorkspaceResourceUsageSampler } from "./resource-usage";
 import { isCodeReviewOperation } from "@zeros/protocol/code-review";
 import { handleCodeReviewRoute } from "../code-review/routes";
 import { CodeReviewError } from "../code-review/errors";
@@ -88,7 +85,6 @@ import {
 // exports are handed directly to the desktop save surface.
 // ──────────────────────────────────────────────────────────
 
-import type { CloudCustomizationOperation } from "@zeros/protocol/cloud-customization";
 import {
   extensionQuerySchema,
   saveZerosSkillSchema,
@@ -248,13 +244,7 @@ import {
 } from "../git/worktree";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
-import { QualifiedCloudFilePolicy, withCloudFilePolicy } from "../files/cloud-file-policy";
-import { listMentionPaths } from "../files/mention-paths";
-import { zerosStateRoot } from "../git/state";
-import { cloudActorCan, type CloudActorRole } from "@zeros/protocol/cloud-actors";
 import { transferContextAttachment } from "../files/attachment-transfer";
-import { transferCloudAttachment } from "../files/cloud-attachment-transfer";
-import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import {
   externalizeLegacyMessageImages,
   payloadNeedsLegacyImageMigration,
@@ -311,8 +301,6 @@ import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
 import { initializeWorkspaceDesign } from "../git/design-mode";
-import { browseCloudDesignDirectories, createCloudDesignDirectory, selectCloudDesignDirectory } from "../design/cloud-directories";
-import { withDesignWriteAuthority } from "../design/write-authority";
 import { withWorkspaceGitMutation } from "../git/mutation-lock";
 import { unfenceDesignDirectory } from "../design/workspace-lock";
 
@@ -637,8 +625,6 @@ const WRITE_OPS = new Set<string>([
  * WRITE_OPS is a remote-security allowlist, and widening it would accidentally
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
-  "design.createDirectory",
-  "design.selectDirectory",
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
@@ -672,7 +658,6 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.history.undo",
   "design.history.redo",
   "design.asset.insert",
-  "design.asset.upload",
   "design.token.update",
   "design.stage",
   "design.unstage",
@@ -813,7 +798,6 @@ const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
-  "design.asset.upload",
   "design.stage",
   "design.unstage",
   "design.save",
@@ -1159,7 +1143,6 @@ const REMOTE_READABLE = new Set<string>([
   "codeReview.list",
   // Workspaces + projects (repository navigation / workspace picker)
   "workspace.list",
-  "workspace.resourceUsage",
   "project.list",
   // Chats sidebar + handoff picker
   "chats.list",
@@ -1354,10 +1337,9 @@ interface DesignTerritoryTransitionTarget {
 }
 
 export class WorkspaceService {
-  private readonly resourceUsageSampler = new WorkspaceResourceUsageSampler();
   private readonly catalogReader = new DesignCatalogReader();
   private readonly designRouteHost: DesignWorkspaceRouteHost = {
-    readDesignCatalog: (input, remote, admission, cloud) => this.readDesignCatalog(input, remote, admission, cloud),
+    readDesignCatalog: (input, remote, admission) => this.readDesignCatalog(input, remote, admission),
     resolveDesignWorkspace: (workspaceId, remote) =>
       this.resolveDesignWorkspace(workspaceId, remote),
     resolveReadCwd: (workspaceId, remote) =>
@@ -1387,13 +1369,7 @@ export class WorkspaceService {
       ) => Promise<unknown>)
     | null = null;
 
-  constructor(
-    private readonly root: string,
-    private readonly options: {
-      primaryDesignWorkspace?: boolean;
-      cloudResourceUsageIdentity?: () => WorkspaceResourceUsageIdentity | null;
-    } = {},
-  ) {
+  constructor(private readonly root: string) {
     // v11: hand the chats DB layer an authoritative folder→workspaceId resolver
     // so every chat upsert caches its owning workspace (db/chats.ts stays free of
     // a workspace-service import). Bound to this instance to read the live
@@ -1441,10 +1417,6 @@ export class WorkspaceService {
   }
   setGatewayAccessor(fn: () => McpGateway | null): void {
     this.gatewayAccessor = fn;
-  }
-  private cloudCustomizationRequest: ((actorSessionId: string, operation: CloudCustomizationOperation, params: Record<string, unknown>) => Promise<unknown>) | null = null;
-  setCloudCustomizationRequest(request: NonNullable<WorkspaceService["cloudCustomizationRequest"]>): void {
-    this.cloudCustomizationRequest = request;
   }
   /** Per-launch capability used only by the local Electron custom protocol.
    * Remote renderers use srcDoc and never receive this host-local authority. */
@@ -1989,7 +1961,7 @@ export class WorkspaceService {
     const workspaceId = this.codeReviewOwnerForCwd(input.cwd);
     if (!workspaceId) return null;
     const workspace = getWorkspaceById(workspaceId);
-    if (workspace && (workspace.archivedAt != null || (!this.options.primaryDesignWorkspace && workspace.placement === "cloud"))) return null;
+    if (workspace && (workspace.archivedAt != null || (workspace.placement === "cloud"))) return null;
     const workspacePath = this.resolveReadCwd(workspaceId, false);
     // An admitted raw repository root may be a compatibility alias of the
     // same owner, but never an unrelated or more-specific workspace.
@@ -2062,13 +2034,7 @@ export class WorkspaceService {
       });
     }
     const cwd = this.resolveReadCwd(workspaceId, remote);
-    // A qualified cloud allocation owns one primary checkout. It has no local
-    // worktree row, but is the same opaque, server-resolved owner used by Git,
-    // files and agent sessions. Only the immutable engine deployment enables
-    // this; client parameters cannot turn a desktop root into a Design owner.
-    const workspace = workspaceId === LOCAL_MAIN_WORKSPACE_ID && this.options.primaryDesignWorkspace
-      ? this.localMainEntry()
-      : getWorkspaceById(workspaceId);
+    const workspace = getWorkspaceById(workspaceId);
     if (!workspace || workspace.path !== cwd) {
       throw new GitError({
         code: "VALIDATION_FAILED",
@@ -2131,7 +2097,7 @@ export class WorkspaceService {
     // Foundation reads need only re-read that document, not walk every other
     // directory in the repository. Explicit listing/selection still discovers
     // new documents; cloud keeps its current admission sequence.
-    const selectedLocalDirectory = !this.options.primaryDesignWorkspace && workspace.placement !== "cloud"
+    const selectedLocalDirectory = workspace.placement !== "cloud"
       ? pointer.configured && hasLiveMarker(pointer.directory) ? pointer.directory
         : hasLiveMarker(registered) ? registered : null
       : null;
@@ -2306,12 +2272,9 @@ export class WorkspaceService {
     this.catalogReader.retire(connectionId);
   }
 
-  private readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission, cloud: boolean) {
-    const owner = (workspace: Workspace): DesignCatalogOwner => {
-      if (cloud && !admission.cloudOrganizationId) throw new DesignCatalogError("authority-lost");
-      return { workspaceId: workspace.id, directoryId: input.directoryId,
-        placement: cloud ? "cloud" : "local", organizationId: cloud ? admission.cloudOrganizationId! : workspace.organizationId ?? null };
-    };
+  private readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission) {
+    const owner = (workspace: Workspace): DesignCatalogOwner => ({ workspaceId: workspace.id, directoryId: input.directoryId,
+      placement: "local", organizationId: workspace.organizationId ?? null });
     return this.catalogReader.read(input, admission, {
       open: () => this.withDesignReadWorkspace(input.workspaceId, remote, async ({ workspace, root, designDirectory }) => {
         const metadata = await readDesignCatalogMetadata(root, designDirectory);
@@ -2374,10 +2337,6 @@ export class WorkspaceService {
   /** A synthetic entry for the primary checkout so a remote client can browse
    *  the project root without a managed worktree. */
   private localMainEntry(): Workspace {
-    if (this.options.primaryDesignWorkspace) {
-      const primary = getWorkspaceById(LOCAL_MAIN_WORKSPACE_ID);
-      if (primary?.placement === "cloud" && primary.path === this.root) return { ...primary, present: true };
-    }
     return {
       id: LOCAL_MAIN_WORKSPACE_ID,
       repoSlug: "",
@@ -2456,7 +2415,7 @@ export class WorkspaceService {
     // drop chats whose workspace the owner restricted from remote — its
     // workspace is hidden, so its transcript must be too. No restrictions →
     // pass the rows through untouched.
-    const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
+    const restricted = listRemoteRestrictedWorkspaceIds();
     if (restricted.size === 0) return rows;
     const workspaces = listWorkspaces({});
     return rows.filter((row) => {
@@ -2477,7 +2436,7 @@ export class WorkspaceService {
   }
 
   private remoteFolderRestricted(folder: string): boolean {
-    const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
+    const restricted = listRemoteRestrictedWorkspaceIds();
     if (restricted.size === 0) return false;
     const workspaceId = this.managedWorkspaceTokenForFolder(folder, listWorkspaces({}));
     return workspaceId !== null && restricted.has(workspaceId);
@@ -2521,103 +2480,16 @@ export class WorkspaceService {
     params: Params = {},
     opts: {
       remote?: boolean;
-      cloudWorker?: boolean;
-      cloudActorIdentity?: { userId: string; deviceId: string; sessionId?: string };
       /** Verified transport account, never an operation parameter. */
       reviewUserId?: string;
       reviewUserName?: string;
-      cloudFileActor?: { role: CloudActorRole; authorized: () => boolean };
       hostLocalResources?: boolean;
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
       catalogAdmission?: DesignCatalogAdmission;
-      /** Engine-owned snapshot boundary, never a wire parameter. Read NORMAL
-       * rows and their FULL metadata without yielding; optional image I/O may
-       * retry the entire read, with its original writer still fenced. */
-      cloudHistoryRead?: <T extends object>(read: () => T,
-        prepare?: (value: T, assertCurrent: () => void) => Promise<void> | undefined) => Promise<T>;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
-    if (op === "workspace.resourceUsage") {
-      const request = z.object({ workspaceId: z.literal(LOCAL_MAIN_WORKSPACE_ID),
-        generation: z.number().int().positive(), engineInstanceId: z.string().uuid() }).strict().safeParse(params);
-      const identity = WorkspaceResourceUsageIdentitySchema.safeParse(this.options.cloudResourceUsageIdentity?.());
-      const assertAdmitted = () => {
-        const current = WorkspaceResourceUsageIdentitySchema.safeParse(this.options.cloudResourceUsageIdentity?.());
-        if (!remote || !opts.cloudWorker || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity ||
-            !opts.cloudFileActor?.authorized() || !request.success || !identity.success ||
-            request.data.generation !== identity.data.generation || request.data.engineInstanceId !== identity.data.engineInstanceId ||
-            !current.success || JSON.stringify(current.data) !== JSON.stringify(identity.data))
-          throw new GitError({ code: "REMOTE_RESTRICTED", message: "Resource usage requires the admitted cloud workspace." });
-      };
-      assertAdmitted();
-      const sample = await this.resourceUsageSampler.sample(identity.data!, this.root);
-      assertAdmitted();
-      return sample;
-    }
-    // Qualified VM authority is server-owned, independent of the paired-host
-    // relay flag. Never infer it from a path, client params, or remote alone.
-    const cloudFileOperation = ["design.asset.upload", "file.tree", "file.ignored", "file.read", "file.write",
-      "context.graph.list", "context.graph.scaffold",
-      "workspace.listWorkingDirectories", "workspace.setWorkingDirectories",
-      "design.browseDirectories", "design.createDirectory", "design.selectDirectory",
-      "design.previewExistingDirectory", "design.adoptDirectory", "design.renameDirectory", "design.removeDirectory"].includes(op) || isCodeReviewOperation(op) || isGitReviewOperation(op);
-    let cloudFiles: QualifiedCloudFilePolicy | undefined;
-    if (cloudFileOperation && opts.cloudFileActor) {
-      if (!remote || !opts.cloudWorker || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity ||
-          params.workspaceId !== LOCAL_MAIN_WORKSPACE_ID ||
-          (params.repoRoot !== undefined && params.repoRoot !== this.root)) {
-        throw new GitError({ code: "REMOTE_RESTRICTED", message: "Cloud Files requires the admitted primary workspace." });
-      }
-      let ownerRoots: string[] | undefined;
-      const currentOwners = () => {
-        if (!ownerRoots) {
-          const workspaces = listWorkspaces({});
-          ownerRoots = [...workspaces.map(workspace => workspace.path), ...listKnownRepoRoots()];
-          // Registration is engine-owned. Reuse one DB snapshot within a
-          // synchronous filter, then refresh after every asynchronous yield.
-          queueMicrotask(() => { ownerRoots = undefined; });
-        }
-        return ownerRoots;
-      };
-      cloudFiles = new QualifiedCloudFilePolicy(this.root, {
-        canEdit: cloudActorCan(opts.cloudFileActor.role, "edit"), authorized: opts.cloudFileActor.authorized,
-        privateRoots: [zerosStateRoot(), os.homedir(), "/srv/zeros/state", "/srv/zeros/home", "/opt/zeros", "/etc/zeros", "/zeros", "/opt/zeros-infra", "/opt/zeros-bootstrap", "/srv/zeros/runtime-installs"],
-        ownerRoots: currentOwners,
-      });
-      cloudFiles.assertAuthorized(["file.write", "context.graph.scaffold", "workspace.setWorkingDirectories"].includes(op) || (isCodeReviewOperation(op) && op !== "codeReview.list") || (isGitReviewOperation(op) && op !== "git.reviewHunks"));
-    }
-    if (this.options.primaryDesignWorkspace && params.workspaceId === LOCAL_MAIN_WORKSPACE_ID &&
-        ["workspace.archive", "workspace.delete", "workspace.restore", "workspace.recover", "workspace.deleteSnapshot"].includes(op)) {
-      throw new GitError({ code: "REMOTE_RESTRICTED", message: "Manage the cloud allocation through its workspace lifecycle service." });
-    }
-    // Cloud actors are role-admitted by the engine, independently of the
-    // trusted-device relay policy. Only an immutable cloud deployment may
-    // expose Design, and only for its opaque primary checkout. Files use the
-    // independent qualified policy above; other remote restrictions remain.
-    const cloudDesign = remote && opts.cloudWorker === true &&
-      this.options.primaryDesignWorkspace === true && (op.startsWith("design.") || op === "workspace.setMode");
-    const humanActor = cloudDesign && opts.cloudActorIdentity
-      ? { kind: "human" as const, id: `cloud:${opts.cloudActorIdentity.userId}:${opts.cloudActorIdentity.deviceId}` }
-      : undefined;
-    if (cloudDesign) {
-      if (!humanActor || params.workspaceId !== LOCAL_MAIN_WORKSPACE_ID ||
-          (params.repoRoot !== undefined && params.repoRoot !== this.root)) {
-        throw new GitError({ code: "REMOTE_RESTRICTED", message: "Cloud Design requires the admitted primary workspace." });
-      }
-      // Only directory lifecycle operations accept a repository-root field.
-      // Other Design operations retain their strict portable request schemas.
-      if (["design.previewExistingDirectory", "design.adoptDirectory", "design.removeDirectory", "design.renameDirectory"].includes(op)) {
-        params = { ...params, repoRoot: this.root };
-      }
-    }
-    const designRemote = remote && !cloudDesign;
-    // A qualified cloud worker grants its authenticated desktop client normal
-    // workspace authority, but its files do not live behind that Mac's local
-    // `zeros-design:` protocol handler. Keep those independent: remote relay
-    // policy controls operations, while this bit controls only host-local
-    // resource capabilities.
     const hostLocalResources = opts.hostLocalResources ?? !remote;
     const lifecycleMutationWorkspaceId = this.lifecycleMutationWorkspaceId(
       op,
@@ -2644,7 +2516,7 @@ export class WorkspaceService {
     // switch reaches them. (chats.upsert/bulkUpsert add/move the client's own
     // rows, so their requested destination folders are checked separately.)
     if (remote) {
-      const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
+      const restricted = listRemoteRestrictedWorkspaceIds();
       const targetWorkspaceId = optStr(params, "workspaceId");
       if (targetWorkspaceId && restricted.has(targetWorkspaceId)) {
         throw new GitError({
@@ -2709,40 +2581,23 @@ export class WorkspaceService {
     if (!opts.designDirectoryResolved && DESIGN_DOCUMENT_MUTATIONS.has(op)) {
       return this.withDesignReadWorkspace(
         reqStr(params, "workspaceId"),
-        designRemote,
+        remote,
         () =>
           this.handle(op, params, { ...opts, designDirectoryResolved: true }),
       );
     }
     if (opts.designDirectoryResolved && DESIGN_DOCUMENT_MUTATIONS.has(op) && typeof params.directoryId === "string") {
-      const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), designRemote);
+      const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), remote);
       if (designDirectoryEntry(workspace.path, designDirectoryNameFor(workspace.path))?.id !== params.directoryId) {
         throw new GitError({ code: "VALIDATION_FAILED", message: "The active Design directory changed. Refresh before editing." });
       }
     }
     if (isDesignWorkspaceRoute(op)) {
-      const host = humanActor ? { ...this.designRouteHost,
-        designHistoryState: (workspacePath: string, create?: boolean) => this.designHistoryState(workspacePath, create, humanActor.id),
-        recordDesignHistory: (workspacePath: string, entry: WorkspaceDesignHistoryEntry) => this.recordDesignHistory(workspacePath, entry, humanActor.id),
-      } : this.designRouteHost;
-      const dispatch = () => handleDesignWorkspaceRoute(host, op, params, {
-        remote: designRemote,
+      return handleDesignWorkspaceRoute(this.designRouteHost, op, params, {
+        remote,
         hostLocalResources,
-        ...(humanActor ? { actor: humanActor, primaryRepositoryRoot: this.root } : {}),
-        ...(cloudFiles ? { cloudFiles } : {}),
-        ...(opts.catalogAdmission ? { catalogAdmission: opts.catalogAdmission, cloudCatalog: cloudDesign } : {}),
+        ...(opts.catalogAdmission ? { catalogAdmission: opts.catalogAdmission } : {}),
       });
-      if (op === "design.asset.upload") {
-        if (!cloudDesign || !cloudFiles) throw new Error("Image upload requires the admitted cloud workspace.");
-        const policy = cloudFiles;
-        const authorize = () => { policy.assertPath(`${designDirectoryNameFor(this.root)}/assets`, true); };
-        authorize();
-        return withDesignWriteAuthority(authorize, dispatch);
-      }
-      const policy = cloudFiles;
-      return policy && op !== "design.previewExistingDirectory"
-        ? withDesignWriteAuthority(() => policy.assertAuthorized(true), dispatch)
-        : dispatch();
     }
     if (isCodeReviewOperation(op)) {
       return handleCodeReviewRoute({
@@ -2750,48 +2605,31 @@ export class WorkspaceService {
         ownerRoots: () => this.codeReviewOwnerRoots(),
       }, op, params, {
         remote,
-        userId: opts.reviewUserId ?? opts.cloudActorIdentity?.userId,
+        userId: opts.reviewUserId,
         userName: opts.reviewUserName,
-        cloudFiles,
       });
     }
     if (isGitReviewOperation(op)) {
       const workspaceId = reqStr(params, "workspaceId");
       const cwd = this.resolveReadCwd(workspaceId, remote);
       return handleGitReviewOperation(op, params, {
-        cwd, remote, cloudPolicy: cloudFiles,
+        cwd, remote,
         assertSourceWrite: (paths, action) => assertNoDesignPathWrites(workspaceId, paths, action, cwd),
       });
     }
     switch (op) {
-      case "design.browseDirectories":
-      case "design.createDirectory":
-      case "design.selectDirectory": {
-        if (!cloudDesign || !cloudFiles || !opts.cloudFileActor ||
-            !cloudActorCan(opts.cloudFileActor.role, op === "design.browseDirectories" ? "read" : "manage")) {
-          throw new GitError({ code: "REMOTE_RESTRICTED", message: "This operation requires the admitted cloud workspace role." });
-        }
-        if (op === "design.browseDirectories") return browseCloudDesignDirectories(params, cloudFiles);
-        const policy = cloudFiles;
-        const workspace = this.resolveDesignWorkspaceRecord(LOCAL_MAIN_WORKSPACE_ID, false);
-        return withDesignWriteAuthority(() => policy.assertAuthorized(true), () =>
-          op === "design.createDirectory"
-            ? createCloudDesignDirectory(workspace, params, policy)
-            : selectCloudDesignDirectory(workspace, params, policy, (targets, mutation) => this.withDesignTerritoryTransition(targets, mutation)),
-        );
-      }
       case "design.status": {
-        const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), designRemote);
+        const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), remote);
         return readDesignCheckoutStatus(workspace.path);
       }
       case "design.initialize": {
         const workspace = this.resolveDesignWorkspaceRecord(
-          reqStr(params, "workspaceId"), designRemote,
+          reqStr(params, "workspaceId"), remote,
         );
         await assertDesignCheckoutReadable(workspace.path);
         return withDesignWorkspaceMutation(workspace.path, () =>
           initializeWorkspaceDesign(workspace, async () => ({
-            snapshot: await this.readDesignSnapshot(workspace, designRemote, {
+            snapshot: await this.readDesignSnapshot(workspace, remote, {
               hostLocalResources,
             }),
           })),
@@ -2823,7 +2661,7 @@ export class WorkspaceService {
         // and needs real paths to open/spawn/create like local; the restriction
         // list, NOT path-hiding, is the boundary (a restricted workspace is gone
         // from this list entirely).
-        const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
+        const restricted = listRemoteRestrictedWorkspaceIds();
         return {
           workspaces: workspaces.filter((w) => !restricted.has(w.id)),
         };
@@ -2834,7 +2672,7 @@ export class WorkspaceService {
       // device can neither read nor change what's hidden from it. The desktop
       // owner manages the list from repo settings.
       case "workspace.listRemoteRestricted": {
-        return { ids: Array.from(listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace)) };
+        return { ids: Array.from(listRemoteRestrictedWorkspaceIds()) };
       }
       case "workspace.setRemoteRestricted": {
         setWorkspaceRemoteRestricted(
@@ -2846,24 +2684,17 @@ export class WorkspaceService {
       // ── Working directories (per-worktree sparse-checkout) ──
       // Paired-host relays cannot use this picker: a selection removes folders
       // from the checkout. Both operations remain off the relay allowlist.
-      // Qualified VM readers/editors use the independent cloud actor policy.
       //
       // No Zeros-side persistence on purpose: git already stores the cone in
       // the worktree's own `.git` config and it survives restarts. A second
       // copy in settings could only drift from the real thing.
       case "workspace.listWorkingDirectories": {
-        if (remote && !cloudFiles) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Working directories require the desktop or an admitted cloud workspace." });
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        const state = await getWorkingDirectories(cwd, {
+        return getWorkingDirectories(cwd, {
           designRoots: await designRootsForWorkingDirectories(cwd),
         });
-        if (!cloudFiles) return state;
-        cloudFiles.assertAuthorized();
-        return { ...state, all: state.all.filter(dir => cloudFiles.allows(dir)),
-          included: state.included.filter(dir => cloudFiles.allows(dir)), locked: state.locked.filter(dir => cloudFiles.allows(dir)) };
       }
       case "workspace.setWorkingDirectories": {
-        if (remote && !cloudFiles) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Working directories require the desktop or an admitted cloud workspace." });
         const raw = params.directories;
         if (!Array.isArray(raw)) {
           throw new GitError({
@@ -2876,10 +2707,6 @@ export class WorkspaceService {
         const directories = raw.filter(
           (d): d is string => typeof d === "string",
         );
-        if (cloudFiles) {
-          cloudFiles.assertNoNestedOwners();
-          for (const directory of directories) cloudFiles.assertPath(directory, true);
-        }
         // Deafen the worktree watcher for the duration — the single most
         // expensive part of this operation, and the reason a save on a real
         // monorepo timed out.
@@ -2910,13 +2737,8 @@ export class WorkspaceService {
           cwd,
         );
         try {
-          cloudFiles?.assertAuthorized(true);
           return await setWorkingDirectories(cwd, directories, {
             designRoots: await designRootsForWorkingDirectories(cwd),
-            ...(cloudFiles ? { assertAuthorized: () => {
-              cloudFiles.assertNoNestedOwners();
-              for (const directory of directories) cloudFiles.assertPath(directory, true);
-            } } : {}),
           });
         } finally {
           // Always resume, including after a throw: the checkout is still live
@@ -3424,11 +3246,6 @@ export class WorkspaceService {
       case "skills.listZeros":
       case "skills.saveZeros":
       case "skills.removeZeros": {
-        if (remote && opts.cloudWorker && this.options.primaryDesignWorkspace && opts.cloudActorIdentity?.sessionId && this.cloudCustomizationRequest) {
-          if (params.repoRoot !== undefined && params.repoRoot !== this.root) throw new Error("Organization customization cannot import device configuration.");
-          const { repoRoot: _repoRoot, workspaceId: _workspaceId, ...request } = params;
-          return this.cloudCustomizationRequest(opts.cloudActorIdentity.sessionId, op, request);
-        }
         if (remote)
           throw new Error(
             "Local customization is available only on this device.",
@@ -4035,7 +3852,7 @@ export class WorkspaceService {
             chatDeletions: tombstonesSince("chat", 0),
           };
         };
-        return opts.cloudHistoryRead ? opts.cloudHistoryRead(read) : read();
+        return read();
       }
       // What names an Untitled chat (desktop only: relay clients are refused
       // by the deny-by-default remote gate, which does not list this op).
@@ -4098,7 +3915,6 @@ export class WorkspaceService {
       case "chats.upsert": {
         const c = coerceChatRow(params.chat);
         if (c) {
-          if (opts.cloudWorker && wasChatDeleted(c.id)) throw new Error("Cloud conversation was deleted");
           upsertChat(
             remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
           );
@@ -4170,7 +3986,6 @@ export class WorkspaceService {
           .map((c) =>
             remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
           );
-        if (opts.cloudWorker && rows.some(c => wasChatDeleted(c.id))) throw new Error("Cloud conversation was deleted");
         bulkUpsertChats(rows);
         return { ok: true };
       }
@@ -4183,19 +3998,11 @@ export class WorkspaceService {
         const chatId = reqStr(params, "chatId");
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         const before = optNum(params, "before");
-        if (opts.cloudHistoryRead) return opts.cloudHistoryRead(
-          () => ({ messages: windowChatMessagesPage(chatId, limit, before).messages }),
-          (page, assertCurrent) => {
-            const folder = page.messages.some(row => payloadNeedsLegacyImageMigration(row.payload))
-              ? this.legacyImageMigrationCwd(chatId) : null;
-            return folder ? externalizeLegacyMessageImages({ cwd: folder, chatId, rows: page.messages, assertCurrent }).then(() => {}) : undefined;
-          },
-        );
         const page = windowChatMessagesPage(chatId, limit, before);
         // A Local turn longer than the row budget reports its opening prompt
         // beside the contiguous window. Cloud workers keep their existing
         // wire shape: their history carries its own projection contract.
-        const opening = opts.cloudWorker ? undefined : page.turnOpening;
+        const opening = page.turnOpening;
         const rows = opening ? [opening, ...page.messages] : page.messages;
         const needsImageMigration = rows.some((row) =>
           payloadNeedsLegacyImageMigration(row.payload),
@@ -4214,14 +4021,6 @@ export class WorkspaceService {
         const chatId = reqStr(params, "chatId");
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         const beforeMsgId = reqStr(params, "beforeMsgId");
-        if (opts.cloudHistoryRead) return opts.cloudHistoryRead(
-          () => ({ messages: windowOlderChatMessages(chatId, limit, beforeMsgId) }),
-          (page, assertCurrent) => {
-            const folder = page.messages.some(row => payloadNeedsLegacyImageMigration(row.payload))
-              ? this.legacyImageMigrationCwd(chatId) : null;
-            return folder ? externalizeLegacyMessageImages({ cwd: folder, chatId, rows: page.messages, assertCurrent }).then(() => {}) : undefined;
-          },
-        );
         const messages = windowOlderChatMessages(
           chatId,
           limit,
@@ -4264,7 +4063,7 @@ export class WorkspaceService {
           if (remote) hits = hits.filter((h) => !this.remoteChatRestricted(h.chatId));
           return { hits };
         };
-        return opts.cloudHistoryRead ? opts.cloudHistoryRead(read) : read();
+        return read();
       }
       case "messages.clear":
         return { cleared: clearChatMessages(reqStr(params, "chatId")) };
@@ -4330,7 +4129,7 @@ export class WorkspaceService {
         if (params.includeIgnored === true) {
           // Inclusive mention search has the same local-only boundary as
           // file.ignored: ignored folders may contain other private worktrees.
-          if (remote && !cloudFiles)
+          if (remote)
             throw new GitError({
               code: "REMOTE_RESTRICTED",
               message: "Ignored files can only be listed from the desktop app.",
@@ -4340,7 +4139,7 @@ export class WorkspaceService {
             remote,
           );
           return {
-            files: cloudFiles ? await listMentionPaths(cwd, optStr(params, "query") ?? "", optNum(params, "limit") ?? 20_000, undefined, cloudFiles) : await listWorkspaceFiles(cwd, optNum(params, "limit"), {
+            files: await listWorkspaceFiles(cwd, optNum(params, "limit"), {
               includeIgnored: true,
               query: optStr(params, "query"),
               mentionRevision: optStr(params, "mentionRevision"),
@@ -4352,8 +4151,7 @@ export class WorkspaceService {
           params.includeDesignDirectories === true
             ? await listWorkspaceFilesWithDesign(cwd, optNum(params, "limit"))
             : { files: await listWorkspaceFiles(cwd, optNum(params, "limit")) };
-        cloudFiles?.assertAuthorized();
-        const files = cloudFiles ? listing.files.filter(file => cloudFiles.allows(file)) : remote
+        const files = remote
           ? listing.files.filter((f) => !isSensitiveRepoPath(f))
           : listing.files;
         // Hide credential/secret files from a remote client even if they're
@@ -4388,7 +4186,7 @@ export class WorkspaceService {
       // the operator's own machine and already reads these files freely.
       // Qualified VMs instead use private-path and nested-owner checks. ──
       case "file.ignored": {
-        if (remote && !cloudFiles) {
+        if (remote) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message: "Ignored files can only be listed from the desktop app.",
@@ -4396,17 +4194,15 @@ export class WorkspaceService {
         }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
         const directory = optStr(params, "dir");
-        if (cloudFiles && directory && !cloudFiles.allows(directory)) return { entries: [] };
         const entries = await listIgnoredEntries(cwd, directory);
-        cloudFiles?.assertAuthorized();
         return {
-          entries: cloudFiles ? entries.filter(entry => cloudFiles.allows(entry)) : entries,
+          entries: entries,
         };
       }
       case "file.read": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
         const rel = reqStr(params, "path");
-        if (remote && !cloudFiles && isSensitiveRepoPath(rel)) {
+        if (remote && isSensitiveRepoPath(rel)) {
           throw new GitError({
             code: "VALIDATION_FAILED",
             message:
@@ -4415,16 +4211,15 @@ export class WorkspaceService {
         }
         // readWorkspaceFile re-checks the RESOLVED + realpath target so a
         // collapsing path ('.env/.') or an innocuously-named symlink can't leak.
-        const read = readWorkspaceFile(cwd, rel, { remote, cloudPolicy: cloudFiles });
+        const read = readWorkspaceFile(cwd, rel, { remote });
         // Design ownership is presentation here. A malformed local manifest
         // must not block reading the source needed to repair it.
         try {
           const isDesignPath = makeDesignPathRecognizer(cwd, activeDesignDirectoryNameFor(cwd));
-          return (isDesignPath(rel) || (cloudFiles && read.kind !== "error" &&
-            isDesignPath(nodePath.relative(cwd, cloudFiles.assertPath(rel)))))
+          return isDesignPath(rel)
             ? { ...read, designPath: true } : read;
         } catch (error) {
-          if (remote || cloudFiles) throw error;
+          if (remote) throw error;
           const normalized = normalizeRepoMutationPath(rel);
           const roots = await stickyRecognizedDesignDirectories(cwd);
           return normalized && roots.some(root => normalized.startsWith(`${root}/`))
@@ -4442,8 +4237,7 @@ export class WorkspaceService {
             message: "file.write requires string content",
           });
         }
-        const expectedCloudTarget = cloudFiles?.assertPath(rel, true);
-        const writePaths = expectedCloudTarget ? [rel, nodePath.relative(cwd, expectedCloudTarget)] : [rel];
+        const writePaths = [rel];
         for (const candidate of writePaths.filter(candidate => normalizeRepoMutationPath(candidate)?.endsWith("/design.toml"))) {
           let claimsDesign: boolean;
           try {
@@ -4451,7 +4245,7 @@ export class WorkspaceService {
           } catch {
             claimsDesign = true;
           }
-          if (claimsDesign && (remote || cloudFiles || !await isExistingDesignManifest(cwd, candidate)))
+          if (claimsDesign && (remote || !await isExistingDesignManifest(cwd, candidate)))
             throw new GitError({
               code: "VALIDATION_FAILED",
               message:
@@ -4461,7 +4255,7 @@ export class WorkspaceService {
         // Native source repair remains available while canvas/manifest JSON
         // cannot parse. Registration creation and private lifecycle state are
         // still owned by Settings, independent of the composer tag.
-        if (remote || cloudFiles) {
+        if (remote) {
           await assertNoDesignPathWrites(targetWorkspaceId, writePaths, "editing", cwd);
         } else if (writePaths.some(candidate => {
           const normalized = normalizeRepoMutationPath(candidate);
@@ -4471,7 +4265,7 @@ export class WorkspaceService {
         })) {
           throw new GitError({ code: "VALIDATION_FAILED", message: "Use Zeros Settings to create or migrate Design registration." });
         }
-        if (remote && !cloudFiles && isSensitiveRepoPath(rel)) {
+        if (remote && isSensitiveRepoPath(rel)) {
           throw new GitError({
             code: "VALIDATION_FAILED",
             message:
@@ -4482,18 +4276,9 @@ export class WorkspaceService {
         // containment + symlink-escape + secret denylist) — the SAME boundary as
         // file.read — and writes atomically (tmp + rename) so a crash can't
         // truncate the file.
-        return writeWorkspaceFile(cwd, rel, content, { remote, cloudPolicy: cloudFiles, expectedCloudTarget });
+        return writeWorkspaceFile(cwd, rel, content, { remote });
       }
       case "attachment.write": {
-        if (opts.cloudWorker === true) {
-          if (!remote || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity || !opts.cloudFileActor ||
-              params.workspaceId !== LOCAL_MAIN_WORKSPACE_ID || (params.repoRoot !== undefined && params.repoRoot !== this.root))
-            throw new CloudCommandFailureError({ stage: "validation", category: "access_denied" });
-          return transferCloudAttachment(this.root, params, {
-            userId: opts.cloudActorIdentity.userId, role: opts.cloudFileActor.role, authorized: opts.cloudFileActor.authorized,
-            ownerRoots: () => [...listWorkspaces({}).map(workspace => workspace.path), ...listKnownRepoRoots()],
-          });
-        }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
         try {
           return await transferContextAttachment(cwd, params, { allowNativeSource: !remote && hostLocalResources });
@@ -4506,23 +4291,20 @@ export class WorkspaceService {
       }
 
       // ── Context graph (the Context tab's canvas) ──────────
-      // Context is workspace-owned on a qualified VM. Paired-host relay clients
-      // retain the refusal for the desktop's private local/ material.
+      // Desktop-only, by explicit refusal like `file.ignored`: context material
+      // is private to the desktop and never crosses a remote connection.
       case "context.graph.list": {
-        if (remote && !cloudFiles) {
+        if (remote) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message: "The context graph can only be read from the desktop app.",
           });
         }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        if (!cloudFiles) return listContextGraph(cwd);
-        const result = await withCloudFilePolicy(cloudFiles, () => listContextGraph(cwd));
-        cloudFiles.assertAuthorized();
-        return result;
+        return listContextGraph(cwd);
       }
       case "context.graph.scaffold": {
-        if (remote && !cloudFiles) {
+        if (remote) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message:
@@ -4530,11 +4312,7 @@ export class WorkspaceService {
           });
         }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        if (!cloudFiles) return ensureContextGraph(cwd);
-        await assertNoDesignPathWrites(LOCAL_MAIN_WORKSPACE_ID, [".context", ".context-graph"], "scaffolding context", cwd);
-        const result = await withCloudFilePolicy(cloudFiles, () => ensureContextGraph(cwd));
-        cloudFiles.assertAuthorized(true);
-        return result;
+        return ensureContextGraph(cwd);
       }
       // Retired with the shared scope. The name stays so an older client
       // gets an explicit answer instead of an unknown-operation failure.
@@ -4741,7 +4519,7 @@ export class WorkspaceService {
         const paths = strArr(params, "paths");
         assertLiteralGitMutationPaths(paths, "Discarding");
         this.resolveReadCwd(workspaceId, remote);
-        if (remote || cloudFiles) await assertNoDesignPathWrites(
+        if (remote) await assertNoDesignPathWrites(
           workspaceId,
           paths,
           "discarding",
@@ -4794,7 +4572,6 @@ export class WorkspaceService {
           workspaceId: reqStr(params, "workspaceId"),
           prune: optBool(params, "prune") ?? false,
           remote: optStr(params, "remote"),
-          unshallow: optBool(params, "unshallow"),
         });
       case "git.stashSave":
         return stashSave({
@@ -4918,7 +4695,6 @@ export class WorkspaceService {
         if (remote) this.resolveCwd(workspaceId);
         // Cloud's ambient installation credential is read-only. It cannot
         // answer for the human; the actual write obtains their exact grant.
-        if (opts.cloudWorker) return { state: "unknown" };
         return getWorkspaceRepoAccess(workspaceId);
       }
       case "gh.prGet": {
@@ -5104,7 +4880,7 @@ export class WorkspaceService {
         const paths = strArr(params, "paths");
         assertLiteralGitMutationPaths(paths, "Restoring");
         this.resolveReadCwd(workspaceId, remote);
-        if (remote || cloudFiles) await assertNoDesignPathWrites(
+        if (remote) await assertNoDesignPathWrites(
           workspaceId,
           paths,
           "restoring",
@@ -5204,7 +4980,7 @@ export class WorkspaceService {
           patch,
         );
         this.resolveReadCwd(workspaceId, remote);
-        if (remote || cloudFiles) await assertNoDesignPathWrites(
+        if (remote) await assertNoDesignPathWrites(
           workspaceId,
           patchPaths,
           "staging",
@@ -5221,7 +4997,7 @@ export class WorkspaceService {
           patch,
         );
         this.resolveReadCwd(workspaceId, remote);
-        if (remote || cloudFiles) await assertNoDesignPathWrites(
+        if (remote) await assertNoDesignPathWrites(
           workspaceId,
           patchPaths,
           "unstaging",
@@ -5241,7 +5017,7 @@ export class WorkspaceService {
           patch,
         );
         this.resolveReadCwd(workspaceId, remote);
-        if (remote || cloudFiles) await assertNoDesignPathWrites(
+        if (remote) await assertNoDesignPathWrites(
           workspaceId,
           patchPaths,
           "discarding",
@@ -5303,7 +5079,7 @@ export class WorkspaceService {
       case "workspace.setMode": {
         // Deny-by-default already refuses relay clients before dispatch; keep
         // the defence-in-depth check anyway (same posture as prepareCreate).
-        if (remote && !cloudDesign) {
+        if (remote) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message: "Workspace modes can be switched only in the desktop app.",
@@ -5330,7 +5106,7 @@ export class WorkspaceService {
         if (current === mode) return { ok: true, mode };
         if (mode === "design") {
           const snapshot = await enterDesignMode(workspace, () =>
-            this.readDesignSnapshot(workspace, designRemote, {
+            this.readDesignSnapshot(workspace, remote, {
               hostLocalResources,
             }),
           );

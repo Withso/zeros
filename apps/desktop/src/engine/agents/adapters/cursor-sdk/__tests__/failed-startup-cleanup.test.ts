@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -15,9 +15,7 @@ import {
 import { CURSOR_STATE_RECOVERY_HOLD_FILE } from "../../../session-paths";
 import type { AgentAdapterContext } from "../../../types";
 import type { PreparedBoundary } from "../../../containment/types";
-import { createCloudNativeHome } from "../../../containment/cloud-native-home";
 import { CursorSdkAdapter } from "../adapter";
-import * as cloudExecution from "../../../cloud-provider-execution";
 
 const {
   createRuntimeSpy,
@@ -90,12 +88,6 @@ function boundary(
       throw new Error("host-parity Cursor must not request private state");
     },
   } as unknown as PreparedBoundary;
-}
-
-async function cloudBoundary(): Promise<PreparedBoundary> {
-  const nativeHome = await createCloudNativeHome({ dataRoot: await realpath(root),
-    conversationId: "startup-cleanup", provider: "cursor", executionId: "startup-cleanup" });
-  return { ...boundary(), nativeHome, providerHomePath: nativeHome.paths.home } as PreparedBoundary;
 }
 
 async function recoveryMarkerExists(): Promise<boolean> {
@@ -178,43 +170,6 @@ describe("CursorSdkAdapter — failed session host startup cleanup", () => {
       await adapter.dispose();
       vi.useRealTimers();
     }
-  });
-
-  it("refuses to replace missing cloud history with a fresh native agent", async () => {
-    const coordinator = await cloudBoundary();
-    vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({
-      coordinator, productServers: [],
-      lease: { customization: undefined, assertLive() {} },
-    } as unknown as cloudExecution.CloudProviderExecution);
-    resumeSpy.mockRejectedValueOnce(new Error("Agent prior-agent-id not found"));
-    const adapter=new CursorSdkAdapter(makeCtx());
-    try {
-      await expect(adapter.loadSession({sessionId:"prior-agent-id",cwd:root,env:{CURSOR_API_KEY:"key"},executionBoundary:coordinator})).rejects.toThrow("not found");
-      expect(createSpy).not.toHaveBeenCalled();
-      expect(resumeSpy.mock.calls[0][1].local.settingSources).toEqual([]);
-      expect(disposeSpy).toHaveBeenCalledTimes(1);
-    } finally { await adapter.dispose(); }
-  });
-  it("initializes the cloud store in its ordinary engine-owned physical HOME", async () => {
-    const adapter = new CursorSdkAdapter(makeCtx());
-    const admitted = await cloudBoundary(), providerHome = admitted.providerHomePath!;
-    vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({
-      coordinator: admitted, productServers: [], lease: { customization: undefined, assertLive() {} },
-    } as unknown as cloudExecution.CloudProviderExecution);
-    try {
-      await adapter.newSession({ cwd: root, env: { CURSOR_API_KEY: "key" }, executionBoundary: admitted });
-      const stateRoot = createRuntimeSpy.mock.calls[0][0].env.ZEROS_CURSOR_STATE_ROOT as string;
-      expect(stateRoot.startsWith(providerHome + path.sep)).toBe(true);
-      // The SDK host initializes the store. Its HOME is an ordinary writable
-      // directory owned by the same engine identity, with no worker mapping.
-      await expect(access(stateRoot)).rejects.toMatchObject({ code: "ENOENT" });
-      expect((await stat(providerHome)).uid).toBe(process.geteuid?.());
-      await mkdir(stateRoot, { recursive: true, mode: 0o700 });
-      expect((await stat(stateRoot)).uid).toBe(process.geteuid?.());
-      await expect(access(path.join(root, "engine", "provider-state"))).rejects.toMatchObject({ code: "ENOENT" });
-      await adapter.listSessions({ cwd: root, env: { CURSOR_API_KEY: "key" }, executionBoundary: admitted });
-      expect(createRuntimeSpy.mock.calls[1][0].env.ZEROS_CURSOR_STATE_ROOT).toBe(stateRoot);
-    } finally { await adapter.dispose(); }
   });
 
   it("loads native settings layers under a Code actor's prepared boundary", async () => {

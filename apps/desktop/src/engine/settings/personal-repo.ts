@@ -18,7 +18,6 @@ import os from "node:os";
 import { gitProcessOptions } from "../git/git-execution-identity";
 import { gitProbeFailure } from "../git/git-exec";
 import { isTransientWorktreeRegistryRead } from "../git/worktree-registry";
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
   readBoundedUtf8DescriptorSync,
   readBoundedUtf8FileSync,
@@ -294,7 +293,6 @@ export function ensureLocalSettingsIgnored(
     const info = fstatSync(fd);
     if (!info.isFile() || info.nlink !== 1)
       throw new Error("Git exclusions must use a regular file with one link.");
-    publishCloudWorkspacePath(exclude, fd);
     const text = readBoundedUtf8DescriptorSync(fd, 4 * 1024 * 1024);
     const rule = `/${relative}`;
     if (!text.split(/\r?\n/).includes(rule)) {

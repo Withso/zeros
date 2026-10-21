@@ -1410,7 +1410,7 @@ export class LocalOrchestrationService {
    * the gate is open, both chats are in Local owners and the follower can
    * still see the source. A note that fails is retired, not delivered. */
   private noteAllowed(followerChatId: string, sourceChatId: string): boolean {
-    if (!this.ports.featureOpen() || this.ports.isCloudWorker()) return false;
+    if (!this.ports.featureOpen()) return false;
     try {
       const follower = this.ports.getChat(followerChatId);
       const source = this.ports.getChat(sourceChatId);

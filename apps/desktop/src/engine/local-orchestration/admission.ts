@@ -204,7 +204,7 @@ export class LocalOrchestrationAdmissions {
   readonly admit: AgentSessionToolFactory = async (input): Promise<AgentSessionTools | null> => {
     input.signal.throwIfAborted();
     const { ports, service, registry, server } = this.options;
-    if (ports.isCloudWorker() || !ports.featureOpen() || !input.conversationId || !input.agentId) return null;
+    if (!ports.featureOpen() || !input.conversationId || !input.agentId) return null;
     const chat = ports.getChat(input.conversationId);
     if (!chat) return null;
     try {

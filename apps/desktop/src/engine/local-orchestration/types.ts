@@ -112,7 +112,6 @@ export interface LocalOrchestrationPorts {
   /** Engine boot identity (changes on restart). */
   engineId(): string;
   linkScheme(): LocalLinkScheme;
-  isCloudWorker(): boolean;
   /** Is the staged feature open right now? */
   featureOpen(): boolean;
 

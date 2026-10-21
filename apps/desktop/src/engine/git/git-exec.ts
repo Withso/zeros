@@ -33,7 +33,6 @@ import {
 import { pruneLauncherScriptEnv } from "../env/launcher-env";
 import { gitExecutionIdentity, gitProcessOptions } from "./git-execution-identity";
 import { withoutLocalDevelopment } from "../env/local-development";
-import { scopedCloudGitAuthorEnvironment } from "./cloud-git-author";
 import { currentGitReadLane, type GitReadLane } from "./git-read-lane";
 export { gitExecutionIdentity } from "./git-execution-identity";
 
@@ -100,8 +99,6 @@ export interface RunFileOptions {
   env?: Record<string, string | undefined>;
   /** Abort the process and its request when the owning capability is revoked. */
   signal?: AbortSignal;
-  /** Opt-in Linux cloud fetch group: TERM cleanup, then KILL after two seconds. */
-  processGroup?: boolean;
   /** Run the final child as the qualified cloud worker. The engine remains
    * root, but filesystem mutations produced on the worker's behalf must keep
    * the tenant checkout worker-owned. */
@@ -114,7 +111,6 @@ export interface RunFileResult {
 }
 
 interface BunSubprocess {
-  pid?: number;
   stdout: ReadableStream<Uint8Array> | null;
   stderr: ReadableStream<Uint8Array> | null;
   exited: Promise<number>;
@@ -137,7 +133,6 @@ interface BunSubprocessRuntime {
       killSignal: "SIGKILL";
       uid?: number;
       gid?: number;
-      detached?: boolean;
     },
   ): BunSubprocess;
 }
@@ -151,29 +146,6 @@ function bunSubprocessRuntime(): BunSubprocessRuntime | null {
   return typeof candidate?.spawn === "function"
     ? (candidate as BunSubprocessRuntime)
     : null;
-}
-
-function cloudProcessGroup(pid: number | undefined) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let aborted = false;
-  const signal = (value: NodeJS.Signals) => {
-    if (pid === undefined || pid <= 1) return;
-    try { process.kill(-pid, value); } catch { /* Already exited. */ }
-  };
-  return {
-    abort() {
-      if (aborted) return;
-      aborted = true;
-      signal("SIGTERM");
-      timer = setTimeout(() => signal("SIGKILL"), 2000);
-      timer.unref();
-    },
-    dispose() {
-      clearTimeout(timer);
-      // A parent may close its pipes before every helper has stopped.
-      if (aborted) signal("SIGKILL");
-    },
-  };
 }
 
 async function readBunOutput(
@@ -271,7 +243,6 @@ export async function runFile(
         // A timeout is a hard request-path boundary. Git and cleanup hooks do
         // not get to ignore SIGTERM and strand the single engine process.
         killSignal: "SIGKILL",
-        ...(opts.processGroup ? { detached: true } : {}),
       });
     } catch (error) {
       throw Object.assign(
@@ -279,10 +250,8 @@ export async function runFile(
         { stdout: "", stderr: "" },
       );
     }
-    const group = opts.processGroup ? cloudProcessGroup(child.pid) : null;
-    const abort = group?.abort ?? (() => child.kill("SIGKILL"));
+    const abort = () => child.kill("SIGKILL");
     opts.signal?.addEventListener("abort", abort, { once: true });
-    if (group && opts.signal?.aborted) abort();
     // Drain both pipes concurrently with exit waiting. Reading after `exited`
     // can deadlock a chatty child on a full pipe.
     let exitCode: number;
@@ -296,7 +265,6 @@ export async function runFile(
       ]);
     } finally {
       opts.signal?.removeEventListener("abort", abort);
-      group?.dispose();
     }
     if (opts.signal?.aborted) {
       throw opts.signal.reason instanceof Error
@@ -336,8 +304,7 @@ export async function runFile(
       ? { timeout: opts.timeoutMs }
       : {}),
     ...(opts.env ? { env: opts.env } : {}),
-    ...(opts.signal && !opts.processGroup ? { signal: opts.signal } : {}),
-    ...(opts.processGroup ? { detached: true } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
     ...(opts.identity
       ? { uid: opts.identity.uid, gid: opts.identity.gid }
       : {}),
@@ -353,26 +320,14 @@ export async function runFile(
     child.child.stdin.write(opts.input);
     child.child.stdin.end();
   }
-  const group = opts.processGroup ? cloudProcessGroup(child.child.pid) : null;
-  if (group) {
-    opts.signal?.addEventListener("abort", group.abort, { once: true });
-    if (opts.signal?.aborted) group.abort();
+  const { stdout, stderr } = await child;
+  if (inputError && inputError.code !== "EPIPE") {
+    throw Object.assign(inputError, { stdout, stderr });
   }
-  try {
-    const { stdout, stderr } = await child;
-    if (inputError && inputError.code !== "EPIPE") {
-      throw Object.assign(inputError, { stdout, stderr });
-    }
-    return { stdout: stdout ?? "", stderr: stderr ?? "" };
-  } finally {
-    if (group) opts.signal?.removeEventListener("abort", group.abort);
-    group?.dispose();
-  }
+  return { stdout: stdout ?? "", stderr: stderr ?? "" };
 }
 
 export interface RunGitOptions {
-  /** Only explicit cloud history fetches opt in; Local process behavior stays unchanged. */
-  processGroup?: boolean;
   /** Treat the named git error categories as "expected" — they're
    *  returned to the caller via `expectedError` instead of thrown.
    *  Used by pull/rebase to surface conflicts without raising. */
@@ -1925,7 +1880,7 @@ export async function runGit(
   try {
     // Policy probes must share this release boundary: a config failure can
     // occur before the final Git command starts.
-    const baseChildEnv = gitChildEnv({ ...scopedCloudGitAuthorEnvironment(), ...opts.env });
+    const baseChildEnv = gitChildEnv(opts.env);
     const policyArgs = await engineGitPolicyArgs(
       cwd,
       parsedCommand.globalArgs,
@@ -1967,7 +1922,6 @@ export async function runGit(
           env: { ...baseChildEnv, ...controlledEnv },
           input: opts.input,
           signal: opts.signal,
-          ...(opts.processGroup ? { processGroup: true } : {}),
           identity: opts.identity,
         });
         // Some remote helpers have returned exit 0 after their child transport

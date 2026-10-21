@@ -88,7 +88,6 @@ interface TestEngineInternals {
   ): Promise<void>;
   activePromptIsLive(prompt: ActivePromptRecord): boolean;
   cancelLiveAgentSessions(sessionIds: Iterable<string>): Promise<boolean>;
-  retireAllCodeAgentSessionsForTerritoryChange(): Promise<void>;
   withGlobalDesignTerritoryTransition<T>(
     mutation: () => Promise<T>,
   ): Promise<T>;
@@ -915,10 +914,6 @@ describe("tab close while a provider session is still binding", () => {
       ).mockImplementation(() => {});
       vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
       vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
-      vi.spyOn(
-        state,
-        "retireAllCodeAgentSessionsForTerritoryChange",
-      ).mockResolvedValue();
       let releaseTransition!: () => void;
       let transitionEntered!: () => void;
       const transitionReady = new Promise<void>((resolve) => {
@@ -994,10 +989,6 @@ describe("tab close while a provider session is still binding", () => {
       ).mockImplementation(() => {});
       vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
       vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
-      vi.spyOn(
-        state,
-        "retireAllCodeAgentSessionsForTerritoryChange",
-      ).mockResolvedValue();
       let releaseTransition!: () => void;
       let transitionEntered!: () => void;
       const transitionReady = new Promise<void>((resolve) => {
@@ -1078,10 +1069,6 @@ describe("tab close while a provider session is still binding", () => {
       ).mockImplementation(() => {});
       vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
       vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
-      vi.spyOn(
-        state,
-        "retireAllCodeAgentSessionsForTerritoryChange",
-      ).mockResolvedValue();
 
       const start = state.handleMessage(newSessionMessage(agentId), client);
       await vi.waitFor(() => expect(newSession).toHaveBeenCalledTimes(1));
@@ -1130,10 +1117,6 @@ describe("tab close while a provider session is still binding", () => {
       ).mockImplementation(() => {});
       vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
       vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
-      vi.spyOn(
-        state,
-        "retireAllCodeAgentSessionsForTerritoryChange",
-      ).mockResolvedValue();
       let releaseTransition!: () => void;
       let transitionEntered!: () => void;
       const transitionReady = new Promise<void>((resolve) => {

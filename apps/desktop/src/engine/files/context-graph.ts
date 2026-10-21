@@ -27,10 +27,7 @@ import fs from "node:fs/promises";
 import { constants as fsConstants, type Dirent } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { currentCloudFilePolicy } from "./cloud-file-policy";
-import { publishCloudWorkspacePath } from "./cloud-workspace-ownership";
 import { createAttachmentTemporaryDirectory } from "./attachment-temporary-directory";
-import { cloudWorkspacePublicationPath } from "../agents/containment/cloud-workspace-paths";
 import { cleanupLegacyAttachmentStaging } from "./attachment-legacy-staging";
 import {
   assertContextDirectory,
@@ -161,9 +158,6 @@ const scaffolds = new Map<string, Promise<ContextGraphScaffoldResult>>();
 export function ensureContextGraph(
   workspaceRoot: string,
 ): Promise<ContextGraphScaffoldResult> {
-  // Do not borrow another actor's in-flight scaffold: its authority can expire
-  // independently. Exclusive filesystem creation still makes this idempotent.
-  if (currentCloudFilePolicy()) return scaffoldContextGraph(path.resolve(workspaceRoot));
   const key = path.resolve(workspaceRoot);
   const pending = scaffolds.get(key);
   if (pending) return pending;
@@ -178,9 +172,7 @@ async function scaffoldContextGraph(
   workspaceRoot: string,
 ): Promise<ContextGraphScaffoldResult> {
   const root = graphRoot(workspaceRoot);
-  const policy = currentCloudFilePolicy();
   try {
-    currentCloudFilePolicy()?.assertAuthorized(true);
     await assertContextDirectory(root, workspaceRoot);
     if (!(await isConfined(root, workspaceRoot))) {
       return { ok: false, created: false, error: "graph escapes workspace" };
@@ -199,9 +191,7 @@ async function scaffoldContextGraph(
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, created, error: "graph escapes workspace" };
     }
-    if (policy) created = policy.createDirectory(path.relative(workspaceRoot, dir));
-    else created = (await fs.mkdir(dir, { recursive: true })) !== undefined;
-    publishCloudWorkspacePath(dir);
+    created = (await fs.mkdir(dir, { recursive: true })) !== undefined;
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, created, error: "graph escapes workspace" };
     }
@@ -231,10 +221,7 @@ function kindForName(name: string): ContextGraphKind {
 async function readPreview(absPath: string): Promise<string | undefined> {
   let handle: fs.FileHandle | null = null;
   try {
-    const policy = currentCloudFilePolicy();
-    if (policy) policy.assertPath(path.relative(policy.root, absPath));
-    handle = await fs.open(absPath, policy ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK : "r");
-    policy?.assertDescriptor(handle.fd, absPath);
+    handle = await fs.open(absPath, "r");
     const buf = Buffer.alloc(PREVIEW_READ_BYTES);
     const { bytesRead } = await handle.read(buf, 0, PREVIEW_READ_BYTES, 0);
     if (bytesRead === 0) return undefined;
@@ -262,7 +249,6 @@ async function collectFile(
   category: ContextGraphCategory,
   attachmentId?: string,
 ): Promise<void> {
-  if (currentCloudFilePolicy() && !currentCloudFilePolicy()!.allows(relPath)) return;
   if (state.items.length >= MAX_ITEMS) {
     state.truncated = true;
     return;
@@ -291,12 +277,10 @@ async function collectFile(
 }
 
 async function readDirBounded(absDir: string, limit = MAX_DIR_ENTRIES) {
-  const policy = currentCloudFilePolicy();
-  if (policy && !policy.allows(path.relative(policy.root, absDir))) return [];
   const entries = await fs
     .readdir(absDir, { withFileTypes: true })
     .catch(() => []);
-  return entries.slice(0, limit).filter(entry => !policy || policy.allows(path.relative(policy.root, path.join(absDir, entry.name))));
+  return entries.slice(0, limit);
 }
 
 /** Collect one level of id folders under `attachmentsAbs`, files directly inside. */
@@ -543,9 +527,6 @@ async function atomicWriteAttachment(
   contents: AttachmentContents,
   workspaceRoot: string,
 ): Promise<void> {
-  // The template's logical workspace is a separate bind mount. Keep the
-  // already-authorized destination on the same shared mount as staging.
-  const publicationPath = cloudWorkspacePublicationPath(filePath);
   const temporary = await createAttachmentTemporaryDirectory(workspaceRoot);
   const temporaryPath = path.join(
     temporary.path,
@@ -566,9 +547,11 @@ async function atomicWriteAttachment(
       await handle.writeFile(chunk);
       offset += chunk.length;
     }
+    await handle.close();
+    handle = null;
     if (!Buffer.isBuffer(contents)) await contents.verify?.();
     try {
-      await fs.rename(temporaryPath, publicationPath);
+      await fs.rename(temporaryPath, filePath);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (
@@ -582,10 +565,9 @@ async function atomicWriteAttachment(
       // The destination is a directory-shaped squatter. Remove the entry and
       // retry the rename; rename itself still replaces any file/symlink planted
       // in the gap rather than following it.
-      await fs.rm(publicationPath, { recursive: true, force: true });
-      await fs.rename(temporaryPath, publicationPath);
+      await fs.rm(filePath, { recursive: true, force: true });
+      await fs.rename(temporaryPath, filePath);
     }
-    publishCloudWorkspacePath(publicationPath, handle.fd);
   } finally {
     await handle?.close().catch(() => {});
     await temporary.dispose().catch(() => {});
@@ -678,7 +660,6 @@ async function stageAttachmentContents(
       return { ok: false, error: "path escapes workspace" };
     }
     await fs.mkdir(dir, { recursive: true });
-    publishCloudWorkspacePath(dir);
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, error: "path escapes workspace" };
     }

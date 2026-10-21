@@ -14,11 +14,9 @@ import { CursorUsageReconciler, cursorTokenUsage, sumCursorUsage } from "./usage
 // ──────────────────────────────────────────────────────────
 
 import type { SteerOutcome } from "@zeros/protocol/messages";
-import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
-import { cloudCommandFailureFromCode, decodeCloudCommandFailure, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import {
   sessionToolGroups,
   type SessionToolInventoryEntry,
@@ -31,8 +29,6 @@ import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 import { isDevRuntime } from "../../../runtime";
 
 import { AgentFailureError } from "../../types";
-import { cloudProviderExecution, cloudExecutionLifetime, executionMcpServers, cloudBootTurnReservation,
-  assertCloudBootNativeHandoff, markCloudBootNativeHandoff, type CloudProviderExecution } from "../../cloud-provider-execution";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { scanCursorMcpServers } from "../../mcp-scan";
@@ -77,7 +73,6 @@ import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 import type { PreparedBoundary } from "../../containment/types";
 import { durableCursorStateRoot } from "./state-overlay";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
-import { cloudCursorInstructions } from "./cloud-instructions";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -1049,9 +1044,7 @@ async function loadSdk(): Promise<CursorSdkModule> {
 
 // Ordinary local Code chats load every Cursor settings layer, as the Cursor
 // app would: project and user rules, AGENTS.md, skills, plugins and MCP
-// servers declared in Cursor's own settings. A cloud execution's layers follow
-// its lease (host/cloud-policy.ts rewrites every request to the same value).
-// Restricted actors and the host opt-out keep only their admitted runtime.
+// servers declared in Cursor's own settings. Restricted actors and the host opt-out keep only their admitted runtime.
 // Capture the sources once at admission: they key the SDK's executor cache,
 // so prewarm, create, resume and mode rebuilds must reuse them.
 const NATIVE_CURSOR_SETTING_SOURCES = [
@@ -1066,8 +1059,6 @@ type CursorSettingSources = readonly (typeof NATIVE_CURSOR_SETTING_SOURCES)[numb
 function cursorSettingSources(
   boundary?: PreparedBoundary,
 ): CursorSettingSources {
-  const cloud = cloudProviderExecution(boundary);
-  if (cloud) return cloud.customization ? ["user"] : [];
   return nativeMcpPassthroughEnabled(undefined, boundary)
     ? NATIVE_CURSOR_SETTING_SOURCES
     : [];
@@ -1091,9 +1082,6 @@ interface Session {
   /** Per-session SDK transport. Production always points at a dedicated
    * Cursor host below this session's prepared execution boundary. */
   sdk: CursorSdkModule;
-  /** Original private execution identity; warm turns capture their reservation
-   * before configuration awaits instead of looking up a later current token. */
-  cloudExecution?: CloudProviderExecution;
   disposeRuntime?: () => Promise<void>;
   /** The HOME this session's Cursor host actually runs with, and where the SDK
    * writes `.cursor/projects/<slug>/agent-transcripts` — so every engine-side read
@@ -1115,9 +1103,6 @@ interface Session {
   env?: Record<string, string>;
   mcpServers?: McpServerRegistration[];
   settingSources: CursorSettingSources;
-  /** Bounded engine-read guidance captured at admission, including resume.
-   * Native configuration remains off; mode rebuilds reuse this exact text. */
-  repositoryInstructions?: string;
   /** The autoReview value currently baked into `agent` (set at create/resume).
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
    *  diverges, the next prompt rebuilds the agent to reconcile. */
@@ -1270,7 +1255,6 @@ export class CursorSdkAdapter implements AgentAdapter {
    * admissions. Existing sessions retain the state object captured for their
    * own API key. */
   private modelState = createCursorModelState(null);
-  private readonly cloudModelStates = new WeakMap<CloudProviderExecution, CursorModelState>();
   private modelActivationRevision = 0;
   private appliedModelActivationRevision = 0;
   constructor(ctx: AgentAdapterContext) {
@@ -1325,25 +1309,14 @@ export class CursorSdkAdapter implements AgentAdapter {
     return advertiseAgentCapabilities(this, this.cachedInitialize);
   }
 
-  async initializeSession(sessionId: string, options: { waitForModels?: boolean } = {}): Promise<InitializeResponse> {
+  async initializeSession(sessionId: string): Promise<InitializeResponse> {
     const base = await this.initialize();
     // Always strip the Local account snapshot for an unknown/retired route.
     const { models: _models, modelsAccountScoped: _scope, ...meta } = base._meta ?? {};
     const generic = { ...base, _meta: meta };
     const session = this.sessions.get(sessionId);
     if (!session || session.disposing) return generic;
-    if (!session.cloudExecution) return base;
-    try { cloudExecutionLifetime(session.cloudExecution).assertLive(); }
-    catch { return generic; }
-    const discovery = this.discoverModels(session.apiKey, session.modelState, session.sdk);
-    // Post-turn metadata reads join the bounded refresh; ID-only native startup
-    // stays nonblocking. No prompt is replayed or substituted by this read.
-    if (options.waitForModels !== false) await discovery;
-    if (this.sessions.get(sessionId) !== session || session.disposing) return generic;
-    try { cloudExecutionLifetime(session.cloudExecution).assertLive(); }
-    catch { return generic; }
-    const models = session.modelState.confirmed?.models;
-    return { ...base, _meta: { ...meta, ...(models !== undefined ? { models, modelsAccountScoped: true } : {}) } };
+    return base;
   }
 
   private clearPublishedModels(): void {
@@ -1533,24 +1506,17 @@ export class CursorSdkAdapter implements AgentAdapter {
   private async startModelDiscoveryForSession(
     apiKey: string,
     sessionSdk: CursorSdkModule,
-    cloud?: CloudProviderExecution | null,
     env?: Record<string, string>,
     admission?: { executionId: string; stage: "newSession" | "loadSession" },
   ): Promise<CursorModelState> {
-    let state: CursorModelState;
-    if (cloud) {
-      state = this.cloudModelStates.get(cloud) ?? createCursorModelState(cloud.executionId, "cloud");
-      this.cloudModelStates.set(cloud, state);
-    } else {
-      state = await this.activateModelState(apiKey);
-    }
+    const state = await this.activateModelState(apiKey);
     const registry = CURSOR_REGISTRY_PARAMETER_MODELS.has(env?.CURSOR_MODEL?.trim() ?? "");
     const stage = admission?.stage ?? "newSession";
     let notified = false;
     const notify = () => {
       if (notified || !admission) return;
       try {
-        this.assertModelAuthority(state, cloud, stage);
+        this.assertModelAuthority(state, stage);
         notified = true;
         this.ctx.emit.onSessionUpdate(AGENT_ID, {
           sessionId: admission.executionId,
@@ -1569,17 +1535,15 @@ export class CursorSdkAdapter implements AgentAdapter {
       void discovery.catch(() => undefined);
       if (registry) {
         await discovery;
-        this.assertModelAuthority(state, cloud, stage);
+        this.assertModelAuthority(state, stage);
         if (!state.confirmed) throw failedCursorModelDiscovery(stage, state.discoveryFailure ?? "transport-closed");
       } else await Promise.resolve();
     } finally { state.discoveryListeners.delete(notify); }
     return state;
   }
 
-  private assertModelAuthority(state: CursorModelState, cloud?: CloudProviderExecution | null,
-    stage: AgentFailureStage = "newSession"): void {
-    if (cloud) cloudExecutionLifetime(cloud).assertLive();
-    else if (state.authenticationContext !== (this.ctx.authenticationContext?.() ?? "default"))
+  private assertModelAuthority(state: CursorModelState, stage: AgentFailureStage = "newSession"): void {
+    if (state.authenticationContext !== (this.ctx.authenticationContext?.() ?? "default"))
       throw new AgentFailureError({
         kind: "lifecycle-superseded", stage, agentId: AGENT_ID,
         message: "The Cursor account changed while its model settings were loading.",
@@ -1605,13 +1569,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (process.env.CURSOR_RIPGREP_PATH && !env.CURSOR_RIPGREP_PATH) {
       env.CURSOR_RIPGREP_PATH = process.env.CURSOR_RIPGREP_PATH;
     }
-    // Cloud uses its admitted physical HOME; Local stores retain their exact
-    // serialized location. Placement comes from the original factory object,
-    // never a readable old backend value.
-    const cloud = cloudProviderExecution(opts.executionBoundary);
-    const localState = cloud
-      ? join(cloud.coordinator.nativeHome.paths.cursorHome, "zeros-store")
-      : await durableCursorStateRoot(opts.cwd);
+    // Local stores retain their exact serialized location.
+    const localState = await durableCursorStateRoot(opts.cwd);
     env.ZEROS_CURSOR_STATE_ROOT = localState;
     const runtime = createCursorHostRuntime({
       executionBoundary: opts.executionBoundary,
@@ -1968,7 +1927,6 @@ export class CursorSdkAdapter implements AgentAdapter {
   private async withModelRecovery<T>(
     opts: {
       state: CursorModelState;
-      cloud?: CloudProviderExecution | null;
       apiKey: string;
       sdk: CursorSdkModule;
       envModel: string | undefined;
@@ -1979,7 +1937,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     attempt: (modelId: string) => Promise<T>,
   ): Promise<{ result: T; modelId: string }> {
     try {
-      this.assertModelAuthority(opts.state, opts.cloud, opts.stage);
+      this.assertModelAuthority(opts.state, opts.stage);
       return { result: await attempt(opts.modelId), modelId: opts.modelId };
     } catch (err) {
       const message = normalizeProviderError("cursor", err).message;
@@ -2006,7 +1964,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           `on this account (${message.slice(0, 160)}); retrying with ` +
           `${retryModelId}.`,
       );
-      this.assertModelAuthority(opts.state, opts.cloud, opts.stage);
+      this.assertModelAuthority(opts.state, opts.stage);
       return { result: await attempt(retryModelId), modelId: retryModelId };
     }
   }
@@ -2073,21 +2031,19 @@ export class CursorSdkAdapter implements AgentAdapter {
     const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
-    const cloud = cloudProviderExecution(opts.executionBoundary);
-    const repositoryInstructions = cloudCursorInstructions(cloud);
     const runtime = await this.createSessionRuntime(opts);
-    const mcpSource = executionMcpServers(cloudProviderExecution(opts.executionBoundary), opts.mcpServers);
+    const mcpSource = opts.mcpServers ? [...opts.mcpServers] : undefined;
     const catalog = this.mcpCatalog(mcpSource);
     // Fire-and-forget, and BEFORE the awaits below on purpose: the whole point
     // is to overlap the workspace/backend warm-up with model discovery and
     // `Agent.create` rather than serialize behind them.
     this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, mcpServers: catalog.servers, settingSources }, autoReviewFor(initialMode));
     // Start credential-scoped catalog discovery before model resolution.
-    // Local fallback stays within the configured account; cloud execution
-    // requires the exact admitted model. Refresh never replays a turn.
+    // Local fallback stays within the configured account. Refresh never
+    // replays a turn.
     let modelState: CursorModelState;
     try {
-      modelState = await this.startModelDiscoveryForSession(apiKey, runtime.sdk, cloud, opts.env,
+      modelState = await this.startModelDiscoveryForSession(apiKey, runtime.sdk, opts.env,
         { executionId, stage: "newSession" });
     } catch (error) {
       await this.finalizeRejectedSessionRuntime(runtime);
@@ -2097,7 +2053,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     const sdk = runtime.sdk;
     let agent: SdkAgent;
     try {
-      this.assertModelAuthority(modelState, cloud);
+      this.assertModelAuthority(modelState);
       modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env, modelState);
       const sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
       // ID-only discovery is detached, so a retired pick can reach the SDK;
@@ -2106,7 +2062,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       const created = await this.withModelRecovery(
         {
           state: modelState,
-          cloud,
           apiKey, sdk,
           envModel: opts.env?.CURSOR_MODEL,
           env: opts.env,
@@ -2151,7 +2106,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       modeId: initialMode,
       agent,
       sdk,
-      ...(cloud ? { cloudExecution: cloud } : {}),
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
@@ -2159,7 +2113,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
-      repositoryInstructions,
       appliedAutoReview: autoReviewFor(initialMode),
       prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
@@ -2176,7 +2129,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           availableModes: CURSOR_SDK_MODES,
         },
       } as never,
-      initialize: await this.initializeSession(executionId, { waitForModels: false }),
+      initialize: await this.initializeSession(executionId),
     };
   }
 
@@ -2193,8 +2146,6 @@ export class CursorSdkAdapter implements AgentAdapter {
     const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
-    const cloud = cloudProviderExecution(opts.executionBoundary);
-    const repositoryInstructions = cloudCursorInstructions(cloud);
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const providerResumeId = opts.providerBinding?.resumeId ?? opts.sessionId;
     if (!providerResumeId) {
@@ -2205,7 +2156,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
     const runtime = await this.createSessionRuntime(opts);
-    const mcpSource = executionMcpServers(cloudProviderExecution(opts.executionBoundary), opts.mcpServers);
+    const mcpSource = opts.mcpServers ? [...opts.mcpServers] : undefined;
     const catalog = this.mcpCatalog(mcpSource);
     // Same overlap as newSession: a reopened chat pays the identical cold
     // workspace/backend cost on its first turn, so warm it while the catalog
@@ -2218,7 +2169,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // selection isn't offered by this account.
     let modelState: CursorModelState;
     try {
-      modelState = await this.startModelDiscoveryForSession(apiKey, runtime.sdk, cloud, opts.env,
+      modelState = await this.startModelDiscoveryForSession(apiKey, runtime.sdk, opts.env,
         { executionId, stage: "loadSession" });
     } catch (error) {
       await this.finalizeRejectedSessionRuntime(runtime);
@@ -2238,7 +2189,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // prior transcript carrying it).
     let resumedFresh = false;
     try {
-      this.assertModelAuthority(modelState, cloud, "loadSession");
+      this.assertModelAuthority(modelState, "loadSession");
       modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env, modelState, "loadSession");
       sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
       // A reopened chat carries the model it was created on; if Cursor has
@@ -2247,7 +2198,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       const resumed = await this.withModelRecovery(
         {
           state: modelState,
-          cloud,
           apiKey, sdk,
           envModel: opts.env?.CURSOR_MODEL,
           env: opts.env,
@@ -2298,7 +2248,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       // case recovers this way; auth / transport failures still throw so
       // the UI can prompt re-auth or retry instead of silently dropping
       // the user's context.
-      if (failure.failure.kind !== "session-expired" || cloudProviderExecution(opts.executionBoundary)) {
+      if (failure.failure.kind !== "session-expired") {
         await this.finalizeRejectedSessionRuntime(runtime);
         throw failure;
       }
@@ -2312,7 +2262,6 @@ export class CursorSdkAdapter implements AgentAdapter {
         const created = await this.withModelRecovery(
           {
             state: modelState,
-            cloud,
             apiKey, sdk,
             envModel: opts.env?.CURSOR_MODEL,
             env: opts.env,
@@ -2354,7 +2303,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       modeId: initialMode,
       agent,
       sdk,
-      ...(cloud ? { cloudExecution: cloud } : {}),
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
@@ -2362,7 +2310,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
-      repositoryInstructions,
       appliedAutoReview: autoReviewFor(initialMode),
       prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
@@ -2447,12 +2394,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
 
-    const cloud = session.cloudExecution;
     void this.discoverModels(session.apiKey, session.modelState, session.sdk);
-    const reservation = cloud?.mode === "boot-owner-v1" ? cloudBootTurnReservation(cloud) : null;
-    if (cloud?.mode === "boot-owner-v1" && !reservation)
-      throw this.classify(new CloudCommandFailureError({ stage: "validation", category: "access_denied" }), "prompt");
-    const message = buildUserMessage(opts.prompt, session.repositoryInstructions);
+    const message = buildUserMessage(opts.prompt);
     session.cancelRequested = false;
 
     // Configuration refresh is preparation, not a submitted prompt. Stop must
@@ -2635,14 +2578,6 @@ export class CursorSdkAdapter implements AgentAdapter {
           mode: sdkModeFor(session.modeId),
           model: current.selection,
           local: { force: true },
-          ...(cloud?.mode === "boot-owner-v1" ? { beforeNativeWrite: () => {
-            if (!ownsUpdates() || !reservation)
-              throw new CloudCommandFailureError({ stage: "validation", category: "lifecycle_superseded" });
-            assertCloudBootNativeHandoff(cloud, reservation);
-            // Mark BEFORE the irreversible write. A thrown write may still
-            // have submitted bytes; passive observers never authorize replay.
-            markCloudBootNativeHandoff(cloud, reservation);
-          } } : {}),
           ...(opts.onNativePromptStage ? { onNativePromptStage: (stage: NativePromptStage) => {
             if (!ownsUpdates()) return;
             try { void Promise.resolve(opts.onNativePromptStage!(stage)).catch(() => {}); } catch { /* observation is inert */ }
@@ -3049,25 +2984,13 @@ export class CursorSdkAdapter implements AgentAdapter {
   }): Promise<void> {
     const session = this.sessions.get(opts.sessionId);
     if (!session) return;
-    const cloud = session.cloudExecution;
-    if (cloud) {
-      cloudExecutionLifetime(cloud).assertLive();
-      if ((opts.env.CURSOR_MODEL !== undefined && opts.env.CURSOR_MODEL !== cloud.model) ||
-          (opts.env.ZEROS_REQUIRE_EXACT_MODEL !== undefined && opts.env.ZEROS_REQUIRE_EXACT_MODEL !== "1")) {
-        throw new CloudCommandFailureError({ stage: "validation", category: "access_denied" });
-      }
-    }
     const carried = { ...(session.env ?? {}) };
     delete carried.CURSOR_MODEL;
     delete carried.ZEROS_THINKING_EFFORT;
     delete carried.ZEROS_FAST_MODE;
     delete carried.ZEROS_ADDITIONAL_DIRS;
     delete carried.ZEROS_PERMISSION_MODE;
-    // Cloud follow-up snapshots carry mutable composer settings, while the
-    // exact model belongs to the admitted execution. Local snapshots continue
-    // to own their model selection, including an omitted/default choice.
-    const env = { ...carried, ...opts.env,
-      ...(cloud ? { CURSOR_MODEL: cloud.model, ZEROS_REQUIRE_EXACT_MODEL: "1" } : {}) };
+    const env = { ...carried, ...opts.env };
     const modelId = this.resolveModel(
       env.CURSOR_MODEL,
       env,
@@ -3147,8 +3070,6 @@ export class CursorSdkAdapter implements AgentAdapter {
   async updateCredentials(opts: ProviderCredentialUpdate): Promise<void> {
     const session = this.sessions.get(opts.sessionId);
     if (!session) return;
-    if (session.cloudExecution)
-      throw new Error("A cloud execution keeps the credential it was admitted with");
     const env = withProviderConnection(session.env, opts);
     // A removed key or signed-out account asks for a connection, exactly as a
     // new session would; it never falls back to the previous key.
@@ -3354,14 +3275,6 @@ export function classifyCursorSdkError(
   stage: "newSession" | "loadSession" | "prompt",
 ): AgentFailureError {
   if (err instanceof AgentFailureError) return err;
-  const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
-  if (decodeCloudCommandFailure(code)) {
-    const failure = err && typeof err === "object" && "failure" in err
-      ? (err as { failure: AgentFailureError["failure"] }).failure : cloudCommandFailureFromCode(code, "cursor")!;
-    return Object.assign(new AgentFailureError(failure), { code });
-  }
-  if (isCloudAgentAdmissionCode(code)) return Object.assign(new AgentFailureError({ kind: "cloud-credentials-unavailable", stage,
-    agentId: "cursor", message: "Cloud credentials are unavailable. Review the provider connection before retrying." }), { code });
   const native = normalizeProviderError("cursor", err);
   const message = native.message;
   // 0. An UNEXPECTED Cursor host death (tagged by host-client.onExit). The
@@ -3445,11 +3358,11 @@ export function classifyCursorSdkError(
 
 /** ContentBlock[] → the SDK's `{ text, images }` user message. Text
  *  blocks concatenate; image blocks map to SDKImage (base64 or url). */
-function buildUserMessage(blocks: ContentBlock[], repositoryInstructions?: string): {
+function buildUserMessage(blocks: ContentBlock[]): {
   text: string;
   images?: Array<{ data: string; mimeType: string } | { url: string }>;
 } {
-  const texts: string[] = repositoryInstructions ? [repositoryInstructions] : [];
+  const texts: string[] = [];
   const images: Array<{ data: string; mimeType: string } | { url: string }> =
     [];
   for (const raw of blocks) {

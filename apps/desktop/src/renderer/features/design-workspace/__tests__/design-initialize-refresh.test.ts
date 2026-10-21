@@ -6,8 +6,6 @@ import {
 } from "../../../../engine/workspace/change-events";
 import { MessageRouter } from "../../../../engine/transport/router";
 import type { EngineMessage } from "../../../../engine/types";
-import { cloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
-import { cloudIncoming } from "../../../platform/bridge/cloud-runtime-wire";
 import { listWorkspaceFileListing } from "../../../platform/git";
 import {
   loadWorkspaceFileListing,
@@ -30,25 +28,9 @@ vi.mock("../../../state/use-projects", () => ({
   notifyWorkspacesChangedForIds: vi.fn(),
 }));
 
-const cloud = {
-  organizationId: "11111111-1111-4111-8111-111111111111",
-  workspaceId: "22222222-2222-4222-8222-222222222222",
-  root: "/srv/zeros/workspace",
-  engineWorkspaceId: "local-main",
-};
-const otherCloud = cloudWorkspaceKey({
-  organizationId: "33333333-3333-4333-8333-333333333333",
-  workspaceId: "44444444-4444-4444-8444-444444444444",
-});
 const owners = [
   { label: "Personal Local", id: "personal-local", cwd: "/personal/repo" },
   { label: "organization Local", id: "organization-local", cwd: "/org/repo" },
-  {
-    label: "organization cloud",
-    id: cloudWorkspaceKey(cloud),
-    cwd: cloudWorkspaceKey(cloud),
-  },
-  { label: "another cloud owner", id: otherCloud, cwd: otherCloud },
 ];
 
 beforeEach(() => {
@@ -58,7 +40,7 @@ beforeEach(() => {
 });
 
 describe("Design initialization refresh", () => {
-  it.each(owners.slice(0, 3))(
+  it.each(owners)(
     "updates warm Files and Changes for $label without refreshing a switched owner",
     async (owner) => {
       const listings = new Map<string, WorkspaceFileListing>();
@@ -78,19 +60,15 @@ describe("Design initialization refresh", () => {
         getGitRefreshKeyForTests(target.cwd, target.id),
       );
       try {
-        const cloudWorker = owner.id === cloudWorkspaceKey(cloud);
         const router = new MessageRouter();
         router.register({
           id: "initiator",
-          kind: cloudWorker ? "cloud" : "local",
+          kind: "local",
           close: () => {},
           send: (message) => {
             if (message.type !== "DB_CHANGED") return;
-            const incoming = cloudWorker
-              ? cloudIncoming(cloud, { ...message })
-              : message;
             triggerGitRefreshForWorkspaceIdsForTests(
-              incoming.workspaceIds as string[],
+              message.workspaceIds as string[],
             );
           },
         });
@@ -117,10 +95,10 @@ describe("Design initialization refresh", () => {
           timestamp: 0,
           source: "engine",
           type: "DB_CHANGED",
-          kinds: dbChangedKinds("design.initialize", undefined, cloudWorker),
-          workspaceIds: [cloudWorker ? cloud.engineWorkspaceId : owner.id],
+          kinds: dbChangedKinds("design.initialize"),
+          workspaceIds: [owner.id],
         } as EngineMessage;
-        if (dbChangedIncludesOriginator("design.initialize", cloudWorker)) {
+        if (dbChangedIncludesOriginator("design.initialize")) {
           router.broadcast(message);
         } else {
           router.broadcastExcept("initiator", message);

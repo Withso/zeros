@@ -1,4 +1,3 @@
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { TOKENS_SEED } from "./document-seeds";
 import { MAX_DESIGN_TEXT_BYTES, utf8Bytes } from "./render-budget";
 import { captureDesignDependencies } from "./dependency-read-set";
@@ -99,8 +98,7 @@ import {
   writePrivateDesignState,
 } from "./metadata";
 import { readSafeRegularFile } from "./safe-files";
-import { safeLocalReference, listDesignAssets, MAX_DESIGN_ASSETS } from "./assets";
-import { assertDesignAssetUploadTarget, parseDesignUploadedAsset, publishDesignUploadedAsset, type DesignUploadedAsset } from "./asset-upload";
+import { safeLocalReference } from "./assets";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { readDesignFrameRenderIdentityFromSource } from "./frame-lifecycle";
 
@@ -128,7 +126,6 @@ export async function ensureSafeDesignRoot(workspacePath: string): Promise<strin
   const workspaceRoot = await realpath(path.resolve(workspacePath));
   const directory = designDirectory(workspacePath);
   await mkdir(directory, { recursive: true });
-  publishCloudWorkspacePath(directory);
   const canonicalDirectory = await realpath(directory);
   // realpath the WORKSPACE root only; every design-dir segment below it must
   // be a real directory (no symlink hop), or the canonical spelling differs
@@ -171,7 +168,6 @@ export async function assertSafeDesignWriteTarget(
       const candidate = path.join(canonicalParent, segment);
       try {
         await mkdir(candidate);
-        publishCloudWorkspacePath(candidate);
       } catch (error: unknown) {
         const code =
           error && typeof error === "object" && "code" in error
@@ -201,7 +197,6 @@ export async function writeIfMissing(
   let wrote = false;
   try {
     await writeFile(file, content, { encoding: "utf8", flag: "wx" });
-    publishCloudWorkspacePath(file);
     wrote = true;
   } catch (error: unknown) {
     const code =
@@ -248,7 +243,6 @@ export async function initializeDesignDocumentUnlocked(
   for (const folder of ["assets", "components"]) {
     const target = path.join(directory, folder);
     await assertSafeDesignWriteTarget(workspacePath, path.join(target, ".zeros-validation"));
-    publishCloudWorkspacePath(target);
   }
   await writeIfMissing(path.join(directory, DESIGN_TOKENS_FILE), TOKENS_SEED, created, workspacePath);
   return created;
@@ -539,7 +533,7 @@ function parseDesignTransactionJournal(
   const entryFile = assertFrameFile(String(journal.entryFile ?? ""));
   const documentId = designWebDocumentId(entryFile);
   if (
-    (journal.version !== 1 && journal.version !== 2) ||
+    journal.version !== 1 ||
     journal.documentId !== documentId ||
     typeof journal.nextRevision !== "string" ||
     !/^[a-f0-9]{24}$/.test(journal.nextRevision) ||
@@ -548,9 +542,6 @@ function parseDesignTransactionJournal(
   ) {
     throw new Error("Malformed design transaction journal.");
   }
-  if (journal.version === 1 && journal.asset !== undefined)
-    throw new Error("Unexpected asset in a V1 Design transaction.");
-  const asset = journal.version === 2 ? parseDesignUploadedAsset(journal.asset) : undefined;
   const files = journal.files.map((candidate) => {
     if (
       !candidate ||
@@ -622,8 +613,7 @@ function parseDesignTransactionJournal(
     z: 0,
   });
   return {
-    version: journal.version,
-    ...(asset ? { asset } : {}),
+    version: 1,
     documentId,
     entryFile,
     nextRevision: journal.nextRevision,
@@ -670,7 +660,6 @@ async function applyDesignTransactionJournalUnlocked(
         );
     }
   }
-  if (journal.asset) publishDesignUploadedAsset(workspacePath, journal.asset);
   canvas.foundation = journal.foundation;
   canvas.frames[journal.entryFile] = {
     ...canvas.frames[journal.entryFile],
@@ -906,7 +895,6 @@ export async function commitDesignWebDocumentState(
   next: DesignWebDocumentState,
   options: {
     assertAuthorized?: () => void;
-    asset?: DesignUploadedAsset;
     movementGuard?: DesignMovementGuard;
   } = {},
 ): Promise<void> {
@@ -1046,20 +1034,8 @@ export async function commitDesignWebDocumentState(
         },
       },
     };
-    const asset = options.asset
-      ? parseDesignUploadedAsset(options.asset)
-      : undefined;
-    if (
-      asset &&
-      !assertDesignAssetUploadTarget(workspacePath, asset) &&
-      (await listDesignAssets(workspacePath)).length >= MAX_DESIGN_ASSETS
-    )
-      throw new Error(
-        "This Design directory already has 128 images. Remove an unused image before uploading.",
-      );
     const journal: DesignTransactionJournal = {
-      version: asset ? 2 : 1,
-      ...(asset ? { asset } : {}),
+      version: 1,
       documentId: normalized.documentId,
       entryFile: file,
       nextRevision: normalized.revision,

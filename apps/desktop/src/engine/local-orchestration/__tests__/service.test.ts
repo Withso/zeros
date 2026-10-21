@@ -90,7 +90,6 @@ function chat(id: string, folder: string, extra: Partial<ChatRow> = {}): ChatRow
 
 class FakePorts implements LocalOrchestrationPorts {
   open = true;
-  cloud = false;
   scheme: "zeros-dev" | "zeros" = "zeros-dev";
   managed: Workspace[] = [workspace("ws_a", WS_A), workspace("ws_b", WS_B), workspace("ws_org", WS_ORG, { organizationId: "org_1" })];
   projects: EngineProject[] = [project("proj_app", REPO, "app"), project("proj_other", OTHER_REPO, "other")];
@@ -122,7 +121,6 @@ class FakePorts implements LocalOrchestrationPorts {
 
   engineId = () => "engine-test";
   linkScheme = () => this.scheme;
-  isCloudWorker = () => this.cloud;
   featureOpen = () => this.open;
   listManagedWorkspaces = () => this.managed;
   getManagedWorkspace = (id: string) => this.managed.find((w) => w.id === id) ?? null;
@@ -276,12 +274,9 @@ describe("Local CLI visibility", () => {
     expect(ports.started).toHaveLength(0);
   });
 
-  it("refuses organization and cloud callers and closed copies", async () => {
+  it("refuses organization callers and closed copies", async () => {
     const org: LocalCallerScope = { executionId: "exec-o", chatId: "o", agentId: "claude", surface: "cli" };
     expect(code(await call(org, "whoami"))).toBe("NOT_LOCAL");
-    ports.cloud = true;
-    expect(code(await call(parent, "whoami"))).toBe("NOT_LOCAL");
-    ports.cloud = false;
     ports.open = false;
     expect(code(await call(parent, "whoami"))).toBe("UNAVAILABLE");
   });

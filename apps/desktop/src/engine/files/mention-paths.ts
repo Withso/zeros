@@ -1,6 +1,5 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import type { QualifiedCloudFilePolicy } from "./cloud-file-policy";
 import {
   compareWorkspaceEntries,
   normalizeWorkspacePathQuery,
@@ -173,13 +172,10 @@ export async function listMentionPaths(
   query: string,
   limit: number,
   revision?: string,
-  cloudPolicy?: QualifiedCloudFilePolicy,
 ): Promise<string[]> {
   const cap = Math.min(20_000, Math.max(0, Math.floor(limit)));
   if (!cwd || !Number.isFinite(cap) || cap === 0) return [];
-  // A cached local index has different authority. Cloud filters before ranking
-  // and never lets a private subtree consume the result window or cache.
-  if (!cloudPolicy && revision && revision.length <= 128) {
+  if (revision && revision.length <= 128) {
     try {
       const index = await getIndex(
         cwd,
@@ -210,9 +206,7 @@ export async function listMentionPaths(
       compact();
       return !q && best.length === cap && best[cap - 1].entry.kind === "file";
     },
-    cloudPolicy,
   );
-  cloudPolicy?.assertAuthorized();
   compact();
   return best.map(({ entry }) => toWirePath(entry));
 }
@@ -225,7 +219,6 @@ async function walkMentionPaths(
   cwd: string,
   visit: (entry: WorkspaceEntry) => void,
   finishedDepth?: () => boolean,
-  cloudPolicy?: QualifiedCloudFilePolicy,
 ): Promise<void> {
   const root = await fs.realpath(cwd);
   let dirs = [""];
@@ -236,7 +229,6 @@ async function walkMentionPaths(
     let real: string;
     let entries: import("node:fs").Dirent[];
     try {
-      if (cloudPolicy && !cloudPolicy.allows(relative)) return;
       real = await fs.realpath(path.join(root, relative));
       const inside = path.relative(root, real);
       if (
@@ -254,7 +246,6 @@ async function walkMentionPaths(
     }
     for (const entry of entries) {
       const rel = relative ? `${relative}/${entry.name}` : entry.name;
-      if (cloudPolicy && !cloudPolicy.allows(rel)) continue;
       let folder = entry.isDirectory();
       if (entry.isSymbolicLink()) {
         try {

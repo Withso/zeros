@@ -289,14 +289,12 @@ describe("Cursor registry discovery during Local resume", () => {
     } finally { catalog.resolve(GROK); await pending; await adapter.dispose(); }
   });
 
-  it("resumes through the Local gateway without a cloud factory or control-plane connection", async () => {
+  it("resumes through the Local gateway without a control-plane connection", async () => {
     vi.useRealTimers();
     const root = await realpath(await mkdtemp(path.join(tmpdir(), "zeros-local-cursor-registry-")));
     vi.stubEnv("ZEROS_DATA_DIR", path.join(root, "engine"));
-    const prepare = vi.fn(() => { throw new Error("Local resume must not request cloud admission"); });
     const { adapter } = setup();
     const gateway = new AgentGateway({ projectRoot: root, executionBoundary: testExecutionBoundary(),
-      cloudAgentExecutionFactory: { prepare },
       events: { onSessionUpdate() {}, onPermissionRequest() {}, onQuestionRequest() {}, onAgentStderr() {}, onAgentExit() {} },
     });
     (gateway as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set("cursor", adapter);
@@ -310,7 +308,6 @@ describe("Cursor registry discovery during Local resume", () => {
       expect(sdk.resume).toHaveBeenCalledExactlyOnceWith(OPTIONS.sessionId, expect.objectContaining({ model: EXPECTED }));
       expect(sdk.models).toHaveBeenCalledTimes(2);
       expect(sdk.create).not.toHaveBeenCalled();
-      expect(prepare).not.toHaveBeenCalled();
       expect(fetch).not.toHaveBeenCalled();
     } finally { await gateway.dispose(); await rm(root, { recursive: true, force: true }); }
   });

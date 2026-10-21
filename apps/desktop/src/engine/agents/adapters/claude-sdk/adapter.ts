@@ -54,8 +54,6 @@ import { randomUUID } from "node:crypto";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import * as fsp from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { resolveCloudRuntime, resolveCloudRuntimePackagePath } from "../../containment/cloud-runtime-root.mjs";
 import * as path from "node:path";
 import { personalRepoRoot } from "../../../settings/personal-repo";
 import { readClaudeConnectors, readClaudeDiscovery } from "./extensions";
@@ -80,11 +78,6 @@ import {
   type UserDialogResult,
 } from "@anthropic-ai/claude-agent-sdk";
 import { isClaudeParentProgress } from "../claude/event-feedback";
-import {assertCloudBootNativeContinuation,assertCloudBootNativeHandoff,cloudBootTurnReservation,cloudExecutionLifetime,
-  cloudProviderExecution,isCloudBootProviderExecution,markCloudBootNativeHandoff,
-  type CloudBootProviderExecution,type CloudBootTurnReservation} from "../../cloud-provider-execution";
-import {CloudCommandFailureError} from "@zeros/protocol/cloud-commands";
-import {cloudClaudeTools,CLAUDE_INSTRUCTION_FILES} from "./cloud-tools";
 
 import type {
   AdvertisedModel,
@@ -169,9 +162,6 @@ import {
   claudeCliMissingMessage,
   isPinnedClaudeRuntime,
   resolveClaudeCli,
-  claudePlatformPackages,
-  claudeBinaryName,
-  isExecutableFileSync,
   type ClaudeCliSourceKind,
 } from "./binary-resolver";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
@@ -187,24 +177,6 @@ import { defaultMacClaudeOAuthAuthority } from "../../containment/claude-oauth-a
  *  (and again if the tier ever changes mid-run) instead of once per turn. */
 let loggedCliSource: ClaudeCliSourceKind | null = null;
 
-/** Cloud resolution starts at the admitted worker tree, independent of desktop
- * overrides and the writable workspace's package graph. */
-export function resolveCloudClaudeCli(): {path:string;source:"bundled"} {
-  const runtime=resolveCloudRuntime();
-  const guard=resolveCloudRuntimePackagePath;
-  const anchor=path.join(runtime.workerRoot,"package.json");
-  guard(path.join(runtime.workerRoot,"node_modules/@anthropic-ai/claude-agent-sdk/package.json"));
-  const sdk=guard(createRequire(guard(anchor)).resolve("@anthropic-ai/claude-agent-sdk"));
-  const fromSdk=createRequire(sdk);
-  for(const pkg of claudePlatformPackages()) {
-    let binary:string;
-    try { binary=fromSdk.resolve(`${pkg}/${claudeBinaryName()}`); } catch { continue; }
-    binary=guard(binary);
-    if(binary.startsWith(`${runtime.workerRoot}/`)&&isExecutableFileSync(binary))return {path:binary,source:"bundled"};
-  }
-  throw new Error("Cloud Claude requires the immutable bundled runtime");
-}
-
 const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
 const CLAUDE_AUTO_MEMORY_ENV_VAR = "ZEROS_CLAUDE_AUTO_MEMORY";
 const CLAUDE_IDLE_COMPACTION_ENV_VAR = "ZEROS_CLAUDE_IDLE_COMPACTION";
@@ -213,14 +185,17 @@ const ALLOWED_CLAUDE_IDLE_TIMEOUT_MINUTES = new Set([30, 60, 120, 300]);
 
 type ClaudeSettingSources = NonNullable<Options["settingSources"]>;
 
+/** Builtin flag layer that loads CLAUDE.md and AGENTS.md; repo settings cannot
+ * enable it. */
+const CLAUDE_INSTRUCTION_FILES: NonNullable<Settings["pluginConfigs"]> = {
+  "agents-md@builtin": { options: { instructionFiles: "claude-md-and-agents-md" } },
+};
+
 /** Ordinary local Code chats load Claude's own configuration as the CLI
  *  would: CLAUDE.md and AGENTS.md, rules, skills, hooks, plugins and MCP
- *  servers declared in local settings. A cloud execution's sources follow its
- *  lease (cloud-tools.ts applies the same value); restricted actors keep only
- *  their admitted configuration. */
+ *  servers declared in local settings. Restricted actors keep only their
+ *  admitted configuration. */
 function claudeSettingSources(boundary?: PreparedBoundary): ClaudeSettingSources {
-  const cloud = cloudProviderExecution(boundary);
-  if (cloud) return cloud.customization ? ["user"] : [];
   return isNativeCodeActor(boundary) ? ["user", "project", "local"] : [];
 }
 
@@ -826,11 +801,6 @@ interface SdkSession {
     assistantIds: Set<string>;
     stream: { id: string; blocks: Map<number, "text" | "tool"> } | null;
   };
-  /** Original foreground authority, independent of optional timing hooks. */
-  nativeBootHandoff?:{
-    execution:CloudBootProviderExecution;reservation:CloudBootTurnReservation;query:Query;
-    turn:Deferred<{stopReason:StopReason;usage?:TurnUsage}>;uuid:string;entered:boolean;writtenUuids:Set<string>;
-  };
   usageLedger: TurnUsageLedger;
   usageOwnerTurnId?: string;
   pendingUsageTurnId?: string;
@@ -1262,7 +1232,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     await ensureSessionDir(zerosSessionId);
     await writeSessionMeta(zerosSessionId, {
       agentId: this.agentId,
-      cwd: cloudProviderExecution(opts.executionBoundary)?.cwd??opts.cwd,
+      cwd: opts.cwd,
       pid: process.pid,
       createdAt: Date.now(),
     });
@@ -1324,7 +1294,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         this.sessions.delete(executionId);
         await this.teardown(existing);
       } else {
-        existing.cwd = cloudProviderExecution(opts.executionBoundary)?.cwd??opts.cwd;
+        existing.cwd = opts.cwd;
         existing.env = opts.env;
         existing.cliBinary = opts.cliBinary?.trim() || undefined;
         existing.mcpServers = opts.mcpServers;
@@ -1411,7 +1381,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     return {
       modelState,
       zerosSessionId,
-      cwd: cloudProviderExecution(opts.executionBoundary)?.cwd??opts.cwd,
+      cwd: opts.cwd,
       env: opts.env,
       cliBinary: opts.cliBinary?.trim() || undefined,
       mcpServers: opts.mcpServers,
@@ -1422,7 +1392,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // Fresh chat → honour the user's configured default mode (settings.json
       // hierarchy); a persisted per-chat mode overrides via reconcile.
       permissionMode: (opts.env?.ZEROS_PERMISSION_MODE ? defaultModeTokenToClaudeMode(opts.env.ZEROS_PERMISSION_MODE) : null) ??
-        (cloudProviderExecution(opts.executionBoundary)?"default":resolveDefaultPermissionMode(opts.cwd)),
+        resolveDefaultPermissionMode(opts.cwd),
       claudeSessionId: null,
       // Protocol-v8 builds persisted chats.session_id and can only reopen a
       // Claude session directory by this Zeros locator. Keep it as the
@@ -1557,8 +1527,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    * keep the process alive. A conversation needs a resumable SDK id; an empty
    * control connection opened by Tools can be discarded without losing input. */
   private canDetachIdleQuery(state: SdkSession): boolean {
-    const cloud=cloudProviderExecution(state.executionBoundary);
-    if(isCloudBootProviderExecution(cloud)&&!cloud.lifetime.signal.aborted)return false;
     return Boolean(
       !state.disposed &&
       state.query &&
@@ -1573,7 +1541,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       state.pendingPermissions.size === 0 &&
       state.pendingQuestions.size === 0 &&
       state.input.pendingCount === 0 &&
-      !cloudProviderExecution(state.executionBoundary)?.background?.preservesNativeProcess &&
       !state.translator.hasProcessWork && state.pendingSteers.size === 0 && !state.cancelOperation,
     );
   }
@@ -1666,12 +1633,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         agentId: this.agentId,
       });
     }
-    const entryCloud=cloudProviderExecution(state.executionBoundary);
-    const bootExecution=isCloudBootProviderExecution(entryCloud)?entryCloud:null;
-    const bootReservation=bootExecution?cloudBootTurnReservation(bootExecution):null;
-    if(entryCloud?.mode==="boot-owner-v1"&&(!bootExecution||!bootReservation))
-      throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
-    if(bootExecution&&bootReservation)assertCloudBootNativeHandoff(bootExecution,bootReservation);
     // Captured before the first await: from here on, a cancel belongs to THIS
     // turn (the engine has already accepted it), so the stale-flag reset below
     // must not erase it. See cancelSeq.
@@ -1757,8 +1718,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         };
       }
       this.ensureQuery(state);
-      if(bootExecution&&cloudProviderExecution(state.executionBoundary)!==bootExecution)
-        throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
 
       while (state.pendingModelReapply && state.query) {
         const pending = state.pendingModelReapply;
@@ -1793,8 +1752,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       const userMessageUuid = randomUUID();
       state.turnMessageUuids.clear();
       state.turnMessageUuids.add(userMessageUuid);
-      if(bootExecution&&bootReservation&&state.query)state.nativeBootHandoff={execution:bootExecution,reservation:bootReservation,
-        query:state.query,turn,uuid:userMessageUuid,entered:false,writtenUuids:new Set()};
       state.nativePromptObservation = (opts.onNativePromptStage || opts.onNativeOutput) && state.query ? {
         query: state.query, turn, uuid: userMessageUuid,
         ...(opts.onNativePromptStage ? { callback: opts.onNativePromptStage } : {}),
@@ -1844,7 +1801,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           } as PromptResponse,
         };
       } finally {
-        if(state.nativeBootHandoff?.turn===turn)state.nativeBootHandoff=undefined;
         if (state.nativePromptObservation?.turn === turn) state.nativePromptObservation = undefined;
         // A turn that produced nothing (error, cancel) must not hand its
         // pending measurement to whichever turn runs next.
@@ -2648,12 +2604,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         const actionFailure = pendingError ? providerErrorFailure(
           "claude", normalizeProviderError("claude", pendingError), "prompt",
         ) : null;
-        // Cloud retirement revokes the execution lease before disposing the
-        // adapter. A completed, idle provider can therefore exit with 137 while
-        // `disposed` is still false. Keep genuine unfinished/background work
-        // visible; only the expected idle shutdown loses its transport notice.
-        const retiredIdleCloud = !lostBackgroundWork && !actionFailure &&
-          cloudProviderExecution(state.executionBoundary)?.lifetime.signal.aborted === true;
         // A clean iterator return is still a disconnect when the current send
         // never received its result. Detach before settling so a continuation
         // cannot enqueue its next prompt into this spent query.
@@ -2671,7 +2621,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.translator.endActivity();
         this.clearCommandDiscovery(state);
         state.consumer = null;
-        if (!unfinished && !rejectedPrompt && !reportedStartupFailure && !state.cancelRequested && !state.disposed && !continuationFailure && !retiredIdleCloud && (actionFailure || lostBackgroundWork || streamError)) {
+        if (!unfinished && !rejectedPrompt && !reportedStartupFailure && !state.cancelRequested && !state.disposed && !continuationFailure && (actionFailure || lostBackgroundWork || streamError)) {
           if (actionFailure) {
             reportContinuation("claude-background-failed", actionFailure.message, false, actionFailure.failure.kind);
           } else {
@@ -2962,21 +2912,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     }
   }
 
-  backgroundWorkActive(sessionId:string):boolean{
-    const state=this.mustState(sessionId);
-    return !!state.query&&state.translator.hasProcessWork;
-  }
-
-  assertBackgroundReuse(opts:{sessionId:string;env:Record<string,string>;modeId?:string}):void{
-    const state=this.mustState(opts.sessionId);
-    if(!cloudProviderExecution(state.executionBoundary)?.background?.preservesNativeProcess)return;
-    const previous=state.env??{},mode=opts.modeId?normalizeModeId(opts.modeId):undefined;
-    if(state.pendingRestart||(mode&&(mode==="bypass")!==state.queryAllowsBypass)||
-      (previous.ZEROS_THINKING_EFFORT==="max")!==(opts.env.ZEROS_THINKING_EFFORT==="max")||
-      (opts.env.CLAUDE_MAX_TURNS!==undefined&&opts.env.CLAUDE_MAX_TURNS!==previous.CLAUDE_MAX_TURNS))
-      throw new Error("Stop background work before changing settings that restart Claude");
-  }
-
   async stopBackgroundTask(opts: {
     sessionId: string;
     taskId: string;
@@ -3086,7 +3021,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   async setMode(opts: { sessionId: string; modeId: string }): Promise<void> {
     const state = this.mustState(opts.sessionId);
-    this.assertBackgroundReuse({...opts,env:state.env??{}});
     const requestedMode = normalizeModeId(opts.modeId);
     const mode = requestedMode;
     // The mode we report back to the renderer — normally the requested id,
@@ -3226,8 +3160,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   async setModel(opts: { sessionId: string; model: string }): Promise<void> {
     const state = this.sessions.get(opts.sessionId);
     if (!state || !opts.model.trim()) return;
-    const cloud=cloudProviderExecution(state.executionBoundary);
-    if(cloud&&opts.model.trim()!==cloud.model)throw new Error("Cloud model changes require a new credential admission");
     state.model = opts.model.trim();
     state.modelSelection.select(state.model);
     state.pendingModelReapply = { model: state.model };
@@ -3255,15 +3187,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   }): Promise<void> {
     const state = this.sessions.get(opts.sessionId);
     if (!state) return;
-    this.assertBackgroundReuse(opts);
-    const cloud=cloudProviderExecution(state.executionBoundary);
-    if(cloud){
-      cloudExecutionLifetime(cloud).assertLive();
-      if(Object.keys(opts.env).some(name=>!["ANTHROPIC_MODEL","ZEROS_THINKING_EFFORT","ZEROS_FAST_MODE","CLAUDE_MAX_TURNS",CLAUDE_AUTO_MEMORY_ENV_VAR,CLAUDE_IDLE_COMPACTION_ENV_VAR].includes(name))||
-        [CLAUDE_AUTO_MEMORY_ENV_VAR,CLAUDE_IDLE_COMPACTION_ENV_VAR].some(name=>opts.env[name]!==undefined&&opts.env[name]!=="0"&&opts.env[name]!=="1")||
-        (opts.env.ANTHROPIC_MODEL!==undefined&&opts.env.ANTHROPIC_MODEL!==cloud.model))
-        throw new Error("Cloud provider configuration requires a new credential admission");
-    }
     const prevEnv = state.env ?? {};
     const incomingModel = opts.env.ANTHROPIC_MODEL?.trim() || undefined;
     const currentModel =
@@ -3349,8 +3272,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   async updateCredentials(opts: ProviderCredentialUpdate): Promise<void> {
     const state = this.sessions.get(opts.sessionId);
     if (!state) return;
-    if (cloudProviderExecution(state.executionBoundary))
-      throw new Error("A cloud execution keeps the credential it was admitted with");
     // The live process writes under the root it started with.
     const from = state.pendingHistoryCarry?.from ?? nativeHistoryRoot("claude", state.env);
     state.env = withProviderConnection(state.env, opts);
@@ -3484,13 +3405,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       const scopedRules = (options.suggestions ?? [])
         .filter((s) => s.type === "addRules" && s.behavior === "allow")
         .map((s) => ({ ...s, destination: "localSettings" as const }));
-      // The cloud checkout is shared by organization actors. Until there is
-      // engine-owned actor-scoped persistence, offer only once/chat approval;
-      // never ask the SDK to write localSettings for a cloud actor.
-      const cloud=cloudProviderExecution(state.executionBoundary);
-      let projectRules: PermissionUpdate[] = requiresExplicitApproval||cloud ? [] : scopedRules;
+      let projectRules: PermissionUpdate[] = requiresExplicitApproval ? [] : scopedRules;
       let projectName = "Allow for this project";
-      if (!cloud&&!requiresExplicitApproval && scopedRules.length === 0 && EDIT_TOOLS.has(toolName)) {
+      if (!requiresExplicitApproval && scopedRules.length === 0 && EDIT_TOOLS.has(toolName)) {
         projectRules = [
           {
             type: "addRules",
@@ -4482,7 +4399,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  so it is NOT represented here. */
   private buildFlagSettings(state: SdkSession): Partial<Settings> {
     const env = state.env;
-    const cloud=cloudProviderExecution(state.executionBoundary);
     const effortEnv = env?.ZEROS_THINKING_EFFORT?.trim();
     const fast = env?.ZEROS_FAST_MODE === "1";
     const ultracode = effortEnv === "ultracode";
@@ -4520,19 +4436,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // in charge; an absent/legacy preference keeps Zeros' default Off.
       ...(env?.[CLAUDE_IDLE_COMPACTION_ENV_VAR] === "1" ? {} : { idleCompaction: false }),
       permissions: {
-        additionalDirectories:cloud?[]:additionalDirectories,
-        allow:cloud?[]:allow,
-        deny: cloud?[]:[...new Set(deny)],
+        additionalDirectories:additionalDirectories,
+        allow:allow,
+        deny: [...new Set(deny)],
       },
     };
   }
 
   private buildOptions(state: SdkSession): Options {
     const env = state.env;
-    const cloud=cloudProviderExecution(state.executionBoundary);
-    if(cloud)cloudExecutionLifetime(cloud).assertLive();
-    if(cloud&&(state.model??env?.ANTHROPIC_MODEL)!==cloud.model)
-      throw new Error("Cloud provider model authority changed");
     const exact = requireExplicitModel(env, "ANTHROPIC_MODEL");
     const queryAbort = state.abort;
     const ownsActivity = () => !state.disposed && !state.cancelRequested &&
@@ -4568,7 +4480,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const systemAppend = [appendSys, nativeInstruction]
       .filter((value): value is string => Boolean(value))
       .join("\n\n");
-    const {settings:cloudSettings,...cloudOptions}=cloud?cloudClaudeTools(cloud,systemAppend):{};
     // Zeros no longer configures an overload backup or a spend ceiling.
     // Ignore legacy env values from saved sessions/older clients. Explicit
     // native fallback notices continue to drive narration and model adoption.
@@ -4578,7 +4489,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Per-session registry (gateway-resolved for this cwd: user + repo +
     // workspace layers, RCE-gated) wins; fall back to the global view.
     const sessionMcp = materializeMcpServerRegistrations(
-      cloud?[]:state.mcpServers ?? this.ctx.mcpServers,
+      state.mcpServers ?? this.ctx.mcpServers,
       state.env ?? {},
     );
     const mcpServers: Options["mcpServers"] =
@@ -4607,7 +4518,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // node_modules sits next to sdk.mjs, which is true in dev and false in every
     // packaged build. Failing HERE (before query()) turns an opaque
     // "AGENT RESPONSE FAILURE" into a message that names the fix.
-    const cli = cloud ? resolveCloudClaudeCli() : resolveClaudeCli({ override: state.cliBinary });
+    const cli = resolveClaudeCli({ override: state.cliBinary });
     if (!cli.path) {
       throw new AgentFailureError({
         kind: "auth-required",
@@ -4645,7 +4556,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // The SDK REPLACES the subprocess env entirely when `env` is set, so
       // we MUST spread process.env (PATH/HOME/keychain access depend on it).
       env: state.executionBoundary
-        ? stripEngineAuthorityEnv({ ...(env ?? {}), ...(cloud?.coordinator.nativeHome.environment() ?? {}), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1" })
+        ? stripEngineAuthorityEnv({ ...(env ?? {}), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1" })
         : preserveAmbientConfigRoots({
             ...(process.env as Record<string, string>),
             ...env,
@@ -4660,32 +4571,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                 spawnOptions,
                 {
                   onSpawn: (tracked) => state.containedProcesses.add(tracked),
-                  ...(isCloudBootProviderExecution(cloud)?{beforeUserMessageWrite:(uuid:string)=>{
-                    const handoff=state.nativeBootHandoff;
-                    const ownsQuery=!!handoff&&state.input===observationInput&&state.abort===observationAbort&&handoff.query===state.query&&
-                      handoff.turn===state.turn&&!state.disposed&&!state.cancelRequested&&!state.cancelOperation;
-                    try{
-                      if(!ownsQuery||!handoff||handoff.execution!==cloud)throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
-                      if(handoff.writtenUuids.has(uuid))throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
-                      if(handoff.writtenUuids.size>=1024)throw new CloudCommandFailureError({stage:"validation",category:"execution_limit"});
-                      if(!handoff.entered){
-                        if(uuid!==handoff.uuid)throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
-                        assertCloudBootNativeHandoff(cloud,handoff.reservation);
-                        markCloudBootNativeHandoff(cloud,handoff.reservation);
-                        handoff.entered=true;
-                      }else{
-                        if(uuid===handoff.uuid||!state.turnMessageUuids.has(uuid))throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
-                        assertCloudBootNativeContinuation(cloud,handoff.reservation);
-                      }
-                      handoff.writtenUuids.add(uuid);
-                    }catch(error){
-                      // The pinned transport wraps stdin errors. Preserve the
-                      // original typed cause for this exact turn before that
-                      // wrapper, without rejecting a newer query/turn.
-                      if(ownsQuery)handoff?.turn.reject(error);
-                      throw error;
-                    }
-                  }}:{}),
                   onUserMessageWrite: uuid => {
                     if (state.input === observationInput && state.abort === observationAbort)
                       this.observeNativePromptStage(state, state.query, uuid, "native_write");
@@ -4701,7 +4586,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
               ),
           }
         : {}),
-      ...(!cloud&&this.oauthTokenProvider && !hasExplicitClaudeCredential(state.env) &&
+      ...(this.oauthTokenProvider && !hasExplicitClaudeCredential(state.env) &&
         (!state.env?.CLAUDE_CONFIG_DIR || state.env.CLAUDE_CONFIG_DIR === process.env.CLAUDE_CONFIG_DIR)
         ? {
             // The pinned CLI emits this control request only when it needs an
@@ -4837,7 +4722,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       ...(maxEffort ? { effort: maxEffort } : {}),
       settings: {
         ...settings,
-        ...cloudSettings,
         showThinkingSummaries: true,
         ...(settingSources.includes("project")
           ? { pluginConfigs: CLAUDE_INSTRUCTION_FILES }
@@ -4863,7 +4747,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // order (user override → staged Contents/Resources/claude → bundled
       // package → the user's own install).
       pathToClaudeCodeExecutable: cliPath,
-      ...cloudOptions,
     };
     // Verification breadcrumb: one line per query (re)creation echoing the
     // composer knobs actually sent to the SDK. Tail the engine log (main.log /

@@ -1,7 +1,7 @@
 // Configuration, not a server import: bundlers bake these public switches into
 // Electron and the renderer. Keeping the JSON in the standalone CP's source
 // also includes it in that deployment without a generated or copied policy.
-import channels from "../../control-plane/src/cloud-workspace-channels.json";
+import channels from "../../control-plane/src/cloud/channels.json";
 
 const deploymentChannel = { dev: "development", alpha: "alpha", beta: "beta", stable: "production" } as const;
 

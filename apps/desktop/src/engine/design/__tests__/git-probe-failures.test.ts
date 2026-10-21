@@ -5,7 +5,6 @@ import path from "node:path";
 import type { ExecFileOptions, ExecFileSyncOptions } from "node:child_process";
 
 const state = vi.hoisted(() => ({
-  cloud: false,
   command: "",
   stderr: "",
   status: 128,
@@ -14,10 +13,6 @@ const state = vi.hoisted(() => ({
     args: string[];
     options: ExecFileOptions | ExecFileSyncOptions;
   }>,
-}));
-vi.mock("../../agents/containment/cloud-worker-config", () => ({
-  loadCloudWorkerConfiguration: () =>
-    state.cloud ? { version: 4, uid: 10001, gid: 10001 } : null,
 }));
 vi.mock("node:child_process", async (original) => {
   const actual = await original<typeof import("node:child_process")>();
@@ -69,13 +64,12 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe.each([false, true])(
-  "Design Git probe failures (cloud=%s)",
-  (cloud) => {
+describe(
+  "Design Git probe failures",
+  () => {
     it("rejects an empty checkout before starting a child process", async () => {
       vi.resetModules();
       Object.assign(state, {
-        cloud,
         command: "rev-parse",
         stderr: "",
         status: 128,
@@ -116,7 +110,6 @@ describe.each([false, true])(
       async (command, operation, stderr, reason) => {
         vi.resetModules();
         Object.assign(state, {
-          cloud,
           command,
           stderr,
           status: 128,
@@ -167,15 +160,14 @@ describe.each([false, true])(
         expect(serialized).not.toContain("private output");
         expect(cause).not.toHaveProperty("cause", expect.anything());
         const options = state.calls.at(-1)!.options;
-        expect(options.uid).toBe(cloud ? process.geteuid?.() : undefined);
-        expect(options.gid).toBe(cloud ? process.geteuid?.() : undefined);
+        expect(options.uid).toBeUndefined();
+        expect(options.gid).toBeUndefined();
       },
     );
 
     it("retains check-ignore's successful no-match exit 1", async () => {
       vi.resetModules();
       Object.assign(state, {
-        cloud,
         command: "check-ignore",
         stderr: "",
         status: 1,

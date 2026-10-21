@@ -21,7 +21,6 @@ export interface DesignCatalogAdmission {
   connectionId: string;
   authority: string;
   authorized: () => boolean;
-  cloudOrganizationId?: string;
 }
 
 export interface DesignCatalogSnapshot {

@@ -50,7 +50,6 @@ import type {
   PreparedBoundary,
   TerritoryGeneration,
 } from "./types";
-import { cloudWorkloadHostEntry, isCloudWorkloadCustody, type CloudWorkloadCustody } from "./cloud-workload-custody";
 
 const execFileAsync = promisify(execFile);
 const PROCESS_POLL_MS = 20;
@@ -68,10 +67,6 @@ export interface HostOwnedLifecycleSnapshot {
 }
 const originalPreparedLifecycles = new WeakMap<PreparedBoundary, () => HostOwnedLifecycleSnapshot>();
 const originalPendingFences = new WeakMap<PreparedBoundary, () => Promise<void>>();
-const originalCloudHosts = new WeakMap<HostExecutionBoundary, CloudWorkloadCustody>();
-export function hostCloudWorkloadCustody(host: HostExecutionBoundary): CloudWorkloadCustody | null {
-  return originalCloudHosts.get(host) ?? null;
-}
 export function hostFenceUnstartedLaunches(boundary: PreparedBoundary): Promise<void> {
   const fence = originalPendingFences.get(boundary);
   if (!fence) return Promise.reject(new Error("host launch fence requires its original prepared scope"));
@@ -132,8 +127,6 @@ export interface HostExecutionBoundaryOptions {
   readonly supervisorRuntime?: string;
   /** Test seam for simulating an engine that died while its child remains. */
   readonly ownerProcessId?: number;
-  /** Only cloud controllers supply an ORIGINAL root-verified kernel client. */
-  readonly cloudWorkloadCustody?: CloudWorkloadCustody;
   /** Fixed qualification keeps ordinary bookkeeping visible to the template
    * sanitizer. Native launch/recovery records still require exact retirement. */
   readonly retainSessionDirectories?: boolean;
@@ -772,11 +765,6 @@ export class HostExecutionBoundary implements ExecutionBoundary {
   private readonly failedPreparationProofs = new Map<string, Promise<void>>();
 
   constructor(options: HostExecutionBoundaryOptions = {}) {
-    if (options.cloudWorkloadCustody !== undefined) {
-      if (!isCloudWorkloadCustody(options.cloudWorkloadCustody)) throw new Error("cloud Host launch requires original custody");
-      options.cloudWorkloadCustody.assertLive();
-      originalCloudHosts.set(this, options.cloudWorkloadCustody);
-    }
     this.projectRoot = path.resolve(options.projectRoot ?? process.cwd());
     this.supervisorScript =
       options.supervisorScript ??
@@ -1082,9 +1070,6 @@ export class HostExecutionBoundary implements ExecutionBoundary {
       providerHomePath: request.providerStateEnv?.HOME ?? homedir(),
       wrapSpawn: (spawnRequest: BoundarySpawnRequest) => {
         if (revoked) throw new Error("host execution boundary is revoked");
-        const custody = originalCloudHosts.get(this);
-        custody?.assertLive();
-        const cloudEntry = custody ? cloudWorkloadHostEntry(custody) : null;
         const token = randomUUID();
         const pendingPath = path.join(commandsRoot, `${token}.json`);
         const claimPath = path.join(claimsRoot, `${token}.json`);
@@ -1109,17 +1094,15 @@ export class HostExecutionBoundary implements ExecutionBoundary {
         const originalSupervisorEnvironment = Object.fromEntries(
           Object.entries(spawnRequest.env).filter(
             ([name]) =>
-              cloudEntry || name === "ELECTRON_RUN_AS_NODE" ||
+              name === "ELECTRON_RUN_AS_NODE" ||
               name.startsWith(HOST_SUPERVISOR_INTERNAL_PREFIX),
           ),
         );
         const env = {
-          ...(cloudEntry ? {} : spawnRequest.env),
+          ...spawnRequest.env,
           [`${HOST_SUPERVISOR_INTERNAL_PREFIX}ORIGINAL_ENV`]: Buffer.from(
             JSON.stringify(originalSupervisorEnvironment),
           ).toString("base64url"),
-          ...(cloudEntry ? { [`${HOST_SUPERVISOR_INTERNAL_PREFIX}WORKLOAD_ENTRY`]:
-            Buffer.from(JSON.stringify(cloudEntry)).toString("base64url") } : {}),
           ...(process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON === "1"
             ? { ELECTRON_RUN_AS_NODE: "1" }
             : {}),
@@ -1140,8 +1123,7 @@ export class HostExecutionBoundary implements ExecutionBoundary {
           String(process.pid),
           "--parent-pid",
           String(process.pid),
-          ...(cloudEntry ? ["--cloud-workload"] : []),
-          ...(!cloudEntry && spawnRequest.cpuPriority === "below-normal"
+          ...(spawnRequest.cpuPriority === "below-normal"
             ? ["--priority", "below-normal"]
             : []),
           "--",
