@@ -5,7 +5,10 @@
   "license": "MIT",
   "type": "module",
   "description": "Standalone cloud workspace worker with native agent drivers.",
+  "engines": { "node": ">=24 <25" },
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "lint": "eslint src scripts vitest.config.ts",
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -22,6 +25,7 @@
   "devDependencies": {
     "@types/node": "^20.19.39",
     "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
     "typescript": "5.9.3",
     "vitest": "^4.1.11"
   }

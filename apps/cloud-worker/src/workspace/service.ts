@@ -89,6 +89,7 @@ export class WorkspaceService {
     if (refsChanged || content) this.publish(refsChanged);
   }
   async flush(): Promise<void> { await this.git.flush(); await this.metadataQueue; await this.watcher?.flush(); }
+  githubChanged(): void { this.invalidate(true); }
   async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; await this.watcher?.dispose(); await this.git.flush(); await this.metadataQueue; }
 
   private invalidate(refs: boolean): void {

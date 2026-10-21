@@ -1,0 +1,3 @@
+#!/bin/sh
+worker_bin=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node "$worker_bin/../git-askpass.mjs" "$@"
