@@ -7,6 +7,8 @@ import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
 
+export type CloudV2InstalledRepository = { repository: string; defaultBranch: string | null };
+
 export type CloudV2Workspace = {
   id: string;
   organizationId: string;
@@ -234,15 +236,19 @@ export class CloudV2Store {
 
   /** Repositories installed on the organization's active Cloud Computer, or
    * null when it has none yet. */
-  async installedRepositories(organizationId: string): Promise<string[] | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ recipe: { repositories?: { repository?: unknown }[] } }>(
+  async installedRepositories(organizationId: string): Promise<CloudV2InstalledRepository[] | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ recipe: { repositories?: { repository?: unknown; ref?: unknown; branch?: unknown }[] } }>(
       `SELECT build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
        WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded'`,
       [organizationId],
     ));
     if (!rows[0]) return null;
-    return (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [entry.repository] : []);
+    return (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
+      repository: entry.repository,
+      defaultBranch: typeof entry.ref === "string" && entry.ref ? entry.ref
+        : typeof entry.branch === "string" && entry.branch ? entry.branch : null,
+    }] : []);
   }
 
   /** Revokes a stopped or deleted workspace's tokens; deletion also drops its history. */

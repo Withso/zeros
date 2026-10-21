@@ -21,6 +21,8 @@ export const CloudV2RecipeSchema = z.object({
     /** Branch or tag to clone; a rebuild pins `commit` instead. */
     ref: z.string().min(1).max(255).optional(),
     commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    /** Branch observed immediately after cloning, before a pinned rebuild detaches HEAD. */
+    branch: z.string().min(1).max(255).optional(),
     /** Non-interactive bash run in the checkout as the workspace user, e.g. "pnpm install". */
     setup: z.string().max(8_000).optional(),
   }).strict()).min(1).max(10),
@@ -54,12 +56,21 @@ export function cloudV2SnapshotName(channel: string, organizationId: string, ver
 export class CloudV2Computers {
   constructor(private readonly pool: pg.Pool) {}
 
-  async requireAdmin(organizationId: string, userId: string): Promise<void> {
+  private async memberRole(organizationId: string, userId: string): Promise<string> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ role: string }>(
       `SELECT m.role FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
        WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed`, [organizationId, userId]));
     if (!rows[0]) throw new HttpError(404, "not_found", "Organization not found");
-    if (rows[0].role !== "owner" && rows[0].role !== "admin") throw new HttpError(403, "forbidden", "Requires an owner or admin");
+    return rows[0].role;
+  }
+
+  async requireMember(organizationId: string, userId: string): Promise<void> {
+    await this.memberRole(organizationId, userId);
+  }
+
+  async requireAdmin(organizationId: string, userId: string): Promise<void> {
+    const role = await this.memberRole(organizationId, userId);
+    if (role !== "owner" && role !== "admin") throw new HttpError(403, "forbidden", "Requires an owner or admin");
   }
 
   async overview(organizationId: string): Promise<{ activeBuildId: string | null; snapshotName: string | null; builds: CloudV2Build[] }> {
@@ -243,18 +254,22 @@ export class CloudV2ComputerBuilder {
         `mkdir -p ${shellQuote(dir.slice(0, dir.lastIndexOf("/")))}`,
         `git -c ${shellQuote(`http.extraHeader=Authorization: Basic ${auth}`)} clone ${entry.ref ? `--branch ${shellQuote(entry.ref)} ` : ""}` +
           `${shellQuote(`https://github.com/${entry.repository}.git`)} ${shellQuote(dir)}`,
+        `zeros_build_branch=$(git -C ${shellQuote(dir)} symbolic-ref --quiet --short HEAD || true)`,
         ...(entry.commit ? [`git -C ${shellQuote(dir)} checkout --detach ${shellQuote(entry.commit)}`] : []),
+        `printf '\\nzeros-build-branch=%s\\n' "$zeros_build_branch"`,
         `git -C ${shellQuote(dir)} rev-parse HEAD`,
       ]), 900);
       await log(`[zeros] clone ${entry.repository}: exit ${clone.exitCode}\n`);
       if (clone.exitCode !== 0) throw Object.assign(new Error("clone failed"), { code: "computer_clone_failed" });
       const commit = clone.stdout.trim().split("\n").pop() ?? "";
+      const branch = /(?:^|\n)zeros-build-branch=([^\r\n]*)/.exec(clone.stdout)?.[1];
       if (entry.setup) {
         const setup = await compute.execLong(sandboxId, `${asZeros([`cd ${shellQuote(dir)}`, entry.setup])} 2>&1`, 3600);
         await log(setup.stdout.slice(-64 * 1024) + `\n[zeros] setup ${entry.repository}: exit ${setup.exitCode}\n`);
         if (setup.exitCode !== 0) throw Object.assign(new Error("setup failed"), { code: "computer_setup_failed" });
       }
-      pinned.push({ ...entry, ...(/^[0-9a-f]{40}$/.test(commit) ? { commit } : {}) });
+      const { branch: _previousBranch, ...recipe } = entry;
+      pinned.push({ ...recipe, ...(branch ? { branch } : {}), ...(/^[0-9a-f]{40}$/.test(commit) ? { commit } : {}) });
     }
     await computers.update(job.id, { recipe: { ...job.recipe, repositories: pinned } });
     // Boat captures a running sandbox's disk; flush it first.

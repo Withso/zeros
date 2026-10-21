@@ -6,7 +6,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { CloudV2Capabilities } from "./contract.js";
-import type { CloudV2Store, CloudV2Workspace } from "./store.js";
+import type { CloudV2InstalledRepository, CloudV2Store, CloudV2Workspace } from "./store.js";
 import { CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
 
@@ -21,16 +21,16 @@ const branchName = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(
 const CreateSchema = z.object({
   organizationId: uuid,
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(200),
-  baseBranch: branchName.default("main"),
+  baseBranch: branchName.optional(),
   branch: branchName.optional(),
   name: z.string().trim().min(1).max(200).optional(),
 }).strict();
 
 export type CloudV2RouteDeps = {
   store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "transition" | "issueToken" | "listChats" | "windowMessages">;
-  computers: Pick<CloudV2Computers, "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
+  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
-  installedRepositories(organizationId: string): Promise<readonly string[] | null>;
+  installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
   bridgeBaseUrl: string;
   /** Default branch names start with this, e.g. "zeros/". */
@@ -54,16 +54,18 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const parsed = CreateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud workspace request");
     const input = parsed.data;
+    await deps.computers.requireMember(input.organizationId, c.get("user").id);
     const installed = await deps.installedRepositories(input.organizationId);
     if (!installed) throw new HttpError(409, "cloud_computer_build_required", "Build this organization's Cloud Computer first");
-    if (!installed.some(repo => repo.toLowerCase() === input.repository.toLowerCase()))
+    const repository = installed.find(repo => repo.repository.toLowerCase() === input.repository.toLowerCase());
+    if (!repository)
       throw new HttpError(409, "repository_not_installed", "Add this repository to the Cloud Computer first");
     const id = randomUUID();
     const name = input.name ?? input.repository.split("/")[1]!;
     const workspace = await deps.store.createWorkspace({
       id, organizationId: input.organizationId, creatorUserId: c.get("user").id, name,
-      repository: input.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
-      baseBranch: input.baseBranch, computerBuildId: null,
+      repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
+      baseBranch: input.baseBranch ?? repository.defaultBranch ?? "main", computerBuildId: null,
     });
     return c.json({ workspace: document(workspace) }, 201);
   });
@@ -142,6 +144,12 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!parsed.success) throw new HttpError(404, "not_found", "Organization not found");
     return parsed.data;
   };
+
+  app.get("/v1/cloud-v2/organizations/:org/computer/repositories", async c => {
+    const organizationId = org(c.req.param("org"));
+    await deps.computers.requireMember(organizationId, c.get("user").id);
+    return c.json({ repositories: await deps.installedRepositories(organizationId) });
+  });
 
   app.get("/v1/cloud-v2/organizations/:org/computer", async c => {
     const organizationId = org(c.req.param("org"));
