@@ -38,6 +38,7 @@ describe("cloud v2 relay contract", () => {
     expect(CloudV2ControlFrameSchema.parse({ t: "refusal", id, code: "workspace_stopped" }).t).toBe("refusal");
     expect(CloudV2ControlFrameSchema.safeParse({ t: "reply", id, code: "x" }).success).toBe(false);
     expect(CloudV2WorkerFrameSchema.safeParse({ t: "exec", command: "rm -rf /" }).success).toBe(false);
+    expect(CloudV2WorkerFrameSchema.safeParse({ t: "request", id, kind: "proxy-token" }).success).toBe(false);
   });
 
   it("delivers proxy logins with an expiry and a Cursor key, nothing else", () => {

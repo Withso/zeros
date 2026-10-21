@@ -66,7 +66,7 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   }).strict(),
   /** Idle means no running agent turn and no open terminal. */
   z.object({ t: z.literal("idle"), idle: z.boolean() }).strict(),
-  z.object({ t: z.literal("request"), id: z.uuid(), kind: z.enum(["github-token", "proxy-token"]) }).strict(),
+  z.object({ t: z.literal("request"), id: z.uuid(), kind: z.literal("github-token") }).strict(),
 ]);
 export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
 
@@ -76,7 +76,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("open"), clientId }).strict(),
   z.object({ t: z.literal("close"), clientId }).strict(),
   z.object({ t: z.literal("frame"), clientId, frame }).strict(),
-  /** Sent after hello and again whenever a login or proxy token changes. */
+  /** Sent after hello and again before any proxy token expires or a login
+   * changes. The control plane owns refresh; the worker never asks for it. */
   z.object({
     t: z.literal("config"),
     workspace: z.object({
