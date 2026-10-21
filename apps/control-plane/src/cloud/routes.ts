@@ -27,7 +27,7 @@ const CreateSchema = z.object({
 }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "transition" | "issueToken" | "listChats" | "windowMessages">;
+  store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "windowMessages">;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
@@ -115,17 +115,12 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     return c.json({ result: { messages: await deps.store.windowMessages(workspace.id, chatId.data, limit) } });
   });
 
-  for (const [action, from, to] of [
-    // A failed wake keeps its VM and checkout, so it can be started again.
-    ["start", ["stopped", "failed"], "starting"],
-    ["stop", ["running", "starting"], "stopping"],
-  ] as const) {
+  for (const action of ["start", "stop", "archive"] as const) {
     app.post(`/v1/cloud-v2/workspaces/:id/${action}`, async c => {
       const id = uuid.safeParse(c.req.param("id"));
       if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
-      const workspace = await deps.store.get(id.data, c.get("user").id);
-      const moved = await deps.store.transition(workspace.id, from, to);
-      return c.json({ workspace: document(moved ?? workspace) }, moved ? 202 : 200);
+      const { workspace, moved } = await deps.store.requestLifecycle(id.data, c.get("user").id, action);
+      return c.json({ workspace: document(workspace) }, moved ? 202 : 200);
     });
   }
 

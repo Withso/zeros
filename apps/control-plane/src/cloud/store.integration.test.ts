@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudV2Store } from "./store.js";
+import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -114,5 +116,119 @@ d("cloud v2 store", () => {
     expect(await store.verifyProxyToken(token)).toBeNull();
     await store.transition(workspace.id, ["creating"], "running");
     expect((await store.verifyProxyToken(token))?.id).toBe(workspace.id);
+  });
+
+  it("archives every accepted state, retains the timestamp on retry, and persists it in list/get", async () => {
+    for (const state of ["running", "starting", "stopping", "stopped", "failed"] as const) {
+      const created = await create();
+      expect(created.archivedAt).toBeNull();
+      await store.transition(created.id, ["creating"], state);
+      const moved = state === "running" || state === "starting";
+      const archived = await store.requestLifecycle(created.id, creator, "archive");
+      expect(archived.moved).toBe(moved);
+      expect(archived.workspace.state).toBe(moved ? "stopping" : state);
+      const timestamp = archived.workspace.archivedAt!;
+      expect(new Date(timestamp).toISOString()).toBe(timestamp);
+      expect((await store.get(created.id, creator)).archivedAt).toBe(timestamp);
+      expect((await store.list(org, creator)).find(row => row.id === created.id)?.archivedAt).toBe(timestamp);
+      expect(await store.requestLifecycle(created.id, creator, "archive"))
+        .toMatchObject({ moved: false, workspace: { archivedAt: timestamp } });
+      if (archived.workspace.state === "stopping") {
+        expect(await store.transition(created.id, ["stopping"], "stopped"))
+          .toMatchObject({ state: "stopped", archivedAt: timestamp });
+      }
+    }
+  });
+
+  it("refuses archive during creation/deletion and for another member or a departed creator", async () => {
+    const created = await create();
+    for (const state of ["creating", "deleting"] as const) {
+      await store.transition(created.id, ["creating"], state);
+      await expect(store.requestLifecycle(created.id, creator, "archive"))
+        .rejects.toMatchObject({ status: 409, code: "workspace_unavailable" });
+      expect((await store.get(created.id, creator)).archivedAt).toBeNull();
+    }
+    await store.transition(created.id, ["deleting"], "stopped");
+    await expect(store.requestLifecycle(created.id, member, "archive")).rejects.toMatchObject({ status: 404 });
+    await pool.query(`DELETE FROM organization_members WHERE org_id = $1 AND user_id = $2`, [org, creator]);
+    await expect(store.requestLifecycle(created.id, creator, "archive")).rejects.toMatchObject({ status: 404 });
+    const { rows } = await pool.query(`SELECT state, archived_at FROM cloud_v2_workspaces WHERE id = $1`, [created.id]);
+    expect(rows[0]).toMatchObject({ state: "stopped", archived_at: null });
+  });
+
+  it("restores archived stopped/failed workspaces and clears archive while a stop is pending", async () => {
+    for (const state of ["stopped", "failed", "stopping"] as const) {
+      const created = await create();
+      await store.transition(created.id, ["creating"], state);
+      await store.requestLifecycle(created.id, creator, "archive");
+      const moved = state !== "stopping";
+      const restored = await store.requestLifecycle(created.id, creator, "start");
+      expect(restored).toMatchObject({ moved, workspace: { state: moved ? "starting" : state, archivedAt: null } });
+      expect((await store.get(created.id, creator)).archivedAt).toBeNull();
+    }
+  });
+
+  it("keeps ordinary/idle stop unarchived and clears archive on a successful connect wake only", async () => {
+    const created = await create();
+    await store.transition(created.id, ["creating"], "running");
+    expect(await store.requestLifecycle(created.id, creator, "stop"))
+      .toMatchObject({ moved: true, workspace: { state: "stopping", archivedAt: null } });
+    expect(await store.transition(created.id, ["stopping"], "stopped"))
+      .toMatchObject({ state: "stopped", archivedAt: null });
+    await store.transition(created.id, ["stopped"], "running");
+    expect(await store.transition(created.id, ["running"], "stopping"))
+      .toMatchObject({ state: "stopping", archivedAt: null });
+    await store.transition(created.id, ["stopping"], "stopped");
+    await store.requestLifecycle(created.id, creator, "archive");
+    expect(await store.transition(created.id, ["running"], "starting")).toBeNull();
+    expect((await store.get(created.id, creator)).archivedAt).not.toBeNull();
+
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: creator } as never); await next(); });
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as CloudV2RouteDeps));
+    expect((await app.request(`/v1/cloud-v2/workspaces/${created.id}/connect`, { method: "POST" })).status).toBe(200);
+    expect(await store.get(created.id, creator)).toMatchObject({ state: "starting", archivedAt: null });
+  });
+
+  it("versions archive metadata without rescheduling a stop already in progress", async () => {
+    const created = await create();
+    await store.transition(created.id, ["creating"], "stopping");
+    await store.defer(created.id, "stopping", 60_000, { failure: true });
+    await pool.query(`UPDATE cloud_v2_workspaces SET updated_at = clock_timestamp() - interval '1 hour' WHERE id = $1`, [created.id]);
+    const scheduling = async () => (await pool.query(
+      `SELECT attempts, next_attempt_at, updated_at FROM cloud_v2_workspaces WHERE id = $1`, [created.id],
+    )).rows[0];
+    const before = await scheduling();
+    const archived = await store.requestLifecycle(created.id, creator, "archive");
+    expect(archived.moved).toBe(false);
+    expect(Date.parse(archived.workspace.updatedAt)).toBeGreaterThan(before.updated_at.getTime());
+    const after = await scheduling();
+    expect(after).toMatchObject({ attempts: before.attempts, next_attempt_at: before.next_attempt_at });
+    expect((await store.requestLifecycle(created.id, creator, "archive")).workspace.updatedAt).toBe(archived.workspace.updatedAt);
+    expect((await store.requestLifecycle(created.id, creator, "start")).moved).toBe(false);
+    expect(await scheduling()).toMatchObject({ attempts: before.attempts, next_attempt_at: before.next_attempt_at });
+  });
+
+  it("rechecks the state after a concurrent deletion wins the workspace lock", async () => {
+    const created = await create();
+    await store.transition(created.id, ["creating"], "running");
+    const blocker = await pool.connect();
+    let result: Promise<unknown> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      const pid = (await blocker.query(`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
+      await blocker.query(`UPDATE cloud_v2_workspaces SET state = 'deleting' WHERE id = $1`, [created.id]);
+      result = store.requestLifecycle(created.id, creator, "archive").catch(error => error);
+      await expect.poll(async () => (await pool.query(
+        `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS waiting`, [pid],
+      )).rows[0].waiting).toBe(true);
+      await blocker.query("COMMIT");
+      await expect(result).resolves.toMatchObject({ status: 409 });
+      expect(await store.get(created.id, creator)).toMatchObject({ state: "deleting", archivedAt: null });
+    } finally {
+      await blocker.query("ROLLBACK");
+      blocker.release();
+      await result;
+    }
   });
 });

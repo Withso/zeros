@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
+import type { CloudV2Workspace } from "./store.js";
 
 const org = "11111111-1111-4111-8111-111111111111";
 const member = "22222222-2222-4222-8222-222222222222";
@@ -82,5 +83,66 @@ describe("cloud v2 creation", () => {
     expect(await response.json()).toEqual({ error: { code } });
     expect(f.requireMember).toHaveBeenCalledWith(org, member);
     expect(f.createWorkspace).not.toHaveBeenCalled();
+  });
+});
+
+describe("cloud v2 archive routes", () => {
+  const id = "33333333-3333-4333-8333-333333333333";
+  const archivedAt = "2026-10-21T12:00:00.000Z";
+  const path = `/v1/cloud-v2/workspaces/${id}`;
+  const row: CloudV2Workspace = {
+    id, organizationId: org, creatorUserId: member, name: "Project", repository: "example/project",
+    branch: "zeros/project", baseBranch: "master", state: "stopped", archivedAt,
+    boatSandboxId: "fixture-vm", computerBuildId: null, errorCode: null, activeAt: null,
+    createdAt: archivedAt, updatedAt: archivedAt,
+  };
+  function setup() {
+    const store = {
+      get: vi.fn(async () => row), list: vi.fn(async () => [row]),
+      requestLifecycle: vi.fn(async () => ({ workspace: row, moved: false })),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError
+      ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    return { app, store };
+  }
+
+  it.each([
+    ["stopping", true, 202], ["stopping", false, 200], ["stopped", false, 200], ["failed", false, 200],
+  ] as const)("returns the archive document for %s (moved %s)", async (state, moved, status) => {
+    const { app, store } = setup();
+    store.requestLifecycle.mockResolvedValue({ workspace: { ...row, state }, moved });
+    const response = await app.request(`${path}/archive`, { method: "POST" });
+    expect(response.status).toBe(status);
+    expect(await response.json()).toMatchObject({ workspace: { id, state, archivedAt, version: 2, placement: "cloud" } });
+    expect(store.requestLifecycle).toHaveBeenCalledWith(id, member, "archive");
+  });
+
+  it.each([404, 409] as const)("preserves creator refusals and state conflicts (%s)", async status => {
+    const { app, store } = setup();
+    store.requestLifecycle.mockRejectedValue(new HttpError(status, status === 404 ? "not_found" : "workspace_unavailable", "Unavailable"));
+    const response = await app.request(`${path}/archive`, { method: "POST" });
+    expect(response.status).toBe(status);
+    expect(store.requestLifecycle).toHaveBeenCalledWith(id, member, "archive");
+  });
+
+  it("returns the restored document from start and includes archive metadata in list/get", async () => {
+    const { app, store } = setup();
+    expect(await (await app.request(path)).json()).toMatchObject({ workspace: { archivedAt } });
+    expect(await (await app.request(`/v1/cloud-v2/workspaces?organizationId=${org}`)).json())
+      .toMatchObject({ workspaces: [{ archivedAt }] });
+    store.requestLifecycle.mockResolvedValue({ workspace: { ...row, state: "starting", archivedAt: null }, moved: true });
+    const response = await app.request(`${path}/start`, { method: "POST" });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ workspace: { state: "starting", archivedAt: null } });
+    expect(store.requestLifecycle).toHaveBeenCalledWith(id, member, "start");
+  });
+
+  it("rejects an invalid workspace identity before mutation", async () => {
+    const { app, store } = setup();
+    expect((await app.request("/v1/cloud-v2/workspaces/invalid/archive", { method: "POST" })).status).toBe(404);
+    expect(store.requestLifecycle).not.toHaveBeenCalled();
   });
 });
