@@ -10,8 +10,9 @@ import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
-import { WORKSPACE_ID } from "./worker-fixtures";
+import { CLIENT_A, WORKSPACE_ID, browserFrame, config } from "./worker-fixtures";
 import { GithubBroker, githubEnvironment } from "../credentials/github";
+import { repositoryFixture } from "../workspace/__tests__/repository-fixture";
 
 const exec = promisify(execFile);
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -87,25 +88,39 @@ it("resolves the executable askpass wrapper after relocation, including spaces",
 });
 
 it("boots the relocated entry, waits for a token, connects to a fake relay, and shuts down", async () => {
+  const { root, scope, git } = await repositoryFixture();
+  const origin = join(directory, "origin.git"); await git("clone", "--bare", root, origin); await git("remote", "add", "origin", origin);
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" }); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("No relay fixture address.");
   const tokenFile = join(directory, "token"), state = join(directory, "state");
   const messages: Array<Record<string, unknown>> = []; let authenticated = false;
   server.on("connection", (socket, request) => {
     authenticated = request.headers.authorization === "Bearer fixture-package-worker";
-    socket.on("message", raw => { messages.push(JSON.parse(raw.toString())); });
+    socket.on("message", raw => {
+      const message = JSON.parse(raw.toString()); messages.push(message);
+      if (message.t === "hello") {
+        socket.send(JSON.stringify({ ...config, workspace: scope.workspace, agents: {} }));
+        socket.send(JSON.stringify({ t: "open", clientId: CLIENT_A }));
+      }
+      if (message.t === "frame" && message.frame.type === "ENGINE_READY")
+        socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_CREATE", { sessionId: "package-shell" }) }));
+      if (message.t === "frame" && message.frame.type === "PTY_CREATED")
+        socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId: "package-shell", data: "printf 'BUNDLED_PTY_OK\\n'\n" }) }));
+    });
   });
   const harness = join(dist, "boot-smoke.mjs");
   await writeFile(harness, `import { startWorker, readBootEnvironment } from './worker.mjs';\nstartWorker({...readBootEnvironment(),tokenFile:${JSON.stringify(tokenFile)},directory:${JSON.stringify(state)}});\n`);
   let child: ChildProcess | undefined; let output = "";
   try {
-    child = spawn(process.execPath, [harness], { cwd: directory, env: { ...workerChildEnvironment(), ZEROS_WORKER_URL: `ws://127.0.0.1:${address.port}/v2/cloud/worker`, ZEROS_WORKSPACE_ID: WORKSPACE_ID }, stdio: ["ignore", "pipe", "pipe"] });
+    child = spawn(process.execPath, [harness], { cwd: directory, env: { ...workerChildEnvironment(), HOME: root, ZEROS_WORKER_URL: `ws://127.0.0.1:${address.port}/v2/cloud/worker`, ZEROS_WORKSPACE_ID: WORKSPACE_ID }, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
     await expect.poll(() => output.includes("credential-unavailable")).toBe(true);
     expect(child.exitCode).toBeNull(); expect(messages).toEqual([]);
     await writeFile(tokenFile, "fixture-package-worker", { mode: 0o600 }); await chmod(tokenFile, 0o600);
-    await expect.poll(() => messages.length).toBe(1);
+    await expect.poll(() => messages.length > 0, { timeout: 5000 }).toBe(true);
     expect(authenticated).toBe(true); expect(messages[0]).toMatchObject({ t: "hello", protocol: 1 });
+    await expect.poll(() => messages.some(message => message.t === "frame" && (message.frame as { type: string; data?: string }).type === "PTY_DATA"
+      && (message.frame as { data: string }).data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
     const exited = once(child, "exit"); child.kill("SIGTERM"); await exited;
     expect(child.exitCode).toBe(0); expect(output).not.toContain("fixture-package-worker");
   } finally {

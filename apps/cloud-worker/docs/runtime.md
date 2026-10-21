@@ -25,6 +25,19 @@ Git mutations share a queue; reads remain independent. Native HEAD/ref changes
 and checkout file changes emit `DB_CHANGED` for the native workspace UUID.
 PR metadata is cached by branch and invalidated by ref changes and Git mutations.
 
+PTY shells are shared by native session id. App disconnect and relay reconnect
+retain the shell; explicit kill removes it. Exited shared rows remain visible
+until closed or restarted. Ephemeral terminals are private to one app connection
+and close with it. Login terminals are unavailable in cloud. Checked directory
+descriptors bind native startup to the checkout, and children inherit only
+runtime variables and GitHub broker wiring.
+
+Reattach uses the same xterm resolved-screen serializer as Local. A per-shell
+queue orders screen snapshots, subscriptions and live bytes, with native output
+paused at 256 KiB pending and resumed below 128 KiB. Terminal dimensions and
+registry size are bounded. Open shells keep the worker active, including while
+no app is connected; activity is reported again every 55 seconds.
+
 Unsupported operations always return `CLOUD_V2_UNSUPPORTED`. The explicit lists
 in `workspace/chat-service.ts` and `workspace/git.ts` have regression tests.
 Git reset/restore/clean, hunk mutations, repository creation/catalog operations,

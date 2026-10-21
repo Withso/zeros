@@ -15,6 +15,7 @@ import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/s
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
 import { commandRunner } from "./workspace/commands";
+import { Terminals } from "./terminals/service";
 
 interface WorkerOptions {
   directory: string;
@@ -38,6 +39,7 @@ export class CloudWorker {
   private chats?: ChatService;
   private history?: HistoryMirror;
   private workspace?: WorkspaceService;
+  private terminals?: Terminals;
   private readonly tokens: GithubTokens;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
@@ -58,7 +60,7 @@ export class CloudWorker {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    this.heartbeat = setInterval(() => { if (this.agents?.busy) void this.reportIdle(true); }, 55_000);
+    this.heartbeat = setInterval(() => { if (this.agents?.busy || this.terminals?.busy) void this.reportIdle(true); }, 55_000);
     this.heartbeat.unref?.();
     this.options.transport.start({
       open: async () => {
@@ -68,7 +70,11 @@ export class CloudWorker {
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"] } });
       },
       frame: (raw) => this.receive(raw),
-      close: () => { this.online = false; this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); },
+      close: () => {
+        this.online = false;
+        for (const client of this.clients.values()) this.terminals?.detach(client);
+        this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect();
+      },
     });
   }
 
@@ -80,12 +86,14 @@ export class CloudWorker {
     await this.store?.flush();
     await this.history?.flush();
     await this.workspace?.flush();
+    await this.terminals?.flush();
   }
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect();
     await this.configuring.catch(() => {});
+    await this.terminals?.dispose();
     await this.workspace?.dispose();
     await this.agents?.dispose();
     await this.store?.flush();
@@ -109,8 +117,12 @@ export class CloudWorker {
     // Checkout preparation can be waiting for this reply. Never queue control
     // replies behind configuration or behind ordinary app work.
     if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
-    if (message.t === "close") { this.clients.delete(message.clientId); return; }
+    if (message.t === "close") {
+      const client = this.clients.get(message.clientId); if (client) this.terminals?.detach(client);
+      this.clients.delete(message.clientId); return;
+    }
     if (message.t === "open") {
+      const previous = this.clients.get(message.clientId); if (previous) this.terminals?.detach(previous);
       const client: Client = { id: message.clientId, rejected: false, send: async (frame) => {
         if (this.clients.get(client.id) === client && !client.rejected) await this.send({ t: "frame", clientId: client.id, frame });
       } };
@@ -138,6 +150,7 @@ export class CloudWorker {
     }
     if (frame.type === "HEARTBEAT") return;
     if (frame.type.startsWith("AGENT_")) return this.agents!.handle(client, frame);
+    if (frame.type.startsWith("PTY_")) return this.terminals!.handle(client, frame);
     if (frame.type === "WORKSPACE_REQUEST") {
       try {
         const service = /^(chats|messages|turns)\./.test(frame.op) ? this.chats! : this.workspace!;
@@ -167,6 +180,7 @@ export class CloudWorker {
       this.scope = scope; this.store = store;
       this.agents = new Agents(store, scope, this.options.drivers ?? { codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }) }, config,
         (frame) => this.broadcast(frame), () => { void this.reportIdle(); });
+      this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId));
       this.history = new HistoryMirror(store, this.options.transport);
       this.unsubscribers.push(store.onChange((change) => {
@@ -188,7 +202,7 @@ export class CloudWorker {
   }
   private async reportIdle(force = false): Promise<void> {
     if (!this.online || !this.agents) return;
-    const idle = !this.agents.busy;
+    const idle = !this.agents.busy && !this.terminals?.busy;
     if (force || this.idle !== idle) { this.idle = idle; await this.send({ t: "idle", idle }); }
   }
 }
