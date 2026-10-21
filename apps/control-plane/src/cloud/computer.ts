@@ -10,6 +10,9 @@ import { HttpError } from "../authz.js";
 import type { CloudV2Compute } from "./boat.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
+const HEARTBEAT_MS = 60_000;
+/** A build whose server stopped (a deploy, a crash) is failed after this. */
+const INTERRUPTED_AFTER = "5 minutes";
 const repository = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(200);
 export const CloudV2RecipeSchema = z.object({
   /** Boat named snapshot of the Zeros v2 base image. */
@@ -105,10 +108,25 @@ export class CloudV2Computers {
 
   async claim(): Promise<CloudV2Build | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
-      `UPDATE cloud_v2_computer_builds SET state = 'building', started_at = clock_timestamp()
+      `UPDATE cloud_v2_computer_builds SET state = 'building', started_at = clock_timestamp(), heartbeat_at = clock_timestamp()
        WHERE id = (SELECT id FROM cloud_v2_computer_builds WHERE state = 'queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
        RETURNING ${COLUMNS}`));
     return rows[0] ? build(rows[0]) : null;
+  }
+
+  async heartbeat(buildId: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_computer_builds SET heartbeat_at = clock_timestamp() WHERE id = $1 AND state = 'building'`, [buildId]));
+  }
+
+  /** Fails builds whose server stopped beating and returns their builders. */
+  async failInterrupted(): Promise<string[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ builder_sandbox_id: string | null }>(
+      `UPDATE cloud_v2_computer_builds SET state = 'failed', error_code = 'computer_build_interrupted', finished_at = clock_timestamp(),
+         log = right(log || E'\\n[zeros] build interrupted; start it again\\n', ${MAX_LOG_BYTES})
+       WHERE state = 'building' AND coalesce(heartbeat_at, started_at) < clock_timestamp() - interval '${INTERRUPTED_AFTER}'
+       RETURNING builder_sandbox_id`));
+    return rows.flatMap(row => row.builder_sandbox_id ? [row.builder_sandbox_id] : []);
   }
 
   async append(buildId: string, text: string): Promise<void> {
@@ -128,16 +146,15 @@ export class CloudV2Computers {
       [buildId, code.slice(0, 64)]));
   }
 
-  /** Makes the build live and returns the snapshot and builder it replaced. */
-  async activate(buildId: string, snapshotName: string): Promise<{ previousSnapshot: string | null; previousBuilder: string | null }> {
+  /** Makes the build live and returns the snapshot it replaced. */
+  async activate(buildId: string, snapshotName: string): Promise<{ previousSnapshot: string | null }> {
     return withSystemTx(this.pool, async tx => {
       const { rows } = await tx.query<{ org_id: string }>(
         `UPDATE cloud_v2_computer_builds SET state = 'succeeded', snapshot_id = $2, finished_at = clock_timestamp()
          WHERE id = $1 AND state = 'building' RETURNING org_id`, [buildId, snapshotName]);
       if (!rows[0]) throw new Error("build is not running");
-      const previous = (await tx.query<{ snapshot_name: string | null; builder_sandbox_id: string | null }>(
-        `SELECT c.snapshot_name, b.builder_sandbox_id FROM cloud_v2_computers c
-         LEFT JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id WHERE c.org_id = $1 FOR UPDATE OF c`, [rows[0].org_id])).rows[0];
+      const previous = (await tx.query<{ snapshot_name: string | null }>(
+        `SELECT snapshot_name FROM cloud_v2_computers WHERE org_id = $1 FOR UPDATE`, [rows[0].org_id])).rows[0];
       await tx.query(
         `INSERT INTO cloud_v2_computers (org_id, active_build_id, snapshot_name) VALUES ($1, $2, $3)
          ON CONFLICT (org_id) DO UPDATE SET active_build_id = EXCLUDED.active_build_id, snapshot_name = EXCLUDED.snapshot_name,
@@ -145,7 +162,7 @@ export class CloudV2Computers {
       // The replaced build keeps its recipe; only its Boat snapshot goes away.
       if (previous?.snapshot_name) await tx.query(
         `UPDATE cloud_v2_computer_builds SET snapshot_id = NULL WHERE org_id = $1 AND snapshot_id = $2`, [rows[0].org_id, previous.snapshot_name]);
-      return { previousSnapshot: previous?.snapshot_name ?? null, previousBuilder: previous?.builder_sandbox_id ?? null };
+      return { previousSnapshot: previous?.snapshot_name ?? null };
     });
   }
 }
@@ -173,14 +190,20 @@ export class CloudV2ComputerBuilder {
   }) {}
 
   async tick(): Promise<void> {
-    const job = await this.deps.computers.claim();
+    const { computers, compute } = this.deps;
+    for (const builder of await computers.failInterrupted()) await compute.delete(builder).catch(() => {});
+    const job = await computers.claim();
     if (!job) return;
+    const beat = setInterval(() => { void computers.heartbeat(job.id).catch(() => {}); }, HEARTBEAT_MS);
+    beat.unref();
     try {
       await this.run(job);
     } catch (error) {
       const code = (error as { code?: unknown } | null)?.code;
-      await this.deps.computers.append(job.id, `\n[zeros] build failed: ${typeof code === "string" ? code : "error"}\n`);
-      await this.deps.computers.fail(job.id, typeof code === "string" ? code : "computer_build_failed");
+      await computers.append(job.id, `\n[zeros] build failed: ${typeof code === "string" ? code : "error"}\n`);
+      await computers.fail(job.id, typeof code === "string" ? code : "computer_build_failed");
+    } finally {
+      clearInterval(beat);
     }
   }
 
@@ -190,6 +213,18 @@ export class CloudV2ComputerBuilder {
     await log(`[zeros] building Cloud Computer v${job.version} from ${job.recipe.base}\n`);
     const { sandboxId } = await compute.create({ key: job.id, from: job.recipe.base, name: `zeros-${this.deps.channel}-build-${job.id.slice(0, 8)}`, env: {} });
     await computers.update(job.id, { builderSandboxId: sandboxId });
+    // The named snapshot is an independent copy of the disk, so the builder
+    // goes as soon as the build ends, whether it succeeded or not.
+    try {
+      await this.install(job, sandboxId);
+    } finally {
+      await compute.delete(sandboxId).catch(() => {});
+    }
+  }
+
+  private async install(job: CloudV2Build, sandboxId: string): Promise<void> {
+    const { compute, computers } = this.deps;
+    const log = (text: string) => computers.append(job.id, text);
     const pinned: CloudV2Recipe["repositories"] = [];
     for (const entry of job.recipe.repositories) {
       if (!job.createdBy) throw Object.assign(new Error("no creator"), { code: "computer_build_creator_missing" });
@@ -216,12 +251,12 @@ export class CloudV2ComputerBuilder {
       pinned.push({ ...entry, ...(/^[0-9a-f]{40}$/.test(commit) ? { commit } : {}) });
     }
     await computers.update(job.id, { recipe: { ...job.recipe, repositories: pinned } });
-    await compute.stop(sandboxId);
+    // Boat captures a running sandbox's disk; flush it first.
+    await compute.exec(sandboxId, "sync", 120);
     const name = cloudV2SnapshotName(this.deps.channel, job.organizationId, job.version);
     await compute.saveSnapshot(sandboxId, name);
     const replaced = await computers.activate(job.id, name);
     await log(`[zeros] Cloud Computer v${job.version} is live as ${name}\n`);
     if (replaced.previousSnapshot) await compute.deleteSnapshot(replaced.previousSnapshot).catch(() => {});
-    if (replaced.previousBuilder && replaced.previousBuilder !== sandboxId) await compute.delete(replaced.previousBuilder).catch(() => {});
   }
 }

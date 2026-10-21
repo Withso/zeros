@@ -22,6 +22,9 @@ CREATE TABLE cloud_v2_computer_builds (
   created_by uuid REFERENCES users(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   started_at timestamptz,
+  -- Written every minute while a server runs the build; a stale one means the
+  -- server stopped and the build is failed so the organization can retry.
+  heartbeat_at timestamptz,
   finished_at timestamptz,
   UNIQUE (org_id, version)
 );

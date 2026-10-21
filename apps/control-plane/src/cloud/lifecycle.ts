@@ -8,7 +8,9 @@ import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 
 const BATCH = 10;
 const LEASE_MS = 2 * 60_000;
-const HELLO_POLL_MS = 15_000;
+/** The worker's hello moves the workspace to running at once; this poll only
+ * re-delivers a credential to a worker that has not connected. */
+const HELLO_POLL_MS = 30_000;
 const BOOT_DEADLINE_MS = 10 * 60_000;
 const MAX_ATTEMPTS = 8;
 export const CLOUD_V2_IDLE_STOP_MS = 10 * 60_000;
@@ -86,7 +88,7 @@ export class CloudV2Lifecycle {
         const code = errorCode(error);
         this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code})`);
         if (workspace.attempts >= MAX_ATTEMPTS) await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
-        else await this.deps.store.defer(workspace.id, workspace.state, Math.min(5_000 * 2 ** workspace.attempts, 5 * 60_000));
+        else await this.deps.store.defer(workspace.id, workspace.state, Math.min(5_000 * 2 ** workspace.attempts, 5 * 60_000), { failure: true });
       }
     }
   }
@@ -116,10 +118,19 @@ export class CloudV2Lifecycle {
         return;
       }
       case "starting": {
-        if (!workspace.boatSandboxId) throw Object.assign(new Error("missing sandbox"), { code: "sandbox_missing" });
-        // Resume is idempotent; repeating it while the worker boots is harmless.
-        if (workspace.attempts === 1 || workspace.attempts % 4 === 0) await compute.resume(workspace.boatSandboxId);
-        if (workspace.attempts === 1) await this.deliverToken(workspace, workspace.boatSandboxId);
+        if (!workspace.boatSandboxId) {
+          await store.transition(workspace.id, ["starting"], "failed", { errorCode: "sandbox_missing" });
+          return;
+        }
+        const waking = now - Date.parse(workspace.updatedAt);
+        if (waking > BOOT_DEADLINE_MS) {
+          await store.transition(workspace.id, ["starting"], "failed", { errorCode: "worker_boot_timeout" });
+          return;
+        }
+        // Resume is idempotent. The resumed worker reconnects with the
+        // credential it kept; only one that has not gets a fresh credential.
+        await compute.resume(workspace.boatSandboxId);
+        if (waking >= HELLO_POLL_MS) await this.deliverToken(workspace, workspace.boatSandboxId);
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
       }

@@ -52,7 +52,7 @@ describe("cloud v2 lifecycle", () => {
     });
     expect(JSON.stringify(vi.mocked(compute.create).mock.calls)).not.toContain(token);
     expect(vi.mocked(compute.exec).mock.calls[0]![0]).toBe("bx_new1");
-    expect(store.defer).toHaveBeenLastCalledWith(expect.any(String), "creating", 15_000);
+    expect(store.defer).toHaveBeenLastCalledWith(expect.any(String), "creating", 30_000);
   });
 
   it("fails creation without a Cloud Computer and after the boot deadline", async () => {
@@ -69,7 +69,7 @@ describe("cloud v2 lifecycle", () => {
     const failing = setup([workspace("stopping", { boatSandboxId: "bx_abc1", attempts: 2 })]);
     vi.mocked(failing.compute.stop).mockRejectedValueOnce(Object.assign(new Error("boom"), { code: "provider_request_failed" }));
     await failing.lifecycle.tick();
-    expect(failing.store.defer).toHaveBeenCalledWith(expect.any(String), "stopping", 20_000);
+    expect(failing.store.defer).toHaveBeenCalledWith(expect.any(String), "stopping", 20_000, { failure: true });
     const last = setup([workspace("stopping", { boatSandboxId: "bx_abc1", attempts: 8 })]);
     vi.mocked(last.compute.stop).mockRejectedValueOnce(Object.assign(new Error("boom"), { code: "provider_budget_exhausted" }));
     await last.lifecycle.tick();
@@ -91,15 +91,28 @@ describe("cloud v2 lifecycle", () => {
     expect(store.revoke).toHaveBeenCalledWith("7f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", true);
   });
 
-  it("resumes a starting VM and re-delivers the token on the first attempt only", async () => {
-    const first = setup([workspace("starting", { boatSandboxId: "bx_abc1", attempts: 1 })]);
-    await first.lifecycle.tick();
-    expect(first.compute.resume).toHaveBeenCalledWith("bx_abc1");
-    expect(first.compute.exec).toHaveBeenCalledTimes(1);
-    const second = setup([workspace("starting", { boatSandboxId: "bx_abc1", attempts: 2 })]);
-    await second.lifecycle.tick();
-    expect(second.compute.resume).not.toHaveBeenCalled();
-    expect(second.compute.exec).not.toHaveBeenCalled();
+  it("resumes a stopped VM, lets its worker reconnect with its own credential, then re-delivers one", async () => {
+    const fresh = setup([workspace("starting", { boatSandboxId: "bx_abc1", updatedAt: new Date(NOW - 5_000).toISOString() })]);
+    await fresh.lifecycle.tick();
+    expect(fresh.compute.resume).toHaveBeenCalledWith("bx_abc1");
+    expect(fresh.compute.exec).not.toHaveBeenCalled();
+    expect(fresh.store.defer).toHaveBeenLastCalledWith(expect.any(String), "starting", 30_000);
+    // A first delivery that failed while the VM restored is retried, never dropped.
+    const slow = setup([workspace("starting", { boatSandboxId: "bx_abc1", attempts: 3, updatedAt: new Date(NOW - 45_000).toISOString() })]);
+    await slow.lifecycle.tick();
+    expect(slow.compute.resume).toHaveBeenCalledWith("bx_abc1");
+    expect(slow.compute.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a wake that never reconnects, and a start without a VM at once", async () => {
+    const late = setup([workspace("starting", { boatSandboxId: "bx_abc1", updatedAt: new Date(NOW - 11 * 60_000).toISOString() })]);
+    await late.lifecycle.tick();
+    expect(late.store.transition).toHaveBeenCalledWith(expect.any(String), ["starting"], "failed", { errorCode: "worker_boot_timeout" });
+    expect(late.compute.resume).not.toHaveBeenCalled();
+    const lost = setup([workspace("starting")]);
+    await lost.lifecycle.tick();
+    expect(lost.store.transition).toHaveBeenCalledWith(expect.any(String), ["starting"], "failed", { errorCode: "sandbox_missing" });
+    expect(lost.store.defer).not.toHaveBeenCalled();
   });
 
   it("writes the token through base64 without ever putting it in shell syntax", () => {

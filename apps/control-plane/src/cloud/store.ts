@@ -116,6 +116,7 @@ export class CloudV2Store {
          boat_sandbox_id = CASE WHEN $4::boolean THEN $5 ELSE boat_sandbox_id END,
          error_code = CASE WHEN $6::boolean THEN $7 ELSE error_code END,
          worker_token_hash = CASE WHEN $3 = 'deleted' THEN NULL ELSE worker_token_hash END,
+         active_at = CASE WHEN $3 = 'running' THEN clock_timestamp() ELSE active_at END,
          attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
        WHERE id = $1 AND state = ANY($2::text[]) RETURNING ${COLUMNS}`,
       [id, from, to, patch.boatSandboxId !== undefined, patch.boatSandboxId ?? null,
@@ -203,13 +204,15 @@ export class CloudV2Store {
     return rows.map(row => ({ ...workspace(row), attempts: row.attempts }));
   }
 
-  /** Waits for an outside event (the worker's hello) without counting a failure. */
-  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string } = {}): Promise<void> {
+  /** Schedules the next step. Waiting for an outside event (the worker's
+   * hello) clears the failure count; a failure keeps it. `updated_at` stays
+   * the time the state was entered. */
+  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string; failure?: boolean } = {}): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET next_attempt_at = clock_timestamp() + make_interval(secs => $3::double precision / 1000),
-         boat_sandbox_id = coalesce($4, boat_sandbox_id), updated_at = clock_timestamp()
+         boat_sandbox_id = coalesce($4, boat_sandbox_id), attempts = CASE WHEN $5::boolean THEN attempts ELSE 0 END
        WHERE id = $1 AND state = $2`,
-      [id, state, ms, patch.boatSandboxId ?? null],
+      [id, state, ms, patch.boatSandboxId ?? null, patch.failure === true],
     ));
   }
 

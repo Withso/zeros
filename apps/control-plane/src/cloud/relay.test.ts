@@ -128,6 +128,17 @@ describe("cloud v2 relay", () => {
     expect(state).toBe("running");
   });
 
+  it("refuses a worker whose workspace is stopped", async () => {
+    state = "stopped";
+    const ws = new WebSocket(`${url}/v2/cloud/worker`, { headers: { authorization: `Bearer ${workerToken}` } });
+    sockets.push(ws);
+    await opened(ws);
+    const closed = new Promise<number>(resolve => ws.once("close", code => resolve(code)));
+    ws.send(JSON.stringify({ t: "hello", protocol: 1, workerVersion: "0.1.0", capabilities }));
+    expect(await closed).toBe(4001);
+    expect(state).toBe("stopped");
+  });
+
   it("answers history reads from the mirror while the worker is away", async () => {
     vi.mocked(deps.answerOffline).mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", requestId: "r2", result: { chats: [] } });
     const a = await app();

@@ -68,6 +68,22 @@ d("cloud v2 store", () => {
     await expect(store.get(workspace.id, creator)).rejects.toMatchObject({ status: 404 });
   });
 
+  it("starts a fresh idle window each time the workspace runs; waiting keeps the state's start and resets failures", async () => {
+    const workspace = await create();
+    await store.transition(workspace.id, ["creating"], "running");
+    await pool.query(`UPDATE cloud_v2_workspaces SET active_at = now() - interval '1 hour' WHERE id = $1`, [workspace.id]);
+    for (const [from, to] of [["running", "stopping"], ["stopping", "stopped"], ["stopped", "starting"]] as const) await store.transition(workspace.id, [from], to);
+    const entered = (await store.get(workspace.id, creator)).updatedAt;
+    expect((await store.claimPending(10, 0))[0]!.attempts).toBe(1);
+    await store.defer(workspace.id, "starting", 0, { failure: true });
+    expect((await store.claimPending(10, 0))[0]!.attempts).toBe(2);
+    await store.defer(workspace.id, "starting", 0);
+    expect((await store.claimPending(10, 0))[0]!.attempts).toBe(1);
+    expect((await store.get(workspace.id, creator)).updatedAt).toBe(entered);
+    await store.transition(workspace.id, ["starting"], "running");
+    expect(await store.idleSince(new Date(Date.now() - 10 * 60_000))).toEqual([]);
+  });
+
   it("consumes a connect ticket exactly once, and only for its workspace and creator", async () => {
     const workspace = await create();
     const other = await create();

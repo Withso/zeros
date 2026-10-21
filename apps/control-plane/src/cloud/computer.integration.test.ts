@@ -64,6 +64,10 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(await new CloudV2Store(pool).installedRepositories(org)).toEqual(["withso/zeros"]);
     const cloneCommand = vi.mocked(boat.execLong).mock.calls[0]![1];
     expect(cloneCommand).not.toContain("ghs_token");
+    // A named snapshot is an independent copy: the builder goes as soon as it is ready.
+    expect(boat.saveSnapshot).toHaveBeenCalledWith("bx_build1", cloudV2SnapshotName("alpha", org, 1));
+    expect(boat.delete).toHaveBeenCalledWith("bx_build1");
+    expect(boat.stop).not.toHaveBeenCalled();
 
     vi.mocked(boat.create).mockResolvedValueOnce({ sandboxId: "bx_build2" });
     await computers.reactivate(org, admin, overview.builds[0]!.id);
@@ -73,7 +77,7 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview.builds[0]!.recipe).toMatchObject({ rebuiltFrom: 1 });
     expect(overview.builds[0]!.recipe.repositories[0]!.commit).toBe(commit);
     expect(boat.deleteSnapshot).toHaveBeenCalledWith(cloudV2SnapshotName("alpha", org, 1));
-    expect(boat.delete).toHaveBeenCalledWith("bx_build1");
+    expect(boat.delete).toHaveBeenLastCalledWith("bx_build2");
     expect(overview.builds[1]).toMatchObject({ state: "succeeded", snapshotId: null });
   });
 
@@ -89,5 +93,20 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview.builds[0]).toMatchObject({ state: "failed", errorCode: "computer_setup_failed" });
     expect(await computers.log(org, build.id)).toContain("ERR! missing");
     expect(boat.saveSnapshot).not.toHaveBeenCalled();
+    expect(boat.delete).toHaveBeenCalledWith("bx_build1");
+  });
+
+  it("fails a build whose server stopped mid-build, removes its builder and accepts a new build", async () => {
+    const boat = compute();
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", cloneToken: async () => "ghs_token" });
+    const lost = await computers.enqueue(org, admin, recipe);
+    await computers.claim();
+    await computers.update(lost.id, { builderSandboxId: "bx_lost1" });
+    await pool.query(`UPDATE cloud_v2_computer_builds SET heartbeat_at = now() - interval '10 minutes' WHERE id = $1`, [lost.id]);
+    await expect(computers.enqueue(org, admin, recipe)).rejects.toMatchObject({ code: "computer_build_in_progress" });
+    await builder.tick();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ id: lost.id, state: "failed", errorCode: "computer_build_interrupted" });
+    expect(boat.delete).toHaveBeenCalledWith("bx_lost1");
+    expect((await computers.enqueue(org, admin, recipe)).version).toBe(2);
   });
 });

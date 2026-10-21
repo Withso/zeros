@@ -116,7 +116,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   });
 
   for (const [action, from, to] of [
-    ["start", ["stopped"], "starting"],
+    // A failed wake keeps its VM and checkout, so it can be started again.
+    ["start", ["stopped", "failed"], "starting"],
     ["stop", ["running", "starting"], "stopping"],
   ] as const) {
     app.post(`/v1/cloud-v2/workspaces/:id/${action}`, async c => {

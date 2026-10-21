@@ -12,6 +12,8 @@ export type CloudV2CommandResult = { exitCode: number; stdout: string; timedOut:
 
 /** Boat's command endpoint accepts at most about ten minutes per command. */
 export const BOAT_MAX_COMMAND_SECONDS = 600;
+const SNAPSHOT_SAVE_MS = 30 * 60_000;
+const NamedSnapshot = z.object({ snapshot: z.object({ status: z.string() }).passthrough() }).passthrough();
 
 export interface CloudV2Compute {
   /** Idempotent per key: a retry after a lost reply returns the same sandbox. */
@@ -23,7 +25,7 @@ export interface CloudV2Compute {
   exec(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
   /** Runs past the per-command limit: starts a detached job, then polls it. */
   execLong(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
-  /** Saves a stopped sandbox's disk under a name; a later name replaces it. */
+  /** Saves the sandbox's disk under a name and returns once it can deploy. */
   saveSnapshot(sandboxId: string, name: string): Promise<void>;
   deleteSnapshot(name: string): Promise<void>;
 }
@@ -41,7 +43,11 @@ function notFound(error: unknown): boolean {
 }
 
 export class BoatCloudV2Compute implements CloudV2Compute {
-  constructor(private readonly client: Pick<BoatApiClient, "request">, private readonly machineType = "default") {}
+  constructor(
+    private readonly client: Pick<BoatApiClient, "request">,
+    private readonly machineType = "default",
+    private readonly sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
+  ) {}
 
   async create(input: { key: string; from: string; name: string; env: Record<string, string> }) {
     if (!SNAPSHOT_NAME.test(input.from)) throw new Error("Invalid Boat snapshot name");
@@ -98,7 +104,7 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     if (started.exitCode !== 0) return started;
     const deadline = Date.now() + timeoutSeconds * 1000;
     for (;;) {
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await this.sleep(5000);
       const poll = await this.exec(sandboxId, `if [ -f ${job}.exit ]; then cat ${job}.exit; else echo running; fi`, 30);
       const state = poll.stdout.trim();
       if (state !== "running") {
@@ -112,9 +118,17 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     }
   }
 
+  /** Boat answers the save at once and finishes it in the background. */
   async saveSnapshot(sandboxId: string, name: string): Promise<void> {
     if (!SNAPSHOT_NAME.test(name)) throw new Error("Invalid Boat snapshot name");
-    await this.client.request("/named-snapshots", { method: "POST", body: { sandboxId: this.id(sandboxId), name }, timeoutMs: 600_000 });
+    await this.client.request("/named-snapshots", { method: "POST", body: { sandboxId: this.id(sandboxId), name } });
+    for (const deadline = Date.now() + SNAPSHOT_SAVE_MS; Date.now() < deadline;) {
+      const { status } = NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot;
+      if (status === "ready") return;
+      if (status === "failed") throw Object.assign(new Error("snapshot save failed"), { code: "computer_snapshot_failed" });
+      await this.sleep(5000);
+    }
+    throw Object.assign(new Error("snapshot save timed out"), { code: "computer_snapshot_timeout" });
   }
 
   async deleteSnapshot(name: string): Promise<void> {

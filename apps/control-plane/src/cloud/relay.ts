@@ -182,7 +182,7 @@ export class CloudV2Relay {
 
   private async workerReady(room: Room, ws: WebSocket): Promise<void> {
     try {
-      const running = await this.deps.store.transition(room.workspace.id, ["creating", "starting", "running", "stopped"], "running");
+      const running = await this.deps.store.transition(room.workspace.id, ["creating", "starting", "running"], "running");
       if (!running) { ws.close(4001, "workspace_stopped"); return; }
       room.workspace = running;
       send(ws, await this.deps.config(running));

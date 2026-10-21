@@ -37,7 +37,7 @@ async function call(method, route, body, headers = {}) {
     headers: { authorization: `Bearer ${boat.apiKey}`, accept: "application/json", "content-type": "application/json",
       ...(boat.billingOrg ? { "x-boat-org": boat.billingOrg } : {}), ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(15 * 60_000),
+    signal: globalThis.AbortSignal.timeout(15 * 60_000),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`Boat ${method} ${route.split("/").slice(0, 3).join("/")} failed: ${response.status} ${data?.error?.code ?? data?.code ?? ""}`);
@@ -142,7 +142,12 @@ async function main() {
   await call("POST", "/named-snapshots", { sandboxId, name });
   for (let attempt = 0; attempt < 200; attempt++) {
     const snapshot = (await call("GET", `/named-snapshots/${name}`)).snapshot;
-    if (snapshot?.status === "ready") { log(`ready: ${name} (builder ${sandboxId} backs it; keep it)`); return; }
+    if (snapshot?.status === "ready") {
+      // A named snapshot is an independent copy; the builder is not needed.
+      await call("DELETE", `/sandboxes/${sandboxId}`, undefined, { "x-ascii-confirm-delete": sandboxId });
+      log(`ready: ${name}`);
+      return;
+    }
     await new Promise(resolve => setTimeout(resolve, 5000));
   }
   throw new Error("The named snapshot did not become ready");
