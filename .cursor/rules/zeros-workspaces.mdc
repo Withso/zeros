@@ -47,7 +47,9 @@ Zeros runs the same product against two runtimes. Handle both on every change.
 4. **Cloud realities.**
    - A cloud workspace can be creating, starting, running, stopping, stopped,
      failed, deleting or deleted. Render states through the workbench status
-     standard (docs/design-system.md).
+     standard (docs/design-system.md). Archive is a separate `archivedAt` flag:
+     stopped or failed workspaces with it display as archived. Restore starts
+     the VM and clears the flag; idle stop never sets it.
    - Passive history reads use the control-plane mirror and never wake a VM.
      Explicit work wakes it. Running turns and recent terminal input/output
      report activity; an idle shell must not keep the VM awake indefinitely.
@@ -62,7 +64,8 @@ Zeros runs the same product against two runtimes. Handle both on every change.
      boundaries; agents can access other conversations and delivered credentials
      on their VM.
    - Access is creator-only and requires current organization membership;
-     enforce it on the server. Organization admins manage Cloud Computer builds.
+     enforce it on the server. Each organization has one Cloud Computer;
+     organization admins manage its recipe, builds and active snapshot.
      Several devices belonging to the creator may attach and must converge.
    - Create and wake install the control plane's SHA-pinned runtime under
      `/opt/zeros/runtime/<sha256>`, reached through `/opt/zeros/worker`.

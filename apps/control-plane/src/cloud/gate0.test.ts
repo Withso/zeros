@@ -8,7 +8,7 @@ import { runCloudV2Gate0 } from "./gate0.js";
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
-async function fixture(failAgent?: string) {
+async function fixture(failAgent?: string, protocolVersion = 21) {
   const id = randomUUID(), organizationId = randomUUID();
   const repository = "example/project", root = `/home/user/${repository}`, branch = "zeros/gate0";
   const calls: { method: string; path: string; body: any }[] = [];
@@ -57,7 +57,7 @@ async function fixture(failAgent?: string) {
   });
   wss.on("connection", ws => {
     const send = (frame: Record<string, unknown>) => ws.send(JSON.stringify({ id: randomUUID(), source: "engine", timestamp: Date.now(), ...frame }));
-    send({ type: "ENGINE_READY", protocolVersion: 1 });
+    send({ type: "ENGINE_READY", protocolVersion, minProtocolVersion: 2 });
     ws.on("message", raw => {
       const frame = JSON.parse(String(raw)); frames.push(frame);
       const reply = (type: string, fields: object = {}) => send({ type, requestId: frame.id, ...fields });
@@ -119,8 +119,8 @@ async function fixture(failAgent?: string) {
 }
 
 describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
-  it("uses ticket protocols, checks all three turns and native file/git/PTY frames, then stops, reads history, wakes and deletes one workspace", async () => {
-    const f = await fixture();
+  it.each([20, 21])("uses protocol %s, checks all three turns and native file/git/PTY frames, then stops, reads history, wakes and deletes one workspace", async protocolVersion => {
+    const f = await fixture(undefined, protocolVersion);
     await expect(runCloudV2Gate0(f.options)).resolves.toMatchObject({ agents: ["codex", "claude", "cursor"], deleted: true });
     expect(f.calls.filter(c => c.method === "POST" && c.path === "/v1/cloud-v2/workspaces")).toHaveLength(1);
     expect(f.calls.find(c => c.path === "/v1/cloud-v2/workspaces")?.body).not.toHaveProperty("baseBranch");
@@ -128,6 +128,9 @@ describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
     expect(f.calls.filter(c => c.path.endsWith("/start"))).toHaveLength(1);
     expect(f.calls.filter(c => c.method === "DELETE")).toHaveLength(1);
     expect(f.connections()).toBe(2);
+    const handshakes = f.frames.filter(frame => frame.type === "CONNECTED");
+    expect(handshakes).toHaveLength(2);
+    for (const frame of handshakes) expect(frame).toMatchObject({ source: "browser", protocolVersion, capabilities: [] });
     expect(f.frames.filter(f => f.type === "AGENT_PROMPT").map(f => f.agentId)).toEqual(["codex", "claude", "cursor"]);
     expect(f.frames.filter(f => f.type === "WORKSPACE_REQUEST").map(f => f.op)).toEqual(expect.arrayContaining(["file.write", "file.read", "git.status", "git.stage", "git.diff", "git.unstage"]));
     expect(f.calls.some(c => c.path.includes("/builds"))).toBe(false);

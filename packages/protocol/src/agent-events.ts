@@ -1117,9 +1117,7 @@ export interface SessionInfo {
 }
 
 export interface NewSessionResponse {
-  /** Last confirmed qualification for a cloud conversation attachment. */
-  nativeCapabilities?: import("./cloud-agent-execution").CloudNativeCapabilities;
-  /** Exact live task snapshot when restoring a cloud attachment's metadata. */
+  /** Exact live task snapshot when attaching to an existing execution. */
   backgroundTasks?: BackgroundTasksUpdate;
   /** Canonical Zeros-owned live route, never persisted as provider identity. */
   executionId: ExecutionId;
@@ -1137,7 +1135,6 @@ export interface NewSessionResponse {
 }
 
 export interface LoadSessionResponse {
-  nativeCapabilities?: import("./cloud-agent-execution").CloudNativeCapabilities;
   executionId?: ExecutionId;
   providerBinding?: ProviderBinding;
   providerMetadata?: ProviderMetadata;

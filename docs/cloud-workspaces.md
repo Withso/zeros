@@ -37,7 +37,7 @@ The control plane delivers the worker credential to
 on every connection attempt. Checkout and provider configuration arrive over
 the authenticated relay after `hello`.
 
-Each organization's Cloud Computer is a recipe and an active named snapshot.
+Each organization has one Cloud Computer: a recipe and an active named snapshot.
 A build starts from Boat's stock image, installs the runtime, clones the
 selected repositories, runs their setup scripts and records the cloned
 branches and commits. A successful build becomes the active snapshot, and
@@ -73,9 +73,10 @@ retains the VM disk; Delete removes the VM and revokes its access. Account
 and organization deletion also enqueue their workspaces for cleanup.
 
 Archive sets `archivedAt` and requests the same stop lifecycle. The UI treats
-a stopped or failed workspace with that flag as archived; idle stop leaves it unset.
-Start restores the workspace by clearing the flag, as does a connect request
-that wakes a stopped workspace. Archive is refused during creation or deletion.
+a stopped or failed workspace with that flag as archived; idle stop leaves it
+unset. Start restores the workspace by clearing the flag, as does a connect
+request that wakes a stopped workspace. Archive is refused during creation or
+deletion.
 
 ## Configuration
 

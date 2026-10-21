@@ -64,6 +64,9 @@ boundary; session directories and child environment allowlists do not isolate
 agents from other sessions or credentials delivered to that VM. Claude and
 Cursor receive their selected credentials; Codex uses the control-plane proxy.
 Access is limited to the creator while they remain an organization member.
+Each organization has one Cloud Computer recipe and active snapshot. On
+create and wake, the runtime is fetched at boot and verified against its
+SHA-256 pin before the worker starts.
 Cloud supports chat, files, Git and terminals; Browser, Design and simulators
 are unavailable. Local Personal and organization-local provider tools,
 permissions and Host lifecycle stay unchanged. See
