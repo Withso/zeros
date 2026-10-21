@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "./test-database.js";
 import { withSystemTx } from "./db.js";
 import { manageCloudInitialDeleteCapture as manage } from "./manage-cloud-initial-delete-capture.js";
 import { seedInitialDeleteCapture } from "./cloud-workspaces/initial-delete-capture-test-fixtures.js";
+import { DatabaseCloudWorkspaceBlobService, MemoryCloudWorkspaceObjectStore } from "./cloud-workspaces/object-store.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("initial Delete capture operator", () => {
@@ -92,5 +93,49 @@ suite("initial Delete capture operator", () => {
     })).rejects.toMatchObject({ code: "23514" });
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_initial_delete_captures")).rows[0].n).toBe(0);
     expect((await pool.query("SELECT count(*)::int AS n FROM workspace_checkpoint_requests")).rows[0].n).toBe(0);
+  });
+
+  // Live baaf9349 shape: after the Delete was accepted, the now-ready engine
+  // wrote one ordinary periodic checkpoint before any repair could run.
+  async function checkpoint(f: Awaited<ReturnType<typeof seedInitialDeleteCapture>>, reason: string, createdAt?: string) {
+    const objects = new DatabaseCloudWorkspaceBlobService({ pool, objectStore: new MemoryCloudWorkspaceObjectStore(),
+      encryptionKeyV1: randomBytes(32).toString("base64url"), workosEnabled: false });
+    const blob = await objects.put({ ...f.scope, bytes: Buffer.from(`synthetic ${reason} checkpoint`) });
+    await pool.query(`INSERT INTO workspace_content_heads(workspace_id,org_id,current_revision,durable_revision)
+      VALUES($1,$2,1,1) ON CONFLICT DO NOTHING`, [f.workspaceId, f.organizationId]);
+    await pool.query(`INSERT INTO workspace_content_revisions(workspace_id,org_id,revision,parent_revision,
+      authority_epoch,generation,engine_instance_id,idempotency_key,request_sha256,changed_entry_count)
+      VALUES($1,$2,1,0,1,1,$3,'periodic-content',decode(repeat('a',64),'hex'),1) ON CONFLICT DO NOTHING`,
+    [f.workspaceId, f.organizationId, f.engineInstanceId]);
+    await pool.query(`INSERT INTO workspace_checkpoints(id,workspace_id,org_id,idempotency_key,request_sha256,
+      content_revision,record_revision,authority_epoch,generation,reason,manifest_blob_id,inclusion_policy,
+      file_count,total_bytes,state,integrity_sha256,durable_at,created_at)
+      VALUES($1,$2,$3,$4,decode(repeat('c',64),'hex'),1,0,1,1,$5,$6,'{}',0,0,'durable',decode(repeat('c',64),'hex'),now(),coalesce($7::timestamptz,now()))`,
+    [randomUUID(), f.workspaceId, f.organizationId, `periodic-${randomUUID()}`, reason, blob.id, createdAt ?? null]);
+  }
+
+  it("captures after an ordinary periodic checkpoint written by the same ready engine", async () => {
+    const f = await seedInitialDeleteCapture(pool);
+    await checkpoint(f, "periodic");
+    const plan = await manage(pool, f.request, options());
+    expect(plan.state).toBe("planned");
+    const accepted = await manage(pool, f.request, { ...options(), execute: true, approval: plan.approval });
+    expect(accepted).toMatchObject({ state: "capture_queued", deleteIntentId: f.deleteId, captureRequestId: expect.any(String) });
+    expect((await pool.query("SELECT reason,state FROM workspace_checkpoint_requests WHERE id=$1", [accepted.captureRequestId])).rows)
+      .toEqual([{ reason: "before_delete", state: "queued" }]);
+    expect((await withSystemTx(pool, tx => tx.query("SELECT cloud_final_save_proven($1) AS proven", [f.deleteId]))).rows).toEqual([{ proven: false }]);
+  });
+
+  it.each(["manual", "before_stop", "before_delete"])("still refuses an existing %s checkpoint", async reason => {
+    const f = await seedInitialDeleteCapture(pool);
+    await checkpoint(f, reason);
+    await expect(manage(pool, f.request, options())).rejects.toMatchObject({ code: "initial_delete_source_unavailable" });
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_initial_delete_captures")).rows[0].n).toBe(0);
+  });
+
+  it("still refuses a periodic checkpoint older than the engine registration", async () => {
+    const f = await seedInitialDeleteCapture(pool);
+    await checkpoint(f, "periodic", "2000-01-01T00:00:00Z");
+    await expect(manage(pool, f.request, options())).rejects.toMatchObject({ code: "initial_delete_source_unavailable" });
   });
 });
