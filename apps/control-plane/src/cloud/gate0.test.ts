@@ -65,7 +65,9 @@ async function fixture(failAgent?: string) {
         const p = frame.params;
         const result = (() => {
           switch (frame.op) {
-            case "workspace.list": return { workspaces: [{ ...workspace(), path: root }] };
+            // Native Local/worker row, not the HTTP workspace document.
+            case "workspace.list": return { workspaces: [{ id, path: root, repoRoot: root, repoSlug: repository,
+              branch, baseBranch: "master", status: "in-progress", kind: "code", placement: "cloud", organizationId }] };
             case "file.write": files.set(p.path, p.content); return { kind: "success" };
             case "file.read": return { kind: "text", content: files.get(p.path) };
             case "git.status": return { untracked: staged ? [] : [...files.keys()].map(path => path.slice(root.length + 1)) };
