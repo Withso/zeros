@@ -21,3 +21,12 @@
   needed `PROTOCOL_VERSION` 21, with the minimum still 2. The worker bundles the
   protocol, so its runtime SHA-256 changed. Publish the runtime and set the Dev
   `CLOUD_V2_RUNTIME_SHA256` before gate0 (`playbooks/integrate-pr.md`).
+- **A consumer scan needs barrel exports and field readers.** Direct
+  module-path imports missed `CloudAgentConnectionHealthSchema` imported via
+  the `@zeros/protocol` barrel. They also missed renderer reads of core fields
+  such as `session.boundary?.browser`. Search for exported symbols and field
+  names, then let a full typecheck confirm.
+- **A shared `node_modules` can typecheck the wrong package.** A worktree whose
+  `@zeros/*` links point into another checkout resolves that checkout's
+  protocol, so its typecheck passes against the other checkout's code. Link
+  `@zeros/*` to the worktree's own packages before trusting the run.

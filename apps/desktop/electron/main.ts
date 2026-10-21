@@ -14,7 +14,6 @@ if (LOCAL_DEVELOPMENT_BUILD_ERROR) {
 }
 
 import { hydrateShellPath } from "./shell-path";
-import { desktopUserPresence } from "./desktop-user-presence";
 import { rendererProcessOwners } from "./renderer-process-owners";
 import { startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
@@ -1879,12 +1878,6 @@ app.whenReady().then(async () => {
     setCommand(name, handler);
   }
   let startAuthSecurityMonitor = () => {};
-  const userPresence = desktopUserPresence(powerMonitor, emitEvent);
-  setCommand("app_user_presence", (_args, event) => {
-    trustedBrowserWindow(event);
-    return { available: userPresence.available() };
-  });
-  app.once("will-quit", userPresence.close);
   if (!IS_LOCAL_DEVELOPMENT) {
     const authSecurityMonitor = new WorkOSDesktopSecurityMonitor({
       baseUrl: controlPlaneBaseUrl(),

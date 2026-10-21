@@ -37,7 +37,6 @@ const ALLOWED_COMMANDS = new Set<string>([
   "agent_context_files",
   "app_info",
   "local_navigation_ready",
-  "app_user_presence",
   "cursor_subscription",
   "provider_subscription",
   "cloud_provider_auth",
