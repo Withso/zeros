@@ -32,7 +32,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.296: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.37: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (666 resolved package/version records)
+PACKAGE INVENTORY (667 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.296
@@ -2545,9 +2545,16 @@ hastscript@9.0.1
   Source: https://github.com/syntax-tree/hastscript
   License documents: dd1081884a92
 
-hono@4.13.7
+hono@4.13.11
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
+  Author: Yusuke Wada <yusuke@kamawada.com> (https://github.com/yusukebe)
+  Source: https://github.com/honojs/hono
+  License documents: a6ab98e5c77b
+
+hono@4.13.13
+  License: MIT
+  Surfaces: control plane
   Author: Yusuke Wada <yusuke@kamawada.com> (https://github.com/yusukebe)
   Source: https://github.com/honojs/hono
   License documents: a6ab98e5c77b
@@ -16018,8 +16025,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT a6ab98e5c77b
 SHA-256: a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115
-Applies to: hono@4.13.7
-Source labels: hono@4.13.7 — LICENSE
+Applies to: hono@4.13.11, hono@4.13.13
+Source labels: hono@4.13.11 — LICENSE; hono@4.13.13 — LICENSE
 ================================================================================
 
 MIT License
