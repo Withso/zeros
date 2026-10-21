@@ -3,6 +3,7 @@
 // cloud v2 only opens the selected, current, unrevoked version.
 import type pg from "pg";
 import { withSystemTx } from "../db.js";
+import { DatabaseCodexAuthRenewal, type CodexCredentialVersion } from "../cloud-workspaces/codex-auth-renewal.js";
 import {
   openCloudAgentCredential,
   type CloudAgentCredentialKeys,
@@ -46,5 +47,25 @@ export function createCloudV2AgentLogins(pool: pg.Pool, keys: CloudAgentCredenti
       { credentialId: row.id, ownerUserId: row.owner_user_id, kind: row.kind, version: row.current_version, keyVersion: row.key_version },
       keys.keys,
     );
+  };
+}
+
+/** Renews the ChatGPT login the creator selected, with the vault's fenced,
+ * single-use refresh, so concurrent requests never spend a refresh token twice. */
+export function createCloudV2CodexRefresh(pool: pg.Pool, keys: CloudAgentCredentialKeys, renewal = new DatabaseCodexAuthRenewal(pool, keys)) {
+  return async (ownerUserId: string, organizationId: string): Promise<void> => {
+    const reservation = await withSystemTx(pool, async tx => {
+      const credential = (await tx.query<CodexCredentialVersion>(
+        `SELECT credential.id, credential.owner_user_id, credential.revision, credential.current_version
+         FROM cloud_agent_organization_connections connection
+         JOIN cloud_agent_credentials credential ON credential.id = connection.credential_id
+           AND credential.owner_user_id = connection.owner_user_id AND credential.revoked_at IS NULL AND credential.kind = 'codex-chatgpt'
+         WHERE connection.org_id = $1 AND connection.owner_user_id = $2 AND connection.provider = 'codex'
+         FOR UPDATE OF credential`,
+        [organizationId, ownerUserId],
+      )).rows[0];
+      return credential ? renewal.reserve(tx, credential) : null;
+    });
+    if (reservation) await renewal.complete(reservation);
   };
 }

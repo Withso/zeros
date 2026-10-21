@@ -8,7 +8,7 @@ import { HttpError } from "../authz.js";
 import { BoatApiClient } from "../cloud-workspaces/boat-client.js";
 import { cloudAgentCredentialKeys } from "../cloud-workspaces/agent-credentials.js";
 import type { CloudAgentCredentialMaterial } from "../cloud-workspaces/agent-credential-envelope.js";
-import { createCloudV2AgentLogins, type CloudV2AgentLogins } from "./agent-logins.js";
+import { createCloudV2AgentLogins, createCloudV2CodexRefresh, type CloudV2AgentLogins } from "./agent-logins.js";
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
@@ -99,7 +99,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     installedRepositories: organizationId => store.installedRepositories(organizationId),
     bridgeBaseUrl: v2.realtimeUrl,
   };
-  const proxy: CloudV2ProxyDeps = { store, logins };
+  const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const relay = roles.relay ? new CloudV2Relay({
     store,
     config: workerConfig,

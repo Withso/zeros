@@ -9,6 +9,8 @@ import { isCloudV2Token } from "./tokens.js";
 
 export const CLOUD_V2_PROXY_PREFIX = "/v2/cloud/proxy";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
+/** Renew a ChatGPT login this long before it expires. */
+const RENEW_BEFORE_MS = 5 * 60_000;
 /** Hop-by-hop and identity headers that must not cross the proxy. */
 const DROP = new Set([
   "authorization", "x-api-key", "host", "connection", "keep-alive", "content-length", "transfer-encoding", "te", "trailer",
@@ -18,6 +20,8 @@ const DROP = new Set([
 export type CloudV2ProxyDeps = {
   store: Pick<CloudV2Store, "verifyProxyToken">;
   logins: CloudV2AgentLogins;
+  /** Renews the creator's ChatGPT login through the vault's single-use refresh. */
+  refreshCodex?: (ownerUserId: string, organizationId: string) => Promise<void>;
   fetch?: typeof fetch;
   now?: () => number;
 };
@@ -60,7 +64,13 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     const headers = forwardHeaders(c.req.raw.headers);
     let target: string;
 
-    const login = await deps.logins(workspace.creatorUserId, workspace.organizationId, "codex");
+    const expiring = (value: Awaited<ReturnType<CloudV2AgentLogins>>) =>
+      value?.kind === "codex-chatgpt" && value.expiresAt * 1000 <= (deps.now?.() ?? Date.now()) + RENEW_BEFORE_MS;
+    let login = await deps.logins(workspace.creatorUserId, workspace.organizationId, "codex");
+    if (expiring(login) && deps.refreshCodex) {
+      await deps.refreshCodex(workspace.creatorUserId, workspace.organizationId).catch(() => {});
+      login = await deps.logins(workspace.creatorUserId, workspace.organizationId, "codex");
+    }
     if (login?.kind === "codex-chatgpt") {
       if (login.expiresAt * 1000 <= (deps.now?.() ?? Date.now()) + 30_000)
         return failure(401, "agent_login_expired", "Reconnect Codex in Settings → Agents");
