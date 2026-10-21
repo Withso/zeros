@@ -325,6 +325,11 @@
       "lanes": ["cloud-runtime"]
     },
     {
+      "id": "cloud-v2-worker",
+      "include": ["apps/cloud-worker/**"],
+      "lanes": ["cloud-runtime"]
+    },
+    {
       "id": "cloud-clients-tested-by-backend",
       "include": ["apps/desktop/**"],
       "lanes": ["control-plane", "control-plane-db"],
@@ -573,6 +578,20 @@
         "pnpm --dir apps/control-plane exec vitest run --glob 'src/load-sim/*.scale.test.ts'"
       ],
       "runs_elsewhere": ".github/workflows/ci.yml:cloud-scale (advisory until the owner requires it)"
+    },
+    "cloud-v2-worker": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["cloud-runtime", "protocol"]
+      },
+      "execution_group": "cloud-v2-worker",
+      "commands": [
+        "pnpm --filter @zeros/cloud-worker run typecheck",
+        "pnpm --filter @zeros/cloud-worker run lint",
+        "pnpm --filter @zeros/cloud-worker run test"
+      ],
+      "runs_elsewhere": ".github/workflows/ci.yml:cloud-v2-worker (Node 24, the worker's runtime)"
     },
     "cloud-client-sdk": {
       "when": {

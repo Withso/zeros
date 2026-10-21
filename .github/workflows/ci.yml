@@ -1286,6 +1286,34 @@ jobs:
           fi
           pnpm --dir packages/cloud-client test
 
+  cloud-v2-worker:
+    name: cloud v2 worker
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.result == 'success' && fromJSON(needs.scope.outputs.ledger).lanes['cloud-runtime'] == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Setup Node
+        # The worker runs on Node 24 on its VM.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck, lint and test the worker
+        run: |
+          set -euo pipefail
+          pnpm --filter @zeros/cloud-worker run typecheck
+          pnpm --filter @zeros/cloud-worker run lint
+          pnpm --filter @zeros/cloud-worker run test
+
   secret-scan:
     name: secret scan (PR commit range)
     needs: scope
@@ -1423,6 +1451,7 @@ jobs:
       - cloud-chaos
       - cloud-scale
       - cloud-client
+      - cloud-v2-worker
     runs-on: ubuntu-latest
     steps:
       - name: Setup Node
@@ -1532,6 +1561,7 @@ jobs:
             "cloud-chaos": "advisory",
             "cloud-scale": "advisory",
             "cloud-client": "advisory",
+            "cloud-v2-worker": ledger.lanes["cloud-runtime"] === true,
           };
           const jobIds = Object.keys(selected);
           if (!sameKeys(needs, jobIds)) fail("The workflow job inventory is incomplete or unknown.");
