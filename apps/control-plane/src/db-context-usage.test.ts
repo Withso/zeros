@@ -62,6 +62,8 @@ const ALLOWED: Record<string, string> = {
     "Owner-only CLI; sets app.system in its own transaction and requires the migration owner for one exact complete-loss Delete receipt.",
   "src/manage-cloud-owner-existing-delete.ts#manageCloudOwnerExistingDelete":
     "Owner-only CLI; sets app.system before table access and retains the migration owner for loss on one exact existing Delete.",
+  "src/manage-cloud-initial-delete-capture.ts#manageCloudInitialDeleteCapture":
+    "Owner-only CLI; sets app.system before table access and retains the migration owner for the first live capture on one exact accepted Delete.",
   "src/manage-cloud-rollout-flag.ts#manageCloudRolloutFlag":
     "Operator CLI on the migration-owner pool; sets app.system in its own transaction.",
   "src/manage-cloud-workspace-deletion.ts#manageCloudWorkspaceDeletion":
