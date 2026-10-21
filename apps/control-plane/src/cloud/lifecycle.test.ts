@@ -10,7 +10,7 @@ const runtime = `/opt/zeros/runtime/${"b".repeat(64)}`;
 function workspace(state: CloudV2Workspace["state"], extra: Partial<CloudV2Workspace> = {}): CloudV2Workspace & { attempts: number } {
   return {
     id: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", organizationId: "org", creatorUserId: "u", name: "w", repository: "o/r",
-    branch: "zeros/w", baseBranch: "main", state, boatSandboxId: null, computerBuildId: null, errorCode: null, activeAt: null,
+    branch: "zeros/w", baseBranch: "main", state, boatSandboxId: null, computerBuildId: null, errorCode: null, activeAt: null, archivedAt: null,
     createdAt: new Date(NOW - 60_000).toISOString(), updatedAt: new Date(NOW).toISOString(), attempts: 1, ...extra,
   };
 }

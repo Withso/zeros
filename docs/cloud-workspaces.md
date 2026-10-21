@@ -72,6 +72,11 @@ the VM. Explicit work or Start wakes it and reconnects the worker. Stop
 retains the VM disk; Delete removes the VM and revokes its access. Account
 and organization deletion also enqueue their workspaces for cleanup.
 
+Archive sets `archivedAt` and requests the same stop lifecycle. The UI treats
+a stopped or failed workspace with that flag as archived; idle stop leaves it unset.
+Start restores the workspace by clearing the flag, as does a connect request
+that wakes a stopped workspace. Archive is refused during creation or deletion.
+
 ## Configuration
 
 The control plane reads these names in

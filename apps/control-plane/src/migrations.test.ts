@@ -1226,9 +1226,14 @@ d("migration ladder", { timeout: 30_000 }, () => {
     await pool.query("INSERT INTO cloud_v2_chats(workspace_id,chat_id,row) VALUES($1,'chat',$2)",[workspaceId,{id:"chat"}]);
     await pool.query("INSERT INTO cloud_v2_messages(workspace_id,chat_id,msg_id,kind,payload,created_at_ms) VALUES($1,'chat','message','text','retained transcript',1)",[workspaceId]);
     const tables = ["cloud_agent_credentials","cloud_agent_credential_versions","cloud_agent_credential_organizations","cloud_codex_auth_caches","cloud_codex_refresh_fingerprints","github_installations","cloud_v2_workspaces","cloud_v2_chats","cloud_v2_messages"];
-    const snapshot = async () => Promise.all(tables.map(async table=>JSON.stringify((await pool.query(`SELECT * FROM ${table}`)).rows)));
+    const snapshot = async () => Promise.all(tables.map(async table=> {
+      const rows = (await pool.query(`SELECT * FROM ${table}`)).rows;
+      // Later expand migrations may add metadata; compare the retained fields.
+      if (table === "cloud_v2_workspaces") for (const row of rows) delete row.archived_at;
+      return JSON.stringify(rows);
+    }));
     const before = await snapshot();
-    expect(await runMigrations(pool)).toEqual(["0182_retire_legacy_cloud.sql"]);
+    expect(await runMigrations(pool)).toEqual(LADDER.slice(LADDER.indexOf("0182_retire_legacy_cloud.sql")));
     // Compare booleans so failures cannot print synthetic credential material.
     expect(JSON.stringify(await snapshot()) === JSON.stringify(before)).toBe(true);
     const material = (await pool.query("SELECT nonce,ciphertext,auth_tag FROM cloud_agent_credential_versions WHERE credential_id=$1",[credentialId])).rows[0];
@@ -1238,6 +1243,21 @@ d("migration ladder", { timeout: 30_000 }, () => {
     expect((await withUserTx(pool,owner.userId,tx=>tx.query("SELECT 1 FROM cloud_agent_credential_versions"))).rowCount).toBe(0);
     expect((await withSystemTx(pool,tx=>tx.query("SELECT 1 FROM cloud_agent_credential_versions"))).rowCount).toBe(1);
     await withSystemTx(pool,tx=>tx.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2",[owner.organizationId,owner.userId]));
+  });
+
+  it("adds a nullable archive flag without changing an existing v2 workspace", async () => {
+    await applyThrough(LADDER.indexOf("0183_cloud_v2_workspace_archive.sql"));
+    const owner = await seedCredentialOwner(pool), id = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state)
+      VALUES($1,$2,$3,'Existing','o/r','topic','main','stopped')`, [id, owner.organizationId, owner.userId]);
+    const before = (await pool.query(`SELECT * FROM cloud_v2_workspaces WHERE id = $1`, [id])).rows[0];
+    expect(await runMigrations(pool)).toContain("0183_cloud_v2_workspace_archive.sql");
+    const { archived_at: archivedAt, ...after } = (await pool.query(`SELECT * FROM cloud_v2_workspaces WHERE id = $1`, [id])).rows[0];
+    expect(archivedAt).toBeNull();
+    expect(after).toEqual(before);
+    expect((await pool.query(`SELECT data_type, is_nullable FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'cloud_v2_workspaces' AND column_name = 'archived_at'`)).rows)
+      .toEqual([{ data_type: "timestamp with time zone", is_nullable: "YES" }]);
   });
 
   it("applies the NEWEST migration to a database at the previous revision", async () => {
