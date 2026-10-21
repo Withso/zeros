@@ -132,6 +132,27 @@ export class SessionStore {
     return value ? structuredClone(value) : undefined;
   }
 
+  /** Routing reads must not clone the transcript on every prompt or event. */
+  metadata(chatId: string): Pick<SessionData, "chat" | "nativeSessionId" | "paused"> | undefined {
+    const value = this.sessions.get(chatId);
+    return value ? structuredClone({ chat: value.chat, nativeSessionId: value.nativeSessionId, paused: value.paused }) : undefined;
+  }
+
+  history(chatId: string): readonly CloudV2MessageRow[] { return this.sessions.get(chatId)?.rows ?? []; }
+
+  hasQueued(chatId: string): boolean {
+    const value = this.sessions.get(chatId);
+    return !!value?.chat && !value.paused && value.inbox.some((entry) => entry.state === "queued");
+  }
+
+  receipt(chatId: string, requestId: string): InboxEntry | undefined {
+    return structuredClone(this.sessions.get(chatId)?.inbox.find((entry) => entry.requestId === requestId));
+  }
+
+  steerReceipt(chatId: string, executionId: string, attemptId: string): SteerReceipt | undefined {
+    return structuredClone(this.sessions.get(chatId)?.steers.find((entry) => entry.executionId === executionId && entry.attemptId === attemptId));
+  }
+
   list(): { chats: ChatRow[]; chatDeletions: string[] } {
     return structuredClone({
       chats: [...this.sessions.values()].flatMap((value) => value.chat ? [value.chat] : []).sort((a, b) => b.updatedAt - a.updatedAt),

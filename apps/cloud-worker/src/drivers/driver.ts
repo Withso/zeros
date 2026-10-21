@@ -1,13 +1,17 @@
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 
-export interface DriverOpen {
+interface DriverSession {
   sessionId: string;
   cwd: string;
   model?: string;
   nativeSessionId?: string;
-  proxy: { baseUrl: string; token: string };
 }
+
+export type DriverOpen = DriverSession & (
+  | { proxy: { baseUrl: string; token: string }; apiKey?: never }
+  | { apiKey: string; proxy?: never }
+);
 
 /** One driver owns one native conversation. Relay/inbox/history are worker-owned. */
 export interface Driver {
