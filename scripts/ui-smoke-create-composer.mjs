@@ -1,6 +1,6 @@
 import { expect } from "@playwright/test";
 
-const unbuiltComputer = () => ({ activeBuildId: null, snapshotName: null, builds: [] });
+const unbuiltComputer = () => ({ repositories: null });
 const workspaceFixture = (overrides = {}) => ({
   id: "88888888-8888-4888-8888-888888888888",
   organizationId: "11111111-1111-4111-8111-111111111111",
@@ -46,7 +46,7 @@ async function expectContextControlsInOneRow(page) {
 export async function runCreateComposerSmoke({ page, check, harnessBase }) {
   // Organization Create depends on its Cloud Computer, not a Local checkout.
   // Mock the read at the transport boundary; production validates its schema.
-  await page.route(/^https:\/\/api\.example\.test\/v1\/cloud-v2\/organizations\/[^/]+\/computer(?:\?|$)/, route => {
+  await page.route(/^https:\/\/api\.example\.test\/v1\/cloud-v2\/organizations\/[^/]+\/computer\/repositories(?:\?|$)/, route => {
     expect(route.request().method()).toBe("GET");
     return route.fulfill({ json: unbuiltComputer() });
   });
@@ -317,13 +317,6 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
 /** A delayed real create response must not retarget the newly selected owner. */
 export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
   const organizationId = "11111111-1111-4111-8111-111111111111";
-  const active = {
-    id: "77777777-7777-4777-8777-777777777777", organizationId, version: 1,
-    recipe: { repositories: [{ repository: "example/project", ref: "main" }] },
-    state: "succeeded", snapshotId: "fixture-snapshot", errorCode: null,
-    createdAt: "2026-10-21T10:00:00Z", startedAt: "2026-10-21T10:00:00Z",
-    finishedAt: "2026-10-21T10:00:00Z",
-  };
   const existing = workspaceFixture();
   const created = workspaceFixture({ id: "44444444-4444-4444-8444-444444444444",
     name: "Created in Organization 1", state: "running" });
@@ -333,8 +326,8 @@ export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
   await page.route("https://api.example.test/**", async route => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (pathname === `/v1/cloud-v2/organizations/${organizationId}/computer` && request.method() === "GET") {
-      await route.fulfill({ json: { activeBuildId: active.id, snapshotName: "fixture-computer", builds: [active] } });
+    if (pathname === `/v1/cloud-v2/organizations/${organizationId}/computer/repositories` && request.method() === "GET") {
+      await route.fulfill({ json: { repositories: [{ repository: "example/project", defaultBranch: "master" }] } });
     } else if (pathname === "/v1/cloud-v2/workspaces" && request.method() === "GET") {
       const owner = new URL(request.url()).searchParams.get("organizationId");
       await route.fulfill({ json: { workspaces: owner === organizationId ? [existing] : [] } });
@@ -370,12 +363,13 @@ export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
     const location = page.getByRole("button", { name: "Workspace location", exact: true });
     await expect(location).toHaveCount(0);
     await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
+    await expect(page.locator("[data-create-source-trigger]")).toHaveText("master");
     await editor.fill("Preserve this prompt while creation finishes");
     await card.getByRole("button", { name: "Create", exact: true }).click();
     await expect.poll(() => creates.length).toBe(1);
     expect(creates[0].pathname).toBe("/v1/cloud-v2/workspaces");
     expect(creates[0].body).toMatchObject({ organizationId, repository: "example/project" });
-    expect(creates[0].body.baseBranch).toEqual(expect.any(String));
+    expect(creates[0].body).not.toHaveProperty("baseBranch");
     expect(creates[0].idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
     await page.evaluate(() => window.setCreateOrganization("personal"));
     releaseCreate();
