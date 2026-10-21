@@ -22,7 +22,7 @@ import { createDesignContextReference, inspectDesignContext } from "./context";
 import { assertDesignCheckoutReadable } from "./checkout-status";
 import { withDesignDirectoryNameLease, withoutDesignDirectoryNameLease } from "./directory-registry";
 import { readDirectoryDesignManifest } from "./metadata";
-import { lintDesignDocument, listDesignFrames, readDesignBaseTheme, readDesignThemeNames, readDesignWebDocumentState } from "./document";
+import { designUnknownThemeMessage, lintDesignDocument, listDesignFrames, readDesignBaseTheme, readDesignThemeNames, readDesignWebDocumentState } from "./document";
 import { readCanvas } from "./document-storage";
 import { prepareFrameRenderSource } from "./render-preparation";
 import { designStyleCheckReport, readDesignStyleSources } from "./style-sources";
@@ -221,7 +221,7 @@ async function startVerificationServer(options: DesignVerificationOptions) {
         // The same themes the canvas Themes control offers for this directory.
         const themes = await readDesignThemeNames(lease.workspacePath);
         if (!themes.includes(theme)) {
-          fail(400, themes.length ? `Unknown theme ${JSON.stringify(theme)}. Choose one of: ${themes.join(", ")}.` : `Unknown theme ${JSON.stringify(theme)}. This Design directory declares no themes.`); return;
+          fail(400, designUnknownThemeMessage(theme, themes)); return;
         }
       }
       // With no theme chosen, frames show the default theme, as on the canvas.

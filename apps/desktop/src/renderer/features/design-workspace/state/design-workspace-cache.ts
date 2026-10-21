@@ -36,6 +36,7 @@ import {
   designSnapshot,
   designUpdateToken,
   designUpdateCanvas,
+  designMoveFrames,
   designUpdateStyles,
   designTransferNode,
   designWriteHtml,
@@ -1740,6 +1741,25 @@ export async function updateDesignFrameGeometryCached(
       result.foundationRevision,
     );
     return result.geometry;
+  });
+}
+
+/** Several canvas frames moved together in one write and one undo step. The
+ * confirmed snapshot is published directly, so release cannot snap back. */
+export async function moveDesignFramesCached(
+  workspaceId: string,
+  moves: readonly {
+    frame: string;
+    from: DesignFrameGeometryWire;
+    to: DesignFrameGeometryWire;
+  }[],
+): Promise<DesignWorkspaceSnapshotWire> {
+  return runLocalDesignMutation(workspaceId, async () => {
+    const result = await designMoveFrames(workspaceId, moves);
+    historyPreview.clear(workspaceId);
+    const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result);
+    settleFoundationMutation(workspaceId, null, snapshot);
+    return snapshot;
   });
 }
 

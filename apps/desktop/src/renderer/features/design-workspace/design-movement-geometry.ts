@@ -13,8 +13,10 @@ import {
 } from "./design-canvas-math";
 import { preserveDesignLayoutPins } from "./design-layout-values";
 import {
+  designRelocationInheritedStyles,
   designRelocationSchema,
   type DesignRelocation,
+  type DesignRuntimeRelocationContext,
 } from "@zeros/protocol/design-relocation";
 
 export const DESIGN_MOVE_ACTIVATION_PIXELS = 3;
@@ -64,10 +66,18 @@ function matrix(value: DesignRuntimeCoordinateSpace | null) {
   return { a, b, c, d, e, f };
 }
 
+/** Place a layer at `origin` under `parent`, carrying the inherited values
+ * it would otherwise lose there. `destination` is the drop parent's measured
+ * relocation context (`sameDocument` when it is in the layer's own frame):
+ * omitted for a new frame that copies the layer's head, null when the parent
+ * was not measured, which carries every value so the layer looks the same
+ * anywhere. */
 export function designNodeRelocation(
   details: DesignRuntimeNodeDetails,
   origin: { x: number; y: number },
   parent: DesignRuntimeCoordinateSpace = [1, 0, 0, 1, 0, 0],
+  destination?: DesignRuntimeRelocationContext | null,
+  sameDocument = false,
 ): DesignRelocation {
   const context = details.relocationContext;
   if (!context || !details.box || !details.borderCoordinateSpace)
@@ -88,7 +98,49 @@ export function designNodeRelocation(
     width: details.box.width,
     height: details.box.height,
     matrix: [local.a, local.b, local.c, local.d, local.e, local.f],
-    inheritedStyles: context.inheritedStyles,
+    inheritedStyles: designRelocationInheritedStyles(context, destination, sameDocument),
+  });
+}
+
+/** A whole body-rooted frame placed at `origin` under `parent`: its content
+ * keeps the frame's size, and its body's inherited appearance travels unless
+ * the drop parent (`destination`, its measured context) already gives the
+ * same value. */
+export function designFrameRelocation(
+  body: DesignRuntimeNodeDetails,
+  size: { width: number; height: number },
+  origin: { x: number; y: number },
+  parent: DesignRuntimeCoordinateSpace = [1, 0, 0, 1, 0, 0],
+  destination?: DesignRuntimeRelocationContext | null,
+): DesignRelocation {
+  const context = body.relocationContext;
+  if (!context)
+    throw new Error("This frame's appearance must be measured before it can move into another frame.");
+  const local = multiplyDesignMatrices(invertDesignMatrix(matrix(parent)), {
+    a: 1, b: 0, c: 0, d: 1, e: origin.x, f: origin.y,
+  });
+  return designRelocationSchema.parse({
+    width: size.width,
+    height: size.height,
+    matrix: [local.a, local.b, local.c, local.d, local.e, local.f],
+    inheritedStyles: designRelocationInheritedStyles(context, destination ?? null),
+  });
+}
+
+/** The saved form of a same-frame relocation. Its drag preview carried every
+ * inherited value (the drop parent is measured only at release); the saved
+ * move keeps only what the measured parent would not give the layer, in the
+ * layer's own document. An unmeasured parent keeps the preview's values. */
+export function designSettledRelocation(
+  relocation: DesignRelocation,
+  details: DesignRuntimeNodeDetails,
+  parent: DesignRuntimeNodeDetails | null | undefined,
+): DesignRelocation {
+  const context = details.relocationContext;
+  if (!context || !parent?.relocationContext) return relocation;
+  return designRelocationSchema.parse({
+    ...relocation,
+    inheritedStyles: designRelocationInheritedStyles(context, parent.relocationContext, true),
   });
 }
 

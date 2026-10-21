@@ -1,5 +1,7 @@
 import { expect } from "@playwright/test";
 import { runDesignSavedEditingSmoke } from "./ui-smoke-design-saved-editing.mjs";
+import { runDesignNestingSmoke } from "./ui-smoke-design-nesting.mjs";
+import { runDesignPicturesSmoke } from "./ui-smoke-design-pictures.mjs";
 
 async function openCanvasFixture(page, query = "layoutGestures") {
   const origin = new URL(page.url()).origin;
@@ -776,6 +778,8 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignNoopGroupResizeSmoke(options);
   await runDesignFrameDirectoryReplacementSmoke(options);
   await runDesignPanDirectoryReplacementSmoke(options);
+  await runDesignNestingSmoke(options);
+  await runDesignPicturesSmoke(options);
 }
 
 export async function runDesignFrameLiveCameraSmoke({ page, check }) {

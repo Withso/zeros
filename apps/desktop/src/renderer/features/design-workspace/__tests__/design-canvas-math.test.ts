@@ -377,6 +377,36 @@ describe("design canvas viewport math", () => {
     expect(withOpenLayers.size).toBe(4);
   });
 
+  it("paints small pictured frames as pictures instead of live documents", () => {
+    const frames = [
+      { file: "pictured.html", x: 0, y: 0, width: 1_440, height: 900 },
+      { file: "unpictured.html", x: 1_600, y: 0, width: 1_440, height: 900 },
+      { file: "selected.html", x: 3_200, y: 0, width: 1_440, height: 900 },
+    ];
+    // Zoomed out: 1440 × 0.1 × 2 = 288 device pixels, inside one overview picture.
+    const zoomedOut = selectLiveDesignFrameFiles({
+      frames,
+      viewport: { width: 1_000, height: 700 },
+      view: { zoom: 0.1, panX: 0, panY: 0 },
+      selectedFrame: "selected.html",
+      maxLive: 12,
+      pictured: new Set(["pictured.html", "selected.html"]),
+      devicePixelRatio: 2,
+    });
+    expect([...zoomedOut].sort()).toEqual(["selected.html", "unpictured.html"]);
+    // Painted larger than an overview picture, the frame is live again.
+    const zoomedIn = selectLiveDesignFrameFiles({
+      frames,
+      viewport: { width: 1_000, height: 700 },
+      view: { zoom: 0.3, panX: 0, panY: 0 },
+      selectedFrame: null,
+      maxLive: 12,
+      pictured: new Set(["pictured.html"]),
+      devicePixelRatio: 2,
+    });
+    expect(zoomedIn.has("pictured.html")).toBe(true);
+  });
+
   it("does not fill unused live slots with distant heavy documents", () => {
     const frames = Array.from({ length: 1000 }, (_, index) => ({
       file: `frame-${index}.html`,

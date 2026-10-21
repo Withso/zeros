@@ -7,7 +7,8 @@
 // speaks to it. Authored design files remain HTML/CSS-only: the script below is
 // app-owned, nonce-gated, and removed from every screenshot clone.
 
-import { DESIGN_RELOCATION_INHERITED_PROPERTIES, type DesignRuntimeRelocationContext } from "./design-relocation";
+import { DESIGN_RELOCATION_INHERITED_PROPERTIES, DESIGN_RELOCATION_MAX_INHERITED_STYLES, type DesignRuntimeRelocationContext } from "./design-relocation";
+import { DESIGN_STILL_TIMELINES_SOURCE } from "./design-capture";
 
 export const DESIGN_RUNTIME_PROTOCOL = "zeros-design-runtime";
 export const DESIGN_RUNTIME_VERSION = 2;
@@ -710,9 +711,11 @@ function isRuntimeChildrenLayout(
 }
 
 export function isDesignRuntimeRelocationContext(value: unknown): value is DesignRuntimeRelocationContext {
-  return isRecord(value) && isRecord(value.inheritedStyles) &&
-    Object.keys(value.inheritedStyles).length <= 64 &&
-    Object.entries(value.inheritedStyles).every(([key, style]) => key.length <= 128 && typeof style === "string" && style.length <= 2048) &&
+  const boundedStyles = (styles: unknown) => isRecord(styles) && Object.keys(styles).length <= 64 &&
+    Object.entries(styles).every(([key, style]) => key.length <= 128 && typeof style === "string" && style.length <= 2048);
+  return isRecord(value) && boundedStyles(value.inheritedStyles) &&
+    (value.baseStyles === undefined || boundedStyles(value.baseStyles)) &&
+    (value.rootStyles === undefined || boundedStyles(value.rootStyles)) &&
     Array.isArray(value.unsupported) && value.unsupported.length <= 8 &&
     value.unsupported.every((reason) => typeof reason === "string" && reason.length <= 256);
 }
@@ -1046,6 +1049,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * selection/style commits; the explicit previewMotion path owns the only
    * animations allowed to run in Motion mode. */
   function suspendAuthoredMotion() {
+    stillAuthoredTimelines();
     if (typeof document.getAnimations !== "function") return;
     var previews = new Set();
     previewAnimationsByOid.forEach(function (animation) {
@@ -1056,6 +1060,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       try { animation.cancel(); } catch (_error) {}
     });
   }
+
+  /** SVG SMIL timelines, marquees and media loop outside the Web Animations
+   * API. They hold their opening state with the capture hosts' definition. */
+  ${DESIGN_STILL_TIMELINES_SOURCE}
 
   /** The same guarantee scoped to one element and its subtree. A preview write
    * can only start a transition on the element it wrote to, so once a gesture's
@@ -2228,36 +2236,55 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return result;
   }
 
+  /** What a layer needs to look the same in another parent or frame. Its
+   * frame base (the body, styled by the directory's shared imports) comes
+   * from the destination's own styles, so only values the layer's context
+   * sets beyond that base travel; the base itself is reported for a
+   * destination whose base differs. The body carries its whole inherited
+   * appearance. Ancestor effects, SVG, scroll state and stilled animations
+   * stay where they are, as in any design tool: a layer leaving a faded group
+   * is no longer faded. Only a box the planner cannot place is refused. */
   function relocationContextOf(element) {
     var inheritedStyles = {};
+    var baseStyles = {};
+    var rootStyles = {};
     var unsupported = new Set();
     var computed = getComputedStyle(element);
+    var body = document.body;
+    var base = body && body !== element && body.contains(element) ? getComputedStyle(body) : null;
+    var root = getComputedStyle(document.documentElement);
+    var carried = 0;
+    var portable = function (value) {
+      return value.length <= 2048 && !value.toLowerCase().includes("url(");
+    };
+    // These default to currentColor. Freezing that resolved color would stop
+    // a later color edit from reaching the text, so they follow color instead.
+    var followsColor = function (style, property, value) {
+      return (property === "-webkit-text-fill-color" || property === "-webkit-text-stroke-color") &&
+        value === style.getPropertyValue("color");
+    };
     ${JSON.stringify(DESIGN_RELOCATION_INHERITED_PROPERTIES)}.forEach(function (property) {
       var value = computed.getPropertyValue(property);
-      if (value.toLowerCase().includes("url(")) unsupported.add("inherited asset reference");
-      if (value.length > 2048) unsupported.add("inherited style size");
-      else if (value) inheritedStyles[property] = value;
+      var baseValue = base ? base.getPropertyValue(property) : "";
+      if (base && baseValue && portable(baseValue) && !followsColor(base, property, baseValue))
+        baseStyles[property] = baseValue;
+      if (!value || !portable(value) || followsColor(computed, property, value) || (base && value === baseValue)) return;
+      inheritedStyles[property] = value;
+      carried += 1;
     });
-    Array.from(computed).filter(function (property) { return property.startsWith("--") && property !== "--zeros-layout-origin-flow"; }).forEach(function (property) {
+    Array.from(computed).forEach(function (property) {
+      if (!property.startsWith("--") || property === "--zeros-layout-origin-flow") return;
+      if (carried >= ${DESIGN_RELOCATION_MAX_INHERITED_STYLES} || property.length > 128) return;
       var value = computed.getPropertyValue(property);
-      if (value.toLowerCase().includes("url(")) unsupported.add("inherited asset reference");
-      if (Object.keys(inheritedStyles).length >= 64 || property.length > 128 || value.length > 2048) unsupported.add("inherited style size");
-      else inheritedStyles[property] = value;
+      var rootValue = root.getPropertyValue(property);
+      if (!portable(value) || value === rootValue) return;
+      inheritedStyles[property] = value;
+      if (portable(rootValue)) rootStyles[property] = rootValue;
+      carried += 1;
     });
-    for (var ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
-      var style = getComputedStyle(ancestor);
-      if (Number(style.opacity) !== 1 || style.filter !== "none" || style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || style.maskImage !== "none" || style.clipPath !== "none" || style.textDecorationLine !== "none") unsupported.add("ancestor compositing");
-    }
-    var descendants = element.querySelectorAll("*");
-    if (descendants.length > 256) unsupported.add("subtree size");
-    var inspect = [element].concat(Array.from(descendants).slice(0, 256));
-    inspect.forEach(function (node) {
-      var style = getComputedStyle(node);
-      if (!(node instanceof HTMLElement) || style.position === "fixed" || style.position === "sticky" || style.display === "contents" || node.scrollTop || node.scrollLeft) unsupported.add("unsupported subtree layout");
-      if (style.animationName !== "none" || node.getAnimations().length) unsupported.add("active animation");
-    });
+    if (computed.display === "contents") unsupported.add("a layer without its own box");
     if (!borderCoordinateSpaceOf(element, computed, rectOf(element))) unsupported.add("unsupported transform");
-    return { inheritedStyles: inheritedStyles, unsupported: Array.from(unsupported) };
+    return { inheritedStyles: inheritedStyles, baseStyles: baseStyles, rootStyles: rootStyles, unsupported: Array.from(unsupported) };
   }
 
   function detailsOf(element, layoutOnly, relocation) {
@@ -4344,6 +4371,19 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   window.addEventListener("message", receiveHandshake);
+  // A CSS animation that starts later (a hover, :checked or media query
+  // state) is stilled as it starts, and media cannot start playing, so no
+  // frame repaints in a loop while it sits on the canvas.
+  document.addEventListener("animationstart", function (startEvent) {
+    if (disposed) return;
+    var target = startEvent.target;
+    if (target && typeof target.getAnimations === "function") suspendElementMotion(target);
+  }, true);
+  document.addEventListener("play", function (playEvent) {
+    var target = playEvent.target;
+    if (disposed || !target || typeof target.pause !== "function") return;
+    try { target.pause(); } catch (_error) {}
+  }, true);
 
   function publishMutation() {
     mutationTimer = null;

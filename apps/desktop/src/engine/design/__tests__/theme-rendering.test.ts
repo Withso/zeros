@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { DesignApi } from "@zeros/design-web";
+import { designCaptureRequestSchema } from "@zeros/protocol/design-capture";
 import { createDesignCaptureRenderer } from "../capture-client";
 import { DesignDraftStore, designDocumentIdForFrame } from "../design-api";
 import { createDesignFrame, initializeDesignDocument, readDesignFrameRenderSourceFromSource, readDesignWebDocumentState } from "../document";
@@ -81,6 +82,86 @@ it.each(["dark", null])("API capture uses the declared default %s and preserves 
     const composed = await readDesignFrameRenderSourceFromSource(value.root, value.frame, value.html);
     await renderer.renderComposed!({ state, viewport, html: withDesignTheme(composed.html, "light"), sourceVersion: composed.sourceVersion });
     expect(await readInk(page)).toEqual([255, 255, 255]);
+  } finally {
+    await page.close();
+    await value.close();
+  }
+});
+
+it("API capture shows a requested theme and rejects one the directory does not offer", async () => {
+  const value = await fixture("main { color: white; } .dark main { color: black; }", "light", { dark: ".dark" });
+  const page = await browser.newPage({ viewport: { width: 16, height: 16 } });
+  try {
+    const renderer = createDesignCaptureRenderer(value.root, { url: "http://127.0.0.1:1", token: "a".repeat(64) }, (async (_url, request) => {
+      const input = JSON.parse(request!.body as string);
+      await page.setContent(input.html);
+      const bytes = await page.screenshot();
+      return new Response(JSON.stringify({ version: 1, revision: input.revision, width: 16, height: 16, data: bytes.toString("base64"), renderer: "fixture-chromium" }));
+    }) as typeof fetch)!;
+    const state = await readDesignWebDocumentState(value.root, value.frame);
+    const api = new DesignApi(new DesignDraftStore(value.root), { authorization: { kind: "trusted-in-process" }, renderer });
+    const viewport = { width: 16, height: 16, deviceScaleFactor: 1, colorScheme: "light" as const, reducedMotion: "reduce" as const };
+    const documentId = designDocumentIdForFrame(value.frame);
+    await api.render({ documentId, expectedRevision: state.revision, viewport });
+    expect(await readInk(page)).toEqual([255, 255, 255]);
+    await api.render({ documentId, expectedRevision: state.revision, viewport, theme: "dark" });
+    expect(await readInk(page)).toEqual([0, 0, 0]);
+    await expect(
+      api.render({ documentId, expectedRevision: state.revision, viewport, theme: "sepia" }),
+    ).rejects.toThrow('Unknown theme "sepia". Choose one of: dark, light.');
+  } finally {
+    await page.close();
+    await value.close();
+  }
+});
+
+it("API capture lays out a large viewport and scales it into the capture raster", async () => {
+  const value = await fixture("main { color: white; }", "light", {});
+  const page = await browser.newPage({ viewport: { width: 2048, height: 819 } });
+  try {
+    const requests: Record<string, unknown>[] = [];
+    const renderer = createDesignCaptureRenderer(value.root, { url: "http://127.0.0.1:1", token: "a".repeat(64) }, (async (_url, request) => {
+      const input = JSON.parse(request!.body as string);
+      requests.push(input);
+      const bytes = await page.screenshot();
+      return new Response(JSON.stringify({ version: 1, revision: input.revision, width: input.width, height: input.height, data: bytes.toString("base64"), renderer: "fixture-chromium" }));
+    }) as typeof fetch)!;
+    const state = await readDesignWebDocumentState(value.root, value.frame);
+    const api = new DesignApi(new DesignDraftStore(value.root), { authorization: { kind: "trusted-in-process" }, renderer });
+    const viewport = { width: 3000, height: 1200, deviceScaleFactor: 1, colorScheme: "light" as const, reducedMotion: "reduce" as const };
+    const artifact = await api.render({
+      documentId: designDocumentIdForFrame(value.frame), expectedRevision: state.revision, viewport,
+      rasterSize: { width: 2048, height: 819 },
+    });
+    expect(requests[0]).toMatchObject({ width: 2048, height: 819, layoutViewport: { width: 3000, height: 1200 } });
+    expect({ width: artifact.width, height: artifact.height }).toEqual({ width: 2048, height: 819 });
+  } finally {
+    await page.close();
+    await value.close();
+  }
+});
+
+it("API capture asks the host for a preview-sized raster it will accept", async () => {
+  const value = await fixture("main { color: white; }", "light", {});
+  const page = await browser.newPage({ viewport: { width: 384, height: 240 } });
+  try {
+    const requests: unknown[] = [];
+    const renderer = createDesignCaptureRenderer(value.root, { url: "http://127.0.0.1:1", token: "a".repeat(64) }, (async (_url, request) => {
+      const input = JSON.parse(request!.body as string);
+      // The capture host validates every request with this schema.
+      requests.push(designCaptureRequestSchema.parse(input));
+      const bytes = await page.screenshot();
+      return new Response(JSON.stringify({ version: 1, revision: input.revision, width: input.width, height: input.height, data: bytes.toString("base64"), renderer: "fixture-chromium" }));
+    }) as typeof fetch)!;
+    const state = await readDesignWebDocumentState(value.root, value.frame);
+    const api = new DesignApi(new DesignDraftStore(value.root), { authorization: { kind: "trusted-in-process" }, renderer });
+    const artifact = await api.render({
+      documentId: designDocumentIdForFrame(value.frame), expectedRevision: state.revision,
+      viewport: { width: 1600, height: 1000, deviceScaleFactor: 1, colorScheme: "light", reducedMotion: "reduce" },
+      rasterSize: { width: 384, height: 240 },
+    });
+    expect(requests[0]).toMatchObject({ width: 384, height: 240, maxDimension: 384, layoutViewport: { width: 1600, height: 1000 } });
+    expect({ width: artifact.width, height: artifact.height }).toEqual({ width: 384, height: 240 });
   } finally {
     await page.close();
     await value.close();

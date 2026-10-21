@@ -54,6 +54,21 @@
         "cmp_compare"
       ],
       "folder": "ui-components"
+    },
+    {
+      "id": "page_new_pages",
+      "title": "New pages",
+      "frames": [
+        "np_ws_changes",
+        "np_changes_scopes",
+        "np_changes_menu",
+        "np_changes_layout",
+        "np_changes_states",
+        "np_changes_review",
+        "np_changes_conflicts",
+        "np_changes_availability"
+      ],
+      "folder": "new-pages"
     }
   ],
   "frames": {
@@ -75,6 +90,15 @@
       "width": 1040,
       "height": 976
     },
+    "np_ws_changes": {
+      "kind": "html",
+      "source": "new-pages/workspace-changes.html",
+      "title": "Workspace — Changes tab",
+      "x": 0,
+      "y": 0,
+      "width": 1600,
+      "height": 1000
+    },
     "cmp_button": {
       "kind": "html",
       "source": "ui-components/button.html",
@@ -83,6 +107,15 @@
       "y": 1216,
       "width": 1040,
       "height": 1648
+    },
+    "np_changes_scopes": {
+      "kind": "html",
+      "source": "new-pages/changes-scopes.html",
+      "title": "Changes — comparison scopes",
+      "x": 0,
+      "y": 1360,
+      "width": 1434,
+      "height": 1384
     },
     "cmp_icon_button": {
       "kind": "html",
@@ -93,6 +126,15 @@
       "width": 1040,
       "height": 1152
     },
+    "np_changes_menu": {
+      "kind": "html",
+      "source": "new-pages/changes-scope-menu.html",
+      "title": "Changes — scope menu",
+      "x": 1594,
+      "y": 1360,
+      "width": 1678,
+      "height": 434
+    },
     "cmp_split_button": {
       "kind": "html",
       "source": "ui-components/split-button.html",
@@ -101,6 +143,15 @@
       "y": 1216,
       "width": 1040,
       "height": 720
+    },
+    "np_changes_layout": {
+      "kind": "html",
+      "source": "new-pages/changes-layout.html",
+      "title": "Changes — diff layouts",
+      "x": 3432,
+      "y": 1360,
+      "width": 1434,
+      "height": 1384
     },
     "cmp_toolbar": {
       "kind": "html",
@@ -111,6 +162,15 @@
       "width": 1040,
       "height": 672
     },
+    "np_changes_states": {
+      "kind": "html",
+      "source": "new-pages/changes-states.html",
+      "title": "Changes — list and status",
+      "x": 5026,
+      "y": 1360,
+      "width": 1434,
+      "height": 1384
+    },
     "cmp_input": {
       "kind": "html",
       "source": "ui-components/input.html",
@@ -119,6 +179,15 @@
       "y": 3104,
       "width": 1040,
       "height": 936
+    },
+    "np_changes_review": {
+      "kind": "html",
+      "source": "new-pages/changes-review.html",
+      "title": "Changes — review actions",
+      "x": 6620,
+      "y": 1360,
+      "width": 1434,
+      "height": 2024
     },
     "cmp_textarea": {
       "kind": "html",
@@ -129,6 +198,15 @@
       "width": 1040,
       "height": 520
     },
+    "np_changes_conflicts": {
+      "kind": "html",
+      "source": "new-pages/changes-conflicts.html",
+      "title": "Changes — conflicts and special files",
+      "x": 8214,
+      "y": 1360,
+      "width": 1434,
+      "height": 1384
+    },
     "cmp_select": {
       "kind": "html",
       "source": "ui-components/select.html",
@@ -137,6 +215,15 @@
       "y": 3104,
       "width": 1040,
       "height": 1328
+    },
+    "np_changes_availability": {
+      "kind": "html",
+      "source": "new-pages/changes-availability.html",
+      "title": "Changes — workspace availability",
+      "x": 9808,
+      "y": 1360,
+      "width": 2134,
+      "height": 1493
     },
     "cmp_checkbox": {
       "kind": "html",
@@ -425,6 +512,72 @@
       "themes": {
         "light": "[data-theme=\"light\"]"
       }
+    },
+    {
+      "id": "app-global-platform",
+      "title": "App global: platform",
+      "kind": "css",
+      "path": "styles/global/platform.css"
+    },
+    {
+      "id": "app-global-animations",
+      "title": "App global: animations",
+      "kind": "css",
+      "path": "styles/global/animations.css"
+    },
+    {
+      "id": "app-global-runtime",
+      "title": "App global: runtime content",
+      "kind": "css",
+      "path": "styles/global/runtime-content.css"
+    },
+    {
+      "id": "app-global-document",
+      "title": "App global: document",
+      "kind": "css",
+      "path": "styles/global/document.css"
+    },
+    {
+      "id": "app-global-scrollbars",
+      "title": "App global: scrollbars",
+      "kind": "css",
+      "path": "styles/global/scrollbars.css"
+    },
+    {
+      "id": "app-composer-pills",
+      "title": "Composer pills",
+      "kind": "css",
+      "path": "apps/desktop/src/renderer/features/agent/composer-pills.css"
+    },
+    {
+      "id": "app-composer-editor",
+      "title": "Composer editor",
+      "kind": "css",
+      "path": "apps/desktop/src/renderer/features/agent/composer-editor/composer-editor.css"
+    },
+    {
+      "id": "app-settings-page",
+      "title": "Settings page",
+      "kind": "css",
+      "path": "apps/desktop/src/renderer/features/settings/settings-page.css"
+    },
+    {
+      "id": "app-conversation-summary",
+      "title": "Conversation summary",
+      "kind": "css",
+      "path": "apps/desktop/src/renderer/shell/conversation/conversation-summary.css"
+    },
+    {
+      "id": "vendor-sonner",
+      "title": "Toasts (sonner)",
+      "kind": "css",
+      "path": "node_modules/sonner/dist/styles.css"
+    },
+    {
+      "id": "vendor-xterm",
+      "title": "Terminal (xterm)",
+      "kind": "css",
+      "path": "node_modules/@xterm/xterm/css/xterm.css"
     }
   ],
   "themes": [

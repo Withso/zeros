@@ -6,6 +6,7 @@ import {
   DESIGN_CAPTURE_HTML_BYTES,
   DESIGN_CAPTURE_TIMEOUT_MS,
   DESIGN_STATIC_RENDER_CSS,
+  DESIGN_STATIC_RENDER_SCRIPT,
   designCaptureRequestSchema,
 } from "@zeros/protocol/design-capture";
 import { sanitizeDesignFrameMarkup, insertDesignHeadMarkup } from "./source";
@@ -68,6 +69,8 @@ async function render(input: ReturnType<typeof designCaptureRequestSchema.parse>
       `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">${stillStyles}`,
     );
     await page.setContent(html, { waitUntil: "load" });
+    // SMIL, marquees and media hold their opening state, as the canvas shows them.
+    await page.evaluate(DESIGN_STATIC_RENDER_SCRIPT);
     await page.evaluate(async () => {
       await document.fonts.ready;
       await Promise.all(

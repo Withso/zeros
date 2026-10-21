@@ -1,6 +1,7 @@
 import type { DesignLocalHistoryCheckpoint } from "@zeros/design-web";
 import {
   type DesignFrameChange,
+  type DesignFrameGeometry,
   type DesignFrameRestorePoint,
 } from "./document";
 
@@ -24,6 +25,13 @@ export type WorkspaceDesignHistoryEntry =
       kind: "frame";
       before: DesignFrameRestorePoint | null;
       after: DesignFrameRestorePoint | null;
+      bytes: number;
+    }
+  | {
+      /** Several canvas frames moved in one write; only their geometry. */
+      kind: "geometry";
+      moves: Array<{ file: string; before: DesignFrameGeometry; after: DesignFrameGeometry }>;
+      frame: string;
       bytes: number;
     };
 
@@ -83,6 +91,7 @@ export function pruneWorkspaceDesignFrameHistory(
             (point) => point && deletedFile(point.file),
           )
         : deletedFile(entry.frame) ||
+          (entry.kind === "geometry" && entry.moves.some((move) => deletedFile(move.file))) ||
           (entry.kind === "transfer" &&
             (entry.changes.some((change) =>
               [change.before, change.after].some(
@@ -100,6 +109,12 @@ export function pruneWorkspaceDesignFrameHistory(
   state.undo = state.undo.filter(keep);
   state.redo = state.redo.filter(keep);
   state.bytes = Math.max(0, state.bytes);
+}
+
+export function geometryDesignHistoryEntry(
+  moves: Array<{ file: string; before: DesignFrameGeometry; after: DesignFrameGeometry }>,
+): WorkspaceDesignHistoryEntry {
+  return { kind: "geometry", moves, frame: moves[0]!.file, bytes: JSON.stringify(moves).length * 2 + 64 };
 }
 
 export function documentDesignHistoryEntry(

@@ -2,20 +2,19 @@ import { describe, expect, it } from "vitest";
 import { designRelocationRootStyles, assertDesignRelocationSource } from "../relocation-source";
 
 describe("source-preserving relocation admission", () => {
-  it("refuses context-dependent selectors and viewport layout before extracting source", () => {
-    for (const css of [".parent > .child { color:red }", ".child:nth-child(2) { width:30px }", "@media(min-width:700px){.child{color:red}}", ".child{width:30vw}", ".child{perspective:500px}", ".child{animation:move 1s}"]) {
-      expect(() => assertDesignRelocationSource(`<html><head><style>${css}</style></head><body><div data-oid="child"></div></body></html>`)).toThrow(/safely/);
+  it("admits the ordinary CSS of real frames: context selectors, media queries, viewport units, motion", () => {
+    for (const css of [".parent > .child { color:red }", ".child:nth-child(2) { width:30px }", "@media(min-width:700px){.child{color:red}}", ".child{width:30vw}", ".child{perspective:500px}", ".child{animation:move 1s}", "svg.lucide:not([fill]){fill:none!important}"]) {
+      expect(() => assertDesignRelocationSource(`<html><head><style>${css}</style></head><body><div data-oid="child"></div></body></html>`, "child")).not.toThrow();
     }
-  });
-
-  it("admits simple rules, stable custom properties and the seeded reset", () => {
-    expect(() => assertDesignRelocationSource('<html><head><style>@layer reset { *, *::before, *::after { box-sizing:border-box } html,body{margin:0} } :root{--accent:red} .child{color:var(--accent);border:2px solid}</style></head><body><div data-oid="child" style="width:100px;height:80px"></div></body></html>')).not.toThrow();
-  });
-
-  it("rejects a transformed document coordinate system and inline viewport dependencies", () => {
     for (const source of ['<html><body style="position:relative;padding:20px"><div data-oid="child"></div></body></html>', '<style>body{transform:scale(2)}</style><div data-oid="child"></div>', '<div data-oid="child"><div style="width:30vw"></div></div>']) {
-      expect(() => assertDesignRelocationSource(source, "child")).toThrow(/safely/);
+      expect(() => assertDesignRelocationSource(source, "child")).not.toThrow();
     }
+  });
+
+  it("refuses only a component instance inside the moving layer", () => {
+    expect(() => assertDesignRelocationSource('<body><div data-oid="child"><zd-card data-oid="card"></zd-card></div></body>', "child")).toThrow(/component instance/);
+    expect(() => assertDesignRelocationSource('<body><div data-oid="child"><span data-zid="button" data-oid="button"></span></div></body>', "child")).toThrow(/component instance/);
+    expect(() => assertDesignRelocationSource('<body><zd-card data-oid="card"></zd-card><div data-oid="child"></div></body>', "child")).not.toThrow();
   });
 
   it("preserves the measured local size and full affine pose without carrying root margins", () => {

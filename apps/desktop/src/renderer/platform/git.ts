@@ -139,6 +139,8 @@ import {
   bridgeDesignStyleBuildPresence,
   bridgeDesignRefreshStyles,
   bridgeDesignSnapshot,
+  bridgeDesignPreview,
+  bridgeDesignMoveFrames,
   bridgeDesignTokens,
   bridgeDesignUpdateToken,
   bridgeDesignUpdateCanvas,
@@ -559,6 +561,13 @@ export async function designSnapshot(
   );
 }
 
+export async function designPreview(
+  workspaceId: string,
+  input: Parameters<typeof bridgeDesignPreview>[2],
+): ReturnType<typeof bridgeDesignPreview> {
+  return bridgeDesignPreview(requireBridge("preview a design frame"), workspaceId, input);
+}
+
 export async function designTokens(
   workspaceId: string,
 ): Promise<DesignTokenWire[]> {
@@ -718,6 +727,13 @@ export async function designUpdateCanvas(
     frame,
     geometry,
   );
+}
+
+export async function designMoveFrames(
+  workspaceId: string,
+  moves: Parameters<typeof bridgeDesignMoveFrames>[2],
+): Promise<DesignWorkspaceSnapshotWire> {
+  return bridgeDesignMoveFrames(requireBridge("move design frames"), workspaceId, moves);
 }
 
 export async function designDuplicateFrame(

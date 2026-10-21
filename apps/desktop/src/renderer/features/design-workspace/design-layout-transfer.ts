@@ -1,10 +1,22 @@
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import {
+  DESIGN_RUNTIME_DOCUMENT_BODY_ID,
+  type DesignRuntimeNodeDetails,
+} from "@zeros/protocol/design-runtime";
 import type { DesignCanvasFrameWire } from "../../platform/git";
-import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
-import { transferDesignNodeCached } from "./state/design-workspace-cache";
+import {
+  designFrameRuntime,
+  waitForDesignFrameRuntime,
+} from "../../platform/bridge/design-frame-runtime";
+import {
+  designWorkspaceSnapshotCache,
+  transferDesignNodeCached,
+} from "./state/design-workspace-cache";
 import { selectDesignFrame, selectDesignNode } from "./state/design-selection";
 import { designLayoutDrop } from "./design-layout-drag";
-import { designNodeRelocation } from "./design-movement-geometry";
+import {
+  designFrameRelocation,
+  designNodeRelocation,
+} from "./design-movement-geometry";
 import {
   captureDesignPageOwner,
   designWorkspaceView,
@@ -33,6 +45,59 @@ export function designCanvasDropTargetFrame(
     >((top, candidate) => (!top || candidate.z >= top.z ? candidate : top), undefined);
 }
 
+/** The frame under a canvas point that a dragged frame or layer would join,
+ * as in a design tool: the topmost one, never the dragged frame itself, and
+ * never a text frame, which holds no layers. */
+export function designCanvasFrameAt(
+  source: string,
+  frames: readonly DesignCanvasFrameWire[],
+  point: { x: number; y: number },
+): DesignCanvasFrameWire | undefined {
+  return frames
+    .filter(
+      (candidate) =>
+        candidate.file !== source &&
+        candidate.kind !== "text" &&
+        point.x >= candidate.x &&
+        point.y >= candidate.y &&
+        point.x <= candidate.x + candidate.width &&
+        point.y <= candidate.y + candidate.height,
+    )
+    .reduce<
+      DesignCanvasFrameWire | undefined
+    >((top, candidate) => (!top || candidate.z >= top.z ? candidate : top), undefined);
+}
+
+/** How long a release waits for a destination frame that just went live. */
+const DESTINATION_READY_MS = 2_000;
+
+/** One layer released outside its frame, as in a design tool: over another
+ * frame it joins that frame at the pointer; over empty canvas it becomes a
+ * frame of its own. The frame under the pointer is found among the frames
+ * confirmed at release, never those the gesture started with; `nest`
+ * outlines it (and makes it live) while the move saves. */
+export async function transferDesignLayerAtRelease(
+  input: Omit<Parameters<typeof transferDesignLayerOnCanvas>[0], "frames" | "detach" | "destination" | "pointer"> & {
+    pointer: { x: number; y: number };
+    nest?: (file: string | null) => void;
+  },
+): Promise<boolean> {
+  const { nest, ...transfer } = input;
+  const frames = designWorkspaceSnapshotCache.peekSnapshot(input.workspaceId).data?.frames ?? [];
+  const destination = designCanvasFrameAt(input.frame.file, frames, input.pointer);
+  if (destination) nest?.(destination.file);
+  try {
+    return await transferDesignLayerOnCanvas({
+      ...transfer,
+      frames,
+      detach: true,
+      ...(destination ? { destination } : {}),
+    });
+  } finally {
+    if (destination) nest?.(null);
+  }
+}
+
 export async function transferDesignLayerOnCanvas(input: {
   workspaceId: string;
   folder: string;
@@ -45,6 +110,11 @@ export async function transferDesignLayerOnCanvas(input: {
   canWrite?: () => boolean;
   requireRelocation?: boolean;
   presented?: (frame: DesignCanvasFrameWire) => Promise<void>;
+  /** The canvas point under the pointer at release. The destination is the
+   * frame under it and the drop slot is resolved at it, as in a design tool. */
+  pointer?: { x: number; y: number };
+  /** The destination the gesture already highlighted, kept at release. */
+  destination?: DesignCanvasFrameWire;
 }): Promise<boolean> {
   const { workspaceId, folder, frame, details, origin } = input;
   const owner = captureDesignPageOwner(workspaceId);
@@ -54,26 +124,37 @@ export async function transferDesignLayerOnCanvas(input: {
     designWorkspaceView(workspaceId).selectionEvent ===
       initialSelection.selectionEvent &&
     input.isCurrent?.() !== false;
-  const center = {
+  const center = input.pointer ?? {
     x: origin.x + details.rect.width / 2,
     y: origin.y + details.rect.height / 2,
   };
-  const destination = designCanvasDropTargetFrame(frame.file, input.frames, {
-    ...origin,
-    width: details.rect.width,
-    height: details.rect.height,
-  });
+  const destination =
+    input.destination ??
+    (input.pointer
+      ? designCanvasFrameAt(frame.file, input.frames, input.pointer)
+      : designCanvasDropTargetFrame(frame.file, input.frames, {
+          ...origin,
+          width: details.rect.width,
+          height: details.rect.height,
+        }));
   if (!destination && !input.detach) return false;
+  // A small frame paints a picture until the gesture asks for it; give its
+  // document a moment to become ready before resolving the drop inside it.
   const targetRuntime = destination
-    ? designFrameRuntime(workspaceId, destination.file)
+    ? (designFrameRuntime(workspaceId, destination.file) ??
+      (await waitForDesignFrameRuntime(workspaceId, destination.file, DESTINATION_READY_MS)))
     : null;
+  if (destination && !targetRuntime)
+    throw new Error(`${destination.title} is still loading. Try the move again in a moment.`);
   const targets = targetRuntime?.supports("getLayoutTargets")
     ? await targetRuntime.getLayoutTargets()
     : [];
   if (!hasIntent() || input.canWrite?.() === false) return false;
+  // The moving layer is not in the destination's tree; its id must not
+  // match one there (every frame's body shares the body id).
   const drop = destination
     ? designLayoutDrop(
-        { ...details, layout: undefined },
+        { ...details, oid: "\u0000moving-layer", layout: undefined },
         targets,
         { x: center.x - destination.x, y: center.y - destination.y },
         { x: origin.x - destination.x, y: origin.y - destination.y },
@@ -85,36 +166,58 @@ export async function transferDesignLayerOnCanvas(input: {
     throw new Error(
       "This runtime cannot measure inherited appearance for safe layer relocation.",
     );
-  const relocation = details.relocationContext
-    ? designNodeRelocation(
-        details,
-        destination
-          ? { x: origin.x - destination.x, y: origin.y - destination.y }
-          : { x: 0, y: 0 },
-        destination
-          ? targets.find((target) => target.oid === drop?.parentId)
-              ?.childCoordinateSpace
-          : undefined,
-      )
-    : undefined;
-  if (
-    relocation &&
-    destination &&
-    !targets.find((target) => target.oid === drop?.parentId)
-      ?.childCoordinateSpace
-  )
-    throw new Error("The destination's editable coordinates are unavailable.");
   const destinationParent = targets.find(
     (target) => target.oid === drop?.parentId,
   );
-  if (
+  // The drop parent, its frame's body and that frame's styles decide what
+  // the layer inherits there; measure the parent so only the differences
+  // travel. A new frame copies the source's head.
+  const destinationContext =
+    destination && details.relocationContext && drop && targetRuntime
+      ? await Promise.resolve()
+          .then(() => targetRuntime.getNodeDetails(drop.parentId, undefined, { relocation: true }))
+          .then((parent) => parent?.relocationContext ?? null, () => null)
+      : destination
+        ? null
+        : undefined;
+  if (!hasIntent() || input.canWrite?.() === false) return false;
+  // A body-rooted frame moves whole: its content keeps the frame's size.
+  const wholeFrame = details.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID;
+  if (wholeFrame && !destination) return false;
+  const relocation = !details.relocationContext
+    ? undefined
+    : wholeFrame
+      ? designFrameRelocation(
+          details,
+          { width: frame.width, height: frame.height },
+          { x: origin.x - destination!.x, y: origin.y - destination!.y },
+          destinationParent?.childCoordinateSpace,
+          destinationContext,
+        )
+      : designNodeRelocation(
+          details,
+          destination
+            ? { x: origin.x - destination.x, y: origin.y - destination.y }
+            : { x: 0, y: 0 },
+          destination ? destinationParent?.childCoordinateSpace : undefined,
+          destinationContext,
+        );
+  const background = wholeFrame ? details.styles?.backgroundColor : undefined;
+  const frameBackground =
+    background && !/^(?:transparent|rgba\([^)]*,\s*0\))$/.test(background)
+      ? background
+      : undefined;
+  if (relocation && destination && !destinationParent?.childCoordinateSpace)
+    throw new Error("The destination's editable coordinates are unavailable.");
+  // An absolutely placed layer needs a positioned parent; a static one
+  // becomes relative in the same move, as a same-frame move does.
+  const parentStyles =
     relocation &&
-    destinationParent?.tag !== "body" &&
-    destinationParent?.styles.position === "static"
-  )
-    throw new Error(
-      "This destination does not provide a positioned container. Move the layer into an independent frame instead.",
-    );
+    destinationParent &&
+    destinationParent.tag !== "body" &&
+    destinationParent.styles.position === "static"
+      ? { position: "relative" as const }
+      : undefined;
   if (relocation && sourceRuntime?.sourceVersion !== details.sourceVersion)
     throw new Error("The source frame changed before the layer move.");
   const result = await transferDesignNodeCached(
@@ -149,6 +252,8 @@ export async function transferDesignLayerOnCanvas(input: {
             parentId: drop.parentId,
             beforeId: drop.beforeId,
             styles: drop.styles,
+            ...(parentStyles ? { parentStyles } : {}),
+            ...(frameBackground ? { frameBackground } : {}),
             ...(relocation
               ? {
                   destinationMovementGuard: {

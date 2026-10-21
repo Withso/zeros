@@ -263,10 +263,14 @@ export function createDesignLayoutDropResolver(
           throw new Error(
             "The destination's editable coordinates are unavailable.",
           );
+        // The parent is not measured while dragging; the preview carries
+        // every inherited value, and the release keeps only what the
+        // measured drop parent would not give the layer.
         const relocation = designNodeRelocation(
           node,
           origin,
           parent.childCoordinateSpace,
+          null,
         );
         return {
           nodeId: node.oid,

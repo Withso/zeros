@@ -2,21 +2,27 @@
 
 These renderer-side helpers are preparation for representation integration, not
 10,000-frame workspace support. The engine still admits at most 256 frames.
-The preview cache and spatial index have no canvas consumer yet. Strict
-latest-in-flight scheduling is opt-in; legacy queue callers and PNG export
-keep their existing result behavior.
+The preview cache holds the canvas's frame pictures
+(`state/design-frame-previews.ts`); the spatial index has no canvas consumer
+yet. Strict latest-in-flight scheduling is opt-in; legacy queue callers and PNG
+export keep their existing result behavior.
 
 ## Preview retention
 
 `DesignPreviewCache` retains immutable PNG metadata independently of runtime
-trees. The caller supplies an exact opaque paint key. The helper does not
+trees, or encoded picture Blobs behind object URLs (`DesignPreviewBlobImage`,
+the canvas's frame pictures). The caller supplies an exact opaque paint key. The helper does not
 construct owner identity, invent paint epochs or publish selection state.
 Integration must include owner/placement/workspace/root/directory/frame,
 source/dependencies, theme/fonts and representation identity, with a separate
 admission epoch supplied by the canonical intent owner.
 
 Each cache instance bounds entries, encoded string/key bytes and decoded/texture
-estimates separately. Defaults are 10,000 entries, 32 MiB encoded and 128 MiB
+estimates separately. A Blob picture is charged its encoded bytes only: the
+browser decodes it when an `<img>` paints it and keeps those pixels in its own
+decode cache. An `evicted` event names keys admission removed to make room, and
+`disposed` releases an image's resources (the picture cache revokes its object
+URL there). Defaults are 10,000 entries, 32 MiB encoded and 128 MiB
 decoded estimate; configuration may lower but not exceed them. PNG IHDR sizes
 must match declared raster-pixel dimensions, not a frame's logical CSS viewport.
 The decoded estimate reserves two RGBA backings

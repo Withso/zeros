@@ -441,7 +441,11 @@ references, not as a template.
   read live from the checkout: `styles/zeros-tokens.css` as a `tailwind`
   source, compiled for each frame's classes (Tailwind emits the font, type and
   radius scales a frame reads with `var()`), and `styles/semantic-tokens.css`
-  as a `css` source. Frames therefore use the app's utilities (`bg-bg2`, `p-3`,
+  as a `css` source. The `styles/global/*.css` modules that `styles/globals.css`
+  imports (1px lucide strokes, agent markdown, scrollbars, keyframes), the
+  renderer's component stylesheets and the sonner and xterm vendor CSS are
+  `css` sources too, declared one per file because a `css` source does not
+  follow `@import`. Frames therefore use the app's utilities (`bg-bg2`, `p-3`,
   `rounded-md`, `text-xs`) and its tokens, including uncommitted edits. An edit
   to `styles/tokens/*.json` reaches frames once `pnpm design:docs` regenerates
   `styles/zeros-tokens.css`.

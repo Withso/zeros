@@ -79,7 +79,7 @@ describe("relocation context", () => {
     }
   });
 
-  it("captures inherited appearance on demand and refuses ancestor compositing", async () => {
+  it("carries only the appearance a layer's own context sets, past shared tokens, icons and faded groups", async () => {
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage();
@@ -90,12 +90,18 @@ describe("relocation context", () => {
               styles: Record<string, string>;
               relocationContext?: {
                 inheritedStyles: Record<string, string>;
+                baseStyles?: Record<string, string>;
+                rootStyles?: Record<string, string>;
                 unsupported: string[];
               };
             }>
           >((resolve, reject) => {
+            // A Design directory's imported tokens: hundreds of inherited
+            // custom properties every frame shares through the same styles.
+            const tokens = Array.from({ length: 300 }, (_, index) => `--token-${index}: ${index}px;`).join("");
+            document.head.innerHTML = `<style>:root{${tokens}} body{font-family:Georgia;color:rgb(9,9,9)}</style>`;
             document.body.innerHTML =
-              '<div style="color:rgb(1,2,3);font-size:30px;--accent: red;transform:scale(2);--zeros-layout-origin-flow:1"><div data-oid="child" style="width:100px;height:80px;background:var(--accent)">Keep</div></div><div style="opacity:.5"><div data-oid="composited" style="--zeros-layout-origin-flow:1">Keep</div></div>';
+              '<div style="color:rgb(1,2,3);font-size:30px;--accent: red;transform:scale(2);--zeros-layout-origin-flow:1"><div data-oid="child" style="width:100px;height:80px;background:var(--accent)">Keep<svg width="10" height="10"><path d="M0 0h10v10z"/></svg></div></div><div style="opacity:.5"><div data-oid="composited" style="--zeros-layout-origin-flow:1">Keep</div></div>';
             const sourceVersion = "a".repeat(24);
             Object.assign(window, {
               __zerosDesignSourceVersion: sourceVersion,
@@ -151,15 +157,19 @@ describe("relocation context", () => {
         DESIGN_RUNTIME_SOURCE,
       );
       expect(result[0]!.relocationContext).toBeUndefined();
-      expect(result[1]!.relocationContext?.inheritedStyles).toMatchObject({
+      const child = result[1]!.relocationContext!;
+      expect(child.inheritedStyles).toEqual({
         color: "rgb(1, 2, 3)",
         "font-size": "30px",
         "--accent": "red",
       });
-      expect(result[1]!.relocationContext?.unsupported).toEqual([]);
-      expect(result[2]!.relocationContext?.unsupported).toContain(
-        "ancestor compositing",
-      );
+      expect(child.baseStyles).toMatchObject({ "font-family": "Georgia", color: "rgb(9, 9, 9)" });
+      // What the root gives the custom properties the context sets: none here.
+      expect(child.rootStyles).toEqual({ "--accent": "" });
+      expect(Object.keys(child.inheritedStyles).some((key) => key.startsWith("--token-"))).toBe(false);
+      expect(child.unsupported).toEqual([]);
+      // Leaving a faded group is an ordinary move; the layer is no longer faded.
+      expect(result[2]!.relocationContext?.unsupported).toEqual([]);
       expect(result[0]!.styles["--zeros-layout-origin-flow"]).toBe("");
       expect(
         result[1]!.relocationContext?.inheritedStyles[

@@ -50,6 +50,7 @@ import { useSessionsStore } from "../features/agent/sessions-store";
 import { clearCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
 import { setCloudTranscriptCacheOwner, readCachedCloudTranscriptWindow, forgetRemovedCloudTranscriptWorkspaces, retainAuthorizedCloudTranscriptWorkspaces } from "../platform/cloud-transcript-cache";
 import { clearCloudProviderConnections } from "../features/settings/cloud-provider-connection";
+import { forgetDesignFramePreviews, setDesignFramePreviewAccount } from "../features/design-workspace/state/use-design-frame-previews";
 import { toast } from "../shared/ui/primitives/elements";
 import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
 import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspace-latency";
@@ -236,6 +237,7 @@ function ActiveCloudWorkspaceLifecycle() {
     const offCatalog = subscribeCloudWorkspaceRows((change) => {
       pruneCloudLatencySpans();
       forgetRemovedCloudTranscriptWorkspaces(change.removedWorkspaceIds);
+      forgetDesignFramePreviews(change.removedWorkspaceIds);
       const bridge = getActiveBridge();
       if (bridge instanceof WorkspaceRuntimeClient) bridge.pruneCloudConnections();
       if (change.removedWorkspaceIds.length) pruneCloudWorkspaceCollections(change.removedWorkspaceIds);
@@ -248,6 +250,7 @@ function ActiveCloudWorkspaceLifecycle() {
       stream?.dispose(); stream = undefined;
       clearCloudLatencySpans();
       setCloudTranscriptCacheOwner(null);
+      setDesignFramePreviewAccount(null);
       setCloudChatCacheOwner(null);
       setCloudCreationModeOwner(null);
       if (preservePendingTarget) {
@@ -287,6 +290,7 @@ function ActiveCloudWorkspaceLifecycle() {
       restored = false;
       setCloudChatCacheOwner(next);
       setCloudTranscriptCacheOwner(next);
+      setDesignFramePreviewAccount(next);
       cached = loadCloudChatCache();
       refresh();
       setCloudCreationModeOwner(next);
@@ -334,6 +338,7 @@ function ActiveCloudWorkspaceLifecycle() {
       window.removeEventListener("focus", refresh);
       setCloudChatCacheOwner(null);
       setCloudTranscriptCacheOwner(null);
+      setDesignFramePreviewAccount(null);
       setCloudCreationModeOwner(null);
     };
   }, []);

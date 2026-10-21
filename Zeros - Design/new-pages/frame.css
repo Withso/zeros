@@ -1,0 +1,104 @@
+/* New pages — shared frame chrome.
+
+   Every frame on this page is the app's own markup: renderer components
+   mounted with fixture data and serialized, so they carry the exact Tailwind
+   classes and data/aria state attributes the app ships. Their styling comes
+   from the imported app style sources (meta/canvas.json `styles`); nothing
+   here redeclares a product token. This file sizes windows, lays out the
+   short state labels on sheet frames, and restores lucide's default SVG
+   presentation attributes that the serializer drops to keep files small. */
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* lucide-react writes these as attributes on every icon; they were removed
+   from the markup only where they matched these defaults. */
+svg.lucide:not([fill]) { fill: none; }
+svg.lucide:not([stroke]) { stroke: currentColor; }
+svg.lucide:not([stroke-linecap]) { stroke-linecap: round; }
+svg.lucide:not([stroke-linejoin]) { stroke-linejoin: round; }
+
+/* ── Full window ──────────────────────────────────────────── */
+.np-window {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Sheet: labelled crops of real windows ────────────────── */
+.np-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-8);
+  color: var(--fg2);
+}
+.np-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  height: var(--space-12);
+}
+.np-eyebrow {
+  color: var(--muted-fg);
+  font-size: var(--text-2xxs);
+  line-height: 16px;
+  font-weight: var(--weight-medium);
+}
+.np-title {
+  color: var(--fg1);
+  font-size: var(--text-lg);
+  line-height: 28px;
+  font-weight: var(--weight-medium);
+}
+.np-grid {
+  display: grid;
+  gap: var(--space-8) var(--space-6);
+  align-items: start;
+}
+.np-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  min-width: 0;
+}
+.np-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  height: 38px;
+}
+.np-state {
+  color: var(--fg1);
+  font-size: var(--text-xs);
+  line-height: 18px;
+  font-weight: var(--weight-medium);
+}
+.np-note {
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  line-height: 18px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* The shot is the containing block for the window's fixed-position chrome
+   (its transform), so app overlays stay inside their crop. */
+.np-clip {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border1);
+  border-radius: var(--radius-lg);
+  background: var(--bg1);
+}
+.np-shot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+}

@@ -245,6 +245,72 @@ describe("Code-session Design tools", () => {
     expect((await readDesignWebDocumentState(root, frame)).revision).toBe(revision);
   });
 
+  it("captures a frame at its own size in a requested theme, scaled into one capture raster", async () => {
+    // The CLI (`design capture --theme`) already does this; the API capture
+    // used to require width/height <= 2048 and could not choose a theme, so a
+    // large frame was cropped and Light could not be verified.
+    const folder = path.join(root, DESIGN_DIRECTORY_NAME);
+    const canvasPath = path.join(folder, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasPath, "utf8"));
+    const id = Object.keys(canvas.frames).find((key) => canvas.frames[key].source === frame)!;
+    canvas.frames[id] = { ...canvas.frames[id], width: 3000, height: 1200 };
+    await writeFile(canvasPath, JSON.stringify(canvas));
+    const seen: unknown[] = [];
+    const capturing = session(actorId, {
+      renderer: {
+        async render(input) {
+          seen.push({ viewport: input.viewport, theme: input.theme, rasterSize: input.rasterSize });
+          const size = input.rasterSize ?? input.viewport;
+          return { mimeType: "image/png", bytes: new Uint8Array([1]), width: size.width, height: size.height, revision: input.state.revision };
+        },
+      },
+    });
+    const current = (await readDesignWebDocumentState(root, frame)).revision;
+    const result = await call(
+      "design_capture",
+      { documentId: `frame:${frame}`, expectedRevision: current, theme: "light" },
+      capturing,
+    );
+    expect(seen).toEqual([
+      {
+        viewport: expect.objectContaining({ width: 3000, height: 1200 }),
+        theme: "light",
+        rasterSize: { width: 2048, height: 819 },
+      },
+    ]);
+    expect({ width: result.width, height: result.height, theme: result.theme }).toEqual({ width: 2048, height: 819, theme: "light" });
+    await expect(
+      call("design_capture", { documentId: `frame:${frame}`, expectedRevision: current, theme: "Light" }, capturing),
+    ).rejects.toThrow();
+  });
+
+  it("captures a frame taller than 8192 px whole by default, as the canvas lays it out", async () => {
+    const folder = path.join(root, DESIGN_DIRECTORY_NAME);
+    const canvasPath = path.join(folder, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasPath, "utf8"));
+    const id = Object.keys(canvas.frames).find((key) => canvas.frames[key].source === frame)!;
+    canvas.frames[id] = { ...canvas.frames[id], width: 1440, height: 12000 };
+    await writeFile(canvasPath, JSON.stringify(canvas));
+    const seen: unknown[] = [];
+    const capturing = session(actorId, {
+      renderer: {
+        async render(input) {
+          seen.push({ viewport: input.viewport, rasterSize: input.rasterSize });
+          const size = input.rasterSize ?? input.viewport;
+          return { mimeType: "image/png", bytes: new Uint8Array([1]), width: size.width, height: size.height, revision: input.state.revision };
+        },
+      },
+    });
+    const current = (await readDesignWebDocumentState(root, frame)).revision;
+    await call("design_capture", { documentId: `frame:${frame}`, expectedRevision: current }, capturing);
+    expect(seen).toEqual([
+      { viewport: expect.objectContaining({ width: 1440, height: 12000 }), rasterSize: { width: 246, height: 2048 } },
+    ]);
+    await expect(
+      call("design_capture", { documentId: "frame:missing.html", expectedRevision: current }, capturing),
+    ).rejects.toThrow("Design frame not found: missing.html");
+  });
+
   it("does not hold the Design write lane while a capture host is rendering", async () => {
     let entered!: () => void;
     let finish!: () => void;

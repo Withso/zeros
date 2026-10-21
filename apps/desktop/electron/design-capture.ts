@@ -1,7 +1,7 @@
 import { BrowserWindow, session } from "electron";
 import { randomUUID } from "node:crypto";
 import { rendererProcessOwners } from "./renderer-process-owners";
-import { DESIGN_STATIC_RENDER_CSS } from "@zeros/protocol/design-capture";
+import { DESIGN_STATIC_RENDER_CSS, DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
 import { prepareDesignCaptureViewport, captureScaledDesignPng } from "../src/engine/design/capture-viewport";
 import {
   startDesignCaptureService,
@@ -93,7 +93,10 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
         },
       );
       signal.throwIfAborted();
-      // Evaluation is host-authored; CSP forbids authored scripts. Decode data images/fonts before taking the exact viewport.
+      // Evaluation is host-authored; CSP forbids authored scripts. SMIL,
+      // marquees and media hold their opening state, as the canvas shows them.
+      await window.webContents.executeJavaScript(DESIGN_STATIC_RENDER_SCRIPT);
+      // Decode data images/fonts before taking the exact viewport.
       await window.webContents.executeJavaScript(
         `Promise.all([document.fonts.ready,...Array.from(document.images, image => image.decode().catch(()=>{}))]).then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))`,
       );

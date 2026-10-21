@@ -563,6 +563,32 @@ describe("design document", () => {
     ]);
   });
 
+  it("treats a var() with a fallback as an optional hook, not an unknown token", async () => {
+    // The app's file-type icons paint with var(--zeros-fi, var(--zeros-fi-blue)):
+    // --zeros-fi is an override hook that is deliberately undeclared, and
+    // declaring it (the old advice) would recolour every icon.
+    await initializeDesignDocument(root);
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/optional-hooks.html"),
+      `<!doctype html><html><head><style>:root { --frame-accent: rebeccapurple; }</style></head>
+<body><main data-oid="main" style="color:var(--icon-hook, var(--frame-accent)); background:var( --tint-hook ,transparent); border-color:var(--missing-accent)">Hooks</main></body></html>`,
+      "utf8",
+    );
+
+    const report = await lintDesignDocument(root, "page-1/optional-hooks.html", {
+      healOids: false,
+    });
+    const unknown = report.violations.filter(
+      (violation) => violation.ruleId === "unknown-token",
+    );
+
+    expect(unknown).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining("--missing-accent"),
+      }),
+    ]);
+  });
+
   it("rejects unsafe, cyclic, and symlinked component definitions", async () => {
     await initializeDesignDocument(root);
     const components = path.join(root, DESIGN_DIRECTORY_NAME, "components");

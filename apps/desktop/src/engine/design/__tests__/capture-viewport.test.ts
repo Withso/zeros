@@ -89,3 +89,27 @@ it.each([
     }
   },
 );
+
+it("captures a canvas preview at its own layout in a small bounded raster", async () => {
+  const viewport = { width: 1600, height: 1000 };
+  const { width, height } = designCaptureRasterSize(viewport, 384);
+  expect({ width, height }).toEqual({ width: 384, height: 240 });
+  const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+  try {
+    const input = designCaptureRequestSchema.parse({
+      version: 1, revision: "revision", html: "<main>Frame</main>",
+      width, height, layoutViewport: viewport, maxDimension: 384,
+    });
+    const session = await page.context().newCDPSession(page);
+    await prepareDesignCaptureViewport(input, (params) => session.send("Emulation.setDeviceMetricsOverride", params));
+    await page.setContent(
+      "<style>html,body{margin:0}main{height:100vh;background:lime}@media(min-width:1200px){main{background:linear-gradient(red 0 50%,blue 50% 100%)}}</style><main></main>",
+    );
+    // Layout stays at the frame's 1600 px: the wide-frame media query applies.
+    expect(await page.evaluate(() => ({ width: innerWidth, height: innerHeight }))).toEqual(viewport);
+    const bytes = await captureScaledDesignPng(input, (params) => session.send("Page.captureScreenshot", params));
+    expect([bytes.readUInt32BE(16), bytes.readUInt32BE(20)]).toEqual([384, 240]);
+  } finally {
+    await page.close();
+  }
+});

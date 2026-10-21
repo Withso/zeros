@@ -79,6 +79,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "design.frame.duplicate",
   "design.frame.delete",
   "design.canvas.update",
+  "design.frames.move",
   "design.node.styles",
   "design.node.transfer",
   "design.node.text",

@@ -7,14 +7,20 @@
 // --- IMPORTS ---
 
 import { FileCode2 } from "lucide-react";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
 import { type DesignCanvasFrameWire } from "../../platform/git";
 import { type DesignHighResolutionViewportTile } from "./design-canvas-math";
 import { DesignFrameRuntimeIframe } from "./design-frame-runtime-iframe";
 import { designBackgroundWork } from "./state/design-background-work";
+import {
+  designFrameAutoCapture,
+  type DesignPreviewLevel,
+  type DesignPreviewOwner,
+} from "./state/design-frame-previews";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { useDesignFramePreview } from "./state/use-design-frame-previews";
 
 
 
@@ -61,6 +67,8 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   highResolutionTile,
   highResolutionDisabled,
   designDirectory,
+  previewOwner,
+  previewLevel,
 }: {
   workspaceId: string;
   protocolCapability: string | null;
@@ -75,7 +83,18 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   highResolutionDisabled: boolean;
   /** The Design directory the canvas shows (agent stylesheet drafts). */
   designDirectory?: string;
+  /** Who this frame's saved pictures belong to; null paints none. */
+  previewOwner?: DesignPreviewOwner | null;
+  /** The picture level that stays sharp at the frame's painted size. */
+  previewLevel?: DesignPreviewLevel;
 }) {
+  // Text frames are transparent over the canvas; they keep painting themselves.
+  const picture = useDesignFramePreview(
+    previewOwner && frame.kind !== "text"
+      ? { owner: previewOwner, file: frame.file, sourceVersion: frame.sourceVersion, theme,
+          level: previewLevel ?? "overview" }
+      : null,
+  );
   const screenshot = useDesignRuntimeStore(
     (state) =>
       state.byWorkspace[workspaceId]?.frames[frame.file]?.screenshotsByNode[""],
@@ -197,6 +216,18 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
     workspaceId,
   ]);
 
+  // A current picture renders the saved source exactly; an in-frame capture
+  // of the current generation is next; an older picture holds the frame's
+  // last pixels while its current picture renders, instead of a blank card.
+  const currentScreenshot =
+    screenshot?.sourceVersion === frame.sourceVersion ? screenshot : null;
+  const pictureCover = useMemo(
+    () => (picture ? { sourceVersion: picture.sourceVersion, dataUrl: picture.url } : null),
+    [picture],
+  );
+  const still = picture?.current
+    ? picture.url
+    : currentScreenshot?.dataUrl ?? picture?.url ?? null;
   let surface: React.ReactNode;
   if (live) {
     surface = (
@@ -208,18 +239,25 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         active={active}
         selected={selected}
         selectedNodeIds={selectedNodeIds}
-        autoCapture
+        autoCapture={designFrameAutoCapture(selected, picture)}
         theme={theme}
-        transitionCover={screenshot ?? null}
+        transitionCover={
+          currentScreenshot ??
+          (picture?.current ? pictureCover : null) ??
+          screenshot ??
+          pictureCover
+        }
         designDirectory={designDirectory}
       />
     );
-  } else if (screenshot?.sourceVersion === frame.sourceVersion) {
+  } else if (still) {
     surface = (
       <img
-        src={screenshot.dataUrl}
+        src={still}
         alt=""
+        decoding="async"
         draggable={false}
+        data-design-frame-picture={picture && still === picture.url ? (picture.current ? "current" : "previous") : undefined}
         className="pointer-events-none block size-full object-fill"
       />
     );

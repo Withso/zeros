@@ -6,24 +6,39 @@ import {
   designWorkspaceView,
 } from "../state/design-workspace-ui";
 
-const mocks = vi.hoisted(() => ({
-  transfer: vi.fn(),
-  selectNode: vi.fn(),
-  selectFrame: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  const state = {
+    transfer: vi.fn(),
+    selectNode: vi.fn(),
+    selectFrame: vi.fn(),
+    targets: [] as unknown[],
+    destinationDetails: undefined as unknown,
+    waitForRuntime: vi.fn(),
+    runtimeFor: vi.fn(),
+    runtime: null as unknown,
+    confirmedFrames: [] as unknown[],
+  };
+  state.runtime = {
+    sourceVersion: "a".repeat(24),
+    supports: () => true,
+    getLayoutTargets: async () => state.targets,
+    getNodeDetails: async () => state.destinationDetails,
+  };
+  return state;
+});
 vi.mock("../state/design-workspace-cache", () => ({
   transferDesignNodeCached: mocks.transfer,
+  designWorkspaceSnapshotCache: {
+    peekSnapshot: () => ({ data: { frames: mocks.confirmedFrames } }),
+  },
 }));
 vi.mock("../state/design-selection", () => ({
   selectDesignNode: mocks.selectNode,
   selectDesignFrame: mocks.selectFrame,
 }));
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
-  designFrameRuntime: () => ({
-    sourceVersion: "a".repeat(24),
-    supports: () => true,
-    getLayoutTargets: async () => [],
-  }),
+  designFrameRuntime: (_workspaceId: string, file: string) => mocks.runtimeFor(file),
+  waitForDesignFrameRuntime: mocks.waitForRuntime,
 }));
 vi.mock("../design-layout-drag", () => ({
   designLayoutDrop: () => ({
@@ -32,7 +47,10 @@ vi.mock("../design-layout-drag", () => ({
     styles: {},
   }),
 }));
-import { transferDesignLayerOnCanvas } from "../design-layout-transfer";
+import {
+  transferDesignLayerAtRelease,
+  transferDesignLayerOnCanvas,
+} from "../design-layout-transfer";
 
 const source = {
   file: "source.html",
@@ -69,6 +87,11 @@ const reply = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.targets = [];
+  mocks.destinationDetails = undefined;
+  mocks.confirmedFrames = [];
+  mocks.runtimeFor.mockImplementation(() => mocks.runtime);
+  mocks.waitForRuntime.mockResolvedValue(null);
   resetDesignWorkspaceUiForTests();
   useDesignWorkspaceUiStore
     .getState()
@@ -234,3 +257,111 @@ describe("canvas transfer presentation", () => {
     );
   });
 });
+
+describe("design-tool nesting", () => {
+  const measured = {
+    ...node,
+    sourceVersion: source.sourceVersion,
+    rect: { x: 40, y: 80, width: 100, height: 80 },
+    box: { x: 40, y: 80, width: 100, height: 80, rotation: 0, scaleX: 1, scaleY: 1, originX: 0.5, originY: 0.5 },
+    borderCoordinateSpace: [1, 0, 0, 1, 40, 80],
+    relocationContext: { inheritedStyles: { color: "navy" }, baseStyles: { "font-family": "Georgia" }, unsupported: [] },
+  } as DesignRuntimeNodeDetails;
+
+  it("joins the frame under the pointer, not the one the layer's centre covers", async () => {
+    const left = { ...destination, file: "left.html", x: 1000, width: 300 };
+    const right = { ...destination, file: "right.html", x: 1400, width: 300 };
+    mocks.transfer.mockResolvedValue({ frame: right.file, nodeId: node.oid, snapshot: { frames: [source, left, right] } });
+    await transferDesignLayerOnCanvas({ ...input, frames: [source, left, right], origin: { x: 1100, y: 100 }, pointer: { x: 1500, y: 150 } });
+    expect(mocks.transfer).toHaveBeenCalledWith(input.workspaceId, expect.objectContaining({ destinationFrame: right.file }));
+  });
+
+  it("makes a static destination parent positioned instead of refusing the move", async () => {
+    mocks.targets = [{ oid: "target-root", tag: "section", styles: { position: "static" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
+    // The destination's body has the same font: only the layer's own color travels.
+    mocks.destinationDetails = { relocationContext: { inheritedStyles: {}, baseStyles: { "font-family": "Georgia" }, unsupported: [] } };
+    await transferDesignLayerOnCanvas({ ...input, details: measured });
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({
+      destinationFrame: destination.file,
+      parentStyles: { position: "relative" },
+      relocation: { inheritedStyles: { color: "navy" } },
+    });
+    expect(mocks.transfer.mock.calls[0]?.[1].relocation.inheritedStyles).not.toHaveProperty("font-family");
+  });
+
+  it("carries the source base where the destination frame's base differs", async () => {
+    mocks.targets = [{ oid: "target-root", tag: "main", styles: { position: "relative" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
+    mocks.destinationDetails = { relocationContext: { inheritedStyles: {}, baseStyles: { "font-family": "Inter" }, unsupported: [] } };
+    await transferDesignLayerOnCanvas({ ...input, details: measured });
+    expect(mocks.transfer.mock.calls[0]?.[1].relocation.inheritedStyles).toEqual({ color: "navy", "font-family": "Georgia" });
+    expect(mocks.transfer.mock.calls[0]?.[1]).not.toHaveProperty("parentStyles");
+  });
+
+  it("carries a base value the drop parent itself overrides, not only its frame's body", async () => {
+    // The destination's body is Georgia too, but the card the layer drops
+    // into sets Inter; the layer keeps the Georgia it shows now.
+    mocks.targets = [{ oid: "target-root", tag: "main", styles: { position: "relative" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
+    mocks.destinationDetails = { relocationContext: { inheritedStyles: { "font-family": "Inter" }, baseStyles: { "font-family": "Georgia" }, unsupported: [] } };
+    await transferDesignLayerOnCanvas({ ...input, details: measured });
+    expect(mocks.transfer.mock.calls[0]?.[1].relocation.inheritedStyles).toEqual({ color: "navy", "font-family": "Georgia" });
+  });
+
+  it("moves a whole body-rooted frame at its own size with its body background", async () => {
+    mocks.targets = [{ oid: "target-root", tag: "main", styles: { position: "relative" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
+    mocks.destinationDetails = { relocationContext: { inheritedStyles: {}, baseStyles: { "font-family": "Georgia", color: "black" }, unsupported: [] } };
+    const body = {
+      oid: "::zeros-document-body",
+      sourceVersion: source.sourceVersion,
+      rect: { x: 0, y: 0, width: 600, height: 900 },
+      styles: { backgroundColor: "snow" },
+      relocationContext: { inheritedStyles: { "font-family": "Georgia", color: "dimgray" }, baseStyles: {}, unsupported: [] },
+    } as unknown as DesignRuntimeNodeDetails;
+    await transferDesignLayerOnCanvas({ ...input, detach: false, details: body, origin: { x: 1040, y: 60 }, destination, pointer: { x: 1100, y: 100 } });
+    const sent = mocks.transfer.mock.calls[0]?.[1];
+    expect(sent).toMatchObject({
+      nodeId: "::zeros-document-body",
+      destinationFrame: destination.file,
+      frameBackground: "snow",
+      relocation: { width: 600, height: 400, matrix: [1, 0, 0, 1, 40, 60], inheritedStyles: { color: "dimgray" } },
+    });
+    expect(sent.relocation.inheritedStyles).not.toHaveProperty("font-family");
+  });
+
+  it("releases a layer into the frame under the pointer among the frames confirmed at release", async () => {
+    // The gesture began when another frame sat under this point; that frame
+    // has since moved away and `destination` moved in.
+    const moved = { ...destination, file: "moved.html", x: 4000 };
+    mocks.confirmedFrames = [source, moved, destination];
+    mocks.targets = [{ oid: "target-root", tag: "main", styles: { position: "relative" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
+    const nest = vi.fn();
+    mocks.transfer.mockImplementation(async () => {
+      expect(nest).toHaveBeenLastCalledWith(destination.file);
+      return reply;
+    });
+    await expect(
+      transferDesignLayerAtRelease({ ...input, details: measured, pointer: { x: 1100, y: 100 }, nest }),
+    ).resolves.toBe(true);
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({ destinationFrame: destination.file });
+    expect(nest.mock.calls).toEqual([[destination.file], [null]]);
+  });
+
+  it("releases a layer over empty canvas into a frame of its own without outlining one", async () => {
+    mocks.confirmedFrames = [source];
+    const nest = vi.fn();
+    await transferDesignLayerAtRelease({ ...input, details: measured, pointer: { x: 3000, y: 3000 }, nest });
+    expect(mocks.transfer.mock.calls[0]?.[1]).not.toHaveProperty("destinationFrame");
+    expect(nest).not.toHaveBeenCalled();
+  });
+
+  it("waits for a destination frame that just went live, and refuses one that never loads", async () => {
+    mocks.runtimeFor.mockImplementation((file: string) => (file === destination.file ? null : mocks.runtime));
+    mocks.waitForRuntime.mockResolvedValueOnce(mocks.runtime);
+    await expect(transferDesignLayerOnCanvas({ ...input })).resolves.toBe(true);
+    expect(mocks.waitForRuntime).toHaveBeenCalledWith(input.workspaceId, destination.file, expect.any(Number));
+    expect(mocks.transfer).toHaveBeenCalledOnce();
+    mocks.waitForRuntime.mockResolvedValueOnce(null);
+    await expect(transferDesignLayerOnCanvas({ ...input })).rejects.toThrow(/still loading/);
+    expect(mocks.transfer).toHaveBeenCalledOnce();
+  });
+});
+

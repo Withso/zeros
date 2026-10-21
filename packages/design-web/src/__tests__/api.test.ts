@@ -765,6 +765,30 @@ describe("headless Design API", () => {
     ).rejects.toThrow("cancelled");
   });
 
+  it("lays a scaled render out at the frame's full size and budgets its raster", async () => {
+    const render = vi.fn<DesignHeadlessRenderer["render"]>(async ({ state, rasterSize, viewport }) => ({
+      mimeType: "image/png",
+      bytes: new Uint8Array([137, 80, 78, 71]),
+      width: (rasterSize ?? viewport).width,
+      height: (rasterSize ?? viewport).height,
+      revision: state.revision,
+    }));
+    const api = trustedApi(repository(), { renderer: { render } });
+    // Taller than 8192 and larger than the layout pixel budget: a picture
+    // of the whole frame, not a stretched picture of its top.
+    for (const [viewport, rasterSize] of [
+      [{ width: 1440, height: 12000 }, { width: 46, height: 384 }],
+      [{ width: 2560, height: 7000 }, { width: 140, height: 384 }],
+    ] as const) {
+      await expect(api.render({ documentId: "document-1", viewport, rasterSize }))
+        .resolves.toMatchObject(rasterSize);
+      expect(render.mock.calls.at(-1)?.[0]).toMatchObject({ viewport, rasterSize });
+    }
+    // Without a smaller raster the output is the layout, so its budget holds.
+    await expect(api.render({ documentId: "document-1", viewport: { width: 2560, height: 7000 } }))
+      .rejects.toThrow("pixel budget");
+  });
+
   it("rejects a renderer artifact that is not pinned to the requested viewport", async () => {
     const api = trustedApi(repository(), {
       renderer: {

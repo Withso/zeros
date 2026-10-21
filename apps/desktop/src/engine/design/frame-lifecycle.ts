@@ -1,4 +1,5 @@
-import { escapeText, insertDesignHeadMarkup } from "./source";
+import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
+import { escapeAttribute, escapeText, insertDesignHeadMarkup } from "./source";
 import { FRAME_SEED, TEXT_FRAME_SEED } from "./document-seeds";
 import { readDesignStyleSourceCatalog } from "./style-sources";
 import { captureDesignDependencies } from "./dependency-read-set";
@@ -44,6 +45,7 @@ import {
   mutateDesignNodeHtmlSource,
   mutateDesignNodeMoveSource,
   mutateDesignNodeStyles,
+  validateDesignCssValue,
   rebaseDesignHtmlReferences,
 } from "@zeros/design-web";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
@@ -87,9 +89,10 @@ import { legacyFrameId } from "./canvas-file";
 import { isDeepStrictEqual } from "node:util";
 import { assertDesignFrameRestorePage, designFramePage, designPageForWrite, designPageFrameFiles } from "./pages";
 import { designTitleSlug } from "./design-naming";
-import type {
-  DesignRelocation,
-  DesignMovementGuard,
+import {
+  DESIGN_FRAMES_MOVE_LIMIT,
+  type DesignRelocation,
+  type DesignMovementGuard,
 } from "@zeros/protocol/design-relocation";
 import { assertDesignRelocationSource, designRelocationRootStyles } from "./relocation-source";
 
@@ -761,6 +764,39 @@ export async function restoreDesignFrameChanges(
   });
 }
 
+/** Move several canvas frames in one recoverable canvas write. Every frame's
+ * geometry must still equal the `from` it was measured at, so a stale gesture
+ * or undo moves none of them. Frame sources are untouched. */
+export async function moveDesignFrameGeometries(
+  workspacePath: string,
+  moves: readonly { file: string; from: DesignFrameGeometry; to: DesignFrameGeometry }[],
+): Promise<void> {
+  if (moves.length < 1 || moves.length > DESIGN_FRAMES_MOVE_LIMIT)
+    throw new Error(`Move between 1 and ${DESIGN_FRAMES_MOVE_LIMIT} frames at a time.`);
+  return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
+    const canvas = await readCanvas(workspacePath);
+    const seen = new Set<string>();
+    for (const move of moves) {
+      const file = assertFrameFile(move.file);
+      if (seen.has(file)) throw new Error("Each frame moves once.");
+      seen.add(file);
+      const current = canvas.frames[file];
+      if (
+        !current ||
+        current.x !== move.from.x ||
+        current.y !== move.from.y ||
+        current.w !== move.from.w ||
+        current.h !== move.from.h ||
+        current.z !== move.from.z
+      )
+        throw new Error("A frame moved or changed before this move. Refresh and try again.");
+      canvas.frames[file] = normalizeGeometry({ ...current, ...move.to }, current);
+    }
+    await writeCanvas(workspacePath, canvas, [], { rollbackOnFailure: true });
+  });
+}
+
 /** The Design surface owns cross-document moves. Source is extracted inside
  * the engine; the renderer supplies only identities, geometry and CSS values. */
 export async function transferDesignNode(
@@ -775,6 +811,12 @@ export async function transferDesignNode(
     relocation?: DesignRelocation;
     movementGuard?: DesignMovementGuard;
     destinationMovementGuard?: DesignMovementGuard;
+    /** A static destination parent becomes the positioned container of an
+     * absolutely placed layer in the same move. */
+    parentStyles?: { position: "relative" };
+    /** A whole body-rooted frame keeps its body's background on the layer
+     * that now holds its content. */
+    frameBackground?: string;
     geometry: DesignFrameGeometry;
   },
 ): Promise<{ frame: string; nodeId: string; changes: DesignFrameChange[] }> {
@@ -796,33 +838,53 @@ export async function transferDesignNode(
     const relocationStyles = input.relocation
       ? designRelocationRootStyles(input.relocation)
       : null;
-    const prepared = input.relocation
-      ? await prepareFrameRenderSourceForFile(
-          workspacePath,
-          from.file,
-          from.source,
-        )
-      : null;
-    const identity =
-      prepared ??
-      (await readDesignFrameRenderIdentityFromSource(
-        workspacePath,
-        from.file,
-        from.source,
-      ));
+    if (
+      input.parentStyles !== undefined &&
+      !isDeepStrictEqual(input.parentStyles, { position: "relative" })
+    )
+      throw new Error("A layer move can only make its new parent positioned.");
+    if (input.frameBackground !== undefined)
+      validateDesignCssValue("background-color", input.frameBackground);
+    const identity = await readDesignFrameRenderIdentityFromSource(
+      workspacePath,
+      from.file,
+      from.source,
+    );
     if (identity.sourceVersion !== input.sourceVersion)
       throw new Error("The source frame changed before the layer move.");
-    if (prepared)
-      assertDesignRelocationSource(prepared.sanitized, input.nodeId);
     if (input.destinationFrame === from.file && !relocationStyles)
       throw new Error("Use a node move for layers in the same frame.");
+    // A body-rooted frame moves whole: its body's content, in one new layer.
+    const wholeFrame = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID;
+    if (
+      wholeFrame &&
+      (!input.destinationFrame ||
+        input.destinationFrame === from.file ||
+        !relocationStyles)
+    )
+      throw new Error("A whole frame can only be nested into another frame.");
     const fromSource = healDesignOids(from.source).html;
+    if (relocationStyles && !wholeFrame)
+      assertDesignRelocationSource(fromSource, input.nodeId);
     const sourceDocument = parse(fromSource, { sourceCodeLocationInfo: true });
-    const record = designNodeRecords(sourceDocument).find(
-      (record) => record.oid === input.nodeId,
-    );
-    const span = record?.element.sourceCodeLocation;
-    if (!record || !span)
+    const record = wholeFrame
+      ? undefined
+      : designNodeRecords(sourceDocument).find(
+          (record) => record.oid === input.nodeId,
+        );
+    const bodyElement = elementRecords(sourceDocument).find(
+      ({ element }) => element.tagName === "body",
+    )?.element;
+    const bodyLocation = bodyElement?.sourceCodeLocation;
+    const span = wholeFrame
+      ? bodyLocation?.startTag && bodyLocation.endTag
+        ? {
+            startOffset: bodyLocation.startTag.endOffset,
+            endOffset: bodyLocation.endTag.startOffset,
+          }
+        : undefined
+      : record?.element.sourceCodeLocation;
+    if ((!wholeFrame && !record) || !span)
       throw new Error("The layer has no movable source span.");
     if (input.destinationFrame === from.file && relocationStyles) {
       if (input.destinationSourceVersion !== input.sourceVersion)
@@ -838,12 +900,13 @@ export async function transferDesignNode(
         entryFile: from.file,
         files: { [from.file]: moved },
       });
-      const source = mutateDesignNodeStyles(state, {
+      let source = mutateDesignNodeStyles(state, {
         nodeId: input.nodeId,
         styles: relocationStyles,
         scope: "inline",
         appendInlineOverrides: true,
       }).files[from.file]!;
+      source = withPositionedParent(source, from.file, input.parentId, input.parentStyles);
       const changes = [{ before: from, after: { ...from, source } }];
       await applyDesignFrameChangesUnlocked(
         workspacePath,
@@ -852,23 +915,39 @@ export async function transferDesignNode(
       );
       return { frame: from.file, nodeId: input.nodeId, changes };
     }
-    let fragment = fromSource.slice(span.startOffset, span.endOffset);
-    const root = record.element.attrs.some(
-      (attribute) => attribute.name === "data-zeros-frame-root",
-    );
-    const body = elementRecords(sourceDocument).find(
-      ({ element }) => element.tagName === "body",
-    )?.element;
-    const bodySpan = body?.sourceCodeLocation;
-    if (!bodySpan?.startTag || !bodySpan.endTag)
+    const body = bodyElement;
+    const bodySpan = bodyLocation;
+    if (!body || !bodySpan?.startTag || !bodySpan.endTag)
       throw new Error("The source frame needs an explicit body.");
+    let nodeId = input.nodeId;
+    let fragment = fromSource.slice(span.startOffset, span.endOffset);
+    if (wholeFrame) {
+      const taken = new Set([
+        ...designNodeRecords(sourceDocument).map((candidate) => candidate.oid),
+      ]);
+      do nodeId = `frame-${randomUUID().slice(0, 8)}`;
+      while (taken.has(nodeId));
+      // The body's own class and inline style carry to the new layer.
+      const carried = ["class", "style"]
+        .map((name) => [name, body.attrs.find((attribute) => attribute.name === name)?.value] as const)
+        .filter(([, value]) => value)
+        .map(([name, value]) => ` ${name}="${escapeAttribute(value!)}"`)
+        .join("");
+      fragment = `<div data-oid="${nodeId}"${carried}>${fragment}</div>`;
+    }
+    const root =
+      wholeFrame ||
+      record!.element.attrs.some(
+        (attribute) => attribute.name === "data-zeros-frame-root",
+      );
     const removeFrame =
-      root &&
-      body?.childNodes.filter(
-        (child) =>
-          "tagName" in child &&
-          child.attrs.some((attribute) => attribute.name === "data-oid"),
-      ).length === 1;
+      wholeFrame ||
+      (root &&
+        body.childNodes.filter(
+          (child) =>
+            "tagName" in child &&
+            child.attrs.some((attribute) => attribute.name === "data-oid"),
+        ).length === 1);
     const remaining = removeFrame
       ? null
       : {
@@ -912,31 +991,8 @@ export async function transferDesignNode(
       );
       if (destinationIdentity.sourceVersion !== input.destinationSourceVersion)
         throw new Error("The destination frame changed before the layer move.");
-      if (prepared) {
-        const target = await prepareFrameRenderSourceForFile(
-          workspacePath,
-          destination.file,
-          destination.source,
-        );
-        assertDesignRelocationSource(target.sanitized);
-        const sheets = (source: string) =>
-          elementRecords(parse(source))
-            .filter(({ element }) => element.tagName === "style")
-            .map(({ element }) =>
-              element.childNodes
-                .map((node) => ("value" in node ? node.value : ""))
-                .join(""),
-            );
-        if (
-          !isDeepStrictEqual(
-            sheets(prepared.sanitized),
-            sheets(target.sanitized),
-          )
-        )
-          throw new Error(
-            "These frames use different stylesheets and cannot be combined safely. Move the layer into an independent frame instead.",
-          );
-      }
+      // Imported directory styles reach every frame; the source's own
+      // stylesheets travel below as dependencies of the moved layer.
       const destinationSource = healDesignOids(destination.source).html;
       const destinationIds = new Set(
         designNodeRecords(parse(destinationSource)).map((record) => record.oid),
@@ -951,7 +1007,7 @@ export async function transferDesignNode(
         );
       fragment = mutateDesignNodeAttributeSource(
         fragment,
-        input.nodeId,
+        nodeId,
         "data-zeros-frame-root",
         null,
         from.file,
@@ -971,10 +1027,11 @@ export async function transferDesignNode(
       if (input.beforeId)
         source = mutateDesignNodeMoveSource(
           source,
-          input.nodeId,
+          nodeId,
           input.parentId ?? "::zeros-document-body",
           input.beforeId,
         );
+      source = withPositionedParent(source, destination.file, input.parentId, input.parentStyles);
       // Keep local stylesheet dependencies when a detached frame is put back.
       // They remain relative to the same Design directory.
       const dependencies = elementRecords(sourceDocument)
@@ -1046,9 +1103,14 @@ export async function transferDesignNode(
         },
       };
     }
-    const styles =
-      relocationStyles ??
-      (input.destinationFrame
+    const styles = relocationStyles
+      ? {
+          ...(input.frameBackground && wholeFrame
+            ? { "background-color": input.frameBackground }
+            : {}),
+          ...relocationStyles,
+        }
+      : (input.destinationFrame
         ? (input.styles ?? {})
         : {
             ...input.styles,
@@ -1070,7 +1132,7 @@ export async function transferDesignNode(
         files: { [after.file]: after.source },
       });
       after.source = mutateDesignNodeStyles(state, {
-        nodeId: input.nodeId,
+        nodeId,
         styles,
         scope: "inline",
         appendInlineOverrides: relocationStyles !== null,
@@ -1090,8 +1152,30 @@ export async function transferDesignNode(
           : []),
       ]),
     );
-    return { frame: after.file, nodeId: input.nodeId, changes };
+    return { frame: after.file, nodeId, changes };
   });
+}
+
+/** Make a static destination parent the containing block of a layer placed
+ * absolutely inside it. The body already is one. */
+function withPositionedParent(
+  source: string,
+  file: string,
+  parentId: string | undefined,
+  parentStyles: { position: "relative" } | undefined,
+): string {
+  if (!parentStyles || !parentId || parentId === DESIGN_RUNTIME_DOCUMENT_BODY_ID) return source;
+  const state = createDesignWebDocumentState({
+    documentId: "transfer",
+    entryFile: file,
+    files: { [file]: source },
+  });
+  return mutateDesignNodeStyles(state, {
+    nodeId: parentId,
+    styles: parentStyles,
+    scope: "inline",
+    appendInlineOverrides: true,
+  }).files[file]!;
 }
 
 /** Replace one present frame with an exact prior/later history state. The

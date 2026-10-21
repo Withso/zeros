@@ -7,6 +7,7 @@ import {
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ComposerModeSnapshot } from "@zeros/protocol/composer-mode";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import { designCaptureRasterSize } from "@zeros/protocol/design-capture";
 import { designPageIdSchema } from "@zeros/protocol/design-pages";
 import { readDesignPageContext } from "./page-selection";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -19,6 +20,7 @@ import {
 } from "@zeros/design-core";
 import { DesignApi, type DesignHeadlessRenderer } from "@zeros/design-web";
 import { DesignDraftStore } from "./design-api";
+import { DESIGN_THEME_NAME } from "./source";
 import { designPagesMigrationGeneration } from "./pages-migration";
 import { DESIGN_AGENT_SAFE_OPERATION_TYPES } from "./design-agent-capability";
 import type { DesignMcpToolHandler } from "./design-agent-mcp";
@@ -33,6 +35,7 @@ import {
   listDesignFrames,
   lintDesignDocument,
   readDesignFrameRenderSourceFromSource,
+  readDesignFrameSelectionIdentity,
 } from "./document";
 import {
   DesignRequestStore,
@@ -50,6 +53,8 @@ const documentId = z
   .max(512);
 const revision = z.string().min(1).max(128);
 const exactDocument = { documentId, expectedRevision: revision };
+/** A capture lays out up to a whole canvas frame (FRAME_MAX_SIZE). */
+const DESIGN_CAPTURE_MAX_LAYOUT_SIDE = 16_384;
 const requestId = designRequestIdSchema;
 const requestEnvelope = {
   requestId,
@@ -258,12 +263,16 @@ const definitions = {
   },
   design_capture: {
     description:
-      "Capture the exact authored revision using the host's qualified headless renderer.",
+      "Capture the exact authored revision using the host's qualified headless renderer. " +
+      "width/height default to the frame's canvas size; a frame larger than 2048 × 2048 is laid out " +
+      "at full size and scaled into one raster, as `zeros-engine design capture` does. " +
+      "theme shows a theme the canvas Themes control offers; omitted shows the default theme.",
     schema: z
       .object({
         ...exactDocument,
-        width: z.number().int().min(1).max(2048),
-        height: z.number().int().min(1).max(2048),
+        width: z.number().int().min(1).max(DESIGN_CAPTURE_MAX_LAYOUT_SIDE).optional(),
+        height: z.number().int().min(1).max(DESIGN_CAPTURE_MAX_LAYOUT_SIDE).optional(),
+        theme: z.string().regex(DESIGN_THEME_NAME).optional(),
       })
       .strict(),
   },
@@ -977,15 +986,36 @@ export class DesignCodeTools implements DesignMcpToolHandler {
         };
       }
       case "design_capture": {
-        const { width, height, ...input } = definitions[name].schema.parse(raw);
+        const { width, height, theme, ...input } =
+          definitions[name].schema.parse(raw);
+        // Default to the frame's own canvas size, like the native capture;
+        // only this frame is read, never the whole directory.
+        let size = { width, height };
+        if (width === undefined || height === undefined) {
+          const frame = await readDesignFrameSelectionIdentity(
+            this.target.workspacePath,
+            this.frame(input.documentId),
+          );
+          size = {
+            width: width ?? Math.min(DESIGN_CAPTURE_MAX_LAYOUT_SIDE, Math.ceil(frame.width)),
+            height: height ?? Math.min(DESIGN_CAPTURE_MAX_LAYOUT_SIDE, Math.ceil(frame.height)),
+          };
+        }
+        const viewport = { width: size.width!, height: size.height! };
+        const raster = designCaptureRasterSize(viewport);
+        const scaled =
+          raster.width !== viewport.width || raster.height !== viewport.height;
         const artifact = await this.api.render({
           ...input,
           viewport: {
-            width,
-            height,
+            ...viewport,
             deviceScaleFactor: 1,
             reducedMotion: "reduce",
           },
+          ...(theme ? { theme } : {}),
+          ...(scaled
+            ? { rasterSize: { width: raster.width, height: raster.height } }
+            : {}),
           signal,
         });
         if (artifact.revision !== input.expectedRevision)
@@ -996,6 +1026,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
           throw new Error("Capture exceeds 1 MiB; use a smaller viewport.");
         return {
           ...input,
+          ...(theme ? { theme } : {}),
           ...artifact,
           bytes: undefined,
           data: Buffer.from(artifact.bytes).toString("base64"),

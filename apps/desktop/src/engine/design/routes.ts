@@ -1,5 +1,6 @@
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
 import {
+  designFramesMoveSchema,
   designMovementGuardSchema,
   designRelocationSchema,
 } from "@zeros/protocol/design-relocation";
@@ -8,8 +9,8 @@ import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
 import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
-import { DESIGN_CAPTURE_TIMEOUT_MS, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
-import { captureWorkspaceDesign } from "./workspace-capture";
+import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewRequestSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import { captureWorkspaceDesign, previewWorkspaceDesign } from "./workspace-capture";
 import { openDesignVerification, designFramePreviewUrl } from "./verification-service";
 import { createDesignContextReference, inspectDesignContext } from "./context";
 import {
@@ -86,6 +87,7 @@ import { DesignPageTargetError } from "./pages";
 import {
   captureDesignFrameRestorePoint,
   transferDesignNode,
+  moveDesignFrameGeometries,
   restoreDesignFrameChanges,
   createDesignFrame,
   createDesignPage,
@@ -148,6 +150,7 @@ import {
   transferDesignHistoryBytes,
   pruneWorkspaceDesignHistory,
   documentDesignHistoryEntry,
+  geometryDesignHistoryEntry,
   frameDesignHistoryEntry,
   type WorkspaceDesignHistoryEntry,
   type WorkspaceDesignHistoryState,
@@ -226,6 +229,7 @@ export interface DesignWorkspaceRouteHost {
 const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.catalog.read",
   "design.capture",
+  "design.preview",
   "design.styleBuilds.presence",
   "design.styles.refresh",
   "design.context.create",
@@ -264,6 +268,7 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.frame.duplicate",
   "design.frame.delete",
   "design.canvas.update",
+  "design.frames.move",
   "design.node.transfer",
   "design.node.styles",
   "design.node.text",
@@ -301,6 +306,11 @@ export async function handleDesignWorkspaceRoute(
     case "design.capture": {
       const input = designWorkspaceCaptureSchema.parse(params);
       return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => captureWorkspaceDesign(root, input));
+    }
+    case "design.preview": {
+      // A canvas preview of the saved source; it never changes the checkout.
+      const input = designPreviewRequestSchema.parse(params);
+      return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => previewWorkspaceDesign(root, input));
     }
     case "design.styleBuilds.presence": {
       // A Design tab shows this workspace, or stopped showing it. Builds start
@@ -601,6 +611,33 @@ export async function handleDesignWorkspaceRoute(
                 ? entry.frame
                 : (entry.changes[0]?.before?.file ?? null),
             historyFrame: direction === "redo" ? entry.frame : (entry.changes[0]?.before?.file ?? entry.frame),
+          };
+        }
+        if (entry.kind === "geometry") {
+          try {
+            await moveDesignFrameGeometries(
+              workspace.path,
+              entry.moves.map((move) => ({
+                file: move.file,
+                from: direction === "undo" ? move.after : move.before,
+                to: direction === "undo" ? move.before : move.after,
+              })),
+            );
+          } catch (error) {
+            if (error instanceof DesignPageTargetError)
+              history.bytes = Math.max(0, history.bytes - entry.bytes);
+            else source.push(entry);
+            throw error;
+          }
+          destination.push(entry);
+          return {
+            result: null,
+            snapshot: await host.readDesignSnapshot(workspace, remote, {
+              hostLocalResources,
+              fresh: true,
+            }),
+            historySelection: entry.frame,
+            historyFrame: entry.frame,
           };
         }
         if (entry.kind === "frame") {
@@ -1405,6 +1442,31 @@ export async function handleDesignWorkspaceRoute(
         },
       };
     }
+    case "design.frames.move": {
+      // Several selected canvas frames move together in one canvas write
+      // and one undo step.
+      const workspace = host.resolveDesignWorkspace(
+        reqStr(params, "workspaceId"),
+        remote,
+      );
+      const moves = designFramesMoveSchema.parse(params.moves);
+      await moveDesignFrameGeometries(
+        workspace.path,
+        moves.map((move) => ({ file: move.frame, from: move.from, to: move.to })),
+      );
+      host.recordDesignHistory(
+        workspace.path,
+        geometryDesignHistoryEntry(
+          moves.map((move) => ({ file: move.frame, before: move.from, after: move.to })),
+        ),
+      );
+      return {
+        snapshot: await host.readDesignSnapshot(workspace, remote, {
+          hostLocalResources,
+          fresh: true,
+        }),
+      };
+    }
     case "design.node.transfer": {
       const workspace = host.resolveDesignWorkspace(
         reqStr(params, "workspaceId"),
@@ -1457,6 +1519,12 @@ export async function handleDesignWorkspaceRoute(
                 params.destinationMovementGuard,
               ),
             }
+          : {}),
+        ...(params.parentStyles !== undefined
+          ? { parentStyles: params.parentStyles as { position: "relative" } }
+          : {}),
+        ...(params.frameBackground !== undefined
+          ? { frameBackground: reqStr(params, "frameBackground") }
           : {}),
         geometry: {
           x: reqNum(params, "x"),

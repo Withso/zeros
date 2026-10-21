@@ -137,10 +137,21 @@ export interface DesignRenderArtifact {
   metadata?: Readonly<Record<string, string | number | boolean>>;
 }
 
+/** Output pixels for a viewport that is laid out at full size and scaled
+ *  down into a smaller capture raster. */
+export interface DesignRenderRaster {
+  width: number;
+  height: number;
+}
+
 export interface DesignHeadlessRenderer {
   render(input: {
     state: DesignWebDocumentState;
     viewport: Required<DesignRenderViewport>;
+    /** A theme the canvas Themes control offers; omitted shows the default. */
+    theme?: string;
+    /** When set, the artifact has these dimensions instead of the viewport's. */
+    rasterSize?: DesignRenderRaster;
     signal?: AbortSignal;
   }): Promise<DesignRenderArtifact>;
 }
@@ -319,11 +330,19 @@ function validatedRuntimeEvidence(
   });
 }
 
+/** A layout viewport's largest side. A render scaled into a smaller raster
+ * may lay out a whole frame (frames reach 16,384 px); its output pixels are
+ * the raster's, which carry the pixel budget instead. */
+const DESIGN_RENDER_MAX_LAYOUT_SIDE = 8_192;
+const DESIGN_RENDER_MAX_SCALED_LAYOUT_SIDE = 16_384;
+
 function requiredViewport(
   viewport: DesignRenderViewport,
+  scaled = false,
 ): Required<DesignRenderViewport> {
-  const width = boundedInteger(viewport.width, 0, 1, 8_192);
-  const height = boundedInteger(viewport.height, 0, 1, 8_192);
+  const side = scaled ? DESIGN_RENDER_MAX_SCALED_LAYOUT_SIDE : DESIGN_RENDER_MAX_LAYOUT_SIDE;
+  const width = boundedInteger(viewport.width, 0, 1, side);
+  const height = boundedInteger(viewport.height, 0, 1, side);
   const deviceScaleFactor = Math.min(
     3,
     Math.max(
@@ -334,8 +353,9 @@ function requiredViewport(
     ),
   );
   if (
+    !scaled &&
     width * height * deviceScaleFactor * deviceScaleFactor >
-    DESIGN_API_MAX_RENDER_PIXELS
+      DESIGN_API_MAX_RENDER_PIXELS
   ) {
     throw new Error("Design render exceeds the pixel budget.");
   }
@@ -348,10 +368,46 @@ function requiredViewport(
   };
 }
 
+const DESIGN_RENDER_THEME = /^[a-z][a-z0-9_-]{0,63}$/;
+
+function optionalTheme(theme: string | undefined): string | undefined {
+  if (theme === undefined) return undefined;
+  if (typeof theme !== "string" || !DESIGN_RENDER_THEME.test(theme)) {
+    throw new Error(
+      "Theme names use lowercase letters, digits, - and _, starting with a letter.",
+    );
+  }
+  return theme;
+}
+
+/** A raster may only scale a viewport down, keeping its aspect ratio. */
+function optionalRaster(
+  raster: DesignRenderRaster | undefined,
+  viewport: Required<DesignRenderViewport>,
+): DesignRenderRaster | undefined {
+  if (raster === undefined) return undefined;
+  const width = boundedInteger(raster.width, 0, 1, viewport.width);
+  const height = boundedInteger(raster.height, 0, 1, viewport.height);
+  if (width !== raster.width || height !== raster.height) {
+    throw new Error("A capture raster can only scale its viewport down.");
+  }
+  const ratio = (width / height) / (viewport.width / viewport.height);
+  if (Math.abs(ratio - 1) > Math.max(1 / width, 1 / height) * 2) {
+    throw new Error("A capture raster must keep its viewport's aspect ratio.");
+  }
+  const scale = viewport.deviceScaleFactor;
+  if (width * height * scale * scale > DESIGN_API_MAX_RENDER_PIXELS) {
+    throw new Error("Design render exceeds the pixel budget.");
+  }
+  return width === viewport.width && height === viewport.height
+    ? undefined
+    : { width, height };
+}
+
 function assertRenderArtifact(
   artifact: DesignRenderArtifact,
   state: DesignWebDocumentState,
-  viewport: Required<DesignRenderViewport>,
+  viewport: { width: number; height: number },
 ): void {
   if (!(artifact.bytes instanceof Uint8Array)) {
     throw new Error(
@@ -771,6 +827,10 @@ export class DesignApi {
     documentId: string;
     expectedRevision?: string;
     viewport: DesignRenderViewport;
+    /** A theme the canvas Themes control offers; omitted shows the default. */
+    theme?: string;
+    /** Lay out at `viewport`, return an artifact scaled to this size. */
+    rasterSize?: DesignRenderRaster;
     signal?: AbortSignal;
   }): Promise<DesignRenderArtifact> {
     if (!this.options.renderer) {
@@ -778,7 +838,18 @@ export class DesignApi {
     }
     const documentId = validatedDocumentId(input.documentId);
     const expectedRevision = validatedExpectedRevision(input.expectedRevision);
-    const viewport = requiredViewport(input.viewport);
+    const viewport = requiredViewport(input.viewport, input.rasterSize !== undefined);
+    const theme = optionalTheme(input.theme);
+    const rasterSize = optionalRaster(input.rasterSize, viewport);
+    // A scaled layout beyond the unscaled bounds must actually be scaled.
+    if (
+      !rasterSize &&
+      (viewport.width > DESIGN_RENDER_MAX_LAYOUT_SIDE ||
+        viewport.height > DESIGN_RENDER_MAX_LAYOUT_SIDE ||
+        viewport.width * viewport.height * viewport.deviceScaleFactor ** 2 >
+          DESIGN_API_MAX_RENDER_PIXELS)
+    )
+      throw new Error("Design render exceeds the pixel budget.");
     const state = await this.withDocumentTurn(documentId, async () => {
       await this.authorizeRead(documentId, "document.render");
       const entry = await this.load(documentId);
@@ -801,6 +872,8 @@ export class DesignApi {
     const artifact = await this.options.renderer.render({
       state,
       viewport,
+      ...(theme ? { theme } : {}),
+      ...(rasterSize ? { rasterSize } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
     if (input.signal?.aborted) {
@@ -809,7 +882,7 @@ export class DesignApi {
         new Error("The headless design render was cancelled.")
       );
     }
-    assertRenderArtifact(artifact, state, viewport);
+    assertRenderArtifact(artifact, state, rasterSize ?? viewport);
     return artifact;
   }
 
