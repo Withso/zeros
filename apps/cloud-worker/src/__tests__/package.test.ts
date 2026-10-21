@@ -46,7 +46,7 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
     }
   }
   await walk(); expect(Object.keys(manifest.files).sort()).toEqual(files.sort());
-  for (const name of ["worker.mjs", "git-askpass.mjs", "gh.mjs", "bin/gh", "bin/git-askpass"])
+  for (const name of ["worker.mjs", "cursor-host.mjs", "git-askpass.mjs", "gh.mjs", "bin/gh", "bin/git-askpass"])
     expect(files).toContain(name);
   // Hash the native executables too, not only their package manifests.
   for (const name of files) {
@@ -73,6 +73,23 @@ it("loads all external SDKs and runs node-pty without the checkout or pnpm store
   const path = join(dist, "native-smoke.mjs"); await writeFile(path, script);
   const result = await exec(process.execPath, [path], { cwd: directory, env: workerChildEnvironment(), timeout: 15_000, maxBuffer: 1024 * 1024 });
   expect(result.stderr).toBe(""); await rm(path);
+});
+
+it("boots the relocated Cursor host with its real pinned SDK over IPC without contacting a provider", async () => {
+  const child = spawn(process.execPath, [join(dist, "cursor-host.mjs")], { cwd: directory,
+    env: { ...workerChildEnvironment(), CURSOR_API_KEY: "fixture-offline-key" }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  try {
+    const reply = new Promise((resolve, reject) => {
+      child.once("message", resolve); child.once("error", reject);
+      child.once("exit", () => reject(new Error("Cursor host exited before replying.")));
+    });
+    child.send({ id: 1, method: "unsupported-offline-probe", params: {} });
+    await expect(reply).resolves.toEqual({ t: "reply", id: 1, error: "Unsupported Cursor host request." });
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, "exit"); child.kill("SIGTERM"); await exited;
+    }
+  }
 });
 
 it("resolves the executable askpass wrapper after relocation, including spaces", async () => {

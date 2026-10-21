@@ -60,11 +60,24 @@ Native failures end the turn without an automatic prompt retry. A reserved
 Claude UUID is provisional until model content or a successful root result
 confirms its native binding; opening a view cannot create a false resume target.
 
+Cursor keeps one native SDK agent per conversation in a separate Node host.
+The host receives only Cursor's login plus runtime and Git broker variables;
+SDK output uses an IPC channel separate from native logs. Each send has its own
+native run and mapper, including callbacks before send resolves. Text steering
+uses native receipts; lost receipts remain uncertain and are never replayed.
+Stop cancels a pending send as soon as its run appears, with a bounded process
+group shutdown if it stalls. Model changes apply to the next send. Question
+tools are excluded; an unexpected question ends the turn. The SDK's `request`
+frame is ordinary request-id metadata. Final results and bounded, owned child
+transcript reads settle before turn completion. Usage comes from the native run;
+only an exact run-id billing match supplies cost, with no inferred charges or
+late billing polling.
+
 ## Image package
 
 Build on Linux with Node 24 LTS, on the same architecture and glibc as the VM:
 `pnpm --filter @zeros/cloud-worker build`. Install the entire `dist/` directory
-as `/opt/zeros/worker`, owned by root. It includes `worker.mjs`, `git-askpass.mjs`,
+as `/opt/zeros/worker`, owned by root. It includes `worker.mjs`, `cursor-host.mjs`, `git-askpass.mjs`,
 `gh.mjs`, executable `bin/gh` and `bin/git-askpass` wrappers, `package.json`,
 `runtime-manifest.json`, license notices and a materialized `node_modules/`.
 There are no links back to the build checkout or pnpm store. The manifest records

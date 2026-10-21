@@ -98,7 +98,7 @@ async function inventory(directory, prefix = "", files = {}) {
 }
 
 try {
-  await build({ absWorkingDir: root, entryPoints: { worker: "src/main.ts", "git-askpass": "src/credentials/askpass-entry.ts", gh: "src/credentials/gh-entry.ts" },
+  await build({ absWorkingDir: root, entryPoints: { worker: "src/main.ts", "cursor-host": "src/drivers/cursor/host-entry.ts", "git-askpass": "src/credentials/askpass-entry.ts", gh: "src/credentials/gh-entry.ts" },
     outdir: staging, outExtension: { ".js": ".mjs" }, bundle: true, platform: "node", target: "node24", format: "esm", external,
     banner: { js: 'import { createRequire as createRuntimeRequire } from "node:module"; const require = createRuntimeRequire(import.meta.url);' },
     legalComments: "linked", sourcemap: false, logLevel: "warning",

@@ -23,7 +23,7 @@ const VERSIONS = { codex: "0.162.1", claude: "0.3.296", cursor: "1.0.37" };
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
 const initialized = (agentId: CloudV2Agent): InitializeResponse => ({
   protocolVersion: 1, agentInfo: { name: NAMES[agentId], version: VERSIONS[agentId] },
-  authMethods: [], agentCapabilities: { loadSession: true, steering: agentId !== "cursor", promptCapabilities: { image: true } },
+  authMethods: [], agentCapabilities: { loadSession: true, steering: true, promptCapabilities: { image: true } },
 });
 const publicError = (error: unknown): string => error instanceof WorkspaceError ? error.message
   : error instanceof Error && /\b401\b|unauthori[sz]ed|authentication/i.test(error.message)

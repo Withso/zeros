@@ -7,6 +7,7 @@ import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/versio
 import { Agents, type AppClient, type DriverFactories } from "./agents";
 import { CodexDriver } from "./drivers/codex/driver";
 import { ClaudeDriver } from "./drivers/claude/driver";
+import { CursorDriver } from "./drivers/cursor/driver";
 import { SessionStore } from "./sessions/session-store";
 import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
@@ -181,6 +182,7 @@ export class CloudWorker {
       this.scope = scope; this.store = store;
       this.agents = new Agents(store, scope, this.options.drivers ?? {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
+        cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
         (frame) => this.broadcast(frame), () => { void this.reportIdle(); });
       this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
