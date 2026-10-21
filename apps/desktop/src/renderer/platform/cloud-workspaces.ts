@@ -17,7 +17,7 @@ import { WorkspaceRuntimeClient, type CloudResourceUsageConnection } from "./bri
 import { bridgeWorkspaceResourceUsage } from "./bridge/workspace-bridge";
 import { forgetCloudWorkspacePortForwarding } from "./cloud-workspace-access";
 import { isFeatureEnabled } from "../config/release-channel";
-import { changeCloudV2Workspace, cloudV2Document, getCloudV2Workspace, listCloudV2Workspaces } from "./cloud-v2";
+import { changeCloudV2Workspace, cloudV2Document, createCloudV2Workspace, getCloudV2Workspace, listCloudV2Workspaces } from "./cloud-v2";
 import { getTeamStoreState } from "../features/team/team-store";
 import { CloudAcceptedLifecycleReceiptSchema, CloudRestartInputSchema,
   type CloudAcceptedLifecycleReceipt } from "@zeros/protocol/cloud-final-save";
@@ -361,22 +361,17 @@ export async function createCloudWorkspaceDocument(input: {
   idempotencyKey: string;
 }): Promise<CloudWorkspaceDocument> {
   const epoch = getOrganizationStoreGeneration();
-  const { organizationId, idempotencyKey, ...body } = input;
-  const assertAccount = () => {
-    if (epoch !== getOrganizationStoreGeneration())
-      throw new Error("Your account changed while creating the cloud workspace");
-  };
-  const create = () => {
-    assertAccount();
-    return request(
-      organizationPath(organizationId),
-      z.object({ workspace: CloudWorkspaceDocumentSchema }),
-      { body, idempotencyKey },
-    );
-  };
-  const result = await create();
-  assertAccount();
-  if (result.workspace.organizationId !== organizationId)
+  // v2 forks the organization's live Cloud Computer, which already has the
+  // repository installed; the server rejects repositories it does not have.
+  const workspace = await createCloudV2Workspace({
+    organizationId: input.organizationId,
+    repository: `${input.repository.owner}/${input.repository.name}`,
+    baseBranch: input.repository.revision,
+    ...(input.name ? { name: input.name } : {}),
+  });
+  if (epoch !== getOrganizationStoreGeneration())
+    throw new Error("Your account changed while creating the cloud workspace");
+  if (workspace.organizationId !== input.organizationId)
     throw new Error("Cloud creation returned a different organization");
-  return result.workspace;
+  return cloudV2Document(workspace);
 }

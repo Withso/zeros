@@ -1,4 +1,4 @@
-import { CloudComputerV2Panel } from "./cloud-computer-v2-panel";
+import { CloudComputerPanel } from "./cloud-computer-panel";
 import { prefetchCloudComputerV2 } from "./cloud-computer-v2-client";
 import { CloudMcpPanel, CloudSkillsPanel } from "./cloud-customization-panel";
 import { prefetchCloudCustomization } from "./cloud-customization-client";
@@ -262,7 +262,7 @@ const SECTIONS: SectionDef[] = [
     icon: Box,
     Panel: ModelsPanel,
   },
-  { id: "cloud-computer", label: "Cloud Computer", icon: Box, Panel: CloudComputerV2Panel },
+  { id: "cloud-computer", label: "Cloud Computer", icon: Box, Panel: CloudComputerPanel },
   { id: "cloud-mcp", label: "MCP servers", icon: Blocks, Panel: CloudMcpPanel },
   { id: "cloud-skills", label: "Skills", icon: Blocks, Panel: CloudSkillsPanel },
   {
