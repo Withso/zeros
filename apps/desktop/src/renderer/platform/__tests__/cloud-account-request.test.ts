@@ -13,6 +13,13 @@ vi.mock("../../features/team/control-plane", () => ({
 import { CloudWorkspaceDocumentSchema, changeCloudWorkspaceLifecycle, cloudAccountRequest, cloudAgentGrant, cloudAgentDelegations, createCloudWorkspaceDocument, getCloudWorkspaceDocument,
   getCloudRuntimeUpgradeAvailability } from "../cloud-workspaces";
 
+function v2Workspace(id: string, state: string) {
+  return {
+    id, organizationId: id, creatorUserId: id, name: "Workspace", repository: "sample/repo", branch: "zeros/workspace",
+    baseBranch: "main", state, errorCode: null, createdAt: "2026-10-04T00:00:00.000Z", updatedAt: "2026-10-04T00:00:00.000Z",
+    version: 2, capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex"] },
+  };
+}
 const session = { access_token: "synthetic-session", user: { sub: "user_provider_subject_sentinel", accountId: "55555555-5555-4555-8555-555555555555" } };
 beforeEach(() => { state.generation = 0; state.session.mockReset(); state.source.mockReset(); });
 afterEach(() => vi.unstubAllGlobals());
@@ -39,47 +46,35 @@ describe("cloud request account boundaries", () => {
     expect(fetcher.mock.calls[0][1]).toMatchObject({ method: "GET", cache: "no-store" });
     await expect(getCloudRuntimeUpgradeAvailability({ organizationId, workspaceId })).rejects.toThrow("workspace identity");
   });
-  it.each([undefined, "interaction"] as const)("uses the existing wake endpoint with optional reason %s, preserving other lifecycle bodies", async reason => {
+  it("starts, stops and deletes through the v2 lifecycle endpoints", async () => {
     state.session.mockResolvedValue(session);
     const id = "11111111-1111-4111-8111-111111111111";
-    const workspace = {
-      id, organizationId: id, teamId: id, name: "Wake fixture", createdBy: id, placement: "cloud", status: "ready",
-      capabilities: { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null },
-      repository: { forge: "github.com", owner: "sample", name: "repo", revision: "main" },
-      generation: { number: 1, architecture: "linux/amd64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
-        observedState: "ready", lastObservedAt: null },
-      version: 1, error: null, createdAt: "2026-10-04T00:00:00.000Z", updatedAt: "2026-10-04T00:00:00.000Z", deletedAt: null,
-    };
-    const fetch = vi.fn(async () => Response.json({ workspace })); vi.stubGlobal("fetch", fetch);
+    const fetch = vi.fn(async () => Response.json({ workspace: v2Workspace(id, "starting") })); vi.stubGlobal("fetch", fetch);
     const target = { organizationId: id, workspaceId: id };
-    await changeCloudWorkspaceLifecycle(target, "wake", "fixture-intent", reason);
-    expect(fetch).toHaveBeenCalledWith(`https://api.example.test/v1/organizations/${id}/cloud-workspaces/${id}/wake`,
-      expect.objectContaining({ method: "POST", body: JSON.stringify(reason ? { reason } : {}) }));
-    fetch.mockClear();
-    await changeCloudWorkspaceLifecycle(target, "stop", "fixture-stop", reason);
-    expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/\/stop$/), expect.objectContaining({ body: "{}" }));
+    expect((await changeCloudWorkspaceLifecycle(target, "wake", "fixture-intent", "interaction")).status).toBe("waking");
+    expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}/start`,
+      expect.objectContaining({ method: "POST", body: "{}" }));
+    await changeCloudWorkspaceLifecycle(target, "archive", "fixture-archive");
+    expect(fetch).toHaveBeenLastCalledWith(expect.stringMatching(/\/v1\/cloud-v2\/workspaces\/[^/]+\/stop$/), expect.objectContaining({ method: "POST" }));
+    await changeCloudWorkspaceLifecycle(target, "delete", "fixture-delete");
+    expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}`, expect.objectContaining({ method: "DELETE" }));
   });
   it("preserves optional server-derived edit access without inferring it from legacy write access", () => {
     const capabilities = { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null };
     expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse(capabilities).canEdit).toBeUndefined();
     for (const canEdit of [true, false]) expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse({ ...capabilities, canEdit }).canEdit).toBe(canEdit);
   });
-  it("retains server-derived admin metadata in a fetched workspace DTO", async () => {
+  it("maps a v2 workspace into the shared document and rejects a changed identity", async () => {
     state.session.mockResolvedValue(session);
     const id = "11111111-1111-4111-8111-111111111111";
-    const workspace = {
-      id, organizationId: id, teamId: id, name: "Configure Cloud Computer", createdBy: id,
-      ownerUserId: id, adminWorkspace: { creatorUserId: id }, placement: "cloud", status: "provisioning",
-      capabilities: { canWrite: true, canManage: true, canStart: false, startUnavailableReason: "workspace_not_stopped" },
-      repository: { forge: "github.com", owner: "sample", name: "repo", revision: "main" },
-      generation: { number: 1, architecture: "linux/amd64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
-        observedState: "unknown", lastObservedAt: null },
-      version: 1, error: null, createdAt: "2026-10-04T00:00:00.000Z", updatedAt: "2026-10-04T00:00:00.000Z", deletedAt: null,
-    };
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace })));
-    expect((await getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).adminWorkspace).toEqual({ creatorUserId: id });
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...workspace, adminWorkspace: { creatorUserId: "invalid" } } })));
-    await expect(getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).rejects.toThrow();
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: v2Workspace(id, "running") })));
+    const document = await getCloudWorkspaceDocument({ organizationId: id, workspaceId: id });
+    expect(CloudWorkspaceDocumentSchema.parse(document)).toMatchObject({
+      status: "ready", placement: "cloud", repository: { owner: "sample", name: "repo", revision: "main" },
+      capabilities: { canWrite: true, canEdit: true, canStart: false },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...v2Workspace(id, "running"), id: "22222222-2222-4222-8222-222222222222" } })));
+    await expect(getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).rejects.toThrow("identity");
   });
   it("chooses the proven account grant even when a newer unqualified API-key grant matches the same model", async () => {
     state.session.mockResolvedValue(session);

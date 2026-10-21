@@ -14,23 +14,24 @@ const org = "11111111-1111-4111-8111-111111111111";
 beforeEach(() => { io.fetch.mockReset(); io.epoch++; });
 afterEach(() => vi.restoreAllMocks());
 describe("scoped catalog HTTP reads", () => {
-  it("uses the membership route for every page while retaining the advertised watermark", async () => {
-    io.fetch.mockResolvedValueOnce(Response.json({ workspaces: [], nextCursor: "next/page", catalogVersion: 7 }))
-      .mockResolvedValueOnce(Response.json({ workspaces: [], nextCursor: null, catalogVersion: 8 }));
-    await expect(listCloudWorkspaceCatalogSnapshot(org)).resolves.toEqual({ workspaces: [], catalogVersion: 8 });
-    expect(io.fetch.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
-      `/v1/organizations/${org}/cloud-workspaces`, `/v1/organizations/${org}/cloud-workspaces`,
-    ]);
-    expect(new URL(String(io.fetch.mock.calls[1]![0])).searchParams.get("cursor")).toBe("next/page");
+  it("reads each organization's v2 workspaces and maps them into shared documents", async () => {
+    const row = { id: org, organizationId: org, creatorUserId: org, name: "zeros", repository: "withso/zeros", branch: "zeros/w",
+      baseBranch: "main", state: "stopped", errorCode: null, createdAt: "2026-10-21T00:00:00Z", updatedAt: "2026-10-21T00:00:00Z",
+      version: 2, capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex"] } };
+    io.fetch.mockResolvedValueOnce(Response.json({ workspaces: [row] }));
+    const snapshot = await listCloudWorkspaceCatalogSnapshot(org);
+    expect(snapshot.catalogVersion).toBeNull();
+    expect(snapshot.workspaces.map(doc => [doc.id, doc.status, doc.capabilities.canStart])).toEqual([[org, "stopped", true]]);
+    const url = new URL(String(io.fetch.mock.calls[0]![0]));
+    expect([url.pathname, url.searchParams.get("organizationId")]).toEqual(["/v1/cloud-v2/workspaces", org]);
   });
 
-  it("retains the original global list and marks mixed-version pages unproven", async () => {
-    io.fetch.mockResolvedValue(Response.json({ workspaces: [], nextCursor: null }));
-    await expect(listCloudWorkspaceCatalogSnapshot()).resolves.toEqual({ workspaces: [], catalogVersion: null });
-    expect(new URL(String(io.fetch.mock.calls[0]![0])).pathname).toBe("/v1/cloud-workspaces");
-    io.fetch.mockResolvedValue(Response.json({ workspaces: [], nextCursor: null }));
-    await expect(listCloudWorkspaceDocuments(org)).resolves.toEqual([]);
-    expect(new URL(String(io.fetch.mock.calls[1]![0])).pathname).toBe(`/v1/organizations/${org}/cloud-workspaces`);
+  it("rejects a v2 page that returns another organization's workspace", async () => {
+    io.fetch.mockResolvedValueOnce(Response.json({ workspaces: [{ id: org, organizationId: "22222222-2222-4222-8222-222222222222",
+      creatorUserId: org, name: "x", repository: "o/r", branch: "b", baseBranch: "main", state: "running", errorCode: null,
+      createdAt: "2026-10-21T00:00:00Z", updatedAt: "2026-10-21T00:00:00Z", version: 2,
+      capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: [] } }] }));
+    await expect(listCloudWorkspaceDocuments(org)).rejects.toThrow("another organization");
   });
 
   it("validates an organization before performing authenticated I/O", async () => {

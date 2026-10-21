@@ -67,7 +67,8 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
       observedState: workspace.state,
       lastObservedAt: iso(workspace.updatedAt),
     },
-    version: 0,
+    // Monotonic per workspace, so a late read never replaces a newer document.
+    version: Date.parse(workspace.updatedAt),
     error: workspace.errorCode ? { code: workspace.errorCode, message: ERRORS[workspace.errorCode] ?? "This cloud workspace is unavailable." } : null,
     createdAt: iso(workspace.createdAt),
     updatedAt: iso(workspace.updatedAt),

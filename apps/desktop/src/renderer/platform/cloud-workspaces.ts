@@ -17,6 +17,8 @@ import { WorkspaceRuntimeClient, type CloudResourceUsageConnection } from "./bri
 import { bridgeWorkspaceResourceUsage } from "./bridge/workspace-bridge";
 import { forgetCloudWorkspacePortForwarding } from "./cloud-workspace-access";
 import { isFeatureEnabled } from "../config/release-channel";
+import { changeCloudV2Workspace, cloudV2Document, getCloudV2Workspace, listCloudV2Workspaces } from "./cloud-v2";
+import { getTeamStoreState } from "../features/team/team-store";
 import { CloudAcceptedLifecycleReceiptSchema, CloudRestartInputSchema,
   type CloudAcceptedLifecycleReceipt } from "@zeros/protocol/cloud-final-save";
 
@@ -241,80 +243,35 @@ export interface CloudWorkspaceCatalogSnapshot {
   /** A resume hint, never an event cutoff or a transaction snapshot point. */
   catalogVersion: number | null;
 }
+/** Cloud v2: one read per organization the account can use cloud in. */
 export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string): Promise<CloudWorkspaceCatalogSnapshot> {
-  const path = organizationId === undefined ? "/v1/cloud-workspaces" : organizationPath(organizationId);
-  const rows: CloudWorkspaceDocument[] = [];
-  let cursor: string | null = null;
-  let watermark = 0, complete = true;
-  const seen = new Set<string>();
-  do {
-    const page: {
-      workspaces: CloudWorkspaceDocument[];
-      nextCursor: string | null;
-      catalogVersion?: number;
-    } = await request(
-      `${path}?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
-      z.object({
-        workspaces: z.array(CloudWorkspaceDocumentSchema).max(100),
-        nextCursor: z.string().nullable(),
-        catalogVersion: z.number().int().nonnegative().safe().optional(),
-      }),
-    );
-    if (organizationId !== undefined && page.workspaces.some(row => row.organizationId !== organizationId))
-      throw new Error("Cloud catalog returned another organization");
-    rows.push(...page.workspaces);
-    if (page.catalogVersion === undefined) complete = false;
-    else watermark = Math.max(watermark, page.catalogVersion);
-    cursor = page.nextCursor;
-    if (cursor && (seen.has(cursor) || rows.length >= 2_000))
-      throw new Error("Cloud workspace list exceeded its page limit");
-    if (cursor) seen.add(cursor);
-  } while (cursor);
-  return { workspaces: rows, catalogVersion: complete ? watermark : null };
+  const organizations = organizationId !== undefined ? [organizationId]
+    : (getTeamStoreState().me?.organizations ?? [])
+      .filter(org => !org.isPersonal && org.workspaceCapabilities.cloud).map(org => org.id).slice(0, 16);
+  const workspaces: CloudWorkspaceDocument[] = [];
+  for (const id of organizations) workspaces.push(...(await listCloudV2Workspaces(id)).map(cloudV2Document));
+  return { workspaces, catalogVersion: null };
 }
 
 export async function getCloudWorkspaceDocument(
   target: CloudWorkspaceTarget,
 ): Promise<CloudWorkspaceDocument> {
-  const { workspace } = await request(
-    `/v1/cloud-workspaces/${z.string().uuid().parse(target.workspaceId)}`,
-    z.object({ workspace: CloudWorkspaceDocumentSchema }),
-  );
-  if (
-    workspace.id !== target.workspaceId ||
-    workspace.organizationId !== target.organizationId
-  )
-    throw new Error("Cloud workspace response changed identity");
-  return workspace;
+  return cloudV2Document(await getCloudV2Workspace(target));
 }
 
 export async function changeCloudWorkspaceLifecycle(
   target: CloudWorkspaceTarget,
   operation: "wake" | "stop" | "archive" | "delete",
-  idempotencyKey: string,
-  reason?: "interaction",
+  _idempotencyKey: string,
+  _reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {
-  const { workspace } = await request(
-    `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}${operation === "delete" ? "" : `/${operation}`}`,
-    z.object({ workspace: CloudWorkspaceDocumentSchema }),
-    {
-      // Additive hint on the existing wake path; server-side cross-device
-      // interaction backoff can use it later without changing clients.
-      body: operation === "wake" && reason ? { reason } : {},
-      idempotencyKey,
-      method: operation === "delete" ? "DELETE" : "POST",
-    },
-  );
-  if (
-    workspace.id !== target.workspaceId ||
-    workspace.organizationId !== target.organizationId
-  )
+  // v2 has no archive: a stopped workspace already keeps its disk.
+  const action = operation === "wake" ? "start" : operation === "delete" ? "delete" : "stop";
+  const workspace = cloudV2Document(await changeCloudV2Workspace(target, action));
+  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud lifecycle response changed identity");
-  if (operation === "delete") {
-    // A successful server deletion remains successful if native cleanup is
-    // already retired; runtime authority independently fences new tunnels.
-    await forgetCloudWorkspacePortForwarding(target).catch(() => undefined);
-  }
+  // A successful server deletion stays successful if native cleanup fails.
+  if (operation === "delete") await forgetCloudWorkspacePortForwarding(target).catch(() => undefined);
   return workspace;
 }
 

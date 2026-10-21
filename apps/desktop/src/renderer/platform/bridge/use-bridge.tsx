@@ -20,7 +20,6 @@ import React, {
   useCallback,
   useSyncExternalStore,
 } from "react";
-import { prepareCloudGithubWrite } from "../cloud-github";
 import {
   RuntimeClient,
   invalidateEnginePort,
@@ -31,9 +30,8 @@ import { getActiveBridge, setActiveBridge, wireCloudRuntimeRetirement } from "./
 import { wireGithubCredentialWriteback } from "./github-token-sync";
 import { nativeListen, useNativeRuntime } from "../runtime";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
-import { openCloudRuntime } from "./open-cloud-runtime";
-import { readCloudWorkspaceHistory } from "../cloud-history";
-import { onCloudHistoryRestoreHead } from "../cloud-transcript-cache";
+import { openCloudV2Runtime } from "./open-cloud-v2-runtime";
+import { readCloudV2History } from "../cloud-v2";
 import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, cloudWorkspaceStopVersion, getCloudWorkspaceRows, isCloudWorkspaceLifecyclePending } from "../../state/cloud-workspace-catalog";
 import { wireWorkbenchConnectionRejection } from "../../state/workbench-availability";
 
@@ -57,7 +55,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const [client] = useState(
     () =>
       new WorkspaceRuntimeClient({
-        open: openCloudRuntime,
+        open: openCloudV2Runtime,
         workspaces: () => getCloudWorkspaceRows() as unknown as Record<string, unknown>[],
         workspacesConfirmed: cloudWorkspaceCatalogConfirmed,
         canAccess: target => canReadCloudWorkspace(cloudWorkspaceDocument(target)),
@@ -70,10 +68,9 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
             : undefined;
         },
         manage: cloudWorkspaceOperation,
-        readHistory: readCloudWorkspaceHistory,
-        checkpointHistory: true,
-        onHistoryRestoreHead: onCloudHistoryRestoreHead,
-        prepareGithubWrite: prepareCloudGithubWrite,
+        // History comes from the worker when connected and from the control
+        // plane's mirror otherwise; neither read wakes the VM.
+        readHistory: readCloudV2History,
       }),
   );
   const nativeRuntime = useNativeRuntime();

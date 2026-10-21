@@ -16,12 +16,9 @@ import { changeCloudWorkspaceLifecycle } from "../cloud-workspaces";
 const id = "11111111-1111-4111-8111-111111111111";
 const target = { organizationId: id, workspaceId: id };
 const workspace = {
-  id, organizationId: id, teamId: id, createdBy: id, name: "Workspace", placement: "cloud", status: "deleting",
-  desiredState: "deleted", version: 1, error: null, deletedAt: null,
-  createdAt: "2026-10-07T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z",
-  capabilities: { canWrite: true, canManage: true, canStart: false, startUnavailableReason: "workspace_not_stopped" },
-  repository: { forge: "github.com", owner: "example", name: "repo", revision: "main" },
-  generation: { number: 1, architecture: "linux/amd64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "running", lastObservedAt: null },
+  id, organizationId: id, creatorUserId: id, name: "Workspace", repository: "example/repo", branch: "zeros/workspace",
+  baseBranch: "main", state: "deleting", errorCode: null, createdAt: "2026-10-07T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z",
+  version: 2, capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex"] },
 };
 beforeEach(() => {
   state.generation = 0; state.forget.mockReset().mockResolvedValue(undefined);
