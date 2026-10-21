@@ -1,0 +1,66 @@
+import { chmod, lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { expect, it } from "vitest";
+import { FileService } from "../files";
+import { repositoryFixture } from "./repository-fixture";
+
+it("reads and atomically writes native or relative paths with Local's result shapes", async () => {
+  const { scope, root } = await repositoryFixture();
+  const files = new FileService(scope);
+  await chmod(join(root, "readme.txt"), 0o755);
+  expect(await files.handle("file.read", { workspaceId: scope.workspace.id, path: "readme.txt" })).toEqual({ kind: "text", path: "readme.txt", bytes: 8, content: "initial\n" });
+  expect(await files.handle("file.write", { workspaceId: scope.workspace.id, path: join(root, "readme.txt"), content: "edited\n" })).toEqual({ kind: "success", path: "readme.txt", bytes: 7 });
+  expect((await lstat(join(root, "readme.txt"))).mode & 0o777).toBe(0o755);
+  expect(await readFile(join(root, "readme.txt"), "utf8")).toBe("edited\n");
+  expect(await files.handle("file.write", { path: "new/nested.txt", content: "created" })).toMatchObject({ kind: "success" });
+  expect(await files.handle("file.read", { path: "new/nested.txt" })).toMatchObject({ content: "created" });
+});
+
+it("rejects foreign identities, traversal and symlinks escaping the checkout", async () => {
+  const { scope, root, directory } = await repositoryFixture();
+  const files = new FileService(scope);
+  await writeFile(join(directory, "outside.txt"), "outside fixture");
+  await symlink(join(directory, "outside.txt"), join(root, "link.txt"));
+  await symlink(directory, join(root, "link-dir"));
+  for (const path of ["../outside.txt", join(directory, "outside.txt"), "link.txt", "link-dir/outside.txt", ".git/config", "bad\0path"]) {
+    expect(await files.handle("file.read", { path })).toMatchObject({ kind: "error" });
+    expect(await files.handle("file.write", { path, content: "replacement" })).toMatchObject({ kind: "error" });
+  }
+  expect(await readFile(join(directory, "outside.txt"), "utf8")).toBe("outside fixture");
+  await expect(files.handle("file.tree", { workspaceId: "foreign" })).rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" });
+  await expect(files.handle("fs.listDir", { path: directory })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+});
+
+it("follows an internal read symlink and confines directory listings", async () => {
+  const { scope, root, directory } = await repositoryFixture();
+  const files = new FileService(scope);
+  await symlink("readme.txt", join(root, "internal.txt"));
+  await mkdir(join(root, "src")); await mkdir(join(root, ".hidden"));
+  await symlink(directory, join(root, "outside"));
+  expect(await files.handle("file.read", { path: "internal.txt" })).toMatchObject({ kind: "text", content: "initial\n" });
+  expect(await files.handle("fs.listDir", {})).toEqual({ path: root, parent: null, entries: [{ name: "src", path: join(root, "src") }] });
+  expect(await files.handle("fs.listDir", { path: join(root, "src") })).toMatchObject({ path: join(root, "src"), parent: root });
+});
+
+it("bounds text, image and binary reads and oversized writes", async () => {
+  const { scope, root } = await repositoryFixture(); const files = new FileService(scope);
+  await writeFile(join(root, "binary.dat"), Buffer.from([65, 0, 66]));
+  await writeFile(join(root, "image.png"), Buffer.from([137, 80, 78, 71]));
+  await writeFile(join(root, "large.txt"), "x".repeat(2_000_001));
+  expect(await files.handle("file.read", { path: "binary.dat" })).toEqual({ kind: "binary", path: "binary.dat", bytes: 3 });
+  expect(await files.handle("file.read", { path: "image.png" })).toEqual({ kind: "image", path: "image.png", bytes: 4, dataUrl: "data:image/png;base64,iVBORw==" });
+  expect(await files.handle("file.read", { path: "large.txt" })).toEqual({ kind: "too-large", path: "large.txt", bytes: 2_000_001 });
+  expect(await files.handle("file.write", { path: "readme.txt", content: "x".repeat(2_000_001) })).toMatchObject({ kind: "too-large" });
+  expect(await readFile(join(root, "readme.txt"), "utf8")).toBe("initial\n");
+});
+
+it("lists exact Git paths, including newline names, and lazily expands ignored entries", async () => {
+  const { scope, root } = await repositoryFixture(); const files = new FileService(scope);
+  await writeFile(join(root, "line\nbreak.txt"), "new\n");
+  await writeFile(join(root, ".gitignore"), "ignored/\n");
+  await mkdir(join(root, "ignored")); await writeFile(join(root, "ignored/file.txt"), "ignored\n");
+  expect(await files.handle("file.tree", {})).toEqual({ files: [".gitignore", "line\nbreak.txt", "readme.txt"] });
+  expect(await files.handle("file.ignored", {})).toEqual({ entries: ["ignored/"] });
+  expect(await files.handle("file.ignored", { dir: "ignored" })).toEqual({ entries: ["ignored/file.txt"] });
+  expect(await files.handle("file.tree", { includeIgnored: true, query: "file.txt", limit: 1 })).toEqual({ files: ["ignored/file.txt"] });
+});
