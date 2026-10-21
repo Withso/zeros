@@ -1,7 +1,7 @@
 // The only compute provider cloud v2 uses. Every call is a direct Boat API
 // request; there is no provider registry or adapter layer between them.
 import { z } from "zod";
-import type { BoatApiClient } from "../cloud-workspaces/boat-client.js";
+import type { BoatApiClient } from "../cloud/boat-client.js";
 
 const SANDBOX_ID = /^bx_[a-z0-9]{4,32}$/;
 const SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/;

@@ -1,4 +1,4 @@
-import { cloudAgentModelAllowed } from "../cloud-workspaces/agent-models.js";
+import { cloudAgentModelAllowed } from "../agent-credentials/agent-models.js";
 import {
   createHash,
   createHmac,
@@ -8,9 +8,9 @@ import {
 import type pg from "pg";
 import {ConditionalRemovalRequestSchema,ConditionalRemovalResponseSchema,type ConditionalRemovalRequest} from "./client.js";
 import {HttpError} from "../authz.js";
-import { cloudAgentCredentialConnectionMethod } from "../cloud-workspaces/agent-credentials.js";
-import type { CloudAgentCredentialKeys } from "../cloud-workspaces/agent-credential-envelope.js";
-import { codexRefreshFingerprint } from "../cloud-workspaces/codex-auth-cache.js";
+import { cloudAgentCredentialConnectionMethod } from "../agent-credentials/agent-credentials.js";
+import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
+import { codexRefreshFingerprint } from "../agent-credentials/codex-auth-cache.js";
 import {
   sealMaterial,
   openMaterial,

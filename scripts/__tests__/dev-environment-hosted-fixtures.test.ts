@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { fixtureIssues, bindFixture, seedHostedFixture, verifyFixtureMembership, bootstrapFixtureOrganization } from "../dev-environment/hosted-fixtures.mjs";
 import { validateStaffRoleRequest } from "../../apps/control-plane/src/manage-staff";
-import { validateCloudWorkspaceQuotaRequest } from "../../apps/control-plane/src/manage-cloud-workspace-quota";
 
 const fixture = { workosUserId: "user_test", workosOrganizationId: "org_test", expectedEmail: "dev@example.test",
   expectedOrganizationSlug: "test-org", computeAllowance: "pro-monthly" };
@@ -9,18 +8,14 @@ const userId = "11111111-1111-4111-8111-111111111111", orgId = "22222222-2222-42
 function setup(rows: any[] = []) {
   const state: any = { owner: "a".repeat(24), generation: "33333333-3333-4333-8333-333333333333" };
   const manage = vi.fn(async (pool, request) => ({ state: request.execute ? "changed" : "planned", approval: "bound-plan" }));
-  const credit = vi.fn(async () => ({ state: "ready", periodId: "period" }));
-  const allowance = vi.fn(function () { return { ensure: credit }; });
   const modules: any = {
     "manage-staff.js": { validateStaffRoleRequest, manageStaffRole: manage },
-    "manage-cloud-workspace-quota.js": { validateCloudWorkspaceQuotaRequest, manageCloudWorkspaceQuota: manage },
-    "cloud-workspaces/pro-allowance.js": { DatabaseProMonthlyAllowance: allowance },
   };
   const query = vi.fn(async () => ({ rows }));
   const f = { runtime: {}, migration: { query: vi.fn(async () => ({ rows: [] as any[] })) }, withSystemTx: vi.fn(async (pool, fn) => fn({ query })), module: vi.fn(async name => modules[name]),
     request: { ...state, fixture: bindFixture(state, fixture), roles: { runtime: { url: "postgresql://runtime@localhost/postgres" },
-      migration: { url: "postgresql://owner@localhost/postgres" } }, worker: { storageMiB: 20480 }, boat: { secondsPerDollar: 100_000 } } };
-  return { ...f, manage, credit, allowance, query, state };
+      migration: { url: "postgresql://owner@localhost/postgres" } } } };
+  return { ...f, manage, query, state };
 }
 describe("explicit hosted Dev fixture", () => {
   it("imports only a verified Dev organization after the selected account signs in", async () => {
@@ -74,15 +69,13 @@ describe("explicit hosted Dev fixture", () => {
     const f = setup([{ user_id: userId, organization_id: orgId, email: "different@example.test", slug: "test-org" }]);
     await expect(seedHostedFixture(f)).rejects.toThrow(/differs/); expect(f.manage).not.toHaveBeenCalled();
   });
-  it("uses the release Pro allowance policy instead of conflicting organization funding", async () => {
+  it("seeds the signed-in owner without legacy worker sizing, quota or compute credits", async () => {
     const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);
     expect(await seedHostedFixture(f)).toEqual({ seeded: true });
-    expect(f.manage).toHaveBeenCalledTimes(4);
+    expect(f.manage).toHaveBeenCalledTimes(2);
     expect(f.manage.mock.calls.every(([pool, input]) => pool === f.migration && input.channel === "development")).toBe(true);
-    expect(f.allowance).toHaveBeenCalledWith(f.runtime, { policyId: "hosted-dev", secondsPerDollar: 100_000 });
-    expect(f.credit).toHaveBeenCalledWith(userId);
-    await seedHostedFixture(f);
-    expect(f.credit.mock.calls[0]).toEqual(f.credit.mock.calls[1]);
+    expect(f.module).toHaveBeenCalledExactlyOnceWith("manage-staff.js");
+
   });
   it("keeps legacy profiles readable for cleanup but requires explicit migration before seeding", async () => {
     const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);
@@ -92,25 +85,5 @@ describe("explicit hosted Dev fixture", () => {
     f.request.fixture = bindFixture({}, legacy);
     await expect(seedHostedFixture(f)).rejects.toThrow(/organization.*credit.*Pro.*archive/i);
     expect(f.manage).not.toHaveBeenCalled();
-    expect(f.credit).not.toHaveBeenCalled();
-  });
-  it("preserves an operator's quota when reseeding a Dev environment with additional workspaces", async () => {
-    const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);
-    f.migration.query.mockResolvedValue({ rows: [{ reason: "Temporary second workspace for parity verification", next_max_storage_mib: 140446 }] });
-    await expect(seedHostedFixture(f)).resolves.toEqual({ seeded: true });
-    expect(f.manage).toHaveBeenCalledTimes(2); // Staff authority only; do not reset the owner's quota.
-    expect(f.module).not.toHaveBeenCalledWith("manage-cloud-workspace-quota.js");
-    expect(f.credit).toHaveBeenCalledWith(userId);
-  });
-  it("never shrinks its own existing storage quota after rebuilding a smaller image", async () => {
-    const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);
-    f.migration.query.mockResolvedValue({ rows: [{ reason: `Disposable development fixture ${f.state.owner}/${f.state.generation}`, next_max_storage_mib: 80000 }] });
-    await seedHostedFixture(f);
-    expect(f.manage.mock.calls[2][1].next.maxStorageMiB).toBe(80000);
-  });
-  it("reports allowance conflicts without claiming a successful seed", async () => {
-    const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);
-    f.credit.mockResolvedValue({ state: "legacy_conflict" } as any);
-    await expect(seedHostedFixture(f)).rejects.toThrow(/legacy_conflict/);
   });
 });

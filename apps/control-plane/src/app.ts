@@ -1,4 +1,3 @@
-import { CLOUD_GITHUB_PROXY_PATH, createCloudGithubProxyRoutes } from "./cloud-workspaces/github-write-proxy.js";
 // ──────────────────────────────────────────────────────────
 // HTTP surface assembly — pure, no side effects.
 //
@@ -12,14 +11,6 @@ import { CLOUD_GITHUB_PROXY_PATH, createCloudGithubProxyRoutes } from "./cloud-w
 // ──────────────────────────────────────────────────────────
 
 import { Hono, type Context } from "hono";
-import { createCloudGithubWriteRoutes, CLOUD_GITHUB_WRITE_PATH } from "./cloud-workspaces/github-write-routes.js";
-import type { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
-import type { DatabaseCloudGithubReads } from "./cloud-workspaces/github-read-proxy.js";
-import { createDeviceSessionRoutes, type DeviceSessionRouteOptions } from "./realtime/device-session-routes.js";
-import { createCloudRuntimeConnectRoutes, type CloudRuntimeConnectOptions } from "./cloud-workspaces/runtime-connect-routes.js";
-import { CLOUD_GITHUB_READ_PATH, createCloudGithubReadRoutes } from "./cloud-workspaces/github-read-routes.js";
-import { createCloudIdleStopRoutes, CLOUD_IDLE_STOP_PATH, type DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
-import {isCustomerCloudPath,publicCloudError} from "./cloud-workspaces/public-contract.js";
 import { HTTPException } from "hono/http-exception";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
@@ -28,7 +19,6 @@ import type pg from "pg";
 
 import type { Config } from "./config.js";
 import { DatabaseAcquireTimeoutError } from "./db.js";
-import type { CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
 import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
 import { createHash } from "node:crypto";
@@ -62,24 +52,6 @@ import { createZerosDevAuthRoutes, zerosDevAuthEnabled, ZEROS_DEV_AUTH_PATHS, ty
 import { DatabaseZerosDevAuthRepository } from "./zeros-dev-auth-repository.js";
 import { ZerosDevWorkOSPasswordProvider } from "./zeros-dev-auth-workos.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
-import { AuthSessionProofService } from "./auth-session-proof.js";
-import { DatabaseCloudAcceptedWorkService } from "./cloud-workspaces/accepted-work.js";
-import {
-  createCloudWorkspaceInternalRoutes,
-  CLOUD_WORKSPACE_ENGINE_CHECKPOINT_HINT_PATH,
-  CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
-  CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
-  CLOUD_WORKSPACE_INTERNAL_PATHS,
-  cloudWorkspaceInternalResponseHeaders,
-  type CloudWorkspaceEngineUplinkAdvertisement,
-  type CloudWorkspaceInternalSetupService,
-} from "./cloud-workspaces/internal-routes.js";
-import { previewRequestFromEdge, type CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
-import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
-import type { CloudWorkspaceProviderResolver } from "./cloud-workspaces/provider-resolver.js";
-import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
-import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
-import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
 import { createAccountRecoveryRoutes } from "./account-recovery.js";
 import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
 import { createOpsRoutes } from "./ops.js";
@@ -88,58 +60,18 @@ import {
   createSecurityEventRoutes,
 } from "./security-events.js";
 import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
-import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
 import type { MigrationStatus } from "./migrate.js";
-import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-services.js";
-import { createCloudRuntimeServiceAuthorityRoutes, createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming, type RequestCostObserverStatus, type RequestDatabaseCost } from "./request-timing.js";
 import { createDatabaseTimingReporter } from "./database-timing.js";
 import { observeDatabaseTiming, tracingMiddleware } from "./tracing.js";
-import {
-  DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
-  engineLifecycleRequestsPerMinute,
-} from "./cloud-workspaces/engine-heartbeat.js";
-import { engineCheckpointHintRequestsPerMinute } from "./cloud-workspaces/engine-checkpoint-hints.js";
-import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH } from "./cloud-workspaces/checkpoint-progress-contract.js";
-import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, releaseCanaryConfiguration, releaseCanaryDesignationConfiguration } from "./cloud-workspaces/release-canaries.js";
-import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./cloud-workspaces/release-canary-routes.js";
-import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.js";
-import { createRuntimePublicationRoutes, createRuntimeStaffRoutes, RUNTIME_STAFF_PATH, type RuntimePublicationDependencies } from "./cloud-workspaces/runtime-publication-routes.js";
-import {
-  CLOUD_CAPABILITY_ENGINE_PATH,
-  createCloudCapabilityEngineRoutes,
-  createCloudCapabilityKeyRoutes,
-  type CloudCapabilityService,
-} from "./cloud-workspaces/capability-routes.js";
-import { createEngineCapabilityGate, createEngineClientCapabilityGate } from "./cloud-workspaces/capability-service-verifier.js";
+import { cloudAgentCredentialKeys } from "./agent-credentials/agent-credentials.js";
 
 export type CreateAppDependencies = {
   /** Cloud workspace v2: creator routes under /v1 and the worker model proxy. */
   cloudV2?: { routes: CloudV2RouteDeps; proxy: CloudV2ProxyDeps };
   zerosDevAuth?: ZerosDevAuthDependencies;
   requestCostObserver?: (cost: RequestDatabaseCost) => void | Promise<void>;
-  runtimePublication?: RuntimePublicationDependencies;
-  releaseCanaries?: DatabaseReleaseCanaryService;
-  releaseCanaryDesignations?: DatabaseReleaseCanaryDesignationService;
   clientCompatibility?: ClientCompatibility;
-  cloudGithubWriteGrants?: DatabaseCloudGithubWriteGrants;
-  cloudGithubReads?: DatabaseCloudGithubReads;
-  cloudIdleStop?: DatabaseCloudIdleStop;
-  cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
-  cloudWorkspaceEngineUplink?: CloudWorkspaceEngineUplinkAdvertisement;
-  cloudCapabilities?: CloudCapabilityService;
-  /** S3 `POST /v1/device-sessions`; mounted only with a realtime origin. */
-  deviceSessions?: DeviceSessionRouteOptions;
-  /** S3 `runtime/connect` and `runtime/capabilities`; mounted only with an S1 issuer. */
-  cloudRuntimeConnect?: CloudRuntimeConnectOptions;
-  cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
-  cloudRuntimeServiceAccess?: DatabaseCloudRuntimeServiceAccess;
-  cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
-  cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService;
-  cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService;
-  cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService;
-  cloudWorkspaceProviderResolver?: CloudWorkspaceProviderResolver;
-  cloudWorkspaceHealthService?: CloudWorkspaceReleaseHealthReader;
   securityEventBroker?: PostgresSecurityEventBroker;
   workosProvider?: RailwayWorkOSProvider;
   migrationStatus?: MigrationStatus;
@@ -149,30 +81,10 @@ export type ControlPlaneApp = Hono & {
   readonly requestCostObserverStatus?: () => RequestCostObserverStatus;
 };
 
-function isCloudWorkspaceApiPath(requestPath: string): boolean {
-  return (
-    requestPath === "/v1/cloud-workspaces" ||
-    requestPath.startsWith("/v1/cloud-workspaces/") ||
-    requestPath === "/v1/cloud-agent-credentials" ||
-    requestPath.startsWith("/v1/cloud-agent-credentials/") ||
-    requestPath === "/v1/cloud-workspace-invitations/accept" ||
-    requestPath === "/v1/cloud-compute-credits" ||
-    requestPath === "/v1/auth/snapshot" ||
-    requestPath === "/v1/auth/events" ||
-    requestPath === "/v1/devices" ||
-    requestPath.startsWith("/v1/devices/") ||
-    requestPath === "/internal/v1/cloud-workspaces" ||
-    requestPath.startsWith("/internal/v1/cloud-workspaces/") ||
-    requestPath === "/internal/v2/cloud-workspaces" ||
-    requestPath.startsWith("/internal/v2/cloud-workspaces/") ||
-    requestPath.startsWith("/internal/v1/release-canaries/") ||
-    requestPath === "/internal/v1/runtime-bases" ||
-    requestPath.startsWith("/internal/v1/runtime-bundles/") ||
-    requestPath.startsWith("/v1/internal/cloud-runtime/") ||
-    /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management|cloud-compute-credits|agent-connections)(?:\/|$)/u.test(
-      requestPath,
-    )
-  );
+function isCloudWorkspaceApiPath(path: string): boolean {
+  return path === "/v1/auth/snapshot" || path === "/v1/auth/events" || path.startsWith("/v1/cloud-v2/") || path.startsWith("/v2/cloud/") ||
+    path === "/v1/cloud-agent-credentials" || path.startsWith("/v1/cloud-agent-credentials/") ||
+    /^\/v1\/organizations\/[^/]+\/agent-connections(?:\/|$)/.test(path);
 }
 
 /** Assemble the control plane's public, browser, and authenticated API boundaries,
@@ -201,11 +113,6 @@ export function createApp(
   }
   // Readiness stays public even during maintenance; /healthz remains liveness.
   app.route("/", createReleaseIdentityRoutes(config, pool, dependencies));
-  // The S1 key set is public and served from memory; verifiers must reach it
-  // whenever this process serves anything.
-  if (dependencies.cloudCapabilities) {
-    app.route("/", createCloudCapabilityKeyRoutes(dependencies.cloudCapabilities.keyStore));
-  }
   if (config.databaseMaintenanceMode) {
     // A restored database may contain deliverable outboxes and live sessions.
     // Do not even assemble provider/auth routers while fencing its writers.
@@ -243,13 +150,6 @@ export function createApp(
     dependencies.migrationStatus?.state === "controlled_migration_pending"
       ? dependencies.migrationStatus
       : null;
-  const releaseCanaryConfig = pendingMigration ? null : releaseCanaryConfiguration(config);
-  const releaseCanaries = pendingMigration ? null : dependencies.releaseCanaries ?? (releaseCanaryConfig ? new DatabaseReleaseCanaryService(pool, releaseCanaryConfig) : null);
-  const releaseDesignationConfig = pendingMigration ? null : releaseCanaryDesignationConfiguration(config);
-  const releaseCanaryDesignations = pendingMigration ? null : dependencies.releaseCanaryDesignations ?? releaseCanaries ??
-    (releaseDesignationConfig ? new DatabaseReleaseCanaryDesignationService(pool, releaseDesignationConfig) : null);
-  if (releaseCanaries) app.route("/", createReleaseCanaryAdmissionRoutes(releaseCanaries));
-
   // A deferred 0025 means later cloud columns (starting in 0026) do not exist.
   // Keep the complete public and internal cloud surface behind one first-in-
   // chain barrier so neither auth nor a router can touch that partial schema.
@@ -275,9 +175,6 @@ export function createApp(
       );
     });
   }
-  // CI has its own GitHub Actions issuer and workflow authority. Account JWTs
-  // cannot publish artifacts; staff operations remain behind account auth.
-  app.route("/", createRuntimePublicationRoutes(config, pool, dependencies.runtimePublication));
   if (dependencies.cloudV2) {
     // Workspace proxy tokens, not user sessions, authenticate the model proxy.
     // Keyed per workspace token: many VMs can share one provider egress address.
@@ -285,49 +182,11 @@ export function createApp(
       c => createHash("sha256").update(c.req.header("authorization") ?? c.req.header("x-api-key") ?? "").digest("base64url")));
     app.route("/", createCloudV2ProxyRoutes(dependencies.cloudV2.proxy));
   }
-  app.use(`${RUNTIME_STAFF_PATH}/*`, async (c, next) => {
-    c.header("Cache-Control", "no-store");
-    c.header("Pragma", "no-cache");
-    await next();
-  });
   const workosProvider =
     config.auth.provider === "workos" && config.workos
       ? (dependencies.workosProvider ??
         new RailwayWorkOSProvider(config.auth, config.workos))
       : undefined;
-
-  if (!pendingMigration && dependencies.cloudRuntimeServiceAccess) {
-    app.route("/", createCloudRuntimeServiceAuthorityRoutes(dependencies.cloudRuntimeServiceAccess));
-  }
-
-  // Preview capabilities use an isolated wildcard origin and a dedicated
-  // header, not an interactive account JWT. Let the access service recognize
-  // only its exact host before ordinary API middleware runs; every non-preview
-  // request falls through unchanged.
-  if (!pendingMigration && dependencies.cloudWorkspaceAccessService) {
-    const previewPreAuthLimit = rateLimit(
-      "cloud-preview-preauth",
-      600,
-      60_000,
-      // A direct Cloudflare Tunnel supplies CF-Connecting-IP instead of
-      // X-Real-IP, so protected preview clients keep their own buckets.
-      (c) => clientAddress((name) => c.req.header(name)),
-    );
-    app.use("*", async (c, next) => {
-      const access = dependencies.cloudWorkspaceAccessService!;
-      const previewRequest = previewRequestFromEdge(c.req.raw);
-      if (!access.recognizesPreviewRequest(previewRequest)) {
-        await next();
-        return;
-      }
-      // Run a no-op continuation through the shared limiter before capability
-      // parsing, PostgreSQL, provider lookup, or upstream body buffering.
-      await previewPreAuthLimit(c, async () => undefined);
-      const proxied = await access.handlePreviewRequest(previewRequest);
-      if (proxied) return proxied;
-      await next();
-    });
-  }
 
   // Health: no auth (Railway healthcheck), proves DB reachability.
   app.get("/healthz", async (c) => {
@@ -338,32 +197,7 @@ export function createApp(
         dependencies.migrationStatus?.state === "controlled_migration_pending"
           ? { migrations: dependencies.migrationStatus }
           : {};
-      if (!dependencies.cloudWorkspaceHealthService) {
-        return c.json({ ok: true, ...migrationState, ...development });
-      }
-      try {
-        return c.json({
-          ok: true,
-          ...migrationState,
-          ...development,
-          cloudWorkspaces:
-            await dependencies.cloudWorkspaceHealthService.read(),
-        });
-      } catch {
-        // Cloud workspaces are an independently gated subsystem. A failed
-        // aggregate query must be visible without crash-looping unrelated
-        // WorkOS, team, invitation, GitHub, and settings APIs.
-        return c.json({
-          ok: true,
-          ...migrationState,
-          ...development,
-          cloudWorkspaces: {
-            enabled: true,
-            operationalState: "unknown",
-            reasons: ["health_query_failed"],
-          },
-        });
-      }
+      return c.json({ ok: true, ...migrationState, ...development });
     } catch (error) {
       c.header("Cache-Control", "no-store");
       if (error instanceof DatabaseAcquireTimeoutError) c.header("Retry-After", "1");
@@ -443,108 +277,6 @@ export function createApp(
     );
   }
 
-  // The sandbox helper and cloud engine authenticate with narrow one-use or
-  // heartbeat capabilities, not an interactive account JWT. Mount this
-  // non-browser surface before `/v1/*` middleware and only when the guarded
-  // setup worker has been configured at boot.
-  if (dependencies.cloudWorkspaceInternalSetupService) {
-    // Reject anonymous capability guessing before JSON buffering, token
-    // parsing, or PostgreSQL work. Railway supplies X-Real-IP; the protected
-    // qualification tunnel supplies CF-Connecting-IP. Prefer Railway's header
-    // when both are present, validate either value, and collapse missing or
-    // attacker-controlled garbage into one bounded bucket.
-    const internalClientIp = (c: Context) => clientAddress((name) => c.req.header(name));
-    const internalPreAuthLimit = rateLimit(
-      "cloud-workspace-internal-preauth",
-      600,
-      60_000,
-      internalClientIp,
-    );
-    // An engine stops when registration or a heartbeat is rejected. Streaming
-    // event, record and command traffic from engines behind one egress
-    // address must never exhaust that budget.
-    const engineLifecyclePreAuthLimit = rateLimit(
-      "cloud-workspace-engine-lifecycle-preauth",
-      engineLifecycleRequestsPerMinute(
-        config.cloudWorkspaces?.setupExecution?.engineHeartbeatIntervalMs ??
-          DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
-      ),
-      60_000,
-      internalClientIp,
-    );
-    const engineLifecyclePaths = new Set<string>([
-      CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
-      CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
-    ]);
-    // Checkpoint hints are optional waits with their own budget, so a fleet
-    // holding them never crowds out lifecycle, command or record requests.
-    const engineCheckpointHintPreAuthLimit = rateLimit(
-      "cloud-workspace-engine-checkpoint-hint-preauth",
-      engineCheckpointHintRequestsPerMinute(),
-      60_000,
-      internalClientIp,
-    );
-    // Optional diagnostics cannot consume the budget that admits seal uploads,
-    // checkpoint completion, ordinary synchronization or heartbeat authority.
-    const engineCheckpointProgressPreAuthLimit = rateLimit(
-      "cloud-workspace-engine-checkpoint-progress-preauth", 600, 60_000, internalClientIp,
-    );
-    if (dependencies.cloudGithubReads) {
-      app.use(CLOUD_GITHUB_READ_PATH, cloudWorkspaceInternalResponseHeaders);
-      app.use(CLOUD_GITHUB_READ_PATH, internalPreAuthLimit);
-      app.route("/", createCloudGithubReadRoutes(dependencies.cloudGithubReads));
-    }
-    if (dependencies.cloudGithubWriteGrants) {
-      app.use(CLOUD_GITHUB_WRITE_PATH, cloudWorkspaceInternalResponseHeaders);
-      app.use(CLOUD_GITHUB_WRITE_PATH, internalPreAuthLimit);
-      app.route("/", createCloudGithubWriteRoutes(dependencies.cloudGithubWriteGrants));
-      app.use(`${CLOUD_GITHUB_PROXY_PATH}/*`, cloudWorkspaceInternalResponseHeaders);
-      app.use(`${CLOUD_GITHUB_PROXY_PATH}/*`, internalPreAuthLimit);
-      app.route("/", createCloudGithubProxyRoutes(dependencies.cloudGithubWriteGrants));
-    }
-    if (dependencies.cloudIdleStop) {
-      app.use(CLOUD_IDLE_STOP_PATH, cloudWorkspaceInternalResponseHeaders);
-      app.use(CLOUD_IDLE_STOP_PATH, internalPreAuthLimit);
-      app.route("/", createCloudIdleStopRoutes(dependencies.cloudIdleStop));
-    }
-    for (const path of CLOUD_WORKSPACE_INTERNAL_PATHS) {
-      app.use(path, cloudWorkspaceInternalResponseHeaders);
-      app.use(path, (c, next) =>
-        (engineLifecyclePaths.has(c.req.path)
-          ? engineLifecyclePreAuthLimit
-          : c.req.path === CLOUD_WORKSPACE_ENGINE_CHECKPOINT_HINT_PATH
-            ? engineCheckpointHintPreAuthLimit
-            : c.req.path === CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH
-              ? engineCheckpointProgressPreAuthLimit
-            : internalPreAuthLimit)(c, next),
-      );
-    }
-    const clientCapabilities = dependencies.cloudCapabilities
-      ? createEngineClientCapabilityGate(dependencies.cloudCapabilities) : undefined;
-    const acceptedWork = dependencies.cloudCapabilities && clientCapabilities && workosProvider
-      ? new DatabaseCloudAcceptedWorkService({ pool, flags: dependencies.cloudCapabilities.flags,
-        verifier: clientCapabilities.verifier, proof: new AuthSessionProofService(pool, workosProvider),
-        workosEnabled: config.auth.provider === "workos" }) : undefined;
-    app.route(
-      "/",
-      createCloudWorkspaceInternalRoutes(
-        dependencies.cloudWorkspaceInternalSetupService,
-        {
-          ...(dependencies.cloudWorkspaceEngineUplink ? { engineUplink: dependencies.cloudWorkspaceEngineUplink } : {}),
-          ...(dependencies.cloudCapabilities ? { engineCapabilities: createEngineCapabilityGate(dependencies.cloudCapabilities) } : {}),
-          ...(clientCapabilities ? { clientCapabilities } : {}),
-          ...(acceptedWork ? { acceptedWork } : {}),
-        },
-      ),
-    );
-    // The engine-token REST fallback shares the internal surface's response
-    // headers and pre-auth rate limit (path-based middleware above).
-    if (dependencies.cloudCapabilities) {
-      app.use(CLOUD_CAPABILITY_ENGINE_PATH, cloudWorkspaceInternalResponseHeaders);
-      app.route("/", createCloudCapabilityEngineRoutes(dependencies.cloudCapabilities, { clientAddress: internalClientIp }));
-    }
-  }
-
   // CORS: the callers are the Electron renderer (localhost dev origin /
   // packaged origin) and later app.zeros.build. Auth is a bearer token —
   // no cookies, nothing ambient — so a wildcard origin with credentials
@@ -560,15 +292,7 @@ export function createApp(
         "x-zeros-client",
         "idempotency-key",
         "traceparent",
-        "x-zeros-access-credential",
-        "x-zeros-runtime-admission",
-        "x-zeros-device-id",
-        "x-zeros-device-key-version",
-        "x-zeros-device-timestamp",
-        "x-zeros-device-nonce",
-        "x-zeros-device-signature",
-        "x-zeros-export-grant",
-        "x-zeros-replica-grant",
+
       ],
       maxAge: 86400,
     }),
@@ -631,48 +355,7 @@ export function createApp(
   // an anonymous caller must not make the service buffer a multi-MiB body.
   const defaultBodyLimit = bodyLimit({ maxSize: 256 * 1024 });
   const feedbackBodyLimit = bodyLimit({ maxSize: 2 * 1024 * 1024 });
-  const forkImportBodyLimits = {
-    blob: 64 * 1024 * 1024,
-    entries: 8 * 1024 * 1024,
-    records: 16 * 1024 * 1024,
-  } as const;
-  const forkBlobUploadPath =
-    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/blobs$/i;
-  const forkEntryImportPath =
-    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/entries$/i;
-  const forkRecordImportPath =
-    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/records$/i;
-  const forkImportBodyMaximum = (
-    method: string,
-    path: string,
-  ): number | null =>
-    method === "POST" && forkBlobUploadPath.test(path)
-      ? forkImportBodyLimits.blob
-      : method === "PUT" && forkEntryImportPath.test(path)
-        ? forkImportBodyLimits.entries
-        : method === "PUT" && forkRecordImportPath.test(path)
-          ? forkImportBodyLimits.records
-          : null;
   app.use("/v1/*", async (c, next) => {
-    const forkImportMaximum = forkImportBodyMaximum(c.req.method, c.req.path);
-    if (forkImportMaximum !== null) {
-      // Do not grant an anonymous chunked request a multi-MiB buffering budget.
-      // Desktop callers know the exact body size and bind it in a canonical
-      // Content-Length before authentication or body consumption.
-      const rawLength = c.req.header("content-length") ?? "";
-      if (!/^(?:0|[1-9][0-9]{0,8})$/.test(rawLength)) {
-        throw new HttpError(
-          411,
-          "content_length_required",
-          "Fork imports require an exact Content-Length",
-        );
-      }
-      if (Number(rawLength) > forkImportMaximum) {
-        throw new HttpError(413, "body_too_large", "Request body is too large");
-      }
-      await next();
-      return;
-    }
     if (c.req.path === "/v1/feedback") {
       await next();
       return;
@@ -689,17 +372,6 @@ export function createApp(
   // spam mutations or flood the audit log. Runs AFTER auth so it keys on the
   // verified user id, not the IP.
   app.use("/v1/*", rateLimit("global", 240, 60_000));
-  app.route("/", createRuntimeStaffRoutes(config, pool, dependencies.runtimePublication?.requalify));
-  if (releaseCanaryDesignations) app.route("/", createReleaseCanaryDesignationRoutes(releaseCanaryDesignations));
-
-  // The larger fork-blob budget is available only after bearer verification
-  // and the global per-user rate limit. The route rechecks exact fork
-  // authority before durable publication.
-  app.use("/v1/*", (c, next) => {
-    const maximum = forkImportBodyMaximum(c.req.method, c.req.path);
-    return maximum === null ? next() : bodyLimit({ maxSize: maximum })(c, next);
-  });
-
   // Feedback can fan out to two paid third-party APIs and accept a larger
   // body, so keep a much tighter per-user ceiling in addition to the blanket
   // rate limit. Authentication has already populated the user key.
@@ -712,9 +384,6 @@ export function createApp(
 
   app.route("/", createFeedbackRoutes(config.feedback));
   app.route("/", createChatTitleRoutes(config.chatTitleApiKey));
-  if (dependencies.cloudRuntimeServiceAccess && !pendingMigration) {
-    app.route("/", createCloudRuntimeServiceRoutes(dependencies.cloudRuntimeServiceAccess));
-  }
   app.route("/", createAccountRecoveryRoutes(pool));
   app.route("/", createDeletionLifecycleRoutes(pool));
   if (config.workos?.opsOrigin && config.deploymentChannel !== "beta") {
@@ -735,31 +404,17 @@ export function createApp(
       dependencies.securityEventBroker ?? new PostgresSecurityEventBroker(pool),
     ),
   );
-  if (dependencies.deviceSessions && !pendingMigration) app.route("/", createDeviceSessionRoutes(pool, dependencies.deviceSessions));
-  if (dependencies.cloudRuntimeConnect && !pendingMigration) app.route("/", createCloudRuntimeConnectRoutes(dependencies.cloudRuntimeConnect));
   if (dependencies.cloudV2) app.route("/", createCloudV2Routes(dependencies.cloudV2.routes));
   app.route(
     "/",
-    createRoutes(pool, emailConfig, config.cloudWorkspaces, {
-      cloudAgentCredentialKeys: cloudAgentCredentialKeys(config.cloudAgentCredentials ?? config.cloudWorkspaces),
-      cloudWorkspaceAccessService:
-        dependencies.cloudWorkspaceAccessService ?? null,
-      cloudWorkspaceRepositoryResolver:
-        dependencies.cloudWorkspaceRepositoryResolver ?? null,
-      cloudWorkspaceProviderResolver: dependencies.cloudWorkspaceProviderResolver ?? null,
-      cloudWorkspaceForkService: dependencies.cloudWorkspaceForkService ?? null,
-      cloudWorkspaceReplicaService:
-        dependencies.cloudWorkspaceReplicaService ?? null,
-      cloudWorkspaceEngineClientAdmissionService:
-        dependencies.cloudWorkspaceEngineClientAdmissionService ?? null,
+    createRoutes(pool, emailConfig, {
+      cloudAgentCredentialKeys: cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null),
       workosEnabled: config.auth.provider === "workos",
       ...(workosProvider ? { workosProvider } : {}),
       inviteLinkBase: config.inviteLinkBase,
     }),
   );
-  if (config.github) app.route("/", createGithubRoutes(pool, config.github, {
-    ...(dependencies.cloudGithubWriteGrants ? { writeGrants: dependencies.cloudGithubWriteGrants } : {}),
-  }));
+  if (config.github) app.route("/", createGithubRoutes(pool, config.github));
 
   app.onError((err, c) => {
     if (err instanceof DatabaseAcquireTimeoutError) {
@@ -772,7 +427,9 @@ export function createApp(
     // middleware contract.
     if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof HttpError) {
-      if(isCustomerCloudPath(c.req.path))return c.json({error:publicCloudError(err.code)},err.status);
+      if (c.req.path.startsWith("/v1/cloud-v2/") && err.status >= 500) {
+        return c.json({ error: { code: "cloud_workspace_unavailable", message: "The cloud workspace is temporarily unavailable" } }, err.status);
+      }
       return c.json(
         {
           error: {

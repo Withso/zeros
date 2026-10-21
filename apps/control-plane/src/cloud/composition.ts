@@ -5,9 +5,9 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { Config } from "../config.js";
 import { HttpError } from "../authz.js";
-import { BoatApiClient } from "../cloud-workspaces/boat-client.js";
-import { cloudAgentCredentialKeys } from "../cloud-workspaces/agent-credentials.js";
-import type { CloudAgentCredentialMaterial } from "../cloud-workspaces/agent-credential-envelope.js";
+import { BoatApiClient } from "../cloud/boat-client.js";
+import { cloudAgentCredentialKeys } from "../agent-credentials/agent-credentials.js";
+import type { CloudAgentCredentialMaterial } from "../agent-credentials/agent-credential-envelope.js";
 import { createCloudV2AgentLogins, createCloudV2CodexRefresh, type CloudV2AgentLogins } from "./agent-logins.js";
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
@@ -63,7 +63,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const compute = new BoatCloudV2Compute(new BoatApiClient({
     apiKey: v2.boat.apiKey, timeoutMs: 120_000, ...(v2.boat.billingOrg ? { billingOrg: v2.boat.billingOrg } : {}),
   }));
-  const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? config.cloudWorkspaces);
+  const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null);
   const logins: CloudV2AgentLogins = keys ? createCloudV2AgentLogins(pool, keys) : async () => null;
   const githubToken = config.github ? createCloudV2GithubTokens(pool, config.github) : async () => {
     throw new HttpError(409, "github_unavailable", "GitHub is not configured");

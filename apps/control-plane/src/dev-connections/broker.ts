@@ -1,10 +1,10 @@
-import { parseCodexNativeCache } from "../cloud-workspaces/codex-auth-cache.js";
+import { parseCodexNativeCache } from "../agent-credentials/codex-auth-cache.js";
 import {
   renewCodexNativeAuth,
   type CodexAuthRenewer,
   type CredentialRenewer,
-} from "../cloud-workspaces/codex-auth-keeper.js";
-import { publishKnownCredentialRenewal } from "../cloud-workspaces/codex-auth-renewal.js";
+} from "../agent-credentials/codex-auth-keeper.js";
+import { publishKnownCredentialRenewal } from "../agent-credentials/codex-auth-renewal.js";
 import { DevConnectionStore, type RenewalReservation } from "./store.js";
 import {
   GrantScopeSchema,

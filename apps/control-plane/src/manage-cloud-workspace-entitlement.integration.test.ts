@@ -1,4 +1,4 @@
-import {withCloudFixtureOwnerTx} from "./cloud-workspaces/test-fixtures.js";
+import {withCredentialFixtureOwnerTx} from "./agent-credentials/test-fixtures.js";
 import { randomUUID } from "node:crypto";
 
 import pg from "pg";
@@ -11,10 +11,6 @@ import {
   manageCloudWorkspaceEntitlement,
   validateCloudWorkspaceEntitlementRequest,
 } from "./manage-cloud-workspace-entitlement.js";
-import {
-  manageCloudWorkspaceQuota,
-  validateCloudWorkspaceQuotaRequest,
-} from "./manage-cloud-workspace-quota.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -32,7 +28,7 @@ d("owner-managed cloud-workspace Organization entitlements", () => {
     await pool.end();
   });
 
-  it("plans, target-binds, activates explicit seats, audits, and unlocks first-quota planning", async () => {
+  it("plans, target-binds, activates explicit seats, and audits", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const actor = await ensureUser(pool, {
       provider: "workos",
@@ -216,31 +212,6 @@ d("owner-managed cloud-workspace Organization entitlements", () => {
       change_count: "1",
     });
 
-    // Entitlement/seat activation is deliberately separate from quota
-    // provisioning, but it must satisfy the quota command's paid gate.
-    await expect(
-      manageCloudWorkspaceQuota(
-        pool,
-        validateCloudWorkspaceQuotaRequest({
-          databaseUrl: url!,
-          channel: "alpha",
-          railwayEnvironmentName: "alpha",
-          execute: false,
-          productionConfirmed: undefined,
-          approval: undefined,
-          organizationId,
-          expectedOrganizationSlug: organizationSlug,
-          actorUserId: actor.id,
-          maxWorkspaces: "2",
-          maxRunningWorkspaces: "1",
-          maxCpuMillicores: "4000",
-          maxMemoryMiB: "8192",
-          maxStorageMiB: "40960",
-          reason: "Provision the first reviewed quota after activation.",
-        }),
-      ),
-    ).resolves.toMatchObject({ state: "planned", previous: null });
-
     const unchanged = await manageCloudWorkspaceEntitlement(
       pool,
       validateCloudWorkspaceEntitlementRequest(base),
@@ -351,7 +322,7 @@ d("owner-managed cloud-workspace Organization entitlements", () => {
       [organizationId],
     );
     await withSystemTx(pool, (tx) =>
-      tx.query(`SELECT purge_cloud_workspace_operator_configuration($1)`, [
+      tx.query(`SELECT purge_organization_entitlement_configuration($1)`, [
         organizationId,
       ]),
     );
@@ -553,7 +524,7 @@ d("owner-managed cloud-workspace Organization entitlements", () => {
         [organizationId,peer.id],
       ));
     }
-    await withCloudFixtureOwnerTx(pool, (tx) =>
+    await withCredentialFixtureOwnerTx(pool, (tx) =>
       tx.query(
         `INSERT INTO account_entitlements (
            user_id, plan, status, cloud_workspaces_allowed, source,

@@ -4,6 +4,7 @@ import type pg from "pg";
 import { z } from "zod";
 
 import { withSystemTx, type Tx } from "./db.js";
+import { scheduleCloudDeletion } from "./cloud/deletion.js";
 import { HttpError } from "./authz.js";
 import {
   resolveWorkOSProviderLockKeys,
@@ -165,12 +166,7 @@ export async function applyWorkOSIdentityEventInTransaction(
        WHERE provider_sub = $1 OR account_user_id = $2`,
       [event.user.id, account.user_id],
     );
-    await tx.query(
-      `UPDATE cloud_workspace_endpoint_grants
-       SET revoked_at = COALESCE(revoked_at, now())
-       WHERE account_user_id = $1 AND revoked_at IS NULL`,
-      [account.user_id],
-    );
+    await scheduleCloudDeletion(tx, { userId: account.user_id });
 
     // An ordinary provider deletion revokes every collaborative membership.
     // During an already-scheduled account deletion, however, the account is

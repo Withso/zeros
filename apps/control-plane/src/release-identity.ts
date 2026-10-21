@@ -6,37 +6,16 @@ import type { Config } from "./config.js";
 import { withSystemTx } from "./db.js";
 import type { MigrationStatus } from "./migrate.js";
 import { isNewerExpandMigration } from "./migration-phase.js";
-import { hasOnlyCloudWorkspaceCleanupReasons, type CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
-import { readRuntimeReleaseIdentity } from "./cloud-workspaces/runtime-publication-routes.js";
-import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./cloud-workspaces/engine-protocol-version.js";
-import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
 
 type LedgerRow = { name: string; checksum: string | null; phase?: string | null };
 type Dependencies = {
   sourceSha?: string;
   migrationStatus?: MigrationStatus;
-  cloudWorkspaceHealthService?: CloudWorkspaceReleaseHealthReader;
   readManifest?: () => Promise<LedgerRow[]>;
   readLedger?: () => Promise<LedgerRow[]>;
-  readWorkerQualified?: (provider: string, imageRef: string) => Promise<boolean>;
-  readRuntimeIdentity?: () => ReturnType<typeof readRuntimeReleaseIdentity>;
 };
 const sha = (value: string | undefined | null) => /^[a-f0-9]{40}$/.test(value ?? "") ? value! : null;
 const digest = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
-export function qualifiedWorkerMatrix(rows: Array<{ credential_kind: string; runtime_id?: string; base_compatibility_id?: string; profile: string; enabled: boolean; mcp_qualified: boolean }>) {
-  if (rows.length > 100) return false;
-  const required = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"], runtimes = new Map<string, Set<string>>();
-  for (const row of rows) {
-    if (!row.enabled || !row.mcp_qualified || row.profile !== "zeros-cloud-worker-v4" ||
-        !/^r1-[a-f0-9]{64}$/.test(row.runtime_id ?? "") || !/^bc1-[a-f0-9]{64}$/.test(row.base_compatibility_id ?? "") ||
-        !required.includes(row.credential_kind)) continue;
-    const identity = `${row.runtime_id}/${row.base_compatibility_id}`;
-    const kinds = runtimes.get(identity) ?? new Set<string>();
-    kinds.add(row.credential_kind); runtimes.set(identity, kinds);
-  }
-  return [...runtimes.values()].some(kinds => required.every(kind => kinds.has(kind)));
-}
-
 async function packagedManifest(): Promise<LedgerRow[]> {
   const directory = new URL("../migrations/", import.meta.url);
   const files = (await readdir(directory)).filter(name => /^\d{4}_[a-z0-9_]+\.sql$/.test(name)).sort();
@@ -75,82 +54,13 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
         manifestSha256: digest(JSON.stringify(expected)),
       };
     } catch { /* Fail closed without exposing database errors. */ }
-    const cloudChannel = cloudWorkspaceChannelEnabled(config.deploymentChannel);
-    const configured = cloudChannel ? config.cloudWorkspaces : null;
-    let cloud: { enabled: boolean; ready: boolean; state: string; operationalState?: "degraded" } =
-      { enabled: !!configured, ready: !configured, state: configured ? "unknown" : "disabled" };
-    let deferredReadiness: { kind: "retired-boat-deletions" } | undefined;
-    if (configured && !maintenance && migrations.state === "current") {
-      try {
-        const service = deps.cloudWorkspaceHealthService;
-        const measured = service?.readForRelease
-          ? await service.readForRelease()
-          : { health: await service?.read(), stalledDeletionsDeferred: false, controlPlaneReady: undefined };
-        const health = measured.health;
-        // Preserve the existing v1 retired-Boat label only for its original
-        // proven inventory. Other cleanup alerts remain on /healthz; the
-        // identity's cloud.state measures CP release eligibility.
-        const deferred = measured.stalledDeletionsDeferred && health?.operationalState === "degraded" &&
-          health.reasons.length === 1 && health.reasons[0] === "deletion_intent_stalled";
-        const eligible = measured.controlPlaneReady === undefined
-          ? health?.operationalState === "healthy" || deferred
-          : measured.controlPlaneReady === true && health !== undefined &&
-            (health.operationalState === "healthy" ? health.reasons.length === 0
-              : health.operationalState === "degraded" && hasOnlyCloudWorkspaceCleanupReasons(health.reasons));
-        const ready = eligible && health?.backgroundWorkers === "enabled" &&
-          health.setupExecution === "enabled" && health.durability === "enabled";
-        cloud = { enabled: true, ready, state: ready ? "healthy" : "unready",
-          ...(deferred && ready ? { operationalState: "degraded" as const } : {}) };
-        if (deferred && ready) deferredReadiness = { kind: "retired-boat-deletions" };
-      } catch { /* Never reflect health diagnostics into the identity. */ }
-    }
-    // Image references are immutable public artifact identities, never URLs.
-    const selected = configured ? { provider: configured.provider, imageRef: configured.imageRef, sourceSha: configured.sourceCommit,
-      architecture: configured.architecture, storageMiB: configured.storageMiB } : cloudChannel ? config.selectedCloudWorker : null;
-    const imageRef = selected?.imageRef;
-    const validImage = selected?.provider === "boat" && /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(imageRef ?? "");
-    const worker = selected && typeof imageRef === "string" && validImage && sha(selected.sourceSha) &&
-      ["linux/amd64", "linux/arm64"].includes(selected.architecture) && Number.isSafeInteger(selected.storageMiB) && selected.storageMiB > 0 ? {
-      provider: selected.provider, imageRef, sourceSha: sha(selected.sourceSha),
-      architecture: selected.architecture, storageMiB: selected.storageMiB,
-    } : null;
-    let workerQualified = false;
-    if (worker && cloud.ready && !maintenance && migrations.state === "current") {
-      try {
-        // Only the audited migration-owner operator can write these approvals.
-        // Expose existence for the selected immutable image, never credential
-        // kinds, account identities or evidence. Per-credential runtime
-        // admission still enforces its exact contract and MCP qualification.
-        workerQualified = deps.readWorkerQualified ? await deps.readWorkerQualified(worker.provider, worker.imageRef) :
-          await withSystemTx(pool, async tx => qualifiedWorkerMatrix((await tx.query<Parameters<typeof qualifiedWorkerMatrix>[0][number]>(
-            `SELECT qualification.credential_kind,qualification.runtime_id,qualification.base_compatibility_id,
-                    qualification.profile,qualification.enabled,qualification.mcp_qualified
-             FROM cloud_runtime_qualifications qualification
-             JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=qualification.runtime_id AND bundle.revoked_at IS NULL
-               AND bundle.engine_protocol_version=$3
-             JOIN cloud_runtime_base_images base USING(base_compatibility_id)
-             JOIN cloud_runtime_base_contracts contract USING(base_compatibility_id)
-             WHERE base.provider=$1 AND base.image_ref=$2 AND base.revoked_at IS NULL AND contract.revoked_at IS NULL
-               AND qualification.profile='zeros-cloud-worker-v4' AND qualification.enabled AND qualification.mcp_qualified
-               AND qualification.revoked_at IS NULL AND qualification.evidence->>'mode'='full'
-               AND EXISTS (SELECT 1 FROM cloud_runtime_channel_releases release WHERE release.runtime_id=bundle.runtime_id
-                 AND release.channel='alpha' AND release.confirmed_at IS NOT NULL AND release.revoked_at IS NULL)
-             LIMIT 101`,
-            [worker.provider, worker.imageRef, CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION],
-          )).rows), { consistentRead: true });
-      } catch { /* Missing/unreadable approval must not authorize publication. */ }
-    }
-    let runtimeV4: Awaited<ReturnType<typeof readRuntimeReleaseIdentity>> | undefined;
-    if (cloudChannel && config.cloudRuntimePublication && !maintenance && migrations.state === "current") {
-      try {
-        runtimeV4 = await (deps.readRuntimeIdentity ? deps.readRuntimeIdentity() :
-          readRuntimeReleaseIdentity(pool, config.cloudWorkspaceNewRuntimeProfile ?? "v4"));
-      } catch { /* Registry visibility never changes v1 readiness or leaks diagnostics. */ }
-    }
-    return { version: 1 as const, ready: !!sourceSha && !maintenance && migrations.state === "current" && cloud.ready && (!configured || !!worker),
-      sourceSha, channel: config.deploymentChannel, maintenance, migrations, cloud, worker, workerQualified,
-      ...(deferredReadiness ? { deferredReadiness } : {}),
-      ...(runtimeV4 ? { runtimeV4 } : {}) };
+    const ready = !!sourceSha && !maintenance && migrations.state === "current";
+    const cloud = { enabled: !!config.cloudV2, ready: !config.cloudV2 || ready,
+      state: config.cloudV2 ? ready ? "healthy" : "unready" : "disabled" };
+    // Retain the released response shape; v2 distributes a versioned runtime,
+    // so there is no separately qualified VM image.
+    return { version: 1 as const, ready, sourceSha, channel: config.deploymentChannel,
+      maintenance, migrations, cloud, worker: null, workerQualified: false };
   }
   app.get("/v1/release-identity", async c => {
     c.header("Cache-Control", "no-store");

@@ -9,10 +9,6 @@ import { resetMigratedTestDatabase } from "./test-database.js";
 import { createRoutes } from "./routes.js";
 import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
 import type { WorkOSInvitationRecord } from "./workos-provider.js";
-import {
-  seedCanonicalCloudWorkspaceAuthority,
-  seedCanonicalCloudWorkspacePrerequisites,
-} from "./cloud-workspaces/test-fixtures.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -53,7 +49,6 @@ d("organization routes", () => {
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
     await resetMigratedTestDatabase(pool);
-    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     owner = { ...(await signup("Ada")), staffRole: "platform_owner" };
     member = await signup("Grace");
     actor = owner;
@@ -66,7 +61,7 @@ d("organization routes", () => {
     app.route("/", createDeletionLifecycleRoutes(pool));
     app.route(
       "/",
-      createRoutes(pool, undefined, null, {
+      createRoutes(pool, undefined, {
         inviteLinkBase: "https://app-alpha.zeros.build/invite",
       }),
     );
@@ -396,7 +391,7 @@ d("organization routes", () => {
     });
     nativeApp.route(
       "/",
-      createRoutes(pool, undefined, null, {
+      createRoutes(pool, undefined, {
         workosEnabled: true,
         workosProvider: provider,
         inviteLinkBase: "https://app-alpha.zeros.build/invite",
@@ -643,7 +638,7 @@ d("organization routes", () => {
     });
     workosApp.route(
       "/",
-      createRoutes(pool, undefined, null, {
+      createRoutes(pool, undefined, {
         workosEnabled: true,
         inviteLinkBase: "https://app-alpha.zeros.build/invite",
       }),
@@ -1034,76 +1029,7 @@ d("organization routes", () => {
     });
   });
 
-  it("refuses organization deletion until every cloud workspace is deleted", async () => {
-    const created = await request("/v1/organizations", {
-      method: "POST",
-      body: { name: "Cloud Retention" },
-    });
-    const body = (await created.json()) as {
-      organization: { id: string; defaultTeamId: string };
-    };
-    const workspaceId = randomUUID();
-    await withSystemTx(pool, async (tx) => {
-      const prerequisite = await seedCanonicalCloudWorkspacePrerequisites(tx, {
-        organizationId: body.organization.id,
-        ownerUserId: owner.id,
-      });
-      await tx.query(
-        `INSERT INTO cloud_workspaces (
-           id, org_id, team_id, created_by, display_name,
-           repository_forge, repository_owner, repository_name,
-           repository_revision, repository_id, owner_user_id, assignee_user_id
-         ) VALUES ($1, $2, $3, $4, 'Retained workspace',
-                   'github.com', 'withso', 'zeros', 'main', $5, $4, $4)`,
-        [
-          workspaceId,
-          body.organization.id,
-          body.organization.defaultTeamId,
-          owner.id,
-          prerequisite.repositoryId,
-        ],
-      );
-      await seedCanonicalCloudWorkspaceAuthority(tx, {
-        workspaceId,
-        organizationId: body.organization.id,
-        ownerUserId: owner.id,
-      });
-      await tx.query(
-        `INSERT INTO cloud_workspace_generations (
-           workspace_id, generation, org_id, provider, image_ref,
-           architecture, cpu_millicores, memory_mib, storage_mib, created_by,
-           provider_connection_id
-         ) VALUES ($1, 1, $2, 'boat', 'zeros:test', 'linux/amd64',
-                   1000, 2048, 10240, $3, $4)`,
-        [
-          workspaceId,
-          body.organization.id,
-          owner.id,
-          prerequisite.providerConnectionId,
-        ],
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_provider_bindings (
-           workspace_id, generation, org_id, provider
-         ) VALUES ($1, 1, $2, 'boat')`,
-        [workspaceId, body.organization.id],
-      );
-    });
 
-    const deleted = await request(
-      `/v1/organizations/${body.organization.id}`,
-      { method: "DELETE", body: { confirmation: "Cloud Retention" } },
-    );
-    expect(deleted.status).toBe(409);
-    await expect(deleted.json()).resolves.toMatchObject({
-      error: { code: "organization_has_cloud_workspaces" },
-    });
-    const organization = await pool.query(
-      `SELECT deleted_at FROM organizations WHERE id = $1`,
-      [body.organization.id],
-    );
-    expect(organization.rows[0]?.deleted_at).toBeNull();
-  });
 
   it("schedules and restores a collaborative organization without deleting it in WorkOS", async () => {
     const created = await request("/v1/organizations", {

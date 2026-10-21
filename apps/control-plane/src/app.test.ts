@@ -29,62 +29,9 @@ const pool = {
 
 const emailConfig = { from: null, token: null, apiUrl: "", inviteLinkBase: "" };
 
-it.each([
-  ["capability-session-admission", true], ["capability-session-admission", false],
-  ["capability-session-renewal", true], ["capability-session-renewal", false],
-] as const)("bounds %s before parsing with declared length %s and rollout off", async (route, declaredLength) => {
-  const invoke = vi.fn(async () => ({ version: 1 }));
-  const app = createApp(config(null), pool, emailConfig as never, {
-    cloudWorkspaceInternalSetupService: {
-      redeem: invoke, registerEngine: invoke, heartbeat: invoke,
-      admitCapabilitySession: invoke, renewCapabilitySession: invoke,
-    } as never,
-    cloudCapabilities: {
-      pool, issuer: "https://api.example.test", workosEnabled: true,
-      keyStore: { publicKeySet: () => [] },
-      flags: { enabled: () => false, anyEnabled: () => false },
-    } as never,
-  });
-  const bytes = new TextEncoder().encode(JSON.stringify({ padding: "x".repeat(512 * 1024) }));
-  const headers: Record<string, string> = {
-    authorization: `Bearer zwh_${"a".repeat(43)}`, "content-type": "application/json",
-  };
-  if (declaredLength) headers["content-length"] = String(bytes.byteLength);
-  let offset = 0;
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (offset === bytes.length) { controller.close(); return; }
-      const next = Math.min(bytes.length, offset + 16 * 1024);
-      controller.enqueue(bytes.slice(offset, next)); offset = next;
-    },
-  });
-  const request = new Request(`http://localhost/internal/v2/cloud-workspaces/engine/${route}`, {
-    method: "POST", headers, body: stream, duplex: "half",
-  } as RequestInit & { duplex: "half" });
-  const response = await app.request(request);
-  expect(invoke).not.toHaveBeenCalled();
-  expect(response.status).toBe(413);
-});
 
-it("checks native grant authority before account auth without exposing or admitting a stream", async () => {
-  const expiresAtMs = Date.now() + 10_000;
-  const check = vi.fn(async (_request: Request): Promise<number | null> => expiresAtMs);
-  const app = createApp(config(null), pool, emailConfig as never, { cloudRuntimeServiceAccess: { check } as never });
-  const path = "https://api.example.test/v1/cloud-workspaces/services/tunnel/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-  const missing = await app.request(path);
-  expect(missing.status).toBe(401);
-  expect(check).not.toHaveBeenCalled();
-  const headers = { "x-zeros-runtime-service": `zsh_${"a".repeat(43)}` };
-  const response = await app.request(path.replace("https:", "http:"), { headers: { ...headers, "x-forwarded-proto": "https", "x-forwarded-host": "ignored.example.test" } });
-  expect(response.status).toBe(200);
-  expect(check.mock.calls[0]![0].url).toBe(path);
-  expect(response.headers.get("cache-control")).toBe("no-store");
-  expect(await response.json()).toEqual({ expiresAtMs });
-  check.mockResolvedValueOnce(null);
-  const revoked = await app.request(path, { headers });
-  expect(revoked.status).toBe(401);
-  expect(revoked.headers.get("cache-control")).toBe("no-store");
-});
+
+
 
 it("requires app authentication before a paid chat title request", async () => {
   const fetchSpy = vi.spyOn(globalThis, "fetch");
@@ -213,7 +160,7 @@ function workosConfig(): Config {
 
 describe("unexpected error privacy", () => {
   it("returns a closed retry response for capacity loss, including on customer cloud routes", async () => {
-    for (const path of ["/v1/me", "/v1/cloud-workspaces", "/v1/organizations/example/cloud-workspaces"]) {
+    for (const path of ["/v1/me", "/v1/cloud-v2/workspaces"]) {
       const app = createApp(config(null), pool, emailConfig as never);
       const context = new Context(new Request(`https://api.example.test${path}`));
       const response = await app.errorHandler(new DatabaseAcquireTimeoutError(), context);
@@ -225,7 +172,7 @@ describe("unexpected error privacy", () => {
   });
   it("projects deliberate customer cloud errors without infrastructure messages or details",async()=>{
     const app=createApp(config(null),pool,emailConfig as never);
-    const context=new Context(new Request('https://api.example.test/v1/cloud-workspaces/workspace'),{path:'/v1/cloud-workspaces/workspace'});
+    const context=new Context(new Request('https://api.example.test/v1/cloud-v2/workspaces/workspace'),{path:'/v1/cloud-v2/workspaces/workspace'});
     const response=await app.errorHandler(new HttpError(503,'boat_credit_limit','Boat raw diagnostic',{target:'private-target'}),context);
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({error:{code:'cloud_workspace_unavailable',message:'The cloud workspace is temporarily unavailable'}});
@@ -461,37 +408,7 @@ describe("app assembly — healthz", () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
-  it("reports aggregate cloud posture without making a degraded subsystem a crash loop", async () => {
-    const cloud = createApp(
-      config(null),
-      {
-        query: async () => ({ rows: [] }),
-      } as unknown as pg.Pool,
-      emailConfig as never,
-      {
-        cloudWorkspaceHealthService: {
-          read: async () => ({
-            enabled: true,
-            setupExecution: "paused",
-            durability: "enabled",
-            outboxDelivery: "retained",
-            operationalState: "degraded",
-            reasons: ["deletion_jobs_failed"],
-          }),
-        },
-      },
-    );
-    const response = await cloud.request("/healthz");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      ok: true,
-      cloudWorkspaces: {
-        setupExecution: "paused",
-        operationalState: "degraded",
-        reasons: ["deletion_jobs_failed"],
-      },
-    });
-  });
+
 
   it("exposes a boot-deferred migration while cloud runtime remains disabled", async () => {
     const healthy = createApp(
@@ -536,20 +453,9 @@ describe("app assembly — healthz", () => {
       },
     );
     const paths = [
-      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspaces",
-      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspaces/22222222-2222-4222-8222-222222222222",
-      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspace-management/provider-connections",
-      "/v1/devices",
-      "/v1/devices/33333333-3333-4333-8333-333333333333",
-      "/internal/v1/cloud-workspaces/engine/heartbeat",
-      "/internal/v2/cloud-workspaces/engine/client-admission",
-      "/v1/cloud-workspaces",
-      "/v1/cloud-workspaces/22222222-2222-4222-8222-222222222222/invitations",
-      "/v1/cloud-workspace-invitations/accept",
-      "/v1/cloud-compute-credits",
-      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-compute-credits",
-      "/v1/auth/snapshot",
-      "/v1/auth/events",
+      "/v1/cloud-v2/workspaces", "/v1/cloud-v2/computers",
+      "/v1/cloud-agent-credentials", "/v1/organizations/11111111-1111-4111-8111-111111111111/agent-connections",
+      "/v1/auth/snapshot", "/v1/auth/events",
     ];
 
     for (const requestPath of paths) {
@@ -570,327 +476,9 @@ describe("app assembly — healthz", () => {
   });
 });
 
-describe("app assembly — cloud workspace internal capabilities", () => {
-  it("mounts capability auth outside interactive bearer middleware only when supplied", async () => {
-    const service = {
-      redeem: async () => ({ version: 1, material: "bounded" }),
-      registerEngine: async () => ({ version: 1 }),
-      heartbeat: async () => ({ version: 1 }),
-    };
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceInternalSetupService: service,
-    });
-    const response = await app.request(
-      "/internal/v1/cloud-workspaces/setup/admission",
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer zws_${"A".repeat(43)}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          workspaceId: "11111111-1111-4111-8111-111111111111",
-          organizationId: "22222222-2222-4222-8222-222222222222",
-          generation: 1,
-          setupRunId: "33333333-3333-4333-8333-333333333333",
-          executionFence: 1,
-          expected: {
-            imageRef: "snapshot-pinned",
-            imageSourceCommit: "a".repeat(40),
-            repositoryRevision: "refs/heads/main",
-            settingsVersion: 1,
-            settingsSha256: "b".repeat(64),
-          },
-        }),
-      },
-    );
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ version: 1, material: "bounded" });
 
-    const disabled = createApp(config(null), pool, emailConfig as never);
-    expect(
-      (
-        await disabled.request(
-          "/internal/v1/cloud-workspaces/setup/admission",
-          { method: "POST" },
-        )
-      ).status,
-    ).toBe(404);
-  });
 
-  it("throttles capability guesses by trusted edge IP before service work", async () => {
-    let serviceCalls = 0;
-    const service = {
-      redeem: async () => {
-        serviceCalls += 1;
-        return { version: 1 };
-      },
-      registerEngine: async () => {
-        serviceCalls += 1;
-        return { version: 1 };
-      },
-      heartbeat: async () => {
-        serviceCalls += 1;
-        return { version: 1 };
-      },
-    };
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceInternalSetupService: service,
-    });
-    let response: Response | null = null;
-    for (let attempt = 0; attempt < 601; attempt += 1) {
-      response = await app.request(
-        "/internal/v1/cloud-workspaces/setup/admission",
-        {
-          method: "POST",
-          headers: {
-            authorization: "Bearer invalid",
-            "cf-connecting-ip": "203.0.113.91",
-          },
-        },
-      );
-    }
 
-    expect(response?.status).toBe(429);
-    expect(serviceCalls).toBe(0);
-  });
-
-  it("keeps engine registration and heartbeats out of the streaming traffic budget", async () => {
-    const heartbeat = vi.fn(async () => ({ version: 1 }));
-    const redeem = vi.fn(async () => ({ version: 1 }));
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceInternalSetupService: { redeem, registerEngine: heartbeat, heartbeat },
-    });
-    const post = (path: string, token: string) => app.request(path, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-real-ip": "203.0.113.94" },
-      body: JSON.stringify({ workspaceId: "11111111-1111-4111-8111-111111111111",
-        organizationId: "22222222-2222-4222-8222-222222222222", generation: 1,
-        engineInstanceId: "33333333-3333-4333-8333-333333333333" }),
-    });
-    for (let attempt = 0; attempt < 600; attempt += 1)
-      await post("/internal/v1/cloud-workspaces/setup/admission", "invalid");
-    expect((await post("/internal/v1/cloud-workspaces/setup/admission", "invalid")).status).toBe(429);
-    const beat = () => post("/internal/v1/cloud-workspaces/engine/heartbeat", `zwh_${"c".repeat(43)}`);
-    // 300 engines per address at the default 10-second cadence.
-    for (let attempt = 0; attempt < 1_800; attempt += 1) expect((await beat()).status).toBe(200);
-    expect(heartbeat).toHaveBeenCalledTimes(1_800);
-    expect((await beat()).status).toBe(429);
-    expect(redeem).not.toHaveBeenCalled();
-  });
-
-  it("keeps optional checkpoint diagnostics out of the checkpoint and authority budgets", async () => {
-    const invoke = vi.fn(async () => ({ version: 1 }));
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceInternalSetupService: {
-        redeem: invoke, registerEngine: invoke, heartbeat: invoke, commitCheckpoint: invoke,
-      },
-    });
-    const post = (path: string) => app.request(`/internal/v1/cloud-workspaces/${path}`, {
-      method: "POST", headers: { authorization: `Bearer zwh_${"d".repeat(43)}`,
-        "content-type": "application/json", "x-real-ip": "203.0.113.95" }, body: "{}",
-    });
-    for (let attempt = 0; attempt < 600; attempt++) await post("engine/checkpoint-progress");
-    expect((await post("engine/checkpoint-progress")).status).toBe(429);
-    // Still reaches each strict parser: diagnostic traffic cannot prevent seal
-    // capture, ordinary synchronization or heartbeat authority from progressing.
-    expect((await post("engine/checkpoints/commit")).status).toBe(422);
-    expect((await post("engine/heartbeat")).status).toBe(422);
-    expect((await post("setup/admission")).status).toBe(401);
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it.each(["client-admission", "agent-execution"])("throttles valid-shape v2 %s guesses before service work", async (endpoint) => {
-    const invoke = vi.fn(async () => ({ version: 1 }));
-    const service = {
-      redeem: invoke, registerEngine: invoke, heartbeat: invoke,
-      admitActorClient: invoke, agentExecutions: { validate: invoke },
-    };
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceInternalSetupService: service as never,
-    });
-    const scope = { workspaceId: "11111111-1111-4111-8111-111111111111", organizationId: "22222222-2222-4222-8222-222222222222", generation: 1, engineInstanceId: "33333333-3333-4333-8333-333333333333" };
-    const body = endpoint === "client-admission"
-      ? { ...scope, grantToken: `zwa_${"a".repeat(43)}` }
-      : { ...scope, request: { kind: "validate", leaseId: "44444444-4444-4444-8444-444444444444" } };
-    const request = () => app.request(`/internal/v2/cloud-workspaces/engine/${endpoint}`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer zwh_${"b".repeat(43)}`, "x-real-ip": endpoint === "client-admission" ? "203.0.113.92" : "203.0.113.93" }, body: JSON.stringify(body),
-    });
-    for (let attempt = 0; attempt < 600; attempt += 1) expect((await request()).status).toBe(200);
-    expect(invoke).toHaveBeenCalledTimes(600);
-    const limited = await request();
-    expect(limited.status).toBe(429);
-    expect(invoke).toHaveBeenCalledTimes(600);
-    expect(limited.headers.get("cache-control")).toBe("no-store");
-    expect(limited.headers.get("x-content-type-options")).toBe("nosniff");
-  });
-});
-
-describe("app assembly — isolated cloud preview proxy", () => {
-  it("preserves HTTPS preview identity behind the TLS-terminating edge without trusting a forwarded host", async () => {
-    const host = "0123456789abcdef0123456789abcdef.cloud-preview.example.test";
-    const handlePreviewRequest = vi.fn(async (request: Request) => new Response(await request.text()));
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceAccessService: {
-        issue: async () => { throw new Error("unused"); }, revoke: async () => { throw new Error("unused"); },
-        recognizesPreviewRequest: request => new URL(request.url).origin === `https://${host}`,
-        handlePreviewRequest,
-      },
-    });
-    const response = await app.request(`http://${host}/submit?x=1`, { method: "POST", headers: { "x-forwarded-proto": "https" }, body: "exact-body" });
-    expect(response.status).toBe(200); expect(await response.text()).toBe("exact-body");
-    expect(handlePreviewRequest.mock.calls[0]![0].url).toBe(`https://${host}/submit?x=1`);
-    const unrelated = await app.request("http://api.example.test/v1/me", { headers: { "x-forwarded-proto": "https", "x-forwarded-host": host } });
-    expect(unrelated.status).toBe(401); expect(handlePreviewRequest).toHaveBeenCalledOnce();
-    for (const proto of ["http", "https,http", ""]) {
-      await app.request(`http://${host}/submit`, { headers: { "x-forwarded-proto": proto } });
-    }
-    expect(handlePreviewRequest).toHaveBeenCalledOnce();
-  });
-
-  it("does not enter the preview database path while a controlled migration is pending", async () => {
-    const handlePreviewRequest = vi.fn(async () => new Response("proxied"));
-    const app = createApp(config(null), pool, emailConfig as never, {
-      migrationStatus: {
-        state: "controlled_migration_pending",
-        migration: "0025_cloud_workspace_engine_authority.sql",
-        dependentRuntime: "cloud_workspaces",
-      },
-      cloudWorkspaceAccessService: {
-        issue: async () => {
-          throw new Error("not used");
-        },
-        revoke: async () => {
-          throw new Error("not used");
-        },
-        recognizesPreviewRequest: () => true,
-        handlePreviewRequest,
-      },
-    });
-
-    const response = await app.request(
-      "https://0123456789abcdef0123456789abcdef.cloud-preview.example.test/app",
-    );
-
-    expect(response.status).not.toBe(200);
-    expect(handlePreviewRequest).not.toHaveBeenCalled();
-  });
-
-  it("serves a capability-authorized preview before interactive auth", async () => {
-    const access = {
-      issue: async () => {
-        throw new Error("not used");
-      },
-      revoke: async () => {
-        throw new Error("not used");
-      },
-      recognizesPreviewRequest: (request: Request) =>
-        new URL(request.url).hostname.endsWith(".cloud-preview.example.test"),
-      handlePreviewRequest: async (request: Request) =>
-        new URL(request.url).hostname.endsWith(".cloud-preview.example.test")
-          ? new Response("proxied", {
-              headers: { "cache-control": "no-store" },
-            })
-          : null,
-    };
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceAccessService: access,
-    });
-    const response = await app.request(
-      "https://0123456789abcdef0123456789abcdef.cloud-preview.example.test/app",
-    );
-    expect(response.status).toBe(200);
-    expect(await response.text()).toBe("proxied");
-
-    const api = await app.request("https://api.example.test/v1/me");
-    expect(api.status).toBe(401);
-  });
-
-  it("throttles preview hosts by trusted client IP before capability or database work", async () => {
-    let handled = 0;
-    const access = {
-      issue: async () => {
-        throw new Error("not used");
-      },
-      revoke: async () => {
-        throw new Error("not used");
-      },
-      recognizesPreviewRequest: (request: Request) =>
-        new URL(request.url).hostname.endsWith(".cloud-preview.example.test"),
-      handlePreviewRequest: async () => {
-        handled += 1;
-        return new Response("denied", { status: 401 });
-      },
-    };
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceAccessService: access,
-    });
-    let response: Response | null = null;
-    for (let attempt = 0; attempt < 601; attempt += 1) {
-      response = await app.request(
-        "https://0123456789abcdef0123456789abcdef.cloud-preview.example.test/app",
-        { headers: { "x-real-ip": "198.51.100.77" } },
-      );
-    }
-    expect(response?.status).toBe(429);
-    expect(handled).toBe(600);
-  });
-
-  it("keeps Cloudflare preview clients in independent pre-auth buckets", async () => {
-    let handled = 0;
-    const access = {
-      issue: async () => {
-        throw new Error("not used");
-      },
-      revoke: async () => {
-        throw new Error("not used");
-      },
-      recognizesPreviewRequest: (request: Request) =>
-        new URL(request.url).hostname.endsWith(".cloud-preview.example.test"),
-      handlePreviewRequest: async () => {
-        handled += 1;
-        return new Response("denied", { status: 401 });
-      },
-    };
-    const app = createApp(config(null), pool, emailConfig as never, {
-      cloudWorkspaceAccessService: access,
-    });
-    const url =
-      "https://fedcba9876543210fedcba9876543210.cloud-preview.example.test/app";
-    for (let attempt = 0; attempt < 600; attempt += 1) {
-      await app.request(url, {
-        headers: { "cf-connecting-ip": "198.51.100.81" },
-      });
-    }
-    const otherClient = await app.request(url, {
-      headers: { "cf-connecting-ip": "198.51.100.82" },
-    });
-
-    expect(otherClient.status).toBe(401);
-    expect(handled).toBe(601);
-  });
-
-  it("allows the dedicated revocation header through CORS preflight", async () => {
-    const app = createApp(config(null), pool, emailConfig as never);
-    const response = await app.request(
-      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspaces/22222222-2222-4222-8222-222222222222/access/33333333-3333-4333-8333-333333333333",
-      {
-        method: "OPTIONS",
-        headers: {
-          origin: "app://zeros",
-          "access-control-request-method": "DELETE",
-          "access-control-request-headers":
-            "authorization,x-zeros-access-credential,x-zeros-runtime-admission",
-        },
-      },
-    );
-    expect(response.status).toBe(204);
-    expect(response.headers.get("access-control-allow-headers")).toContain(
-      "x-zeros-access-credential",
-    );
-    expect(response.headers.get("access-control-allow-headers")).toContain("x-zeros-runtime-admission");
-  });
-});
 
 describe("app assembly — tracing", () => {
   const PARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AuthBackendConfig } from "./config.js";
-import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
+import { cloudWorkspaceChannelEnabled } from "./cloud/channel-policy.js";
 
 export type ZerosDevAuthConfig = {
   subject: string;

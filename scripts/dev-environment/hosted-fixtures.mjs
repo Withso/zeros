@@ -87,7 +87,6 @@ export async function bootstrapFixtureOrganization({ runtime, withSystemTx, fixt
       VALUES ($1,$2,$3,$4,false,true)`, [orgId, fixture.expectedOrganizationSlug, proof.name, userId]);
     await tx.query(`INSERT INTO organization_members(org_id,user_id,role,workos_membership_id,membership_source)
       VALUES ($1,$2,'owner',$3,'workos')`, [orgId, userId, proof.membershipId]);
-    await tx.query("SELECT provision_cloud_workspace_pro_defaults($1)", [orgId]);
     const team = await tx.query(`INSERT INTO teams(org_id,slug,name,is_default,created_by)
       VALUES ($1,'default','Default',true,$2) RETURNING id`, [orgId, userId]);
     await tx.query(`INSERT INTO team_members(team_id,org_id,user_id,role) VALUES ($1,$2,$3,'maintainer')`, [team.rows[0].id, orgId, userId]);
@@ -103,8 +102,7 @@ export async function bootstrapFixtureOrganization({ runtime, withSystemTx, fixt
 export async function seedHostedFixture({ runtime, migration, withSystemTx, module, request }) {
   const fixture = request.fixture;
   assertCurrentFixtureFunding(fixture);
-  if (fixtureIssues(fixture).length || !fixture || !Number.isSafeInteger(request.worker?.storageMiB) || request.worker.storageMiB < 1 ||
-      !Number.isSafeInteger(request.boat?.secondsPerDollar) || request.boat.secondsPerDollar < 1 || request.boat.secondsPerDollar > 1_000_000_000_000 ||
+  if (fixtureIssues(fixture).length || !fixture ||
       !Number.isFinite(Date.parse(fixture.startsAt)) || !Number.isFinite(Date.parse(fixture.endsAt)) ||
       Date.parse(fixture.endsAt) <= Date.now() || Date.parse(fixture.endsAt) <= Date.parse(fixture.startsAt) ||
       Date.parse(fixture.endsAt) - Date.parse(fixture.startsAt) > 7 * 86400_000) throw new Error("Invalid Dev fixture authority");
@@ -136,25 +134,5 @@ export async function seedHostedFixture({ runtime, migration, withSystemTx, modu
   };
   await apply("manage-staff.js", "validateStaffRoleRequest", "manageStaffRole", {
     subjectUserId: row.user_id, expectedEmail: row.email, nextRole: "platform_owner" });
-  // The fixture seeds an initial limit, not a recurring override of operator
-  // decisions. Reapplying one workspace after an audited increase can strand
-  // live usage and abort every subsequent Dev deployment. The append-only
-  // owner audit also recognizes generations seeded before this guard existed.
-  const quotaChange = (await migration.query(`SELECT reason, next_max_storage_mib
-    FROM cloud_workspace_quota_changes WHERE org_id=$1
-    ORDER BY created_at DESC, id DESC LIMIT 1`, [row.organization_id])).rows[0];
-  if (!quotaChange || quotaChange.reason === common.reason) {
-    await apply("manage-cloud-workspace-quota.js", "validateCloudWorkspaceQuotaRequest", "manageCloudWorkspaceQuota", {
-      maxWorkspaces: "1", maxRunningWorkspaces: "1", maxCpuMillicores: "4000", maxMemoryMiB: "8192",
-      maxStorageMiB: String(Math.max(request.worker.storageMiB, quotaChange?.next_max_storage_mib ?? 0)) });
-  }
-  // New workspaces always use the creator's individual Pro authority. Staff
-  // activation above supplies the normal audited complimentary entitlement;
-  // the release issuer owns its period, receipt, price and retry semantics.
-  const { DatabaseProMonthlyAllowance } = await module("cloud-workspaces/pro-allowance.js");
-  const allowance = await new DatabaseProMonthlyAllowance(runtime, {
-    policyId: "hosted-dev", secondsPerDollar: request.boat.secondsPerDollar,
-  }).ensure(row.user_id);
-  if (allowance.state !== "ready") throw new Error(`Dev Pro allowance is ${allowance.state}; existing funding was preserved. Archive this generation before changing its funding model.`);
   return { seeded: true };
 }

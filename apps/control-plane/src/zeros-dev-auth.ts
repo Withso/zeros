@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Config } from "./config.js";
 import type { AuthTokenClaims } from "./auth-token-contract.js";
-import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
+import { cloudWorkspaceChannelEnabled } from "./cloud/channel-policy.js";
 import { ZerosDevAuthError } from "./zeros-dev-auth-config.js";
 import type { ZerosDevAuthRepository, ZerosDevAuthOutcome } from "./zeros-dev-auth-repository.js";
 import { abortable, boundedJson, type ZerosDevIssuedGrant, type ZerosDevPasswordProvider } from "./zeros-dev-auth-workos.js";

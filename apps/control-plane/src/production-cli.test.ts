@@ -12,21 +12,9 @@ const PACKAGE_ROOT = path.resolve(
 );
 const MIGRATIONS_DIR = path.join(PACKAGE_ROOT, "migrations");
 const DIST_MIGRATOR = path.join(PACKAGE_ROOT, "dist/migrate.js");
-const DIST_QUOTA_MANAGER = path.join(
-  PACKAGE_ROOT,
-  "dist/manage-cloud-workspace-quota.js",
-);
 const DIST_ENTITLEMENT_MANAGER = path.join(
   PACKAGE_ROOT,
   "dist/manage-cloud-workspace-entitlement.js",
-);
-const DIST_OBJECT_STORAGE_MANAGER = path.join(
-  PACKAGE_ROOT,
-  "dist/manage-cloud-workspace-object-storage.js",
-);
-const DIST_OBJECT_ROTATION_MANAGER = path.join(
-  PACKAGE_ROOT,
-  "dist/manage-cloud-workspace-object-rotation.js",
 );
 const DIST_WORKOS_ERASURE_MANAGER = path.join(
   PACKAGE_ROOT,
@@ -46,19 +34,6 @@ beforeAll(() => {
   });
 }, 60_000);
 
-it("runs the compiled quota manager as the documented production entrypoint", () => {
-  const result = spawnSync(process.execPath, [DIST_QUOTA_MANAGER], {
-    cwd: PACKAGE_ROOT,
-    encoding: "utf8",
-    env: { ...process.env, DATABASE_URL: "" },
-  });
-
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain(
-    "[cloud-quota] failed: DATABASE_URL is required",
-  );
-});
-
 it("runs the compiled entitlement manager as the documented production entrypoint", () => {
   const result = spawnSync(process.execPath, [DIST_ENTITLEMENT_MANAGER], {
     cwd: PACKAGE_ROOT,
@@ -69,43 +44,6 @@ it("runs the compiled entitlement manager as the documented production entrypoin
   expect(result.status).toBe(1);
   expect(result.stderr).toContain(
     "[cloud-entitlement] failed: DATABASE_URL is required",
-  );
-});
-
-it("runs the compiled cloud deletion operator without loading credentials or contacting a provider", () => {
-  const result = spawnSync(process.execPath, [path.join(PACKAGE_ROOT, "dist/manage-cloud-workspace-deletion.js")], {
-    cwd: PACKAGE_ROOT,
-    encoding: "utf8",
-    env: { PATH: process.env.PATH, DATABASE_URL: "" },
-  });
-  expect(result.status).toBe(1);
-  expect(result.stdout).toBe("");
-  expect(result.stderr).toBe("[cloud-workspace-deletion] failed: DATABASE_URL is required\n");
-});
-
-it("runs the compiled object-storage manager as the documented production entrypoint", () => {
-  const result = spawnSync(process.execPath, [DIST_OBJECT_STORAGE_MANAGER], {
-    cwd: PACKAGE_ROOT,
-    encoding: "utf8",
-    env: { ...process.env, DATABASE_URL: "" },
-  });
-
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain(
-    "[cloud-object-storage] failed: DATABASE_URL is required",
-  );
-});
-
-it("runs the compiled object-rotation retry as the documented production entrypoint", () => {
-  const result = spawnSync(process.execPath, [DIST_OBJECT_ROTATION_MANAGER], {
-    cwd: PACKAGE_ROOT,
-    encoding: "utf8",
-    env: { ...process.env, DATABASE_URL: "" },
-  });
-
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain(
-    "[cloud-object-rotation] failed: DATABASE_URL is required",
   );
 });
 
@@ -169,8 +107,6 @@ databaseDescribe("compiled production migration entrypoint", () => {
         AUTH_PROVIDER: "auth0",
         AUTH0_DOMAIN: "tenant.example.test",
         AUTH_AUDIENCE: "https://api.example.test",
-        CLOUD_WORKSPACES_ENABLED: "false",
-        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
         CONTROL_PLANE_MIGRATION_APPROVALS: "",
       },
     });
@@ -193,8 +129,6 @@ databaseDescribe("compiled production migration entrypoint", () => {
         AUTH_PROVIDER: "auth0",
         AUTH0_DOMAIN: "tenant.example.test",
         AUTH_AUDIENCE: "https://api.example.test",
-        CLOUD_WORKSPACES_ENABLED: "false",
-        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
         CONTROL_PLANE_MIGRATION_APPROVALS:
           "0025_cloud_workspace_engine_authority.sql",
       },
@@ -218,8 +152,6 @@ databaseDescribe("compiled production migration entrypoint", () => {
         AUTH_PROVIDER: "auth0",
         AUTH0_DOMAIN: "tenant.example.test",
         AUTH_AUDIENCE: "https://api.example.test",
-        CLOUD_WORKSPACES_ENABLED: "false",
-        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
         CONTROL_PLANE_MIGRATION_APPROVALS:
           "0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql",
       },

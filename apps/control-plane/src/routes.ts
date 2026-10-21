@@ -27,21 +27,9 @@ import { randomSuffix, slugify } from "./auth.js";
 import type { EmailConfig } from "./email.js";
 import { deliverInvitationEmail } from "./invitation-delivery.js";
 import { rateLimit } from "./ratelimit.js";
-import type { CloudWorkspaceBackendConfig } from "./config.js";
-import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
-import type { CloudWorkspaceProviderResolver } from "./cloud-workspaces/provider-resolver.js";
-import {createCloudWorkspaceCollaborationRoutes} from "./cloud-workspaces/collaboration-routes.js";
-import {createCloudAgentCredentialRoutes} from "./cloud-workspaces/agent-credential-routes.js";
-import { createCloudCustomizationRoutes } from "./cloud-workspaces/mcp-routes.js";
-import { DatabaseCloudCustomizationService } from "./cloud-workspaces/customization-store.js";
-import {cloudAgentCredentialKeys,DatabaseCloudAgentCredentialService} from "./cloud-workspaces/agent-credentials.js";
-import type { CloudAgentCredentialKeys } from "./cloud-workspaces/agent-credential-envelope.js";
-import {workspaceInvitationDeliveryConfig} from "./cloud-workspaces/invitation-delivery.js";
-import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
-import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
-import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
-import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
-import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
+import {createCloudAgentCredentialRoutes} from "./agent-credentials/agent-credential-routes.js";
+import {DatabaseCloudAgentCredentialService} from "./agent-credentials/agent-credentials.js";
+import type { CloudAgentCredentialKeys } from "./agent-credentials/agent-credential-envelope.js";
 import {
   enqueueWorkOSCommand,
   workOSInvitationOrderingKey,
@@ -411,15 +399,8 @@ const ORGANIZATION_SUMMARY_SQL = `
 export function createRoutes(
   pool: pg.Pool,
   email?: EmailConfig,
-  cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
   options: {
     cloudAgentCredentialKeys?: CloudAgentCredentialKeys | null;
-    cloudWorkspaceAccessService?: CloudWorkspaceAccessService | null;
-    cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver | null;
-    cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService | null;
-    cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService | null;
-    cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService | null;
-    cloudWorkspaceProviderResolver?: CloudWorkspaceProviderResolver | null;
     workosEnabled?: boolean;
     workosProvider?: WorkOSInvitationResolver;
     inviteLinkBase?: string;
@@ -477,26 +458,9 @@ export function createRoutes(
       options.inviteLinkBase ?? DEFAULT_INVITE_LINK_BASE,
     ),
   );
-  app.route(
-    "/",
-    createCloudWorkspaceRoutes(pool, cloudWorkspaces, {
-      accessService: options.cloudWorkspaceAccessService ?? null,
-      repositoryResolver: options.cloudWorkspaceRepositoryResolver ?? null,
-      providerResolver: options.cloudWorkspaceProviderResolver ?? null,
-      forkService: options.cloudWorkspaceForkService ?? null,
-      replicaService: options.cloudWorkspaceReplicaService ?? null,
-      engineClientAdmissionService:
-        options.cloudWorkspaceEngineClientAdmissionService ?? null,
-      workosEnabled: options.workosEnabled === true,
-    }),
-  );
-  if(cloudWorkspaces) app.route("/",createCloudWorkspaceCollaborationRoutes(pool,
-    workspaceInvitationDeliveryConfig(cloudWorkspaces,options.inviteLinkBase??DEFAULT_INVITE_LINK_BASE,email)));
-  const workspaceAgentCredentialKeys=cloudAgentCredentialKeys(cloudWorkspaces);
-  const agentCredentialKeys=options.cloudAgentCredentialKeys??workspaceAgentCredentialKeys;
-  if(agentCredentialKeys) app.route("/",createCloudAgentCredentialRoutes(new DatabaseCloudAgentCredentialService(pool,agentCredentialKeys),
-    {workspaceEnabled:cloudWorkspaces!==null}));
-  if(workspaceAgentCredentialKeys) app.route("/",createCloudCustomizationRoutes(new DatabaseCloudCustomizationService(pool,workspaceAgentCredentialKeys)));
+  if (options.cloudAgentCredentialKeys) app.route("/", createCloudAgentCredentialRoutes(
+    new DatabaseCloudAgentCredentialService(pool, options.cloudAgentCredentialKeys)));
+
 
   app.post(
     "/v1/invitations/accept",
@@ -767,7 +731,6 @@ function createOrganizationRouter(
          VALUES ($1, $2, 'owner')`,
         [root.id, user.id],
       );
-      await tx.query("SELECT provision_cloud_workspace_pro_defaults($1)", [root.id]);
       const team = await tx.query<{ id: string }>(
         `INSERT INTO teams (org_id, slug, name, is_default, created_by)
          VALUES ($1, 'default', 'Default', true, $2)
@@ -1020,12 +983,6 @@ function createOrganizationRouter(
         [orgId],
       );
       await tx.query(
-        `UPDATE cloud_workspace_endpoint_grants
-         SET revoked_at = COALESCE(revoked_at, now())
-         WHERE org_id = $1 AND account_user_id = $2 AND revoked_at IS NULL`,
-        [orgId, targetId],
-      );
-      await tx.query(
         `INSERT INTO security_events (
            kind, user_id, org_id, authorization_revision, payload
          ) VALUES (
@@ -1187,12 +1144,6 @@ function createOrganizationRouter(
          SET authorization_revision = authorization_revision + 1
          WHERE id = $1 RETURNING authorization_revision`,
         [orgId],
-      );
-      await tx.query(
-        `UPDATE cloud_workspace_endpoint_grants
-         SET revoked_at = COALESCE(revoked_at, now())
-         WHERE org_id = $1 AND account_user_id = $2 AND revoked_at IS NULL`,
-        [orgId, targetId],
       );
       await tx.query(
         `INSERT INTO security_events (
