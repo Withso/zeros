@@ -22,7 +22,7 @@ import {
   hasConfirmedAgents,
   useAgentsSnapshot,
 } from "./agents-cache";
-import { modelsForAgent, type ModelOption } from "./model-catalog";
+import { modelsForAgent } from "./model-catalog";
 
 /** Renderer metadata from exact-workspace consent, never part of the engine registry. */
 export type WorkspaceRegistryAgent = BridgeRegistryAgent & {
