@@ -103,7 +103,7 @@ export async function commitFinalSaveFixture(pool: pg.Pool, source: FixtureSourc
   const receipt = await content.commitCheckpoint({...source,requestId:request.id,idempotencyKey:`commit.${request.id}`,contentRevision:revision,
     reason:input.reason,manifestBlobId:manifest.id,artifactBlobId:null,inclusionPolicy:{},fileCount:counts.files,totalBytes:Number(counts.bytes),
     integritySha256:manifest.plaintextSha256});
-  return {request,receipt};
+  return {request,receipt,objects,blobs};
 }
 
 /** Real relational source with a sealed writer. Native custody/retirement is

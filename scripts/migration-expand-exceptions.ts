@@ -159,6 +159,13 @@ END $$;`],
   cloud_unstarted_candidate_hold_capture(),adopt_cloud_unstarted_candidate_cleanup(uuid),cloud_unstarted_candidate_hold_source(),
   cloud_final_save_dispatchable(uuid),require_cloud_unstarted_candidate_retirement() FROM PUBLIC;`],
   },
+  "0179_cloud_initial_delete_capture.sql": {
+    "initial-delete-capture-privileges": ["REVOKE ALL ON cloud_workspace_initial_delete_captures FROM PUBLIC,zeros_app;"],
+    "truncate-guard": [`CREATE TRIGGER cloud_initial_delete_capture_no_truncate BEFORE TRUNCATE ON cloud_workspace_initial_delete_captures
+  FOR EACH STATEMENT EXECUTE FUNCTION guard_cloud_initial_delete_capture();`],
+    "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_initial_delete_capture_source(uuid,boolean),guard_cloud_initial_delete_capture(),
+  require_cloud_initial_delete_capture(),admit_cloud_initial_delete_capture(uuid,bytea,boolean) FROM PUBLIC;`],
+  },
   "0178_cloud_owner_existing_delete.sql": {},
   "0177_cloud_owner_discard_delete.sql": {
     "new-table-privileges": ["REVOKE ALL ON cloud_workspace_owner_delete_receipts,cloud_workspace_owner_delete_dispositions FROM PUBLIC,zeros_app;"],
@@ -282,6 +289,9 @@ const ownerDeleteDigests: Record<string,string> = {
   "owner-delete-erasure": "f9ad30f4845bbb178eede1256a90014ae24f3c473dd525d967395d438529b184",
 };
 
+// One first-source completion retains the complete pre-binding recovery.
+const initialDeleteSourceDigest = "73ff2ed9852c36aff906dc03c688e7bb1036d83db04c7f533f88979b22916a5b";
+
 // Exact additions retain prior save proof and physical-purge authority.
 const ownerExistingDeleteDigests: Record<string,string> = {
   "new-table-privileges": "5dcd878e4e2935bddcf73f215d27bd635dde05c6ecea4e29b07911e0ed542699",
@@ -387,6 +397,8 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
         createHash("sha256").update(statement).digest("hex") === unstartedCandidateDigests[rule]) ||
       (file === "0177_cloud_owner_discard_delete.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerDeleteDigests[rule]) ||
+      (file === "0179_cloud_initial_delete_capture.sql" && rule === "initial-delete-source" &&
+        createHash("sha256").update(statement).digest("hex") === initialDeleteSourceDigest) ||
       (file === "0178_cloud_owner_existing_delete.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");

@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/cloud-workspaces/operations.ts",
+  "before": "        `DELETE FROM workspace_file_entries\n         WHERE workspace_id = $1 AND org_id = $2`,\n",
+  "after": ""
+}

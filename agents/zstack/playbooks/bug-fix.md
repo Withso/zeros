@@ -211,6 +211,11 @@
    and erasure claims. Already enrolled loss needs an exact owner receipt;
    preserve its capture facts and accepted Delete, then prove ordinary provider
    completion and physical erasure without converting loss to saved proof.
+   For Delete during initial setup, distinguish enrollment, registration, active
+   writer and sealed save proof. Replay the accepted Delete through readiness and
+   the real recovery worker; preserve its original source and failure clocks.
+   Count mutable file projections after record purge even when content heads are
+   gone. Test same-org/foreign-org siblings and rollback after DELETE executed.
    For canaries with durable fixtures and moving defaults, test unchanged,
    moved, unavailable and mid-run selection. Refresh at most once against the
    captured qualified tuple, with separate build/lifecycle/cleanup budgets.
