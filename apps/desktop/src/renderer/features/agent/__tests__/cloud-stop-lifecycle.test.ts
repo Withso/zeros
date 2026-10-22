@@ -12,6 +12,7 @@ import { agentSessionHasActiveWork, BLANK, useSessionsStore } from "../sessions-
 import type { AgentSessionState } from "../use-agent-session";
 import { lastUserPrompt } from "../auth-prompt-recovery";
 import { classifyRpcError } from "../../../platform/bridge/failure";
+import { canSwitchPristineChat } from "../pristine-chat";
 
 const CHAT = "11111111-1111-4111-8111-111111111111";
 const CLOUD = "cloud://22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333";
@@ -90,7 +91,7 @@ function harness(cwd = CLOUD, chat = CHAT) {
     ...lifecycle, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey, cloudScopedId, hasBackgroundAgentWork, loadedBackgroundTaskState, agentSessionHasActiveWork,
     WorkspaceRuntimeClient: RecoveryBridge, lastUserPrompt, classifyRpcError, Error,
     reconcileChatMessagesRef: { current: reconcile },
-    closeActivityForSession, closeRouteForSession, invalidateTranscriptRequest,
+    closeActivityForSession, closeRouteForSession, invalidateTranscriptRequest, canSwitchPristineChat, BLANK,
     crypto: { randomUUID }, bridge, getStore: useSessionsStore.getState,
     cancelGenerationsRef: { current: new Map() },
     flushLocalNotificationsRef: { current: vi.fn() },
@@ -107,7 +108,7 @@ function harness(cwd = CLOUD, chat = CHAT) {
     nativeTranscriptSnapshotsRef: mapRef(), cloudFlushRef: mapRef(), queueHeldRef: mapRef(), flushBubbleRef: mapRef(),
     authPromptsRef: mapRef(), turnProducedOutputRef: mapRef(), announcedDirsRef: mapRef(), promptActivityRef: mapRef(),
     capabilityRefreshInFlightRef: mapRef(),
-    useWorkspaceStore: { getState: () => ({ chats: [{ id: chat, folder: cwd, agentId: "codex" }] }) },
+    useWorkspaceStore: { getState: () => ({ chats: [{ id: chat, folder: cwd, agentId: "codex", title: "Untitled" }] }) },
     pauseQueue: () => useSessionsStore.getState().patchSession(chat, { queuePaused: true }),
     evictUnretainedTranscripts: vi.fn(), cancelStalledAdmission: vi.fn(), notifyAgentSendFailure: vi.fn(),
   });
@@ -115,7 +116,7 @@ function harness(cwd = CLOUD, chat = CHAT) {
   return {
     bridge, gate, followUp, sendQueueRef, account, context, reconcile,
     cancel: () => (context.cancel as (id: string) => Promise<void>)(chat),
-    close: () => (context.closeSession as (id: string) => void | Promise<boolean>)(chat),
+    close: (options?: { reason: "agent-switch" }) => (context.closeSession as (id: string, options?: { reason: "agent-switch" }) => void | Promise<boolean>)(chat, options),
     dispose: () => (context.disposeAll as () => void)(),
     recover: () => (context.recoverCloudPrompt as (chat: string, turn: string) => Promise<boolean>)(chat, "turn-1"),
     slot: () => useSessionsStore.getState().sessions[chat],
@@ -125,6 +126,25 @@ function harness(cwd = CLOUD, chat = CHAT) {
 afterEach(() => {
   useSessionsStore.setState({ sessions: {}, executionToChatId: {}, pendingLocalTurns: {}, cancellingChats: new Set() });
   vi.restoreAllMocks();
+});
+
+describe("untouched cloud view retirement", () => {
+  it("retires a reconnecting empty view without Stop or waiting for the worker", () => {
+    const h = harness(); h.sendQueueRef.current.clear();
+    useSessionsStore.getState().patchSession(CHAT, { status: "reconnecting", foregroundTurnId: null, activeTurnStartedAt: null });
+    expect(h.close({ reason: "agent-switch" })).toBeUndefined();
+    expect(h.slot()).toMatchObject({ status: "idle", sessionId: null, transcriptState: "resident", hasTranscript: false, messages: [] });
+    expect(h.bridge.request).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "AGENT_CLOSE_SESSION", chatId: CHAT, agentId: "codex" }), expect.anything());
+    expect((h.bridge.request.mock.calls as unknown[][])[0][0]).not.toHaveProperty("userStop");
+    expect(h.bridge.send).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent-switch retirement after a Send was admitted", async () => {
+    const h = harness();
+    const closing = h.close({ reason: "agent-switch" });
+    expect(h.bridge.request).not.toHaveBeenCalled(); expect(h.bridge.send).not.toHaveBeenCalled();
+    expect(await closing).toBe(false); expect(h.slot().status).toBe("streaming");
+  });
 });
 
 describe("cloud Retry renderer reconciliation", () => {

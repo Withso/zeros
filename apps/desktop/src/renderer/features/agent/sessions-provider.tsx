@@ -69,6 +69,7 @@ import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { refreshAgentModelCatalog } from "./refresh-agent-model-catalog";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { cloudScopedId, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { canSwitchPristineChat } from "./pristine-chat";
 import { cloudReplyOwnership } from "../../platform/bridge/cloud-runtime-wire";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
@@ -6508,9 +6509,17 @@ export function AgentSessionsProvider({
   }, [getStore]);
 
   const closeSession = useCallback<SessionsActions["closeSession"]>(
-    (chatId) => {
+    (chatId, options) => {
       const existing = cloudClosesRef.current.get(chatId);
       if (existing) return existing;
+      const slot = getStore().sessions[chatId];
+      const chat = useWorkspaceStore.getState().chats.find((row) => row.id === chatId);
+      const switchingCloudAgent = options?.reason === "agent-switch" && isCloudWorkspace(slot?.cwd ?? chat?.folder);
+      if (switchingCloudAgent) {
+        const activity = closeActivityForSession(slot, { localSendInFlight: sendingChatsRef.current.has(chatId),
+          queuedCount: sendQueueRef.current.get(chatId)?.length ?? 0 });
+        if (!canSwitchPristineChat(chat, slot) || activity.running || activity.queuedCount > 0) return Promise.resolve(false);
+      }
       // Closing a tab has the same cancellation boundary as Stop. Record it
       // before any bridge/route guard so a prompt still awaiting create/load
       // cannot dispatch after the tab has disappeared.
@@ -6518,8 +6527,6 @@ export function AgentSessionsProvider({
       cloudSendPreparationRef.current.cancel(chatId);
       if (getStore().sessions[chatId]?.cloudSendWait) cloudSendWaitRef.current.cancel(chatId);
       cloudFlushRef.current.delete(chatId);
-      const slot = getStore().sessions[chatId];
-      const chat = useWorkspaceStore.getState().chats.find((row) => row.id === chatId);
       const agentId = slot?.agentId ?? chat?.agentId;
       const release = () => {
         prebindDirtySessionsRef.current.delete(chatId);
@@ -6544,6 +6551,15 @@ export function AgentSessionsProvider({
       };
       const requestClose = () => bridge!.request({ type: "AGENT_CLOSE_SESSION", agentId: agentId!, chatId,
         ...closeRouteForSession(getStore().sessions[chatId]) }, { timeoutMs: 15_000 });
+      if (switchingCloudAgent) {
+        // The worker's next open with this same chatId owns rebinding. Retiring
+        // an unused view is not a user Stop and needs no network round trip.
+        // A late old open is fenced by the cancellation generation above.
+        if (bridge && agentId && (slot?.executionId ?? slot?.sessionId)) void requestClose().catch(() => {});
+        release();
+        getStore().setSession(chatId, { ...BLANK, cwd: slot?.cwd ?? chat!.folder, transcriptState: "resident" });
+        return;
+      }
       if (isCloudWorkspace(slot?.cwd ?? chat?.folder)) {
         const account = cloudCatalogGeneration(), cwd = slot?.cwd, turnId = slot?.foregroundTurnId;
         const executionId = slot?.executionId ?? slot?.sessionId;

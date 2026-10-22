@@ -254,6 +254,7 @@ import {
 } from "./agents-cache";
 import { invalidateCloudAgentRegistry, useWorkspaceAgents } from "./workspace-agent-registry";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { canSwitchPristineChat } from "./pristine-chat";
 import { cloudCatalogGeneration } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
@@ -1308,19 +1309,12 @@ function AgentChatBody({
     const slot = s.sessions[chatId];
     return !!slot && (slot.hasTranscript || slot.messages.length > 0);
   });
-  const transcriptKnown = useSessionsStore((s) =>
-    chatId
-      ? (s.sessions[chatId]?.transcriptState ?? "resident") === "resident"
-      : true,
-  );
   // Which turn (if any) this renderer has an unsettled prompt for. The tail's
   // liveness is derived from this rather than from session status, so a chat
   // being REOPENED — a tab switch, a workspace switch, an app reload, all of
   // which warm a session — never repaints a finished turn as working.
-  const conversationStarted =
-    hasSessionMessages ||
-    !transcriptKnown ||
-    (chatThread ? chatThread.title !== "Untitled" : false);
+  const conversationStarted = useSessionsStore((s) => !!chatThread &&
+    !canSwitchPristineChat(chatThread, chatId ? s.sessions[chatId] : undefined));
 
   // One-time-per-WORKSPACE cost heads-up, shown as a toast and scoped per
   // workspace rather than per chat. The prompt cache is keyed by model AND
@@ -1361,9 +1355,11 @@ function AgentChatBody({
   //   agent's session, so open a NEW tab bound to the picked agent+model
   //   (ADD_CHAT appends + activates it) and leave this one untouched; the
   //   in-progress draft is copied across.
+  const agentSwitchRef = useRef(0);
   const switchAgentModel = useCallback(
-    (sel: AgentModelSelection) => {
+    function selectAgentModel(sel: AgentModelSelection) {
       if (!chatThread || !chatId) return;
+      const selection = ++agentSwitchRef.current;
       const born = newChatBornDefaults(sel.agentId);
       // Exact-key restoration: a model always gets its own last effort/Fast
       // pair. Never carry the source model's configuration across this switch.
@@ -1377,11 +1373,21 @@ function AgentChatBody({
       // respawn the sessions slot is empty while disk history hydrates, and
       // the title is the durable tell that a first message ever happened.
       const currentSlot = useSessionsStore.getState().sessions[chatId];
-      const pristine =
-        (currentSlot?.transcriptState ?? "resident") === "resident" &&
-        !currentSlot?.hasTranscript &&
-        (currentSlot?.messages.length ?? 0) === 0 &&
-        chatThread.title === "Untitled";
+      if (isCloudWorkspace(chatThread.folder) && currentSlot && currentSlot.transcriptState !== "resident") {
+        const { navigationVersion, activeChatId } = useWorkspaceStore.getState();
+        // Unknown history is not proof of a started chat. Share its existing
+        // read before deciding whether a new tab is necessary. Only the latest
+        // pick in this exact view may act after hydration.
+        void agentSessions.hydrateChat(chatId).then(() => {
+          const state = useWorkspaceStore.getState(), current = state.chats.find(row => row.id === chatId);
+          if (agentSwitchRef.current === selection && current?.folder === chatThread.folder &&
+              current.agentId === chatThread.agentId && current.updatedAt === chatThread.updatedAt &&
+              state.navigationVersion === navigationVersion && state.activeChatId === activeChatId &&
+              useSessionsStore.getState().sessions[chatId]?.transcriptState === "resident") selectAgentModel(sel);
+        }).catch(() => {});
+        return;
+      }
+      const pristine = canSwitchPristineChat(chatThread, currentSlot);
       if (pristine) {
         const { navigationVersion, activeChatId } = useWorkspaceStore.getState();
         const apply = () => updateChatSettings({
@@ -1395,11 +1401,13 @@ function AgentChatBody({
           prePlanModeId: undefined,
           sessionId: undefined,
         });
-        const closing = agentSessions.closeSession(chatId);
+        const closing = isCloudWorkspace(chatThread.folder)
+          ? agentSessions.closeSession(chatId, { reason: "agent-switch" })
+          : agentSessions.closeSession(chatId);
         if (closing) {
           void closing.then((confirmed) => {
             const state = useWorkspaceStore.getState(), current = state.chats.find((row) => row.id === chatId);
-            if (confirmed && current?.folder === chatThread.folder && current.agentId === chatThread.agentId &&
+            if (confirmed && agentSwitchRef.current === selection && current?.folder === chatThread.folder && current.agentId === chatThread.agentId &&
                 current.updatedAt === chatThread.updatedAt && state.navigationVersion === navigationVersion &&
                 state.activeChatId === activeChatId) apply();
           }).catch(() => {});

@@ -206,4 +206,16 @@ describe("Local link provider admission", () => {
     await renderChat();
     expect(harness.ensure).toHaveBeenCalled();
   });
+
+  it("opens each cloud selection in the original chat view when its empty title is mirrored", async () => {
+    harness.chat!.folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    harness.chat!.title = ""; harness.passive = false; harness.draft = true;
+    for (const agentId of ["codex", "claude", "cursor"]) {
+      harness.chat!.agentId = agentId;
+      await renderChat();
+      expect(harness.ensure).toHaveBeenLastCalledWith(agentId, expect.objectContaining({ cwd: harness.chat!.folder }));
+      expect(harness.chat!.id).toBe("linked");
+    }
+    expect(harness.dispatch).not.toHaveBeenCalled(); expect(harness.load).not.toHaveBeenCalled();
+  });
 });
