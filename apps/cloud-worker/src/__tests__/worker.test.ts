@@ -77,6 +77,26 @@ describe("worker bridge routing through a fake relay", () => {
     expect(relay.bridge("CONNECTION_REJECTED")[0].clientId).toBe(CLIENT_A);
   });
 
+  it("retries the final history flush after a transient Stop failure without restarting the turn", async () => {
+    const { worker, relay, drivers, chat, prompt } = await setup();
+    const sessionId = await chat();
+    await relay.request(CLIENT_A, prompt(sessionId));
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    await worker.flush();
+    const original = relay.send.bind(relay);
+    relay.send = async frame => frame.t === "history" ? false : original(frame);
+    drivers[0].emit({ sessionUpdate: "agent_message_chunk", messageId: "answer", content: { type: "text", text: "retry final mirror" } });
+    await expect(relay.receive({ t: "stop", id: randomUUID() })).rejects.toThrow("History mirror is unavailable");
+    expect(relay.frames.some(frame => frame.t === "stop-ack")).toBe(false);
+    relay.send = original;
+    await relay.receive(config);
+    const id = randomUUID();
+    await relay.receive({ t: "stop", id });
+    expect(relay.frames.at(-1)).toEqual({ t: "stop-ack", id });
+    expect(drivers[0].prompts).toHaveLength(1);
+    expect(relay.frames.some(frame => frame.t === "history" && frame.messages?.rows.some(row => row.payload.includes("retry final mirror")))).toBe(true);
+  });
+
   it("routes replies to their client and shared updates to all clients using authoritative chat identity", async () => {
     const { relay, drivers, chat, prompt, op } = await setup();
     const sessionId = await chat();

@@ -10,7 +10,7 @@ export const CLIENT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 export const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
 export const WORKSPACE_KEY = `cloud://11111111-1111-4111-8111-111111111111/${WORKSPACE_ID}`;
 export const config: Extract<CloudV2ControlFrame, { t: "config" }> = {
-  t: "config", workspace: { id: WORKSPACE_ID, organizationId: "11111111-1111-4111-8111-111111111111", checkoutPath: "/fixture/checkout", repository: "fixture/repo", branch: "workspace/fixture", baseBranch: "main" },
+  t: "config", loginRevision: "0", workspace: { id: WORKSPACE_ID, organizationId: "11111111-1111-4111-8111-111111111111", checkoutPath: "/fixture/checkout", repository: "fixture/repo", branch: "workspace/fixture", baseBranch: "main" },
   agents: { codex: { baseUrl: "http://127.0.0.1:1/v1", token: "fixture-proxy-token", expiresAt: 9_999_999_999_999 } },
 };
 export const browserFrame = <T extends Record<string, unknown>>(type: string, fields: T = {} as T) => ({ id: randomUUID() as string, source: "browser", timestamp: Date.now(), type, ...fields });

@@ -28,7 +28,8 @@ it("recovers from a failed first config when a later replacement can prepare the
   const worker = new CloudWorker({ directory: state, transport: relay, prepareCheckout: async () => {
     if (++attempts === 1) throw new Error("Fixture unavailable");
   } }); workers.push(worker); worker.start();
-  await relay.receive({ ...config, workspace: scope.workspace });
+  // The HTTP carrier needs the failure to schedule another configuration read.
+  await expect(relay.receive({ ...config, workspace: scope.workspace })).rejects.toThrow("Fixture unavailable");
   await relay.receive({ ...config, workspace: scope.workspace });
   await relay.receive({ t: "open", clientId: CLIENT_A });
   expect(attempts).toBe(2); expect(relay.bridge("ENGINE_READY")).toHaveLength(1);

@@ -69,7 +69,14 @@ export class InboundBridge {
     if (frame.t === "stop-ack") {
       for (const connection of this.connections) {
         const id = connection.stops.get(frame.id);
-        if (id) { connection.stops.delete(frame.id); return this.write(connection.socket, { t: "stop-ack", id }); }
+        if (id) {
+          connection.stops.delete(frame.id);
+          const sent = await this.write(connection.socket, { t: "stop-ack", id });
+          // Move every replica onto its offline/wake path before Boat freezes
+          // the VM. Another requester must receive its own pending ack first.
+          if (sent) for (const peer of this.connections) if (!peer.stops.size) peer.socket.close(1001, "worker_stopping");
+          return sent;
+        }
       }
     }
     return false;
@@ -83,10 +90,11 @@ export class InboundBridge {
   }
 
   private authenticate(request: IncomingMessage): number {
+    // Failed attempts must never lock out an authentic control-plane grant.
+    if (this.verifier?.accept(request.headers["x-zeros-worker-auth"])) return 0;
     if (Date.now() - this.failureWindow >= 30_000) { this.failureWindow = Date.now(); this.failures = 0; }
     if (this.failures >= (this.options.failedAuthLimit ?? 32)) return 429;
-    if (!this.verifier?.accept(request.headers["x-zeros-worker-auth"])) { this.failures++; return 401; }
-    return 0;
+    this.failures++; return 401;
   }
 
   private reject(socket: Duplex, status: number): void {

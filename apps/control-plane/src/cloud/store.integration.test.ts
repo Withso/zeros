@@ -39,6 +39,54 @@ d("cloud v2 store", () => {
     computerBuildId: null,
   });
 
+  it.each(["creator", "relay"] as const)("fences the suspended process before a %s wake can race runtime installation", async source => {
+    const w = await create(), oldToken = await store.rotateWorkerToken(w.id), oldBoot = randomUUID();
+    await store.acceptWorkerHello(oldToken, oldBoot);
+    await store.transition(w.id, ["running"], "stopped");
+    if (source === "creator") await store.requestLifecycle(w.id, creator, "start");
+    else await store.transition(w.id, ["stopped"], "starting");
+    // Boat can restart the old service immediately on resume, before hostPort
+    // and token delivery. Its old hello must not mark the workspace ready.
+    expect(await store.acceptWorkerHello(oldToken, randomUUID())).toBeNull();
+    expect(await store.workerSession(oldToken, oldBoot)).toBeNull();
+    expect((await store.get(w.id, creator)).state).toBe("starting");
+    expect((await store.workerRoute(w.id))?.bootId).toBeNull();
+    const freshToken = await store.rotateWorkerToken(w.id);
+    expect(await store.acceptWorkerHello(freshToken, randomUUID())).toMatchObject({ state: "running" });
+  });
+
+  it("revokes the stopped worker credential while retaining mirrored history", async () => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id);
+    await store.acceptWorkerHello(token, randomUUID());
+    await store.writeHistory(w.id, { chats: [{ id: "retained" }] });
+    await store.revoke(w.id, false);
+    expect(await store.byWorkerToken(token)).toBeNull();
+    expect((await store.listChats(w.id)).chats).toEqual([{ id: "retained" }]);
+  });
+
+  it("stores private routing separately and fences ordered history by boot after a lost response", async () => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), bootId = randomUUID();
+    await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_test" });
+    await store.setWorkerRoute(w.id, "bx_test", "https://fixture-41783.on.boat.dev", { encrypted: true });
+    expect(await store.acceptWorkerHello(token, bootId)).toMatchObject({ state: "running" });
+    expect(await store.workerRoute(w.id)).toMatchObject({ url: "https://fixture-41783.on.boat.dev", bootId, portToken: { encrypted: true } });
+    expect(await store.get(w.id, creator)).not.toHaveProperty("portToken");
+    const history = { chats: [{ id: "chat", title: "first" }] };
+    await store.writeWorkerHistory(token, bootId, 1, history);
+    // A committed response was lost. The same request is acknowledged once;
+    // its first-insert ordering and row timestamps are retained.
+    const before = await pool.query("SELECT updated_at FROM cloud_v2_chats WHERE workspace_id=$1", [w.id]);
+    await store.writeWorkerHistory(token, bootId, 1, history);
+    expect((await pool.query("SELECT updated_at FROM cloud_v2_chats WHERE workspace_id=$1", [w.id])).rows).toEqual(before.rows);
+    await expect(store.writeWorkerHistory(token, bootId, 3, history)).rejects.toMatchObject({ code: "history_sequence_gap" });
+    await expect(store.writeWorkerHistory(token, bootId, 1, { chats: [{ id: "other" }] })).rejects.toMatchObject({ code: "history_sequence_conflict" });
+    const nextBoot = randomUUID();
+    await store.acceptWorkerHello(token, nextBoot);
+    await expect(store.writeWorkerHistory(token, bootId, 2, history)).rejects.toMatchObject({ code: "worker_boot_changed" });
+    await store.writeWorkerHistory(token, nextBoot, 1, { chats: [{ id: "chat", title: "second" }] });
+    expect((await store.listChats(w.id)).chats).toMatchObject([{ id: "chat", title: "second" }]);
+  });
+
   it("creates a workspace only its creator can read, and returns the worker token once", async () => {
     const workspace = await create();
     expect(workspace.state).toBe("creating");

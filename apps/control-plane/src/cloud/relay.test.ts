@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { EventEmitter } from "node:events";
 import type pg from "pg";
 import { PostgresSecurityEventBroker } from "../security-events.js";
@@ -10,9 +10,8 @@ import type { CloudV2Workspace } from "./store.js";
 import { newCloudV2Token } from "./tokens.js";
 
 const workspaceId = "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11";
-const workerToken = newCloudV2Token("worker").token;
 const ticket = newCloudV2Token("connect").token;
-const capabilities = { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex"] };
+
 
 function workspace(state: CloudV2Workspace["state"]): CloudV2Workspace {
   return {
@@ -34,7 +33,10 @@ function opened(ws: WebSocket): Promise<void> {
 }
 
 describe("cloud v2 relay", () => {
-  let server: Server;
+  let server: Server, workerServer: WebSocketServer;
+  let workerUrl: string;
+  let accessEpoch: string;
+  const connectedWorkers: WebSocket[] = [];
   let relay: CloudV2Relay;
   let url: string;
   let state: CloudV2Workspace["state"];
@@ -46,28 +48,36 @@ describe("cloud v2 relay", () => {
   const sockets: WebSocket[] = [];
 
   beforeEach(async () => {
-    state = "running";
+    state = "running"; accessEpoch = "0";
+    workerServer = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2.worker" });
+    await new Promise<void>(resolve => workerServer.once("listening", resolve));
+    workerUrl = `http://127.0.0.1:${(workerServer.address() as AddressInfo).port}`;
+    connectedWorkers.length = 0;
+    workerServer.on("connection", (ws, request) => {
+      expect(request.url).toBe("/v2/worker/bridge");
+      expect(request.headers.cookie).toBe("_port_auth=synthetic-port-token");
+      expect(request.headers["x-zeros-worker-auth"]).toBe("synthetic-grant");
+      connectedWorkers.push(ws);
+    });
     authorized = true; loginRevision = "0";
     notification = Object.assign(new EventEmitter(), { query: vi.fn(async () => ({ rows: [] })), release: vi.fn() });
     broker = new PostgresSecurityEventBroker({ connect: async () => notification } as unknown as pg.Pool);
     deps = {
       store: {
-        byWorkerToken: vi.fn(async token => token === workerToken ? { ...workspace(state), accessEpoch: "0" } : null),
-        consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId, accessEpoch: "0" } : null),
+        consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId, accessEpoch } : null),
         get: vi.fn(async () => workspace(state)),
-        accessEpoch: vi.fn(async () => authorized ? "0" : null),
+        accessEpoch: vi.fn(async () => authorized ? accessEpoch : null),
         loginRevision: vi.fn(async () => loginRevision),
-        transition: vi.fn(async (_id, from: readonly string[], to) => from.includes(state) ? workspace(state = to) : null),
-        markActive: vi.fn(async () => {}),
-        writeHistory: vi.fn(async () => {}),
       },
       securityEvents: broker,
       config: vi.fn(async ws => ({
-        t: "config" as const,
+        t: "config" as const, loginRevision,
         workspace: { id: ws.id, organizationId: ws.organizationId, checkoutPath: "/home/user/o/r", repository: ws.repository, branch: ws.branch, baseBranch: "main" },
         agents: {},
       })),
-      githubToken: vi.fn(async () => ({ token: "ghs_test", expiresAt: 1 })),
+      workerRoute: vi.fn(async () => authorized ? { workspace: workspace(state), accessEpoch, url: workerUrl, token: "synthetic-port-token", bootId: workspaceId } : null),
+      mintWorkerToken: () => "synthetic-grant",
+      retryBaseMs: 10, retryMaxMs: 20, idleMs: 40,
       wake: vi.fn(async () => {}),
       answerOffline: vi.fn(async () => null),
     };
@@ -81,18 +91,16 @@ describe("cloud v2 relay", () => {
   afterEach(async () => {
     for (const socket of sockets.splice(0)) socket.terminate();
     relay.close();
+    for (const socket of workerServer.clients) socket.terminate();
+    await new Promise<void>(resolve => workerServer.close(() => resolve()));
     await broker.stop();
     await new Promise(resolve => server.close(resolve));
   });
 
   const worker = async () => {
-    const ws = new WebSocket(`${url}/v2/cloud/worker`, { headers: { authorization: `Bearer ${workerToken}` } });
-    sockets.push(ws);
-    await opened(ws);
-    const config = nextMessage(ws);
-    ws.send(JSON.stringify({ t: "hello", protocol: 1, workerVersion: "0.1.0", capabilities }));
-    expect((await config).t).toBe("config");
-    return ws;
+    await app();
+    await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+    return connectedWorkers[0]!;
   };
   const app = async () => {
     const ws = new WebSocket(`${url}/v2/cloud/workspaces/${workspaceId}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket}`]);
@@ -120,7 +128,7 @@ describe("cloud v2 relay", () => {
     release();
     await Promise.all([first, second]);
     await vi.waitFor(() => expect(frames).toHaveLength(1));
-    expect(frames[0]).toEqual({ ...base, agents: {} });
+    expect(frames[0]).toEqual({ ...base, loginRevision: "2", agents: {} });
   });
 
   it("relays app frames to the worker verbatim and worker frames back", async () => {
@@ -164,6 +172,7 @@ describe("cloud v2 relay", () => {
   it("fences a queued frame when authority is revoked during an offline read", async () => {
     let release!: () => void;
     vi.mocked(deps.answerOffline).mockImplementation(async () => new Promise(resolve => { release = () => resolve(null); }));
+    state = "starting";
     const a = await app();
     a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "waiting" }));
     await vi.waitFor(() => expect(release).toBeTypeOf("function"));
@@ -187,68 +196,110 @@ describe("cloud v2 relay", () => {
     expect(deps.wake).not.toHaveBeenCalled();
   });
 
-  it("refuses a worker without a valid token and an app without a ticket", async () => {
-    const bad = new WebSocket(`${url}/v2/cloud/worker`, { headers: { authorization: "Bearer zw2w_wrong" } });
-    await expect(opened(bad)).rejects.toThrow("http 401");
+  it("refuses an app without a ticket and leaves the retired worker upgrade unclaimed", async () => {
     const noTicket = new WebSocket(`${url}/v2/cloud/workspaces/${workspaceId}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL]);
+    noTicket.on("error", () => {});
     await expect(opened(noTicket)).rejects.toThrow("http 401");
+    noTicket.terminate();
   });
 
-  it("wakes a stopped workspace and delivers queued frames once the worker says hello", async () => {
+  it("never dials stopped or starting VMs, and drains queued work after outbound hello marks running", async () => {
     state = "stopped";
     const a = await app();
-    await vi.waitFor(() => expect(deps.wake).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(deps.wake).toHaveBeenCalled());
     const prompt = { type: "AGENT_PROMPT", id: "p1" };
     a.send(JSON.stringify(prompt));
     await vi.waitFor(() => expect(deps.answerOffline).toHaveBeenCalled());
+    expect(connectedWorkers).toHaveLength(0);
     state = "starting";
-    const ws = new WebSocket(`${url}/v2/cloud/worker`, { headers: { authorization: `Bearer ${workerToken}` } });
-    sockets.push(ws);
-    await opened(ws);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(connectedWorkers).toHaveLength(0);
     const frames: any[] = [];
-    ws.on("message", data => frames.push(JSON.parse(String(data))));
-    ws.send(JSON.stringify({ t: "hello", protocol: 1, workerVersion: "0.1.0", capabilities }));
+    workerServer.once("connection", socket => socket.on("message", data => frames.push(JSON.parse(String(data)))));
+    state = "running";
     await vi.waitFor(() => expect(frames.map(frame => frame.t)).toEqual(["config", "open", "frame"]));
     expect(frames[2].frame).toEqual(prompt);
-    expect(state).toBe("running");
   });
 
-  it("refuses a worker whose workspace is stopped", async () => {
-    state = "stopped";
-    const ws = new WebSocket(`${url}/v2/cloud/worker`, { headers: { authorization: `Bearer ${workerToken}` } });
-    sockets.push(ws);
-    await opened(ws);
-    const closed = new Promise<number>(resolve => ws.once("close", code => resolve(code)));
-    ws.send(JSON.stringify({ t: "hello", protocol: 1, workerVersion: "0.1.0", capabilities }));
-    expect(await closed).toBe(4001);
-    expect(state).toBe("stopped");
-  });
-
-  it("drops a worker left over from before a stop when an app connects, then answers from the mirror", async () => {
+  it("redials while apps remain, and closes the connection after the final app leaves", async () => {
     const w = await worker();
-    const dropped = new Promise<void>(resolve => w.once("close", () => resolve()));
-    state = "stopped";
-    vi.mocked(deps.answerOffline).mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", requestId: "r3", result: [] });
-    const a = await app();
-    await dropped;
-    expect(deps.wake).toHaveBeenCalledTimes(1);
+    w.terminate();
+    await vi.waitFor(() => expect(connectedWorkers).toHaveLength(2));
+    for (const a of sockets) a.close();
+    await vi.waitFor(() => expect(connectedWorkers.at(-1)!.readyState).toBe(WebSocket.CLOSED));
+    expect(connectedWorkers).toHaveLength(2);
+  });
+
+  it("keeps an attached app on offline history after Stop and wakes only for explicit work", async () => {
+    const w = await worker(), a = sockets[0]!;
+    const reads = vi.mocked(deps.workerRoute).mock.calls.length;
+    state = "stopped"; w.terminate();
+    await vi.waitFor(() => expect(vi.mocked(deps.workerRoute).mock.calls.length).toBeGreaterThan(reads));
+    expect(deps.wake).not.toHaveBeenCalled();
+    a.send(JSON.stringify({ type: "HEARTBEAT" }));
+    a.send(JSON.stringify({ type: "CONNECTED", protocolVersion: 21 }));
+    vi.mocked(deps.answerOffline).mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", requestId: "offline", result: { chats: [] } });
     const reply = nextMessage(a);
-    a.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "r3", op: "chats.list" }));
-    expect(await reply).toMatchObject({ requestId: "r3" });
+    a.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "offline", op: "chats.list" }));
+    expect(await reply).toMatchObject({ requestId: "offline" });
+    expect(deps.wake).not.toHaveBeenCalled();
+    const frames: any[] = [];
+    workerServer.once("connection", socket => socket.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    a.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "explicit", op: "file.read", params: { path: "readme.txt" } }));
+    await vi.waitFor(() => expect(deps.wake).toHaveBeenCalledOnce());
+    state = "running";
+    await vi.waitFor(() => expect(frames.some(frame => frame.t === "frame" && frame.frame.id === "explicit")).toBe(true));
+    expect(a.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("wakes the workspace when a connected app sends work after its worker went away", async () => {
+  it("dials a worker for Stop without an app and waits for the matching ack", async () => {
+    state = "stopping";
+    const frames: any[] = [];
+    workerServer.once("connection", socket => socket.on("message", raw => {
+      const frame = JSON.parse(String(raw)); frames.push(frame);
+      if (frame.t === "stop") socket.send(JSON.stringify({ t: "stop-ack", id: frame.id }));
+    }));
+    expect(await relay.stopWorkspace(workspace(state), 1000)).toBe(true);
+    expect(frames.some(frame => frame.t === "stop")).toBe(true);
+  });
+
+  it("releases an idle connection after Stop cancels its previous idle timer", async () => {
     const w = await worker();
+    for (const a of sockets) a.close();
+    await nextMessage(w); // The final app close has scheduled idle cleanup.
+    w.on("message", raw => {
+      const frame = JSON.parse(String(raw));
+      if (frame.t === "stop") w.send(JSON.stringify({ t: "stop-ack", id: frame.id }));
+    });
+    expect(await relay.stopWorkspace(workspace("stopping"), 1000)).toBe(true);
+    await vi.waitFor(() => expect(w.readyState).toBe(WebSocket.CLOSED));
+  });
+
+  it("bounds the wake queue at 64 frames", async () => {
+    state = "starting";
     const a = await app();
-    await vi.waitFor(() => expect(deps.store.transition).toHaveBeenCalled());
-    w.close();
-    await new Promise(resolve => setTimeout(resolve, 50));
-    state = "stopped";
-    a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "p2" }));
-    await vi.waitFor(() => expect(deps.wake).toHaveBeenCalledTimes(1));
+    for (let i = 0; i < 65; i++) a.send(JSON.stringify({ type: "AGENT_PROMPT", id: String(i) }));
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(connectedWorkers).toHaveLength(0);
+  });
+
+  it("never lets a stale app admission evict a newer access generation", async () => {
+    let release!: () => void;
+    vi.mocked(deps.store.get).mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(workspace("running")); }));
+    const stale = app();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    accessEpoch = "1";
+    const current = await app();
+    await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+    release();
+    const old = await stale;
+    await vi.waitFor(() => expect(old.readyState).toBe(WebSocket.CLOSED));
+    expect(current.readyState).toBe(WebSocket.OPEN);
+    expect(connectedWorkers[0]!.readyState).toBe(WebSocket.OPEN);
   });
 
   it("answers history reads from the mirror while the worker is away", async () => {
+    state = "starting";
     vi.mocked(deps.answerOffline).mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", requestId: "r2", result: { chats: [] } });
     const a = await app();
     const reply = nextMessage(a);
@@ -256,23 +307,10 @@ describe("cloud v2 relay", () => {
     expect(await reply).toMatchObject({ requestId: "r2", result: { chats: [] } });
   });
 
-  it("mirrors history in order and answers GitHub token requests", async () => {
+  it("refuses control-plane-only HTTP payloads on the live bridge", async () => {
     const w = await worker();
-    w.send(JSON.stringify({ t: "history", chats: [{ id: "c1" }] }));
-    w.send(JSON.stringify({ t: "history", chatDeletions: ["c0"] }));
-    await vi.waitFor(() => expect(deps.store.writeHistory).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(deps.store.writeHistory).mock.calls.map(call => call[1])).toEqual([{ chats: [{ id: "c1" }] }, { chatDeletions: ["c0"] }]);
-    const reply = nextMessage(w);
-    w.send(JSON.stringify({ t: "request", id: workspaceId, kind: "github-token" }));
-    expect(await reply).toEqual({ t: "reply", id: workspaceId, token: "ghs_test", expiresAt: 1 });
-  });
-
-  it("closes a worker that sends anything before hello or an unknown frame", async () => {
-    const ws = new WebSocket(`${url}/v2/cloud/worker`, { headers: { authorization: `Bearer ${workerToken}` } });
-    sockets.push(ws);
-    await opened(ws);
-    const closed = new Promise<number>(resolve => ws.once("close", code => resolve(code)));
-    ws.send(JSON.stringify({ t: "idle", idle: true }));
+    const closed = new Promise<number>(resolve => w.once("close", code => resolve(code)));
+    w.send(JSON.stringify({ t: "history", chats: [{ id: "wrong-carrier" }] }));
     expect(await closed).toBe(4003);
   });
 });

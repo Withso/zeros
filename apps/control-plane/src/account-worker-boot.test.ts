@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const f = vi.hoisted(() => ({
@@ -20,6 +21,7 @@ vi.mock("./config.js", async original => {
     DATABASE_URL: "postgres://fixture@localhost/test_boot", DATABASE_MIGRATIONS_ON_BOOT: "false",
     AUTH0_DOMAIN: "identity.example.test", AUTH_AUDIENCE: "https://api.example.test",
     CONTROL_PLANE_PROCESS_ROLE: f.role, RAILWAY_ENVIRONMENT_NAME: f.channel,
+    CLOUD_V2_WORKER_SIGNING_KEY: generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
     CLOUD_V2_ENABLED: String(f.cloudEnabled), BOAT_API_KEY: "synthetic-never-used",
     CLOUD_V2_API_URL: "https://api.example.test", CLOUD_V2_REALTIME_URL: "wss://realtime.example.test",
     CLOUD_V2_RUNTIME_SHA256: "a".repeat(64), CLOUD_V2_RUNTIME_STORE_ENDPOINT: "https://storage.example.test",
@@ -61,7 +63,7 @@ beforeEach(() => {
   f.startWorkos.mockReturnValue(f.workos); f.securityStart.mockReturnValue(f.securityStop);
   f.notifications.mockReturnValue(f.stopNotifications); f.lifecycle.start.mockReturnValue(f.lifecycleStop);
   f.cloud.mockImplementation((config, _pool, roles) => config.cloudV2 ? {
-    routes: f.routes, proxy: f.proxy, relay: roles.relay ? f.relay : null,
+    routes: f.routes, proxy: f.proxy, connections: f.relay, workers: {}, relay: roles.relay ? f.relay : null,
     lifecycle: roles.lifecycle ? f.lifecycle : null, loginChanges: roles.relay ? f.loginChanges : null,
   } : null);
   f.serve.mockImplementation((_options, ready) => { ready({ port: 8080 }); return f.server; });

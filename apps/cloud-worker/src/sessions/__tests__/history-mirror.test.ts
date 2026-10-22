@@ -7,6 +7,22 @@ import { SessionStore } from "../session-store";
 import { HistoryMirror } from "../history-mirror";
 import { FakeRelay, WORKSPACE_KEY } from "../../__tests__/worker-fixtures";
 
+it("does not resnapshot an online HTTP mirror for each replica's config push", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "worker-history-config-"));
+  const store = await SessionStore.open(directory, WORKSPACE_KEY);
+  await store.upsert({ id: "chat", folder: WORKSPACE_KEY, title: "Retained" });
+  const relay = new FakeRelay(); relay.connected = true;
+  const mirror = new HistoryMirror(store, relay);
+  try {
+    mirror.connect(); await mirror.flush();
+    const before = relay.frames.length;
+    for (let replica = 0; replica < 3; replica++) { mirror.connect(); await mirror.flush(); }
+    expect(relay.frames).toHaveLength(before);
+    mirror.disconnect(); mirror.connect(); await mirror.flush();
+    expect(relay.frames.length).toBeGreaterThan(before);
+  } finally { await mirror.dispose(); await store.flush(); await rm(directory, { recursive: true, force: true }); }
+});
+
 it("an old failed send cannot disable history on a newer connection", async () => {
   const directory = await mkdtemp(join(tmpdir(), "worker-history-"));
   const store = await SessionStore.open(directory, WORKSPACE_KEY);

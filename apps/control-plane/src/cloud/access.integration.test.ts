@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import pg from "pg";
 import { Hono } from "hono";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureUser, type AuthedUser } from "../auth.js";
 import { createRoutes } from "../routes.js";
@@ -17,7 +17,9 @@ const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("cloud access through membership routes and security publication", () => {
   let pool: pg.Pool, store: CloudV2Store, owner: AuthedUser, creator: AuthedUser;
   let org: string, workspace: CloudV2Workspace, relay: CloudV2Relay, server: Server;
-  let broker: PostgresSecurityEventBroker;
+  let broker: PostgresSecurityEventBroker, workerServer: WebSocketServer;
+  const workerFrames = new Map<WebSocket, any[]>();
+  const bootId = randomUUID();
   const sockets: WebSocket[] = [];
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 5 }); });
   afterAll(async () => pool.end());
@@ -41,10 +43,16 @@ d("cloud access through membership routes and security publication", () => {
       name: "w", repository: "fixture/repo", branch: "zeros/w", baseBranch: "main", computerBuildId: null });
     await store.transition(workspace.id, ["creating"], "running");
     broker = new PostgresSecurityEventBroker(pool);
+    workerServer = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2.worker" });
+    await new Promise<void>(resolve => workerServer.once("listening", resolve));
+    workerFrames.clear();
+    workerServer.on("connection", ws => { const frames: any[] = []; workerFrames.set(ws, frames); ws.on("message", raw => frames.push(JSON.parse(String(raw)))); });
     relay = new CloudV2Relay({ store, securityEvents: broker, wake: async () => {}, answerOffline: async () => null,
-      config: async w => ({ t: "config", workspace: { id: w.id, organizationId: org, repository: w.repository,
+      config: async w => ({ t: "config", loginRevision: "0", workspace: { id: w.id, organizationId: org, repository: w.repository,
         checkoutPath: "/home/user/fixture/repo", branch: w.branch, baseBranch: w.baseBranch }, agents: {} }),
-      githubToken: async () => { throw new Error("Not used"); } });
+      mintWorkerToken: () => "synthetic-grant",
+      workerRoute: async id => { const route = await store.workerRoute(id); return route ? { ...route,
+        url: `http://127.0.0.1:${(workerServer.address() as AddressInfo).port}`, token: "synthetic-port-token" } : null; } });
     server = createServer();
     server.on("upgrade", (req, socket, head) => { if (!relay.handleUpgrade(req, socket, head)) socket.destroy(); });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -53,6 +61,7 @@ d("cloud access through membership routes and security publication", () => {
     for (const socket of sockets.splice(0)) socket.terminate();
     relay?.close(); await broker?.stop();
     if (server) await new Promise<void>(resolve => server.close(() => resolve()));
+    if (workerServer) { for (const socket of workerServer.clients) socket.terminate(); await new Promise<void>(resolve => workerServer.close(() => resolve())); }
   });
 
   async function connected() {
@@ -60,17 +69,13 @@ d("cloud access through membership routes and security publication", () => {
     const token = await store.rotateWorkerToken(workspace.id);
     const proxy = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: 60_000 });
     const ticket = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator.id, ttlMs: 60_000, authority: creator });
-    const worker = new WebSocket(`${url}/v2/cloud/worker`, { headers: { authorization: `Bearer ${token}` } });
-    sockets.push(worker);
-    await new Promise<void>(resolve => worker.once("open", resolve));
-    const configured = new Promise(resolve => worker.once("message", resolve));
-    worker.send(JSON.stringify({ t: "hello", protocol: 1, workerVersion: "test", capabilities: {
-      design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex"],
-    } }));
-    await configured;
+    await store.acceptWorkerHello(token, bootId);
     const app = new WebSocket(`${url}/v2/cloud/workspaces/${workspace.id}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`]);
     sockets.push(app);
     await new Promise<void>(resolve => app.once("open", resolve));
+    await vi.waitFor(() => expect(workerFrames.size).toBe(1));
+    const worker = [...workerFrames.keys()][0]!;
+    await vi.waitFor(() => expect(workerFrames.get(worker)!.some(frame => frame.t === "open")).toBe(true));
     return { app, worker, token, proxy: proxy.token };
   }
 
