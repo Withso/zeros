@@ -26,6 +26,7 @@ const CreateSchema = z.object({
   branch: branchName.optional(),
   name: z.string().trim().min(1).max(200).optional(),
 }).strict();
+const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
 
 export type CloudV2RouteDeps = {
   store: Pick<CloudV2Store, "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow">;
@@ -98,16 +99,20 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     return c.json({ workspace: document(await deps.store.get(id.data, c.get("user").id)) });
   });
 
-  /** A one-use, one-minute ticket for the bridge socket. Opening a stopped
-   * workspace starts it, so the VM boots while the app connects. */
-  app.post("/v1/cloud-v2/workspaces/:id/connect", async c => {
+  /** A one-use, one-minute ticket. Passive reconnects keep stopped VMs stopped;
+   * older callers that omit wake retain explicit-open behavior. */
+  app.post("/v1/cloud-v2/workspaces/:id/connect", json, async c => {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
+    const body = await c.req.text();
+    const parsed = ConnectSchema.safeParse(body ? await c.req.json().catch(() => null) : {});
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud workspace connection request");
+    const { wake } = parsed.data;
     const userId = c.get("user").id;
     const workspace = await deps.store.get(id.data, userId);
     if (workspace.state === "deleting" || workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
-    if (workspace.state === "stopped") await deps.store.transition(workspace.id, ["stopped"], "starting");
-    const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user") });
+    if (wake && workspace.state === "stopped") await deps.store.transition(workspace.id, ["stopped"], "starting");
+    const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],

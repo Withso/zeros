@@ -139,7 +139,7 @@ d("cloud v2 store", () => {
     const other = await create();
     const { token } = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator, ttlMs: 60_000 });
     expect(await store.consumeConnectTicket(token, other.id)).toBeNull();
-    expect(await store.consumeConnectTicket(token, workspace.id)).toEqual({ userId: creator, accessEpoch: "0" });
+    expect(await store.consumeConnectTicket(token, workspace.id)).toEqual({ userId: creator, accessEpoch: "0", wake: true });
     expect(await store.consumeConnectTicket(token, workspace.id)).toBeNull();
     const expired = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator, ttlMs: -1 });
     expect(await store.consumeConnectTicket(expired.token, workspace.id)).toBeNull();
@@ -156,6 +156,29 @@ d("cloud v2 store", () => {
     await store.writeHistory(workspace.id, { chatDeletions: ["c1"] });
     expect(await store.listChats(workspace.id)).toEqual({ chats: [], chatDeletions: ["c1"] });
     expect(await store.windowMessages(workspace.id, "c1", 10)).toEqual([]);
+  });
+
+  it.each([false, true, undefined])("persists HTTP connect wake intent without restarting passive workspaces (%s)", async wake => {
+    const created = await create();
+    await store.transition(created.id, ["creating"], "stopped");
+    await store.requestLifecycle(created.id, creator, "archive");
+    const before = await store.get(created.id, creator);
+    await pool.query(`INSERT INTO user_identities (user_id, provider, provider_sub, email_at_link)
+      VALUES ($1::uuid, 'workos', ($1::uuid)::text, 'fixture@example.test')`, [creator]);
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: creator, accountRevision: 1,
+      identity: { provider: "workos", subject: creator }, authentication: { sessionId: null, tokenExpiresAt: null } } as never); await next(); });
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as CloudV2RouteDeps));
+    const response = await app.request(`/v1/cloud-v2/workspaces/${created.id}/connect`, { method: "POST",
+      ...(wake === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify({ wake }) }) });
+    expect(response.status).toBe(200);
+    const after = await store.get(created.id, creator);
+    if (wake === false) expect(after).toEqual(before);
+    else expect(after).toMatchObject({ state: "starting", archivedAt: null });
+    const { protocols } = await response.json();
+    const token = protocols[1].slice("ticket.".length);
+    expect(await store.consumeConnectTicket(token, created.id)).toEqual({ userId: creator, accessEpoch: "0", wake: wake !== false });
+    expect(await store.consumeConnectTicket(token, created.id)).toBeNull();
   });
 
   it("verifies proxy tokens only while the workspace runs", async () => {

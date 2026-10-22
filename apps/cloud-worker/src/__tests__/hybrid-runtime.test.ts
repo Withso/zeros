@@ -63,7 +63,7 @@ it("serves two independent CP replicas, broadcasts a shared turn, and flushes HT
     for (let replica = 0; replica < 2; replica++) {
       const ticket = newCloudV2Token("connect").token;
       const relay = new CloudV2Relay({ store: {
-        consumeConnectTicket: async value => value === ticket ? { userId: WORKSPACE_ID, accessEpoch: "0" } : null,
+        consumeConnectTicket: async value => value === ticket ? { userId: WORKSPACE_ID, accessEpoch: "0", wake: true } : null,
         get: async () => workspace, accessEpoch: async () => "0", loginRevision: async () => "0",
       }, config: async () => config, wake: async () => {}, answerOffline: async () => null,
       workerRoute: async () => ({ workspace, accessEpoch: "0", url: `http://127.0.0.1:${workerPort}`, token: "synthetic-private-route-token", bootId }),

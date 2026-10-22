@@ -94,6 +94,49 @@ describe("cloud v2 creation", () => {
   });
 });
 
+describe("cloud v2 connect wake intent", () => {
+  const id = "33333333-3333-4333-8333-333333333333";
+  const path = `/v1/cloud-v2/workspaces/${id}/connect`;
+  function setup() {
+    const store = {
+      get: vi.fn(async () => ({ id, state: "stopped" })),
+      transition: vi.fn(async () => null),
+      issueToken: vi.fn(async () => ({ token: "synthetic-connect-ticket", expiresAt: new Date(60_000) })),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError
+      ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    return { app, store };
+  }
+
+  it.each([
+    ["no body", undefined, true], ["omitted wake", {}, true],
+    ["explicit open", { wake: true }, true], ["passive reconnect", { wake: false }, false],
+  ] as const)("preserves the ticket's wake intent for %s", async (_name, input, wake) => {
+    const { app, store } = setup();
+    const response = await app.request(path, { method: "POST",
+      ...(input === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(input) }) });
+    expect(response.status).toBe(200);
+    if (wake) expect(store.transition).toHaveBeenCalledWith(id, ["stopped"], "starting");
+    else expect(store.transition).not.toHaveBeenCalled();
+    expect(store.issueToken).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: id, kind: "connect", userId: member, wake }));
+    expect(await response.json()).toMatchObject({
+      url: `wss://dev.example.test/v2/cloud/workspaces/${id}/bridge`,
+      protocols: ["zeros.cloud.v2", "ticket.synthetic-connect-ticket"],
+    });
+  });
+
+  it.each(['{"wake":"false"}', 'null', '{', '{"wake":false,"other":true}'])("refuses invalid connect input without waking (%s)", async body => {
+    const { app, store } = setup();
+    const response = await app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body });
+    expect(response.status).toBe(400);
+    expect(store.transition).not.toHaveBeenCalled();
+    expect(store.issueToken).not.toHaveBeenCalled();
+  });
+});
+
 describe("cloud v2 archive routes", () => {
   const id = "33333333-3333-4333-8333-333333333333";
   const archivedAt = "2026-10-21T12:00:00.000Z";

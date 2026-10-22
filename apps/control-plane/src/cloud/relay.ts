@@ -170,7 +170,7 @@ export class CloudV2Relay {
         room.workspace = route.workspace;
         if (route.workspace.state === "stopped") {
           // Losing a socket during idle Stop must not wake the VM again just
-          // because an app stayed attached. Admission or explicit work does.
+          // because an app stayed attached. Explicit opens or work may wake it.
           if (!room.wakeAllowed) return;
           this.wake(room);
         }
@@ -263,18 +263,18 @@ export class CloudV2Relay {
     const offered = String(request.headers["sec-websocket-protocol"] ?? "").split(",").map(value => value.trim());
     const ticket = offered.find(value => value.startsWith("ticket."))?.slice("ticket.".length) ?? "";
     if (!offered.includes(CLOUD_V2_BRIDGE_PROTOCOL) || !isCloudV2Token(ticket, "connect")) return reject(socket);
-    let workspace: CloudV2Workspace | null = null, epoch: string | undefined;
+    let workspace: CloudV2Workspace | null = null, epoch: string | undefined, wake = false;
     try {
       const grant = await this.deps.store.consumeConnectTicket(ticket, workspaceId);
       if (grant && await this.deps.store.accessEpoch(workspaceId) === grant.accessEpoch) {
-        workspace = await this.deps.store.get(workspaceId, grant.userId); epoch = grant.accessEpoch;
+        workspace = await this.deps.store.get(workspaceId, grant.userId); epoch = grant.accessEpoch; wake = grant.wake;
       }
     } catch { this.deps.logger?.warn("[cloud-v2] app admission failed"); }
     if (!workspace || this.closed) return reject(socket);
     const admitted = workspace;
-    this.server.handleUpgrade(request, socket, head, ws => this.attachApp(admitted, epoch!, ws));
+    this.server.handleUpgrade(request, socket, head, ws => this.attachApp(admitted, epoch!, wake, ws));
   }
-  private attachApp(workspace: CloudV2Workspace, epoch: string, ws: WebSocket): void {
+  private attachApp(workspace: CloudV2Workspace, epoch: string, wake: boolean, ws: WebSocket): void {
     const room = this.room(workspace, epoch);
     if (!room) { ws.close(4001, "access_revoked"); return; }
     clearTimeout(room.idleTimer); delete room.idleTimer;
@@ -285,7 +285,10 @@ export class CloudV2Relay {
       if (!allowed || ws.readyState !== WebSocket.OPEN) { ws.close(4001, "access_revoked"); return; }
       room.clients.set(clientId, ws);
       if (room.ready) send(room.worker, { t: "open", clientId });
-      else { room.wakeAllowed = true; this.wake(room); this.ensureConnected(room); }
+      else {
+        if (wake) { room.wakeAllowed = true; this.wake(room); }
+        this.ensureConnected(room);
+      }
     });
     ws.on("error", () => {});
     ws.on("message", (data, binary) => {

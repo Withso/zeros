@@ -43,12 +43,13 @@ describe("cloud v2 relay", () => {
   let deps: CloudV2RelayDeps;
   let authorized: boolean;
   let loginRevision: string;
+  let ticketWake: boolean;
   let broker: PostgresSecurityEventBroker;
   let notification: EventEmitter;
   const sockets: WebSocket[] = [];
 
   beforeEach(async () => {
-    state = "running"; accessEpoch = "0";
+    state = "running"; accessEpoch = "0"; ticketWake = true;
     workerServer = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2.worker" });
     await new Promise<void>(resolve => workerServer.once("listening", resolve));
     workerUrl = `http://127.0.0.1:${(workerServer.address() as AddressInfo).port}`;
@@ -64,7 +65,7 @@ describe("cloud v2 relay", () => {
     broker = new PostgresSecurityEventBroker({ connect: async () => notification } as unknown as pg.Pool);
     deps = {
       store: {
-        consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId, accessEpoch } : null),
+        consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId, accessEpoch, wake: ticketWake } : null),
         get: vi.fn(async () => workspace(state)),
         accessEpoch: vi.fn(async () => authorized ? accessEpoch : null),
         loginRevision: vi.fn(async () => loginRevision),
@@ -228,6 +229,47 @@ describe("cloud v2 relay", () => {
     for (const a of sockets) a.close();
     await vi.waitFor(() => expect(connectedWorkers.at(-1)!.readyState).toBe(WebSocket.CLOSED));
     expect(connectedWorkers).toHaveLength(2);
+  });
+
+  it.each(["new room", "reconnect after idle stop"])("keeps a passive %s stopped until explicit work wakes it", async scenario => {
+    if (scenario === "reconnect after idle stop") {
+      const w = await worker(), original = sockets[0]!;
+      const reads = vi.mocked(deps.workerRoute).mock.calls.length;
+      state = "stopped"; w.terminate();
+      await vi.waitFor(() => expect(vi.mocked(deps.workerRoute).mock.calls.length).toBeGreaterThan(reads));
+      original.close();
+      await vi.waitFor(() => expect(original.readyState).toBe(WebSocket.CLOSED));
+    }
+    state = "stopped"; ticketWake = false;
+    const dials = connectedWorkers.length;
+    const a = await app();
+    const snapshot = { type: "WORKSPACE_RESPONSE", requestId: "passive-history", result: { chats: [] } };
+    vi.mocked(deps.answerOffline).mockResolvedValueOnce(snapshot);
+    const reply = nextMessage(a);
+    a.send(JSON.stringify({ type: "HEARTBEAT" }));
+    a.send(JSON.stringify({ type: "CONNECTED", protocolVersion: 21 }));
+    a.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "passive-history", op: "chats.list" }));
+    expect(await reply).toEqual(snapshot);
+    expect(deps.wake).not.toHaveBeenCalled();
+    expect(connectedWorkers).toHaveLength(dials);
+
+    const frames: any[] = [];
+    workerServer.once("connection", socket => socket.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    const request = { type: "AGENT_PROMPT", id: "explicit-work" };
+    a.send(JSON.stringify(request));
+    await vi.waitFor(() => expect(deps.wake).toHaveBeenCalledOnce());
+    expect(connectedWorkers).toHaveLength(dials);
+    state = "running";
+    await vi.waitFor(() => expect(frames.map(frame => frame.t)).toEqual(["config", "open", "frame"]));
+    expect(frames[2].frame).toEqual(request);
+    expect(connectedWorkers).toHaveLength(dials + 1);
+  });
+
+  it("lets a passive ticket attach to an already-running VM", async () => {
+    ticketWake = false;
+    const w = await worker();
+    expect(w.readyState).toBe(WebSocket.OPEN);
+    expect(deps.wake).not.toHaveBeenCalled();
   });
 
   it("keeps an attached app on offline history after Stop and wakes only for explicit work", async () => {
