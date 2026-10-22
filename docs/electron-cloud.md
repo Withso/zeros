@@ -138,7 +138,14 @@ key derives from that state, VMs keep trusting the control plane across
 restarts. Boat sandbox, builder and snapshot names carry the checkout's owner,
 so two checkouts never share a provider resource.
 
-`--reset` asks for the owner ID (or `--yes`). It runs this checkout's migrator,
+`--stop` waits for this checkout's desktop app, its Vite/watch processes and the
+backend services to exit. Shutdown gives each owned process group time to exit
+gracefully, then escalates within a bounded deadline and confirms it is gone.
+Other checkouts and their apps stay running. A second start refuses an earlier
+run whose shutdown is unconfirmed; its private receipt and data are kept.
+
+`--reset` asks for the owner ID (or `--yes`) and confirms the same app/backend
+shutdown before cleanup. It then runs this checkout's migrator,
 then drains: it fences the database, deletes only this checkout's VMs, builders
 and snapshots, and confirms each is gone. Only then does it remove the
 database, the WorkOS webhook, the DNS records and the tunnel. If anything is
