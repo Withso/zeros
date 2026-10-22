@@ -1,7 +1,8 @@
-// Deployed-Dev gate0. Reads the private Dev profile and .env.agent in memory;
+// Hosted or local Dev gate0. Reads the private Dev profile and .env.agent in memory;
 // credentials, provider output and remote error bodies never enter logs.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { parseArgs, parseEnv } from "node:util";
 import { decodeJwt } from "jose";
@@ -22,13 +23,42 @@ export function gate0DevTarget(input: string, domain: string): { origin: string;
   } catch { throw new Gate0Failure("dev_target"); }
 }
 
-const Profile = z.object({
-  version: z.literal(2), mode: z.literal("hosted"),
+type LocalTarget = { owner: string; runId: string; apiPort: number };
+
+export function gate0LocalTarget(input: string | undefined, domain: string, local: LocalTarget): { origin: string; owner: string } {
+  try {
+    const url = new URL(input ?? `https://api-dev-${local.owner}.${domain}`);
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
+    if (url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname) && url.port === String(local.apiPort))
+      return { origin: url.origin, owner: local.owner };
+    const target = gate0DevTarget(url.href, domain);
+    if (target.owner !== local.owner) throw new Error();
+    return target;
+  } catch { throw new Gate0Failure("local_target"); }
+}
+
+export function gate0LocalIdentity(health: unknown, local: LocalTarget): void {
+  const result = z.object({ ok: z.literal(true), development: z.object({
+    owner: z.literal(local.owner), runId: z.literal(local.runId),
+  }).strict() }).safeParse(health);
+  if (!result.success) throw new Gate0Failure("local_identity");
+}
+
+const CommonProfile = z.object({
   cloudflare: z.object({ domain: z.string().regex(/^[a-z0-9.-]+$/) }),
   workos: z.object({ environment: z.enum(["alpha", "dev"]), webClientId: z.string().regex(/^client_[A-Za-z0-9_-]+$/), apiKey: z.string().min(16) }),
-  registry: z.object({ endpoint: z.string().url(), bucket: z.string(), encryptionKey: z.string(), accessKeyId: z.string(), secretAccessKey: z.string() }),
   boat: z.object({ apiKey: z.string().min(16), billingOrg: z.string().optional() }),
   fixture: z.object({ workosUserId: z.string(), expectedEmail: z.string().email(), expectedOrganizationSlug: z.string() }).optional(),
+});
+const Profile = CommonProfile.extend({
+  version: z.literal(2), mode: z.literal("hosted"),
+  registry: z.object({ endpoint: z.string().url(), bucket: z.string(), encryptionKey: z.string(), accessKeyId: z.string(), secretAccessKey: z.string() }),
+});
+const LocalState = z.object({
+  version: z.literal(1), status: z.literal("active"), owner: z.string().regex(/^[a-f0-9]{24}$/), identity: z.string(),
+  keys: z.object({ agent: z.string().regex(/^[a-f0-9]{64}$/) }),
+  ports: z.object({ api: z.number().int().min(1024).max(65535) }),
+  launcher: z.object({ runId: z.string().uuid() }),
 });
 
 /** A separate test login. Never reads, rotates or writes the shared saved
@@ -78,19 +108,36 @@ async function main() {
   const { values } = parseArgs({ options: {
     api: { type: "string" }, profile: { type: "string" }, "agent-env": { type: "string" }, organization: { type: "string" },
     repository: { type: "string" }, agents: { type: "string" }, runtime: { type: "string" }, keep: { type: "boolean" }, help: { type: "boolean" },
+    local: { type: "boolean" },
   } });
   if (values.help) {
-    console.log("cloud-v2:gate0 --api <Dev API origin> [--profile <private JSON>] [--agent-env <private .env.agent>] [--organization <UUID>] [--repository owner/name] [--runtime <sha256>] [--agents codex,claude,cursor] [--keep]");
-    console.log("Uses the selected Dev profile's WorkOS client, Boat access, encrypted registry and the dedicated .env.agent test password. Requires an installed Computer and connected provider logins. Creates one workspace, checks it, then deletes it unless --keep is set.");
+    console.log("cloud-v2:gate0 [--local | --api <Dev API origin>] [--profile <private JSON>] [--agent-env <private .env.agent>] [--organization <UUID>] [--repository owner/name] [--runtime <sha256>] [--agents codex,claude,cursor] [--keep]");
+    console.log("--local uses the running cloud:local instance and its private signing key; --api may select its exact loopback port. Hosted mode reads the encrypted Dev registry. Requires an installed Computer, connected provider logins and the dedicated .env.agent test password. Creates one workspace and deletes it unless --keep is set.");
     return;
   }
   const root = resolve(import.meta.dirname, "../../../..");
-  let profile: z.infer<typeof Profile>, env: NodeJS.Dict<string>;
+  let profile: z.infer<typeof CommonProfile>, hosted: z.infer<typeof Profile> | undefined;
+  let localState: z.infer<typeof LocalState> | undefined, env: NodeJS.Dict<string>;
   try {
-    profile = Profile.parse(JSON.parse(readFileSync(values.profile ?? resolve(root, "zeros-dev-env.json"), "utf8")));
+    if (values.local) {
+      const [{ loadProfile }, { derivedWorkspaceIdentity, readPrivateJson }] = await Promise.all([
+        import(pathToFileURL(resolve(root, "scripts/dev-environment/profile.mjs")).href),
+        import(pathToFileURL(resolve(root, "scripts/dev-environment/state.mjs")).href),
+      ]);
+      profile = CommonProfile.parse(loadProfile(undefined, { root, env: { ...process.env,
+        ...(values.profile ? { ZEROS_DEV_PROFILE_PATH: resolve(values.profile) } : {}) } }));
+      const identity = derivedWorkspaceIdentity(root, process.env);
+      // Read only: gate0 must not create a new local instance or rotate its key.
+      localState = LocalState.parse(readPrivateJson(resolve(homedir(), ".zeros-dev/environments", identity.owner, "workspace.json")));
+      if (localState.owner !== identity.owner || localState.identity !== identity.identity) throw new Error();
+    } else {
+      hosted = Profile.parse(JSON.parse(readFileSync(values.profile ?? resolve(root, "zeros-dev-env.json"), "utf8")));
+      profile = hosted;
+    }
     env = parseEnv(readFileSync(values["agent-env"] ?? resolve(root, ".env.agent"), "utf8"));
   } catch { throw new Gate0Failure("private_configuration"); }
-  const target = gate0DevTarget(values.api ?? "", profile.cloudflare.domain);
+  const local = localState ? { owner: localState.owner, runId: localState.launcher.runId, apiPort: localState.ports.api } : undefined;
+  const target = local ? gate0LocalTarget(values.api, profile.cloudflare.domain, local) : gate0DevTarget(values.api ?? "", profile.cloudflare.domain);
   const agents = z.array(z.enum(GATE0_AGENTS)).min(1).parse((values.agents ?? GATE0_AGENTS.join(",")).split(","));
   const repository = values.repository ?? env.ZEROS_DEV_REPOSITORY;
   if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Gate0Failure("repository_configuration");
@@ -98,23 +145,25 @@ async function main() {
   const subject = profile.fixture?.workosUserId ?? env.ZEROS_DEV_WORKOS_SUBJECT;
   if (!email || !subject || !env.ZEROS_DEV_PASSWORD) throw new Gate0Failure("test_login_configuration");
   if (values.runtime && !/^[a-f0-9]{64}$/.test(values.runtime)) throw new Gate0Failure("runtime_pin");
-  let health;
+  let generation: string | undefined;
   try {
     const response = await fetch(`${target.origin}/healthz`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
-    health = z.object({ ok: z.literal(true), development: z.object({ owner: z.literal(target.owner), generation: z.string().uuid() }) }).safeParse(await response.json());
-    if (!response.ok || !health.success) throw new Error();
+    if (!response.ok) { await response.body?.cancel(); throw new Error(); }
+    const health: unknown = await response.json();
+    if (local) gate0LocalIdentity(health, local);
+    else generation = z.object({ ok: z.literal(true), development: z.object({ owner: z.literal(target.owner), generation: z.string().uuid() }) }).parse(health).development.generation;
   } catch { throw new Gate0Failure("dev_identity"); }
   let transportProbe;
   try {
-    // Read-only Dev registry access: derive the same generation-stable signer
-    // as hosted-profile without printing or storing its private material.
-    const [{ r2Registry }, { cloudV2WorkerSigningKey }] = await Promise.all([
-      import(pathToFileURL(resolve(root, "scripts/dev-environment/hosted-state.mjs")).href),
-      import(pathToFileURL(resolve(root, "scripts/dev-environment/hosted-profile.mjs")).href),
-    ]);
-    const receipt = await r2Registry(profile.registry).read(target.owner);
-    if (receipt?.state?.owner !== target.owner || receipt.state.generation !== health.data.development.generation) throw new Error();
-    const signer = new CloudV2WorkerSigner(cloudV2WorkerSigningKey(receipt.state));
+    const { cloudV2WorkerSigningKey } = await import(pathToFileURL(resolve(root, "scripts/dev-environment/cloud-v2-keys.mjs")).href);
+    let state = localState;
+    if (!state) {
+      const { r2Registry } = await import(pathToFileURL(resolve(root, "scripts/dev-environment/hosted-state.mjs")).href);
+      const receipt = await r2Registry(hosted!.registry).read(target.owner);
+      if (receipt?.state?.owner !== target.owner || receipt.state.generation !== generation) throw new Error();
+      state = receipt.state;
+    }
+    const signer = new CloudV2WorkerSigner(cloudV2WorkerSigningKey(state));
     const compute = new BoatCloudV2Compute(new BoatApiClient({ apiKey: profile.boat.apiKey, timeoutMs: 20_000,
       ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }));
     transportProbe = createGate0TransportProbe({ compute, signer });

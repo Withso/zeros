@@ -130,6 +130,22 @@ d("cloud v2 Cloud Computer builds", () => {
     ]);
   });
 
+  it("uses its local namespace for builds and for snapshot cleanup after a lost name", async () => {
+    const boat = compute(), localOwner = "a".repeat(24);
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "development", localOwner, runtime, cloneToken: async () => "fixture" });
+    const job = await computers.enqueue(org, admin, recipe);
+    await builder.tick();
+    const name = cloudV2SnapshotName("development", org, 1, localOwner);
+    expect(boat.saveSnapshot).toHaveBeenCalledWith("bx_build1", name);
+    expect(boat.create).toHaveBeenCalledWith(expect.objectContaining({ name: `zeros-local-${localOwner}-build-${job.id.slice(0, 8)}` }));
+    expect((await computers.overview(org)).snapshotName).toBe(name);
+    await pool.query("UPDATE cloud_v2_computers SET active_build_id=NULL,snapshot_name=NULL WHERE org_id=$1", [org]);
+    await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_id=NULL,cleanup_requested_at=now() WHERE id=$1", [job.id]);
+    await builder.cleanup();
+    expect(boat.deleteSnapshot).toHaveBeenCalledExactlyOnceWith(name);
+    expect((await pool.query("SELECT snapshot_deleted_at FROM cloud_v2_computer_builds WHERE id=$1", [job.id])).rows[0].snapshot_deleted_at).not.toBeNull();
+  });
+
   it.each(["tag", "commit"])("records a verified remote branch when the Computer is pinned to a %s", async source => {
     const root = await mkdtemp(join(tmpdir(), "zeros-computer-branch-"));
     const run = promisify(execFile);

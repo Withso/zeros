@@ -9,6 +9,8 @@ import { withSystemTx } from "../db.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2Compute } from "./boat.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
+import { cloudV2SandboxName, cloudV2SnapshotName } from "./resource-names.js";
+export { cloudV2SnapshotName } from "./resource-names.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 60_000;
@@ -52,10 +54,6 @@ const build = (row: Row): CloudV2Build => ({
   builderSandboxId: row.builder_sandbox_id, snapshotId: row.snapshot_id, errorCode: row.error_code, createdBy: row.created_by,
   createdAt: row.created_at.toISOString(), startedAt: row.started_at?.toISOString() ?? null, finishedAt: row.finished_at?.toISOString() ?? null,
 });
-
-export function cloudV2SnapshotName(channel: string, organizationId: string, version: number): string {
-  return `zeros-${channel}-${organizationId.replace(/-/g, "").slice(0, 12)}-v${version}`;
-}
 
 export class CloudV2Computers {
   constructor(private readonly pool: pg.Pool) {}
@@ -271,6 +269,7 @@ export class CloudV2ComputerBuilder {
     computers: CloudV2Computers;
     compute: CloudV2Compute;
     channel: string;
+    localOwner?: string | undefined;
     /** The worker runtime cached into every build. */
     runtime: CloudV2Runtime;
     /** A short-lived GitHub token able to clone one repository. */
@@ -307,7 +306,7 @@ export class CloudV2ComputerBuilder {
   }
 
   private builderInput(job: { id: string }) {
-    return { key: job.id, name: `zeros-${this.deps.channel}-build-${job.id.slice(0, 8)}`, env: {} };
+    return { key: job.id, name: cloudV2SandboxName(this.deps.channel, "build", job.id, this.deps.localOwner), env: {} };
   }
 
   private async cleanupBuild(id: string, assertHeld: () => void, finishing = false): Promise<void> {
@@ -333,7 +332,7 @@ export class CloudV2ComputerBuilder {
     if (!resource.active && !resource.snapshot_deleted_at) {
       // Older builds may have cleared snapshot_id before a failed delete. Their
       // deterministic names still let org erasure verify every named snapshot.
-      const name = resource.snapshot_id ?? (resource.cleanup_requested_at ? cloudV2SnapshotName(this.deps.channel, resource.org_id, resource.version) : null);
+      const name = resource.snapshot_id ?? (resource.cleanup_requested_at ? cloudV2SnapshotName(this.deps.channel, resource.org_id, resource.version, this.deps.localOwner) : null);
       if (name) {
         assertHeld(); await compute.deleteSnapshot(name);
         assertHeld(); await computers.confirmDeleted(id, "snapshot");
@@ -412,7 +411,7 @@ export class CloudV2ComputerBuilder {
     await computers.update(job.id, { recipe: { ...job.recipe, repositories: pinned } });
     // Boat captures a running sandbox's disk; flush it first.
     await compute.exec(sandboxId, "sync", 120);
-    const name = cloudV2SnapshotName(this.deps.channel, job.organizationId, job.version);
+    const name = cloudV2SnapshotName(this.deps.channel, job.organizationId, job.version, this.deps.localOwner);
     assertHeld();
     if (!await computers.prepareResource(job.id, name)) return;
     await compute.saveSnapshot(sandboxId, name);

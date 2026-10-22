@@ -37,6 +37,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "catalogs/models-v1.json",
   // Dev provisioning modules used by the integration suites.
   "scripts/dev-environment/",
+  "scripts/dev-ports.mjs",
   // The worker's history window rules, which the mirror parity suite imports.
   "apps/cloud-worker/src/sessions/chat-history.ts",
   "apps/cloud-worker/package.json",

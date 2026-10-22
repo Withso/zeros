@@ -25,6 +25,7 @@ import { CloudV2Store, type CloudV2Workspace } from "./store.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
+import { cloudV2SandboxName } from "./resource-names.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 /** Boat stock image home; repositories live at <home>/<owner>/<name>. */
@@ -65,6 +66,7 @@ export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats"
 export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool) {
   const v2 = config.cloudV2;
   if (!v2) return null;
+  const localOwner = config.development && !("generation" in config.development) ? config.development.owner : undefined;
   const store = new CloudV2Store(pool);
   const compute = new BoatCloudV2Compute(new BoatApiClient({
     apiKey: v2.boat.apiKey, timeoutMs: 120_000, ...(v2.boat.billingOrg ? { billingOrg: v2.boat.billingOrg } : {}),
@@ -137,7 +139,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
-    computers, compute, channel: config.deploymentChannel, runtime,
+    computers, compute, channel: config.deploymentChannel, localOwner, runtime,
     cloneToken: async (organizationId, userId, repository) => {
       if (!repositoryToken) throw new HttpError(409, "github_unavailable", "GitHub is not configured");
       return (await repositoryToken(organizationId, userId, repository)).token;
@@ -152,7 +154,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
     stopWorker: workspace => connections!.stopWorkspace(workspace),
     bootEnv: workspace => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: v2.runtime.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
-    sandboxName: workspace => `zeros-${config.deploymentChannel}-ws-${workspace.id.slice(0, 8)}`,
+    sandboxName: workspace => cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner),
     logger: console,
   }) : null;
   return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges };
