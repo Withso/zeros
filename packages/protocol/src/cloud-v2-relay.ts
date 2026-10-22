@@ -9,6 +9,9 @@ import { z } from "zod";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
 
 export const CLOUD_V2_RELAY_PROTOCOL = 1;
+export const CLOUD_V2_WORKER_PORT = 41783;
+export const CLOUD_V2_WORKER_BRIDGE_PATH = "/v2/worker/bridge";
+export const CLOUD_V2_WORKER_BRIDGE_PROTOCOL = "zeros.cloud.v2.worker";
 export const CLOUD_V2_MAX_FRAME_BYTES = MAX_BRIDGE_FRAME_BYTES;
 /** Rows per history frame; larger backfills are split by the sender. */
 export const CLOUD_V2_MAX_HISTORY_ROWS = 500;
@@ -67,6 +70,7 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   /** Idle means no running agent turn and no open terminal. */
   z.object({ t: z.literal("idle"), idle: z.boolean() }).strict(),
   z.object({ t: z.literal("request"), id: z.uuid(), kind: z.literal("github-token") }).strict(),
+  z.object({ t: z.literal("stop-ack"), id: z.uuid() }).strict(),
 ]);
 export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
 
@@ -77,6 +81,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("open"), clientId }).strict(),
   z.object({ t: z.literal("close"), clientId }).strict(),
   z.object({ t: z.literal("frame"), clientId, frame }).strict(),
+  z.object({ t: z.literal("stop"), id: z.uuid() }).strict(),
   /** Sent after hello and again before any proxy token expires or a login
    * changes. The control plane owns refresh; the worker never asks for it. */
   z.object({

@@ -49,6 +49,25 @@ async function setup(driverSetup?: (driver: FakeDriver) => void) {
 }
 
 describe("worker bridge routing through a fake relay", () => {
+  it("acknowledges VM Stop only after cancelling the turn and committing the final mirror", async () => {
+    const { worker, relay, drivers, chat, prompt } = await setup();
+    const sessionId = await chat(), request = prompt(sessionId);
+    await relay.request(CLIENT_A, request);
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    await worker.flush();
+    const original = relay.send.bind(relay);
+    let unblock!: () => void, writing = false;
+    const blocked = new Promise<void>(resolve => { unblock = resolve; });
+    relay.send = async frame => { if (frame.t === "history") { writing = true; await blocked; } return original(frame); };
+    drivers[0].emit({ sessionUpdate: "agent_message_chunk", messageId: "answer", content: { type: "text", text: "durable before stop" } });
+    const id = randomUUID(), stopping = relay.receive({ t: "stop", id });
+    await expect.poll(() => writing).toBe(true);
+    expect(relay.frames.some(frame => frame.t === "stop-ack")).toBe(false);
+    unblock(); await stopping;
+    expect(drivers[0].disposed).toBe(true);
+    expect(relay.frames.at(-1)).toEqual({ t: "stop-ack", id });
+    expect(relay.frames.some(frame => frame.t === "history" && frame.messages?.rows.some(row => row.payload.includes("durable before stop")))).toBe(true);
+  });
   it("sends hello and the normal ENGINE_READY handshake without a VM path", async () => {
     const { relay } = await setup();
     expect(relay.frames[0]).toMatchObject({ t: "hello", capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"] } });

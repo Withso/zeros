@@ -49,6 +49,7 @@ export class CloudWorker {
   private online = false;
   private disposed = false;
   private started = false;
+  private stopping?: Promise<void>;
   private idle?: boolean;
   private heartbeat?: ReturnType<typeof setInterval>;
   private unsubscribers: Array<() => void> = [];
@@ -119,10 +120,19 @@ export class CloudWorker {
     // Checkout preparation can be waiting for this reply. Never queue control
     // replies behind configuration or behind ordinary app work.
     if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
+    if (message.t === "stop") {
+      // The VM can stop only after the native turn's final rows reach the HTTP
+      // mirror. Keep the transport alive until this correlated ack is sent.
+      this.stopping ??= this.prepareStop();
+      await this.stopping;
+      await this.send({ t: "stop-ack", id: message.id });
+      return;
+    }
     if (message.t === "close") {
       const client = this.clients.get(message.clientId); if (client) this.terminals?.detach(client);
       this.clients.delete(message.clientId); return;
     }
+    if (this.stopping) return;
     if (message.t === "open") {
       const previous = this.clients.get(message.clientId); if (previous) this.terminals?.detach(previous);
       const client: Client = { id: message.clientId, rejected: false, send: async (frame) => {
@@ -201,6 +211,14 @@ export class CloudWorker {
   }
 
   private broadcast(frame: BridgeMessage): Promise<void> { return this.send({ t: "frame", clientId: "*", frame }).then(() => {}); }
+  private async prepareStop(): Promise<void> {
+    clearInterval(this.heartbeat);
+    await this.configuring;
+    await this.agents?.dispose();
+    await this.terminals?.dispose();
+    await this.flush();
+    if (this.history && !await this.history.flush()) throw new Error("History mirror is unavailable.");
+  }
   private async send(frame: CloudV2WorkerFrame): Promise<boolean> {
     if (!this.online) return false;
     try { return await this.options.transport.send(frame); }

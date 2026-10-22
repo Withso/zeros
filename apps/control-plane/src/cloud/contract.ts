@@ -5,6 +5,9 @@
 import { z } from "zod";
 
 export const CLOUD_V2_RELAY_PROTOCOL = 1;
+export const CLOUD_V2_WORKER_PORT = 41783;
+export const CLOUD_V2_WORKER_BRIDGE_PATH = "/v2/worker/bridge";
+export const CLOUD_V2_WORKER_BRIDGE_PROTOCOL = "zeros.cloud.v2.worker";
 export const CLOUD_V2_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const CLOUD_V2_MAX_HISTORY_ROWS = 500;
 
@@ -52,6 +55,7 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   }).strict(),
   z.object({ t: z.literal("idle"), idle: z.boolean() }).strict(),
   z.object({ t: z.literal("request"), id: z.string().uuid(), kind: z.literal("github-token") }).strict(),
+  z.object({ t: z.literal("stop-ack"), id: z.string().uuid() }).strict(),
 ]);
 export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
 
@@ -60,6 +64,7 @@ export type CloudV2ControlFrame =
   | { t: "open"; clientId: string }
   | { t: "close"; clientId: string }
   | { t: "frame"; clientId: string; frame: unknown }
+  | { t: "stop"; id: string }
   | {
       t: "config";
       workspace: { id: string; organizationId: string; checkoutPath: string; repository: string; branch: string; baseBranch: string };
