@@ -88,6 +88,7 @@ export function useChatSession(
     ...slot,
     listAgents: ctx.listAgents,
     initAgent: ctx.initAgent,
+    refreshModelCatalog: () => ctx.refreshModelCatalog(chatId),
     // startSession kept for API compatibility; forwards to ensureSession
     // with the chat's id baked in.
     startSession: (agentId, options) =>

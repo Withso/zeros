@@ -35,7 +35,7 @@ const RATE =
 const NETWORK =
   /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE)\b|fetch\s+failed|socket\s+hang\s?up|getaddrinfo|network\s+(?:error|failure|timeout|unreachable)|connection\s+(?:error|closed|reset|refused|failed|lost)|timed?\s+out|api\s+error[:\s(]*5\d\d\b|overloaded_error|\boverloaded\b/i;
 const MODEL_ACCESS =
-  /\bmodel\b[^\n.]{0,100}\b(?:access\s+(?:denied|required)|not\s+(?:enabled|permitted)|requires\s+(?:a\s+)?(?:different|paid|pro|max)|(?:do\s+not|don't)\s+have\s+access)\b|\bmax\s*mode\b/i;
+  /\bmodel\b[^\n.]{0,100}\b(?:access\s+(?:denied|required)|not\s+(?:enabled|permitted)|requires\s+(?:a\s+)?(?:different|paid|pro|max)|(?:do\s+not|don't)\s+have\s+access)\b|\b(?:does\s+not|do\s+not|doesn't|don't)\s+have\s+access\s+to\s+(?:the\s+)?model\b|\bmax\s*mode\b/i;
 
 const codeKey = (code: string) => code.toLowerCase().replace(/[^a-z0-9]/g, "");
 const codes = (values: string[]) => new Set(values.map(codeKey));

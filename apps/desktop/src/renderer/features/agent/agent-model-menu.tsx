@@ -66,6 +66,7 @@ import {
   effortLabel,
   effortLevelsFor,
   modelsForAgent,
+  modelCatalogInitialize,
   resolveModelOption,
   type ModelOption,
 } from "./model-catalog";
@@ -217,7 +218,7 @@ export function AgentModelMenu({
   const hasSavedDefault = !!getFavoriteModel(defaultAgent?.id);
   const defaultValue = defaultAgent ? modelForNewChat(defaultAgent.id) : null;
   const defaultOption = useMemo(() => defaultAgent && defaultValue
-    ? resolveModelOption(defaultAgent.id, defaultValue, defaultAgent.id === value?.agentId ? initialize : null)
+    ? resolveModelOption(defaultAgent.id, defaultValue, modelCatalogInitialize(defaultAgent.id, value?.agentId, initialize))
     : null, [defaultAgent, defaultValue, value?.agentId, initialize]);
   const defaultModel = defaultOption?.value ?? defaultValue;
 
@@ -234,7 +235,7 @@ export function AgentModelMenu({
         family: agentFamily(agent.id),
         models: modelsForAgent(
           agent.id,
-          agent.id === value?.agentId ? initialize : null,
+          modelCatalogInitialize(agent.id, value?.agentId, initialize),
         ),
       }))
       .filter((g) => g.family !== "" && g.models.length > 0);
@@ -574,7 +575,7 @@ export function AgentModelMenu({
                     : resolveModelConfiguration(
                         row.agent.id,
                         row.model.value,
-                        row.agent.id === value?.agentId ? initialize : null,
+                        modelCatalogInitialize(row.agent.id, value?.agentId, initialize),
                       );
                 const key = `${row.agent.id}:${row.model.value}`;
                 return (
@@ -731,9 +732,7 @@ export function AgentModelMenu({
                               : resolveModelConfiguration(
                                   row.agent.id,
                                   row.model.value,
-                                  row.agent.id === value?.agentId
-                                    ? initialize
-                                    : null,
+                                  modelCatalogInitialize(row.agent.id, value?.agentId, initialize),
                                 );
                           const key = `${row.agent.id}:${row.model.value}`;
                           return (

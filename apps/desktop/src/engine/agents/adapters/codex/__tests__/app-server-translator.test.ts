@@ -1375,6 +1375,16 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("error + advisory notices", () => {
+    it("shows an actionable model refusal while retaining raw evidence only on the native diagnostic", () => {
+      const message = "unexpected status 403 Forbidden: Project `proj_fixture` does not have access to model `gpt-6.1-sol`, url: https://proxy.example.test/v2/cloud/proxy/openai/responses, cf-ray: fixture-ray, request id: fixture-request";
+      env.t.handle("error", { error: { message, codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 403 } } }, willRetry: false });
+      expect(env.t.terminalFailure).toMatchObject({ category: "model-unavailable", message });
+      const notices = env.out.emitted.filter(event => event.update.sessionUpdate === "error_notice");
+      expect(notices).toHaveLength(1);
+      expect(notices[0].update).toMatchObject({ message: "Your OpenAI key can't use GPT-6.1 Sol. Pick another model." });
+      expect(JSON.stringify(notices)).not.toMatch(/proj_fixture|https:|fixture-ray|fixture-request/);
+    });
+
     it.each([
       ["futureProviderError", "futureProviderError"],
       [{ futureTransportError: { httpStatusCode: 529 } }, "futureTransportError (HTTP 529)"],
@@ -1410,8 +1420,9 @@ describe("CodexAppServerTranslator", () => {
         noticeId: string;
       };
       expect(upd.severity).toBe("error");
-      // The translator should have unwrapped the JSON-in-JSON envelope.
-      expect(upd.message).toMatch(/model X is unavailable/);
+      expect(upd.message).toBe("Your Codex connection can't use the selected model. Pick another model.");
+      // The diagnostic still unwraps the JSON-in-JSON provider envelope.
+      expect(env.t.terminalFailure?.message).toContain("model X is unavailable");
       expect(upd.noticeId).toBeTruthy();
     });
 

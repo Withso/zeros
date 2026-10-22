@@ -2,7 +2,10 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
+import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
 import type { Driver, DriverOpen } from "../driver";
+import { WorkspaceError } from "../../workspace/scope";
+import { normalizeProviderError } from "../shared/provider-error";
 import { driverTiming } from "../../agent-timings";
 import { JsonRpcProcess, RpcError } from "../shared/json-rpc-process";
 import { agentEnvironment } from "../shared/agent-environment";
@@ -110,8 +113,9 @@ export class CodexDriver implements Driver {
       driverTiming(this.input, "process_ready");
       return { nativeSessionId: this.nativeSessionId };
     } catch (error) {
+      const failure = this.error(error);
       await this.dispose();
-      throw error;
+      throw failure;
     }
   }
 
@@ -241,8 +245,8 @@ export class CodexDriver implements Driver {
     this.observe(turn);
     this.mapper!.handle(method, params);
     if (this.mapper!.sawTurnTerminal) {
-      const failure = this.mapper!.terminalError;
-      this.settle(failure ? new Error(this.redact(failure)) : undefined);
+      const failure = this.mapper!.terminalFailure ?? this.mapper!.terminalError;
+      this.settle(failure ? this.error(failure) : undefined);
     }
   }
 
@@ -282,7 +286,12 @@ export class CodexDriver implements Driver {
     const token = this.input?.proxy?.token;
     return token ? message.split(token).join("[redacted]").split(JSON.stringify(token).slice(1, -1)).join("[redacted]") : message;
   }
-  private error(error: unknown): Error { return new Error(this.redact(error instanceof Error ? error.message : "Codex request failed.")); }
+  private error(error: unknown): Error {
+    const native = normalizeProviderError("codex", error);
+    return native.category === "model-unavailable"
+      ? new WorkspaceError("model-unavailable", codexModelUnavailableMessage(native.message))
+      : new Error(this.redact(native.message));
+  }
   private pinnedEntry(): string {
     const require = createRequire(import.meta.url);
     const manifest = require.resolve("@openai/codex/package.json");

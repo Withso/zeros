@@ -1,4 +1,5 @@
 import { SESSION_EXPIRED_KEYWORDS } from "./session-expiry";
+import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
 import { claudeStartupRecovery } from "../claude/startup-failure";
 import {
   extractUnavailableModelId,
@@ -34,7 +35,7 @@ const RATE =
 const NETWORK =
   /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE)\b|fetch\s+failed|socket\s+hang\s?up|getaddrinfo|network\s+(?:error|failure|timeout|unreachable)|connection\s+(?:error|closed|reset|refused|failed|lost)|timed?\s+out|api\s+error[:\s(]*5\d\d\b|overloaded_error|\boverloaded\b/i;
 const MODEL_ACCESS =
-  /\bmodel\b[^\n.]{0,100}\b(?:access\s+(?:denied|required)|not\s+(?:enabled|permitted)|requires\s+(?:a\s+)?(?:different|paid|pro|max)|(?:do\s+not|don't)\s+have\s+access)\b|\bmax\s*mode\b/i;
+  /\bmodel\b[^\n.]{0,100}\b(?:access\s+(?:denied|required)|not\s+(?:enabled|permitted)|requires\s+(?:a\s+)?(?:different|paid|pro|max)|(?:do\s+not|don't)\s+have\s+access)\b|\b(?:does\s+not|do\s+not|doesn't|don't)\s+have\s+access\s+to\s+(?:the\s+)?model\b|\bmax\s*mode\b/i;
 
 const codeKey = (code: string) => code.toLowerCase().replace(/[^a-z0-9]/g, "");
 const codes = (values: string[]) => new Set(values.map(codeKey));
@@ -320,8 +321,8 @@ export function normalizeProviderError(
   return finish("protocol-error");
 }
 
-/** Add recovery copy only after classification. Keep the native explanation
- * in `message`, which is also what the persisted failure card displays. */
+/** Add recovery copy only after classification. Codex model refusals keep
+ * provider diagnostics in the native error, outside the persisted chat. */
 export function providerErrorFailure(
   provider: Provider,
   error: ProviderError,
@@ -334,6 +335,14 @@ export function providerErrorFailure(
         ? "Codex"
         : "Cursor";
   const { category, message } = error;
+  if (provider === "codex" && category === "model-unavailable") {
+    const copy = codexModelUnavailableMessage(message);
+    const failure = new AgentFailureError({ kind: "protocol-error", message: copy, advice: copy, stage, agentId: provider });
+    // Local's model-discovery repair still needs the native category. A
+    // non-serialized cause retains evidence without parsing presentation copy.
+    Object.defineProperty(failure, "cause", { value: error });
+    return failure;
+  }
   const startupRecovery = provider === "claude" ? claudeStartupRecovery(error.code) : undefined;
   const actionAdvice =
     startupRecovery?.advice ?? (category === "verification-required"

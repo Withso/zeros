@@ -3,6 +3,7 @@
 // This copy has no Local-engine runtime dependency.
 
 import { boundedStructuredOutput, canonicalToolContent } from "../shared/tool-content";
+import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
 import { CodexTurnUsage } from "./usage-accounting";
 // ──────────────────────────────────────────────────────────
 // Codex app-server → SessionNotification translator.
@@ -1797,7 +1798,8 @@ export class CodexEventMapper {
         sessionUpdate: "error_notice",
         noticeId: `${this.turnPrefix}-error-${this.noticeSeq++}`,
         severity: "error",
-        message: `Codex: ${message}`,
+        message: this.turnNativeFailure.category === "model-unavailable"
+          ? codexModelUnavailableMessage(message) : `Codex: ${message}`,
       } as never,
     });
   }

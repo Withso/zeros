@@ -1034,6 +1034,24 @@ export function staticModesForAgent(agentId: string | null): SessionMode[] {
 
 // ── Live-discovery extraction (capability overlay source) ──
 
+/** The unified cloud menu can show Codex while Claude/Cursor owns the chat.
+ * Never apply one agent's account eligibility to another, or borrow a Local
+ * connection's model list for a cloud workspace. */
+export function modelCatalogInitialize(
+  agentId: string | null | undefined,
+  selectedAgentId: string | null | undefined,
+  initialize: InitializeResponse | null,
+): InitializeResponse | null {
+  if (agentId === selectedAgentId) return initialize;
+  const scope = initialize?._meta?.cloudModelScope;
+  if (agentFamily(agentId ?? null) !== "codex" || !scope?.startsWith("cloud/")) return null;
+  const models = initialize?._meta?.cloudCodexModels;
+  return { protocolVersion: initialize!.protocolVersion, _meta: {
+    modelEnvVar: "OPENAI_MODEL", modelsDynamic: true, cloudModelScope: scope,
+    ...(models ? { models, modelsAccountScoped: true } : {}),
+  } };
+}
+
 function extractMetaModels(
   initialize: InitializeResponse | null,
 ): ModelOption[] | null {

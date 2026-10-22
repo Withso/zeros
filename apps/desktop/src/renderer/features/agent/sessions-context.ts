@@ -106,6 +106,8 @@ export interface SessionsActions {
   };
   listAgents(force?: boolean): Promise<BridgeRegistryAgent[]>;
   initAgent(agentId: string): Promise<InitializeResponse>;
+  /** Metadata only; the owning runtime caches discovery for the selected key. */
+  refreshModelCatalog(chatId: string): void;
   ensureSession(
     chatId: string,
     agentId: string,

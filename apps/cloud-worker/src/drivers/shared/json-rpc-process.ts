@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 export class RpcError extends Error {
-  constructor(message: string, readonly code?: number) { super(message); }
+  constructor(message: string, readonly code?: number, readonly data?: unknown) { super(message); }
 }
 
 export interface RpcProcessOptions {
@@ -95,8 +95,10 @@ export class JsonRpcProcess {
           this.pending.delete(value.id);
           clearTimeout(pending.timer);
           if (value.error && typeof value.error === "object") {
-            const error = value.error as Record<string, unknown>;
-            pending.reject(new RpcError(this.options.redact(typeof error.message === "string" ? error.message : "Codex request failed."), typeof error.code === "number" ? error.code : undefined));
+            // Keep structured provider evidence until classification. Flattening
+            // JSON-RPC data here loses model-access and authentication codes.
+            const error = JSON.parse(this.options.redact(JSON.stringify(value.error))) as Record<string, unknown>;
+            pending.reject(new RpcError(typeof error.message === "string" ? error.message : "Codex request failed.", typeof error.code === "number" ? error.code : undefined, error.data));
           } else if ("result" in value) pending.resolve(value.result);
           else { pending.reject(new RpcError("Invalid Codex response.")); throw new Error(); }
         } else throw new Error();

@@ -610,7 +610,7 @@ describe("repository layout contracts", () => {
     expect(composerPills).toContain("initialize={initialize}");
     expect(modelMenu).toContain("initialize?: InitializeResponse | null");
     expect(modelMenu).toContain(
-      "agent.id === value?.agentId ? initialize : null",
+      "modelCatalogInitialize(agent.id, value?.agentId, initialize)",
     );
   });
 

@@ -1,6 +1,7 @@
 import type { ComponentPropsWithoutRef } from "react";
 import { ArrowUpRight } from "lucide-react";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
+import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { cn } from "@/renderer/shared/ui/cn";
 import { PROMPT_SURFACE_RADIUS } from "./composer-shell";
 
@@ -14,7 +15,7 @@ export const AGENT_NOTICE_ACTION =
 
 /** Provider prose is plain text; only explicit web URLs become links. */
 export function AgentNoticeText({ message }: { message: string }) {
-  const parts = redactLogSecrets(message).split(
+  const parts = redactLogSecrets(modelRejectionDisplayText(message)).split(
     /(https?:\/\/[^\s<>"\]]+[^\s<>"\].,;)])/g,
   );
   return (

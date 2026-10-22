@@ -1,4 +1,5 @@
 import { ToolResourceLink } from "./tool-resource-link";
+import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { generatedImagePath, structuredToolOutput } from "./tool-artifacts";
 import { fileRefPath } from "../markdown-file-path";
 import { cursorSearchOutput } from "./search-output";
@@ -385,7 +386,7 @@ export function renderDetail(
     const m = message as { message?: string };
     if (!m.message) return null;
     return (
-      <div className="text-fg2 px-3 py-2 text-sm whitespace-pre-wrap">{m.message}</div>
+      <div className="text-fg2 px-3 py-2 text-sm whitespace-pre-wrap">{modelRejectionDisplayText(m.message)}</div>
     );
   }
   return null;

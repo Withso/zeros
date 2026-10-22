@@ -49,6 +49,9 @@ input.on("line", async (line) => {
       if (params.collaborationMode?.settings) threadEffort = params.collaborationMode.settings.reasoning_effort ?? undefined;
       turnId = `turn-${++nextTurn}`;
       mode = params.input.map((part) => part.text ?? "").join("");
+      if (mode.startsWith("refusal:")) {
+        output({ id: frame.id, error: { code: -32000, ...JSON.parse(mode.slice(8)) } }); return;
+      }
       if (mode === "crash") { process.exit(23); }
       if (mode === "malformed") { process.stdout.write("invalid-json\n"); return; }
       if (mode === "no-ack") return;

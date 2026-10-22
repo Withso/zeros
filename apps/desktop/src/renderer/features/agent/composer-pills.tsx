@@ -118,6 +118,7 @@ export function ModelPill({
   fast,
   onChange,
   onConfigure,
+  onRefreshModels,
   onSelectAgentModel,
   redirectCrossAgent,
   selectionTiming,
@@ -137,6 +138,9 @@ export function ModelPill({
   fast: boolean;
   onChange: (next: string | null) => void;
   onConfigure: (configuration: ModelConfiguration) => void;
+  /** Optional cloud metadata revalidation. Opens immediately with the retained
+   * snapshot; the worker and control plane bound provider discovery. */
+  onRefreshModels?: () => void;
   /** A pick under a DIFFERENT agent (the unified dropdown lists them all).
    *  Omitted ⇒ cross-agent rows still render but picking one is a no-op. */
   onSelectAgentModel?: (sel: AgentModelSelection) => void;
@@ -190,7 +194,7 @@ export function ModelPill({
       initialize={initialize}
       value={{ agentId, model: activeValue, effort, fast }}
       open={open && !concealed && active}
-      onOpenChange={setOpen}
+      onOpenChange={(nextOpen) => { if (nextOpen && active && !concealed) onRefreshModels?.(); setOpen(nextOpen); }}
       redirectCrossAgent={redirectCrossAgent}
       selectionTiming={selectionTiming}
       onConfigure={onConfigure}

@@ -1462,6 +1462,7 @@ function AgentChatBody({
           agents={agentsList}
           agentId={chatThread.agentId}
           initialize={session.initialize}
+          onRefreshModels={isCloudWorkspace(chatThread.folder) ? session.refreshModelCatalog : undefined}
           value={chatThread.model}
           effort={chatThread.effort}
           fast={!!chatThread.fast}

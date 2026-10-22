@@ -19,6 +19,7 @@ import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/serv
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
 import { commandRunner } from "./workspace/commands";
 import { Terminals } from "./terminals/service";
+import type { ModelDiscoveryOptions } from "./credentials/model-availability";
 
 interface WorkerOptions {
   directory: string;
@@ -30,6 +31,7 @@ interface WorkerOptions {
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
   onTiming?: TimingObserver;
+  modelDiscovery?: ModelDiscoveryOptions;
 }
 interface Client extends AppClient { rejected: boolean }
 
@@ -203,7 +205,7 @@ export class CloudWorker {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
-        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming);
+        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery);
       this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId));
       this.history = new HistoryMirror(store, this.options.transport);

@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import type { CloudV2AgentLogins } from "./agent-logins.js";
 import type { CloudV2Store } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
+import { OpenAiModelAvailability } from "./model-availability.js";
 
 export const CLOUD_V2_PROXY_PREFIX = "/v2/cloud/proxy";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
@@ -47,6 +48,7 @@ function bearer(request: Request): string {
 export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
   const app = new Hono();
   const upstreamFetch = deps.fetch ?? fetch;
+  const models = new OpenAiModelAvailability(upstreamFetch, deps.now);
 
   app.all(`${CLOUD_V2_PROXY_PREFIX}/:provider/*`, async c => {
     const provider = c.req.param("provider");
@@ -67,6 +69,13 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     const expiring = (value: Awaited<ReturnType<CloudV2AgentLogins>>) =>
       value?.kind === "codex-chatgpt" && value.expiresAt * 1000 <= (deps.now?.() ?? Date.now()) + RENEW_BEFORE_MS;
     let login = await deps.logins(workspace.creatorUserId, workspace.organizationId, "codex");
+    if (rest === "/model-availability") {
+      if (c.req.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+      if (login?.kind !== "codex-api-key" && login?.kind !== "codex-chatgpt")
+        return failure(401, "agent_login_required", "Connect Codex in Settings → Agents for this organization");
+      return Response.json({ models: login.kind === "codex-api-key" ? await models.read(login.apiKey) : null },
+        { headers: { "cache-control": "no-store" } });
+    }
     if (expiring(login) && deps.refreshCodex) {
       await deps.refreshCodex(workspace.creatorUserId, workspace.organizationId).catch(() => {});
       login = await deps.logins(workspace.creatorUserId, workspace.organizationId, "codex");

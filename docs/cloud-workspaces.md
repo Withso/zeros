@@ -96,6 +96,18 @@ needed, while active turns keep their spawn-time credentials. Git and `gh`
 request short-lived GitHub installation tokens through the worker's broker.
 Credentials must never be written to transcripts, command arguments or logs.
 
+For an OpenAI API key, the control plane reads that key's `/v1/models` list
+through the existing vault selection and workspace proxy authorization. It
+caches complete model IDs per credential for five minutes (unknown results for
+30 seconds); the worker keeps a 30-second cache fenced by the login revision.
+The cloud model menu leaves unavailable Codex models visible but disabled,
+including when another agent is selected. Opening the menu revalidates metadata
+without waiting to display it or starting a provider turn. Failed discovery is
+unknown, not an empty account list. ChatGPT discovery stays unchanged.
+Model-access refusals show the selected model and an action to choose another;
+provider project IDs, proxy URLs and request IDs remain diagnostic-only. Neither
+discovery nor a refusal automatically changes the saved model or retries a turn.
+
 The worker folds native streams through the shared `applyUpdate` reducer and
 persists chat/session state under `/home/user/.local/share/zeros/cloud-worker`.
 It mirrors chat metadata, deletions and message rows to the control plane.

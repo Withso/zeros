@@ -139,8 +139,10 @@ describe("classifyThreadFailure", () => {
   ])("retains native error evidence: %j", (native, kind) => {
     const result = classifyThreadFailure(native, "prompt") as AgentFailureError;
     expect(result.failure?.kind).toBe(kind);
-    expect(result.message).toContain(native.message);
-    if ("code" in native && native.code === "model_not_found") expect(result.failure.advice).toMatch(/model menu/);
+    if (native.message === "The model `private-model` is not available." || "code" in native && native.code === "model_not_found") {
+      expect(result.message).toBe("Your Codex connection can't use the selected model. Pick another model.");
+      expect(result.failure.advice).toBe(result.message);
+    } else expect(result.message).toContain(native.message);
   });
 
   it("returns AgentFailureError(session-expired) for stale fixtures on prompt stage", () => {
@@ -221,8 +223,8 @@ describe("classifyThreadFailure", () => {
       });
       // The toast suppresses `message`; the user must still learn which pill
       // to change, so the advice names the rejected model.
-      expect(failure.advice).toContain('"gpt-4.9"');
-      expect(failure.advice).toMatch(/model menu/);
+      expect(failure.advice).toContain("gpt-4.9");
+      expect(failure.advice).toContain("Pick another model.");
     }
   });
 

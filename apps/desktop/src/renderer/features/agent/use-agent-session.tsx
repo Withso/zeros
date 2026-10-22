@@ -267,6 +267,7 @@ export interface AgentSessionControls {
    *  auth screen can render the advertised auth methods. Lets the UI honour
    *  whatever the agent tells us without hardcoding per-vendor methods. */
   initAgent(agentId: string): Promise<InitializeResponse>;
+  refreshModelCatalog?(): void;
   /** Create a new session with the given agent id. */
   startSession(agentId: string, options?: StartSessionOptions): Promise<void>;
   /** Send a user prompt. Enqueues a user message immediately.

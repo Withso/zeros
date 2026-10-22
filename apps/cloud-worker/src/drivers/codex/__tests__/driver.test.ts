@@ -26,6 +26,30 @@ const prose = (events: SessionNotification[]) => events.flatMap(({ update }) =>
   update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? [update.content.text] : []).join("");
 
 describe("Codex driver with an offline app-server process", () => {
+  it("classifies a model refusal inside JSON-RPC data before flattening the reply", async () => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    const error = { message: "Request refused.", data: { code: "model_not_found", message: "Project `proj_fixture` does not have access to model `gpt-6-luna`." } };
+    await expect(driver.prompt(content(`refusal:${JSON.stringify(error)}`))).rejects.toMatchObject({
+      code: "model-unavailable", message: "Your OpenAI key can't use GPT-6 Luna. Pick another model.",
+    });
+    expect(JSON.stringify(events)).not.toContain("proj_fixture");
+  });
+
+  it.each(["error", "turn/completed", "rpc"])("keeps model refusal diagnostics out of %s replies and transcript rows", async method => {
+    const { driver, events } = setup();
+    const message = "unexpected status 403 Forbidden: Project `proj_fixture` does not have access to model `gpt-6.1-sol`, url: https://proxy.example.test/v2/cloud/proxy/openai/responses, cf-ray: fixture-ray, request id: fixture-request";
+    const error = { message, codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 403 } } };
+    await driver.open({ ...openInput, model: "gpt-6.1-sol" });
+    const frames = [{ method, params: method === "error" ? { error, willRetry: false } : { turn: { status: "failed", error } } }];
+    const prompt = method === "rpc" ? `refusal:${JSON.stringify(error)}` : `fixture:${JSON.stringify(frames)}`;
+    const failure = await driver.prompt(content(prompt)).catch((value: unknown) => value);
+    expect(failure).toMatchObject({ code: "model-unavailable", message: "Your OpenAI key can't use GPT-6.1 Sol. Pick another model." });
+    expect(JSON.stringify(events)).not.toMatch(/proj_fixture|https:|fixture-ray|fixture-request/);
+    if (method === "error") expect(events.find(event => event.update.sessionUpdate === "error_notice")?.update)
+      .toMatchObject({ message: "Your OpenAI key can't use GPT-6.1 Sol. Pick another model." });
+  });
+
   it("reports native process and turn timing boundaries for cold and reused sends", async () => {
     const { driver } = setup(), stages: string[] = [];
     await driver.open({ ...openInput, onTiming: stage => { stages.push(stage); } });

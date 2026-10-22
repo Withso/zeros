@@ -22,7 +22,7 @@ export async function refreshAgentModelCatalog(options: {
   // Missing capabilities are unknown, not proof that steering is unsupported.
   const needsCapabilities = owner.initialize?.agentCapabilities?.steering === undefined;
   const needsModels = meta?.modelsDynamic &&
-    (meta.modelsAccountScoped === true || !Array.isArray(meta.models) || meta.models.length === 0);
+    (meta.modelsAccountScoped === true || typeof meta.cloudModelScope === "string" || !Array.isArray(meta.models) || meta.models.length === 0);
   if (!needsCapabilities && !needsModels) return;
   const pending = flights.get(owner.bridge) ?? new Map();
   flights.set(owner.bridge, pending);
@@ -30,9 +30,13 @@ export async function refreshAgentModelCatalog(options: {
   if (existing?.initialize === owner.initialize) return existing.result;
   const result = Promise.resolve().then(async () => {
     const initialize = await options.request();
-    const models = initialize?._meta?.models;
+    const models = initialize?._meta?.models ?? initialize?._meta?.cloudCodexModels;
+    const scope = initialize?._meta?.cloudModelScope;
+    const changedCloudCredential = typeof scope === "string" && scope.startsWith("cloud/") &&
+      scope !== owner.initialize?._meta?.cloudModelScope;
+    const completeCloudList = typeof scope === "string" && scope.startsWith("cloud/") && Array.isArray(initialize?._meta?.cloudCodexModels);
     if (!initialize || !needsCapabilities &&
-        (!Array.isArray(models) || models.length === 0 && initialize._meta?.modelsAccountScoped !== true)) return;
+        !changedCloudCredential && (!Array.isArray(models) || models.length === 0 && initialize._meta?.modelsAccountScoped !== true && !completeCloudList)) return;
     const current = options.current();
     if (current?.bridge !== owner.bridge || current.key !== owner.key || current.initialize !== owner.initialize) return;
     options.publish(initialize);

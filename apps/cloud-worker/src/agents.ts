@@ -6,6 +6,7 @@ import type { Driver } from "./drivers/driver";
 import { agentTiming, type TimingObserver, type TimingSpan } from "./agent-timings";
 import { recordUser, userMessage, type InboxEntry, type SessionStore, type SteerReceipt } from "./sessions/session-store";
 import { WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./workspace/scope";
+import { CodexModelAvailability, type ModelDiscoveryOptions } from "./credentials/model-availability";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -40,6 +41,7 @@ export class Agents {
   private readonly routes = new Map<string, Runtime>();
   private readonly chats = new Map<string, Runtime>();
   private config: WorkerConfig;
+  private readonly models: CodexModelAvailability;
 
   constructor(
     private readonly store: SessionStore,
@@ -49,9 +51,13 @@ export class Agents {
     private readonly broadcast: (message: BridgeMessage) => Promise<void>,
     private readonly activity: () => void,
     private readonly onTiming?: TimingObserver,
-  ) { this.config = config; }
+    modelDiscovery?: ModelDiscoveryOptions,
+  ) { this.config = config; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); }
 
-  configure(config: WorkerConfig): void { this.config = config; }
+  configure(config: WorkerConfig): void { this.config = config; this.models.configure(config); }
+  private initialized(agentId: CloudV2Agent): InitializeResponse {
+    return { ...initialized(agentId), _meta: this.models.metadata(agentId === "codex") };
+  }
   get busy(): boolean { return [...this.routes.values()].some((route) => !!route.active || this.hasBackground(route)); }
 
   async handle(client: AppClient, message: BridgeMessage): Promise<void> {
@@ -63,7 +69,8 @@ export class Agents {
               installed: !!this.factories[id], launchKind: this.factories[id] ? "binary" as const : "unavailable" as const, installedVersion: VERSIONS[id], versionCompatible: true, authenticated: !!this.config.agents[id] && !!this.factories[id] })) }));
           return;
         case "AGENT_INIT_AGENT":
-          await client.send(createMessage({ type: "AGENT_AGENT_INITIALIZED", source: "engine", requestId: message.id, agentId: message.agentId, initialize: initialized(this.agent(message.agentId)) }));
+          await this.models.refresh();
+          await client.send(createMessage({ type: "AGENT_AGENT_INITIALIZED", source: "engine", requestId: message.id, agentId: message.agentId, initialize: this.initialized(this.agent(message.agentId)) }));
           return;
         case "AGENT_NEW_SESSION": case "AGENT_LOAD_SESSION": return await this.open(client, message);
         case "AGENT_PROMPT": return await this.prompt(client, message);
@@ -140,7 +147,7 @@ export class Agents {
   async flush(): Promise<void> {
     await Promise.all([...this.routes.values()].map(async (route) => { await route.events; await route.settling; }));
   }
-  async dispose(): Promise<void> { for (const id of [...this.chats.keys()]) await this.closeChat(id); }
+  async dispose(): Promise<void> { this.models.dispose(); for (const id of [...this.chats.keys()]) await this.closeChat(id); }
 
   private agent(id: string): CloudV2Agent {
     if (id !== "codex" && id !== "claude" && id !== "cursor") throw new WorkspaceError("agent-not-found", "Unknown cloud agent.");
@@ -224,7 +231,7 @@ export class Agents {
     timing.mark("driver_ready");
     const chat = this.store.metadata(chatId)!.chat!;
     const session = { sessionId: route.id, executionId: route.id, ...(chat.providerBinding ? { providerBinding: chat.providerBinding } : {}), ...(route.background ? { backgroundTasks: route.background } : {}) };
-    if (message.type === "AGENT_NEW_SESSION") await client.send(createMessage({ type: "AGENT_SESSION_CREATED", source: "engine", requestId: message.id, agentId, session, initialize: initialized(agentId) }));
+    if (message.type === "AGENT_NEW_SESSION") await client.send(createMessage({ type: "AGENT_SESSION_CREATED", source: "engine", requestId: message.id, agentId, session, initialize: this.initialized(agentId) }));
     else await client.send(createMessage({ type: "AGENT_SESSION_LOADED", source: "engine", requestId: message.id, agentId,
       sessionId: route.id, executionId: route.id, response: session, promptActive: !!route.active,
       ...(route.active ? { activeTurnStartedAt: route.active.startedAt, promptId: route.active.promptId } : {}) }));
