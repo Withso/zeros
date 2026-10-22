@@ -1,6 +1,7 @@
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
 // (realtime role), the lifecycle loop (worker role), the HTTP routes and the
 // model proxy (API role). index.ts only starts and stops what this returns.
+import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { PostgresSecurityEventBroker } from "../security-events.js";
@@ -58,7 +59,7 @@ export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats"
   }
 }
 
-export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker) {
+export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool) {
   const v2 = config.cloudV2;
   if (!v2) return null;
   const store = new CloudV2Store(pool);
@@ -110,6 +111,18 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     answerOffline: (workspace, frame) => answerCloudV2Offline(store, workspace, frame),
     logger: console,
   }) : null;
+  const loginChanges = relay ? postgresNotificationSubscription(listenerPool, {
+    channels: ["zeros_cloud_v2_logins"],
+    onReady: () => { void relay.refreshLogins(); },
+    onNotification: notice => {
+      try {
+        const scope = JSON.parse(notice.payload ?? "");
+        if (typeof scope?.ownerUserId === "string" && (scope.organizationId === null || typeof scope.organizationId === "string"))
+          void relay.refreshLogins({ ownerUserId: scope.ownerUserId, ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) });
+      } catch { /* Invalid wake hints carry no authority. */ }
+    },
+  }) : null;
+  void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, runtime,
@@ -128,5 +141,5 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     sandboxName: workspace => `zeros-${config.deploymentChannel}-ws-${workspace.id.slice(0, 8)}`,
     logger: console,
   }) : null;
-  return { store, compute, routes, proxy, relay, lifecycle };
+  return { store, compute, routes, proxy, relay, lifecycle, loginChanges };
 }

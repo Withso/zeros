@@ -40,13 +40,14 @@ describe("cloud v2 relay", () => {
   let state: CloudV2Workspace["state"];
   let deps: CloudV2RelayDeps;
   let authorized: boolean;
+  let loginRevision: string;
   let broker: PostgresSecurityEventBroker;
   let notification: EventEmitter;
   const sockets: WebSocket[] = [];
 
   beforeEach(async () => {
     state = "running";
-    authorized = true;
+    authorized = true; loginRevision = "0";
     notification = Object.assign(new EventEmitter(), { query: vi.fn(async () => ({ rows: [] })), release: vi.fn() });
     broker = new PostgresSecurityEventBroker({ connect: async () => notification } as unknown as pg.Pool);
     deps = {
@@ -55,6 +56,7 @@ describe("cloud v2 relay", () => {
         consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId, accessEpoch: "0" } : null),
         get: vi.fn(async () => workspace(state)),
         accessEpoch: vi.fn(async () => authorized ? "0" : null),
+        loginRevision: vi.fn(async () => loginRevision),
         transition: vi.fn(async (_id, from: readonly string[], to) => from.includes(state) ? workspace(state = to) : null),
         markActive: vi.fn(async () => {}),
         writeHistory: vi.fn(async () => {}),
@@ -98,6 +100,28 @@ describe("cloud v2 relay", () => {
     await opened(ws);
     return ws;
   };
+
+  it("never sends an obsolete config after a newer credential revision commits during its read", async () => {
+    const w = await worker();
+    const frames: any[] = [];
+    w.on("message", data => frames.push(JSON.parse(String(data))));
+    const base = await deps.config(workspace("running"));
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(deps.config).mockImplementationOnce(async () => {
+      entered(); await held; return { ...base, agents: { claude: { oauthToken: "synthetic-obsolete-token" } } };
+    }).mockResolvedValue({ ...base, agents: {} });
+    loginRevision = "1";
+    const first = relay.refreshLogins();
+    await reading;
+    loginRevision = "2";
+    const second = relay.refreshLogins();
+    release();
+    await Promise.all([first, second]);
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(frames[0]).toEqual({ ...base, agents: {} });
+  });
 
   it("relays app frames to the worker verbatim and worker frames back", async () => {
     const w = await worker();

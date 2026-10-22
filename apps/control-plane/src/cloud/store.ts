@@ -318,6 +318,12 @@ export class CloudV2Store {
     return worker.token;
   }
 
+  async loginRevision(id: string): Promise<string | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ revision: string }>(
+      "SELECT login_revision::text AS revision FROM cloud_v2_workspaces WHERE id=$1 AND state<>'deleted'", [id]));
+    return rows[0]?.revision ?? null;
+  }
+
   async computerSnapshot(organizationId: string): Promise<string | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
       `SELECT snapshot_name FROM cloud_v2_computers WHERE org_id = $1`, [organizationId]));

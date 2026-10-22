@@ -34,7 +34,7 @@ const MAX_QUEUED_FRAMES = 64;
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 
 export type CloudV2RelayDeps = {
-  store: Pick<CloudV2Store, "byWorkerToken" | "consumeConnectTicket" | "get" | "transition" | "markActive" | "writeHistory" | "accessEpoch">;
+  store: Pick<CloudV2Store, "byWorkerToken" | "consumeConnectTicket" | "get" | "transition" | "markActive" | "writeHistory" | "accessEpoch" | "loginRevision">;
   securityEvents?: Pick<PostgresSecurityEventBroker, "start" | "subscribe">;
   config(workspace: CloudV2Workspace): Promise<ConfigFrame>;
   githubToken(workspace: CloudV2Workspace): Promise<{ token: string; expiresAt: number }>;
@@ -45,7 +45,11 @@ export type CloudV2RelayDeps = {
   logger?: Pick<Console, "warn">;
 };
 
+type ConfigFlight = { worker: WebSocket; requested: boolean; force: boolean; promise: Promise<boolean> };
+
 type Room = {
+  loginRevision: string | null;
+  configFlight?: ConfigFlight;
   accessEpoch: string;
   revoked: boolean;
   workspace: CloudV2Workspace;
@@ -119,7 +123,7 @@ export class CloudV2Relay {
     let room = this.rooms.get(workspace.id);
     if (room && room.accessEpoch !== accessEpoch) { this.revoke(room); room = undefined; }
     if (!room) {
-      room = { workspace, accessEpoch, revoked: false, worker: null, ready: false, clients: new Map(), queued: new Map(), history: Promise.resolve(), lastActiveWrite: 0 };
+      room = { workspace, accessEpoch, loginRevision: null, revoked: false, worker: null, ready: false, clients: new Map(), queued: new Map(), history: Promise.resolve(), lastActiveWrite: 0 };
       this.rooms.set(workspace.id, room);
     }
     return room;
@@ -153,6 +157,7 @@ export class CloudV2Relay {
 
   private heartbeat(): void {
     this.revalidate();
+    void this.refreshLogins();
     void this.deps.securityEvents?.start().catch(() => {});
     for (const room of this.rooms.values()) {
       for (const socket of [room.worker, ...room.clients.values()]) {
@@ -184,6 +189,7 @@ export class CloudV2Relay {
     room.worker?.close(4000, "replaced");
     room.worker = ws;
     room.ready = false;
+    room.loginRevision = null;
     this.watch(ws);
     const hello = setTimeout(() => ws.close(4002, "hello_timeout"), HELLO_TIMEOUT_MS);
     let inbound = Promise.resolve();
@@ -214,9 +220,7 @@ export class CloudV2Relay {
       const running = await this.deps.store.transition(room.workspace.id, ["creating", "starting", "running"], "running");
       if (!running) { ws.close(4001, "workspace_stopped"); return; }
       room.workspace = running;
-      const config = await this.deps.config(running);
-      if (!await this.authorized(room) || room.worker !== ws) return;
-      send(ws, config);
+      if (!await this.refreshConfig(room, ws, true)) return;
     } catch (error) {
       this.deps.logger?.warn("[cloud-v2] worker config failed", error instanceof Error ? error.message : "unknown");
       ws.close(1011, "config_unavailable");
@@ -225,7 +229,7 @@ export class CloudV2Relay {
     if (room.worker !== ws) return;
     room.ready = true;
     const refresh = setInterval(() => {
-      void this.refreshConfig(room, ws);
+      void this.refreshConfig(room, ws, true).catch(() => ws.close(1011, "config_unavailable"));
     }, CONFIG_REFRESH_MS);
     refresh.unref();
     ws.once("close", () => clearInterval(refresh));
@@ -237,12 +241,49 @@ export class CloudV2Relay {
     room.queued.clear();
   }
 
-  private async refreshConfig(room: Room, ws: WebSocket): Promise<void> {
-    try {
-      if (!await this.authorized(room) || room.worker !== ws) return;
+  /** Transactional notifications reduce latency; polling the persisted revision
+   * repairs lost hints without issuing fresh proxy tokens on every heartbeat. */
+  async refreshLogins(scope?: { ownerUserId: string; organizationId?: string }): Promise<void> {
+    await Promise.all([...this.rooms.values()].map(async room => {
+      if (!room.ready || !room.worker || (scope && (scope.ownerUserId !== room.workspace.creatorUserId ||
+          (scope.organizationId && scope.organizationId !== room.workspace.organizationId)))) return;
+      const ws = room.worker;
+      await this.refreshConfig(room, ws, false).catch(() => ws.close(1011, "config_unavailable"));
+    }));
+  }
+
+  private refreshConfig(room: Room, ws: WebSocket, force: boolean): Promise<boolean> {
+    const active = room.configFlight;
+    if (active?.worker === ws) { active.requested = true; active.force ||= force; return active.promise; }
+    const flight: ConfigFlight = { worker: ws, requested: true, force, promise: Promise.resolve(false) };
+    room.configFlight = flight;
+    flight.promise = this.loadConfig(room, flight).finally(() => {
+      if (room.configFlight === flight) delete room.configFlight;
+    });
+    return flight.promise;
+  }
+
+  private async loadConfig(room: Room, flight: ConfigFlight): Promise<boolean> {
+    const ws = flight.worker;
+    do {
+      flight.requested = false;
+      const force = flight.force; flight.force = false;
+      if (room.revoked || room.worker !== ws) return false;
+      const revision = await this.deps.store.loginRevision(room.workspace.id);
+      if (revision === null) { this.revoke(room); return false; }
+      if (!force && revision === room.loginRevision) continue;
+      if (!await this.authorized(room) || room.worker !== ws) return false;
       const config = await this.deps.config(room.workspace);
-      if (await this.authorized(room) && room.worker === ws) send(ws, config);
-    } catch { ws.close(1011, "config_unavailable"); }
+      if (!await this.authorized(room) || room.worker !== ws) return false;
+      // A selection can commit while the three provider reads are in flight.
+      // Discard that mixed/stale result and re-read; never send it after a newer one.
+      if (revision !== await this.deps.store.loginRevision(room.workspace.id)) {
+        flight.requested = true; flight.force = true; continue;
+      }
+      if (room.worker !== ws || room.revoked) return false;
+      send(ws, config); room.loginRevision = revision;
+    } while (flight.requested);
+    return true;
   }
 
   private async fromWorker(room: Room, ws: WebSocket, frame: Exclude<CloudV2WorkerFrame, { t: "hello" }>): Promise<void> {
