@@ -16,6 +16,7 @@ import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./proc
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
 import { createDesktopSignIn } from "./desktop-sign-in.mjs";
+import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const action = process.argv[2] ?? "start";
@@ -105,6 +106,8 @@ async function start(workspace, profile) {
     const ports = await pickServicePorts();
     console.log("[zeros-dev] Building this checkout's backend and auth web facade");
     await run("pnpm", ["--dir", "apps/control-plane", "build"], { cwd: root, env, signal, timeout: 180_000, label: "Control-plane build" });
+    console.log("[zeros-dev] Selecting this checkout's worker runtime (build and publish if missing)");
+    const runtime = await resolveLocalRuntime(workspace, profile, root, { signal });
     await run("npm", ["--prefix", "apps/web", "run", "build"], { cwd: root, env, signal, timeout: 180_000, label: "Auth web build" });
     console.log("[zeros-dev] Starting isolated PostgreSQL and applying release migrations");
     postgres = await startPostgres(workspace, profile, ports, root); signal.throwIfAborted();
@@ -112,7 +115,7 @@ async function start(workspace, profile) {
     const tunnel = await ensureTunnel(workspace, profile.cloudflare); signal.throwIfAborted();
     await configureTunnel(workspace, profile.cloudflare, ports); signal.throwIfAborted();
     await ensureWorkosWebhook(workspace, profile); signal.throwIfAborted();
-    const apiEnv = { ...env, ...backendEnvironment(workspace, profile, ports, runId) };
+    const apiEnv = { ...env, ...backendEnvironment(workspace, profile, ports, runId, { ZEROS_CLOUD_V2_RUNTIME_SHA256: runtime }) };
     const apiCwd = path.join(root, "apps/control-plane"), logs = privateDirectory(workspace.directory, "logs");
     processes.start("Control plane", process.execPath, watch
       ? [path.join(apiCwd, "node_modules/tsx/dist/cli.mjs"), "watch", "--clear-screen=false", "src/index.ts"]
@@ -188,7 +191,7 @@ async function main() {
     console.log(JSON.stringify({ owner: workspace.state.owner, status: workspace.state.status,
       tunnelProvisioned: Boolean(workspace.state.tunnel.id), identity: profile.workos?.environment ?? "dev",
       cloudV2: { boat: Boolean(profile.boat?.apiKey), runtimeStore: Boolean(profile.storage?.bucket),
-        runtime: /^[0-9a-f]{64}$/.test(process.env.ZEROS_CLOUD_V2_RUNTIME_SHA256 ?? "") ? process.env.ZEROS_CLOUD_V2_RUNTIME_SHA256.slice(0, 12) : null },
+        runtime: (process.env.ZEROS_CLOUD_V2_RUNTIME_SHA256 || workspace.state.cloudRuntime?.sha256)?.slice(0, 12) ?? null },
       issues: profileIssues(profile) }, null, 2));
     return;
   }

@@ -9,10 +9,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { HeadObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { z } from "zod";
-import { cloudV2RuntimeKey } from "./runtime.js";
+import { cloudV2RuntimeKey, type CloudV2RuntimeStore } from "./runtime.js";
 import { inspectRuntimeArchive } from "./runtime-artifact.js";
+import { cloudV2RuntimeSourceKey, runtimeObjectMissing, runtimeStorageClient } from "./runtime-source.js";
 
 const root = resolve(import.meta.dirname, "../../../..");
 const required = (name: string) => {
@@ -37,44 +38,62 @@ async function runtimeStore(local: boolean) {
   };
 }
 
-async function main() {
-  const { values } = parseArgs({ options: { local: { type: "boolean" }, artifact: { type: "string" }, docker: { type: "boolean" }, "allow-dirty": { type: "boolean" }, help: { type: "boolean" } } });
-  if (values.help) {
-    console.log("cloud-v2:publish-runtime [--local] [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. --local reads the electron:cloud profile's storage section; otherwise uses CLOUD_V2_RUNTIME_STORE_*. The SHA pin and immutable runtime key are unchanged.");
-    return;
-  }
-  if (values.artifact && (values.docker || values["allow-dirty"])) throw new Error("Choose either an existing artifact or build options");
-  const storage = await runtimeStore(values.local === true);
-  const store = { region: "auto", endpoint: storage.endpoint, forcePathStyle: true,
-    credentials: { accessKeyId: storage.accessKeyId, secretAccessKey: storage.secretAccessKey } };
+/** Upload the immutable archive before publishing its source index. The local
+ * launcher supplies cancellable process supervision and a clean build env. */
+export async function publishRuntime({ storage, artifact, docker, allowDirty, repository = root, expectedSourceSha256, env, execute, signal }: {
+  storage: CloudV2RuntimeStore; artifact?: string; docker?: boolean; allowDirty?: boolean; repository?: string;
+  expectedSourceSha256?: string; env?: NodeJS.ProcessEnv;
+  execute?: (command: string, args: string[], options: { cwd?: string; timeout?: number }) => unknown;
+  signal?: AbortSignal;
+}) {
   const bucket = storage.bucket;
+  const request = signal ? { abortSignal: signal } : {};
   const work = mkdtempSync(join(tmpdir(), "zeros-runtime-"));
   let client: S3Client | undefined;
   try {
     const archive = join(work, "runtime.tar.gz");
-    if (values.artifact) {
-      const source = lstatSync(values.artifact);
+    if (artifact) {
+      const source = lstatSync(artifact);
       if (!source.isFile() || source.isSymbolicLink()) throw new Error("Runtime archive must be a regular file");
       // Hash and upload the same private copy even if the caller replaces
       // their original archive while storage is being contacted.
-      copyFileSync(values.artifact, archive);
+      copyFileSync(artifact, archive);
     } else {
-      const { packageRuntime } = await import(pathToFileURL(join(root, "apps/cloud-worker/scripts/package-runtime.mjs")).href);
-      await packageRuntime({ repository: root, output: archive, docker: values.docker, allowDirty: values["allow-dirty"] });
+      const { packageRuntime } = await import(pathToFileURL(join(repository, "apps/cloud-worker/scripts/package-runtime.mjs")).href);
+      await packageRuntime({ repository, output: archive, docker, allowDirty, env, execute });
     }
-    const { sha256, bytes } = await inspectRuntimeArchive(archive);
-    client = new S3Client(store);
+    const { sha256, bytes, sourceSha256, commit } = await inspectRuntimeArchive(archive);
+    if (expectedSourceSha256 && sourceSha256 !== expectedSourceSha256) throw new Error("Worker sources changed before publication; retry the build");
+    client = runtimeStorageClient(storage);
     const target = { Bucket: bucket, Key: cloudV2RuntimeKey(sha256) };
-    const stored = await client.send(new HeadObjectCommand(target)).then(() => true, () => false);
+    const stored = await client.send(new HeadObjectCommand(target), request).then(() => true, error => {
+      if (runtimeObjectMissing(error)) return false;
+      throw new Error("Runtime storage lookup failed");
+    });
     if (!stored) await client.send(new PutObjectCommand({
       ...target, Body: createReadStream(archive), ContentLength: bytes, ContentType: "application/gzip",
-    }));
-    console.log(`${stored ? "already stored" : "stored"} ${(bytes / 1e6).toFixed(0)} MB`);
-    console.log(`CLOUD_V2_RUNTIME_SHA256=${sha256}`);
+    }), request);
+    await client.send(new PutObjectCommand({ Bucket: bucket, Key: cloudV2RuntimeSourceKey(sourceSha256),
+      Body: JSON.stringify({ version: 1, sourceSha256, sha256, commit }), ContentType: "application/json", CacheControl: "no-cache" }), request);
+    return { sha256, sourceSha256, commit, bytes, stored };
   } finally {
     client?.destroy();
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+async function main() {
+  const { values } = parseArgs({ options: { local: { type: "boolean" }, artifact: { type: "string" }, docker: { type: "boolean" }, "allow-dirty": { type: "boolean" }, help: { type: "boolean" } } });
+  if (values.help) {
+    console.log("cloud-v2:publish-runtime [--local] [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. --local reads the electron:cloud profile's storage section; otherwise uses CLOUD_V2_RUNTIME_STORE_*. Publishes the SHA-pinned archive and a source-hash index for automatic startup.");
+    return;
+  }
+  if (values.artifact && (values.docker || values["allow-dirty"])) throw new Error("Choose either an existing artifact or build options");
+  const { systemEnvironment } = await import(pathToFileURL(join(root, "scripts/dev-environment/state.mjs")).href);
+  const result = await publishRuntime({ storage: await runtimeStore(values.local === true), ...(values.artifact ? { artifact: values.artifact } : {}),
+    docker: values.docker ?? false, allowDirty: values["allow-dirty"] ?? false, env: systemEnvironment() });
+  console.log(`${result.stored ? "already stored" : "stored"} ${(result.bytes / 1e6).toFixed(0)} MB`);
+  console.log(`CLOUD_V2_RUNTIME_SHA256=${result.sha256}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

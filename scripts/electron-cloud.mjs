@@ -5,14 +5,14 @@
 // named Cloudflare tunnel that Boat VMs reach, and the desktop app pointed at
 // it. Nothing is created in Railway or PlanetScale.
 //
-//   pnpm electron:cloud --runtime <sha256>   start everything and open the app
+//   pnpm electron:cloud                      start everything and open the app
 //   pnpm electron:cloud --headless           backend only, for agents and gate0
 //   pnpm electron:cloud --seed               seed a running stack's test organization
 //   pnpm electron:cloud --stop | --doctor
 //   pnpm electron:cloud --reset [--yes]      delete this checkout's VMs and data
 //
-// The runtime is a worker build published with cloud-v2:publish-runtime; it
-// may also come from ZEROS_CLOUD_V2_RUNTIME_SHA256.
+// Startup resolves/builds the runtime by this checkout's worker source hash.
+// --runtime and ZEROS_CLOUD_V2_RUNTIME_SHA256 remain explicit overrides.
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,8 +40,7 @@ export function electronCloudCommand(argv, env = process.env, defaultRuntime = u
     throw new Error(`Unknown electron:cloud option ${arg}`);
   }
   if (!["start", "backend"].includes(action)) return { action, args, runtime: undefined };
-  if (!SHA256.test(runtime ?? ""))
-    throw new Error("electron:cloud needs a worker runtime: pass --runtime <sha256> from cloud-v2:publish-runtime, or set ZEROS_CLOUD_V2_RUNTIME_SHA256");
+  if (runtime !== undefined && !SHA256.test(runtime)) throw new Error("Invalid worker runtime override");
   return { action, args, runtime };
 }
 

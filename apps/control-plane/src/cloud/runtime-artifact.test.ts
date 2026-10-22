@@ -22,7 +22,7 @@ async function artifact(overrides = {}, corrupt = false) {
   const native = ["@openai/codex-linux-x64", "@anthropic-ai/claude-agent-sdk-linux-x64", "@cursor/sdk-linux-x64"];
   await writeFile(join(dist, "runtime-manifest.json"), JSON.stringify({ version: 1, node: "24", platform: "linux", arch: "x64",
     packages: Object.fromEntries(native.map(name => [`node_modules/${name}`, { name, version: "1.0.0" }])), files, ...overrides }));
-  await writeFile(join(dist, "BUILD.json"), JSON.stringify({ commit: "a".repeat(40) }));
+  await writeFile(join(dist, "BUILD.json"), JSON.stringify({ commit: "a".repeat(40), sourceSha256: "b".repeat(64) }));
   if (corrupt) await writeFile(join(dist, "worker.mjs"), "different bundle");
   const archive = join(root, "runtime.tar.gz");
   execFileSync("tar", ["-czf", archive, "-C", dist, "."]);
@@ -31,7 +31,7 @@ async function artifact(overrides = {}, corrupt = false) {
 
 it("accepts a packaged Linux x64 Node 24 runtime without building or installing anything", async () => {
   const result = await inspectRuntimeArchive(await artifact());
-  expect(result).toMatchObject({ sha256: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: expect.any(Number), commit: "a".repeat(40) });
+  expect(result).toMatchObject({ sha256: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: expect.any(Number), commit: "a".repeat(40), sourceSha256: "b".repeat(64) });
 });
 
 it("accepts bundled subpackages whose manifest omits a package version", async () => {

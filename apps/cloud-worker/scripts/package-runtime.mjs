@@ -30,14 +30,25 @@ export async function stageRuntimeSource(repository, destination, files) {
     if (!stat) continue; // A deliberately deleted tracked source in --allow-dirty mode.
     if (!stat.isFile() || stat.isSymbolicLink() || await realpath(source) !== source)
       throw new Error("Runtime source must be regular files without links");
-    const target = join(destination, file);
-    await mkdir(dirname(target), { recursive: true });
-    await copyFile(source, target, constants.COPYFILE_EXCL);
-    await chmod(target, stat.mode & 0o777);
+    const target = destination ? join(destination, file) : source;
+    if (destination) {
+      await mkdir(dirname(target), { recursive: true });
+      await copyFile(source, target, constants.COPYFILE_EXCL);
+      await chmod(target, stat.mode & 0o777);
+    }
     hash.update(`${file}\0${stat.mode & 0o777}\0`).update(await readFile(target)).update("\0");
     copied.push(file);
   }
   return { files: copied, sha256: hash.digest("hex") };
+}
+
+/** The same filtered paths, modes and bytes as BUILD.json, without building or
+ * copying. Uncommitted worker edits participate; private/unrelated files do not. */
+export async function runtimeSourceIdentity(repository = root) {
+  const git = (...args) => execFileSync("git", args, { cwd: repository, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }).trim();
+  const files = runtimeSourcePaths(git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0"));
+  return { sourceSha256: (await stageRuntimeSource(repository, null, files)).sha256,
+    commit: git("rev-parse", "HEAD"), dirty: Boolean(git("status", "--porcelain", "--untracked-files=all", "--", ...files)) };
 }
 
 const CONTAINER_BUILD = [
@@ -57,7 +68,7 @@ export function dockerRuntimeInvocation(source, output, name) {
     "node:24-bookworm", "timeout", "1200s", "bash", "-lc", CONTAINER_BUILD] };
 }
 
-export async function packageRuntime({ output, allowDirty = false, docker = false, repository = root }) {
+export async function packageRuntime({ output, allowDirty = false, docker = false, repository = root, env, execute = execFileSync }) {
   const git = (...args) => execFileSync("git", args, { cwd: repository, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }).trim();
   const files = runtimeSourcePaths(git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0"));
   const dirty = Boolean(git("status", "--porcelain", "--untracked-files=all", "--", ...files));
@@ -80,13 +91,15 @@ export async function packageRuntime({ output, allowDirty = false, docker = fals
     usedDocker = docker || process.platform !== "linux" || process.arch !== "x64" || Number(process.versions.node.split(".")[0]) !== 24;
     if (usedDocker) {
       const invocation = dockerRuntimeInvocation(source, out, container);
-      execFileSync(invocation.command, invocation.args, { stdio: "inherit", timeout: 21 * 60_000 });
+      await execute(invocation.command, invocation.args, { stdio: "inherit", timeout: 21 * 60_000, env });
     } else {
       // Native Linux uses the already installed dependencies. It does not
       // install or mutate the checkout's shared node_modules or dist folder.
-      execFileSync(process.execPath, [join(repository, "apps/cloud-worker/scripts/build.mjs"), "--outdir", dist], { cwd: repository, stdio: "inherit", timeout: 10 * 60_000 });
+      await execute(process.execPath, [join(repository, "apps/cloud-worker/scripts/build.mjs"), "--outdir", dist], { cwd: repository, stdio: "inherit", timeout: 10 * 60_000, env });
+      if ((await runtimeSourceIdentity(repository)).sourceSha256 !== metadata.sourceSha256)
+        throw new Error("Worker sources changed during packaging; retry the build");
       await copyFile(join(source, "build-metadata.json"), join(dist, "BUILD.json"));
-      execFileSync("tar", ["--sort=name", "--owner=0", "--group=0", "--numeric-owner", "-czf", archive, "-C", dist, "."], { timeout: 10 * 60_000 });
+      await execute("tar", ["--sort=name", "--owner=0", "--group=0", "--numeric-owner", "-czf", archive, "-C", dist, "."], { timeout: 10 * 60_000, env });
     }
     const hash = createHash("sha256");
     for await (const chunk of createReadStream(archive)) hash.update(chunk);

@@ -19,14 +19,15 @@ const member = (archive: string, name: string) => execFileSync("tar", ["-xOzf", 
   maxBuffer: 16 * 1024 * 1024, timeout: 60_000, stdio: ["ignore", "pipe", "pipe"],
 });
 
-export async function inspectRuntimeArchive(archive: string): Promise<{ sha256: string; bytes: number; commit: string }> {
+export async function inspectRuntimeArchive(archive: string): Promise<{ sha256: string; bytes: number; commit: string; sourceSha256: string }> {
   const stat = lstatSync(archive);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Runtime archive must be a regular file");
   if (stat.size < 1 || stat.size > 1024 ** 3) throw new Error("Runtime archive exceeds the size limit");
-  let manifest: z.infer<typeof Manifest>, commit: string;
+  let manifest: z.infer<typeof Manifest>, build: { commit: string; sourceSha256: string };
   try {
     manifest = Manifest.parse(JSON.parse(member(archive, "runtime-manifest.json").toString("utf8")));
-    commit = z.object({ commit: z.string().regex(/^[a-f0-9]{40}$/) }).parse(JSON.parse(member(archive, "BUILD.json").toString("utf8"))).commit;
+    build = z.object({ commit: z.string().regex(/^[a-f0-9]{40}$/), sourceSha256: z.string().regex(/^[a-f0-9]{64}$/) })
+      .parse(JSON.parse(member(archive, "BUILD.json").toString("utf8")));
     if (NATIVE.some(name => !Object.values(manifest.packages).some(pkg => pkg.name === name && pkg.version))) throw new Error();
   } catch { throw new Error("Runtime archive must contain a complete Linux x64 Node 24 worker"); }
   for (const file of ENTRYPOINTS) {
@@ -37,5 +38,5 @@ export async function inspectRuntimeArchive(archive: string): Promise<{ sha256: 
   }
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(archive)) hash.update(chunk);
-  return { sha256: hash.digest("hex"), bytes: stat.size, commit };
+  return { sha256: hash.digest("hex"), bytes: stat.size, ...build };
 }

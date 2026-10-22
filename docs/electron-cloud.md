@@ -39,8 +39,6 @@ build pinned by its SHA-256.
   (a Tunnel Edit and DNS Edit token), `workos` (Alpha), `github` (the Alpha
   GitHub App), `boat`, `storage` and `fixture` sections. Railway, PlanetScale
   and registry sections are ignored.
-- A published worker runtime for this branch (see below), or the SHA-256 of one
-  an agent already published.
 - For seeding and agent checks, `.env.agent` entries: `ZEROS_DEV_REPOSITORY` and
   `ZEROS_DEV_GITHUB_INSTALLATION_ID` (the test repository and its Alpha GitHub App
   installation), `ZEROS_DEV_PASSWORD` (the fixture user's Alpha WorkOS password;
@@ -50,7 +48,24 @@ build pinned by its SHA-256.
 
 ## Worker runtime
 
-Build the Linux x64 worker runtime and publish it to the profile's runtime store:
+Startup computes the packager's worker `sourceSha256` from the checkout's build
+inputs, including uncommitted changes. It looks up
+`cloud-v2/runtime/sources/<sourceSha256>.json` in the profile's runtime store.
+A matching index names the immutable archive SHA and build commit. If absent,
+startup builds and publishes the runtime automatically, natively on Linux x64
+with Node 24 or through Docker on a Mac. Storage errors and malformed indices
+stop startup; they do not trigger a new publication. The last selected runtime
+is recorded in private state, and sources changing during selection require a
+restart. Every VM still verifies the archive SHA at boot.
+
+To prepublish from Linux for a Mac without Docker, run this on the same worker
+sources and with the same runtime store:
+
+```sh
+pnpm --dir apps/control-plane cloud-v2:publish-runtime --local
+```
+
+Or package and publish an archive separately:
 
 ```sh
 node apps/cloud-worker/scripts/package-runtime.mjs --out /tmp/worker-runtime.tar.gz
@@ -63,21 +78,24 @@ without the checkout, private profile or installed dependencies; `--docker`
 forces that path. Publishing checks the archive and stores it under its
 SHA-256, which it prints. `--local` reads the same private profile as the
 launcher, including the `ZEROS_DEV_PROFILE_PATH` override, and uses its
-`storage` section. Pass the printed SHA to `--runtime`.
+`storage` section. Publication also writes the source-hash index. `--runtime`
+can explicitly select the printed SHA when an override is needed. An archive
+must include the packager's `BUILD.json` source hash to be indexed.
 
 ## Commands
 
 ```sh
-pnpm electron:cloud --runtime <sha256>             # start and open the app
-pnpm electron:cloud --headless --runtime <sha256>  # backend only, for agents
+pnpm electron:cloud                              # start and open the app
+pnpm electron:cloud --headless                   # backend only, for agents
+pnpm electron:cloud --runtime <sha256>            # explicit runtime override
 pnpm electron:cloud --seed                         # seed a running stack's test organization
 pnpm electron:cloud --stop                         # stop a running stack
 pnpm electron:cloud --doctor                       # show state and profile issues
 pnpm electron:cloud --reset [--yes]                # delete this checkout's cloud resources and data
 ```
 
-`ZEROS_CLOUD_V2_RUNTIME_SHA256` may replace `--runtime`. `--run-only` disables
-file watching.
+`ZEROS_CLOUD_V2_RUNTIME_SHA256` remains an explicit override like `--runtime`;
+leave both unset for source-based selection. `--run-only` disables file watching.
 
 On its first healthy start, the stack seeds its database once: the verified
 WorkOS test user and organization, the Alpha GitHub installation and test

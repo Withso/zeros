@@ -25,18 +25,19 @@ async function fixture(version = 1) {
   const native = ["@openai/codex-linux-x64", "@anthropic-ai/claude-agent-sdk-linux-x64", "@cursor/sdk-linux-x64"];
   await writeFile(join(dist, "runtime-manifest.json"), JSON.stringify({ version: 1, node: "24", platform: "linux", arch: "x64",
     packages: Object.fromEntries(native.map(name => [name, { name, version: "1.0.0" }])), files }));
-  await writeFile(join(dist, "BUILD.json"), JSON.stringify({ commit: "a".repeat(40) }));
+  await writeFile(join(dist, "BUILD.json"), JSON.stringify({ commit: "a".repeat(40), sourceSha256: "b".repeat(64) }));
   const archive = join(directory, "runtime.tar.gz");
   execFileSync("tar", ["-czf", archive, "-C", dist, "."]);
   const contents = await readFile(archive);
   const sha256 = createHash("sha256").update(contents).digest("hex");
 
   const requests: { method: string; path: string; authorization: string; body: Buffer }[] = [];
+  const status = { head: 404, archive: 200, index: 200 };
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     requests.push({ method: request.method!, path: request.url!, authorization: request.headers.authorization ?? "", body: Buffer.concat(chunks) });
-    response.writeHead(request.method === "HEAD" ? 404 : 200).end();
+    response.writeHead(request.method === "HEAD" ? status.head : request.url!.includes("/sources/") ? status.index : status.archive).end();
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   cleanup.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
@@ -57,18 +58,21 @@ async function fixture(version = 1) {
   const publish = (...args: string[]) => run(process.execPath, ["--import", "tsx", "src/cloud/publish-runtime.ts", "--artifact", archive, ...args], {
     cwd: resolve(import.meta.dirname, "../.."), env, timeout: 15_000,
   });
-  return { archive, contents, env, profile, publish, requests, sha256, storage };
+  return { archive, contents, env, profile, publish, requests, sha256, storage, status };
 }
 
 it.each([1, 2])("publishes --local with the version %i profile's storage, without exposing credentials", async version => {
   const test = await fixture(version);
   const { stdout, stderr } = await test.publish("--local");
-  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT"]);
-  for (const request of test.requests) {
+  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT"]);
+  for (const request of test.requests.slice(0, 2)) {
     expect(request.path.split("?")[0]).toBe(`/fixture-local/cloud-v2/runtime/${test.sha256}.tar.gz`);
     expect(request.authorization).toContain("Credential=fixture-local-access/");
   }
   expect(test.requests[1]!.body.includes(test.contents)).toBe(true);
+  expect(test.requests[2]!.path.split("?")[0]).toBe(`/fixture-local/cloud-v2/runtime/sources/${"b".repeat(64)}.json`);
+  // The S3 SDK may add chunk framing; the bounded JSON itself must be present.
+  expect(test.requests[2]!.body.toString()).toContain(JSON.stringify({ version: 1, sourceSha256: "b".repeat(64), sha256: test.sha256, commit: "a".repeat(40) }));
   expect(stdout).toContain(`CLOUD_V2_RUNTIME_SHA256=${test.sha256}`);
   expect(stderr).toBe("");
   for (const secret of [test.storage.accessKeyId, test.storage.secretAccessKey, "fixture-unrelated-secret", "fixture-hosted-secret"])
@@ -78,7 +82,7 @@ it.each([1, 2])("publishes --local with the version %i profile's storage, withou
 it("keeps environment-based publishing when --local is absent", async () => {
   const test = await fixture();
   const { stdout } = await test.publish();
-  expect(test.requests).toHaveLength(2);
+  expect(test.requests).toHaveLength(3);
   expect(test.requests[1]!.path.split("?")[0]).toBe(`/fixture-hosted/cloud-v2/runtime/${test.sha256}.tar.gz`);
   expect(test.requests[1]!.authorization).toContain("Credential=fixture-hosted-access/");
   expect(stdout).toContain(`CLOUD_V2_RUNTIME_SHA256=${test.sha256}`);
@@ -88,7 +92,7 @@ it("publishes --local with no CLOUD_V2_RUNTIME_STORE_* environment variables", a
   const test = await fixture();
   for (const key of Object.keys(test.env)) if (key.startsWith("CLOUD_V2_RUNTIME_STORE_")) delete test.env[key];
   const { stdout } = await test.publish("--local");
-  expect(test.requests).toHaveLength(2);
+  expect(test.requests).toHaveLength(3);
   expect(test.requests[1]!.path.split("?")[0]).toBe(`/fixture-local/cloud-v2/runtime/${test.sha256}.tar.gz`);
   expect(stdout).toContain(`CLOUD_V2_RUNTIME_SHA256=${test.sha256}`);
 });
@@ -103,4 +107,13 @@ it.each(["incomplete", "malformed"])("refuses a %s local profile without using a
   expect(result.stderr).toContain("Runtime publication failed");
   expect(result.stdout + result.stderr).not.toContain("fixture-local-secret");
   expect(test.requests).toEqual([]);
+});
+
+it("does not treat a storage refusal as a missing runtime or publish an index after failed upload", async () => {
+  const test = await fixture(); test.status.head = 403;
+  expect((await test.publish("--local").catch(error => error)).code).toBe(1);
+  expect(test.requests.map(r => r.method)).toEqual(["HEAD"]);
+  test.requests.length = 0; test.status.head = 404; test.status.archive = 403;
+  expect((await test.publish("--local").catch(error => error)).code).toBe(1);
+  expect(test.requests.map(r => r.method)).toEqual(["HEAD", "PUT"]);
 });

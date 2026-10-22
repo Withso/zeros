@@ -25,8 +25,8 @@ describe("pnpm electron:cloud", () => {
     expect(electronCloudCommand(["--seed"], {})).toEqual({ action: "seed", args: [], runtime: undefined });
   });
 
-  it("refuses a start without a published runtime, unknown flags and conflicting modes", () => {
-    expect(() => electronCloudCommand([], {})).toThrow(/runtime/);
+  it("selects a matching runtime automatically while refusing malformed overrides and flags", () => {
+    expect(electronCloudCommand([], {})).toEqual({ action: "start", args: [], runtime: undefined });
     expect(() => electronCloudCommand(["--runtime", "not-a-sha"], {})).toThrow(/runtime/);
     expect(() => electronCloudCommand(["--runtime"], {})).toThrow(/runtime/);
     expect(() => electronCloudCommand(["--watch"], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toThrow(/--watch/);

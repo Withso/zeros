@@ -1,9 +1,10 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "esbuild";
 import { afterEach, expect, it } from "vitest";
-import { dockerRuntimeInvocation, runtimeSourcePaths, stageRuntimeSource } from "../../apps/cloud-worker/scripts/package-runtime.mjs";
+import { dockerRuntimeInvocation, runtimeSourceIdentity, runtimeSourcePaths, stageRuntimeSource } from "../../apps/cloud-worker/scripts/package-runtime.mjs";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -67,4 +68,20 @@ it("builds Linux amd64 Node 24 with only staging and output mounts and no inheri
   expect(args).not.toContain("--env-file");
   expect(args.at(-1)).toContain("--frozen-lockfile --ignore-scripts");
   expect(args.at(-1)).toContain("rebuild node-pty esbuild");
+});
+
+it("looks up exactly the packager's source hash, including uncommitted bytes and modes but excluding private and unrelated files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cloud-runtime-source-")); roots.push(root);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+  git("init", "-q"); git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "fixture");
+  const file = "apps/cloud-worker/src/main.ts";
+  await mkdir(join(root, file, ".."), { recursive: true }); await writeFile(join(root, file), "worker");
+  const first = await runtimeSourceIdentity(root);
+  expect(first.sourceSha256).toBe((await stageRuntimeSource(root, join(root, "staged"), [file])).sha256);
+  expect(first.dirty).toBe(true);
+  await writeFile(join(root, ".env.agent"), "PRIVATE=fixture"); await writeFile(join(root, "docs.md"), "unrelated");
+  expect((await runtimeSourceIdentity(root)).sourceSha256).toBe(first.sourceSha256);
+  await writeFile(join(root, file), "changed"); const changed = await runtimeSourceIdentity(root);
+  expect(changed.sourceSha256).not.toBe(first.sourceSha256);
+  await chmod(join(root, file), 0o755); expect((await runtimeSourceIdentity(root)).sourceSha256).not.toBe(changed.sourceSha256);
 });
