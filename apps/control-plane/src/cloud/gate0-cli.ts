@@ -7,6 +7,10 @@ import { parseArgs, parseEnv } from "node:util";
 import { decodeJwt } from "jose";
 import { z } from "zod";
 import { GATE0_AGENTS, Gate0Failure, runCloudV2Gate0 } from "./gate0.js";
+import { BoatApiClient } from "./boat-client.js";
+import { BoatCloudV2Compute } from "./boat.js";
+import { CloudV2WorkerSigner } from "./worker-auth.js";
+import { createGate0TransportProbe } from "./gate0-transport.js";
 
 export function gate0DevTarget(input: string, domain: string): { origin: string; owner: string } {
   try {
@@ -22,6 +26,8 @@ const Profile = z.object({
   version: z.literal(2), mode: z.literal("hosted"),
   cloudflare: z.object({ domain: z.string().regex(/^[a-z0-9.-]+$/) }),
   workos: z.object({ environment: z.enum(["alpha", "dev"]), webClientId: z.string().regex(/^client_[A-Za-z0-9_-]+$/), apiKey: z.string().min(16) }),
+  registry: z.object({ endpoint: z.string().url(), bucket: z.string(), encryptionKey: z.string(), accessKeyId: z.string(), secretAccessKey: z.string() }),
+  boat: z.object({ apiKey: z.string().min(16), billingOrg: z.string().optional() }),
   fixture: z.object({ workosUserId: z.string(), expectedEmail: z.string().email(), expectedOrganizationSlug: z.string() }).optional(),
 });
 
@@ -75,7 +81,7 @@ async function main() {
   } });
   if (values.help) {
     console.log("cloud-v2:gate0 --api <Dev API origin> [--profile <private JSON>] [--agent-env <private .env.agent>] [--organization <UUID>] [--repository owner/name] [--runtime <sha256>] [--agents codex,claude,cursor] [--keep]");
-    console.log("Uses the selected Dev profile's WorkOS client and the dedicated .env.agent test password. Requires an installed Computer and connected provider logins. Creates one workspace, checks it, then deletes it unless --keep is set.");
+    console.log("Uses the selected Dev profile's WorkOS client, Boat access, encrypted registry and the dedicated .env.agent test password. Requires an installed Computer and connected provider logins. Creates one workspace, checks it, then deletes it unless --keep is set.");
     return;
   }
   const root = resolve(import.meta.dirname, "../../../..");
@@ -98,6 +104,21 @@ async function main() {
     health = z.object({ ok: z.literal(true), development: z.object({ owner: z.literal(target.owner), generation: z.string().uuid() }) }).safeParse(await response.json());
     if (!response.ok || !health.success) throw new Error();
   } catch { throw new Gate0Failure("dev_identity"); }
+  let transportProbe;
+  try {
+    // Read-only Dev registry access: derive the same generation-stable signer
+    // as hosted-profile without printing or storing its private material.
+    const [{ r2Registry }, { cloudV2WorkerSigningKey }] = await Promise.all([
+      import(pathToFileURL(resolve(root, "scripts/dev-environment/hosted-state.mjs")).href),
+      import(pathToFileURL(resolve(root, "scripts/dev-environment/hosted-profile.mjs")).href),
+    ]);
+    const receipt = await r2Registry(profile.registry).read(target.owner);
+    if (receipt?.state?.owner !== target.owner || receipt.state.generation !== health.data.development.generation) throw new Error();
+    const signer = new CloudV2WorkerSigner(cloudV2WorkerSigningKey(receipt.state));
+    const compute = new BoatCloudV2Compute(new BoatApiClient({ apiKey: profile.boat.apiKey, timeoutMs: 20_000,
+      ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }));
+    transportProbe = createGate0TransportProbe({ compute, signer });
+  } catch { throw new Gate0Failure("transport_configuration"); }
   const session = await gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey, email, subject, password: env.ZEROS_DEV_PASSWORD });
   try {
     const meResponse = await fetch(`${target.origin}/v1/me`, { redirect: "error", signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${await session.accessToken()}` } });
@@ -112,7 +133,7 @@ async function main() {
     if (!loginResponse.ok) { await loginResponse.body?.cancel(); throw new Gate0Failure("provider_logins"); }
     const logins = z.object({ connections: z.array(z.object({ provider: z.string(), connected: z.boolean() })) }).parse(await loginResponse.json());
     for (const agent of agents) if (!logins.connections.some(row => row.provider === agent && row.connected)) throw new Gate0Failure(`agent_${agent}_login`);
-    const result = await runCloudV2Gate0({ apiOrigin: target.origin, organizationId, repository, accessToken: session.accessToken, agents,
+    const result = await runCloudV2Gate0({ apiOrigin: target.origin, organizationId, repository, accessToken: session.accessToken, agents, transportProbe,
       ...(values.runtime ? { runtimeSha: values.runtime } : {}), ...(values.keep ? { keep: true } : {}), log: message => console.log(`[gate0] ${message}`) });
     const skipped = GATE0_AGENTS.filter(agent => !agents.includes(agent));
     if (skipped.length) console.log(`[gate0] Not checked: ${skipped.join(", ")}`);

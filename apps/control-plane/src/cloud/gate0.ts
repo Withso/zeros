@@ -1,16 +1,18 @@
 // Operator-only probe of the deployed v2 API and its real worker. It creates
 // one disposable workspace from an existing Computer, with one stop/wake.
-// No database access, Computer builds, direct Boat calls or model stand-ins.
+// No database access, Computer builds or model stand-ins. The operator's
+// transport probe only inspects this workspace's existing Boat VM.
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket from "ws";
 import { z } from "zod";
+import type { Gate0TransportWorkspace } from "./gate0-transport.js";
 
 export const GATE0_AGENTS = ["codex", "claude", "cursor"] as const;
 type Agent = typeof GATE0_AGENTS[number];
 const FrameSchema = z.object({ type: z.string(), requestId: z.string().optional() }).passthrough();
 type Frame = z.infer<typeof FrameSchema>;
-const WorkspaceSchema = z.object({ id: z.string().uuid(), name: z.string(), repository: z.string(), branch: z.string(), baseBranch: z.string(), state: z.string() });
+const WorkspaceSchema = z.object({ id: z.string().uuid(), name: z.string(), repository: z.string(), branch: z.string(), baseBranch: z.string(), state: z.string(), boatSandboxId: z.string().nullable().optional() });
 const WorkspaceReply = z.object({ workspace: WorkspaceSchema });
 const Rows = z.object({ messages: z.array(z.object({ msgId: z.string(), kind: z.string(), payload: z.string() }).passthrough()) });
 type MessageRows = z.infer<typeof Rows>["messages"];
@@ -92,6 +94,7 @@ export type CloudV2Gate0Options = {
   organizationId: string;
   repository: string;
   runtimeSha?: string;
+  transportProbe?(workspace: Gate0TransportWorkspace): Promise<void>;
   accessToken(): Promise<string>;
   agents?: readonly Agent[];
   keep?: boolean;
@@ -156,7 +159,8 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
   try {
     createAttempted = true;
     workspace = parse(WorkspaceReply, await request(base, "create", "POST", { organizationId: options.organizationId, repository: options.repository, name }), "create").workspace;
-    await waitState("running"); log("create passed");
+    workspace = await waitState("running"); log("create passed");
+    if (options.transportProbe) { await options.transportProbe(workspace); log("hybrid transport passed"); }
     bridge = await connect();
     const nativeRow = WorkspaceSchema.pick({ id: true, branch: true, baseBranch: true }).extend({ path: z.string().startsWith("/") });
     const list = parse(z.object({ workspaces: z.array(nativeRow) }), await bridge.op("workspace.list", { withChanges: true }), "workspace_list");
@@ -251,7 +255,8 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
       requireCheck(sameRows(rows.slice(Math.max(0, rows.length - 1 - limit), -1), older.result.messages), "offline_messages_older");
     }
     requireCheck((await current("offline_stays_stopped")).state === "stopped", "offline_stays_stopped"); log("stop and offline history passed");
-    await request(`${base}/${workspace.id}/start`, "wake", "POST"); await waitState("running");
+    await request(`${base}/${workspace.id}/start`, "wake", "POST"); workspace = await waitState("running");
+    if (options.transportProbe) { await options.transportProbe(workspace); log("hybrid wake transport passed"); }
     bridge = await connect();
     for (const [chatId, rows] of transcripts) requireCheck(sameRows(rows, parse(Rows, await bridge.op("messages.window", { chatId }), "wake_history").messages), "wake_history");
     requireCheck(parse(z.object({ content: z.string() }), await bridge.op("file.read", { ...scope, path }), "wake_file").content === content, "wake_file");

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { runCloudV2Gate0 } from "./gate0.js";
 
@@ -17,7 +17,7 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
   const sessions = new Map<string, string>(), tickets = new Set<string>(), activePrompts = new Map<string, any>();
   const logs: string[] = [];
   let state = "absent", name = "", staged = false, connections = 0;
-  const workspace = () => ({ id, organizationId, repository, branch, baseBranch: "master", name, state });
+  const workspace = () => ({ id, organizationId, repository, branch, baseBranch: "master", name, state, boatSandboxId: "bx_23456789" });
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -152,6 +152,14 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
 }
 
 describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
+  it("checks the existing VM's hybrid route on create and wake, within the one-workspace budget", async () => {
+    const f = await fixture(), transportProbe = vi.fn(async (_workspace: unknown) => {});
+    const result = await runCloudV2Gate0({ ...f.options, transportProbe });
+    expect(transportProbe).toHaveBeenCalledTimes(2);
+    for (const call of transportProbe.mock.calls) expect(call[0]).toMatchObject({ id: result.workspaceId, boatSandboxId: "bx_23456789", state: "running" });
+    expect(f.calls.filter(call => call.method === "POST" && call.path === "/v1/cloud-v2/workspaces")).toHaveLength(1);
+    expect(f.calls.filter(call => call.path.endsWith("/start"))).toHaveLength(1);
+  });
   it.each([20, 21])("uses protocol %s, checks all three turns and native file/git/PTY frames, then stops, reads history, wakes and deletes one workspace", async protocolVersion => {
     const f = await fixture(undefined, protocolVersion);
     await expect(runCloudV2Gate0(f.options)).resolves.toMatchObject({ agents: ["codex", "claude", "cursor"], deleted: true });
