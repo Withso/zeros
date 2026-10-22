@@ -6,6 +6,8 @@ import { HttpError } from "../authz.js";
 import type { CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
 
+import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
+
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
 
@@ -398,14 +400,12 @@ export class CloudV2Store {
     };
   }
 
-  /** Newest `limit` rows in chronological order. */
+  messageWindow(workspaceId: string, chatId: string, options: WindowOptions = {}): Promise<MessageWindow> {
+    return withSystemTx(this.pool, tx => mirrorMessageWindow(tx, workspaceId, chatId, options), { consistentRead: true });
+  }
+
+  /** Rows-only compatibility for internal callers; HTTP also returns turnOpening. */
   async windowMessages(workspaceId: string, chatId: string, limit: number): Promise<CloudV2MessageRow[]> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ msg_id: string; kind: string; payload: string; created_at_ms: string }>(
-      `SELECT msg_id, kind, payload, created_at_ms FROM (
-         SELECT * FROM cloud_v2_messages WHERE workspace_id = $1 AND chat_id = $2 ORDER BY ord DESC LIMIT $3
-       ) newest ORDER BY ord`,
-      [workspaceId, chatId, Math.max(1, Math.min(limit, 1000))],
-    ));
-    return rows.map(row => ({ msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: Number(row.created_at_ms) }));
+    return (await this.messageWindow(workspaceId, chatId, { limit })).messages;
   }
 }

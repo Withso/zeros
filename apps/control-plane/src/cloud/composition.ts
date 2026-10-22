@@ -14,6 +14,7 @@ import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
 import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./github.js";
+import { HISTORY_OPS, readCloudV2History } from "./history.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
@@ -42,19 +43,19 @@ export async function cloudV2AgentConfig(logins: { codex?: Login; claude?: Login
 }
 
 /** Bridge history reads answered from the mirror while the VM is stopped. */
-export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "windowMessages">,
+export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "messageWindow">,
   workspace: CloudV2Workspace, frame: unknown): Promise<unknown | null> {
   const request = frame as { type?: unknown; id?: unknown; op?: unknown; params?: Record<string, unknown> } | null;
   if (request?.type !== "WORKSPACE_REQUEST" || typeof request.id !== "string" || typeof request.op !== "string") return null;
-  let result: unknown;
-  if (request.op === "chats.list") result = await store.listChats(workspace.id);
-  else if (request.op === "messages.window") {
-    const chatId = request.params?.chatId;
-    if (typeof chatId !== "string") return null;
-    const limit = typeof request.params?.limit === "number" ? request.params.limit : 200;
-    result = { messages: await store.windowMessages(workspace.id, chatId, limit) };
-  } else return null;
-  return { type: "WORKSPACE_RESPONSE", id: randomUUID(), source: "engine", timestamp: Date.now(), requestId: request.id, op: request.op, result };
+  if (!HISTORY_OPS.some(op => op === request.op)) return null;
+  const reply = { id: randomUUID(), source: "engine", timestamp: Date.now(), requestId: request.id, op: request.op };
+  try {
+    const result = await readCloudV2History(store, workspace.id, { op: request.op, params: request.params ?? {} });
+    return { ...reply, type: "WORKSPACE_RESPONSE", result };
+  } catch (error) {
+    if (!(error instanceof HttpError)) throw error;
+    return { ...reply, type: "WORKSPACE_ERROR", code: error.code, message: error.message };
+  }
 }
 
 export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker) {
