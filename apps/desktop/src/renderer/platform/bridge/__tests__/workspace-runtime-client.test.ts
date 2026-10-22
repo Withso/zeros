@@ -111,6 +111,36 @@ describe("file reference ownership", () => {
 
 
 describe("workspace runtime routing", () => {
+  it("reuses a healthy running v2 peer for repeated send preparation, but obtains fresh admission after stop", async () => {
+    const peer = fakePeer(a), replacement = fakePeer(a);
+    let running = true;
+    const open = vi.fn().mockResolvedValueOnce(peer.peer).mockResolvedValueOnce(replacement.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [], canReuseForWork: () => running });
+    try {
+      await client.warmWorkspace(a);
+      await client.openWorkspace(a); await client.openWorkspace(a);
+      expect(open).toHaveBeenCalledOnce(); expect(peer.release).not.toHaveBeenCalled();
+      running = false;
+      await client.openWorkspace(a);
+      expect(open).toHaveBeenCalledTimes(2); expect(peer.release).toHaveBeenCalledOnce();
+      expect(open).toHaveBeenLastCalledWith(a, expect.objectContaining({ wake: true }));
+    } finally { client.dispose(); }
+  });
+
+  it("never reuses a disconnected or differently owned peer for queued work", async () => {
+    let identity = "account-1";
+    const old = fakePeer(a), next = fakePeer(a), last = fakePeer(a);
+    const open = vi.fn().mockResolvedValueOnce(old.peer).mockResolvedValueOnce(next.peer).mockResolvedValueOnce(last.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [], canReuseForWork: () => true, identity: () => identity });
+    try {
+      await client.openWorkspace(a); Object.assign(old.peer.client, { status: "disconnected" });
+      await client.openWorkspace(a);
+      expect(open).toHaveBeenCalledTimes(2); expect(old.release).toHaveBeenCalledOnce();
+      identity = "account-2"; await client.openWorkspace(a);
+      expect(open).toHaveBeenCalledTimes(3); expect(next.release).toHaveBeenCalledOnce();
+    } finally { client.dispose(); }
+  });
+
   it.each(["/personal/local", "/organization/local", cloudWorkspaceKey(a)])(
     "classifies an account-retired %s list as cancelled ownership without replay or a provider failure",
     async folder => {

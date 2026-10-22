@@ -95,8 +95,11 @@ execution fences.
 An uncertain response retries the same idempotency ID and initiating reason;
 a definitive refusal needs a new explicit attempt. Stop, account replacement,
 owner deletion and the original attempt deadline retire old work. Cloud prompt
-preparation spends at most ten seconds while the workspace is ready, and at
-most 180 seconds including a wake, with elapsed time beside Starting workspace.
+preparation spends at most ten seconds while both the workspace and its bridge
+are ready. Disconnection and reconnect time pause that budget; the undispatched
+FIFO survives, re-adopts the session and drains once the bridge returns. A healthy
+running v2 bridge is reused across send preparation. The whole attempt is capped at
+180 seconds including a wake, with elapsed time beside Starting workspace.
 CP failed/error statuses end the wait immediately. Serial history-conflict retries share an
 eight-second bound and never retry a mutation or an uncertain dispatch.
 Explicit Retry renews the intent; reconnect, catalog, history, hover and selection

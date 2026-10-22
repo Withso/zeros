@@ -79,10 +79,20 @@ function harness(cloud = true, status = "stopped", resident = true) {
       teamCapabilities: { multiple: false, canCreate: false } }],
     teams: [],
   } as Me | null };
+  let connectionStatus = "connected";
+  const connectionListeners = new Set<() => void>();
+  class WorkspaceRuntimeClient {
+    status = "connected";
+    statusForWorkspace() { return connectionStatus; }
+    onWorkspaceStatusChange(_folder: string, changed: () => void) {
+      connectionListeners.add(changed); return () => connectionListeners.delete(changed);
+    }
+  }
+  const connection = (status: string) => { connectionStatus = status; for (const changed of connectionListeners) changed(); };
 
   const provider: any = { ...lifecycle, ...retention, hasBackgroundAgentWork, Error, BLANK: {}, useCallback: (fn: unknown) => fn, isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId,
     hasCloudWorkspaceAccountAccess: (organizationId: string) => cloudWorkspaceAccountAccess(account.me, organizationId),
-    cloudComputerV2: cloud && cloudWorkspaceAccountAccess(account.me), bridge: { status: "connected" }, getStore: () => store, useWorkspaceStore: { getState: () => workspace },
+    cloudComputerV2: cloud && cloudWorkspaceAccountAccess(account.me), WorkspaceRuntimeClient, bridge: new WorkspaceRuntimeClient(), getStore: () => store, useWorkspaceStore: { getState: () => workspace },
     refreshModelCatalog: vi.fn(), cloudCatalogGeneration: () => 1, cloudWorkspaceDocument: () => doc, prepareForSend: prepare, cloudSendWaitRef: { current: wait },
     subscribeCloudWorkspaces: () => () => {}, cloudWorkspaceStopVersion: () => 0, isCloudWorkspaceLifecyclePending,
     cloudSendPreparationRef: { current: { cancel: vi.fn() } }, beginCloudSendWaitRef: { current: null }, hydrateCloudSendRef: { current: null },
@@ -131,7 +141,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
     clearComposer: clear, clearComposerEditor: clear, pendingSendScrollCountRef: { current: 0 }, sendInFlightRef: { current: false }, startCloudSubmitSpan: () => vi.fn(), toast: toasts,
   };
   vm.runInNewContext(composerCode, composer);
-  return { account, provider, composer, queue, store, prepare, delivered, clear, dispatch, cloudError, toasts, draft, failureNotice,
+  return { account, provider, composer, queue, store, prepare, delivered, clear, dispatch, cloudError, toasts, draft, failureNotice, connection,
     send: () => composer.actions.handleSend(), ready: () => { doc.status = "ready"; wake.resolve(); initialize.resolve(); },
     type: (text: string) => { current = { ...draft, displayText: text, json: { text }, attachments: [], segments: [{ type: "text", text }] }; },
     finish: () => { sending.clear(); store.sessions.chat.status = "ready"; provider.actions.drainNextQueued("chat"); },
@@ -140,6 +150,46 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it("keeps a send queued through a 25-second drop, re-adopts its session and delivers once on reconnect", async () => {
+    const h = harness(true, "ready");
+    Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "old-route" });
+    h.connection("disconnected");
+    await h.send();
+    const id = h.queue.get("chat")![0].bubbleId;
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(h.failureNotice).not.toHaveBeenCalled();
+    expect(h.queue.get("chat")).toHaveLength(1);
+    expect(h.delivered).not.toHaveBeenCalled();
+    h.connection("connected"); h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.provider.ensureSessionRef.current).toHaveBeenCalledOnce();
+    expect(h.delivered).toHaveBeenCalledOnce();
+    expect(h.delivered.mock.calls[0][0]).toBe(id);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(h.delivered).toHaveBeenCalledOnce(); expect(h.failureNotice).not.toHaveBeenCalled();
+  });
+
+  it("pauses the ten-second agent budget across disconnects while retaining connected time", async () => {
+    const h = harness(true, "ready"); await h.send();
+    await vi.advanceTimersByTimeAsync(3_500);
+    h.connection("disconnected"); await vi.advanceTimersByTimeAsync(40_000);
+    expect(h.failureNotice).not.toHaveBeenCalled();
+    h.connection("connecting"); await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.failureNotice).not.toHaveBeenCalled();
+    h.connection("connected"); await vi.advanceTimersByTimeAsync(6_499);
+    expect(h.failureNotice).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "queued_timeout" }));
+    expect(h.delivered).not.toHaveBeenCalled();
+  });
+
+  it("keeps a disconnected send cancelled by Stop from dispatching on a later reconnect", async () => {
+    const h = harness(true, "ready"); h.connection("disconnected"); await h.send();
+    await vi.advanceTimersByTimeAsync(25_000);
+    h.stop(); h.connection("connected"); h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).not.toHaveBeenCalled(); expect(h.failureNotice).not.toHaveBeenCalled();
+    expect(h.queue.get("chat")).toHaveLength(1);
+  });
+
   it.each(["edit", "remove", "delivery"])("does not turn a queued %s into resident history", async action => {
     const h = harness(true, "ready", false);
     useSessionsStore.getState().clearAll();

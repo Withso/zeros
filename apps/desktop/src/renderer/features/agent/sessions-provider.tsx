@@ -4223,6 +4223,8 @@ export function AgentSessionsProvider({
     first.failureLogId ??= crypto.randomUUID();
     const stopVersion = first.waitStopVersion ??= cloudWorkspaceStopVersion(target);
     const folder = slot.cwd, account = cloudCatalogGeneration();
+    const workspaceBridge = bridge instanceof WorkspaceRuntimeClient ? bridge : null;
+    let needsAdoption = workspaceBridge?.statusForWorkspace(folder) !== "connected";
     let generation = cloudWorkspaceDocument(target)?.generation.number;
     let phase: "admission" | "history" = "admission";
     const cancellation = cancelGeneration(cancelGenerationsRef.current, chatId);
@@ -4249,12 +4251,20 @@ export function AgentSessionsProvider({
       if (fresh?.cloudSendWait?.state !== "waiting" || fresh.cloudSendWait.phase !== waitPhase ||
           fresh.cloudSendWait.turnId !== first.bubbleId || fresh.cloudSendWait.startedAt !== displayStartedAt)
         getStore().patchSession(chatId, { cloudSendWait: { state: "waiting", phase: waitPhase, turnId: first.bubbleId, startedAt: displayStartedAt } });
-      return ready;
+      // VM readiness and bridge readiness are independent. An idle tunnel
+      // drop must not spend the agent's acceptance budget or lose this FIFO.
+      const connected = workspaceBridge?.statusForWorkspace(folder) === "connected";
+      if (!connected) needsAdoption = true;
+      return ready && connected;
     };
     cloudSendWaitRef.current.start(chatId, {
       current,
       readiness,
-      observe: subscribeCloudWorkspaces,
+      observe: changed => {
+        const offCatalog = subscribeCloudWorkspaces(changed);
+        const offBridge = workspaceBridge?.onWorkspaceStatusChange(folder!, changed);
+        return () => { offCatalog(); offBridge?.(); };
+      },
       budget: first.waitBudget ??= { elapsedMs: 0 },
       timeoutMs: 10_000,
       timeoutError: () => phase === "history"
@@ -4278,11 +4288,20 @@ export function AgentSessionsProvider({
         if (fresh.transcriptState !== "resident")
           throw new CloudSendWaitError("Couldn't load chat history. Retry to send your message.", "history_unavailable");
         phase = "admission";
+        const agentId = fresh.agentId;
+        // A healthy-looking slot can belong to the connection that just
+        // dropped. Re-adopt through normal ensureSession (never force-close a
+        // provider turn) before dispatching the still-unsent message.
+        if (needsAdoption && fresh.sessionId && fresh.status === "ready") {
+          getStore().patchSession(chatId, { status: "reconnecting" });
+          fresh = getStore().sessions[chatId]!;
+        }
+        needsAdoption = false;
         const env = chatComposerEnv(chatId, fresh.initialize);
         const park = sendAdmissionPark({ hasAgent: true, hasSession: !!fresh.sessionId, status: fresh.status,
           appliedChatEnvKey: fresh.appliedChatEnvKey, expectedEnvKey: env ? chatEnvDriftKey(env) : undefined });
         if (park || ["idle", "warming", "reconnecting", "failed", "auth-required"].includes(fresh.status)) {
-          await ensureSessionRef.current?.(chatId, fresh.agentId, { cwd: fresh.cwd ?? undefined, env,
+          await ensureSessionRef.current?.(chatId, agentId, { cwd: fresh.cwd ?? undefined, env,
             ...executionActorForRecovery(fresh), ...(park === "drift-respawn" || fresh.status === "auth-required" ? { force: true } : {}) });
         }
         if (signal.aborted || !current()) return false;
@@ -4309,7 +4328,8 @@ export function AgentSessionsProvider({
         // A different queue head owns a new wake; the native checkpoint fence
         // still guards command submission even after this preparation returns.
         await prepareForSend(chatId, head.wakeIntent ??= { id: crypto.randomUUID() });
-        return !signal.aborted && current() && sendQueueRef.current.get(chatId)?.[0] === head;
+        return !signal.aborted && current() && !needsAdoption &&
+          workspaceBridge?.statusForWorkspace(folder) === "connected" && sendQueueRef.current.get(chatId)?.[0] === head;
       },
       terminal: error => error instanceof CloudSendWaitError || error instanceof CloudWorkspaceWakeEndedError || error instanceof ControlPlaneError &&
         error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status),
@@ -4336,7 +4356,7 @@ export function AgentSessionsProvider({
           onRetry: () => retryCloudQueuedPrompt(chatId, head, account, folder) });
       },
     });
-  }, [cloudComputerV2, getStore, prepareForSend, drainNextQueued, pauseQueue, refreshQueuedAttachments, retryCloudQueuedPrompt]);
+  }, [bridge, cloudComputerV2, getStore, prepareForSend, drainNextQueued, pauseQueue, refreshQueuedAttachments, retryCloudQueuedPrompt]);
   beginCloudSendWaitRef.current = beginCloudSendWait;
 
   const cancel = useCallback<SessionsActions["cancel"]>(

@@ -582,12 +582,14 @@ export class RuntimeClient {
       if (wasPending) this.pendingWs = null;
       if (this.ws !== ws && !wasPending) return;
       this.cloudDiagnostic("close", { code: event?.code ?? null, stage: wasPending ? "upgrade" : this.handshakeReady ? "ready" : "handshake" });
+      const reconnectImmediately = this.connectionTarget.kind === "cloud" && this.handshakeReady &&
+        event?.code !== 1000 && event?.code !== 4001;
       if (this.ws === ws) this.ws = null;
       // Each reconnect mints a fresh ticket; only a VM that never becomes
       // reachable ends the attempt.
       if (this.connectionTarget.kind === "cloud" && !this.handshakeReady && ++this.cloudConnectFailures >= 5)
         this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_actor_runtime_unavailable", status: 503 }));
-      this.afterDisconnect();
+      this.afterDisconnect(reconnectImmediately);
     };
 
     ws.onerror = () => {
@@ -1102,7 +1104,7 @@ export class RuntimeClient {
   /** Shared disconnect handling for both transports: flip to disconnected,
    *  reject in-flight RPCs (soft-fail), schedule a reconnect, expire the
    *  queue. The caller has already cleared its transport slot. */
-  private afterDisconnect(): void {
+  private afterDisconnect(reconnectImmediately = false): void {
     this.handshakeReady = false;
     this.setStatus("disconnected");
     this._engineConnected = false;
@@ -1114,7 +1116,7 @@ export class RuntimeClient {
     if (this.connectionTarget.kind === "cloud") {
       this.cloudTargetNeedsRefresh = true;
     }
-    this.scheduleReconnect();
+    this.scheduleReconnect(reconnectImmediately);
     // Reject any queue entries whose deadlines have elapsed.
     this.expireQueue(now);
   }
@@ -1257,7 +1259,7 @@ export class RuntimeClient {
     });
   }
 
-  private scheduleReconnect() {
+  private scheduleReconnect(immediate = false) {
     if (this._disposed) return;
     if (
       this.connectionTarget.kind === "cloud" &&
@@ -1277,11 +1279,14 @@ export class RuntimeClient {
     // Engine refused us — don't hammer it; wait for clearRejection() to retry.
     if (this._rejected) return;
     if (this.reconnectTimer) return;
-    const delay =
+    // A previously healthy cloud socket may be dropped by the network/tunnel.
+    // Refresh its ticket in the next tick; unsuccessful handshakes still use
+    // the bounded ladder, and the Local sidecar keeps its existing cadence.
+    const delay = immediate ? 0 :
       RECONNECT_LADDER[
         Math.min(this.reconnectAttempts, RECONNECT_LADDER.length - 1)
       ];
-    this.reconnectAttempts += 1;
+    if (!immediate) this.reconnectAttempts += 1;
     this.cloudDiagnostic("reconnect", { attempt: this.reconnectAttempts, delayMs: delay });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

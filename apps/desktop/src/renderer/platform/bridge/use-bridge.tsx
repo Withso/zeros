@@ -59,6 +59,11 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         workspaces: () => getCloudWorkspaceRows() as unknown as Record<string, unknown>[],
         workspacesConfirmed: cloudWorkspaceCatalogConfirmed,
         canAccess: target => canReadCloudWorkspace(cloudWorkspaceDocument(target)),
+        canReuseForWork: target => {
+          const doc = cloudWorkspaceDocument(target);
+          return canReadCloudWorkspace(doc) && doc?.capabilities.canWrite === true &&
+            (doc.status === "ready" || doc.status === "busy");
+        },
         identity: target => `${cloudCatalogGeneration()}:${cloudWorkspaceDocument(target)?.generation.number ?? "unknown"}`,
         wakeOwner: target => {
           const doc = cloudWorkspaceDocument(target);

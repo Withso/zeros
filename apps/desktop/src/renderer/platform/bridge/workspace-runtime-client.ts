@@ -47,6 +47,9 @@ export interface WorkspaceRuntimeOptions {
   /** Complete catalog confirmation includes an authoritative empty list. */
   workspacesConfirmed?: () => boolean;
   canAccess?: (target: CloudWorkspaceTarget) => boolean;
+  /** A running v2 worker needs no new ticket for each preparation of a send.
+   * Lifecycle progress or Stop must still take the ordinary explicit wake. */
+  canReuseForWork?: (target: CloudWorkspaceTarget) => boolean;
   manage?: (target: CloudWorkspaceTarget, op: string, params?: WireRecord) => Promise<WireRecord>;
   /** Authorized database reads that do not require a worker connection. The
    * mirror stores the worker's native rows, so they are scoped like its replies. */
@@ -696,7 +699,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     const existing = this.peers.get(key);
     const connected = existing && existing.identity === identity && !existing.retired && existing.client.status === "connected";
-    if (connected && !wake)
+    if (connected && (!wake || this.routing.canReuseForWork?.(target) === true))
       return Promise.resolve(existing);
     if (this.closed)
       return Promise.reject(new Error("Workspace connections are closed"));
