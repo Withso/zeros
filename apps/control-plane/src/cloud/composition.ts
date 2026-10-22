@@ -110,9 +110,12 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     logger: console,
   }) : null;
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
-  const builder = roles.lifecycle && repositoryToken ? new CloudV2ComputerBuilder({
+  const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, runtime,
-    cloneToken: async (organizationId, userId, repository) => (await repositoryToken(organizationId, userId, repository)).token,
+    cloneToken: async (organizationId, userId, repository) => {
+      if (!repositoryToken) throw new HttpError(409, "github_unavailable", "GitHub is not configured");
+      return (await repositoryToken(organizationId, userId, repository)).token;
+    },
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({

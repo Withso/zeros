@@ -153,4 +153,18 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(boat.delete).toHaveBeenCalledWith("bx_lost1");
     expect((await computers.enqueue(org, admin, recipe)).version).toBe(2);
   });
+
+  it("retains a replaced snapshot's identity until Boat confirms deletion, then retries", async () => {
+    const boat = compute();
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "fixture" });
+    const first = await computers.enqueue(org, admin, recipe); await builder.tick();
+    vi.mocked(boat.deleteSnapshot).mockRejectedValue(new Error("temporary failure"));
+    await computers.enqueue(org, admin, recipe); await builder.tick();
+    expect((await computers.overview(org)).builds.find(build => build.id === first.id)?.snapshotId)
+      .toBe(cloudV2SnapshotName("alpha", org, 1));
+    vi.mocked(boat.deleteSnapshot).mockResolvedValue(undefined);
+    await builder.cleanup();
+    expect((await computers.overview(org)).builds.find(build => build.id === first.id)?.snapshotId).toBeNull();
+    expect((await computers.overview(org)).snapshotName).toBe(cloudV2SnapshotName("alpha", org, 2));
+  });
 });

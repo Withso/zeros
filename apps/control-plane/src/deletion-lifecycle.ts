@@ -276,6 +276,11 @@ async function assertAccountCloudPurgeReady(tx: Tx, userId: string): Promise<voi
 async function assertOrganizationCloudPurgeReady(tx: Tx, organizationId: string): Promise<void> {
   const pending=await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE org_id=$1 AND state<>'deleted' LIMIT 1 FOR UPDATE",[organizationId]);
   if(pending.rowCount) throw new Error("organization_cloud_deletion_not_verified");
+  const computers=await tx.query(`SELECT 1 FROM cloud_v2_computer_builds WHERE org_id=$1 AND
+    (state IN ('queued','building') OR builder_create_pending OR operation_until IS NOT NULL
+     OR (builder_sandbox_id IS NOT NULL AND builder_deleted_at IS NULL)
+     OR snapshot_id IS NOT NULL OR snapshot_deleted_at IS NULL) LIMIT 1 FOR UPDATE`,[organizationId]);
+  if(computers.rowCount) throw new Error("organization_cloud_computer_deletion_not_verified");
 }
 
 async function insertDeletionRequest(
