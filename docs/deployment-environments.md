@@ -553,12 +553,12 @@ Exercise this procedure in Alpha and Beta before Production. For each channel:
 3. In a database-owner shell inside that exact reviewed image, run only the
    compiled strict migrator. Scope the approval to this one process; never save
    it on the Railway web service. A database beginning before `0009` and
-   advancing through this migration artifact requires all ten controlled
+   advancing through this migration artifact requires all 21 controlled
    boundaries:
 
    ```bash
    NODE_ENV=production \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql,0101_cloud_workspace_pro_entitlements.sql,0103_cloud_workspace_pro_sharing.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql,0101_cloud_workspace_pro_entitlements.sql,0103_cloud_workspace_pro_sharing.sql,0182_retire_legacy_cloud.sql,0191_retire_legacy_cloud_02.sql,0192_retire_legacy_cloud_03.sql,0193_retire_legacy_cloud_04.sql,0194_retire_legacy_cloud_05.sql,0195_retire_legacy_cloud_06.sql,0196_retire_legacy_cloud_07.sql,0197_retire_legacy_cloud_08.sql,0198_retire_legacy_cloud_09.sql,0199_retire_legacy_cloud_10.sql,0200_retire_legacy_cloud_11.sql \
    node dist/migrate.js
    ```
 
@@ -1108,6 +1108,32 @@ An approval variable cannot bypass that date. The hosted migration plan treats
 contracts like controlled boundaries and refuses them even after their date;
 the strict operator migrator is the separate authority. Legacy controlled
 downtime approvals remain unchanged and are not a zero-downtime escape hatch.
+
+Cloud v1 retirement is one controlled cutover across eleven contract files:
+`0182_retire_legacy_cloud.sql` and `0191_retire_legacy_cloud_02.sql` through
+`0200_retire_legacy_cloud_11.sql`. The owner approved that retirement; every
+batch retains the `2026-10-21` not-before date. 0182 preserves vault metadata
+and removes retained-table hooks before the first drops. Follow-up batches
+come after 0190 so existing migration numbers do not move. Their small
+transactions target fewer than 1,000 backend locks; the ladder test measures
+`pg_locks` before each contract commit and fails above 1,500. Never combine
+the batches into one transaction: PostgreSQL holds dependency locks until
+commit, even when the dropped objects no longer exist.
+
+For a database already at 0181, the one-shot approval is:
+
+```bash
+CONTROL_PLANE_MIGRATION_APPROVALS=0182_retire_legacy_cloud.sql,0191_retire_legacy_cloud_02.sql,0192_retire_legacy_cloud_03.sql,0193_retire_legacy_cloud_04.sql,0194_retire_legacy_cloud_05.sql,0195_retire_legacy_cloud_06.sql,0196_retire_legacy_cloud_07.sql,0197_retire_legacy_cloud_08.sql,0198_retire_legacy_cloud_09.sql,0199_retire_legacy_cloud_10.sql,0200_retire_legacy_cloud_11.sql \
+NODE_ENV=production node dist/migrate.js
+```
+
+For `controlled-cutover.yml`, pass that comma-separated filename list as
+`approvals`. Reconcile the ledger after an interruption and approve only the
+remaining controlled filenames. Keep old writers stopped and maintenance
+enabled until the final batch and schema verification succeed; automatic
+service boot cannot approve or defer these contracts. Restore the paired
+backup for a v1 rollback, rather than attempting to run the old binary on a
+partially or fully retired schema.
 
 The first rollout needs a compatible bridge: binaries released before this
 phase-aware verifier still reject every unknown row. Deploy/rehearse the
