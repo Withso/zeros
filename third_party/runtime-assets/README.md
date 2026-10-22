@@ -1,10 +1,13 @@
 # Runtime Git LFS and Design font provenance
 
-These notices, the public archive key and `lock.json` accompany the Linux x64
-runtime's Git LFS and eight Design font packages. They do not install software
-on the base or Computer guest. `runtime-bundle/system-assets.ts` acquires and
-extracts the pinned archives on the bundle build host, then the normal immutable
-runtime inventory covers their selected contents.
+These notices, the public archive key and `lock.json` accompany the Git LFS
+and eight Design font packages shipped in the retired v1 Linux x64 cloud
+runtime. They do not install software on any machine. The v1 bundle builder
+and its public asset mirror were removed with that runtime; the pins, notices
+and retained sources stay so that archived runtime artifacts keep complete
+notices and `pnpm check:licenses` keeps verifying them. The cloud v2 worker
+runtime does not acquire these archives; a future runtime that ships them must
+add its own acquisition path that follows the rules below.
 
 The eight font pins come from Ubuntu noble's release pocket, signed on
 2024-04-25. Git LFS 3.7.1-1 comes from Ubuntu resolute's release pocket,
@@ -74,18 +77,10 @@ To update a pin:
    and the offline native asset tests. Build and verify a clean runtime archive
    on a host with GnuPG, dpkg-deb and the other documented build prerequisites.
    Qualify actual LFS and sandboxed Design capture before base/runtime promotion.
-5. After any lock edit, run
-   `node scripts/cloud-workspace-validation/runtime-bundle/mirror-assets.mjs`
-   from the repository root. Set `mirror` to the newly computed URL in that
-   offline plan, then run the same command with `--apply` using your `gh`
-   identity. Publish the new mirror before merging/building; retain old releases.
-
-The public, content-addressed mirror includes every build download and all
-retained GPL/MPL source/build archives. It needs no build credentials. Mirror
-bytes must pass the same pinned size/hash checks and signed metadata chain as
-canonical archive bytes. See the [mirror process](../../scripts/cloud-workspace-validation/runtime-bundle/README.md#verified-public-asset-mirror)
-for canonical lock hashing, prerelease publication, idempotent verification and
-fallback behavior.
+5. Retain previously published mirror releases; archived runtime artifacts
+   reference them. The mirror publication command was retired with the v1
+   runtime builder, so a pin refresh that needs a new mirror must restore an
+   equivalent verified, content-addressed publication step first.
 
 `pnpm check:licenses` validates the vendored notice/source hashes and exact
 Built-Using notice coverage. No permission is inferred from a download URL; the

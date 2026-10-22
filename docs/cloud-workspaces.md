@@ -28,6 +28,11 @@ renderer translates native checkout paths and IDs into scoped `cloud://`
 identities. A worker `workspace.list` row uses native paths and the workspace
 UUID, not the HTTP workspace document shape.
 
+Relay routing is held in memory: a worker socket and every app socket for its
+workspace must reach the same control-plane process. Run the realtime role as
+exactly one replica. Scaling it out first needs workspace affinity or a shared
+routing layer; the API and lifecycle roles scale independently.
+
 On create and wake, the control plane installs its selected runtime tarball
 from object storage, verifies its SHA-256 and caches it under
 `/opt/zeros/runtime/<sha256>`. `/opt/zeros/worker` points to that directory.

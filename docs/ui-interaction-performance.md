@@ -117,61 +117,16 @@ If it shared a read that retired after that cleanup, it retries once after the
 read releases its identity. This recovery must not start an agent, wake a VM,
 poll on ordinary failures, or reactivate a hidden surface.
 
-Cloud presentation readiness is separate from authoritative transcript
-hydration. An eligible account/org/workspace/chat cache window (at most 200
-messages and 512 KiB) can paint while the session remains `loading`; it suppresses
-Loading, but cannot authorize a send, queue drain or completion. Connected peers
-with no message snapshot still use the parallel cache read. A parked cloud
-hydrate also reads disk before its bridge is available. Cache misses,
-eviction, denial and known incomplete/null/deleted heads remain truthful. Reads
-carry their own verified head and CP/native source through the final await;
-the currently connected peer is not proof of an earlier page's provenance.
-Provisional rows do not mount native turn metadata reads or offer edit, reset,
-fork, permission or retry actions. Their bounded cached window mounts rich
-turns around the visible tail or saved reading anchor first, then on viewport
-approach. All checkpoint anchors remain available for scroll-back; revealed
-turns stay mounted within that existing window. Hidden surfaces suspend the
-observer. Authoritative and Local turns retain their normal rendering, and
-unchanged validation preserves visible message nodes and collection references.
+Cloud v2 workspaces keep no renderer transcript cache. A running workspace's
+worker and a stopped workspace's control-plane history mirror both answer with
+authoritative pages, so cloud chats never paint provisional presentation rows.
+The v1 native cloud cache, its immutable-head provenance rules and its paint
+smoke were retired with the v1 runtime.
 
-The acceptance target for an eligible 200-row window is a visible paint under
-100 ms during start or resume, measured on the minified production build. The
-development-mode UI smoke (`scripts/ui-smoke-cloud-transcript-paint.mjs`) is a
-regression guard with a looser bound, because development React is not the
-shipped build.
-
-A new authenticated boot may retain presentation only when the complete
-immutable manifest, source, coverage, conversation and funding identity match.
-Disk alone cannot prove a successor. Binding changes still retire read and
-confirmation tokens and rotate the durable history nonce; old writes cannot
-restore retired bytes. Projection revisions are not compared across bindings.
-Verified native tail reads also persist their bounded, scrubbed presentation
-through the same native cache. Their `nativeObservation` marker records that
-origin without inventing a CP revision, epoch or complete manifest. An incomplete
-but nondeleted head can retain those rows only on its identical writer, boot,
-funding identity and immutable head. Native observations cannot continue across
-a successor binding, even if its CP manifest matches: live rows may exceed that
-manifest. The original read receipt is checked again after cache I/O; a later
-connected peer cannot supply its provenance. Older CP/disk responses cannot
-overwrite a native observation under the same head.
-
-Changed source/edit/delete/incomplete heads invalidate incompatible rows before
-paint. An identical incomplete CP observation keeps eligible native cache rows
-provisional; it does not mark the session resident or permit Send or mutations.
-A fast incomplete response gives the already-started disk read the same bounded
-250 ms opportunity as a transient failure, then rechecks retained memory after
-any head installation. It starts no provider call or poll. Unchanged validation
-keeps message references, including when native and disk JSON fields enumerate
-in a different order. Local Personal and
-organization-local hydration remain authoritative. Closed cache outcomes/head
-facts and visible-paint/loading durations enter cloud diagnostics without
-content, hashes or durable owner/conversation identifiers.
-
-Local presentation readiness follows the same rule without the cloud fences.
-Local Personal and organization-local chats keep their last confirmed window
-in a bounded Local transcript cache: the exact message objects of chats that
-left the retained deck (memory, at most 16 chats and about 16 MiB) and an
-IndexedDB copy in the purgeable Chromium profile (at most 96 chats and 40 MiB;
+Local presentation readiness: Local Personal and organization-local chats keep
+their last confirmed window in a bounded Local transcript cache: the exact
+message objects of chats that left the retained deck (memory, at most 16 chats
+and about 16 MiB) and an IndexedDB copy in the purgeable Chromium profile (at most 96 chats and 40 MiB;
 200 rows and 768 KiB per chat, least recently read first out). A cold Local
 chat paints that window as provisional `transcriptPresentation` in its first
 visible frame: ChatView publishes a memory copy from a layout effect, the

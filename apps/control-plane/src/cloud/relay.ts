@@ -4,7 +4,7 @@
 // connection's clientId, and worker frames return the same way.
 //
 // Routing is in memory, so it needs the single realtime replica that
-// docs/cloud-workspace/realtime.md already requires.
+// docs/cloud-workspaces.md requires.
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { randomUUID } from "node:crypto";
