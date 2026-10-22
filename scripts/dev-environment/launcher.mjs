@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { createInterface } from "node:readline/promises";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { ensureWorkspace, acquireWorkspaceLock, systemEnvironment, privateDirectory, writePrivateFile, saveWorkspace } from "./state.mjs";
@@ -13,6 +14,7 @@ import { ensureWorkosWebhook, deleteWorkosWebhook } from "./workos.mjs";
 import { startPostgres, pickServicePorts, migratePostgres, databaseCommand } from "./postgres.mjs";
 import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
+import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const action = process.argv[2] ?? "start";
@@ -25,6 +27,35 @@ async function verifyAlpha(profile) {
       auth.env.AUTH_ISSUER !== `https://api.workos.com/user_management/${profile.workos.webClientId}`) {
     throw new Error("The explicitly shared Alpha identity no longer matches Alpha's published auth contract; refresh the private profile");
   }
+}
+
+/** Seeds this instance's test organization once; a missing sign-in is guidance,
+ * not a failure, so the stack stays up for the user to sign in. */
+async function seedCloud(workspace, profile, ports) {
+  const { seedLocalEnvironment } = await import("./local-seed.mjs");
+  const result = await seedLocalEnvironment(workspace, profile, ports, root);
+  recordCloudSeed(workspace.state, result); saveWorkspace(workspace);
+  console.log(`[zeros-dev] ${cloudSeedMessage(result)}`);
+  return result;
+}
+
+async function seedRunning(workspace, profile) {
+  const receipt = workspace.state.launcher, ports = workspace.state.ports;
+  if (!receipt || !Number.isInteger(ports?.api)) throw new Error("Start the stack with pnpm cloud:local first, then run --seed");
+  await waitForHttp(`http://127.0.0.1:${ports.api}/healthz`, { timeout: 10_000,
+    accept: async response => response.ok && (await response.json()).development?.owner === workspace.state.owner });
+  await seedCloud(workspace, profile, ports);
+}
+
+/** Reset deletes this checkout's cloud VMs, snapshots and local data. */
+async function confirmReset(workspace) {
+  if (process.argv.includes("--yes")) return;
+  if (!process.stdin.isTTY) throw new Error("Reset deletes this checkout's cloud workspaces and data; pass --yes to confirm without a prompt");
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await prompt.question(`[zeros-dev] Reset deletes this checkout's cloud workspaces, snapshots and local data. Type ${workspace.state.owner} to continue: `);
+    if (answer.trim() !== workspace.state.owner) throw new Error("Reset cancelled; nothing was deleted");
+  } finally { prompt.close(); }
 }
 
 async function stop(workspace) {
@@ -43,7 +74,7 @@ async function stop(workspace) {
 }
 
 async function start(workspace, profile) {
-  if (workspace.state.status !== "active") throw new Error("This development workspace is archived or awaiting cleanup; finish pnpm dev:archive before restoring it");
+  if (workspace.state.status !== "active") throw new Error("This development workspace is archived or awaiting cleanup; finish pnpm cloud:local --reset before restarting it");
   const issues = profileIssues(profile, { cloud: Boolean(profile.cloud) });
   if (issues.length) throw new Error(issues.join("\n"));
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();
@@ -89,7 +120,7 @@ async function start(workspace, profile) {
       const health = await response.json();
       return health.development?.owner === workspace.state.owner && health.development?.runId === runId;
     };
-    await waitForHttp(`http://127.0.0.1:${ports.api}/healthz`, { signal, accept: healthy });
+    await waitForHttp(`http://127.0.0.1:${ports.api}/healthz`, { signal, accept: healthy, label: "Control plane on loopback" });
     // A private working directory prevents Wrangler loading a checkout's
     // .dev.vars or .env and silently mixing its hosted configuration into Dev.
     const webRoot = privateDirectory(workspace.directory, "web");
@@ -105,12 +136,17 @@ async function start(workspace, profile) {
       "--persist-to", privateDirectory(webRoot, "state"), "--log-level", "error",
       ...Object.entries(webEnvironment(workspace, profile, ports.api)).flatMap(([key, value]) => ["--binding", `${key}=${value}`]),
     ], { cwd: webRoot, env: { ...env, WRANGLER_SEND_METRICS: "false" } });
-    await waitForHttp(`http://127.0.0.1:${ports.web}/`, { signal });
+    await waitForHttp(`http://127.0.0.1:${ports.web}/`, { signal, label: "Auth web facade" });
     processes.start("Cloudflare connector", "cloudflared", ["tunnel", "--no-autoupdate", "--metrics", `127.0.0.1:${ports.tunnelMetrics}`,
       "run", "--token-file", tunnel.tokenFile], { cwd: root, env });
     const publicProfile = publicDevProfile(workspace, profile);
-    await waitForHttp(`${publicProfile.apiOrigin}/healthz`, { signal, timeout: 120_000, accept: healthy });
+    await waitForHttp(`${publicProfile.apiOrigin}/healthz`, { signal, timeout: 120_000, accept: healthy, label: "Control plane through the tunnel" });
     await waitForDevSignIn(publicProfile, { signal, timeout: 120_000 });
+    // A missing fixture input is guidance, not a reason to tear the stack down:
+    // fix it, then run pnpm cloud:local --seed against this running stack.
+    if (cloudSeedNeeded(workspace.state)) await seedCloud(workspace, profile, ports).catch(error =>
+      console.log(`[zeros-dev] Cloud test organization not seeded: ${error.message}. Fix it, then run pnpm cloud:local --seed`));
+    signal.throwIfAborted();
     console.log(`[zeros-dev] Ready: ${publicProfile.apiOrigin}`);
     console.log(`[zeros-dev] Identity: ${publicProfile.authEnvironment}; cloud v2 worker runtime ${apiEnv.CLOUD_V2_RUNTIME_SHA256.slice(0, 12)}. Data persists after shutdown.`);
     if (action !== "backend") {
@@ -138,10 +174,11 @@ async function main() {
     await run(process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"], { cwd: root, env, inherit: true, timeout: 12 * 3600_000 });
     return;
   }
-  if (!["start", "backend", "doctor", "stop", "archive"].includes(action)) throw new Error("Use start, backend, doctor, stop, archive or alpha");
+  if (!["start", "backend", "doctor", "stop", "seed", "archive"].includes(action)) throw new Error("Use start, backend, doctor, stop, seed, archive or alpha");
   const workspace = ensureWorkspace({ repositoryRoot: root });
   if (action === "stop") return stop(workspace);
   const profile = loadProfile(undefined, { root });
+  if (action === "seed") return seedRunning(workspace, profile);
   if (action === "doctor") {
     console.log(JSON.stringify({ owner: workspace.state.owner, status: workspace.state.status,
       tunnelProvisioned: Boolean(workspace.state.tunnel.id), identity: profile.workos?.environment ?? "dev",
@@ -151,6 +188,7 @@ async function main() {
     return;
   }
   if (action === "archive") {
+    if (workspace.state.status !== "archived") await confirmReset(workspace);
     await stop(workspace);
     // Re-read after supervisor shutdown so its final receipt cannot be lost.
     const current = ensureWorkspace({ repositoryRoot: root }), release = acquireWorkspaceLock(current);
@@ -158,9 +196,18 @@ async function main() {
     try {
       if (current.state.status === "archived") return;
       current.state.status = "archiving"; saveWorkspace(current);
+      // Cleanup runs this checkout's own migrator, which also records the local
+      // owner marker on an older instance before drain verifies it.
+      await run("pnpm", ["--dir", "apps/control-plane", "build"], { cwd: root, env: systemEnvironment(), timeout: 180_000, label: "Control-plane build" });
       const ports = await pickServicePorts(); postgres = await startPostgres(current, profile, ports, root);
+      await migratePostgres(current, profile, ports, root);
       const inventory = await databaseCommand(current, ports, root, "inventory");
-      if (inventory.remainingWorkspaces) throw new Error("Owned cloud workspaces remain. Their database and tunnel were preserved; delete them in Zeros Dev before completing archive cleanup.");
+      if (inventory.remainingWorkspaces) console.log(`[zeros-dev] Deleting ${inventory.remainingWorkspaces} cloud workspace(s) with this checkout's VMs, builders and snapshots`);
+      // Drain deletes only this instance's provider resources and confirms each
+      // is gone. Anything uncertain keeps the database, keys and tunnel.
+      const drain = await databaseCommand(current, ports, root, "drain", { backendStopped: true, boat: profile.boat });
+      if (drain?.complete !== true || drain.pending !== 0)
+        throw new Error(`Cloud cleanup is not complete (${drain?.pending ?? "unknown"} pending); data, keys and tunnel were kept. Rerun pnpm cloud:local --reset.`);
       await deleteWorkosWebhook(current, profile); await deleteTunnel(current, profile.cloudflare);
       await postgres.stop(); postgres = undefined;
       for (const name of ["postgres", "desktop", "web", "objects", "backups"]) {
@@ -171,7 +218,7 @@ async function main() {
         }
       }
       current.state.status = "archived"; saveWorkspace(current);
-      console.log("[zeros-dev] Development data, owned webhook, DNS and tunnel removed; receipt retained.");
+      console.log("[zeros-dev] Cloud resources, development data, owned webhook, DNS and tunnel removed; receipt retained.");
     } finally { if (postgres) await postgres.stop(); release(); }
     return;
   }

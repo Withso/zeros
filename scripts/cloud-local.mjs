@@ -7,7 +7,9 @@
 //
 //   pnpm cloud:local --runtime <sha256>   start everything and open the app
 //   pnpm cloud:local --headless           backend only, for agents and gate0
-//   pnpm cloud:local --stop | --doctor | --reset
+//   pnpm cloud:local --seed               seed a running stack's test organization
+//   pnpm cloud:local --stop | --doctor
+//   pnpm cloud:local --reset [--yes]      delete this checkout's VMs and data
 //
 // The runtime is a worker build published with cloud-v2:publish-runtime; it
 // may also come from ZEROS_CLOUD_V2_RUNTIME_SHA256.
@@ -15,7 +17,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MODES = { "--headless": "backend", "--stop": "stop", "--doctor": "doctor", "--reset": "archive" };
+const MODES = { "--headless": "backend", "--stop": "stop", "--doctor": "doctor", "--seed": "seed", "--reset": "archive" };
 const SHA256 = /^[0-9a-f]{64}$/;
 
 /** Pure flag parsing; `defaultRuntime` is for tests and callers that pin one. */
@@ -34,6 +36,7 @@ export function cloudLocalCommand(argv, env = process.env, defaultRuntime = unde
       continue;
     }
     if (arg === "--run-only") { args.push(arg); continue; }
+    if (arg === "--yes" && action === "archive") { args.push(arg); continue; }
     throw new Error(`Unknown cloud:local option ${arg}`);
   }
   if (!["start", "backend"].includes(action)) return { action, args, runtime: undefined };

@@ -88,7 +88,7 @@ export async function withDevPortRetry(launch, { attempts = 3, signal } = {}) {
   }
 }
 
-export async function waitForHttp(url, { signal, timeout = 60_000, headers = {}, accept = response => response.ok } = {}) {
+export async function waitForHttp(url, { signal, timeout = 60_000, headers = {}, accept = response => response.ok, label = "Development service" } = {}) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     signal?.throwIfAborted();
@@ -100,11 +100,11 @@ export async function waitForHttp(url, { signal, timeout = 60_000, headers = {},
     } catch { signal?.throwIfAborted(); }
     await delay(250, undefined, { signal });
   }
-  throw new Error("Development service did not become ready before the deadline");
+  throw new Error(`${label} did not become ready before the deadline`);
 }
 
 export function waitForDevSignIn(profile, options = {}) {
-  return waitForHttp(`${profile.appOrigin}/auth/start`, { ...options, accept: response => {
+  return waitForHttp(`${profile.appOrigin}/auth/start`, { label: "Desktop sign-in through the tunnel", ...options, accept: response => {
     if (response.status !== 303) return false;
     const redirect = new URL(response.headers.get("location") ?? "");
     return redirect.origin === "https://api.workos.com" && redirect.searchParams.get("client_id") === profile.webClientId &&

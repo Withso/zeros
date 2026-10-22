@@ -12,6 +12,8 @@ describe("pnpm cloud:local", () => {
     expect(cloudLocalCommand(["--stop"], {})).toEqual({ action: "stop", args: [], runtime: undefined });
     expect(cloudLocalCommand(["--doctor"], {})).toEqual({ action: "doctor", args: [], runtime: undefined });
     expect(cloudLocalCommand(["--reset"], {})).toEqual({ action: "archive", args: [], runtime: undefined });
+    expect(cloudLocalCommand(["--reset", "--yes"], {})).toEqual({ action: "archive", args: ["--yes"], runtime: undefined });
+    expect(cloudLocalCommand(["--seed"], {})).toEqual({ action: "seed", args: [], runtime: undefined });
   });
 
   it("refuses a start without a published runtime, unknown flags and conflicting modes", () => {
@@ -20,6 +22,8 @@ describe("pnpm cloud:local", () => {
     expect(() => cloudLocalCommand(["--runtime"], {})).toThrow(/runtime/);
     expect(() => cloudLocalCommand(["--watch"], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toThrow(/--watch/);
     expect(() => cloudLocalCommand(["--stop", "--reset"], {})).toThrow(/one of/);
+    // Only a reset accepts --yes.
+    expect(() => cloudLocalCommand(["--yes"], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toThrow(/--yes/);
     expect(() => cloudLocalCommand(["--headless", "--stop"], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toThrow(/one of/);
   });
 });
