@@ -15,11 +15,20 @@ export function createGate0TransportProbe(options: {
 }): (workspace: Gate0TransportWorkspace) => Promise<void> {
   return async workspace => {
     if (!workspace.boatSandboxId) throw new Gate0Failure("worker_sandbox_identity");
+    // Boat's in-VM port agent forwards the protected route from the VM's own
+    // interface addresses, so the check is the worker's own sockets: exactly
+    // one, on loopback. Nothing may hold the port's wildcard address.
     let binding;
-    try { binding = await options.compute.exec(workspace.boatSandboxId, `ss -H -ltn 'sport = :${CLOUD_V2_WORKER_PORT}'`, 10); }
-    catch { throw new Gate0Failure("worker_loopback"); }
-    const addresses = binding.stdout.trim().split("\n").filter(Boolean).map(line => line.trim().split(/\s+/)[3]);
-    if (binding.exitCode !== 0 || binding.timedOut || addresses.length !== 1 || addresses[0] !== `127.0.0.1:${CLOUD_V2_WORKER_PORT}`)
+    try {
+      binding = await options.compute.exec(workspace.boatSandboxId,
+        `echo "worker-pid=$(systemctl show -p MainPID --value zeros-worker.service)"; sudo -n ss -H -ltnp 'sport = :${CLOUD_V2_WORKER_PORT}'`, 10);
+    } catch { throw new Gate0Failure("worker_loopback"); }
+    const [first = "", ...rows] = binding.stdout.trim().split("\n").filter(Boolean);
+    const pid = /^worker-pid=([1-9]\d*)$/.exec(first.trim())?.[1];
+    const listeners = rows.map(line => ({ line, address: line.trim().split(/\s+/)[3] ?? "" }));
+    const own = pid ? listeners.filter(row => row.line.includes(`pid=${pid},`)) : [];
+    const wildcard = listeners.some(row => /^(0\.0\.0\.0|\*|\[::\])(%[^:\]]+)?:/.test(row.address));
+    if (binding.exitCode !== 0 || binding.timedOut || wildcard || own.length !== 1 || own[0]!.address !== `127.0.0.1:${CLOUD_V2_WORKER_PORT}`)
       throw new Gate0Failure("worker_loopback");
     let route;
     try { route = await options.compute.hostPort(workspace.boatSandboxId, { port: CLOUD_V2_WORKER_PORT, localhost: true, title: "Zeros worker" }); }
