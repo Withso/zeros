@@ -15,6 +15,7 @@ import { startPostgres, pickServicePorts, migratePostgres, databaseCommand } fro
 import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
+import { createDesktopSignIn } from "./desktop-sign-in.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const action = process.argv[2] ?? "start";
@@ -63,7 +64,7 @@ async function stop(workspace) {
   if (!receipt) return;
   try {
     const response = await fetch(`http://127.0.0.1:${receipt.port}/stop`, { method: "POST", redirect: "error",
-      headers: { authorization: `Bearer ${receipt.token}` }, signal: AbortSignal.timeout(5000) });
+      headers: { authorization: `Bearer ${receipt.token}` }, signal: globalThis.AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error();
   } catch { throw new Error("The Dev supervisor is unavailable; existing state was preserved. Inspect pnpm dev:doctor before recovering its processes."); }
   const deadline = Date.now() + 45_000;
@@ -79,12 +80,13 @@ async function start(workspace, profile) {
   if (issues.length) throw new Error(issues.join("\n"));
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();
   const env = systemEnvironment(), runId = randomUUID(), token = randomUUID();
-  let postgres, server;
+  let postgres, server, desktopSignIn;
   const abort = () => processes.controller.abort(new Error("Development shutdown requested"));
   for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, abort);
   const signal = processes.controller.signal;
   try {
-    server = createServer((request, response) => {
+    server = createServer(async (request, response) => {
+      if (desktopSignIn && await desktopSignIn.handle(request, response)) return;
       const actual = Buffer.from(request.headers.authorization ?? ""), expected = Buffer.from(`Bearer ${token}`);
       if (request.method !== "POST" || request.url !== "/stop" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
         response.writeHead(404).end(); return;
@@ -152,12 +154,15 @@ async function start(workspace, profile) {
     if (action !== "backend") {
       const desktopEnv = { ...env, ...desktopEnvironment(workspace, profile) };
       await run("pnpm", ["electron:dev:prep"], { cwd: root, env: desktopEnv, signal, inherit: true, timeout: 300_000, label: "Desktop build" });
-      processes.start("Zeros Dev", process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"], { cwd: root, env: desktopEnv, stdio: "inherit" });
+      desktopSignIn = createDesktopSignIn(workspace, profile, { port: server.address().port, runId, root });
+      processes.start("Zeros Dev", process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"],
+        { cwd: root, env: { ...desktopEnv, ...desktopSignIn.environment }, stdio: "inherit" });
     }
     if (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
     if (signal.reason?.message !== "Development shutdown requested") throw signal.reason;
   } finally {
     await processes.stop();
+    await desktopSignIn?.close().catch(() => console.warn("[zeros-dev] An unused automatic sign-in session could not be revoked; private handoff files were removed"));
     if (postgres) await postgres.stop();
     if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
     delete workspace.state.launcher; saveWorkspace(workspace); release();
@@ -210,7 +215,7 @@ async function main() {
         throw new Error(`Cloud cleanup is not complete (${drain?.pending ?? "unknown"} pending); data, keys and tunnel were kept. Rerun pnpm electron:cloud --reset.`);
       await deleteWorkosWebhook(current, profile); await deleteTunnel(current, profile.cloudflare);
       await postgres.stop(); postgres = undefined;
-      for (const name of ["postgres", "desktop", "web", "objects", "backups"]) {
+      for (const name of ["postgres", "desktop", "desktop-sign-in", "web", "objects", "backups"]) {
         const directory = path.join(current.directory, name);
         if (fs.existsSync(directory)) {
           if (fs.lstatSync(directory).isSymbolicLink()) throw new Error("Refusing a linked development cleanup target");

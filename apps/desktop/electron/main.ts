@@ -1251,6 +1251,14 @@ function setupDockBrand(): void {
 
 app.whenReady().then(async () => {
   app.once("will-quit", startProcessMetricsLogging());
+  if (!IS_PACKAGED && !IS_LOCAL_DEVELOPMENT && process.env.ZEROS_CLOUD_DESKTOP_HANDOFF) {
+    try {
+      const { signInCloudDesktop } = await import("./cloud-desktop-sign-in");
+      await signInCloudDesktop();
+    } catch {
+      console.warn("[auth] Automatic cloud development sign-in unavailable; the saved session was preserved. Sign in manually or check the private fixture settings.");
+    }
+  }
   if (IS_LOCAL_DEVELOPMENT && process.env.ZEROS_SHARED_SECRETS_DIR) {
     try {
       migrateLocalProviderSecrets(app.getPath("userData"));

@@ -221,5 +221,14 @@ describe("Dev session sharing across independent processes", () => {
       accessToken: "fixture-rotated-access",
     });
     expect(rotations).toBe(1);
+    // electron:cloud uses one persistent, isolated userData directory per
+    // checkout. A fresh main process must retain its session without borrowing
+    // the channel-shared Dev session or asking WorkOS to sign in again.
+    await command(isolated, "install", { ...session, accountId: "00000000-0000-4000-8000-000000000002" });
+    const isolatedExit = once(isolated, "exit"); isolated.kill(); await isolatedExit;
+    const isolatedRestart = await start("isolated", false);
+    expect(await command(isolatedRestart, "read")).toMatchObject({ accountId: "00000000-0000-4000-8000-000000000002", accessToken: session.accessToken });
+    expect(await command(restarted, "read")).toMatchObject({ accountId: session.accountId });
+    expect(rotations).toBe(1);
   });
 });

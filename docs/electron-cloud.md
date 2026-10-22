@@ -89,6 +89,16 @@ Alpha's database is never changed. Without
 `ZEROS_DEV_PASSWORD`, sign in to the app first and then run `--seed`. A missing
 input is reported without stopping the stack.
 
+The desktop session persists in this instance's `environments/<owner>/desktop`
+directory under `~/.zeros-dev`; the `dev-instances/local-<owner>` directory holds
+the app bundle. With `ZEROS_DEV_PASSWORD`, the launcher signs the fixture user
+into the desktop automatically if there is no saved session. It uses the Alpha
+Desktop client and the fixture organization, verifies the token in Electron
+main, and consumes a private 0600 handoff before opening the window. Passwords
+and API keys stay in the launcher; tokens never enter argv or environment.
+An existing session is reused, and an unavailable or different saved account
+is preserved. This path is inert in packaged builds and `electron:local`.
+
 Agents run `--headless`, then gate0 against this checkout's tunnel:
 
 ```sh
