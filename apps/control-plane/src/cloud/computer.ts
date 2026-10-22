@@ -21,7 +21,7 @@ export const CloudV2RecipeSchema = z.object({
     /** Branch or tag to clone; a rebuild pins `commit` instead. */
     ref: z.string().min(1).max(255).optional(),
     commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
-    /** Branch observed immediately after cloning, before a pinned rebuild detaches HEAD. */
+    /** Verified remote branch observed after cloning, or origin's default for a tag. */
     branch: z.string().min(1).max(255).optional(),
     /** Non-interactive bash run in the checkout as the workspace user, e.g. "pnpm install". */
     setup: z.string().max(8_000).optional(),
@@ -380,6 +380,13 @@ export class CloudV2ComputerBuilder {
         `git -c ${shellQuote(`http.extraHeader=Authorization: Basic ${auth}`)} clone ${entry.ref ? `--branch ${shellQuote(entry.ref)} ` : ""}` +
           `${shellQuote(`https://github.com/${entry.repository}.git`)} ${shellQuote(dir)}`,
         `zeros_build_branch=$(git -C ${shellQuote(dir)} symbolic-ref --quiet --short HEAD || true)`,
+        // A tag clone detaches HEAD. origin/HEAD still names the repository's
+        // default branch; verify its remote ref before recording that fallback.
+        `if [ -z "$zeros_build_branch" ]; then`,
+        `  zeros_build_remote=$(git -C ${shellQuote(dir)} symbolic-ref --quiet refs/remotes/origin/HEAD || true)`,
+        '  case "$zeros_build_remote" in refs/remotes/origin/*) zeros_build_branch=${zeros_build_remote#refs/remotes/origin/};; esac',
+        "fi",
+        `if [ -n "$zeros_build_branch" ] && ! git -C ${shellQuote(dir)} rev-parse --verify --quiet "refs/remotes/origin/$zeros_build_branch^{commit}" >/dev/null; then zeros_build_branch=; fi`,
         ...(entry.commit ? [`git -C ${shellQuote(dir)} checkout --detach ${shellQuote(entry.commit)}`] : []),
         `printf '\\nzeros-build-branch=%s\\n' "$zeros_build_branch"`,
         `git -C ${shellQuote(dir)} rev-parse HEAD`,

@@ -334,8 +334,9 @@ export class CloudV2Store {
     if (!rows[0]) return null;
     return (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
       repository: entry.repository,
-      defaultBranch: typeof entry.ref === "string" && entry.ref ? entry.ref
-        : typeof entry.branch === "string" && entry.branch ? entry.branch : null,
+      // A recipe ref can be a tag. Only the build's verified branch is a
+      // supported source for the worker's origin/<baseBranch> checkout.
+      defaultBranch: typeof entry.branch === "string" && entry.branch ? entry.branch : null,
     }] : []);
   }
 

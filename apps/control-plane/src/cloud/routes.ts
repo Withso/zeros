@@ -67,12 +67,14 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const repository = installed.find(repo => repo.repository.toLowerCase() === input.repository.toLowerCase());
     if (!repository)
       throw new HttpError(409, "repository_not_installed", "Add this repository to the Cloud Computer first");
+    const baseBranch = input.baseBranch ?? repository.defaultBranch;
+    if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
     const id = randomUUID();
     const name = input.name ?? input.repository.split("/")[1]!;
     const create = {
       id, organizationId: input.organizationId, creatorUserId: c.get("user").id, name,
       repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
-      baseBranch: input.baseBranch ?? repository.defaultBranch ?? "main", computerBuildId: null,
+      baseBranch, computerBuildId: null,
     };
     if (key) {
       const receipt = await deps.store.createWorkspaceOnce(create, key, hash, workspace => ({ workspace: document(workspace) }));
