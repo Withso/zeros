@@ -22,9 +22,13 @@ async function assertLocalStaffTarget(migration, request) {
   if (!target || !["postgres:", "postgresql:"].includes(target.protocol) || target.hostname !== "127.0.0.1")
     throw new Error("The local staff seed requires a loopback database");
   await assertLocalDatabaseOwner(migration, request);
-  const { rows } = await migration.query("SELECT current_database() AS database,host(inet_server_addr()) AS address,inet_server_port() AS port");
-  if (rows[0]?.database !== decodeURIComponent(target.pathname.slice(1)) || rows[0]?.address !== "127.0.0.1" ||
-      rows[0]?.port !== Number(target.port || 5432)) throw new Error("The local staff seed database does not match its target");
+  // inet_server_addr/port describe PostgreSQL's network namespace, not the
+  // client's loopback destination (e.g. a Docker published port). They cannot
+  // prove ownership. The launcher pins both URLs before opening either pool;
+  // the database name and mandatory owner/instance markers bind the connection.
+  const { rows } = await migration.query("SELECT current_database() AS database");
+  if (rows[0]?.database !== decodeURIComponent(target.pathname.slice(1)))
+    throw new Error("The local staff seed database does not match its target");
 }
 
 async function grantLocalStaff(migration, request, userId, organizationId, staff) {

@@ -53,7 +53,12 @@ database("electron:cloud seed and confirmed resource drain", () => {
   function seedRequest() {
     const fixture = bindFixture({}, { workosUserId: "user_localfixture", workosOrganizationId: "org_localfixture",
       expectedEmail: "local-fixture@example.test", expectedOrganizationSlug: "local-fixture", computeAllowance: "pro-monthly", bootstrapOrganization: true });
-    return { owner, instanceId, fixture, encryptionKey, migrationUrl: process.env.TEST_DATABASE_URL!,
+    // CI's actual pools keep TEST_DATABASE_URL (localhost -> Docker). The
+    // launcher request contract always uses literal loopback, independently of
+    // the test server's published hostname and internal network namespace.
+    const migrationUrl = new URL(process.env.TEST_DATABASE_URL!);
+    migrationUrl.hostname = "127.0.0.1";
+    return { owner, instanceId, fixture, encryptionKey, migrationUrl: migrationUrl.toString(),
       fixtureProof: { userId: fixture.workosUserId, email: fixture.expectedEmail, organizationId: fixture.workosOrganizationId,
         externalId: organizationId, name: "Local fixture", membershipId: "om_localfixture", membershipUpdatedAt: new Date().toISOString(), verifiedAt: Date.now() },
       githubProof: { installationId: 123, appId: 456, repository: "example/project", accountLogin: "example", accountType: "Organization",
@@ -104,6 +109,8 @@ database("electron:cloud seed and confirmed resource drain", () => {
     const other = await ensureUser(pool, { provider: "workos", providerSubject: "user_otherfixture", email: "other@example.test", displayName: "Other" });
     const request = seedRequest(), remote = new URL(request.migrationUrl); remote.hostname = "alpha.example.test";
     await expect(seed({ ...request, migrationUrl: remote.toString() })).rejects.toThrow(/local|loopback/i);
+    remote.hostname = "localhost";
+    await expect(seed({ ...request, migrationUrl: remote.toString() })).rejects.toThrow(/local|loopback/i);
     const otherDatabase = new URL(request.migrationUrl); otherDatabase.pathname = "/different";
     await expect(seed({ ...request, migrationUrl: otherDatabase.toString() })).rejects.toThrow(/target/i);
     await pool.query("UPDATE zeros_cloud_local_identity SET instance_id=$1", [randomUUID()]);
@@ -125,6 +132,27 @@ database("electron:cloud seed and confirmed resource drain", () => {
     await manageStaffRole(pool, validateStaffRoleRequest({ ...input, execute: true, approval: plan.approval! }));
     await expect(seed(request)).resolves.toMatchObject({ staffRole: "platform_owner" });
     expect((await pool.query("SELECT count(*)::int AS n FROM staff_role_changes WHERE subject_user_id=$1", [user.id])).rows[0].n).toBe(2);
+  });
+
+  it("seeds through the CI localhost URL when PostgreSQL sees a container address and port", async () => {
+    await signIn();
+    const query = pool.query.bind(pool);
+    // A published Docker port is loopback to the client, but inet_server_addr
+    // and inet_server_port describe the other side of that forwarding boundary.
+    // Keep real PostgreSQL for all identity, authorization and staff writes.
+    let observed = false;
+    const spy = vi.spyOn(pool, "query").mockImplementation((...args: any[]) => {
+      const result = (query as any)(...args);
+      if (String(args[0]).startsWith("SELECT current_database() AS database")) return result.then((value: any) => {
+        observed = true;
+        return { ...value, rows: value.rows.map((row: any) => ({ ...row, address: "172.18.0.2", port: 5432 })) };
+      });
+      return result;
+    });
+    try {
+      await expect(seed()).resolves.toMatchObject({ seeded: true, staffRole: "developer" });
+      expect(observed).toBe(true);
+    } finally { spy.mockRestore(); }
   });
 
   it("refuses expired provider proofs and conflicting local ownership", async () => {
