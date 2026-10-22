@@ -1271,6 +1271,29 @@ d("migration ladder", { timeout: 30_000 }, () => {
     expect(ran).toEqual([LADDER[LADDER.length - 1]]);
   });
 
+  it("preserves historical connect tickets as waking while allowing passive tickets", async () => {
+    await applyThrough(LADDER.indexOf("0189_cloud_v2_session_signout.sql") + 1);
+    const owner = await seedCredentialOwner(pool), id = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state)
+      VALUES($1,$2,$3,'Existing','o/r','topic','main','stopped')`, [id, owner.organizationId, owner.userId]);
+    const insert = `INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,user_id,expires_at)
+      VALUES($1,$2,'connect',$3,now()+interval '1 minute')`;
+    await pool.query(insert, [randomBytes(32), id, owner.userId]);
+    const snapshot = async () => (await pool.query(`SELECT workspace_id,kind,user_id,expires_at,used_at,created_at
+      FROM cloud_v2_tokens WHERE workspace_id=$1 ORDER BY created_at`, [id])).rows;
+    const before = await snapshot();
+    expect(await runMigrations(pool)).toContain("0190_cloud_v2_connect_wake.sql");
+    expect(await snapshot()).toEqual(before);
+    expect((await pool.query("SELECT wake_on_connect FROM cloud_v2_tokens WHERE workspace_id=$1", [id])).rows)
+      .toEqual([{ wake_on_connect: true }]);
+    // An older writer that omits the new column must retain waking admission.
+    expect((await pool.query(`${insert} RETURNING wake_on_connect`, [randomBytes(32), id, owner.userId])).rows)
+      .toEqual([{ wake_on_connect: true }]);
+    expect((await pool.query(`INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,user_id,expires_at,wake_on_connect)
+      VALUES($1,$2,'connect',$3,now()+interval '1 minute',false) RETURNING wake_on_connect`, [randomBytes(32), id, owner.userId])).rows)
+      .toEqual([{ wake_on_connect: false }]);
+  });
+
   it("preserves issued security cursors even after every historical event was erased", async () => {
     await applyThrough(LADDER.indexOf("0075_security_event_commit_order.sql"));
     await pool.query("SELECT setval('security_events_sequence_seq', 200, true)");

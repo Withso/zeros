@@ -302,7 +302,7 @@ export class CloudV2Store {
   }
 
   /** A one-use app connect ticket, or a worker model-proxy token. */
-  async issueToken(input: { workspaceId: string; kind: "connect" | "proxy"; userId: string | null; ttlMs: number; authority?: AuthedUser }) {
+  async issueToken(input: { workspaceId: string; kind: "connect" | "proxy"; userId: string | null; ttlMs: number; authority?: AuthedUser; wake?: boolean }) {
     const issued = newCloudV2Token(input.kind);
     const expiresAt = new Date(Date.now() + input.ttlMs);
     await withSystemTx(this.pool, async tx => {
@@ -317,25 +317,25 @@ export class CloudV2Store {
         throw new HttpError(401, "session_revoked", "Authentication is no longer current");
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE expires_at < clock_timestamp() - interval '1 hour'`);
       await tx.query(
-        `INSERT INTO cloud_v2_tokens (token_hash, workspace_id, kind, user_id, expires_at) VALUES ($1, $2, $3, $4, $5)`,
-        [issued.hash, input.workspaceId, input.kind, input.userId, expiresAt],
+        `INSERT INTO cloud_v2_tokens (token_hash, workspace_id, kind, user_id, expires_at, wake_on_connect) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [issued.hash, input.workspaceId, input.kind, input.userId, expiresAt, input.wake ?? true],
       );
     });
     return { token: issued.token, expiresAt };
   }
 
   /** Consumes a connect ticket exactly once. */
-  async consumeConnectTicket(token: string, workspaceId: string): Promise<{ userId: string; accessEpoch: string } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ user_id: string; access_epoch: string }>(
+  async consumeConnectTicket(token: string, workspaceId: string): Promise<{ userId: string; accessEpoch: string; wake: boolean } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ user_id: string; access_epoch: string; wake_on_connect: boolean }>(
       `UPDATE cloud_v2_tokens t SET used_at = clock_timestamp()
        FROM cloud_v2_workspaces w
        WHERE t.token_hash = $1 AND t.kind = 'connect' AND t.workspace_id = $2 AND t.used_at IS NULL
          AND t.expires_at > clock_timestamp() AND w.id = t.workspace_id AND w.creator_user_id = t.user_id
          AND w.state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
-       RETURNING t.user_id, w.access_epoch::text`,
+       RETURNING t.user_id, w.access_epoch::text, t.wake_on_connect`,
       [hashCloudV2Token(token), workspaceId],
     ));
-    return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch } : null;
+    return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch, wake: rows[0].wake_on_connect } : null;
   }
 
   async verifyProxyToken(token: string): Promise<CloudV2Workspace | null> {
