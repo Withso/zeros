@@ -92,7 +92,11 @@ separate from repository files; there is no Mac checkout synchronization.
 The lifecycle loop stops a running VM after ten minutes without activity
 reports. Turns and recent terminal input/output keep reports flowing; an
 untouched shell eventually becomes idle. Passive history reads do not wake
-the VM. Explicit work or Start wakes it and reconnects the worker. Stop
+the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
+the single-use ticket carries that intent through bridge admission. The app
+asks to wake only for an explicit open; a missing value still wakes, for older
+callers. Explicit work over the bridge, or Start, wakes it and reconnects the
+worker. Stop
 retains the VM disk; Delete removes the VM and revokes its access. Account
 and organization deletion also enqueue their workspaces for cleanup.
 
