@@ -132,7 +132,7 @@ export class GitService {
     const visible = (files: DiffFileSummary[]) => files.filter(file => !conflicts.has(file.path));
     if (!lines) {
       const [uncommitted, staged, unstaged] = await Promise.all([this.metadata([head]), this.metadata(["--cached"]), this.metadata([])]);
-      const count = (files: DiffFileSummary[], untracked = false) => new Set([...visible(files).map(file => file.path), ...(untracked ? raw.untracked : [])]).size;
+      const count = (files: DiffFileSummary[], untracked = false) => new Set([...conflicts, ...visible(files).map(file => file.path), ...(untracked ? raw.untracked : [])]).size;
       return { all: count(all, true), uncommitted: count(uncommitted, true), staged: count(staged), unstaged: count(unstaged, true) };
     }
     const result = visible(all).reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 });

@@ -92,3 +92,18 @@ it("does not block status reads behind a pending mutation", async () => {
   expect(await service.handle("git.status", {})).toMatchObject({ untracked: ["new.txt"] });
   release(); await mutation;
 });
+
+it("includes an unresolved UU path in every Changes scope and hasChanges", async () => {
+  const { root, scope, git } = await repositoryFixture();
+  await git("switch", "main");
+  await writeFile(join(root, "readme.txt"), "upstream\n");
+  await git("add", "."); await git("commit", "-m", "upstream");
+  await git("switch", "workspace/fixture");
+  await writeFile(join(root, "readme.txt"), "feature\n");
+  await git("add", "."); await git("commit", "-m", "feature");
+  await expect(git("merge", "main")).rejects.toThrow();
+  expect(await git("status", "--porcelain=v1")).toBe("UU readme.txt");
+  const service = new GitService(scope);
+  expect(await service.handle("git.changeCounts", {})).toEqual({ all: 1, uncommitted: 1, staged: 1, unstaged: 1 });
+  expect(await service.handle("git.hasChanges", {})).toEqual({ hasChanges: true });
+});
