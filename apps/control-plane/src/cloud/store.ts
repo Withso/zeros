@@ -23,6 +23,7 @@ type HistoryInput = {
   messages?: { chatId: string; rows: readonly CloudV2MessageRow[] } | undefined;
 };
 export type CloudV2WorkerSession = CloudV2Workspace & { accessEpoch: string; loginRevision: string };
+export type CloudV2AppGrant = { userId: string; accessEpoch: string; wake: boolean; sessionId: string | null };
 
 export type CloudV2Workspace = {
   id: string;
@@ -78,6 +79,14 @@ const LIVE_ACCESS = `EXISTS (
   JOIN users u ON u.id = m.user_id AND u.auth_status = 'active' AND u.deleted_at IS NULL
   WHERE m.org_id = w.org_id AND m.user_id = w.creator_user_id
     AND NOT o.is_personal AND o.cloud_workspaces_allowed)`;
+
+// WorkOS sid is the device/session authority, independent of the workspace's
+// account/membership epoch. Do not let a lost broker notification keep it live.
+const LIVE_SESSION = `s.provider = 'workos' AND s.user_id = w.creator_user_id
+  AND s.status = 'active' AND s.revoked_at IS NULL
+  AND (s.provider_session_expires_at IS NULL OR s.provider_session_expires_at > clock_timestamp())
+  AND EXISTS (SELECT 1 FROM user_identities i WHERE i.user_id = s.user_id
+    AND i.provider = s.provider AND i.provider_sub = s.provider_sub AND i.status = 'active')`;
 
 const notFound = () => new HttpError(404, "not_found", "Cloud workspace not found");
 
@@ -226,6 +235,17 @@ export class CloudV2Store {
     return rows[0]?.access_epoch ?? null;
   }
 
+  /** One read for a room's workspace authority and every attached session;
+   * streaming must not add one database transaction per viewing device. */
+  async appAccessSnapshot(id: string, sessionIds: readonly string[]): Promise<{ accessEpoch: string; activeSessionIds: string[] } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ access_epoch: string; active_session_ids: string[] }>(
+      `SELECT access_epoch::text, ARRAY(SELECT s.provider_session_id FROM auth_sessions s
+         WHERE s.provider_session_id = ANY($2::text[]) AND ${LIVE_SESSION}) AS active_session_ids
+       FROM cloud_v2_workspaces w WHERE w.id = $1 AND w.state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
+      [id, sessionIds]));
+    return rows[0] ? { accessEpoch: rows[0].access_epoch, activeSessionIds: rows[0].active_session_ids } : null;
+  }
+
   /** Internal only: private route data is deliberately absent from workspace(). */
   async workerRoute(id: string): Promise<{ workspace: CloudV2Workspace; accessEpoch: string; url: string | null; portToken: unknown; bootId: string | null } | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; worker_route_url: string | null; worker_port_token: unknown; worker_boot_id: string | null }>(
@@ -306,8 +326,8 @@ export class CloudV2Store {
     const issued = newCloudV2Token(input.kind);
     const expiresAt = new Date(Date.now() + input.ttlMs);
     await withSystemTx(this.pool, async tx => {
-      // Serialize issuance with revocation; authentication may have changed
-      // after the HTTP middleware accepted the request.
+      // Serialize issuance with workspace revocation and recheck the HTTP
+      // authority. A concurrent session sign-out is also checked at consumption.
       const allowed = await tx.query(`SELECT id FROM cloud_v2_workspaces w
         WHERE id = $1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
           AND ($2::text = 'proxy' OR creator_user_id = $3) FOR UPDATE`,
@@ -317,25 +337,28 @@ export class CloudV2Store {
         throw new HttpError(401, "session_revoked", "Authentication is no longer current");
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE expires_at < clock_timestamp() - interval '1 hour'`);
       await tx.query(
-        `INSERT INTO cloud_v2_tokens (token_hash, workspace_id, kind, user_id, expires_at, wake_on_connect) VALUES ($1, $2, $3, $4, $5, $6)`,
-        [issued.hash, input.workspaceId, input.kind, input.userId, expiresAt, input.wake ?? true],
+        `INSERT INTO cloud_v2_tokens (token_hash, workspace_id, kind, user_id, expires_at, wake_on_connect, provider_session_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [issued.hash, input.workspaceId, input.kind, input.userId, expiresAt, input.wake ?? true,
+          input.kind === "connect" ? input.authority?.authentication.sessionId ?? null : null],
       );
     });
     return { token: issued.token, expiresAt };
   }
 
   /** Consumes a connect ticket exactly once. */
-  async consumeConnectTicket(token: string, workspaceId: string): Promise<{ userId: string; accessEpoch: string; wake: boolean } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ user_id: string; access_epoch: string; wake_on_connect: boolean }>(
+  async consumeConnectTicket(token: string, workspaceId: string): Promise<CloudV2AppGrant | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ user_id: string; access_epoch: string; wake_on_connect: boolean; provider_session_id: string | null }>(
       `UPDATE cloud_v2_tokens t SET used_at = clock_timestamp()
        FROM cloud_v2_workspaces w
        WHERE t.token_hash = $1 AND t.kind = 'connect' AND t.workspace_id = $2 AND t.used_at IS NULL
          AND t.expires_at > clock_timestamp() AND w.id = t.workspace_id AND w.creator_user_id = t.user_id
          AND w.state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
-       RETURNING t.user_id, w.access_epoch::text, t.wake_on_connect`,
+         AND (t.provider_session_id IS NULL OR EXISTS (SELECT 1 FROM auth_sessions s
+           WHERE s.provider_session_id = t.provider_session_id AND ${LIVE_SESSION}))
+       RETURNING t.user_id, w.access_epoch::text, t.wake_on_connect, t.provider_session_id`,
       [hashCloudV2Token(token), workspaceId],
     ));
-    return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch, wake: rows[0].wake_on_connect } : null;
+    return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch, wake: rows[0].wake_on_connect, sessionId: rows[0].provider_session_id } : null;
   }
 
   async verifyProxyToken(token: string): Promise<CloudV2Workspace | null> {

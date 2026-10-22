@@ -174,6 +174,7 @@ END $$;`],
     "privilege-tightening": ["REVOKE ALL ON FUNCTION revoke_cloud_v2_security_access() FROM PUBLIC;"],
   },
   "0189_cloud_v2_session_signout.sql": {},
+  "0201_cloud_v2_app_sessions.sql": {},
   "0180_cloud_initial_delete_periodic_checkpoint.sql": {},
   "0178_cloud_owner_existing_delete.sql": {},
   "0177_cloud_owner_discard_delete.sql": {
@@ -306,6 +307,9 @@ const initialDeletePeriodicSourceDigest = "d4e1a6ee0a5346f91b6c9765f9449406f9824
 // account, organization and workspace revocation retain the complete fence.
 const cloudV2SessionSignoutDigest = "db5bb0cb92d159a89301d5ae5fab410e37ce4bd853b2ca99e2a7b0a4163fa7d9";
 
+// A device sign-out retires only app tickets for the exact verified WorkOS sid.
+const cloudV2AppSessionSignoutDigest = "747fffcd9a89b551618180d11016f3c79018a9f5364c648dc4ce4618ee85d3b4";
+
 // Exact additions retain prior save proof and physical-purge authority.
 const ownerExistingDeleteDigests: Record<string,string> = {
   "new-table-privileges": "5dcd878e4e2935bddcf73f215d27bd635dde05c6ecea4e29b07911e0ed542699",
@@ -417,6 +421,8 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
         createHash("sha256").update(statement).digest("hex") === initialDeletePeriodicSourceDigest) ||
       (file === "0189_cloud_v2_session_signout.sql" && rule === "session-signout" &&
         createHash("sha256").update(statement).digest("hex") === cloudV2SessionSignoutDigest) ||
+      (file === "0201_cloud_v2_app_sessions.sql" && rule === "session-scoped-signout" &&
+        createHash("sha256").update(statement).digest("hex") === cloudV2AppSessionSignoutDigest) ||
       (file === "0178_cloud_owner_existing_delete.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");

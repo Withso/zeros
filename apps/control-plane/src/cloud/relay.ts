@@ -4,6 +4,7 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { randomUUID } from "node:crypto";
+import { AsyncResource } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2ControlFrame } from "./contract.js";
@@ -19,7 +20,7 @@ const MAX_QUEUED_FRAMES = 64;
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 
 export type CloudV2RelayDeps = {
-  store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "loginRevision">;
+  store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "appAccessSnapshot" | "loginRevision">;
   securityEvents?: Pick<PostgresSecurityEventBroker, "start" | "subscribe">;
   config(workspace: CloudV2Workspace): Promise<ConfigFrame>;
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
@@ -34,7 +35,7 @@ type Room = {
   workspace: CloudV2Workspace; accessEpoch: string; revoked: boolean;
   worker: WebSocket | null; ready: boolean; loginRevision: string | null; configAt: number;
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
-  clients: Map<string, WebSocket>; queued: Map<string, unknown[]>;
+  clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
   stops: Map<string, (ok: boolean) => void>; abort: AbortController; wakeRequested: boolean; wakeAllowed: boolean;
 };
 function reject(socket: Duplex): void {
@@ -62,7 +63,11 @@ export class CloudV2Relay {
 
   constructor(private readonly deps: CloudV2RelayDeps) {
     this.ping.unref();
-    this.unsubscribeSecurity = deps.securityEvents?.subscribe(() => { this.securityRevision++; this.revalidate(); });
+    // A pooled LISTEN socket can carry the async context of an earlier WorkOS
+    // operation whose provider lock has ended. These reads belong to the relay.
+    this.unsubscribeSecurity = deps.securityEvents?.subscribe(AsyncResource.bind(() => {
+      this.securityRevision++; this.revalidate();
+    }, "cloud-v2-security-wake"));
     void deps.securityEvents?.start().catch(() => this.revalidate());
   }
 
@@ -116,24 +121,35 @@ export class CloudV2Relay {
     room.revoked = true; room.ready = false; room.abort.abort(); room.queued.clear(); clearTimeout(room.idleTimer);
     room.worker?.close(4001, "access_revoked"); room.worker = null;
     for (const finish of room.stops.values()) finish(false);
-    for (const client of room.clients.values()) client.close(4001, "access_revoked");
+    for (const { ws } of room.clients.values()) ws.close(4001, "access_revoked");
     if (this.rooms.get(room.workspace.id) === room) this.rooms.delete(room.workspace.id);
   }
 
-  private async authorized(room: Room): Promise<boolean> {
+  private async authorized(room: Room, admittingSessionId: string | null = null): Promise<boolean> {
     if (room.revoked || this.closed) return false;
     const revision = this.securityRevision;
-    const epoch = await this.deps.store.accessEpoch(room.workspace.id).catch(() => null);
+    const sessions = new Set([...room.clients.values()].flatMap(client => client.sessionId ? [client.sessionId] : []));
+    if (admittingSessionId) sessions.add(admittingSessionId);
+    const snapshot = await this.deps.store.appAccessSnapshot(room.workspace.id, [...sessions]).catch(() => null);
     if (room.revoked) return false;
-    if (revision !== this.securityRevision) return this.authorized(room);
-    if (epoch === room.accessEpoch) return true;
-    this.revoke(room); return false;
+    if (revision !== this.securityRevision) return this.authorized(room, admittingSessionId);
+    if (!snapshot || snapshot.accessEpoch !== room.accessEpoch) { this.revoke(room); return false; }
+    const live = new Set(snapshot.activeSessionIds);
+    for (const [id, client] of room.clients) {
+      // A new admission may have joined while this read was in flight. Its
+      // own proof, not an older snapshot that omitted it, controls that client.
+      if (client.sessionId && sessions.has(client.sessionId) && !live.has(client.sessionId)) {
+        this.detachApp(room, id);
+        client.ws.close(4001, "access_revoked");
+      }
+    }
+    return !admittingSessionId || live.has(admittingSessionId);
   }
   private revalidate(): void { for (const room of this.rooms.values()) void this.authorized(room); }
   private watch(socket: WebSocket): void { this.alive.add(socket); socket.on("pong", () => this.alive.add(socket)); }
   private heartbeat(): void {
     this.revalidate(); void this.refreshLogins(); void this.deps.securityEvents?.start().catch(() => {});
-    for (const room of this.rooms.values()) for (const socket of [room.worker, ...room.clients.values()]) {
+    for (const room of this.rooms.values()) for (const socket of [room.worker, ...[...room.clients.values()].map(client => client.ws)]) {
       if (!socket || socket.readyState !== WebSocket.OPEN) continue;
       if (!this.alive.has(socket)) { socket.terminate(); continue; }
       this.alive.delete(socket); socket.ping();
@@ -184,7 +200,7 @@ export class CloudV2Relay {
           if (await this.refreshConfig(room, ws, true) && room.worker === ws && ws.readyState === WebSocket.OPEN) {
             room.ready = true; room.wakeAllowed = false;
             for (const [clientId, client] of room.clients) {
-              if (client.readyState !== WebSocket.OPEN) continue;
+              if (client.ws.readyState !== WebSocket.OPEN) continue;
               send(ws, { t: "open", clientId });
               for (const frame of room.queued.get(clientId) ?? []) send(ws, { t: "frame", clientId, frame });
             }
@@ -199,7 +215,7 @@ export class CloudV2Relay {
       await delay(ms, undefined, { signal: room.abort.signal }).catch(() => {});
     }
     if (!room.revoked && this.wanted(room)) {
-      for (const client of room.clients.values()) client.close(1013, "workspace_starting");
+      for (const { ws: client } of room.clients.values()) client.close(1013, "workspace_starting");
       for (const finish of room.stops.values()) finish(false);
     }
   }
@@ -211,8 +227,8 @@ export class CloudV2Relay {
         const frame = CloudV2WorkerFrameSchema.parse(binary ? null : parse(data));
         if (frame.t === "stop-ack") { room.stops.get(frame.id)?.(true); return; }
         if (frame.t !== "frame") { ws.close(4003, "invalid_carrier"); return; }
-        if (frame.clientId === "*") for (const client of room.clients.values()) send(client, frame.frame);
-        else send(room.clients.get(frame.clientId) ?? null, frame.frame);
+        if (frame.clientId === "*") for (const { ws: client } of room.clients.values()) send(client, frame.frame);
+        else send(room.clients.get(frame.clientId)?.ws ?? null, frame.frame);
       } catch { ws.close(4003, "invalid_frame"); }
     });
     ws.on("close", () => {
@@ -263,27 +279,27 @@ export class CloudV2Relay {
     const offered = String(request.headers["sec-websocket-protocol"] ?? "").split(",").map(value => value.trim());
     const ticket = offered.find(value => value.startsWith("ticket."))?.slice("ticket.".length) ?? "";
     if (!offered.includes(CLOUD_V2_BRIDGE_PROTOCOL) || !isCloudV2Token(ticket, "connect")) return reject(socket);
-    let workspace: CloudV2Workspace | null = null, epoch: string | undefined, wake = false;
+    let workspace: CloudV2Workspace | null = null, epoch: string | undefined, wake = false, sessionId: string | null = null;
     try {
       const grant = await this.deps.store.consumeConnectTicket(ticket, workspaceId);
       if (grant && await this.deps.store.accessEpoch(workspaceId) === grant.accessEpoch) {
-        workspace = await this.deps.store.get(workspaceId, grant.userId); epoch = grant.accessEpoch; wake = grant.wake;
+        workspace = await this.deps.store.get(workspaceId, grant.userId); epoch = grant.accessEpoch; wake = grant.wake; sessionId = grant.sessionId;
       }
     } catch { this.deps.logger?.warn("[cloud-v2] app admission failed"); }
     if (!workspace || this.closed) return reject(socket);
     const admitted = workspace;
-    this.server.handleUpgrade(request, socket, head, ws => this.attachApp(admitted, epoch!, wake, ws));
+    this.server.handleUpgrade(request, socket, head, ws => this.attachApp(admitted, epoch!, wake, sessionId, ws));
   }
-  private attachApp(workspace: CloudV2Workspace, epoch: string, wake: boolean, ws: WebSocket): void {
+  private attachApp(workspace: CloudV2Workspace, epoch: string, wake: boolean, sessionId: string | null, ws: WebSocket): void {
     const room = this.room(workspace, epoch);
     if (!room) { ws.close(4001, "access_revoked"); return; }
-    clearTimeout(room.idleTimer); delete room.idleTimer;
-    if (room.worker && workspace.state !== "running") { room.worker.terminate(); room.worker = null; room.ready = false; }
-    if (!room.worker) room.workspace = workspace;
     const clientId = randomUUID(); this.watch(ws);
-    let inbound = this.authorized(room).then(allowed => {
+    let inbound = this.authorized(room, sessionId).then(allowed => {
       if (!allowed || ws.readyState !== WebSocket.OPEN) { ws.close(4001, "access_revoked"); return; }
-      room.clients.set(clientId, ws);
+      clearTimeout(room.idleTimer); delete room.idleTimer;
+      if (room.worker && workspace.state !== "running") { room.worker.terminate(); room.worker = null; room.ready = false; }
+      if (!room.worker) room.workspace = workspace;
+      room.clients.set(clientId, { ws, sessionId });
       if (room.ready) send(room.worker, { t: "open", clientId });
       else {
         if (wake) { room.wakeAllowed = true; this.wake(room); }
@@ -295,11 +311,12 @@ export class CloudV2Relay {
       if (binary) { ws.close(4003, "invalid_frame"); return; }
       inbound = inbound.then(() => this.fromApp(room, clientId, ws, data)).catch(() => ws.close(1011, "relay_unavailable"));
     });
-    ws.on("close", () => {
-      room.clients.delete(clientId); room.queued.delete(clientId);
-      if (room.ready) send(room.worker, { t: "close", clientId });
-      this.idle(room);
-    });
+    ws.on("close", () => { this.detachApp(room, clientId); });
+  }
+  private detachApp(room: Room, clientId: string): void {
+    const attached = room.clients.delete(clientId); room.queued.delete(clientId);
+    if (attached && room.ready) send(room.worker, { t: "close", clientId });
+    this.idle(room);
   }
   private async fromApp(room: Room, clientId: string, ws: WebSocket, data: RawData): Promise<void> {
     if (!await this.authorized(room) || !room.clients.has(clientId)) return;

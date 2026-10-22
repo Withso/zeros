@@ -1334,6 +1334,43 @@ d("migration ladder", { timeout: 30_000 }, () => {
       .toEqual([{ wake_on_connect: false }]);
   });
 
+  it("preserves existing tickets and scopes sign-out to the exact creator session", async () => {
+    const file = "0201_cloud_v2_app_sessions.sql";
+    await applyThrough(LADDER.indexOf(file));
+    const owner = await seedCredentialOwner(pool), other = await seedCredentialOwner(pool), id = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,worker_token_hash)
+      VALUES($1,$2,$3,'Existing','o/r','topic','main','running',$4)`, [id, owner.organizationId, owner.userId, randomBytes(32)]);
+    await pool.query(`INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,user_id,expires_at,wake_on_connect)
+      VALUES($1,$2,'connect',$3,now()+interval '1 minute',false)`, [randomBytes(32), id, owner.userId]);
+    const before = (await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [id])).rows;
+    expect(await runMigrations(pool)).toContain(file);
+    expect((await pool.query("SELECT provider_session_id,wake_on_connect FROM cloud_v2_tokens WHERE workspace_id=$1", [id])).rows)
+      .toEqual([{ provider_session_id: null, wake_on_connect: false }]);
+    expect((await pool.query(`SELECT data_type,is_nullable FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='cloud_v2_tokens' AND column_name='provider_session_id'`)).rows)
+      .toEqual([{ data_type: "text", is_nullable: "YES" }]);
+    for (const sid of ["session-a", "session-b"]) await pool.query(`INSERT INTO cloud_v2_tokens
+      (token_hash,workspace_id,kind,user_id,expires_at,provider_session_id)
+      VALUES($1,$2,'connect',$3,now()+interval '1 minute',$4)`, [randomBytes(32), id, owner.userId, sid]);
+    await pool.query(`INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,expires_at)
+      VALUES($1,$2,'proxy',now()+interval '1 minute')`, [randomBytes(32), id]);
+    const active = async () => (await pool.query(`SELECT kind,provider_session_id FROM cloud_v2_tokens
+      WHERE workspace_id=$1 AND expires_at>clock_timestamp() ORDER BY kind,provider_session_id NULLS FIRST`, [id])).rows;
+    const all = await active();
+    // The event's user is part of the scope; a matching sid alone is not enough.
+    await pool.query(`INSERT INTO security_events(kind,user_id,provider_session_id)
+      VALUES('session.revoked',$1,'session-a')`, [other.userId]);
+    expect(await active()).toEqual(all);
+    await pool.query(`INSERT INTO security_events(kind,user_id,provider_session_id)
+      VALUES('session.revoked',$1,'session-a')`, [owner.userId]);
+    expect(await active()).toEqual([
+      { kind: "connect", provider_session_id: null },
+      { kind: "connect", provider_session_id: "session-b" },
+      { kind: "proxy", provider_session_id: null },
+    ]);
+    expect(JSON.stringify((await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [id])).rows) === JSON.stringify(before)).toBe(true);
+  });
+
   it("preserves issued security cursors even after every historical event was erased", async () => {
     await applyThrough(LADDER.indexOf("0075_security_event_commit_order.sql"));
     await pool.query("SELECT setval('security_events_sequence_seq', 200, true)");
