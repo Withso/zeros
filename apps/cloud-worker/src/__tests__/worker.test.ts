@@ -7,6 +7,9 @@ import { CLOUD_V2_MAX_HISTORY_ROWS, CloudV2WorkerFrameSchema } from "@zeros/prot
 import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/version";
 import type { BridgeMessage, SteerOutcome } from "@zeros/protocol/messages";
 import { CloudWorker } from "../worker";
+// Test-only renderer import: assert the exact consumer identity boundary.
+import { cloudIncoming } from "../../../desktop/src/renderer/platform/bridge/cloud-runtime-wire";
+import { cloudScopedId } from "../../../desktop/src/renderer/platform/bridge/cloud-workspace-key";
 import { SessionStore } from "../sessions/session-store";
 import { UNSUPPORTED_CHAT_OPS } from "../workspace/chat-service";
 import { CLIENT_A, CLIENT_B, WORKSPACE_ID, WORKSPACE_KEY, FakeDriver, FakeRelay, browserFrame, config } from "./worker-fixtures";
@@ -130,6 +133,65 @@ describe("worker bridge routing through a fake relay", () => {
     await expect.poll(() => drivers[0].prompts.length).toBe(3);
     expect(drivers[0].prompts[2]).toEqual([{ type: "text", text: "queued" }]);
     drivers[0].complete();
+  });
+
+  it("acknowledges Stop only after the live turn settles, with the native conversation id", async () => {
+    const { relay, drivers, chat, prompt } = await setup();
+    const sessionId = await chat("native-chat");
+    const request = prompt(sessionId);
+    await relay.request(CLIENT_A, request);
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(drivers[0], "interrupt").mockImplementationOnce(async () => {
+      await gate; drivers[0].complete({ stopReason: "cancelled" });
+    });
+    const cancel = browserFrame("AGENT_CANCEL", { agentId: "codex", sessionId, executionId: sessionId, chatId: "native-chat" });
+    const pending = relay.request(CLIENT_B, cancel);
+    await expect.poll(() => drivers[0].interrupt).toHaveBeenCalledTimes(1);
+    expect(relay.response(cancel.id)).toBeUndefined();
+    release(); await pending;
+    expect(relay.response(cancel.id)).toMatchObject({ type: "WORKSPACE_RESPONSE", requestId: cancel.id,
+      result: { conversationId: "native-chat", state: "cancelled" } });
+    const scope = { organizationId: config.workspace.organizationId, workspaceId: WORKSPACE_ID,
+      engineWorkspaceId: WORKSPACE_ID, root: config.workspace.checkoutPath };
+    expect(cloudIncoming(scope, { ...relay.response(cancel.id)! })).toMatchObject({
+      result: { conversationId: cloudScopedId(scope, "native-chat"), state: "cancelled" },
+    });
+    expect(relay.bridge().find(row => "requestId" in row.frame && row.frame.requestId === cancel.id)?.clientId).toBe(CLIENT_B);
+    expect(relay.response(request.id)).toMatchObject({ type: "AGENT_PROMPT_COMPLETE", stopReason: "cancelled" });
+  });
+
+  it.each(["succeeded", "failed", "cancelled"] as const)("acknowledges Stop after a %s turn without changing its outcome", async state => {
+    const { relay, drivers, chat, prompt } = await setup();
+    const sessionId = await chat();
+    const request = prompt(sessionId);
+    await relay.request(CLIENT_A, request);
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    if (state === "failed") drivers[0].fail();
+    else drivers[0].complete({ stopReason: state === "cancelled" ? "cancelled" : "end_turn" });
+    await expect.poll(() => relay.response(request.id)).toBeDefined();
+    const cancel = browserFrame("AGENT_CANCEL", { agentId: "codex", sessionId, chatId: "chat" });
+    await relay.request(CLIENT_A, cancel);
+    expect(relay.response(cancel.id)).toMatchObject({ type: "WORKSPACE_RESPONSE",
+      result: { conversationId: "chat", state } });
+  });
+
+  it("acknowledges Stop during native session creation without admitting a turn", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const { relay, drivers } = await setup(driver => { driver.opening = gate; });
+    const create = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "new-chat", cwd: WORKSPACE_KEY });
+    const opening = relay.request(CLIENT_A, create);
+    try {
+      await expect.poll(() => drivers[0]?.opened?.sessionId).toBeDefined();
+      const sessionId = drivers[0].opened!.sessionId;
+      const cancel = browserFrame("AGENT_CANCEL", { agentId: "codex", sessionId, chatId: "new-chat" });
+      await relay.request(CLIENT_B, cancel);
+      expect(relay.response(cancel.id)).toMatchObject({ type: "WORKSPACE_RESPONSE",
+        result: { conversationId: "new-chat", state: "cancelled" } });
+      expect(drivers[0].prompts).toHaveLength(0);
+    } finally { release(); await opening; }
   });
 
   it("applies full replacement logins to idle/new children while active turns retain their spawn config", async () => {
@@ -257,9 +319,11 @@ describe("worker bridge routing through a fake relay", () => {
     const { relay, drivers } = await setup();
     const create = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "new-chat", cwd: WORKSPACE_KEY });
     const opening = relay.request(CLIENT_A, create);
-    const stopped = relay.request(CLIENT_B, browserFrame("AGENT_CLOSE_SESSION", { agentId: "codex", chatId: "new-chat", userStop: true }));
+    const cancel = browserFrame("AGENT_CLOSE_SESSION", { agentId: "codex", chatId: "new-chat", userStop: true });
+    const stopped = relay.request(CLIENT_B, cancel);
     await Promise.all([opening, stopped]);
     expect(drivers).toHaveLength(0);
+    expect(relay.response(cancel.id)).toMatchObject({ type: "AGENT_SESSION_CLOSED", chatId: "new-chat" });
     expect(relay.response(create.id)?.type).toBe("AGENT_ERROR");
   });
 
@@ -330,7 +394,7 @@ describe("worker bridge routing through a fake relay", () => {
   it("exposes the deferred chat operations as explicit unsupported errors", async () => {
     const { op } = await setup();
     expect(UNSUPPORTED_CHAT_OPS).toEqual([
-      "messages.clear", "messages.truncateFrom", "chats.summariesForFolder", "turns.list", "turns.get", "turns.diff", "turns.reset", "turns.undoReset", "messages.search", "chats.titleSeeds",
+      "messages.clear", "messages.truncateFrom", "turns.list", "turns.get", "turns.diff", "turns.reset", "turns.undoReset", "messages.search",
     ]);
     for (const name of UNSUPPORTED_CHAT_OPS) expect(await op(name)).toMatchObject({ type: "WORKSPACE_ERROR", code: "CLOUD_V2_UNSUPPORTED", op: name });
   });

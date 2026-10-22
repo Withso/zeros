@@ -91,7 +91,7 @@ d("cloud v2 store", () => {
     const other = await create();
     const { token } = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator, ttlMs: 60_000 });
     expect(await store.consumeConnectTicket(token, other.id)).toBeNull();
-    expect(await store.consumeConnectTicket(token, workspace.id)).toEqual({ userId: creator });
+    expect(await store.consumeConnectTicket(token, workspace.id)).toEqual({ userId: creator, accessEpoch: "0" });
     expect(await store.consumeConnectTicket(token, workspace.id)).toBeNull();
     const expired = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator, ttlMs: -1 });
     expect(await store.consumeConnectTicket(expired.token, workspace.id)).toBeNull();
@@ -116,6 +116,29 @@ d("cloud v2 store", () => {
     expect(await store.verifyProxyToken(token)).toBeNull();
     await store.transition(workspace.id, ["creating"], "running");
     expect((await store.verifyProxyToken(token))?.id).toBe(workspace.id);
+  });
+
+  it.each(["organization.access_revoked", "session.revoked", "account.revoked", "account.authorization_changed"])("revokes worker, proxy and outstanding tickets atomically for %s", async kind => {
+    const w = await create();
+    await store.transition(w.id, ["creating"], "running");
+    const worker = await store.rotateWorkerToken(w.id);
+    const proxy = await store.issueToken({ workspaceId: w.id, kind: "proxy", userId: null, ttlMs: 60_000 });
+    const ticket = await store.issueToken({ workspaceId: w.id, kind: "connect", userId: creator, ttlMs: 60_000 });
+    await pool.query(`INSERT INTO security_events (kind, user_id, org_id) VALUES ($1, $2, $3)`, [kind, creator, org]);
+    expect(await store.byWorkerToken(worker)).toBeNull();
+    expect(await store.verifyProxyToken(proxy.token)).toBeNull();
+    expect(await store.consumeConnectTicket(ticket.token, w.id)).toBeNull();
+    expect((await store.get(w.id, creator)).state).toBe("stopping");
+  });
+
+  it("refuses existing worker and proxy credentials when membership disappears without a notification", async () => {
+    const w = await create();
+    await store.transition(w.id, ["creating"], "running");
+    const worker = await store.rotateWorkerToken(w.id);
+    const proxy = await store.issueToken({ workspaceId: w.id, kind: "proxy", userId: null, ttlMs: 60_000 });
+    await pool.query(`DELETE FROM organization_members WHERE org_id = $1 AND user_id = $2`, [org, creator]);
+    expect(await store.byWorkerToken(worker)).toBeNull();
+    expect(await store.verifyProxyToken(proxy.token)).toBeNull();
   });
 
   it("archives every accepted state, retains the timestamp on retry, and persists it in list/get", async () => {
@@ -184,7 +207,9 @@ d("cloud v2 store", () => {
     expect((await store.get(created.id, creator)).archivedAt).not.toBeNull();
 
     const app = new Hono();
-    app.use("*", async (c, next) => { c.set("user", { id: creator } as never); await next(); });
+    await pool.query(`INSERT INTO user_identities (user_id, provider, provider_sub, email_at_link) VALUES ($1::uuid, 'workos', ($1::uuid)::text, 'fixture@example.test')`, [creator]);
+    app.use("*", async (c, next) => { c.set("user", { id: creator, accountRevision: 1,
+      identity: { provider: "workos", subject: creator }, authentication: { sessionId: null, tokenExpiresAt: null } } as never); await next(); });
     app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as CloudV2RouteDeps));
     expect((await app.request(`/v1/cloud-v2/workspaces/${created.id}/connect`, { method: "POST" })).status).toBe(200);
     expect(await store.get(created.id, creator)).toMatchObject({ state: "starting", archivedAt: null });

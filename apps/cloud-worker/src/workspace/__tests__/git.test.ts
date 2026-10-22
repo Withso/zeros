@@ -1,4 +1,4 @@
-import { rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { GitService } from "../git";
@@ -91,4 +91,54 @@ it("does not block status reads behind a pending mutation", async () => {
   await expect.poll(() => entered).toBe(true);
   expect(await service.handle("git.status", {})).toMatchObject({ untracked: ["new.txt"] });
   release(); await mutation;
+});
+
+it("includes an unresolved UU path in every Changes scope and hasChanges", async () => {
+  const { root, scope, git } = await repositoryFixture();
+  await git("switch", "main");
+  await writeFile(join(root, "readme.txt"), "upstream\n");
+  await git("add", "."); await git("commit", "-m", "upstream");
+  await git("switch", "workspace/fixture");
+  await writeFile(join(root, "readme.txt"), "feature\n");
+  await git("add", "."); await git("commit", "-m", "feature");
+  await expect(git("merge", "main")).rejects.toThrow();
+  expect(await git("status", "--porcelain=v1")).toBe("UU readme.txt");
+  const service = new GitService(scope);
+  expect(await service.handle("git.changeCounts", {})).toEqual({ all: 1, uncommitted: 1, staged: 1, unstaged: 1 });
+  expect(await service.handle("git.hasChanges", {})).toEqual({ hasChanges: true });
+});
+
+it("cleans only selected untracked paths, including a staged-new file after unstage", async () => {
+  const { root, scope } = await repositoryFixture(); const service = new GitService(scope);
+  await writeFile(join(root, "chosen.txt"), "new"); await writeFile(join(root, "keep.txt"), "keep");
+  expect(await service.handle("git.clean", { paths: ["chosen.txt"], confirm: true })).toEqual({ removed: ["chosen.txt"] });
+  await expect(access(join(root, "chosen.txt"))).rejects.toThrow();
+  expect(await readFile(join(root, "keep.txt"), "utf8")).toBe("keep");
+  await service.handle("git.stage", { paths: ["keep.txt"] });
+  await expect(service.handle("git.clean", { paths: ["keep.txt"], confirm: true })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  // Both requests arrive together: clean must follow unstage in the writer queue.
+  const [, cleaned] = await Promise.all([service.handle("git.unstage", { paths: ["keep.txt"] }), service.handle("git.clean", { paths: ["keep.txt"], confirm: true })]);
+  expect(cleaned).toEqual({ removed: ["keep.txt"] });
+});
+
+it("refuses escaped, tracked, directory and unconfirmed clean requests before deleting anything", async () => {
+  const { directory, root, scope } = await repositoryFixture(); const service = new GitService(scope);
+  await writeFile(join(root, "chosen.txt"), "new");
+  await writeFile(join(directory, "outside.txt"), "outside");
+  await mkdir(join(root, "nested")); await writeFile(join(root, "nested", "file"), "nested");
+  await symlink(directory, join(root, "escape"));
+  for (const path of ["../outside.txt", "escape/outside.txt", ".git/config", "readme.txt", "nested"])
+    await expect(service.handle("git.clean", { paths: ["chosen.txt", path], confirm: true })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  for (const params of [{ paths: ["chosen.txt"] }, { confirm: true }, { paths: [], confirm: true }])
+    await expect(service.handle("git.clean", params)).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  expect(await readFile(join(root, "chosen.txt"), "utf8")).toBe("new");
+  expect(await readFile(join(root, "readme.txt"), "utf8")).toBe("initial\n");
+  expect(await readFile(join(directory, "outside.txt"), "utf8")).toBe("outside");
+});
+
+it("treats metacharacters as literal filenames during scoped clean", async () => {
+  const { root, scope } = await repositoryFixture(); const service = new GitService(scope);
+  await writeFile(join(root, "*.txt"), "literal"); await writeFile(join(root, "keep.txt"), "keep");
+  expect(await service.handle("git.clean", { paths: ["*.txt"], confirm: true })).toEqual({ removed: ["*.txt"] });
+  expect(await readFile(join(root, "keep.txt"), "utf8")).toBe("keep");
 });

@@ -1,8 +1,10 @@
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
 // (realtime role), the lifecycle loop (worker role), the HTTP routes and the
 // model proxy (API role). index.ts only starts and stops what this returns.
+import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { Config } from "../config.js";
 import { HttpError } from "../authz.js";
 import { BoatApiClient } from "../cloud/boat-client.js";
@@ -13,6 +15,7 @@ import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
 import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./github.js";
+import { HISTORY_OPS, readCloudV2History } from "./history.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
@@ -41,22 +44,22 @@ export async function cloudV2AgentConfig(logins: { codex?: Login; claude?: Login
 }
 
 /** Bridge history reads answered from the mirror while the VM is stopped. */
-export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "windowMessages">,
+export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "messageWindow">,
   workspace: CloudV2Workspace, frame: unknown): Promise<unknown | null> {
   const request = frame as { type?: unknown; id?: unknown; op?: unknown; params?: Record<string, unknown> } | null;
   if (request?.type !== "WORKSPACE_REQUEST" || typeof request.id !== "string" || typeof request.op !== "string") return null;
-  let result: unknown;
-  if (request.op === "chats.list") result = await store.listChats(workspace.id);
-  else if (request.op === "messages.window") {
-    const chatId = request.params?.chatId;
-    if (typeof chatId !== "string") return null;
-    const limit = typeof request.params?.limit === "number" ? request.params.limit : 200;
-    result = { messages: await store.windowMessages(workspace.id, chatId, limit) };
-  } else return null;
-  return { type: "WORKSPACE_RESPONSE", id: randomUUID(), source: "engine", timestamp: Date.now(), requestId: request.id, op: request.op, result };
+  if (!HISTORY_OPS.some(op => op === request.op)) return null;
+  const reply = { id: randomUUID(), source: "engine", timestamp: Date.now(), requestId: request.id, op: request.op };
+  try {
+    const result = await readCloudV2History(store, workspace.id, { op: request.op, params: request.params ?? {} });
+    return { ...reply, type: "WORKSPACE_RESPONSE", result };
+  } catch (error) {
+    if (!(error instanceof HttpError)) throw error;
+    return { ...reply, type: "WORKSPACE_ERROR", code: error.code, message: error.message };
+  }
 }
 
-export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }) {
+export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool) {
   const v2 = config.cloudV2;
   if (!v2) return null;
   const store = new CloudV2Store(pool);
@@ -101,17 +104,32 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   };
   const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const relay = roles.relay ? new CloudV2Relay({
-    store,
+    store, ...(securityEvents ? { securityEvents } : {}),
     config: workerConfig,
     githubToken,
     wake: async workspace => { await store.transition(workspace.id, ["stopped"], "starting"); },
     answerOffline: (workspace, frame) => answerCloudV2Offline(store, workspace, frame),
     logger: console,
   }) : null;
+  const loginChanges = relay ? postgresNotificationSubscription(listenerPool, {
+    channels: ["zeros_cloud_v2_logins"],
+    onReady: () => { void relay.refreshLogins(); },
+    onNotification: notice => {
+      try {
+        const scope = JSON.parse(notice.payload ?? "");
+        if (typeof scope?.ownerUserId === "string" && (scope.organizationId === null || typeof scope.organizationId === "string"))
+          void relay.refreshLogins({ ownerUserId: scope.ownerUserId, ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) });
+      } catch { /* Invalid wake hints carry no authority. */ }
+    },
+  }) : null;
+  void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
-  const builder = roles.lifecycle && repositoryToken ? new CloudV2ComputerBuilder({
+  const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, runtime,
-    cloneToken: async (organizationId, userId, repository) => (await repositoryToken(organizationId, userId, repository)).token,
+    cloneToken: async (organizationId, userId, repository) => {
+      if (!repositoryToken) throw new HttpError(409, "github_unavailable", "GitHub is not configured");
+      return (await repositoryToken(organizationId, userId, repository)).token;
+    },
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
@@ -123,5 +141,5 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     sandboxName: workspace => `zeros-${config.deploymentChannel}-ws-${workspace.id.slice(0, 8)}`,
     logger: console,
   }) : null;
-  return { store, compute, routes, proxy, relay, lifecycle };
+  return { store, compute, routes, proxy, relay, lifecycle, loginChanges };
 }

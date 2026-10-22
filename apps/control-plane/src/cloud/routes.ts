@@ -1,6 +1,6 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Workspaces are creator-only.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -8,6 +8,7 @@ import { HttpError } from "../authz.js";
 import type { CloudV2Capabilities } from "./contract.js";
 import type { CloudV2InstalledRepository, CloudV2Store, CloudV2Workspace } from "./store.js";
 import { CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
+import { readCloudV2History } from "./history.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
 
 const CONNECT_TICKET_TTL_MS = 60_000;
@@ -27,7 +28,7 @@ const CreateSchema = z.object({
 }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "windowMessages">;
+  store: Pick<CloudV2Store, "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow">;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
@@ -55,18 +56,32 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud workspace request");
     const input = parsed.data;
     await deps.computers.requireMember(input.organizationId, c.get("user").id);
+    const key = c.req.header("Idempotency-Key");
+    if (key !== undefined && !/^[\x21-\x7e]{1,200}$/.test(key)) throw new HttpError(400, "invalid_request", "Invalid creation key");
+    const hash = createHash("sha256").update(JSON.stringify({ ...input, repository: input.repository.toLowerCase() })).digest("hex");
+    if (key) {
+      const previous = await deps.store.readCreateReceipt(c.get("user").id, key, hash);
+      if (previous) return c.json(previous.response, previous.status);
+    }
     const installed = await deps.installedRepositories(input.organizationId);
     if (!installed) throw new HttpError(409, "cloud_computer_build_required", "Build this organization's Cloud Computer first");
     const repository = installed.find(repo => repo.repository.toLowerCase() === input.repository.toLowerCase());
     if (!repository)
       throw new HttpError(409, "repository_not_installed", "Add this repository to the Cloud Computer first");
+    const baseBranch = input.baseBranch ?? repository.defaultBranch;
+    if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
     const id = randomUUID();
     const name = input.name ?? input.repository.split("/")[1]!;
-    const workspace = await deps.store.createWorkspace({
+    const create = {
       id, organizationId: input.organizationId, creatorUserId: c.get("user").id, name,
       repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
-      baseBranch: input.baseBranch ?? repository.defaultBranch ?? "main", computerBuildId: null,
-    });
+      baseBranch, computerBuildId: null,
+    };
+    if (key) {
+      const receipt = await deps.store.createWorkspaceOnce(create, key, hash, workspace => ({ workspace: document(workspace) }));
+      return c.json(receipt.response, receipt.status);
+    }
+    const workspace = await deps.store.createWorkspace(create);
     return c.json({ workspace: document(workspace) }, 201);
   });
 
@@ -92,7 +107,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const workspace = await deps.store.get(id.data, userId);
     if (workspace.state === "deleting" || workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
     if (workspace.state === "stopped") await deps.store.transition(workspace.id, ["stopped"], "starting");
-    const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS });
+    const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user") });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
@@ -101,18 +116,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   });
 
   /** History reads from the control plane's mirror; never wakes the VM. */
-  const HistorySchema = z.object({ op: z.enum(["chats.list", "messages.window"]), params: z.record(z.string(), z.unknown()).default({}) }).strict();
   app.post("/v1/cloud-v2/workspaces/:id/history", json, async c => {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
     const workspace = await deps.store.get(id.data, c.get("user").id);
-    const parsed = HistorySchema.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HttpError(400, "invalid_request", "Unsupported history read");
-    if (parsed.data.op === "chats.list") return c.json({ result: await deps.store.listChats(workspace.id) });
-    const chatId = z.string().min(1).max(256).safeParse(parsed.data.params.chatId);
-    if (!chatId.success) throw new HttpError(400, "invalid_request", "chatId is required");
-    const limit = z.number().int().min(1).max(1000).catch(200).parse(parsed.data.params.limit);
-    return c.json({ result: { messages: await deps.store.windowMessages(workspace.id, chatId.data, limit) } });
+    return c.json({ result: await readCloudV2History(deps.store, workspace.id, await c.req.json().catch(() => null)) });
   });
 
   for (const action of ["start", "stop", "archive"] as const) {

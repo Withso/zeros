@@ -63,14 +63,22 @@ describe("cloud v2 creation", () => {
   it.each([
     ["master", undefined, "master"],
     ["release/stable", undefined, "release/stable"],
-    [null, undefined, "main"],
     ["master", "feature/topic", "feature/topic"],
+    [null, "feature/topic", "feature/topic"],
   ] as const)("uses the installed default unless the user selects a branch (%s, %s)", async (defaultBranch, selected, expected) => {
     const f = fixture([{ repository: "Example/Project", defaultBranch }]);
     const response = await f.create(selected ? { baseBranch: selected } : {});
     expect(response.status).toBe(201);
     expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ baseBranch: expected, creatorUserId: member, repository: "Example/Project" }));
     expect(f.requireMember.mock.invocationCallOrder[0]).toBeLessThan(f.installedRepositories.mock.invocationCallOrder[0]!);
+  });
+
+  it("refuses an omitted base when the build recorded no usable branch", async () => {
+    const f = fixture([{ repository: "example/project", defaultBranch: null }]);
+    const response = await f.create();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "repository_branch_required" } });
+    expect(f.createWorkspace).not.toHaveBeenCalled();
   });
 
   it.each([

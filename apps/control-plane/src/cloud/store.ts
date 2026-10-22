@@ -1,13 +1,22 @@
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
+import type { AuthedUser } from "../auth.js";
+import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
+
+import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
 
 export type CloudV2InstalledRepository = { repository: string; defaultBranch: string | null };
+type CreateWorkspace = {
+  id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
+  baseBranch: string; computerBuildId: string | null;
+};
+type CreateReceipt = { status: 201; response: Record<string, unknown> };
 
 export type CloudV2Workspace = {
   id: string;
@@ -56,16 +65,23 @@ function workspace(row: Row): CloudV2Workspace {
   };
 }
 
+// Every long-lived capability also needs a live account and membership.
+const LIVE_ACCESS = `EXISTS (
+  SELECT 1 FROM organization_members m
+  JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
+  JOIN users u ON u.id = m.user_id AND u.auth_status = 'active' AND u.deleted_at IS NULL
+  WHERE m.org_id = w.org_id AND m.user_id = w.creator_user_id
+    AND NOT o.is_personal AND o.cloud_workspaces_allowed)`;
+
 const notFound = () => new HttpError(404, "not_found", "Cloud workspace not found");
 
-/** v1 is creator-only: the caller must have created the workspace and still
+/** v2 is creator-only: the caller must have created the workspace and still
  * belong to its organization. Anyone else sees the same 404. */
 async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promise<Row> {
   const { rows } = await tx.query<Row>(
     `SELECT ${COLUMNS} FROM cloud_v2_workspaces w
      WHERE w.id = $1 AND w.creator_user_id = $2 AND w.state <> 'deleted'
-       AND EXISTS (SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
-                   WHERE m.org_id = w.org_id AND m.user_id = $2)
+       AND ${LIVE_ACCESS}
      ${lock ? "FOR UPDATE OF w" : ""}`,
     [id, userId],
   );
@@ -76,25 +92,50 @@ async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promi
 export class CloudV2Store {
   constructor(private readonly pool: pg.Pool) {}
 
-  async createWorkspace(input: {
-    id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
-    baseBranch: string; computerBuildId: string | null;
-  }): Promise<CloudV2Workspace> {
-    const row = await withSystemTx(this.pool, async tx => {
-      const member = await tx.query(
-        `SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
-         WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed`,
-        [input.organizationId, input.creatorUserId],
-      );
-      if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
-      return (await tx.query<Row>(
-        `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
-        [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
-          input.baseBranch, input.computerBuildId],
-      )).rows[0]!;
-    });
+  async createWorkspace(input: CreateWorkspace): Promise<CloudV2Workspace> {
+    return withSystemTx(this.pool, tx => this.insertWorkspace(tx, input));
+  }
+
+  private async insertWorkspace(tx: Tx, input: CreateWorkspace): Promise<CloudV2Workspace> {
+    const member = await tx.query(
+      `SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
+       WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed FOR SHARE OF o,m`,
+      [input.organizationId, input.creatorUserId],
+    );
+    if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
+    const row = (await tx.query<Row>(
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
+      [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
+        input.baseBranch, input.computerBuildId],
+    )).rows[0]!;
     return workspace(row);
+  }
+
+  private async createReceipt(tx: Tx, creator: string, key: string, hash: string): Promise<CreateReceipt | null> {
+    const { rows } = await tx.query<CreateReceipt & { request_hash: string }>(
+      "SELECT request_hash,status,response FROM cloud_v2_create_requests WHERE creator_user_id=$1 AND request_key=$2", [creator, key]);
+    if (!rows[0]) return null;
+    if (rows[0].request_hash !== hash) throw new HttpError(409, "idempotency_conflict", "This creation key was already used with different content");
+    return { status: rows[0].status, response: rows[0].response };
+  }
+
+  readCreateReceipt(creator: string, key: string, hash: string): Promise<CreateReceipt | null> {
+    return withSystemTx(this.pool, tx => this.createReceipt(tx, creator, key, hash));
+  }
+
+  createWorkspaceOnce(input: CreateWorkspace, key: string, hash: string,
+    response: (workspace: CloudV2Workspace) => Record<string, unknown>): Promise<CreateReceipt> {
+    return withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-v2-create:${input.creatorUserId}:${key}`]);
+      const previous = await this.createReceipt(tx, input.creatorUserId, key, hash);
+      if (previous) return previous;
+      const workspace = await this.insertWorkspace(tx, input);
+      const receipt = { status: 201 as const, response: response(workspace) };
+      await tx.query(`INSERT INTO cloud_v2_create_requests(creator_user_id,request_key,request_hash,workspace_id,status,response)
+        VALUES($1,$2,$3,$4,$5,$6)`, [input.creatorUserId, key, hash, workspace.id, receipt.status, JSON.stringify(receipt.response)]);
+      return receipt;
+    });
   }
 
   async get(id: string, userId: string): Promise<CloudV2Workspace> {
@@ -159,12 +200,20 @@ export class CloudV2Store {
   }
 
   /** The worker's identity. A deleted workspace has no token hash. */
-  async byWorkerToken(token: string): Promise<CloudV2Workspace | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
-      `SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE worker_token_hash = $1 AND state NOT IN ('deleting','deleted')`,
+  async byWorkerToken(token: string): Promise<(CloudV2Workspace & { accessEpoch: string }) | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string }>(
+      `SELECT ${COLUMNS}, access_epoch::text FROM cloud_v2_workspaces w
+       WHERE worker_token_hash = $1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
       [hashCloudV2Token(token)],
     ));
-    return rows[0] ? workspace(rows[0]) : null;
+    return rows[0] ? { ...workspace(rows[0]), accessEpoch: rows[0].access_epoch } : null;
+  }
+
+  async accessEpoch(id: string): Promise<string | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ access_epoch: string }>(
+      `SELECT access_epoch::text FROM cloud_v2_workspaces w
+       WHERE id = $1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`, [id]));
+    return rows[0]?.access_epoch ?? null;
   }
 
   async markActive(id: string): Promise<void> {
@@ -184,10 +233,19 @@ export class CloudV2Store {
   }
 
   /** A one-use app connect ticket, or a worker model-proxy token. */
-  async issueToken(input: { workspaceId: string; kind: "connect" | "proxy"; userId: string | null; ttlMs: number }) {
+  async issueToken(input: { workspaceId: string; kind: "connect" | "proxy"; userId: string | null; ttlMs: number; authority?: AuthedUser }) {
     const issued = newCloudV2Token(input.kind);
     const expiresAt = new Date(Date.now() + input.ttlMs);
     await withSystemTx(this.pool, async tx => {
+      // Serialize issuance with revocation; authentication may have changed
+      // after the HTTP middleware accepted the request.
+      const allowed = await tx.query(`SELECT id FROM cloud_v2_workspaces w
+        WHERE id = $1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
+          AND ($2::text = 'proxy' OR creator_user_id = $3) FOR UPDATE`,
+        [input.workspaceId, input.kind, input.userId]);
+      if (!allowed.rowCount) throw notFound();
+      if (input.authority && !await securityStreamAuthority(tx, input.authority))
+        throw new HttpError(401, "session_revoked", "Authentication is no longer current");
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE expires_at < clock_timestamp() - interval '1 hour'`);
       await tx.query(
         `INSERT INTO cloud_v2_tokens (token_hash, workspace_id, kind, user_id, expires_at) VALUES ($1, $2, $3, $4, $5)`,
@@ -198,23 +256,23 @@ export class CloudV2Store {
   }
 
   /** Consumes a connect ticket exactly once. */
-  async consumeConnectTicket(token: string, workspaceId: string): Promise<{ userId: string } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ user_id: string }>(
+  async consumeConnectTicket(token: string, workspaceId: string): Promise<{ userId: string; accessEpoch: string } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ user_id: string; access_epoch: string }>(
       `UPDATE cloud_v2_tokens t SET used_at = clock_timestamp()
        FROM cloud_v2_workspaces w
        WHERE t.token_hash = $1 AND t.kind = 'connect' AND t.workspace_id = $2 AND t.used_at IS NULL
          AND t.expires_at > clock_timestamp() AND w.id = t.workspace_id AND w.creator_user_id = t.user_id
-         AND w.state NOT IN ('deleting','deleted')
-       RETURNING t.user_id`,
+         AND w.state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
+       RETURNING t.user_id, w.access_epoch::text`,
       [hashCloudV2Token(token), workspaceId],
     ));
-    return rows[0] ? { userId: rows[0].user_id } : null;
+    return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch } : null;
   }
 
   async verifyProxyToken(token: string): Promise<CloudV2Workspace | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
       `SELECT ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")} FROM cloud_v2_tokens t JOIN cloud_v2_workspaces w ON w.id = t.workspace_id
-       WHERE t.token_hash = $1 AND t.kind = 'proxy' AND t.expires_at > clock_timestamp() AND w.state = 'running'`,
+       WHERE t.token_hash = $1 AND t.kind = 'proxy' AND t.expires_at > clock_timestamp() AND w.state = 'running' AND ${LIVE_ACCESS}`,
       [hashCloudV2Token(token)],
     ));
     return rows[0] ? workspace(rows[0]) : null;
@@ -252,11 +310,18 @@ export class CloudV2Store {
   /** Replaces the worker credential; the plaintext goes only to the VM. */
   async rotateWorkerToken(id: string): Promise<string> {
     const worker = newCloudV2Token("worker");
-    await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET worker_token_hash = $2 WHERE id = $1 AND state NOT IN ('deleting','deleted')`,
+    const changed = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces w SET worker_token_hash = $2 WHERE id = $1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`,
       [id, worker.hash],
     ));
+    if (!changed.rowCount) throw notFound();
     return worker.token;
+  }
+
+  async loginRevision(id: string): Promise<string | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ revision: string }>(
+      "SELECT login_revision::text AS revision FROM cloud_v2_workspaces WHERE id=$1 AND state<>'deleted'", [id]));
+    return rows[0]?.revision ?? null;
   }
 
   async computerSnapshot(organizationId: string): Promise<string | null> {
@@ -277,8 +342,9 @@ export class CloudV2Store {
     if (!rows[0]) return null;
     return (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
       repository: entry.repository,
-      defaultBranch: typeof entry.ref === "string" && entry.ref ? entry.ref
-        : typeof entry.branch === "string" && entry.branch ? entry.branch : null,
+      // A recipe ref can be a tag. Only the build's verified branch is a
+      // supported source for the worker's origin/<baseBranch> checkout.
+      defaultBranch: typeof entry.branch === "string" && entry.branch ? entry.branch : null,
     }] : []);
   }
 
@@ -340,14 +406,12 @@ export class CloudV2Store {
     };
   }
 
-  /** Newest `limit` rows in chronological order. */
+  messageWindow(workspaceId: string, chatId: string, options: WindowOptions = {}): Promise<MessageWindow> {
+    return withSystemTx(this.pool, tx => mirrorMessageWindow(tx, workspaceId, chatId, options), { consistentRead: true });
+  }
+
+  /** Rows-only compatibility for internal callers; HTTP also returns turnOpening. */
   async windowMessages(workspaceId: string, chatId: string, limit: number): Promise<CloudV2MessageRow[]> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ msg_id: string; kind: string; payload: string; created_at_ms: string }>(
-      `SELECT msg_id, kind, payload, created_at_ms FROM (
-         SELECT * FROM cloud_v2_messages WHERE workspace_id = $1 AND chat_id = $2 ORDER BY ord DESC LIMIT $3
-       ) newest ORDER BY ord`,
-      [workspaceId, chatId, Math.max(1, Math.min(limit, 1000))],
-    ));
-    return rows.map(row => ({ msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: Number(row.created_at_ms) }));
+    return (await this.messageWindow(workspaceId, chatId, { limit })).messages;
   }
 }

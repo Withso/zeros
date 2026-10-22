@@ -8,12 +8,13 @@ import { runCloudV2Gate0 } from "./gate0.js";
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
-async function fixture(failAgent?: string, protocolVersion = 21) {
+type Faults = { cancelAck?: "missing" | "request" | "chat" | "state"; completedBeforeStop?: boolean; older?: "anchor" | "wrong" };
+async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults = {}) {
   const id = randomUUID(), organizationId = randomUUID();
   const repository = "example/project", root = `/home/user/${repository}`, branch = "zeros/gate0";
   const calls: { method: string; path: string; body: any }[] = [];
   const frames: any[] = [], chats = new Map<string, any[]>(), files = new Map<string, string>();
-  const sessions = new Map<string, string>(), tickets = new Set<string>();
+  const sessions = new Map<string, string>(), tickets = new Set<string>(), activePrompts = new Map<string, any>();
   const logs: string[] = [];
   let state = "absent", name = "", staged = false, connections = 0;
   const workspace = () => ({ id, organizationId, repository, branch, baseBranch: "master", name, state });
@@ -40,9 +41,17 @@ async function fixture(failAgent?: string, protocolVersion = 21) {
     }
     if (path.endsWith("/stop")) { state = "stopped"; return json({ workspace: workspace() }, 202); }
     if (path.endsWith("/start")) { state = "running"; return json({ workspace: workspace() }, 202); }
-    if (path.endsWith("/history")) return json({ result: body.op === "chats.list"
-      ? { chats: [...chats.keys()].map(id => ({ id })), chatDeletions: [] }
-      : { messages: chats.get(body.params.chatId) ?? [] } });
+    if (path.endsWith("/history")) {
+      if (body.op === "chats.list") return json({ result: { chats: [...chats.keys()].map(id => ({ id })), chatDeletions: [] } });
+      const rows = chats.get(body.params.chatId) ?? [];
+      if (body.op === "messages.windowOlder") {
+        const anchor = rows.findIndex(row => row.msgId === body.params.beforeMsgId);
+        const end = anchor + (faults.older === "anchor" ? 1 : 0);
+        const messages = faults.older === "wrong" ? [] : rows.slice(Math.max(0, end - body.params.limit), end);
+        return json({ result: { messages } });
+      }
+      return json({ result: { messages: rows } });
+    }
     if (method === "DELETE" && path === `/v1/cloud-v2/workspaces/${id}`) { state = "deleted"; return json({ workspace: workspace() }, 202); }
     return json({}, 404);
   });
@@ -96,6 +105,17 @@ async function fixture(failAgent?: string, protocolVersion = 21) {
       if (frame.type === "AGENT_PROMPT") {
         const chatId = sessions.get(frame.sessionId)!;
         if (frame.agentId === failAgent) return reply("AGENT_PROMPT_FAILED", { message: "provider-secret-must-not-appear" });
+        if (chatId.startsWith("gate0-stop-")) {
+          activePrompts.set(frame.sessionId, frame);
+          chats.set(chatId, [
+            { msgId: frame.userMessageId, kind: "text", payload: JSON.stringify({ role: "user", text: frame.prompt[0].text }), createdAt: 1 },
+            { msgId: randomUUID(), kind: "text", payload: JSON.stringify({ role: "agent", text: "Waiting" }), createdAt: 2 },
+          ]);
+          send({ type: "AGENT_SESSION_UPDATE", chatId, notification: { sessionId: frame.sessionId, update: { sessionUpdate: "turn_state", state: "running" } } });
+          send({ type: "AGENT_SESSION_UPDATE", chatId, notification: { sessionId: frame.sessionId, update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Waiting" } } } });
+          if (faults.completedBeforeStop) { activePrompts.delete(frame.sessionId); reply("AGENT_PROMPT_COMPLETE", { stopReason: "end_turn" }); }
+          return;
+        }
         const marker = /zeros-gate0-[a-f0-9-]+/.exec(frame.prompt[0].text)![0];
         chats.set(chatId, [
           { msgId: frame.userMessageId, kind: "text", payload: JSON.stringify({ role: "user", text: frame.prompt[0].text }), createdAt: 1 },
@@ -103,6 +123,19 @@ async function fixture(failAgent?: string, protocolVersion = 21) {
         ]);
         send({ type: "AGENT_SESSION_UPDATE", chatId, notification: { sessionId: frame.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: marker } } } });
         return reply("AGENT_PROMPT_COMPLETE");
+      }
+      if (frame.type === "AGENT_CANCEL") {
+        const prompt = activePrompts.get(frame.sessionId);
+        expect(prompt).toBeDefined(); activePrompts.delete(frame.sessionId);
+        const chatId = sessions.get(frame.sessionId)!;
+        expect(frame.chatId).toBe(chatId);
+        const rows = chats.get(chatId)!;
+        rows[1].payload = JSON.stringify({ role: "agent", text: "Stopped" });
+        send({ type: "AGENT_PROMPT_COMPLETE", requestId: prompt.id, stopReason: "cancelled" });
+        if (faults.cancelAck !== "missing") reply("WORKSPACE_RESPONSE", {
+          op: "AGENT_CANCEL", requestId: faults.cancelAck === "request" ? prompt.id : frame.id,
+          result: { conversationId: faults.cancelAck === "chat" ? "foreign-chat" : chatId, state: faults.cancelAck === "state" ? "succeeded" : "cancelled" },
+        });
       }
     });
   });
@@ -131,11 +164,45 @@ describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
     const handshakes = f.frames.filter(frame => frame.type === "CONNECTED");
     expect(handshakes).toHaveLength(2);
     for (const frame of handshakes) expect(frame).toMatchObject({ source: "browser", protocolVersion, capabilities: [] });
-    expect(f.frames.filter(f => f.type === "AGENT_PROMPT").map(f => f.agentId)).toEqual(["codex", "claude", "cursor"]);
+    expect(f.frames.filter(f => f.type === "AGENT_PROMPT").map(f => f.agentId)).toEqual(["codex", "claude", "cursor", "codex"]);
+    const cancel = f.frames.filter(frame => frame.type === "AGENT_CANCEL");
+    expect(cancel).toHaveLength(1);
+    expect(cancel[0]).toMatchObject({ agentId: "codex", chatId: expect.stringMatching(/^gate0-stop-/) });
+    expect(f.calls.filter(c => c.path.endsWith("/history") && c.body.op === "messages.windowOlder")).toHaveLength(4);
     expect(f.frames.filter(f => f.type === "WORKSPACE_REQUEST").map(f => f.op)).toEqual(expect.arrayContaining(["file.write", "file.read", "git.status", "git.stage", "git.diff", "git.unstage"]));
     expect(f.calls.some(c => c.path.includes("/builds"))).toBe(false);
     expect(f.state()).toBe("deleted");
     expect(f.logs.join("\n")).not.toContain("synthetic-gate0-access");
+  });
+
+  it.each(["missing", "request", "chat", "state"] as const)("fails and cleans up a %s Stop acknowledgement even when the prompt completes", async cancelAck => {
+    const f = await fixture(undefined, 21, { cancelAck });
+    await expect(runCloudV2Gate0(f.options)).rejects.toThrow("agent_stop_ack");
+    expect(f.state()).toBe("deleted");
+    expect(f.calls.some(c => c.path.endsWith("/stop"))).toBe(false);
+  });
+
+  it("requires a live turn for the Stop probe", async () => {
+    const f = await fixture(undefined, 21, { completedBeforeStop: true });
+    await expect(runCloudV2Gate0(f.options)).rejects.toThrow("agent_stop_live");
+    expect(f.frames.some(frame => frame.type === "AGENT_CANCEL")).toBe(false);
+    expect(f.state()).toBe("deleted");
+  });
+
+  it.each(["anchor", "wrong"] as const)("rejects offline paging with %s rows before waking", async older => {
+    const f = await fixture(undefined, 21, { older });
+    await expect(runCloudV2Gate0(f.options)).rejects.toThrow("offline_messages_older");
+    expect(f.calls.some(c => c.path.endsWith("/start"))).toBe(false);
+    expect(f.state()).toBe("deleted");
+  });
+
+  it("uses the first selected provider for Stop without another workspace or wake", async () => {
+    const f = await fixture();
+    await runCloudV2Gate0({ ...f.options, agents: ["claude"] });
+    expect(f.frames.filter(frame => frame.type === "AGENT_PROMPT").map(frame => frame.agentId)).toEqual(["claude", "claude"]);
+    expect(f.frames.find(frame => frame.type === "AGENT_CANCEL")).toMatchObject({ agentId: "claude" });
+    expect(f.calls.filter(c => c.method === "POST" && c.path === "/v1/cloud-v2/workspaces")).toHaveLength(1);
+    expect(f.calls.filter(c => c.path.endsWith("/start"))).toHaveLength(1);
   });
 
   it("deletes the workspace on a failed provider turn and never surfaces the provider's error body", async () => {

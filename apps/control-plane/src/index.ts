@@ -97,7 +97,7 @@ const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.s
 const cloudV2 = runtimeReady ? createCloudV2(config, workerPool ?? pool, {
   relay: processRole === "realtime" || processRole === "combined",
   lifecycle: processRole === "worker" || processRole === "combined",
-}) : null;
+}, securityEventBroker, listenerPool) : null;
 const stopCloudV2Lifecycle = cloudV2?.lifecycle?.start() ?? (async () => {});
 const app = createApp(config, pool, emailConfig, {
   ...(cloudV2 && servesHttpApi ? { cloudV2: { routes: cloudV2.routes, proxy: cloudV2.proxy } } : {}),
@@ -133,7 +133,7 @@ function shutdown(signal: string): void {
   console.log(`[control-plane] ${signal}; draining`);
   cloudV2?.relay?.close();
   const backgroundStopped = Promise.allSettled([
-    stopCloudV2Lifecycle(), stopWorkerNotifications(),
+    stopCloudV2Lifecycle(), stopWorkerNotifications(), cloudV2?.loginChanges?.stop() ?? Promise.resolve(),
     workosSync?.stop() ?? Promise.resolve(), securityEventBroker.stop(), stopSecurityEventPublisher(),
   ]);
   const deadline = setTimeout(() => process.exit(1), 15_000 + (config.shutdownDrainMs ?? 0));

@@ -32,6 +32,8 @@ export interface SteerReceipt extends Omit<PromptInput, "startedAt"> {
 }
 export interface SessionData {
   version: 1;
+  /** Persisted insertion order, matching Local's rowid tie-break for summaries. */
+  ordinal?: number;
   workspaceKey: string;
   chatId: string;
   chat: ChatRow | null;
@@ -48,6 +50,8 @@ export interface SessionChange {
   chat?: ChatRow;
   deleted?: true;
   rows: CloudV2MessageRow[];
+  /** A durable control/turn boundary must flush any pending mirrored rows. */
+  flush?: true;
 }
 
 export function userMessage(input: PromptInput, steeredTurnId?: string): AgentTextMessage {
@@ -87,6 +91,7 @@ export class SessionStore {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly writeFailures = new Map<string, unknown>();
   private readonly errorListeners = new Set<(chatId: string) => void>();
+  private nextOrdinal = 0;
 
   private constructor(private readonly directory: string, readonly workspaceKey: string) {}
 
@@ -107,6 +112,7 @@ export class SessionStore {
           !Array.isArray(value.rows) || !Array.isArray(value.inbox) || !Array.isArray(value.steers) ||
           (value.chat !== null && (!coerceChat(value.chat) || value.chat.id !== value.chatId))) throw new Error("Invalid persisted chat.");
       value.messages = transcript(value.rows);
+      if (Number.isSafeInteger(value.ordinal) && value.ordinal! > store.nextOrdinal) store.nextOrdinal = value.ordinal!;
       store.sessions.set(value.chatId, value);
       // Mark native dispatch BEFORE calling the driver. After a crash there is
       // no evidence that it was unconsumed, so only a fresh explicit send resumes.
@@ -124,6 +130,7 @@ export class SessionStore {
         });
       }
     }
+    for (const value of store.sessions.values()) if (!Number.isSafeInteger(value.ordinal) || value.ordinal! <= 0) value.ordinal = ++store.nextOrdinal;
     return store;
   }
 
@@ -149,6 +156,14 @@ export class SessionStore {
     return structuredClone(this.sessions.get(chatId)?.inbox.find((entry) => entry.requestId === requestId));
   }
 
+  latestReceipt(chatId: string): InboxEntry | undefined {
+    const inbox = this.sessions.get(chatId)?.inbox;
+    for (let i = (inbox?.length ?? 0) - 1; i >= 0; i--) {
+      if (inbox![i].state !== "queued") return structuredClone(inbox![i]);
+    }
+    return undefined;
+  }
+
   steerReceipt(chatId: string, executionId: string, attemptId: string): SteerReceipt | undefined {
     return structuredClone(this.sessions.get(chatId)?.steers.find((entry) => entry.executionId === executionId && entry.attemptId === attemptId));
   }
@@ -158,6 +173,39 @@ export class SessionStore {
       chats: [...this.sessions.values()].flatMap((value) => value.chat ? [value.chat] : []).sort((a, b) => b.updatedAt - a.updatedAt),
       chatDeletions: [...this.sessions.values()].filter((value) => !value.chat).map((value) => value.chatId),
     });
+  }
+
+  titleSeeds(chatIds: readonly string[]) {
+    return [...new Set(chatIds.slice(0, 50))].flatMap(chatId => {
+      const session = this.sessions.get(chatId);
+      if (!session?.chat) return [];
+      const index = session.messages.findIndex(message => message.kind === "text" && message.role === "user"
+        && message.localNote == null && typeof message.text === "string");
+      const first = session.messages[index];
+      if (first?.kind !== "text" || !first.text.trim()) return [];
+      const answered = session.messages.slice(index + 1).some(message => message.kind === "tool" ||
+        (message.kind === "text" && message.role === "agent" && message.modelFallback == null && !!message.text.trim())) ||
+        session.inbox.some(entry => entry.userMessageId === first.id && ["completed", "failed", "cancelled", "interrupted"].includes(entry.state));
+      // The renderer's title request keeps the first 400 and last 100 Unicode
+      // characters. Bound the wire payload to that same input, without secrets
+      // or full transcripts leaving the VM just to name a chat.
+      const chars = Array.from(first.text.trim());
+      const prompt = chars.length <= 500 ? chars.join("") : chars.slice(0, 400).join("") + chars.slice(-100).join("");
+      return [{ chatId, messageId: first.id, prompt, answered }];
+    });
+  }
+
+  summariesForFolder(folder: string, excludeChatId?: string) {
+    return [...this.sessions.values()].filter(session => session.chat?.folder === folder && session.chatId !== excludeChatId)
+      .sort((a, b) => b.chat!.createdAt - a.chat!.createdAt || (b.ordinal ?? 0) - (a.ordinal ?? 0)).flatMap(session => {
+        const chat = session.chat!;
+        const user = session.messages.filter(message => message.kind === "text" && message.role === "user");
+        if (!user.length) return [];
+        const first = user.find(message => message.kind === "text" && typeof message.text === "string");
+        return [{ chatId: chat.id, title: chat.title, folder: chat.folder, summary: first?.kind === "text" ? first.text : "", summaryAt: 0,
+          agentId: chat.agentId, agentName: chat.agentName, userMessageCount: user.length,
+          lastMessageAt: session.rows.reduce((latest, row) => Math.max(latest, row.createdAt), 0) }];
+      });
   }
 
   async upsert(input: unknown): Promise<void> {
@@ -242,13 +290,15 @@ export class SessionStore {
       this.sessions.set(chatId, { ...current, messages: folded, rows });
       this.dirty.add(chatId);
       if (!this.timers.has(chatId)) {
+        // Crash window: 500 ms of streamed transcript plus in-flight disk I/O.
+        // Inbox, metadata and turn completion remain immediately durable.
         const timer = setTimeout(() => {
           this.timers.delete(chatId);
           void this.flushChat(chatId).catch((error: unknown) => {
             this.writeFailures.set(chatId, error);
             for (const listener of this.errorListeners) listener(chatId);
           });
-        }, 250);
+        }, 500);
         timer.unref?.();
         this.timers.set(chatId, timer);
       }
@@ -331,7 +381,7 @@ export class SessionStore {
       if (previous?.chat === null && !allowDeleted) throw new Error("Cloud conversation was deleted.");
       if (!previous && initial === undefined) throw new Error("Unknown chat.");
       const draft: SessionData = structuredClone(previous ?? {
-        version: 1, workspaceKey: this.workspaceKey, chatId, chat: initial ?? null, paused: false, messages: [], rows: [], inbox: [], steers: [],
+        version: 1, ordinal: ++this.nextOrdinal, workspaceKey: this.workspaceKey, chatId, chat: initial ?? null, paused: false, messages: [], rows: [], inbox: [], steers: [],
       });
       const result = edit(draft);
       if (JSON.stringify(draft) === JSON.stringify(previous)) return structuredClone(result);
@@ -343,8 +393,8 @@ export class SessionStore {
       const oldRows = new Map(previous?.rows.map((row) => [row.msgId, row]));
       const changed = draft.rows.filter((row) => JSON.stringify(oldRows.get(row.msgId)) !== JSON.stringify(row));
       const chatChanged = JSON.stringify(previous?.chat) !== JSON.stringify(draft.chat);
-      if (changed.length || chatChanged) for (const listener of this.listeners) listener(structuredClone({
-        chatId, rows: changed, ...(chatChanged ? draft.chat ? { chat: draft.chat } : { deleted: true as const } : {}),
+      for (const listener of this.listeners) listener(structuredClone({
+        chatId, rows: changed, flush: true as const, ...(chatChanged ? draft.chat ? { chat: draft.chat } : { deleted: true as const } : {}),
       }));
       return structuredClone(result);
     });

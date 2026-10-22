@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
@@ -107,22 +112,52 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview.builds[1]).toMatchObject({ state: "succeeded", snapshotId: null });
   });
 
-  it("uses the recipe ref before the recorded branch and returns null before a successful activation", async () => {
+  it("uses only the observed branch, never a tag or commit ref, as the default", async () => {
     const store = new CloudV2Store(pool);
     expect(await store.installedRepositories(org)).toBeNull();
     const queued = await computers.enqueue(org, admin, { repositories: [
       { repository: "example/explicit", ref: "release/stable", branch: "master" },
       { repository: "example/cloned", branch: "master" },
-      { repository: "example/legacy" },
+      { repository: "example/legacy", ref: "v1.2.3" },
     ] });
     await computers.claim();
     expect(await store.installedRepositories(org)).toBeNull();
     await computers.activate(queued.id, "test-snapshot");
     expect(await store.installedRepositories(org)).toEqual([
-      { repository: "example/explicit", defaultBranch: "release/stable" },
+      { repository: "example/explicit", defaultBranch: "master" },
       { repository: "example/cloned", defaultBranch: "master" },
       { repository: "example/legacy", defaultBranch: null },
     ]);
+  });
+
+  it.each(["tag", "commit"])("records a verified remote branch when the Computer is pinned to a %s", async source => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-computer-branch-"));
+    const run = promisify(execFile);
+    const origin = join(root, "origin");
+    try {
+      await run("git", ["init", "--initial-branch=master", origin]);
+      await writeFile(join(origin, "README.md"), "fixture\n");
+      await run("git", ["-C", origin, "add", "README.md"]);
+      await run("git", ["-C", origin, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "fixture"]);
+      await run("git", ["-C", origin, "tag", "v1.2.3"]);
+      const pinnedCommit = (await run("git", ["-C", origin, "rev-parse", "HEAD"])).stdout.trim();
+      const boat = compute();
+      vi.mocked(boat.execLong).mockImplementation(async (_id, command) => {
+        const local = command.replaceAll("https://github.com/example/project.git", origin)
+          .replaceAll("/home/user", join(root, "checkouts"));
+        const result = await run("bash", ["-c", local]);
+        return { exitCode: 0, stdout: result.stdout, timedOut: false };
+      });
+      const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "fixture" });
+      await computers.enqueue(org, admin, { repositories: [{ repository: "example/project",
+        ...(source === "tag" ? { ref: "v1.2.3" } : { commit: pinnedCommit }) }] });
+      await builder.tick();
+      const overview = await computers.overview(org);
+      expect(overview.builds[0]).toMatchObject({ state: "succeeded", recipe: { repositories: [{ branch: "master", commit: pinnedCommit }] } });
+      expect(await new CloudV2Store(pool).installedRepositories(org)).toEqual([{ repository: "example/project", defaultBranch: "master" }]);
+      // This is the worker's new-workspace source; it must exist in the snapshot.
+      await run("git", ["-C", join(root, "checkouts/example/project"), "switch", "-c", "zeros/created", "origin/master"]);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("records a failed setup without touching the live snapshot", async () => {
@@ -152,5 +187,19 @@ d("cloud v2 Cloud Computer builds", () => {
     expect((await computers.overview(org)).builds[0]).toMatchObject({ id: lost.id, state: "failed", errorCode: "computer_build_interrupted" });
     expect(boat.delete).toHaveBeenCalledWith("bx_lost1");
     expect((await computers.enqueue(org, admin, recipe)).version).toBe(2);
+  });
+
+  it("retains a replaced snapshot's identity until Boat confirms deletion, then retries", async () => {
+    const boat = compute();
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "fixture" });
+    const first = await computers.enqueue(org, admin, recipe); await builder.tick();
+    vi.mocked(boat.deleteSnapshot).mockRejectedValue(new Error("temporary failure"));
+    await computers.enqueue(org, admin, recipe); await builder.tick();
+    expect((await computers.overview(org)).builds.find(build => build.id === first.id)?.snapshotId)
+      .toBe(cloudV2SnapshotName("alpha", org, 1));
+    vi.mocked(boat.deleteSnapshot).mockResolvedValue(undefined);
+    await builder.cleanup();
+    expect((await computers.overview(org)).builds.find(build => build.id === first.id)?.snapshotId).toBeNull();
+    expect((await computers.overview(org)).snapshotName).toBe(cloudV2SnapshotName("alpha", org, 2));
   });
 });

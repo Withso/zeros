@@ -30,7 +30,7 @@ export type CloudV2LifecycleDeps = {
   bootEnv(workspace: CloudV2Workspace): Record<string, string>;
   sandboxName(workspace: CloudV2Workspace): string;
   /** Cloud Computer builds share this loop; one runs at a time. */
-  builds?: { tick(): Promise<void> };
+  builds?: { tick(): Promise<void>; cleanup?(): Promise<void> };
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: Pick<Console, "warn">;
@@ -72,13 +72,17 @@ export class CloudV2Lifecycle {
       this.timer = null;
       await this.running;
       await this.building;
+      await this.cleaning;
     };
   }
 
   private building: Promise<void> | null = null;
+  private cleaning: Promise<void> | null = null;
 
   async tick(): Promise<void> {
     const now = this.deps.now?.() ?? Date.now();
+    if (this.building && this.deps.builds?.cleanup && !this.cleaning)
+      this.cleaning = this.deps.builds.cleanup().catch(() => {}).finally(() => { this.cleaning = null; });
     // A build can take many minutes; it never blocks workspace lifecycle steps.
     if (this.deps.builds && !this.building)
       this.building = this.deps.builds.tick().catch(() => {}).finally(() => { this.building = null; });

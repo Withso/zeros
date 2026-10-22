@@ -3,15 +3,17 @@ import type { Transport } from "../transport";
 import type { ChatRow } from "./chat-history";
 import type { SessionChange, SessionStore } from "./session-store";
 
-interface Pending { chat?: ChatRow; deleted?: true; rows: Map<string, CloudV2MessageRow> }
+interface Pending { chat?: ChatRow; deleted?: true; rows: Map<string, CloudV2MessageRow>; due: number }
 
-/** Coalesce changed rows while a send is pending. Offline history remains on
- * disk; reconnect takes a current snapshot instead of buffering event streams. */
+/** Live viewers use bridge frames. The sleeping-VM mirror batches streamed
+ * rows on a one-second trailing edge; durable changes and turn end flush it.
+ * Reconnect takes a current snapshot instead of buffering offline streams. */
 export class HistoryMirror {
   private online = false;
   private epoch = 0;
   private pending = new Map<string, Pending>();
   private sending?: Promise<void>;
+  private timer?: ReturnType<typeof setTimeout>;
   private unsubscribe: () => void;
 
   constructor(private readonly store: SessionStore, private readonly transport: Transport) {
@@ -23,18 +25,25 @@ export class HistoryMirror {
     this.epoch++;
     this.pending.clear();
     const { chats, chatDeletions } = this.store.list();
-    for (const chatId of chatDeletions) this.pending.set(chatId, { deleted: true, rows: new Map() });
-    for (const chat of chats) this.pending.set(chat.id, { chat, rows: new Map(this.store.history(chat.id).map((row) => [row.msgId, row])) });
+    for (const chatId of chatDeletions) this.pending.set(chatId, { deleted: true, rows: new Map(), due: 0 });
+    for (const chat of chats) this.pending.set(chat.id, { chat, rows: new Map(this.store.history(chat.id).map((row) => [row.msgId, row])), due: 0 });
     this.drain();
   }
 
-  disconnect(): void { this.online = false; this.epoch++; this.pending.clear(); }
-  async flush(): Promise<void> { while (this.sending) await this.sending; }
-  async dispose(): Promise<void> { this.unsubscribe(); this.disconnect(); await this.flush(); }
+  disconnect(): void { this.online = false; this.epoch++; this.pending.clear(); clearTimeout(this.timer); this.timer = undefined; }
+  async flush(): Promise<void> {
+    do {
+      for (const pending of this.pending.values()) pending.due = 0;
+      this.drain();
+      await this.sending;
+    } while (this.sending || (this.online && this.pending.size));
+  }
+  async dispose(): Promise<void> { this.unsubscribe(); await this.flush(); this.disconnect(); }
 
   private change(change: SessionChange): void {
     if (!this.online) return;
-    const pending: Pending = this.pending.get(change.chatId) ?? { rows: new Map() };
+    const pending: Pending = this.pending.get(change.chatId) ?? { rows: new Map(), due: Date.now() + 1000 };
+    if (change.flush || change.chat || change.deleted) pending.due = 0;
     if (change.deleted) { pending.deleted = true; pending.chat = undefined; pending.rows.clear(); }
     else {
       if (change.chat) pending.chat = change.chat;
@@ -46,10 +55,22 @@ export class HistoryMirror {
 
   private drain(): void {
     if (this.sending || !this.online) return;
+    clearTimeout(this.timer); this.timer = undefined;
+    const ready = () => [...this.pending].find(([, pending]) => pending.due <= Date.now());
+    if (!ready()) {
+      if (this.pending.size) {
+        const delay = Math.max(0, Math.min(...[...this.pending.values()].map(pending => pending.due)) - Date.now());
+        this.timer = setTimeout(() => { this.timer = undefined; this.drain(); }, delay);
+        this.timer.unref?.();
+      }
+      return;
+    }
+    const epoch = this.epoch;
     this.sending = Promise.resolve().then(async () => {
-      const epoch = this.epoch;
       while (this.online && epoch === this.epoch && this.pending.size) {
-        const [chatId, pending] = this.pending.entries().next().value!;
+        const entry = ready();
+        if (!entry) break;
+        const [chatId, pending] = entry;
         this.pending.delete(chatId);
         const frames: CloudV2WorkerFrame[] = [];
         if (pending.deleted) frames.push({ t: "history", chatDeletions: [chatId] });
@@ -70,6 +91,7 @@ export class HistoryMirror {
           if (!await this.transport.send(frame)) { if (epoch === this.epoch) this.disconnect(); break; }
         }
       }
-    }).finally(() => { this.sending = undefined; if (this.online && this.pending.size) this.drain(); });
+    }).catch(() => { if (epoch === this.epoch) this.disconnect(); })
+      .finally(() => { this.sending = undefined; if (this.online && this.pending.size) this.drain(); });
   }
 }
