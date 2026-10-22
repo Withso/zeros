@@ -113,7 +113,9 @@ function hasAnswer(rows: MessageRows, marker: string): boolean {
   return rows.some(row => {
     try {
       const payload = JSON.parse(row.payload);
-      return row.kind === "text" && payload.role === "agent" && typeof payload.text === "string" && payload.text.trim() === marker;
+      // Models answer the fixed prompt with "OK." or "ok." about as often as "ok".
+      return row.kind === "text" && payload.role === "agent" && typeof payload.text === "string" &&
+        payload.text.trim().replace(/[.!]+$/, "").toLowerCase() === marker;
     } catch { return false; }
   });
 }

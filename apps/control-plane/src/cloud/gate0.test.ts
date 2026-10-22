@@ -9,7 +9,7 @@ import type { Gate0Timing } from "./gate0-transport.js";
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
-type Faults = { cancelAck?: "missing" | "request" | "chat" | "state"; completedBeforeStop?: boolean; older?: "anchor" | "wrong" };
+type Faults = { cancelAck?: "missing" | "request" | "chat" | "state"; completedBeforeStop?: boolean; older?: "anchor" | "wrong"; answer?: string };
 async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults = {}) {
   const id = randomUUID(), organizationId = randomUUID();
   const repository = "example/project", root = `/home/user/${repository}`, branch = "zeros/gate0";
@@ -117,7 +117,7 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
           if (faults.completedBeforeStop) { activePrompts.delete(frame.sessionId); reply("AGENT_PROMPT_COMPLETE", { stopReason: "end_turn" }); }
           return;
         }
-        const marker = /^Reply with exactly:? ([^.\n]+)/.exec(frame.prompt[0].text)![1];
+        const marker = faults.answer ?? /^Reply with exactly:? ([^.\n]+)/.exec(frame.prompt[0].text)![1];
         chats.set(chatId, [
           { msgId: frame.userMessageId, kind: "text", payload: JSON.stringify({ role: "user", text: frame.prompt[0].text }), createdAt: 1 },
           { msgId: randomUUID(), kind: "text", payload: JSON.stringify({ role: "agent", text: marker }), createdAt: 2 },
@@ -286,6 +286,16 @@ describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
     expect(f.frames.filter(frame => frame.type === "AGENT_CANCEL")).toEqual([expect.objectContaining({ agentId: stop })]);
     expect(f.calls.filter(c => c.method === "POST" && c.path === "/v1/cloud-v2/workspaces")).toHaveLength(1);
     expect(f.calls.filter(c => c.path.endsWith("/start"))).toHaveLength(1);
+  });
+
+  // Models answer the fixed prompt with "OK." or "ok." about as often as "ok".
+  it("accepts the marker in any case with trailing punctuation, and nothing else", async () => {
+    for (const answer of ["OK.", "ok.", " Ok! ", "ok"]) await expect(runCloudV2Gate0((await fixture(undefined, 21, { answer })).options)).resolves.toBeTruthy();
+    for (const answer of ["not ok", "okay", "o.k.", "ok, done"]) {
+      const f = await fixture(undefined, 21, { answer });
+      await expect(runCloudV2Gate0(f.options)).rejects.toThrow("agent_codex_answer");
+      expect(f.state()).toBe("deleted");
+    }
   });
 
   it("deletes the workspace on a failed provider turn and never surfaces the provider's error body", async () => {
