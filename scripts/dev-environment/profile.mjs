@@ -2,16 +2,22 @@ import { readPrivateJson, privateDirectory } from "./state.mjs";
 import { developmentProfilePath, profileExists } from "./profile-path.mjs";
 import { workspaceHostnames } from "./cloudflare.mjs";
 import { databaseUrl } from "./postgres.mjs";
+import { cloudCredentialKeyring, cloudV2RuntimeSha256, cloudV2WorkerSigningKey } from "./cloud-v2-keys.mjs";
 
 const CLIENT_ID = /^client_[A-Za-z0-9_-]{1,240}$/;
-export function loadProfile(homeDir, { env = process.env } = {}) {
-  const file = developmentProfilePath(undefined, { homeDir, env });
+/** A version 1 local profile is returned unchanged. A version 2 hosted profile
+ * also carries Railway, PlanetScale and registry authority, which cloud:local
+ * never uses, so only these sections survive before any process sees it. */
+const LOCAL_SECTIONS = ["cloudflare", "workos", "github", "boat", "storage", "fixture"];
+export function loadProfile(homeDir, { env = process.env, root } = {}) {
+  const file = developmentProfilePath(root, { homeDir, env });
   if (!profileExists(file)) {
-    throw new Error("Local Dev recovery needs ~/.zeros-dev/zeros-dev-env.json or an explicit ZEROS_DEV_PROFILE_PATH pointing to the original version 1 profile. For hosted Dev, run bash scripts/setup-zeros-dev.sh --profile /path/to/zeros-dev-env.json.");
+    throw new Error("cloud:local needs zeros-dev-env.json in the checkout or ~/.zeros-dev, or ZEROS_DEV_PROFILE_PATH. Use scripts/dev-environment/profile.example.json for the fields.");
   }
   const profile = readPrivateJson(file);
-  if (profile?.version !== 1) throw new Error("Unsupported Dev configuration version");
-  return profile;
+  if (profile?.version === 1) return profile;
+  if (profile?.version !== 2) throw new Error("Unsupported Dev configuration version");
+  return Object.fromEntries([["version", 1], ...LOCAL_SECTIONS.filter(name => profile[name] !== undefined).map(name => [name, profile[name]])]);
 }
 
 export function profileIssues(profile) {
@@ -54,11 +60,30 @@ export function desktopEnvironment(workspace, profile) {
     AUTH_PROVIDER: "workos", AUTH_DESKTOP_CLIENT_ID: p.desktopClientId,
     AUTH_ISSUER: p.issuer, AUTH_JWKS_URL: p.jwksUrl, AUTH_AUDIENCE: p.audience,
     VITE_APP_BASE_URL: p.appOrigin, VITE_CONTROL_PLANE_URL: p.apiOrigin,
-    ZEROS_CLOUD_WORKSPACES_ENABLED: "false",
+    ZEROS_CLOUD_WORKSPACES_ENABLED: "true",
   };
 }
 
-export function backendEnvironment(workspace, profile, ports, runId) {
+/** cloud:local runs this branch's cloud v2 against its own tunnel origin. The
+ * Boat key and runtime store stay in the backend; the VM fetches the pinned
+ * runtime by presigned URL and trusts only this workspace's signing key. */
+function cloudV2Environment(workspace, profile, apiOrigin, env) {
+  const runtime = cloudV2RuntimeSha256(env);
+  const b = profile.boat, s = profile.storage;
+  if (!b?.apiKey) throw new Error("cloud:local needs the private profile's boat.apiKey (and billingOrg for an organization wallet)");
+  if (!s?.endpoint || !s.bucket || !s.accessKeyId || !s.secretAccessKey)
+    throw new Error("cloud:local needs the private profile's storage endpoint, bucket, accessKeyId and secretAccessKey for worker runtimes");
+  return {
+    CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: apiOrigin, CLOUD_V2_REALTIME_URL: apiOrigin.replace(/^https:/, "wss:"),
+    CLOUD_V2_RUNTIME_SHA256: runtime, CLOUD_V2_RUNTIME_STORE_ENDPOINT: s.endpoint, CLOUD_V2_RUNTIME_STORE_BUCKET: s.bucket,
+    CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: s.accessKeyId, CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: s.secretAccessKey,
+    BOAT_API_KEY: b.apiKey, ...(b.billingOrg ? { BOAT_BILLING_ORG: b.billingOrg } : {}),
+    CLOUD_V2_WORKER_SIGNING_KEY: cloudV2WorkerSigningKey(workspace.state),
+    ...cloudCredentialKeyring(workspace.state),
+  };
+}
+
+export function backendEnvironment(workspace, profile, ports, runId, processEnv = process.env) {
   const p = publicDevProfile(workspace, profile);
   const secret = workspace.state.workosWebhook?.secret;
   if (typeof secret !== "string" || secret.length < 16) throw new Error("The workspace's WorkOS webhook must be provisioned before API startup");
@@ -71,7 +96,8 @@ export function backendEnvironment(workspace, profile, ports, runId) {
     AUTH_ISSUER: p.issuer, AUTH_JWKS_URL: p.jwksUrl, AUTH_AUDIENCE: p.audience,
     APP_ORIGIN: p.appOrigin, INVITE_LINK_BASE: `${p.appOrigin}/invite`,
     WORKOS_API_KEY: profile.workos.apiKey, WORKOS_COOKIE_PASSWORD: workspace.state.keys.cookie,
-    WORKOS_WEBHOOK_SECRET: secret, CLOUD_V2_ENABLED: "false",
+    WORKOS_WEBHOOK_SECRET: secret,
+    ...cloudV2Environment(workspace, profile, p.apiOrigin, processEnv),
   };
   if (profile.github) {
     const g = profile.github;

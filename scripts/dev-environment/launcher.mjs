@@ -112,7 +112,7 @@ async function start(workspace, profile) {
     await waitForHttp(`${publicProfile.apiOrigin}/healthz`, { signal, timeout: 120_000, accept: healthy });
     await waitForDevSignIn(publicProfile, { signal, timeout: 120_000 });
     console.log(`[zeros-dev] Ready: ${publicProfile.apiOrigin}`);
-    console.log(`[zeros-dev] Identity: ${publicProfile.authEnvironment}; cloud workers: ${profile.cloud ? "enabled" : "not configured"}. Data persists after shutdown.`);
+    console.log(`[zeros-dev] Identity: ${publicProfile.authEnvironment}; cloud v2 worker runtime ${apiEnv.CLOUD_V2_RUNTIME_SHA256.slice(0, 12)}. Data persists after shutdown.`);
     if (action !== "backend") {
       const desktopEnv = { ...env, ...desktopEnvironment(workspace, profile) };
       await run("pnpm", ["electron:dev:prep"], { cwd: root, env: desktopEnv, signal, inherit: true, timeout: 300_000, label: "Desktop build" });
@@ -141,11 +141,13 @@ async function main() {
   if (!["start", "backend", "doctor", "stop", "archive"].includes(action)) throw new Error("Use start, backend, doctor, stop, archive or alpha");
   const workspace = ensureWorkspace({ repositoryRoot: root });
   if (action === "stop") return stop(workspace);
-  const profile = loadProfile();
+  const profile = loadProfile(undefined, { root });
   if (action === "doctor") {
     console.log(JSON.stringify({ owner: workspace.state.owner, status: workspace.state.status,
       tunnelProvisioned: Boolean(workspace.state.tunnel.id), identity: profile.workos?.environment ?? "dev",
-      cloudWorkersConfigured: Boolean(profile.cloud), issues: profileIssues(profile, { cloud: true }) }, null, 2));
+      cloudV2: { boat: Boolean(profile.boat?.apiKey), runtimeStore: Boolean(profile.storage?.bucket),
+        runtime: /^[0-9a-f]{64}$/.test(process.env.ZEROS_CLOUD_V2_RUNTIME_SHA256 ?? "") ? process.env.ZEROS_CLOUD_V2_RUNTIME_SHA256.slice(0, 12) : null },
+      issues: profileIssues(profile) }, null, 2));
     return;
   }
   if (action === "archive") {

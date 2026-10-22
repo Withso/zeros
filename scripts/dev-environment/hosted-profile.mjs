@@ -1,9 +1,11 @@
 import path from "node:path";
-import { createPrivateKey, hkdfSync } from "node:crypto";
+import { cloudV2WorkerSigningKey } from "./cloud-v2-keys.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { readPrivateJson, privateDirectory, writePrivateFile } from "./state.mjs";
 import { developmentProfilePath, profileExists, PROFILE_NAME, assertIgnoredProfileDestination } from "./profile-path.mjs";
 import { publicDevProfile } from "./profile.mjs";
+
+export { cloudV2WorkerSigningKey };
 import { fixtureIssues } from "./hosted-fixtures.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -77,18 +79,6 @@ export function hostedDesktopEnvironment(state, profile, directory) {
     ZEROS_CONTROL_PLANE_URL: p.apiOrigin, AUTH_PROVIDER: "workos", AUTH_DESKTOP_CLIENT_ID: p.desktopClientId,
     AUTH_ISSUER: p.issuer, AUTH_JWKS_URL: p.jwksUrl, AUTH_AUDIENCE: p.audience,
     VITE_APP_BASE_URL: p.appOrigin, VITE_CONTROL_PLANE_URL: p.apiOrigin, ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
-}
-
-/** One Ed25519 key per Dev generation signs the control plane's short-lived
- * grants that each VM worker verifies before accepting a connection. It is
- * derived from the generation's agent key with its own label, so redeploys
- * keep the VM trust root without a state migration. */
-export function cloudV2WorkerSigningKey(state) {
-  const seed = Buffer.from(hkdfSync("sha256", Buffer.from(state.keys.agent, "hex"), Buffer.alloc(0),
-    "zeros-dev:cloud-v2-worker-signing:v1", 32));
-  // RFC 8410 PKCS#8 framing for a raw Ed25519 private key seed.
-  const der = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]);
-  return createPrivateKey({ key: der, format: "der", type: "pkcs8" }).export({ format: "der", type: "pkcs8" }).toString("base64");
 }
 
 /** Cloud workspace v2 worker runtime, published into this Dev's storage by

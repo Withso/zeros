@@ -15,6 +15,17 @@ export async function databaseCommand(workspace, ports, repositoryRoot, action) 
   catch { throw new Error("Invalid development database result"); }
 }
 
+/** libpq reads PGDATABASE as a database name, not a connection URI, so a URI
+ * there silently falls back to the default socket. Pass each part through the
+ * child's environment; credentials still never enter argv. */
+export function libpqEnvironment(value) {
+  const url = new URL(value);
+  if (url.protocol !== "postgresql:" || url.hostname !== "127.0.0.1" || !url.port || url.search || url.hash ||
+      !url.username || !url.password || url.pathname.length < 2) throw new Error("Invalid local database connection");
+  return { PGHOST: url.hostname, PGPORT: url.port, PGUSER: decodeURIComponent(url.username),
+    PGPASSWORD: decodeURIComponent(url.password), PGDATABASE: decodeURIComponent(url.pathname.slice(1)) };
+}
+
 export async function migratePostgres(workspace, profile, ports, repositoryRoot) {
   const plan = await databaseCommand(workspace, ports, repositoryRoot, "plan");
   if (plan.pendingMigrations.length) {
@@ -22,7 +33,7 @@ export async function migratePostgres(workspace, profile, ports, repositoryRoot)
     const file = path.join(directory, `before-migrate-${Date.now()}.dump`);
     // Libpq reads the connection from this child's environment, never argv.
     await run(path.join(postgresBinaries(profile), "pg_dump"), ["--format=custom", "--file", file], {
-      env: { ...systemEnvironment(), PGDATABASE: databaseUrl(workspace, ports.database, "migration") }, label: "Pre-migration backup",
+      env: { ...systemEnvironment(), ...libpqEnvironment(databaseUrl(workspace, ports.database, "migration")) }, label: "Pre-migration backup",
     });
     fs.chmodSync(file, 0o600);
     await databaseCommand(workspace, ports, repositoryRoot, "migrate");
@@ -33,7 +44,9 @@ export async function migratePostgres(workspace, profile, ports, repositoryRoot)
 const ROLES = { admin: "zeros_dev_admin", migration: "zeros_dev_migrator", runtime: "zeros_dev_runtime" };
 
 export function postgresBinaries(profile = {}) {
-  const candidates = [profile.postgresBin, "/opt/homebrew/opt/postgresql@18/bin", "/usr/local/opt/postgresql@18/bin", "/usr/lib/postgresql/18/bin", "/usr/pgsql-18/bin"].filter(Boolean);
+  // /usr/bin last: distribution packages that install one major there are
+  // still checked against PostgreSQL 18 before any cluster is touched.
+  const candidates = [profile.postgresBin, "/opt/homebrew/opt/postgresql@18/bin", "/usr/local/opt/postgresql@18/bin", "/usr/lib/postgresql/18/bin", "/usr/pgsql-18/bin", "/usr/bin"].filter(Boolean);
   for (const directory of candidates) if (fs.existsSync(path.join(directory, "initdb")) && fs.existsSync(path.join(directory, "pg_ctl"))) return directory;
   throw new Error("PostgreSQL 18 is required. On macOS run brew install postgresql@18; otherwise set postgresBin in the private Dev profile.");
 }
