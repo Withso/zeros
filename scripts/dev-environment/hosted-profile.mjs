@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createPrivateKey, hkdfSync } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readPrivateJson, privateDirectory, writePrivateFile } from "./state.mjs";
 import { developmentProfilePath, profileExists, PROFILE_NAME, assertIgnoredProfileDestination } from "./profile-path.mjs";
@@ -78,6 +79,18 @@ export function hostedDesktopEnvironment(state, profile, directory) {
     VITE_APP_BASE_URL: p.appOrigin, VITE_CONTROL_PLANE_URL: p.apiOrigin, ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
 }
 
+/** One Ed25519 key per Dev generation signs the control plane's short-lived
+ * grants that each VM worker verifies before accepting a connection. It is
+ * derived from the generation's agent key with its own label, so redeploys
+ * keep the VM trust root without a state migration. */
+export function cloudV2WorkerSigningKey(state) {
+  const seed = Buffer.from(hkdfSync("sha256", Buffer.from(state.keys.agent, "hex"), Buffer.alloc(0),
+    "zeros-dev:cloud-v2-worker-signing:v1", 32));
+  // RFC 8410 PKCS#8 framing for a raw Ed25519 private key seed.
+  const der = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]);
+  return createPrivateKey({ key: der, format: "der", type: "pkcs8" }).export({ format: "der", type: "pkcs8" }).toString("base64");
+}
+
 /** Cloud workspace v2 worker runtime, published into this Dev's storage by
  * `pnpm --dir apps/control-plane cloud-v2:publish-runtime`. VMs download it. */
 function cloudV2Runtime(env) {
@@ -108,7 +121,8 @@ export function hostedBackendEnvironment(state, profile, source, _worker, env = 
     GITHUB_OAUTH_CALLBACK_URL: `${p.apiOrigin}/v1/github/oauth/callback`, GITHUB_COMPLETION_PAGE_URL: `${p.appOrigin}/github/connected`,
     // One Railway service serves the v2 API, worker relay and lifecycle.
     CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: p.apiOrigin, CLOUD_V2_REALTIME_URL: p.apiOrigin.replace(/^https:/, "wss:"),
-    CLOUD_V2_RUNTIME_SHA256: cloudV2Runtime(env), CLOUD_V2_RUNTIME_STORE_ENDPOINT: profile.storage.endpoint,
+    CLOUD_V2_RUNTIME_SHA256: cloudV2Runtime(env), CLOUD_V2_WORKER_SIGNING_KEY: cloudV2WorkerSigningKey(state),
+    CLOUD_V2_RUNTIME_STORE_ENDPOINT: profile.storage.endpoint,
     CLOUD_V2_RUNTIME_STORE_BUCKET: profile.storage.bucket, CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: profile.storage.accessKeyId,
     CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: profile.storage.secretAccessKey,
     BOAT_API_KEY: profile.boat.apiKey, BOAT_BILLING_ORG: profile.boat.billingOrg,
