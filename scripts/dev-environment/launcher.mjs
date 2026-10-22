@@ -41,7 +41,7 @@ async function seedCloud(workspace, profile, ports) {
 
 async function seedRunning(workspace, profile) {
   const receipt = workspace.state.launcher, ports = workspace.state.ports;
-  if (!receipt || !Number.isInteger(ports?.api)) throw new Error("Start the stack with pnpm cloud:local first, then run --seed");
+  if (!receipt || !Number.isInteger(ports?.api)) throw new Error("Start the stack with pnpm electron:cloud first, then run --seed");
   await waitForHttp(`http://127.0.0.1:${ports.api}/healthz`, { timeout: 10_000,
     accept: async response => response.ok && (await response.json()).development?.owner === workspace.state.owner });
   await seedCloud(workspace, profile, ports);
@@ -74,7 +74,7 @@ async function stop(workspace) {
 }
 
 async function start(workspace, profile) {
-  if (workspace.state.status !== "active") throw new Error("This development workspace is archived or awaiting cleanup; finish pnpm cloud:local --reset before restarting it");
+  if (workspace.state.status !== "active") throw new Error("This development workspace is archived or awaiting cleanup; finish pnpm electron:cloud --reset before restarting it");
   const issues = profileIssues(profile, { cloud: Boolean(profile.cloud) });
   if (issues.length) throw new Error(issues.join("\n"));
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();
@@ -143,9 +143,9 @@ async function start(workspace, profile) {
     await waitForHttp(`${publicProfile.apiOrigin}/healthz`, { signal, timeout: 120_000, accept: healthy, label: "Control plane through the tunnel" });
     await waitForDevSignIn(publicProfile, { signal, timeout: 120_000 });
     // A missing fixture input is guidance, not a reason to tear the stack down:
-    // fix it, then run pnpm cloud:local --seed against this running stack.
+    // fix it, then run pnpm electron:cloud --seed against this running stack.
     if (cloudSeedNeeded(workspace.state)) await seedCloud(workspace, profile, ports).catch(error =>
-      console.log(`[zeros-dev] Cloud test organization not seeded: ${error.message}. Fix it, then run pnpm cloud:local --seed`));
+      console.log(`[zeros-dev] Cloud test organization not seeded: ${error.message}. Fix it, then run pnpm electron:cloud --seed`));
     signal.throwIfAborted();
     console.log(`[zeros-dev] Ready: ${publicProfile.apiOrigin}`);
     console.log(`[zeros-dev] Identity: ${publicProfile.authEnvironment}; cloud v2 worker runtime ${apiEnv.CLOUD_V2_RUNTIME_SHA256.slice(0, 12)}. Data persists after shutdown.`);
@@ -207,7 +207,7 @@ async function main() {
       // is gone. Anything uncertain keeps the database, keys and tunnel.
       const drain = await databaseCommand(current, ports, root, "drain", { backendStopped: true, boat: profile.boat });
       if (drain?.complete !== true || drain.pending !== 0)
-        throw new Error(`Cloud cleanup is not complete (${drain?.pending ?? "unknown"} pending); data, keys and tunnel were kept. Rerun pnpm cloud:local --reset.`);
+        throw new Error(`Cloud cleanup is not complete (${drain?.pending ?? "unknown"} pending); data, keys and tunnel were kept. Rerun pnpm electron:cloud --reset.`);
       await deleteWorkosWebhook(current, profile); await deleteTunnel(current, profile.cloudflare);
       await postgres.stop(); postgres = undefined;
       for (const name of ["postgres", "desktop", "web", "objects", "backups"]) {

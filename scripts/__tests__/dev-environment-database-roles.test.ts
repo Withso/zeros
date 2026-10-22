@@ -17,7 +17,7 @@ function admin({ existing = [] as string[], unsafe = 0 } = {}) {
   };
 }
 
-describe("cloud:local database roles", () => {
+describe("electron:cloud database roles", () => {
   // Hosted schema owners bypass RLS (Alpha's is `postgres`), and SECURITY
   // DEFINER helpers such as app_user_org_ids() rely on it: under FORCE RLS a
   // non-bypassing owner re-enters the policy until the stack overflows.

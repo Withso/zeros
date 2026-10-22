@@ -59,10 +59,11 @@ session itself.
      failure.
    - A change to the cloud worker or the protocol it bundles changes its
      runtime SHA-256. Publish the runtime
-     (`pnpm --dir apps/control-plane cloud-v2:publish-runtime`) and redeploy
-     Dev with it before the next gate0 run. `pnpm dev:backend` reads the pin
-     from `ZEROS_CLOUD_V2_RUNTIME_SHA256` and sets the control plane's
-     `CLOUD_V2_RUNTIME_SHA256`.
+     (`pnpm --dir apps/control-plane cloud-v2:publish-runtime --local`) and
+     start this branch with `pnpm electron:cloud --headless` before running
+     `pnpm --dir apps/control-plane cloud-v2:gate0 --local`. The launcher reads
+     `ZEROS_CLOUD_V2_RUNTIME_SHA256` (or `--runtime`) and sets the control
+     plane's `CLOUD_V2_RUNTIME_SHA256`; gate0's `--runtime` must match it.
 9. **Before a release during a freeze,** list which deployables each pending
    PR changes (control plane, cloud runtime, desktop), so the release's effect
    is known before it ships.

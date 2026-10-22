@@ -7,7 +7,7 @@ const workspace = { state: { database: { name: `zeros_dev_${owner}`, migrationPa
 const request = { owner, instanceId, port: 23000,
   migrationUrl: databaseUrl(workspace, 23000, "migration"), runtimeUrl: databaseUrl(workspace, 23000) };
 
-describe("cloud:local database actions", () => {
+describe("electron:cloud database actions", () => {
   it("allows seed only against the exact owned loopback database", () => {
     expect(validateDatabaseRequest({ ...request, action: "seed" }).action).toBe("seed");
     for (const change of [

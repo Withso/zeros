@@ -1,6 +1,6 @@
-# Cloud workspaces on one machine: `pnpm cloud:local`
+# Cloud workspaces on one machine: `pnpm electron:cloud`
 
-`pnpm cloud:local` runs a branch's whole cloud v2 stack: this branch's
+`pnpm electron:cloud` runs a branch's whole cloud v2 stack: this branch's
 control plane, its worker runtime on real Boat VMs, and the desktop app. Use it
 to test cloud workspace changes before they reach `main`. It is the cloud
 counterpart of [`pnpm electron:local`](local-development.md), which stays
@@ -35,7 +35,7 @@ build pinned by its SHA-256.
   OrbStack) to build a worker runtime. Linux x64: PostgreSQL 18, Node 24 and a
   checksum-verified `cloudflared` on `PATH`.
 - The private profile `zeros-dev-env.json` in the checkout or `~/.zeros-dev`,
-  or `ZEROS_DEV_PROFILE_PATH`. `cloud:local` reads only its `cloudflare`
+  or `ZEROS_DEV_PROFILE_PATH`. `electron:cloud` reads only its `cloudflare`
   (a Tunnel Edit and DNS Edit token), `workos` (Alpha), `github` (the Alpha
   GitHub App), `boat`, `storage` and `fixture` sections. Railway, PlanetScale
   and registry sections are ignored.
@@ -68,12 +68,12 @@ launcher, including the `ZEROS_DEV_PROFILE_PATH` override, and uses its
 ## Commands
 
 ```sh
-pnpm cloud:local --runtime <sha256>             # start and open the app
-pnpm cloud:local --headless --runtime <sha256>  # backend only, for agents
-pnpm cloud:local --seed                         # seed a running stack's test organization
-pnpm cloud:local --stop                         # stop a running stack
-pnpm cloud:local --doctor                       # show state and profile issues
-pnpm cloud:local --reset [--yes]                # delete this checkout's cloud resources and data
+pnpm electron:cloud --runtime <sha256>             # start and open the app
+pnpm electron:cloud --headless --runtime <sha256>  # backend only, for agents
+pnpm electron:cloud --seed                         # seed a running stack's test organization
+pnpm electron:cloud --stop                         # stop a running stack
+pnpm electron:cloud --doctor                       # show state and profile issues
+pnpm electron:cloud --reset [--yes]                # delete this checkout's cloud resources and data
 ```
 
 `ZEROS_CLOUD_V2_RUNTIME_SHA256` may replace `--runtime`. `--run-only` disables

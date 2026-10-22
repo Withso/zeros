@@ -14,7 +14,7 @@ import { cloudCredentialKeyring } from "./cloud-v2-keys.mjs";
  * existing test authority; a password login creates only a temporary session. */
 export async function seedLocalEnvironment(workspace, profile, ports, repositoryRoot, options = {}) {
   if (workspace.state.status !== "active" || !workspace.state.launcher?.runId ||
-      !Number.isInteger(ports.api) || ports.api < 1024 || ports.api > 65535) throw new Error("Start this cloud:local backend before seeding");
+      !Number.isInteger(ports.api) || ports.api < 1024 || ports.api > 65535) throw new Error("Start this electron:cloud backend before seeding");
   const module = options.module ?? (name => import(pathToFileURL(path.join(repositoryRoot, "apps/control-plane/dist", name))));
   const request = options.fetch ?? fetch, database = options.database ?? databaseCommand;
   const save = options.save ?? saveWorkspace;
