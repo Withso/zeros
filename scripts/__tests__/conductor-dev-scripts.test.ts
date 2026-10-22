@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parse } from "smol-toml";
 import { afterEach, describe, expect, it } from "vitest";
+import { ensureWorkspace, writePrivateJson } from "../dev-environment/state.mjs";
 
 const repository = path.resolve(import.meta.dirname, "../..");
 const scripts = parse(
@@ -95,6 +96,124 @@ function fixture(hosted = true) {
       }),
   };
 }
+
+function localCloudFixture(hosted = false, env: Record<string, string> = {}) {
+  const f = fixture(hosted);
+  const workspace = ensureWorkspace({ repositoryRoot: f.root, homeDir: f.home, env });
+  fs.mkdirSync(path.join(f.root, "scripts/dev-environment"), { recursive: true });
+  fs.copyFileSync(path.join(repository, "scripts/dev-environment/toolchain.sh"), path.join(f.root, "scripts/dev-environment/toolchain.sh"));
+  fs.writeFileSync(path.join(f.root, "scripts/electron-cloud.mjs"), "");
+  const pkg = JSON.parse(fs.readFileSync(path.join(f.root, "package.json"), "utf8"));
+  pkg.scripts["electron:cloud"] = "node scripts/electron-cloud.mjs";
+  fs.writeFileSync(path.join(f.root, "package.json"), JSON.stringify(pkg));
+  const reset = path.join(f.root, "reset.cjs");
+  fs.writeFileSync(reset, `
+    const fs = require('node:fs');
+    const file = ${JSON.stringify(workspace.file)};
+    if (process.env.ZEROS_RESET_MODE === 'unconfirmed') process.exit(0);
+    if (process.env.ZEROS_RESET_MODE === 'missing') { fs.unlinkSync(file); process.exit(0); }
+    const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+    state.status = 'archived';
+    if (process.env.ZEROS_RESET_MODE === 'replaced') state.instanceId = require('node:crypto').randomUUID();
+    fs.writeFileSync(file, JSON.stringify(state));
+  `);
+  const pnpm = path.join(f.home, ".zeros-dev/tools/bin/pnpm");
+  fs.writeFileSync(pnpm, fs.readFileSync(pnpm, "utf8").replace('exit "${ZEROS_SCRIPT_TEST_EXIT:-0}"',
+    `if [ "\${ZEROS_SCRIPT_TEST_EXIT:-0}" = 0 ] && [ "$*" = 'electron:cloud --reset --yes' ]; then node ${quote(reset)} || exit $?; fi\nexit "\${ZEROS_SCRIPT_TEST_EXIT:-0}"`));
+  return { ...f, workspace };
+}
+
+describe("Conductor electron:cloud archive", () => {
+  it.each([false, true])("confirms the owned reset before hosted cleanup (hosted=%s)", hosted => {
+    const f = localCloudFixture(hosted);
+    const result = f.run(scripts.archive);
+    expect(result.status, result.stderr).toBe(0);
+    expect(f.log()).toEqual(["pnpm electron:cloud --reset --yes", ...(hosted ? ["pnpm dev:archive"] : [])]);
+    expect(JSON.parse(fs.readFileSync(f.workspace.file, "utf8")).status).toBe("archived");
+  });
+
+  it("preserves failed drain and prevents hosted cleanup", () => {
+    const f = localCloudFixture(true), before = fs.readFileSync(f.workspace.file, "utf8");
+    expect(f.run(scripts.archive, 23).status).toBe(23);
+    expect(f.log()).toEqual(["pnpm electron:cloud --reset --yes"]);
+    expect(fs.readFileSync(f.workspace.file, "utf8")).toBe(before);
+  });
+
+  it.each(["unconfirmed", "missing", "replaced"])("requires the same instance's archived receipt after reset: %s", mode => {
+    const f = localCloudFixture(true);
+    const result = f.run(scripts.archive, 0, "22.18.0", { ZEROS_RESET_MODE: mode });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/cleanup.*unconfirmed/i);
+    expect(f.log()).toEqual(["pnpm electron:cloud --reset --yes"]);
+  });
+
+  it.each(["owner", "identity", "instanceId", "status"])("refuses a malformed or foreign %s without resetting", field => {
+    const f = localCloudFixture();
+    writePrivateJson(f.workspace.file, { ...f.workspace.state, [field]: "foreign" });
+    const result = f.run(scripts.archive);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/cleanup.*unconfirmed/i);
+    expect(f.log()).toEqual([]);
+  });
+
+  it.each(["receipt", "parent"])("refuses linked local state: %s", entry => {
+    const f = localCloudFixture();
+    const original = entry === "receipt" ? f.workspace.file : f.workspace.directory;
+    fs.renameSync(original, `${original}-saved`);
+    fs.symlinkSync(`${original}-saved`, original);
+    expect(f.run(scripts.archive).status).not.toBe(0);
+    expect(f.log()).toEqual([]);
+  });
+
+  it("refuses a non-private receipt", () => {
+    const f = localCloudFixture();
+    fs.chmodSync(f.workspace.file, 0o644);
+    expect(f.run(scripts.archive).status).not.toBe(0);
+    expect(f.log()).toEqual([]);
+  });
+
+  it("retries an interrupted reset and skips a positively archived instance", () => {
+    const f = localCloudFixture();
+    writePrivateJson(f.workspace.file, { ...f.workspace.state, status: "archiving" });
+    expect(f.run(scripts.archive).status).toBe(0);
+    fs.rmSync(path.join(f.home, ".zeros-dev/tools/bin/node"));
+    expect(f.run(scripts.archive).status).toBe(0);
+    expect(f.log()).toEqual(["pnpm electron:cloud --reset --yes"]);
+  });
+
+  it.each(["scripts/electron-cloud.mjs", "scripts/dev-environment/toolchain.sh", "package.json"])("blocks an old branch with owned state but without %s", file => {
+    const f = localCloudFixture();
+    fs.rmSync(path.join(f.root, file));
+    const result = f.run(scripts.archive);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/branch.*electron:cloud/i);
+    expect(f.log()).toEqual([]);
+  });
+
+  it.each(["zeros", "conductor", "inherited"])("matches the launcher's root-checked identity: %s", manager => {
+    const f = localCloudFixture();
+    const prefix = manager === "zeros" ? "ZEROS" : "CONDUCTOR";
+    const env: Record<string, string> = prefix === "ZEROS" ? { ZEROS_WORKSPACE_CANONICAL_ID: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa", ZEROS_WORKSPACE_ROOT: f.root }
+      : { CONDUCTOR_WORKSPACE_ID: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", CONDUCTOR_WORKSPACE_PATH: manager === "inherited" ? f.home : f.root };
+    const selected = ensureWorkspace({ repositoryRoot: f.root, homeDir: f.home, env });
+    // The fake reset writes the selected receipt, just as the real launcher does.
+    const reset = path.join(f.root, "reset.cjs");
+    fs.writeFileSync(reset, fs.readFileSync(reset, "utf8").replace(JSON.stringify(f.workspace.file), JSON.stringify(selected.file)));
+    expect(f.run(scripts.archive, 0, "22.18.0", env).status).toBe(0);
+    expect(f.log()).toEqual(["pnpm electron:cloud --reset --yes"]);
+    expect(JSON.parse(fs.readFileSync(selected.file, "utf8")).status).toBe("archived");
+    if (selected.file !== f.workspace.file) expect(JSON.parse(fs.readFileSync(f.workspace.file, "utf8")).status).toBe("active");
+  });
+
+  it("does not reset another checkout's instance", () => {
+    const f = localCloudFixture();
+    const other = path.join(path.dirname(f.root), "other"); fs.mkdirSync(other);
+    const result = f.run(`cd ${quote(other)}\n${scripts.archive}`);
+    expect(result.status, result.stderr).toBe(0);
+    expect(f.log()).toEqual([]);
+    expect(JSON.parse(fs.readFileSync(f.workspace.file, "utf8")).status).toBe("active");
+  });
+});
 
 describe("Conductor Dev actions", () => {
   it("selects qualified tools for Local without invoking hosted setup or hooks", () => {

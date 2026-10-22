@@ -143,3 +143,9 @@ then drains: it fences the database, deletes only this checkout's VMs, builders
 and snapshots, and confirms each is gone. Only then does it remove the
 database, the WorkOS webhook, the DNS records and the tunnel. If anything is
 uncertain, everything is kept; run `--reset` again.
+
+Conductor's archive hook runs `pnpm electron:cloud --reset --yes` when this
+checkout has active local cloud state. Archive proceeds only after the same
+instance retains an `archived` receipt, then performs any hosted Dev cleanup.
+An older branch with local cloud state must switch to a branch that supports
+the reset; branches without that state retain their existing archive behavior.
