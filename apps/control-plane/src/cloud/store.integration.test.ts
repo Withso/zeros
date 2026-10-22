@@ -166,17 +166,32 @@ d("cloud v2 store", () => {
     expect((await store.verifyProxyToken(token))?.id).toBe(workspace.id);
   });
 
-  it.each(["organization.access_revoked", "session.revoked", "account.revoked", "account.authorization_changed"])("revokes worker, proxy and outstanding tickets atomically for %s", async kind => {
+  it.each(["organization.access_revoked", "workspace.authorization_changed", "account.revoked", "account.authorization_changed"])("revokes worker, proxy and outstanding tickets atomically for %s", async kind => {
     const w = await create();
     await store.transition(w.id, ["creating"], "running");
     const worker = await store.rotateWorkerToken(w.id);
     const proxy = await store.issueToken({ workspaceId: w.id, kind: "proxy", userId: null, ttlMs: 60_000 });
     const ticket = await store.issueToken({ workspaceId: w.id, kind: "connect", userId: creator, ttlMs: 60_000 });
-    await pool.query(`INSERT INTO security_events (kind, user_id, org_id) VALUES ($1, $2, $3)`, [kind, creator, org]);
+    await pool.query(`INSERT INTO security_events (kind, user_id, org_id, workspace_id) VALUES ($1, $2, $3, $4)`,
+      [kind, creator, org, kind === "workspace.authorization_changed" ? w.id : null]);
     expect(await store.byWorkerToken(worker)).toBeNull();
     expect(await store.verifyProxyToken(proxy.token)).toBeNull();
     expect(await store.consumeConnectTicket(ticket.token, w.id)).toBeNull();
     expect((await store.get(w.id, creator)).state).toBe("stopping");
+  });
+
+  it("limits a device sign-out to app admission while keeping the running worker and proxy", async () => {
+    const w = await create();
+    await store.transition(w.id, ["creating"], "running");
+    const worker = await store.rotateWorkerToken(w.id);
+    const proxy = await store.issueToken({ workspaceId: w.id, kind: "proxy", userId: null, ttlMs: 60_000 });
+    const ticket = await store.issueToken({ workspaceId: w.id, kind: "connect", userId: creator, ttlMs: 60_000 });
+    const epoch = await store.accessEpoch(w.id);
+    await pool.query("INSERT INTO security_events (kind, user_id) VALUES ('session.revoked', $1)", [creator]);
+    expect(await store.byWorkerToken(worker)).toMatchObject({ id: w.id, state: "running" });
+    expect(await store.verifyProxyToken(proxy.token)).toMatchObject({ id: w.id });
+    expect(await store.accessEpoch(w.id)).toBe(String(BigInt(epoch!) + 1n));
+    expect(await store.consumeConnectTicket(ticket.token, w.id)).toBeNull();
   });
 
   it("refuses existing worker and proxy credentials when membership disappears without a notification", async () => {
