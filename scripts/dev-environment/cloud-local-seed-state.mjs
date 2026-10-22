@@ -3,12 +3,13 @@
 // non-secret identifiers are kept in the instance's private state.
 
 export function cloudSeedNeeded(state) {
-  return state.cloudSeed?.seeded !== true;
+  return state.cloudSeed?.seeded !== true || !["developer", "platform_owner"].includes(state.cloudSeed.staffRole);
 }
 
 export function recordCloudSeed(state, result, now = new Date()) {
   if (result?.seeded === true && typeof result.organizationId === "string")
-    state.cloudSeed = { seeded: true, organizationId: result.organizationId, at: now.toISOString() };
+    state.cloudSeed = { seeded: true, organizationId: result.organizationId,
+      ...(["developer", "platform_owner"].includes(result.staffRole) ? { staffRole: result.staffRole } : {}), at: now.toISOString() };
   return state;
 }
 

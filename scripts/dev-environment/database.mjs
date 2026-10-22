@@ -2,7 +2,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadControlPlaneDependency, DevEnvironmentError, devEnvironmentDiagnostic } from "./dependency-preflight.mjs";
 import { databaseUrl } from "./postgres.mjs";
-import { seedLocalFixture } from "./local-fixtures.mjs";
+import { seedLocalFixture, assertLocalDatabaseOwner } from "./local-fixtures.mjs";
+export { assertLocalDatabaseOwner } from "./local-fixtures.mjs";
 
 export function validateDatabaseRequest(request) {
   if (!/^[a-f0-9]{24}$/.test(request?.owner ?? "") || !Number.isInteger(request.port) || request.port < 1024 || request.port > 65535 ||
@@ -18,12 +19,6 @@ export function validateDatabaseRequest(request) {
     if (value !== databaseUrl(workspace, request.port, role)) throw new Error("Refusing a database outside this local development workspace");
   }
   return request;
-}
-
-export async function assertLocalDatabaseOwner(pool, request) {
-  const { rows } = await pool.query("SELECT owner,instance_id FROM public.zeros_cloud_local_identity");
-  if (rows.length !== 1 || rows[0].owner !== request.owner || rows[0].instance_id !== request.instanceId)
-    throw new Error("The local database belongs to another instance; existing resources were preserved");
 }
 
 export async function inventoryLocalWorkspaces(runtime, withSystemTx) {
@@ -71,8 +66,9 @@ async function execute(request) {
       if (!/^[A-Za-z0-9_-]{43}$/.test(request.encryptionKey ?? "")) throw new Error("Invalid local vault key");
       const { DatabaseCloudAgentCredentialService } = await module("agent-credentials/agent-credentials.js");
       const { cloudAgentModels } = await module("agent-credentials/agent-models.js");
+      const staff = await module("manage-staff.js");
       const vault = new DatabaseCloudAgentCredentialService(runtime, { keys: { 1: request.encryptionKey }, currentKeyVersion: 1 });
-      return await seedLocalFixture({ runtime, migration, withSystemTx, request, vault, models: cloudAgentModels });
+      return await seedLocalFixture({ runtime, migration, withSystemTx, request, vault, models: cloudAgentModels, staff });
     }
     if (request.action === "drain") {
       const { drainLocalCloudResources } = await import("./local-cleanup.mjs");
