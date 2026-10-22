@@ -31,12 +31,15 @@ export async function stageRuntimeSource(repository, destination, files) {
     if (!stat.isFile() || stat.isSymbolicLink() || await realpath(source) !== source)
       throw new Error("Runtime source must be regular files without links");
     const target = destination ? join(destination, file) : source;
+    // Git records only regular or executable. The checkout's umask must not
+    // change the source identity, or another machine never finds the runtime.
+    const mode = stat.mode & 0o111 ? 0o755 : 0o644;
     if (destination) {
       await mkdir(dirname(target), { recursive: true });
       await copyFile(source, target, constants.COPYFILE_EXCL);
-      await chmod(target, stat.mode & 0o777);
+      await chmod(target, mode);
     }
-    hash.update(`${file}\0${stat.mode & 0o777}\0`).update(await readFile(target)).update("\0");
+    hash.update(`${file}\0${mode}\0`).update(await readFile(target)).update("\0");
     copied.push(file);
   }
   return { files: copied, sha256: hash.digest("hex") };

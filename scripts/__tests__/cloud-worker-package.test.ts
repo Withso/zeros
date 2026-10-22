@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -84,4 +84,23 @@ it("looks up exactly the packager's source hash, including uncommitted bytes and
   await writeFile(join(root, file), "changed"); const changed = await runtimeSourceIdentity(root);
   expect(changed.sourceSha256).not.toBe(first.sourceSha256);
   await chmod(join(root, file), 0o755); expect((await runtimeSourceIdentity(root)).sourceSha256).not.toBe(changed.sourceSha256);
+});
+
+// A Mac checkout (umask 022: 0644) and a Linux sandbox (umask 0002: 0664)
+// at the same commit must find the same published runtime. Only Git's file
+// modes, regular or executable, describe the source.
+it("hashes and stages Git's file modes, independent of the checkout's umask", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cloud-runtime-umask-")); roots.push(root);
+  const file = "apps/cloud-worker/src/main.ts";
+  await mkdir(join(root, file, ".."), { recursive: true }); await writeFile(join(root, file), "worker");
+  const hashAs = async (mode: number) => { await chmod(join(root, file), mode); return (await stageRuntimeSource(root, null, [file])).sha256; };
+  const regular = await hashAs(0o644);
+  expect(await hashAs(0o664)).toBe(regular);
+  expect(await hashAs(0o600)).toBe(regular);
+  const executable = await hashAs(0o755);
+  expect(executable).not.toBe(regular);
+  expect(await hashAs(0o775)).toBe(executable);
+  await chmod(join(root, file), 0o664);
+  await stageRuntimeSource(root, join(root, "staged"), [file]);
+  expect((await stat(join(root, "staged", file))).mode & 0o777).toBe(0o644);
 });
