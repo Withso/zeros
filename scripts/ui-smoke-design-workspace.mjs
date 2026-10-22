@@ -60,6 +60,39 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignWorkspaceCanvasSmoke({ page, waitFor, check });
 }
 
+/** Retained from the retired cloud Design directory smoke: the Local Design
+ * menu takes Escape at its first focus and releases the native overlay. */
+export async function checkLocalDesignMenuFirstFocusEscape({ page, check, directoryHeader }) {
+  await page.evaluate(() => {
+    window.__designMenuProbe = { overlayActive: false, escapeSent: false };
+    document.addEventListener("zeros-native-surface-overlay-intent", (event) => {
+      window.__designMenuProbe.overlayActive = event.detail.active;
+    });
+    const onFocus = (event) => {
+      if (event.target.getAttribute?.("role") !== "menu") return;
+      document.removeEventListener("focusin", onFocus, true);
+      window.__designMenuProbe.overlayAtFirstFocus = window.__designMenuProbe.overlayActive;
+      event.target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      window.__designMenuProbe.escapeSent = true;
+    };
+    document.addEventListener("focusin", onFocus, true);
+  });
+  const trigger = directoryHeader.getByRole("button", { name: "Choose Design directory" });
+  await trigger.click();
+  await expect.poll(() => page.evaluate(() => window.__designMenuProbe.escapeSent)).toBe(true);
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+  // Escape returns focus to the trigger, whose own tooltip is a separate
+  // overlay. Leave it before checking that the menu released its intent.
+  await page.evaluate(() => document.activeElement?.blur?.());
+  await page.mouse.move(1, 1);
+  await expect.poll(() => page.evaluate(() => window.__designMenuProbe.overlayActive)).toBe(false);
+  check(
+    "the Local Design menu handles first-focus Escape and releases native overlays",
+    (await page.evaluate(() => window.__designMenuProbe.overlayAtFirstFocus)) === true,
+  );
+}
+
 export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await runDesignCatalogThemesSmoke({ page, check });
   // The harness uses a sandboxed runtime and production Radix primitives;
@@ -128,6 +161,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       (await directoryHeader.getByRole("button", { name: "Choose Design directory" }).count()) === 1 &&
       (await page.locator("[data-workspace-mode-toggle]").count()) === 0,
   );
+  await checkLocalDesignMenuFirstFocusEscape({ page, check, directoryHeader });
   check(
     "design inspector omits the code-column collapse control",
     (await page.getByRole("button", { name: "Hide design panel" }).count()) ===
