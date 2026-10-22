@@ -43,6 +43,7 @@ import { exportDesignPng } from "../../platform/design";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { openDesignFramePreview } from "../../platform/bridge/design-context-bridge";
 import { shellOpenUrl } from "../../platform/app";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { cn } from "../../shared/ui/cn";
 import {
   Button,
@@ -979,6 +980,8 @@ export function DesignInspector({
   zoomActionsRef,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
+  // Cloud workspaces have no Design preview; the control stays visible and inert.
+  const previewAllowed = !isCloudWorkspace(workspaceId);
   const previewDirectoryId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
   );
@@ -996,7 +999,7 @@ export function DesignInspector({
   }, [previewOwner]);
   const openPreview = async () => {
     const previewBridge = getActiveBridge();
-    if (!active || !previewBridge || !workspaceId || !frame || openingPreview) return;
+    if (!active || !previewAllowed || !previewBridge || !workspaceId || !frame || openingPreview) return;
     const directoryId = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId;
     if (!directoryId || directoryId !== previewDirectoryId) return;
     setOpeningPreviewOwner(previewOwner);
@@ -2203,7 +2206,7 @@ export function DesignInspector({
   const exportSection =
     frame && folder && (frameSelected || selectedNodeId) ? (
       <InspectorSection title="Export" data-design-export-section="">
-        <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active} onClick={() => void openPreview()}>
+        <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active || !previewAllowed} onClick={() => void openPreview()}>
           <ExternalLink /> Open preview
         </Button>
         <div className="grid grid-cols-[76px_minmax(0,1fr)] gap-2">
