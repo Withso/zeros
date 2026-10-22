@@ -265,12 +265,12 @@ describe("agent credential check", () => {
       expect(checkZerosDevValues({...identity,...invalid})).toMatchObject({status:"fail"});
   });
 
-  it.each([undefined, "", "synthetic-local-password"])("accepts the cloud:local fixture with an optional password (%#)", async password => {
+  it.each([undefined, "", "synthetic-local-password"])("accepts the electron:cloud fixture with an optional password (%#)", async password => {
     const values = { ZEROS_DEV_REPOSITORY: "test-owner/test-repo", ZEROS_DEV_GITHUB_INSTALLATION_ID: "1234",
       ...(password === undefined ? {} : { ZEROS_DEV_PASSWORD: password }) };
     const { deps, seen } = network();
     const result = byId(await runProviderChecks(values, deps))["zeros-dev"];
-    expect(result).toMatchObject({ status: "ok", detail: expect.stringContaining("cloud:local") });
+    expect(result).toMatchObject({ status: "ok", detail: expect.stringContaining("electron:cloud") });
     expect(result.detail).toContain("live login not checked");
     expect(seen).toEqual([]);
     if (password) expect(JSON.stringify(result)).not.toContain(password);

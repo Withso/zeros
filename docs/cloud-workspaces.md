@@ -72,7 +72,7 @@ Runtime updates do not require rebuilding the Cloud Computer.
 
 ## Testing a branch
 
-[`pnpm cloud:local`](cloud-local.md) runs a branch's control plane, worker
+[`pnpm electron:cloud`](electron-cloud.md) runs a branch's control plane, worker
 runtime and desktop app together, with an isolated database and a named
 tunnel for Boat VMs. Agents run it headless and then gate0 with `--local`.
 

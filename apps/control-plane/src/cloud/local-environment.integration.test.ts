@@ -19,7 +19,7 @@ const encryptionKey = Buffer.alloc(32, 7).toString("base64url");
 const sandboxName = (kind: "build" | "ws", id: string) => cloudV2SandboxName("development", kind, id, owner);
 const snapshotName = (org: string, version: number) => cloudV2SnapshotName("development", org, version, owner);
 
-database("cloud:local seed and confirmed resource drain", () => {
+database("electron:cloud seed and confirmed resource drain", () => {
   let pool: pg.Pool, runtime: pg.Pool, vault: DatabaseCloudAgentCredentialService;
   const role = `cloud_local_test_${randomBytes(6).toString("hex")}`;
 

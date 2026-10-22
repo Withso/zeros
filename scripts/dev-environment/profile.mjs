@@ -6,13 +6,13 @@ import { cloudCredentialKeyring, cloudV2RuntimeSha256, cloudV2WorkerSigningKey }
 
 const CLIENT_ID = /^client_[A-Za-z0-9_-]{1,240}$/;
 /** A version 1 local profile is returned unchanged. A version 2 hosted profile
- * also carries Railway, PlanetScale and registry authority, which cloud:local
+ * also carries Railway, PlanetScale and registry authority, which electron:cloud
  * never uses, so only these sections survive before any process sees it. */
 const LOCAL_SECTIONS = ["cloudflare", "workos", "github", "boat", "storage", "fixture"];
 export function loadProfile(homeDir, { env = process.env, root } = {}) {
   const file = developmentProfilePath(root, { homeDir, env });
   if (!profileExists(file)) {
-    throw new Error("cloud:local needs zeros-dev-env.json in the checkout or ~/.zeros-dev, or ZEROS_DEV_PROFILE_PATH. Use scripts/dev-environment/profile.example.json for the fields.");
+    throw new Error("electron:cloud needs zeros-dev-env.json in the checkout or ~/.zeros-dev, or ZEROS_DEV_PROFILE_PATH. Use scripts/dev-environment/profile.example.json for the fields.");
   }
   const profile = readPrivateJson(file);
   if (profile?.version === 1) return profile;
@@ -64,15 +64,15 @@ export function desktopEnvironment(workspace, profile) {
   };
 }
 
-/** cloud:local runs this branch's cloud v2 against its own tunnel origin. The
+/** electron:cloud runs this branch's cloud v2 against its own tunnel origin. The
  * Boat key and runtime store stay in the backend; the VM fetches the pinned
  * runtime by presigned URL and trusts only this workspace's signing key. */
 function cloudV2Environment(workspace, profile, apiOrigin, env) {
   const runtime = cloudV2RuntimeSha256(env);
   const b = profile.boat, s = profile.storage;
-  if (!b?.apiKey) throw new Error("cloud:local needs the private profile's boat.apiKey (and billingOrg for an organization wallet)");
+  if (!b?.apiKey) throw new Error("electron:cloud needs the private profile's boat.apiKey (and billingOrg for an organization wallet)");
   if (!s?.endpoint || !s.bucket || !s.accessKeyId || !s.secretAccessKey)
-    throw new Error("cloud:local needs the private profile's storage endpoint, bucket, accessKeyId and secretAccessKey for worker runtimes");
+    throw new Error("electron:cloud needs the private profile's storage endpoint, bucket, accessKeyId and secretAccessKey for worker runtimes");
   return {
     CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: apiOrigin, CLOUD_V2_REALTIME_URL: apiOrigin.replace(/^https:/, "wss:"),
     CLOUD_V2_RUNTIME_SHA256: runtime, CLOUD_V2_RUNTIME_STORE_ENDPOINT: s.endpoint, CLOUD_V2_RUNTIME_STORE_BUCKET: s.bucket,

@@ -24,7 +24,7 @@ const ports = { database: 21000, api: 21001 };
 const run = "fb87f8dd-6161-463b-981c-d039c675e0ca";
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
-describe("cloud:local control plane", () => {
+describe("electron:cloud control plane", () => {
   it("runs cloud v2 on this workspace's tunnel origin with its own stable keys", () => {
     const { workspace: w, profile: p } = fixture();
     const api = backendEnvironment(w, p, ports, run, { ZEROS_CLOUD_V2_RUNTIME_SHA256: RUNTIME });
@@ -70,7 +70,7 @@ describe("cloud:local control plane", () => {
   });
 });
 
-describe("cloud:local profile", () => {
+describe("electron:cloud profile", () => {
   it("reads the repository's hosted profile and keeps only what a local stack needs", async () => {
     const { loadProfile } = await import("../dev-environment/profile.mjs");
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-cloud-local-profile-")); roots.push(root);

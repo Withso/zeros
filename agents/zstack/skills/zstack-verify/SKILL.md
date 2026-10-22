@@ -59,21 +59,24 @@ history, activity and credentials. Before a live run, run the offline suites:
 - `pnpm test:control-plane`, with real PostgreSQL for store tests;
 - the shared renderer suites under `platform/bridge`.
 
-The live proof is the deployed Dev gate0 probe:
+The branch's live proof uses the isolated local stack and gate0 probe:
 
 ```sh
-pnpm --dir apps/control-plane cloud-v2:gate0 --api "$ZEROS_GATE0_API_URL" --runtime <runtime-sha256>
+pnpm electron:cloud --headless --runtime <runtime-sha256>
+pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 ```
 
-- Run it only with the task's Alpha authorization, against a deployed Dev
-  backend whose `CLOUD_V2_RUNTIME_SHA256` matches `--runtime` (`pnpm dev:backend`
-  takes it from `ZEROS_CLOUD_V2_RUNTIME_SHA256`).
+- Run it only with the task's cloud-provider authorization, against this
+  checkout's backend whose `CLOUD_V2_RUNTIME_SHA256` matches `--runtime`.
+  `electron:cloud` accepts the pin through `--runtime` or
+  `ZEROS_CLOUD_V2_RUNTIME_SHA256`; no Railway service or PlanetScale branch is
+  created. See `docs/electron-cloud.md`.
 - It creates one disposable workspace from the existing Cloud Computer. It
   runs native Claude, Codex and Cursor turns, plus terminal, file and Git
   round trips. It reads the mirrored history while the VM is stopped, wakes
   the VM once, then deletes the workspace. Pass `--keep` only when you will
   delete the workspace yourself.
-- It starts a real VM. Run it once per deployed change; never loop it.
+- It starts a real VM. Run it once per tested change; never loop it.
 - It reports the failing stage only. Before any cleanup, capture the
   server-side state: control-plane logs and the workspace row through the API.
 - Provider keys stay in `.env.agent` (Alpha and test only) or Actions; never

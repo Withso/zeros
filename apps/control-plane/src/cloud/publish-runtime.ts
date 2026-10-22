@@ -40,7 +40,7 @@ async function runtimeStore(local: boolean) {
 async function main() {
   const { values } = parseArgs({ options: { local: { type: "boolean" }, artifact: { type: "string" }, docker: { type: "boolean" }, "allow-dirty": { type: "boolean" }, help: { type: "boolean" } } });
   if (values.help) {
-    console.log("cloud-v2:publish-runtime [--local] [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. --local reads the cloud:local profile's storage section; otherwise uses CLOUD_V2_RUNTIME_STORE_*. The SHA pin and immutable runtime key are unchanged.");
+    console.log("cloud-v2:publish-runtime [--local] [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. --local reads the electron:cloud profile's storage section; otherwise uses CLOUD_V2_RUNTIME_STORE_*. The SHA pin and immutable runtime key are unchanged.");
     return;
   }
   if (values.artifact && (values.docker || values["allow-dirty"])) throw new Error("Choose either an existing artifact or build options");

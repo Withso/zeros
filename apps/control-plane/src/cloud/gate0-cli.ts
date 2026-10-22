@@ -138,7 +138,7 @@ async function main() {
   } });
   if (values.help) {
     console.log("cloud-v2:gate0 [--local | --api <Dev API origin>] [--profile <private JSON>] [--agent-env <private .env.agent>] [--organization <UUID>] [--repository owner/name] [--runtime <sha256>] [--agents codex,claude,cursor] [--keep]");
-    console.log("--local uses the running cloud:local instance and its private signing key; --api may select its exact loopback port. Hosted mode reads the encrypted Dev registry. Requires an installed Computer, connected provider logins and the dedicated .env.agent test password. Creates one workspace and deletes it unless --keep is set.");
+    console.log("--local uses the running electron:cloud instance and its private signing key; --api may select its exact loopback port. Hosted mode reads the encrypted Dev registry. Requires an installed Computer, connected provider logins and the dedicated .env.agent test password. Creates one workspace and deletes it unless --keep is set.");
     console.log("Models: gpt-6-luna, claude-haiku-5-5, Cursor default. Override in .env.agent with ZEROS_GATE0_{CODEX,CLAUDE,CURSOR}_MODEL. All probe chats select low effort; Cursor Auto has no native effort control.");
     return;
   }

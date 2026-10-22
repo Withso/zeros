@@ -1,4 +1,4 @@
-The first live gate0 on `pnpm cloud:local` found four defects that every
+The first live gate0 on `pnpm electron:cloud` found four defects that every
 offline suite had passed. Each is now a regression.
 
 A WorkOS user who belongs to several organizations gets
