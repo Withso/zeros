@@ -10,6 +10,7 @@ import { WorkspaceRuntimeClient } from "../../../platform/bridge/workspace-runti
 import { resolveBridgeWorkspaceIdForCwd } from "../../../platform/bridge/workspace-id-resolver";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { shouldCancelStalledSessionAdmission } from "../session-admission-policy";
+import { canSwitchPristineChat } from "../pristine-chat";
 
 const ast = ts.createSourceFile("sessions-provider.tsx", readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8"),
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -28,10 +29,14 @@ const code = ts.transpileModule(failureSource + "\n" + Object.entries(callbacks)
 afterEach(() => { useSessionsStore.getState().clearAll(); vi.restoreAllMocks(); });
 
 describe("transcript presentation during session reattachment", () => {
-  it.each([true, false])("a binding-free cloud probe falls back to create only for a typed miss (%s)", async typed => {
+  it.each([
+    { typed: true, message: "No live execution for this conversation." },
+    { typed: false, message: "No live execution for this conversation." },
+    { typed: false, message: "Cloud conversation is unavailable." },
+  ])("a binding-free cloud probe keeps an unused chat switchable: $message (typed $typed)", async ({ typed, message }) => {
     const cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", chatId = "fresh", agentId = "claude";
-    const bridge = { request: vi.fn(async () => ({ type: "AGENT_ERROR", agentId, code: "session-expired", message: "No live execution for this conversation.",
-      ...(typed ? { failure: { kind: "session-expired", stage: "loadSession", agentId, message: "No live execution for this conversation." } } : {}) })) };
+    const bridge = { request: vi.fn(async () => ({ type: "AGENT_ERROR", agentId, code: typed ? "session-expired" : "CLOUD_V2_ERROR", message,
+      ...(typed ? { failure: { kind: "session-expired", stage: "loadSession", agentId, message } } : {}) })) };
     const context: Record<string, unknown> = { BLANK, isCloudWorkspace, cancelGeneration, cancelledSince, executionActorForRecovery,
       Error, classifyRpcError, bindFailureWasSuperseded, shouldCancelStalledSessionAdmission, statusForFailure, resumeFailureInvalidatesBinding,
       getStore: useSessionsStore.getState, bridge, ensureInFlightRef: { current: new Map() },
@@ -45,7 +50,10 @@ describe("transcript presentation during session reattachment", () => {
     if (typed) {
       expect(useSessionsStore.getState().sessions[chatId]).toMatchObject({ status: "warming", error: null, failure: null });
       expect(context.drainOrDropQueue).not.toHaveBeenCalled();
-    } else expect(useSessionsStore.getState().sessions[chatId].error).toBe("No live execution for this conversation.");
+    } else expect(useSessionsStore.getState().sessions[chatId].error).toBe(message);
+    const slot = useSessionsStore.getState().sessions[chatId];
+    expect(slot).toMatchObject({ messages: [], hasTranscript: false, providerBinding: null, sessionId: null });
+    expect(canSwitchPristineChat({ folder: cwd, title: "Untitled" }, slot)).toBe(true);
   });
 
   it.each(["/personal/project", "/organization/project"])("reattaches silently when startup retires the workspace lookup for %s", async cwd => {

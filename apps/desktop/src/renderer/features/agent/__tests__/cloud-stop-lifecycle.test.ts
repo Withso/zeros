@@ -129,6 +129,17 @@ afterEach(() => {
 });
 
 describe("untouched cloud view retirement", () => {
+  it("clears a failed first-open view without Stop or a nonexistent execution close", () => {
+    const h = harness(); h.sendQueueRef.current.clear();
+    useSessionsStore.getState().patchSession(CHAT, { status: "failed", error: "Cloud conversation is unavailable.",
+      failure: { kind: "protocol-error", stage: "loadSession", agentId: "codex", message: "Cloud conversation is unavailable." },
+      sessionId: null, executionId: null, foregroundTurnId: null, activeTurnStartedAt: null });
+    expect(h.close({ reason: "agent-switch" })).toBeUndefined();
+    expect(h.slot()).toMatchObject({ status: "idle", sessionId: null, transcriptState: "resident", hasTranscript: false,
+      messages: [], error: null, failure: null });
+    expect(h.bridge.request).not.toHaveBeenCalled(); expect(h.bridge.send).not.toHaveBeenCalled();
+  });
+
   it("retires a reconnecting empty view without Stop or waiting for the worker", () => {
     const h = harness(); h.sendQueueRef.current.clear();
     useSessionsStore.getState().patchSession(CHAT, { status: "reconnecting", foregroundTurnId: null, activeTurnStartedAt: null });

@@ -25,7 +25,7 @@ function harness(local = false, title = "Untitled") {
   const chat = { id: "chat-a", folder: local ? "/personal/project" :
     "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222",
   title, agentId: "codex", kind: "chat", updatedAt: 1 };
-  const state = { chats: [chat], activeChatId: chat.id, navigationVersion: 0 };
+  const state = { chats: [chat], activeChatId: chat.id, navigationVersion: 0, chatComposerDrafts: {} };
   const slot = { ...BLANK };
   let confirm!: (closed: boolean) => void;
   const pending = new Promise<boolean>(resolve => { confirm = resolve; });
@@ -96,6 +96,43 @@ describe("cloud session close callers", () => {
     expect(h.closeSession).toHaveBeenCalledExactlyOnceWith(h.chat.id, { reason: "agent-switch" });
     expect(h.update).toHaveBeenCalledWith(expect.objectContaining({ agentId: "claude", model: "model", sessionId: undefined }));
     expect(h.state.chats).toHaveLength(1); expect(h.state.activeChatId).toBe(h.chat.id);
+  });
+
+  it.each(["Untitled", ""])("keeps repeated agent picks on the failed first cloud chat (%j)", title => {
+    const h = harness(false, title);
+    h.chat.agentId = "cursor";
+    Object.assign(h.slot, { agentId: "cursor", status: "failed", error: "Cloud conversation is unavailable.",
+      failure: { kind: "protocol-error", stage: "loadSession", agentId: "cursor", message: "Cloud conversation is unavailable." } });
+    for (const agent of ["claude", "claude", "cursor"]) {
+      h.switch(agent);
+      expect(h.state.chats).toHaveLength(1);
+      expect(h.state.chats[0]).toMatchObject({ id: h.chat.id, agentId: agent });
+      expect(h.state.activeChatId).toBe(h.chat.id);
+    }
+    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.hydrateChat).not.toHaveBeenCalled();
+    expect(h.closeSession).toHaveBeenCalledTimes(3);
+    for (const call of h.closeSession.mock.calls) expect(call).toEqual([h.chat.id, { reason: "agent-switch" }]);
+  });
+
+  it.each(["/personal/project", "/organization/project"])("keeps the failed, unused Local chat at %s in place", folder => {
+    const h = harness(true); h.chat.folder = folder;
+    Object.assign(h.slot, { status: "failed", error: "Agent did not start" });
+    h.switch();
+    expect(h.state.chats).toHaveLength(1); expect(h.state.activeChatId).toBe(h.chat.id);
+    expect(h.closeSession).toHaveBeenCalledExactlyOnceWith(h.chat.id);
+    expect(h.update).toHaveBeenCalledOnce(); expect(h.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("still opens a different chat when the failure followed a sent message", () => {
+    const h = harness();
+    Object.assign(h.slot, { status: "failed", error: "Turn failed", hasTranscript: true,
+      messages: [{ id: "sent", kind: "text", role: "user", text: "hello", createdAt: 1 }] });
+    h.switch();
+    expect(h.closeSession).not.toHaveBeenCalled(); expect(h.update).not.toHaveBeenCalled();
+    expect(h.dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "ADD_CHAT",
+      chat: expect.objectContaining({ id: "chat-new", agentId: "claude" }) }));
+    expect(h.state.chats[0].agentId).toBe("codex");
   });
   it("does not publish a fresh chat or archive until clear confirms", async () => {
     const h = harness(); expect(h.clear()).toBe(true);
