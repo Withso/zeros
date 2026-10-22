@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { createInterface } from "node:readline/promises";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { ensureWorkspace, acquireWorkspaceLock, systemEnvironment, privateDirectory, writePrivateFile, saveWorkspace } from "./state.mjs";
+import { ensureWorkspace, acquireWorkspaceLock, systemEnvironment, privateDirectory, writePrivateFile, saveWorkspace, readPrivateJson } from "./state.mjs";
 import { loadProfile, profileIssues, publicDevProfile, desktopEnvironment, backendEnvironment, webEnvironment } from "./profile.mjs";
 import { ensureTunnel, configureTunnel, deleteTunnel } from "./cloudflare.mjs";
 import { ensureWorkosWebhook, deleteWorkosWebhook } from "./workos.mjs";
@@ -62,7 +62,11 @@ async function confirmReset(workspace) {
 
 async function stop(workspace) {
   const receipt = workspace.state.launcher;
-  if (!receipt) return;
+  if (!receipt) {
+    if (fs.existsSync(path.join(workspace.directory, "run.lock")))
+      throw new Error("Development shutdown could not be confirmed; the supervisor is still starting. Retry --stop.");
+    return;
+  }
   try {
     const response = await fetch(`http://127.0.0.1:${receipt.port}/stop`, { method: "POST", redirect: "error",
       headers: { authorization: `Bearer ${receipt.token}` }, signal: globalThis.AbortSignal.timeout(5000) });
@@ -73,10 +77,20 @@ async function stop(workspace) {
     if (Date.now() > deadline) throw new Error("Development shutdown has not completed; retry after it drains");
     await delay(250);
   }
+  // A lost lock is not proof of cleanup. Only the original supervisor may
+  // clear its receipt after every owned service tree and PostgreSQL exit.
+  const current = readPrivateJson(workspace.file);
+  if (current.owner !== workspace.state.owner || current.instanceId !== workspace.state.instanceId || current.launcher)
+    throw new Error("Development shutdown could not be confirmed; existing state was preserved. Retry --stop after inspecting the supervisor.");
+  console.log("[zeros-dev] Desktop and backend processes stopped for this checkout.");
 }
 
 async function start(workspace, profile) {
   if (workspace.state.status !== "active") throw new Error("This development workspace is archived or awaiting cleanup; finish pnpm electron:cloud --reset before restarting it");
+  // A dead supervisor PID alone does not prove that its desktop descendants
+  // exited. Do not recover the lock and overwrite that run's only receipt.
+  if (workspace.state.launcher)
+    throw new Error("The previous launch has not confirmed shutdown; run pnpm electron:cloud --stop before starting again. Existing state was preserved.");
   const issues = profileIssues(profile, { cloud: Boolean(profile.cloud) });
   if (issues.length) throw new Error(issues.join("\n"));
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();

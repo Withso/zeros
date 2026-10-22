@@ -50,7 +50,7 @@ describe("secure portable Dev setup", () => {
   it("imports the cloud setting through actual setup without printing credentials", () => {
     const f = fixture(), repository = path.resolve(import.meta.dirname, "../..");
     fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(f.root, "scripts/dev-environment"), { recursive: true });
-    for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(f.root, "scripts", file));
+    for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(f.root, "scripts", file));
     fs.writeFileSync(path.join(f.root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
     fs.writeFileSync(path.join(f.root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
     const value = Buffer.from(JSON.stringify(f.profile)).toString("base64");
