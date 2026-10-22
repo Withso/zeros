@@ -48,6 +48,8 @@ export interface SessionChange {
   chat?: ChatRow;
   deleted?: true;
   rows: CloudV2MessageRow[];
+  /** A durable control/turn boundary must flush any pending mirrored rows. */
+  flush?: true;
 }
 
 export function userMessage(input: PromptInput, steeredTurnId?: string): AgentTextMessage {
@@ -250,13 +252,15 @@ export class SessionStore {
       this.sessions.set(chatId, { ...current, messages: folded, rows });
       this.dirty.add(chatId);
       if (!this.timers.has(chatId)) {
+        // Crash window: 500 ms of streamed transcript plus in-flight disk I/O.
+        // Inbox, metadata and turn completion remain immediately durable.
         const timer = setTimeout(() => {
           this.timers.delete(chatId);
           void this.flushChat(chatId).catch((error: unknown) => {
             this.writeFailures.set(chatId, error);
             for (const listener of this.errorListeners) listener(chatId);
           });
-        }, 250);
+        }, 500);
         timer.unref?.();
         this.timers.set(chatId, timer);
       }
@@ -351,8 +355,8 @@ export class SessionStore {
       const oldRows = new Map(previous?.rows.map((row) => [row.msgId, row]));
       const changed = draft.rows.filter((row) => JSON.stringify(oldRows.get(row.msgId)) !== JSON.stringify(row));
       const chatChanged = JSON.stringify(previous?.chat) !== JSON.stringify(draft.chat);
-      if (changed.length || chatChanged) for (const listener of this.listeners) listener(structuredClone({
-        chatId, rows: changed, ...(chatChanged ? draft.chat ? { chat: draft.chat } : { deleted: true as const } : {}),
+      for (const listener of this.listeners) listener(structuredClone({
+        chatId, rows: changed, flush: true as const, ...(chatChanged ? draft.chat ? { chat: draft.chat } : { deleted: true as const } : {}),
       }));
       return structuredClone(result);
     });

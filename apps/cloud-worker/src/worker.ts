@@ -189,6 +189,7 @@ export class CloudWorker {
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId));
       this.history = new HistoryMirror(store, this.options.transport);
       this.unsubscribers.push(store.onChange((change) => {
+        if (!change.chat && !change.deleted && !change.rows.length) return;
         void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length ? ["messages"] : [])],
           ...(change.rows.length ? { chatIds: [change.chatId] } : {}) }));
       }), store.onError((chatId) => {
@@ -208,6 +209,14 @@ export class CloudWorker {
   private async reportIdle(force = false): Promise<void> {
     if (!this.online || !this.agents) return;
     const idle = !this.agents.busy && !this.terminals?.busy;
-    if (force || this.idle !== idle) { this.idle = idle; await this.send({ t: "idle", idle }); }
+    if (force || this.idle !== idle) {
+      if (idle) {
+        try { await this.store?.flush(); await this.history?.flush(); }
+        catch { this.options.onError?.("storage"); return; }
+        // A new prompt may have arrived while persistence was draining.
+        if (!this.online || this.agents.busy || this.terminals?.busy) return;
+      }
+      this.idle = idle; await this.send({ t: "idle", idle });
+    }
   }
 }

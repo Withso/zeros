@@ -146,7 +146,7 @@ describe("durable per-chat sessions", () => {
     await expect(store.importMessages("unknown", [row("a", "agent")])).rejects.toThrow("Unknown chat");
   });
 
-  it("coalesces a 5000-row chat's stream at 250 ms and flushes immediately at turn end", async () => {
+  it("coalesces a 5000-row chat's stream at 500 ms and flushes immediately at turn end", async () => {
     const { store, directory } = await setup();
     await store.enqueue("chat", prompt("large"));
     await store.claim("chat");
@@ -162,7 +162,7 @@ describe("durable per-chat sessions", () => {
       // Neither an unchanged history nor its payload strings are reserialized
       // per token. Only the growing row is folded and encoded during a burst.
       expect(stringify.mock.calls.some(([value]) => value && typeof value === "object" && "rows" in value)).toBe(false);
-      await vi.advanceTimersByTimeAsync(249);
+      await vi.advanceTimersByTimeAsync(499);
       expect(save.mock.calls.length).toBe(0);
       await vi.advanceTimersByTimeAsync(1);
       await store.flush();
