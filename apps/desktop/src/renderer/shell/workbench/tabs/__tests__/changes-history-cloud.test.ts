@@ -15,4 +15,18 @@ describe("Changes turn history placement", () => {
     await expect(loadChangesTurns("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222")).resolves.toEqual([]);
     expect(turns.list).not.toHaveBeenCalled();
   });
+  // The cloud Changes tab showed "Couldn't load changes." beside a loaded diff:
+  // its workspace id arrives as a scoped native resource, which the folder-key
+  // test missed, and the worker refuses turns.list as CLOUD_V2_UNSUPPORTED.
+  it("recognizes every cloud identity, not only the folder key", async () => {
+    await expect(loadChangesTurns("cloud:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:workspace")).resolves.toEqual([]);
+    await expect(loadChangesTurns("22222222-2222-4222-8222-222222222222", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222")).resolves.toEqual([]);
+    expect(turns.list).not.toHaveBeenCalled();
+  });
+  it("treats a cloud worker's unsupported turn history as empty, and keeps every other failure", async () => {
+    turns.list.mockRejectedValueOnce(Object.assign(new Error("This operation is not available in cloud workspaces yet."), { code: "CLOUD_V2_UNSUPPORTED" }));
+    await expect(loadChangesTurns("workspace-from-an-unrecognized-cloud-shape")).resolves.toEqual([]);
+    turns.list.mockRejectedValueOnce(Object.assign(new Error("The Git command could not be completed."), { code: "GIT_COMMAND_FAILED" }));
+    await expect(loadChangesTurns("/Users/me/project")).rejects.toThrow("could not be completed");
+  });
 });

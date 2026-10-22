@@ -1,7 +1,7 @@
 import { gitLog, type Commit } from "@/renderer/platform/git";
 import { turnsList, type TurnInfo } from "@/renderer/platform/turns";
 import type { TurnHistoryCursor } from "@zeros/protocol/changes-history";
-import { isCloudWorkspace } from "@/renderer/platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudScopedId } from "@/renderer/platform/bridge/cloud-workspace-key";
 
 const PAGE_SIZE = 500;
 
@@ -29,9 +29,22 @@ export async function loadChangesCommits(
 
 export async function loadChangesTurns(
   workspaceId: string,
+  folder?: string,
 ): Promise<TurnInfo[]> {
   // Turn checkpoints are Local-only for now; cloud v2 serves no turn records.
-  if (isCloudWorkspace(workspaceId)) return [];
+  // A cloud workspace may arrive as its folder key or a scoped resource id.
+  if (isCloudWorkspace(workspaceId) || isCloudWorkspace(folder) || parseCloudScopedId(workspaceId)) return [];
+  try {
+    return await readChangesTurns(workspaceId);
+  } catch (error) {
+    // An optional history read the cloud worker refuses is absent, not a
+    // failure to load the changes beside it.
+    if ((error as { code?: unknown } | null)?.code === "CLOUD_V2_UNSUPPORTED") return [];
+    throw error;
+  }
+}
+
+async function readChangesTurns(workspaceId: string): Promise<TurnInfo[]> {
   const turns = new Map<string, TurnInfo>();
   let before: number | undefined;
   let after: TurnHistoryCursor | undefined;
