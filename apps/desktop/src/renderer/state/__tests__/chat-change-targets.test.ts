@@ -25,7 +25,8 @@ it("a cloud history nudge only re-reads that owner's open transcripts", async ()
     op === "chats.list"
       ? {
           revision: 1,
-          chats: [{ id: cloudScopedId(target, "chat") }],
+          // Native mirror rows; the client scopes them to their owner.
+          chats: [{ id: "chat", folder: "/home/user/Owner/repo" }],
           chatDeletions: [],
         }
       : { messages: [] },
@@ -33,6 +34,7 @@ it("a cloud history nudge only re-reads that owner's open transcripts", async ()
   const client = new WorkspaceRuntimeClient({
     open: vi.fn(),
     workspaces: () => [],
+    historyRoot: () => "/home/user/Owner/repo",
     readHistory: reads,
   });
   const pending: Promise<unknown>[] = [];

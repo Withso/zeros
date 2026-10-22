@@ -18,6 +18,9 @@ const remote = sanitizeCachedChat({
   id: cloudScopedId(target, "saved"),
   folder,
 })!;
+// The control-plane mirror stores the worker's native rows and checkout path.
+const ROOT = "/home/user/Owner/repo";
+const nativeRemote = { ...remote, id: "saved", folder: ROOT };
 afterEach(() => vi.restoreAllMocks());
 it("chat persistence subscribes before Local is ready and merges a later confirmed cloud snapshot", async () => {
   vi.spyOn(RuntimeClient.prototype, "request").mockRejectedValue(
@@ -26,7 +29,8 @@ it("chat persistence subscribes before Local is ready and merges a later confirm
   const bridge = new WorkspaceRuntimeClient({
     open: vi.fn(),
     workspaces: () => [],
-    readHistory: async () => ({ chats: [remote], chatDeletions: [] }),
+    historyRoot: () => ROOT,
+    readHistory: async () => ({ chats: [nativeRemote], chatDeletions: [] }),
   });
   let chats = [local];
   const onSnapshot = vi.fn((snapshot) => {
@@ -77,9 +81,10 @@ it("Local restart and recovery publish independently while preserving confirmed 
   const bridge = new WorkspaceRuntimeClient({
     open: vi.fn(),
     workspaces: () => [],
+    historyRoot: () => ROOT,
     readHistory: async () => ({
       revision,
-      chats: [{ ...remote, title: `Revision ${revision}` }],
+      chats: [{ ...nativeRemote, title: `Revision ${revision}` }],
       chatDeletions: [],
     }),
   });
