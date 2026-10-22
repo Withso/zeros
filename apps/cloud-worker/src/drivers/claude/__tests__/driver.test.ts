@@ -14,6 +14,22 @@ function setup() {
   drivers.push(driver); return { driver, ...h };
 }
 
+it("distinguishes lightweight open from first-turn process readiness and reuse", async () => {
+  const { driver, queries } = setup(), stages: string[] = [];
+  await driver.open({ ...input, onTiming: stage => { stages.push(stage); } });
+  expect(stages).toEqual([]); expect(queries).toHaveLength(0);
+  const first = driver.prompt(text("private-prompt")), query = queries[0], sent = await query.read();
+  expect(stages).toEqual(["turn_sent"]);
+  query.push({ type: "system", subtype: "init", session_id: nativeId });
+  query.push(result(sent.uuid)); await first;
+  expect(stages).toEqual(["turn_sent", "process_ready", "first_provider_event"]);
+  stages.length = 0;
+  const next = driver.prompt(text("private-prompt")), second = await query.read();
+  query.push(result(second.uuid)); await next;
+  expect(queries).toHaveLength(1);
+  expect(stages).toEqual(["turn_sent", "first_provider_event"]);
+});
+
 it("passes the pinned Haiku model and low effort to the native query", async () => {
   const { driver, queries } = setup();
   await driver.open({ ...input, model: "claude-haiku-5-5", effort: "low" });

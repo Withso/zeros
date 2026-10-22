@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import type { Driver, DriverOpen } from "../driver";
+import { driverTiming } from "../../agent-timings";
 import { JsonRpcProcess, RpcError } from "../shared/json-rpc-process";
 import { agentEnvironment } from "../shared/agent-environment";
 import { CodexEventMapper } from "./event-mapper";
@@ -20,6 +21,7 @@ interface CodexOptions {
 }
 
 interface Turn {
+  observed?: boolean;
   id?: string;
   model?: string;
   stopping: boolean;
@@ -105,6 +107,7 @@ export class CodexDriver implements Driver {
       this.model = response.model ?? input.model;
       this.mapper.handle("thread/started", { thread: { id: this.nativeSessionId } });
       this.state = "ready";
+      driverTiming(this.input, "process_ready");
       return { nativeSessionId: this.nativeSessionId };
     } catch (error) {
       await this.dispose();
@@ -123,6 +126,7 @@ export class CodexDriver implements Driver {
     const turn: Turn = { model: this.model, stopping: false, promise, resolve, reject, ack, acknowledge, done, finish, buffered: [] };
     this.active = turn;
     this.mapper!.startTurn();
+    driverTiming(this.input, "turn_sent");
     void this.rpc!.request<{ turn: { id: string; status?: string } }>("turn/start", {
       threadId: this.nativeSessionId, input, ...(turn.model ? { model: turn.model } : {}),
       ...(this.effort ? { effort: this.effort } : {}),
@@ -136,6 +140,7 @@ export class CodexDriver implements Driver {
       if (this.active !== turn) return;
       if (typeof response?.turn?.id !== "string" || !response.turn.id) throw new Error("Codex returned an invalid turn.");
       turn.id = response.turn.id;
+      this.observe(turn);
       this.lastTurnId = turn.id;
       turn.acknowledge();
       this.mapper!.handle("turn/started", { turn: { id: turn.id } });
@@ -233,11 +238,17 @@ export class CodexDriver implements Driver {
       return;
     }
     if (nativeTurn !== undefined && nativeTurn !== turn.id) return;
+    this.observe(turn);
     this.mapper!.handle(method, params);
     if (this.mapper!.sawTurnTerminal) {
       const failure = this.mapper!.terminalError;
       this.settle(failure ? new Error(this.redact(failure)) : undefined);
     }
+  }
+
+  private observe(turn: Turn): void {
+    if (turn.observed) return;
+    turn.observed = true; driverTiming(this.input, "first_provider_event");
   }
 
   private settle(error?: Error): void {

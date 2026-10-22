@@ -29,6 +29,7 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
   });
   const worker = new CloudWorker({ directory: options.directory ?? WORKER_STATE_DIRECTORY, workspaceId: options.workspaceId, transport,
     gitAskpassPath: fileURLToPath(new URL("./bin/git-askpass", import.meta.url)), onError: code => log(code),
+    onTiming: record => log(`timing ${JSON.stringify(record)}`),
   });
   const shutdown = () => { void stop(); };
   const stop = (code = 0): Promise<void> => {

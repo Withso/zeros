@@ -6,6 +6,7 @@ import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/p
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { Driver, DriverOpen } from "../driver";
+import { driverTiming } from "../../agent-timings";
 import { agentEnvironment } from "../shared/agent-environment";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
 import { isClaudeBackgroundAcknowledgement, isUnownedClaudeResult } from "./result-ownership";
@@ -27,7 +28,7 @@ interface ClaudeOptions {
   interruptTimeoutMs?: number;
 }
 interface Process { query: NativeQuery; input: InputQueue<SDKUserMessage> }
-interface Turn extends Deferred<PromptResponse> { uuids: Set<string>; model?: string }
+interface Turn extends Deferred<PromptResponse> { uuids: Set<string>; model?: string; observed?: boolean }
 interface Receipt extends Deferred<SteerOutcome> { timer?: ReturnType<typeof setTimeout> }
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
@@ -68,6 +69,7 @@ export class ClaudeDriver implements Driver {
     const process = this.ensureQuery(), uuid = randomUUID();
     const turn: Turn = { ...createDeferred<PromptResponse>(), uuids: new Set([uuid]), model: this.model };
     this.active = turn; this.mapper!.beginTurn();
+    driverTiming(this.input, "turn_sent");
     process.input.push({ type: "user", uuid, session_id: this.nativeSessionId!, message: { role: "user", content: message }, parent_tool_use_id: null });
     return turn.promise;
   }
@@ -158,6 +160,7 @@ export class ClaudeDriver implements Driver {
         const frame = record(raw), root = !frame.parent_tool_use_id && !frame.agent_id;
         if (frame.type === "system" && frame.subtype === "init") {
           if (frame.session_id !== this.nativeSessionId) throw new Error("Claude resumed a different native session.");
+          driverTiming(this.input, "process_ready");
           if (!this.model && typeof frame.model === "string") this.model = frame.model;
         }
         const isResult = root && frame.type === "result";
@@ -171,6 +174,9 @@ export class ClaudeDriver implements Driver {
         const acknowledgement = isResult && isClaudeBackgroundAcknowledgement(frame);
         const owned = !!this.active && isResult && !acknowledgement && (ids.length ? ids.some(id => this.active!.uuids.has(id)) : !isUnownedClaudeResult(frame));
         const accepted = this.mapper!.feed(raw, { preserveTurnActivity: frame.type === "result" && !!this.active && !owned });
+        if (accepted && root && this.active && !this.active.observed && (!isResult || owned)) {
+          this.active.observed = true; driverTiming(this.input, "first_provider_event");
+        }
         if (accepted && !this.resumed && (hasClaudeModelContent(raw) ||
             (isResult && !acknowledgement && !this.mapper!.terminalError && this.mapper!.stopReason === "end_turn"))) {
           this.resumed = true;

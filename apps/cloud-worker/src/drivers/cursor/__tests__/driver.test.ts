@@ -32,6 +32,18 @@ it("runs the isolated host with only its own login, explicit models and image in
   expect(JSON.parse(f.last()!)).toMatchObject({ sends: 2, model: { id: "grok-4.7" } });
 });
 
+it("reports native process and turn timing boundaries for cold and reused sends", async () => {
+  const driver = new CursorDriver({ hostPath: host.path, environment: { PATH: process.env.PATH, HOME: directory } });
+  drivers.push(driver);
+  const stages: string[] = [];
+  await driver.open({ sessionId: "execution", cwd: directory, apiKey: "fixture-cursor", onTiming: stage => { stages.push(stage); } });
+  expect(stages).toEqual(["process_ready"]);
+  for (let turn = 0; turn < 2; turn++) {
+    stages.length = 0; await driver.prompt(prompt({ inspect: true }));
+    expect(stages).toEqual(["turn_sent", "first_provider_event"]);
+  }
+});
+
 it("cancels a run whose send is pending and can explicitly send again", async () => {
   const f = await setup();
   const running = f.driver.prompt(prompt({ sendDelay: 80, hang: true, before: [{ kind: "delta", value: { type: "text-delta", text: "Preparing" } }] }));

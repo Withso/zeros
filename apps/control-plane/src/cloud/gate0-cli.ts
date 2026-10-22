@@ -11,7 +11,7 @@ import { GATE0_AGENTS, GATE0_DEFAULT_MODELS, Gate0Failure, runCloudV2Gate0 } fro
 import { BoatApiClient } from "./boat-client.js";
 import { BoatCloudV2Compute } from "./boat.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
-import { createGate0TransportProbe } from "./gate0-transport.js";
+import { createGate0TransportProbe, createGate0TimingReader } from "./gate0-transport.js";
 
 export function gate0ModelsFromEnv(env: NodeJS.Dict<string>): Record<typeof GATE0_AGENTS[number], string> {
   return {
@@ -180,7 +180,7 @@ async function main() {
     if (local) gate0LocalIdentity(health, local);
     else generation = z.object({ ok: z.literal(true), development: z.object({ owner: z.literal(target.owner), generation: z.string().uuid() }) }).parse(health).development.generation;
   } catch { throw new Gate0Failure("dev_identity"); }
-  let transportProbe;
+  let transportProbe, readTimings;
   try {
     const { cloudV2WorkerSigningKey } = await import(pathToFileURL(resolve(root, "scripts/dev-environment/cloud-v2-keys.mjs")).href);
     let state = localState;
@@ -194,6 +194,7 @@ async function main() {
     const compute = new BoatCloudV2Compute(new BoatApiClient({ apiKey: profile.boat.apiKey, timeoutMs: 20_000,
       ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }));
     transportProbe = createGate0TransportProbe({ compute, signer });
+    readTimings = createGate0TimingReader({ compute });
   } catch { throw new Gate0Failure("transport_configuration"); }
   const session = await gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey, email, subject, password: env.ZEROS_DEV_PASSWORD,
     ...(profile.fixture?.workosOrganizationId ? { organizationId: profile.fixture.workosOrganizationId } : {}) });
@@ -211,6 +212,7 @@ async function main() {
     const logins = z.object({ connections: z.array(z.object({ provider: z.string(), connected: z.boolean() })) }).parse(await loginResponse.json());
     for (const agent of agents) if (!logins.connections.some(row => row.provider === agent && row.connected)) throw new Gate0Failure(`agent_${agent}_login`);
     const result = await runCloudV2Gate0({ apiOrigin: target.origin, organizationId, repository, accessToken: session.accessToken, agents, models: gate0ModelsFromEnv(env), transportProbe,
+      readTimings,
       ...(values.runtime ? { runtimeSha: values.runtime } : {}), ...(values.keep ? { keep: true } : {}), log: message => console.log(`[gate0] ${message}`) });
     const skipped = GATE0_AGENTS.filter(agent => !agents.includes(agent));
     if (skipped.length) console.log(`[gate0] Not checked: ${skipped.join(", ")}`);

@@ -1,5 +1,6 @@
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
+import type { DriverTimingStage } from "../agent-timings";
 
 interface DriverSession {
   sessionId: string;
@@ -8,6 +9,7 @@ interface DriverSession {
   /** Persisted chat selection. Each driver maps only its supported native values. */
   effort?: string;
   nativeSessionId?: string;
+  onTiming?: (stage: DriverTimingStage) => void;
 }
 
 export type DriverOpen = DriverSession & (

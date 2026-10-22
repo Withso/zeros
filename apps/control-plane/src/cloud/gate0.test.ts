@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { runCloudV2Gate0 } from "./gate0.js";
+import type { Gate0Timing } from "./gate0-transport.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -152,6 +153,36 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
 }
 
 describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
+  it("prints each chat's stage durations, including Stop, before stopping the same VM", async () => {
+    const f = await fixture();
+    const readTimings = vi.fn(async (): Promise<Gate0Timing[]> => {
+      expect(f.state()).toBe("running");
+      return f.frames.filter(frame => frame.type === "AGENT_NEW_SESSION").flatMap(frame => [
+        ...(["open_received", "driver_ready"] as const).map((stage, i) => ({ agent: frame.agentId, chat: frame.chatId.slice(-8), phase: "open" as const, stage, elapsedMs: i * 10 })),
+        ...(["turn_received", "driver_ready", "turn_sent", "first_provider_event", "turn_done"] as const).map((stage, i) => ({ agent: frame.agentId, chat: frame.chatId.slice(-8), phase: "turn" as const, stage, elapsedMs: i * 10 })),
+      ]);
+    });
+    await runCloudV2Gate0({ ...f.options, readTimings });
+    expect(readTimings).toHaveBeenCalledTimes(1);
+    const timings = f.logs.filter(line => line.startsWith("worker timing "));
+    expect(timings).toHaveLength(28);
+    const chats = f.frames.filter(frame => frame.type === "AGENT_NEW_SESSION");
+    expect(new Set(chats.map(chat => `${chat.agentId}:${chat.chatId.slice(-8)}`)).size).toBe(4);
+    for (const chat of chats) {
+      expect(timings).toContain(`worker timing ${chat.agentId} ${chat.chatId.slice(-8)} open driver_ready 10ms`);
+      expect(timings).toContain(`worker timing ${chat.agentId} ${chat.chatId.slice(-8)} turn first_provider_event 30ms`);
+      expect(timings).toContain(`worker timing ${chat.agentId} ${chat.chatId.slice(-8)} turn turn_done 40ms`);
+      expect(timings.join("\n")).not.toContain(chat.chatId);
+    }
+    expect(f.calls.filter(call => call.method === "POST" && call.path === "/v1/cloud-v2/workspaces")).toHaveLength(1);
+  });
+
+  it("rejects missing required timing stages and still deletes its workspace", async () => {
+    const f = await fixture();
+    await expect(runCloudV2Gate0({ ...f.options, readTimings: async () => [] })).rejects.toThrow("worker_timings");
+    expect(f.state()).toBe("deleted");
+  });
+
   it.each([undefined, { codex: "fixture-codex", claude: "fixture-claude", cursor: "fixture-cursor" }])(
     "pins every created and prompted chat to a model and low effort, including Stop (%j)", async models => {
       const f = await fixture();

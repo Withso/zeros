@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket from "ws";
 import { z } from "zod";
-import type { Gate0TransportWorkspace } from "./gate0-transport.js";
+import type { Gate0Timing, Gate0TransportWorkspace } from "./gate0-transport.js";
 
 export const GATE0_AGENTS = ["codex", "claude", "cursor"] as const;
 type Agent = typeof GATE0_AGENTS[number];
@@ -98,6 +98,7 @@ export type CloudV2Gate0Options = {
   repository: string;
   runtimeSha?: string;
   transportProbe?(workspace: Gate0TransportWorkspace): Promise<void>;
+  readTimings?(workspace: Gate0TransportWorkspace): Promise<Gate0Timing[]>;
   accessToken(): Promise<string>;
   agents?: readonly Agent[];
   models?: Partial<Record<Agent, string>>;
@@ -147,6 +148,7 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
 
   let workspace: z.infer<typeof WorkspaceSchema> | undefined, bridge: BridgeProbe | undefined;
   let createAttempted = false, failed: unknown, deleted = false;
+  const timedChats: Array<{ agent: Agent; chat: string }> = [];
   const current = async (stage: string) => parse(WorkspaceReply, await request(`${base}/${workspace!.id}`, stage), stage).workspace;
   const waitState = async (state: string) => until(state, timeoutMs, pollMs, async () => {
     const row = await current(state);
@@ -205,6 +207,7 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
     const transcripts = new Map<string, MessageRows>();
     for (const agentId of agents) {
       const chatId = `gate0-${agentId}-${runId}`, marker = "ok";
+      timedChats.push({ agent: agentId, chat: chatId.slice(-8) });
       await bridge.op("chats.upsert", { chat: { id: chatId, folder: root, agentId, model: models[agentId], effort: "low", title: "Gate0", createdAt: Date.now() } });
       const opened = parse(z.object({ type: z.literal("AGENT_SESSION_CREATED"), session: z.object({ sessionId: z.string() }) }),
         await bridge.request("AGENT_NEW_SESSION", { ...scope, agentId, chatId }, `agent_${agentId}_session`), `agent_${agentId}_session`);
@@ -220,7 +223,8 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
 
     // A separate chat keeps earlier updates/receipts from satisfying Stop.
     // Wait for native activity, not our own recorded user row or running state.
-    const agentId = (["claude", "codex", "cursor"] as const).find(agent => agents.includes(agent))!, chatId = `gate0-stop-${runId}`;
+    const agentId = (["claude", "codex", "cursor"] as const).find(agent => agents.includes(agent))!, chatId = `gate0-stop-${randomUUID()}`;
+    timedChats.push({ agent: agentId, chat: chatId.slice(-8) });
     await bridge.op("chats.upsert", { chat: { id: chatId, folder: root, agentId, model: models[agentId], effort: "low", title: "Gate0 Stop", createdAt: Date.now() } });
     const opened = parse(z.object({ type: z.literal("AGENT_SESSION_CREATED"), session: z.object({ sessionId: z.string() }) }),
       await bridge.request("AGENT_NEW_SESSION", { ...scope, agentId, chatId }, "agent_stop_session"), "agent_stop_session");
@@ -241,6 +245,18 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
     requireCheck(cancelled.type === "AGENT_PROMPT_COMPLETE" && cancelled.stopReason === "cancelled", "agent_stop_complete");
     transcripts.set(chatId, parse(Rows, await bridge.op("messages.window", { chatId }), "agent_stop_history").messages);
     log("live turn Stop passed");
+
+    if (options.readTimings) {
+      const timings = await options.readTimings(workspace);
+      for (const chat of timedChats) {
+        const records = timings.filter(row => row.agent === chat.agent && row.chat === chat.chat);
+        for (const row of records) log(`worker timing ${row.agent} ${row.chat} ${row.phase} ${row.stage} ${row.elapsedMs}ms`);
+        for (const [phase, stages] of [
+          ["open", ["open_received", "driver_ready"]],
+          ["turn", ["turn_received", "driver_ready", "turn_sent", "first_provider_event", "turn_done"]],
+        ] as const) requireCheck(stages.every(stage => records.some(row => row.phase === phase && row.stage === stage)), "worker_timings");
+      }
+    }
 
     // Wait for every final row to reach the mirror before a deliberate stop.
     for (const [chatId, rows] of transcripts) await until("history_mirror", timeoutMs, pollMs, async () => {

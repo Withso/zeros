@@ -4,6 +4,7 @@ import type { SDKUserMessage } from "@cursor/sdk";
 import type { ContentBlock, PromptResponse, SessionNotification, TurnUsage } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import type { Driver, DriverOpen } from "../driver";
+import { driverTiming } from "../../agent-timings";
 import { agentEnvironment } from "../shared/agent-environment";
 import { normalizeProviderError } from "../shared/provider-error";
 import { CursorProcess } from "./host-process";
@@ -17,6 +18,7 @@ interface Options {
   requestTimeoutMs?: number; interruptTimeoutMs?: number;
 }
 interface Turn {
+  observed?: boolean;
   id: string; runId?: string; model: string; stopped: boolean; closing: boolean;
   mapper: CursorSdkTranslator; transcripts: CursorSubagentTranscriptReader;
   callbackUsage?: TurnUsage; streamedUsage?: TurnUsage;
@@ -123,6 +125,7 @@ export class CursorDriver implements Driver {
         if (this.disposed || this.process !== host || result.version !== CURSOR_VERSION || typeof result.nativeSessionId !== "string" || !result.nativeSessionId ||
             (this.nativeSessionId && result.nativeSessionId !== this.nativeSessionId)) throw new Error("Cursor returned a different or closed native session.");
         this.nativeSessionId = result.nativeSessionId;
+        driverTiming(this.input, "process_ready");
       } catch (error) { if (this.process === host) this.process = undefined; await host.dispose(); throw this.error(error); }
     })();
     this.opening = opening;
@@ -139,6 +142,7 @@ export class CursorDriver implements Driver {
           void turn.mapper.pollSubagents(() => this.active === turn && !turn.stopped && !turn.closing).catch(() => {});
       }, 1200);
       turn.poll.unref();
+      driverTiming(this.input, "turn_sent");
       const result = await this.process!.request<{ runId: string }>("prompt", { turnId: turn.id, content: message, model: turn.model });
       if (this.active === turn && (!result.runId || result.runId !== turn.runId)) throw new Error("Cursor returned a different native run.");
     } catch (error) {
@@ -174,6 +178,7 @@ export class CursorDriver implements Driver {
         turn.mapper.feed(value);
       }
     }
+    if (!turn.observed) { turn.observed = true; driverTiming(this.input, "first_provider_event"); }
   }
 
   private async settle(turn: Turn, error?: unknown, result: Record<string, unknown> = {}, billed?: unknown): Promise<void> {

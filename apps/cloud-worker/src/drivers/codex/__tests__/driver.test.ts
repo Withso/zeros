@@ -26,6 +26,16 @@ const prose = (events: SessionNotification[]) => events.flatMap(({ update }) =>
   update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? [update.content.text] : []).join("");
 
 describe("Codex driver with an offline app-server process", () => {
+  it("reports native process and turn timing boundaries for cold and reused sends", async () => {
+    const { driver } = setup(), stages: string[] = [];
+    await driver.open({ ...openInput, onTiming: stage => { stages.push(stage); } });
+    expect(stages).toEqual(["process_ready"]);
+    for (const mode of ["complete", "before-ack"]) {
+      stages.length = 0; await driver.prompt(content(mode));
+      expect(stages).toEqual(["turn_sent", "first_provider_event"]);
+    }
+  });
+
   it("pins the Luna model and low effort on the native turn request", async () => {
     const { driver, events } = setup();
     await driver.open({ ...openInput, model: "gpt-6-luna", effort: "low" });

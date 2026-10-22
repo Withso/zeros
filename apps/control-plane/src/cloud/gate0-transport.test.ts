@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
-import { createGate0TransportProbe } from "./gate0-transport.js";
+import { createGate0TransportProbe, createGate0TimingReader } from "./gate0-transport.js";
 
 const worker = (address: string, pid = 18330) => `LISTEN 0 511 ${address} 0.0.0.0:* users:(("MainThread",pid=${pid},fd=21))\n`;
 // Boat's in-VM port agent forwards the protected route from the VM's own
@@ -67,4 +67,22 @@ it("never reflects Boat routes, cookies or errors into probe diagnostics", async
   const f = fixture();
   f.fetcher.mockReset().mockRejectedValue(new Error("synthetic-private-port-token"));
   await expect(f.probe(f.workspace)).rejects.toThrow(/^Cloud v2 gate0 failed: worker_port_cookie$/);
+});
+
+it("reads a bounded journal and returns only closed, content-free timing records", async () => {
+  const valid = { agent: "codex", chat: "89abcdef", phase: "turn", stage: "turn_sent", elapsedMs: 42 };
+  const line = (record: unknown) => `cloud-worker timing ${JSON.stringify(record)}\n`;
+  const f = fixture("unrelated-private-output\n" + line(valid) + line({ ...valid, prompt: "private-prompt" }) +
+    line({ ...valid, chat: "too-long-private-identity" }) + line({ ...valid, stage: "private-output" }) + line({ ...valid, elapsedMs: -1 }));
+  const read = createGate0TimingReader({ compute: f.compute });
+  expect(await read(f.workspace)).toEqual([valid]);
+  expect(f.compute.exec).toHaveBeenCalledWith(f.workspace.boatSandboxId, "sudo -n journalctl -u zeros-worker.service -n 256 -o cat --no-pager", 10);
+  expect(f.compute.hostPort).not.toHaveBeenCalled(); expect(f.fetcher).not.toHaveBeenCalled();
+});
+
+it.each(["failed", "timed-out", "oversize"])("withholds raw journal data when timing inspection is %s", async fault => {
+  const f = fixture();
+  f.compute.exec.mockResolvedValue({ stdout: fault === "oversize" ? "x".repeat(131073) : "private-output", stderr: "private-error",
+    exitCode: fault === "failed" ? 1 : 0, timedOut: fault === "timed-out" });
+  await expect(createGate0TimingReader({ compute: f.compute })(f.workspace)).rejects.toThrow(/^Cloud v2 gate0 failed: worker_timings$/);
 });

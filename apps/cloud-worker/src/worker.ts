@@ -5,6 +5,7 @@ import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
 import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { Agents, type AppClient, type DriverFactories } from "./agents";
+import type { TimingObserver } from "./agent-timings";
 import { CodexDriver } from "./drivers/codex/driver";
 import { ClaudeDriver } from "./drivers/claude/driver";
 import { CursorDriver } from "./drivers/cursor/driver";
@@ -28,6 +29,7 @@ interface WorkerOptions {
   gitAskpassPath?: string;
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
+  onTiming?: TimingObserver;
 }
 interface Client extends AppClient { rejected: boolean }
 
@@ -201,7 +203,7 @@ export class CloudWorker {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
-        (frame) => this.broadcast(frame), () => { void this.reportIdle(); });
+        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming);
       this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId));
       this.history = new HistoryMirror(store, this.options.transport);

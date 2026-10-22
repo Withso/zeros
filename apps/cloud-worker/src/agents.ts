@@ -3,12 +3,13 @@ import type { BackgroundTasksUpdate, InitializeResponse, PromptResponse, Session
 import { createMessage, type AgentLoadSessionMessage, type AgentNewSessionMessage, type AgentPromptMessage, type AgentSteerMessage, type BridgeMessage, type SteerOutcome } from "@zeros/protocol/messages";
 import type { CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
 import type { Driver } from "./drivers/driver";
+import { agentTiming, type TimingObserver, type TimingSpan } from "./agent-timings";
 import { recordUser, userMessage, type InboxEntry, type SessionStore, type SteerReceipt } from "./sessions/session-store";
 import { WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./workspace/scope";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
-interface Waiter { client: AppClient; requestId: string }
+interface Waiter { client: AppClient; requestId: string; receivedAt: number }
 interface Runtime {
   id: string; chatId: string; agentId: CloudV2Agent; model?: string; effort?: string;
   driver?: Driver; unsubscribe?: () => void; login?: string; opening?: Promise<void>;
@@ -19,6 +20,7 @@ interface Runtime {
   pumping?: Promise<void>; events: Promise<void>; stopping: number; closed: boolean;
   settling?: Promise<void>; steers: Map<string, Promise<SteerReceipt>>;
   waiters: Map<string, Waiter[]>;
+  turnTiming?: TimingSpan;
 }
 
 const VERSIONS = { codex: "0.162.1", claude: "0.3.296", cursor: "1.0.37" };
@@ -46,6 +48,7 @@ export class Agents {
     config: WorkerConfig,
     private readonly broadcast: (message: BridgeMessage) => Promise<void>,
     private readonly activity: () => void,
+    private readonly onTiming?: TimingObserver,
   ) { this.config = config; }
 
   configure(config: WorkerConfig): void { this.config = config; }
@@ -164,6 +167,7 @@ export class Agents {
     const found = requested ? this.routes.get(requested) : undefined;
     const chatId = message.chatId ?? found?.chatId;
     if (!chatId) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "A conversation is required.");
+    const timing = agentTiming(agentId, chatId, "open", this.onTiming);
     if (found && found.chatId !== chatId) throw new WorkspaceError("session-expired", "The execution belongs to a different conversation.");
     let route = this.chats.get(chatId);
     if (message.type === "AGENT_LOAD_SESSION" && message.adoptOnly &&
@@ -204,8 +208,9 @@ export class Agents {
       throw error;
     }
     route.preparing = undefined;
-    await this.ensureDriver(route);
+    await this.ensureDriver(route, timing);
     this.assertCurrent(route);
+    timing.mark("driver_ready");
     const chat = this.store.metadata(chatId)!.chat!;
     const session = { sessionId: route.id, executionId: route.id, ...(chat.providerBinding ? { providerBinding: chat.providerBinding } : {}), ...(route.background ? { backgroundTasks: route.background } : {}) };
     if (message.type === "AGENT_NEW_SESSION") await client.send(createMessage({ type: "AGENT_SESSION_CREATED", source: "engine", requestId: message.id, agentId, session, initialize: initialized(agentId) }));
@@ -215,7 +220,7 @@ export class Agents {
     if (route.active) await this.turnState(route, route.active, "running");
   }
 
-  private async ensureDriver(route: Runtime): Promise<void> {
+  private async ensureDriver(route: Runtime, openingTiming?: TimingSpan): Promise<void> {
     this.assertCurrent(route);
     if (route.opening) return route.opening;
     const login = this.config.agents[route.agentId];
@@ -253,6 +258,10 @@ export class Agents {
       });
       try {
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort,
+          onTiming: stage => {
+            if (!route.closed && this.chats.get(route.chatId) === route && route.driver === driver)
+              (route.turnTiming ?? openingTiming)?.mark(stage);
+          },
           nativeSessionId: this.store.metadata(route.chatId)?.nativeSessionId ?? this.store.metadata(route.chatId)?.chat?.providerBinding?.resumeId,
           ...("oauthToken" in login ? { oauthToken: login.oauthToken } : "apiKey" in login
             ? { apiKey: login.apiKey } : { proxy: { baseUrl: login.baseUrl, token: login.token } }) });
@@ -269,6 +278,7 @@ export class Agents {
   }
 
   private async prompt(client: AppClient, message: AgentPromptMessage): Promise<void> {
+    const receivedAt = performance.now();
     const route = this.route(message);
     // A new Send resumes the paused inbox only after the pending Stop has a
     // terminal receipt; it must not prolong or be interrupted by that Stop.
@@ -284,7 +294,7 @@ export class Agents {
           throw new WorkspaceError("session-expired", "Reopen the conversation with its selected agent before sending.");
       });
       this.assertCurrent(route);
-      const waiter = { client, requestId: message.id };
+      const waiter = { client, requestId: message.id, receivedAt };
       if (entry.state !== "queued" && entry.state !== "running") return this.receipt(route, entry, waiter);
       const waiters = route.waiters.get(entry.requestId) ?? [];
       if (!waiters.some((value) => value.client === client && value.requestId === message.id)) waiters.push(waiter);
@@ -300,12 +310,14 @@ export class Agents {
         const stopping = route.stopping;
         const entry = await this.store.claim(route.chatId);
         if (!entry) break;
+        route.turnTiming = agentTiming(route.agentId, route.chatId, "turn", this.onTiming, route.waiters.get(entry.requestId)?.[0]?.receivedAt);
         route.active = entry; this.activity();
         await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
         await this.turnState(route, entry, "running");
         let response: PromptResponse | undefined, error: string | undefined;
         try {
           await this.ensureDriver(route);
+          route.turnTiming.mark("driver_ready");
           if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
           else {
             if (route.pendingNative) {
@@ -323,6 +335,7 @@ export class Agents {
           await Promise.all([...route.steers.values()]);
           await this.store.finish(route.chatId, entry.requestId, response ? { ...response, userMessageId: entry.userMessageId } : undefined, error);
           const receipt = this.store.receipt(route.chatId, entry.requestId)!;
+          route.turnTiming?.mark("turn_done"); route.turnTiming = undefined;
           await this.turnState(route, entry, receipt.state === "cancelled" ? "cancelled" : receipt.state === "failed" ? "failed" : "completed", receipt.response?.stopReason);
           for (const waiter of route.waiters.get(entry.requestId) ?? []) await this.receipt(route, receipt, waiter);
           route.waiters.delete(entry.requestId); route.active = undefined; this.activity();
@@ -330,6 +343,7 @@ export class Agents {
         await route.settling; route.settling = undefined;
       }
     })().catch(async () => {
+      route.turnTiming?.mark("turn_done"); route.turnTiming = undefined;
       // A failed durable write must stop dispatch; never continue a queue that
       // cannot establish whether the provider consumed the last input.
       route.unsubscribe?.();

@@ -1,10 +1,40 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { CloudV2Compute } from "./boat.js";
 import { CLOUD_V2_WORKER_PORT } from "./contract.js";
 import { Gate0Failure } from "./gate0.js";
 import type { CloudV2WorkerSigner } from "./worker-auth.js";
 
 export type Gate0TransportWorkspace = { id: string; boatSandboxId?: string | null | undefined };
+
+const TimingSchema = z.object({
+  agent: z.enum(["codex", "claude", "cursor"]), chat: z.string().regex(/^[A-Za-z0-9_-]{1,8}$/),
+  phase: z.enum(["open", "turn"]), elapsedMs: z.number().int().nonnegative(),
+  stage: z.enum(["open_received", "turn_received", "process_ready", "driver_ready", "turn_sent", "first_provider_event", "turn_done"]),
+}).strict();
+export type Gate0Timing = z.infer<typeof TimingSchema>;
+
+/** Read only this probe's VM. Whitelist closed timing records before any
+ * output: a service journal may contain unrelated private diagnostics. */
+export function createGate0TimingReader(options: { compute: Pick<CloudV2Compute, "exec"> }): (workspace: Gate0TransportWorkspace) => Promise<Gate0Timing[]> {
+  return async workspace => {
+    try {
+      if (!workspace.boatSandboxId) throw new Error();
+      const result = await options.compute.exec(workspace.boatSandboxId,
+        "sudo -n journalctl -u zeros-worker.service -n 256 -o cat --no-pager", 10);
+      if (result.exitCode !== 0 || result.timedOut || result.stdout.length > 131072) throw new Error();
+      const records: Gate0Timing[] = [], prefix = "cloud-worker timing ";
+      for (const line of result.stdout.split("\n")) {
+        if (!line.startsWith(prefix)) continue;
+        try {
+          const parsed = TimingSchema.safeParse(JSON.parse(line.slice(prefix.length)));
+          if (parsed.success) records.push(parsed.data);
+        } catch { /* An unrelated/malformed log line is never probe output. */ }
+      }
+      return records;
+    } catch { throw new Gate0Failure("worker_timings"); }
+  };
+}
 
 /** Operator-only checks on the probe's existing VM. No create/resume calls;
  * private route tokens and signatures never enter app responses or logs. */
