@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,20 +26,31 @@ export async function stageRuntimeSource(repository, destination, files) {
   const base = await realpath(repository), hash = createHash("sha256"), copied = [];
   for (const file of runtimeSourcePaths(files)) {
     const source = join(base, file);
-    const stat = await lstat(source).catch(error => { if (error.code === "ENOENT") return null; throw error; });
-    if (!stat) continue; // A deliberately deleted tracked source in --allow-dirty mode.
-    if (!stat.isFile() || stat.isSymbolicLink() || await realpath(source) !== source)
-      throw new Error("Runtime source must be regular files without links");
-    const target = destination ? join(destination, file) : source;
-    // Git records only regular or executable. The checkout's umask must not
-    // change the source identity, or another machine never finds the runtime.
-    const mode = stat.mode & 0o111 ? 0o755 : 0o644;
+    // Check and read through one descriptor that refuses a final symlink, so
+    // the hashed bytes are exactly the file that was checked.
+    const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW).catch(error => {
+      if (error.code === "ENOENT") return null;
+      if (error.code === "ELOOP") throw new Error("Runtime source must be regular files without links");
+      throw error;
+    });
+    if (!handle) continue; // A deliberately deleted tracked source in --allow-dirty mode.
+    let bytes, mode;
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || await realpath(source) !== source)
+        throw new Error("Runtime source must be regular files without links");
+      // Git records only regular or executable. The checkout's umask must not
+      // change the source identity, or another machine never finds the runtime.
+      mode = stat.mode & 0o111 ? 0o755 : 0o644;
+      bytes = await handle.readFile();
+    } finally { await handle.close(); }
     if (destination) {
+      const target = join(destination, file);
       await mkdir(dirname(target), { recursive: true });
-      await copyFile(source, target, constants.COPYFILE_EXCL);
+      await writeFile(target, bytes, { flag: "wx", mode });
       await chmod(target, mode);
     }
-    hash.update(`${file}\0${mode}\0`).update(await readFile(target)).update("\0");
+    hash.update(`${file}\0${mode}\0`).update(bytes).update("\0");
     copied.push(file);
   }
   return { files: copied, sha256: hash.digest("hex") };

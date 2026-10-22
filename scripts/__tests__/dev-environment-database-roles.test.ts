@@ -33,7 +33,7 @@ describe("electron:cloud database roles", () => {
     const existing = admin({ existing: ["zeros_app", "zeros_dev_migrator", "zeros_dev_runtime"] });
     await ensureDevelopmentRoles(existing, workspace);
     expect(existing.statements).toContain("ALTER ROLE zeros_dev_migrator BYPASSRLS");
-    expect(existing.statements.some(sql => /^CREATE ROLE|DROP|ALTER ROLE zeros_dev_runtime|ALTER ROLE zeros_app/.test(sql))).toBe(false);
+    expect(existing.statements.some(sql => /^(?:CREATE ROLE|DROP|ALTER ROLE (?:zeros_dev_runtime|zeros_app))\b/.test(sql))).toBe(false);
   });
 
   it("refuses superuser, role or database creation, and any request role that bypasses RLS", async () => {

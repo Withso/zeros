@@ -30,16 +30,18 @@ function kill(pid: number | undefined) {
 }
 async function tree(manager: DevelopmentProcesses, exitParent = false) {
   const root = directory(), ready = path.join(root, "ready"), terminate = path.join(root, "terminate");
-  const leaf = `process.on('SIGTERM', () => require('node:fs').writeFileSync(${JSON.stringify(terminate)}, 'seen'));
+  // Paths travel as arguments, never spliced into generated code.
+  const leaf = `process.on('SIGTERM', () => require('node:fs').writeFileSync(process.argv[1], 'seen'));
     process.send('ready'); setInterval(() => {}, 1000);`;
   const child = manager.start("Desktop fixture", process.execPath, ["-e", `
-    const leaf = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(leaf)}], { stdio: ['ignore','ignore','ignore','ipc'] });
+    const [leafCode, terminate, ready, exitParent] = process.argv.slice(1);
+    const leaf = require('node:child_process').spawn(process.execPath, ['-e', leafCode, terminate], { stdio: ['ignore','ignore','ignore','ipc'] });
     leaf.once('message', () => {
-      require('node:fs').writeFileSync(${JSON.stringify(ready)}, String(leaf.pid));
-      ${exitParent ? "process.exit(0);" : ""}
+      require('node:fs').writeFileSync(ready, String(leaf.pid));
+      if (exitParent === "exit") process.exit(0);
     });
     setInterval(() => {}, 1000);
-  `], {});
+  `, leaf, terminate, ready, exitParent ? "exit" : "stay"], {});
   await vi.waitFor(() => expect(fs.existsSync(ready)).toBe(true));
   return { child, leaf: Number(fs.readFileSync(ready, "utf8")), terminate };
 }
