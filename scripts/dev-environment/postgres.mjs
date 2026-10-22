@@ -84,6 +84,31 @@ export function validateDatabaseUrl(value, workspace, port, role = "runtime") {
   return value;
 }
 
+// The schema owner bypasses RLS like hosted's (`postgres` on Alpha): SECURITY
+// DEFINER helpers such as app_user_org_ids() read FORCE-RLS tables, and a
+// non-bypassing owner re-enters their policies until the stack overflows.
+// Request roles never bypass RLS.
+const ROLE_ATTRIBUTES = { migration: "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS", runtime: "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS" };
+
+/** Creates or verifies this checkout's database roles through its admin connection. */
+export async function ensureDevelopmentRoles(admin, workspace) {
+  const roles = await admin.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1)", [["zeros_app", ROLES.migration, ROLES.runtime]]);
+  const names = new Set(roles.rows.map(row => row.rolname));
+  if (!names.has("zeros_app")) await admin.query("CREATE ROLE zeros_app NOLOGIN NOSUPERUSER NOBYPASSRLS");
+  for (const kind of ["migration", "runtime"]) {
+    if (!names.has(ROLES[kind])) {
+      const statement = await admin.query("SELECT format('CREATE ROLE %I ' || $3::text || ' PASSWORD %L', $1::text, $2::text) AS sql", [ROLES[kind], workspace.state.database[`${kind}Password`], ROLE_ATTRIBUTES[kind]]);
+      await admin.query(statement.rows[0].sql);
+    }
+  }
+  // Checkouts created before the owner needed RLS bypass upgrade in place.
+  if (names.has(ROLES.migration)) await admin.query("ALTER ROLE zeros_dev_migrator BYPASSRLS");
+  await admin.query("GRANT zeros_app TO zeros_dev_migrator WITH ADMIN OPTION");
+  await admin.query("GRANT zeros_app TO zeros_dev_runtime");
+  const unsafe = await admin.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND (rolsuper OR rolcreatedb OR rolcreaterole OR (rolbypassrls AND rolname <> $2))", [["zeros_app", ROLES.migration, ROLES.runtime], ROLES.migration]);
+  if (unsafe.rowCount) throw new Error("Dev database role authority has changed");
+}
+
 export async function startPostgres(workspace, profile, ports, repositoryRoot) {
   const { Client } = loadControlPlaneDependency("pg", repositoryRoot);
   const bin = postgresBinaries(profile);
@@ -129,19 +154,7 @@ export async function startPostgres(workspace, profile, ports, repositoryRoot) {
     try {
       const actual = await admin.query("SHOW data_directory");
       if (fs.realpathSync(actual.rows[0].data_directory) !== fs.realpathSync(data)) throw new Error("PostgreSQL ownership mismatch");
-      const roles = await admin.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1)", [["zeros_app", ROLES.migration, ROLES.runtime]]);
-      const names = new Set(roles.rows.map(row => row.rolname));
-      if (!names.has("zeros_app")) await admin.query("CREATE ROLE zeros_app NOLOGIN NOSUPERUSER NOBYPASSRLS");
-      for (const kind of ["migration", "runtime"]) {
-        if (!names.has(ROLES[kind])) {
-          const statement = await admin.query("SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD %L', $1::text, $2::text) AS sql", [ROLES[kind], workspace.state.database[`${kind}Password`]]);
-          await admin.query(statement.rows[0].sql);
-        }
-      }
-      await admin.query("GRANT zeros_app TO zeros_dev_migrator WITH ADMIN OPTION");
-      await admin.query("GRANT zeros_app TO zeros_dev_runtime");
-      const unsafe = await admin.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND (rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole)", [["zeros_app", ROLES.migration, ROLES.runtime]]);
-      if (unsafe.rowCount) throw new Error("Dev database role authority has changed");
+      await ensureDevelopmentRoles(admin, workspace);
       const db = await admin.query("SELECT datname FROM pg_database WHERE datname = $1", [workspace.state.database.name]);
       if (!db.rowCount) {
         const statement = await admin.query("SELECT format('CREATE DATABASE %I OWNER zeros_dev_migrator', $1::text) AS sql", [workspace.state.database.name]);
