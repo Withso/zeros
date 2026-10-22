@@ -3,13 +3,14 @@
 //
 //   pnpm --dir apps/control-plane cloud-v2:publish-runtime
 //
-// store comes from CLOUD_V2_RUNTIME_STORE_{ENDPOINT,BUCKET,ACCESS_KEY_ID,SECRET_ACCESS_KEY}.
+// Store comes from CLOUD_V2_RUNTIME_STORE_* or the private local profile with --local.
 import { createReadStream, copyFileSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { z } from "zod";
 import { cloudV2RuntimeKey } from "./runtime.js";
 import { inspectRuntimeArchive } from "./runtime-artifact.js";
 
@@ -20,16 +21,33 @@ const required = (name: string) => {
   return value;
 };
 
+async function runtimeStore(local: boolean) {
+  if (local) {
+    const { loadProfile } = await import(pathToFileURL(join(root, "scripts/dev-environment/profile.mjs")).href);
+    // Use the launcher's private-file checks and profile selection. An invalid
+    // local profile must not silently select an ambient hosted store instead.
+    return z.object({
+      endpoint: z.string().trim().min(1), bucket: z.string().trim().min(1),
+      accessKeyId: z.string().trim().min(1), secretAccessKey: z.string().trim().min(1),
+    }).parse(loadProfile(undefined, { root }).storage);
+  }
+  return {
+    endpoint: required("CLOUD_V2_RUNTIME_STORE_ENDPOINT"), bucket: required("CLOUD_V2_RUNTIME_STORE_BUCKET"),
+    accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY"),
+  };
+}
+
 async function main() {
-  const { values } = parseArgs({ options: { artifact: { type: "string" }, docker: { type: "boolean" }, "allow-dirty": { type: "boolean" }, help: { type: "boolean" } } });
+  const { values } = parseArgs({ options: { local: { type: "boolean" }, artifact: { type: "string" }, docker: { type: "boolean" }, "allow-dirty": { type: "boolean" }, help: { type: "boolean" } } });
   if (values.help) {
-    console.log("cloud-v2:publish-runtime [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. Uses CLOUD_V2_RUNTIME_STORE_*; the SHA pin and immutable runtime key are unchanged.");
+    console.log("cloud-v2:publish-runtime [--local] [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. --local reads the cloud:local profile's storage section; otherwise uses CLOUD_V2_RUNTIME_STORE_*. The SHA pin and immutable runtime key are unchanged.");
     return;
   }
   if (values.artifact && (values.docker || values["allow-dirty"])) throw new Error("Choose either an existing artifact or build options");
-  const store = { region: "auto", endpoint: required("CLOUD_V2_RUNTIME_STORE_ENDPOINT"), forcePathStyle: true,
-    credentials: { accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY") } };
-  const bucket = required("CLOUD_V2_RUNTIME_STORE_BUCKET");
+  const storage = await runtimeStore(values.local === true);
+  const store = { region: "auto", endpoint: storage.endpoint, forcePathStyle: true,
+    credentials: { accessKeyId: storage.accessKeyId, secretAccessKey: storage.secretAccessKey } };
+  const bucket = storage.bucket;
   const work = mkdtempSync(join(tmpdir(), "zeros-runtime-"));
   let client: S3Client | undefined;
   try {
@@ -60,5 +78,5 @@ async function main() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(() => { console.error("Runtime publication failed; check the Linux archive/build and CLOUD_V2_RUNTIME_STORE_* configuration. No new pin was emitted."); process.exitCode = 1; });
+  main().catch(() => { console.error("Runtime publication failed; check the Linux archive/build and runtime storage configuration (the private profile with --local, otherwise CLOUD_V2_RUNTIME_STORE_*). No new pin was emitted."); process.exitCode = 1; });
 }
