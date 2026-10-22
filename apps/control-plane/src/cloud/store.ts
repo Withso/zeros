@@ -10,6 +10,11 @@ export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
 
 export type CloudV2InstalledRepository = { repository: string; defaultBranch: string | null };
+type CreateWorkspace = {
+  id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
+  baseBranch: string; computerBuildId: string | null;
+};
+type CreateReceipt = { status: 201; response: Record<string, unknown> };
 
 export type CloudV2Workspace = {
   id: string;
@@ -85,25 +90,50 @@ async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promi
 export class CloudV2Store {
   constructor(private readonly pool: pg.Pool) {}
 
-  async createWorkspace(input: {
-    id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
-    baseBranch: string; computerBuildId: string | null;
-  }): Promise<CloudV2Workspace> {
-    const row = await withSystemTx(this.pool, async tx => {
-      const member = await tx.query(
-        `SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
-         WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed`,
-        [input.organizationId, input.creatorUserId],
-      );
-      if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
-      return (await tx.query<Row>(
-        `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
-        [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
-          input.baseBranch, input.computerBuildId],
-      )).rows[0]!;
-    });
+  async createWorkspace(input: CreateWorkspace): Promise<CloudV2Workspace> {
+    return withSystemTx(this.pool, tx => this.insertWorkspace(tx, input));
+  }
+
+  private async insertWorkspace(tx: Tx, input: CreateWorkspace): Promise<CloudV2Workspace> {
+    const member = await tx.query(
+      `SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
+       WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed FOR SHARE OF o,m`,
+      [input.organizationId, input.creatorUserId],
+    );
+    if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
+    const row = (await tx.query<Row>(
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
+      [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
+        input.baseBranch, input.computerBuildId],
+    )).rows[0]!;
     return workspace(row);
+  }
+
+  private async createReceipt(tx: Tx, creator: string, key: string, hash: string): Promise<CreateReceipt | null> {
+    const { rows } = await tx.query<CreateReceipt & { request_hash: string }>(
+      "SELECT request_hash,status,response FROM cloud_v2_create_requests WHERE creator_user_id=$1 AND request_key=$2", [creator, key]);
+    if (!rows[0]) return null;
+    if (rows[0].request_hash !== hash) throw new HttpError(409, "idempotency_conflict", "This creation key was already used with different content");
+    return { status: rows[0].status, response: rows[0].response };
+  }
+
+  readCreateReceipt(creator: string, key: string, hash: string): Promise<CreateReceipt | null> {
+    return withSystemTx(this.pool, tx => this.createReceipt(tx, creator, key, hash));
+  }
+
+  createWorkspaceOnce(input: CreateWorkspace, key: string, hash: string,
+    response: (workspace: CloudV2Workspace) => Record<string, unknown>): Promise<CreateReceipt> {
+    return withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-v2-create:${input.creatorUserId}:${key}`]);
+      const previous = await this.createReceipt(tx, input.creatorUserId, key, hash);
+      if (previous) return previous;
+      const workspace = await this.insertWorkspace(tx, input);
+      const receipt = { status: 201 as const, response: response(workspace) };
+      await tx.query(`INSERT INTO cloud_v2_create_requests(creator_user_id,request_key,request_hash,workspace_id,status,response)
+        VALUES($1,$2,$3,$4,$5,$6)`, [input.creatorUserId, key, hash, workspace.id, receipt.status, JSON.stringify(receipt.response)]);
+      return receipt;
+    });
   }
 
   async get(id: string, userId: string): Promise<CloudV2Workspace> {

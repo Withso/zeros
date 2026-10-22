@@ -1,6 +1,6 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Workspaces are creator-only.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -27,7 +27,7 @@ const CreateSchema = z.object({
 }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "createWorkspace" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "windowMessages">;
+  store: Pick<CloudV2Store, "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "windowMessages">;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
@@ -55,6 +55,13 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud workspace request");
     const input = parsed.data;
     await deps.computers.requireMember(input.organizationId, c.get("user").id);
+    const key = c.req.header("Idempotency-Key");
+    if (key !== undefined && !/^[\x21-\x7e]{1,200}$/.test(key)) throw new HttpError(400, "invalid_request", "Invalid creation key");
+    const hash = createHash("sha256").update(JSON.stringify({ ...input, repository: input.repository.toLowerCase() })).digest("hex");
+    if (key) {
+      const previous = await deps.store.readCreateReceipt(c.get("user").id, key, hash);
+      if (previous) return c.json(previous.response, previous.status);
+    }
     const installed = await deps.installedRepositories(input.organizationId);
     if (!installed) throw new HttpError(409, "cloud_computer_build_required", "Build this organization's Cloud Computer first");
     const repository = installed.find(repo => repo.repository.toLowerCase() === input.repository.toLowerCase());
@@ -62,11 +69,16 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       throw new HttpError(409, "repository_not_installed", "Add this repository to the Cloud Computer first");
     const id = randomUUID();
     const name = input.name ?? input.repository.split("/")[1]!;
-    const workspace = await deps.store.createWorkspace({
+    const create = {
       id, organizationId: input.organizationId, creatorUserId: c.get("user").id, name,
       repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
       baseBranch: input.baseBranch ?? repository.defaultBranch ?? "main", computerBuildId: null,
-    });
+    };
+    if (key) {
+      const receipt = await deps.store.createWorkspaceOnce(create, key, hash, workspace => ({ workspace: document(workspace) }));
+      return c.json(receipt.response, receipt.status);
+    }
+    const workspace = await deps.store.createWorkspace(create);
     return c.json({ workspace: document(workspace) }, 201);
   });
 
