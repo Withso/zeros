@@ -26,6 +26,12 @@ export function libpqEnvironment(value) {
     PGPASSWORD: decodeURIComponent(url.password), PGDATABASE: decodeURIComponent(url.pathname.slice(1)) };
 }
 
+/** The backup must be complete. Tables with forced row-level security hide
+ * their rows from the migration role, so dump as this local cluster's admin. */
+export function backupEnvironment(workspace, port) {
+  return libpqEnvironment(databaseUrl(workspace, port, "admin"));
+}
+
 export async function migratePostgres(workspace, profile, ports, repositoryRoot) {
   const plan = await databaseCommand(workspace, ports, repositoryRoot, "plan");
   if (plan.pendingMigrations.length) {
@@ -33,7 +39,7 @@ export async function migratePostgres(workspace, profile, ports, repositoryRoot)
     const file = path.join(directory, `before-migrate-${Date.now()}.dump`);
     // Libpq reads the connection from this child's environment, never argv.
     await run(path.join(postgresBinaries(profile), "pg_dump"), ["--format=custom", "--file", file], {
-      env: { ...systemEnvironment(), ...libpqEnvironment(databaseUrl(workspace, ports.database, "migration")) }, label: "Pre-migration backup",
+      env: { ...systemEnvironment(), ...backupEnvironment(workspace, ports.database) }, label: "Pre-migration backup",
     });
     fs.chmodSync(file, 0o600);
     await databaseCommand(workspace, ports, repositoryRoot, "migrate");
