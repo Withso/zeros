@@ -40,6 +40,7 @@ import { syntheticCodexCache } from "./agent-credentials/codex-auth-test-fixture
 import { parseCodexNativeCache, sealCodexNativeCache, CODEX_AUTH_RUNTIME_VERSION } from "./agent-credentials/codex-auth-cache.js";
 import { rememberCodexRefreshSeed } from "./agent-credentials/codex-auth-renewal.js";
 import { seedCredentialOwner } from "./agent-credentials/test-fixtures.js";
+import { migrationPhase } from "./migration-phase.js";
 import {
   migrationChecksum,
   renamedMigrationAliasesFor,
@@ -205,7 +206,10 @@ d("migration ladder", { timeout: 30_000 }, () => {
    *  including recording them — so a later runMigrations() picks up cleanly
    *  from that point instead of re-running what's already there. This is how
    *  we reconstruct "a database at yesterday's revision". */
-  const applyThrough = async (count: number) => {
+  const applyThrough = async (
+    count: number,
+    beforeCommit?: (client: pg.PoolClient, file: string) => Promise<void>,
+  ) => {
     const client = await pool.connect();
     try {
       await client.query(`
@@ -223,6 +227,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             [file],
           );
+          await beforeCommit?.(client, file);
           await client.query("COMMIT");
         } catch (error) {
           await client.query("ROLLBACK");
@@ -1206,6 +1211,41 @@ d("migration ladder", { timeout: 30_000 }, () => {
     });
     const recorded = await ledger();
     for (const file of LADDER) expect(recorded).toContain(file);
+  });
+
+  it("keeps every contract migration below the shared lock budget", async () => {
+    const measured: string[] = [];
+    await applyThrough(LADDER.length, async (client, file) => {
+      if (migrationPhase(file, migrationSource(file)).phase !== "contract") return;
+      // Locks accumulate until COMMIT, including dependencies of CASCADE.
+      // Small hosted clusters share this table with every other connection.
+      const { rows } = await client.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM pg_locks WHERE pid = pg_backend_pid()",
+      );
+      expect(rows[0]!.count, `${file} holds ${rows[0]!.count} locks before commit`).toBeLessThanOrEqual(1_500);
+      measured.push(file);
+    });
+    expect(measured).toContain("0182_retire_legacy_cloud.sql");
+  });
+
+  it("requires the remaining retirement approvals before committing its first batch", async () => {
+    const beforeRetirement = LADDER.indexOf("0182_retire_legacy_cloud.sql");
+    await applyThrough(beforeRetirement);
+    await expect(runMigrations(pool, { env: {
+      NODE_ENV: "production",
+      CONTROL_PLANE_MIGRATION_APPROVALS: "0182_retire_legacy_cloud.sql",
+    } })).rejects.toThrow(/0191_retire_legacy_cloud_02.sql.*not approved/);
+    expect(await ledger()).toEqual(LADDER.slice(0, beforeRetirement));
+  });
+
+  it("refuses automatic boot during a partially completed retirement", async () => {
+    const nextBatch = LADDER.indexOf("0191_retire_legacy_cloud_02.sql");
+    await applyThrough(nextBatch);
+    await expect(runServiceBootMigrations(pool, {
+      cloudWorkspacesEnabled: false,
+      env: { NODE_ENV: "production", CONTROL_PLANE_MIGRATION_APPROVALS: LADDER.slice(nextBatch).join(",") },
+    })).rejects.toThrow(/0191_retire_legacy_cloud_02.sql.*not approved for automatic service boot/);
+    expect(await ledger()).toEqual(LADDER.slice(0, nextBatch));
   });
 
   it("retires the old cloud graph while preserving the vault, Codex seeds, GitHub and v2 history", async () => {
