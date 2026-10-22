@@ -64,9 +64,11 @@ export function useGithubReview({
   confirmedBaseSha?: string;
   renamedPaths?: ReadonlyMap<string, string>;
 }) {
-  const key =
-    workspaceId && prNumber ? githubReviewKey(workspaceId, prNumber) : null;
-  const local = !!cwd && !isCloudWorkspace(cwd) && !isCloudWorkspace(workspaceId) && !parseCloudScopedId(workspaceId);
+  const cloud = isCloudWorkspace(cwd) || isCloudWorkspace(workspaceId) || !!parseCloudScopedId(workspaceId);
+  // Cloud v2 can report a PR summary but does not serve inline review. A null
+  // key also hides any stale unsupported response cached by an older renderer.
+  const key = !cloud && workspaceId && prNumber ? githubReviewKey(workspaceId, prNumber) : null;
+  const local = !!cwd && !cloud;
   const foreground = useDocumentActive(local && active, true);
   const observing = local ? foreground : active;
   const [documentVisible, setDocumentVisible] = useState(visible);

@@ -60,6 +60,7 @@ import {
 } from "../../features/agent/agents-cache";
 import { useWorkspaceAgents, hasConfirmedWorkspaceAgents } from "../../features/agent/workspace-agent-registry";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { hasUntitledChatName } from "../../features/agent/pristine-chat";
 import { useEnabledAgents } from "../../features/agent/enabled-agents";
 import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
@@ -556,7 +557,7 @@ function ChatBody({
         bind: bindRef.current.bind,
         hasTranscript: existing?.hasTranscript ?? false,
         messageCount: existing?.messages.length ?? 0,
-        chatTitle: chat?.title,
+        chatTitle: chat && hasUntitledChatName(chat) ? "Untitled" : chat?.title,
         pendingAutoSend,
         composerHasText,
       });
