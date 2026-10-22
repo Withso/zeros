@@ -68,6 +68,8 @@ it("bootstraps through the authenticated API and closes only its own temporary s
     ...f.options, agentEnv: { ...f.options.agentEnv, ZEROS_DEV_PASSWORD: "test-password" },
   })).rejects.toThrow(/database unavailable/);
   expect(f.signIn).toHaveBeenCalledOnce();
+  // A member of several WorkOS organizations finishes sign-in inside the fixture's.
+  expect(f.signIn).toHaveBeenCalledWith(expect.objectContaining({ subject: "user_localfixture", organizationId: "org_localfixture" }), f.request);
   expect(f.request.mock.calls.map(([url]) => url)).toContain("http://127.0.0.1:23456/v1/me");
   expect(f.session.close).toHaveBeenCalledOnce();
 });

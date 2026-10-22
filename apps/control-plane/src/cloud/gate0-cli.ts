@@ -56,7 +56,8 @@ const CommonProfile = z.object({
   cloudflare: z.object({ domain: z.string().regex(/^[a-z0-9.-]+$/) }),
   workos: z.object({ environment: z.enum(["alpha", "dev"]), webClientId: z.string().regex(/^client_[A-Za-z0-9_-]+$/), apiKey: z.string().min(16) }),
   boat: z.object({ apiKey: z.string().min(16), billingOrg: z.string().optional() }),
-  fixture: z.object({ workosUserId: z.string(), expectedEmail: z.string().email(), expectedOrganizationSlug: z.string() }).optional(),
+  fixture: z.object({ workosUserId: z.string(), expectedEmail: z.string().email(), expectedOrganizationSlug: z.string(),
+    workosOrganizationId: z.string().optional() }).optional(),
 });
 const Profile = CommonProfile.extend({
   version: z.literal(2), mode: z.literal("hosted"),
@@ -69,25 +70,41 @@ const LocalState = z.object({
   launcher: z.object({ runId: z.string().uuid() }),
 });
 
+const OrganizationSelection = z.object({ code: z.literal("organization_selection_required"), pending_authentication_token: z.string().min(16),
+  user: z.object({ id: z.string(), email: z.string() }), organizations: z.array(z.object({ id: z.string() })) });
+
 /** A separate test login. Never reads, rotates or writes the shared saved
- * zeros-dev session; only this probe's newly issued session is revoked. */
-export async function gate0SignIn(input: { clientId: string; apiKey: string; email: string; password: string; subject: string }, fetchImpl: typeof fetch = fetch) {
+ * zeros-dev session; only this probe's newly issued session is revoked. A
+ * member of several WorkOS organizations finishes inside `organizationId`. */
+export async function gate0SignIn(input: { clientId: string; apiKey: string; email: string; password: string; subject: string; organizationId?: string },
+  fetchImpl: typeof fetch = fetch) {
   const origin = "https://api.workos.com/user_management";
   let accessToken = "", refreshToken = "", sessionId = "", expiresAt = 0;
   const request = async (path: string, body: unknown, revoke = false) => {
     try {
       const response = await fetchImpl(`${origin}/${path}`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
         headers: { "content-type": "application/json", ...(revoke ? { authorization: `Bearer ${input.apiKey}` } : {}) }, body: JSON.stringify(body) });
+      // WorkOS asks a member of several organizations to choose one; that reply issues no session.
+      if (!revoke && response.status === 403) return OrganizationSelection.parse(await response.json());
       if (!response.ok) { await response.body?.cancel(); throw new Error(); }
       if (revoke) { await response.body?.cancel(); return undefined; }
       return await response.json();
     } catch { throw new Gate0Failure(revoke ? "sign_out" : "sign_in"); }
   };
   const authenticate = async (grant: Record<string, string>) => {
-    const reply = await request("authenticate", { client_id: input.clientId, client_secret: input.apiKey, ...grant });
+    let reply: unknown = await request("authenticate", { client_id: input.clientId, client_secret: input.apiKey, ...grant });
+    const selection = grant.grant_type === "password" ? OrganizationSelection.safeParse(reply) : undefined;
+    if (selection?.success) {
+      const pending = selection.data;
+      if (pending.user.id !== input.subject || pending.user.email.toLowerCase() !== input.email.toLowerCase()) throw new Gate0Failure("sign_in_identity");
+      if (!input.organizationId || !pending.organizations.some(org => org.id === input.organizationId)) throw new Gate0Failure("sign_in_organization");
+      reply = await request("authenticate", { client_id: input.clientId, client_secret: input.apiKey,
+        grant_type: "urn:workos:oauth:grant-type:organization-selection",
+        pending_authentication_token: pending.pending_authentication_token, organization_id: input.organizationId });
+    }
     const parsed = z.object({ access_token: z.string().min(16), refresh_token: z.string().min(16),
       user: z.object({ id: z.string(), email: z.string(), email_verified: z.literal(true) }),
-      authentication_method: z.string().optional() }).safeParse(reply);
+      authentication_method: z.string().optional(), organization_id: z.string().optional() }).safeParse(reply);
     if (!parsed.success) throw new Gate0Failure("sign_in");
     const value = parsed.data;
     let claims;
@@ -97,6 +114,7 @@ export async function gate0SignIn(input: { clientId: string; apiKey: string; ema
     sessionId = claims.sid;
     if (value.user.id !== input.subject || value.user.email.toLowerCase() !== input.email.toLowerCase() ||
         (grant.grant_type === "password" && value.authentication_method !== "Password") ||
+        (selection?.success && value.organization_id !== input.organizationId) ||
         typeof claims.exp !== "number" || claims.exp * 1000 <= Date.now()) throw new Gate0Failure("sign_in_identity");
     accessToken = value.access_token; refreshToken = value.refresh_token; expiresAt = claims.exp * 1000;
   };
@@ -177,7 +195,8 @@ async function main() {
       ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }));
     transportProbe = createGate0TransportProbe({ compute, signer });
   } catch { throw new Gate0Failure("transport_configuration"); }
-  const session = await gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey, email, subject, password: env.ZEROS_DEV_PASSWORD });
+  const session = await gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey, email, subject, password: env.ZEROS_DEV_PASSWORD,
+    ...(profile.fixture?.workosOrganizationId ? { organizationId: profile.fixture.workosOrganizationId } : {}) });
   try {
     const meResponse = await fetch(`${target.origin}/v1/me`, { redirect: "error", signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${await session.accessToken()}` } });
     if (!meResponse.ok) { await meResponse.body?.cancel(); throw new Gate0Failure("dev_sign_in"); }

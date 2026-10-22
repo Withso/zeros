@@ -37,7 +37,8 @@ export async function seedLocalEnvironment(workspace, profile, ports, repository
   try {
     if (env.ZEROS_DEV_PASSWORD) {
       session = await gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey,
-        email: fixture.expectedEmail, subject: fixture.workosUserId, password: env.ZEROS_DEV_PASSWORD }, request);
+        email: fixture.expectedEmail, subject: fixture.workosUserId, organizationId: fixture.workosOrganizationId,
+        password: env.ZEROS_DEV_PASSWORD }, request);
       // Normal authenticated bootstrap creates the local user and verified
       // WorkOS identity. The fixture never fabricates those rows.
       await json(`${origin}/v1/me`, { authorization: `Bearer ${await session.accessToken()}` });

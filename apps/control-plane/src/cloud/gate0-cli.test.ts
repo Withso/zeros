@@ -73,4 +73,35 @@ describe("gate0 Dev identity and sign-in", () => {
     await expect(gate0SignIn(input, failed)).rejects.toThrow(/^Cloud v2 gate0 failed: sign_in$/);
     expect(failed).toHaveBeenCalledTimes(1);
   });
+
+  const pending = "synthetic-pending-authentication-token";
+  const selection = (user = { id: input.subject, email: input.email }) => Response.json({ code: "organization_selection_required",
+    message: "The user must choose an organization.", pending_authentication_token: pending, user,
+    organizations: [{ id: "org_other", name: "Other" }, { id: "org_fixture", name: "Fixture" }] }, { status: 403 });
+
+  it("finishes a multi-organization password login inside the fixture's organization only", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(selection())
+      .mockResolvedValueOnce(Response.json({ ...grant(), organization_id: "org_fixture" })).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const session = await gate0SignIn({ ...input, organizationId: "org_fixture" }, fetchImpl);
+    await session.close();
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]![1]!.body))).toEqual({ client_id: input.clientId, client_secret: input.apiKey,
+      grant_type: "urn:workos:oauth:grant-type:organization-selection", pending_authentication_token: pending, organization_id: "org_fixture" });
+    expect(JSON.parse(String(fetchImpl.mock.calls[2]![1]!.body))).toEqual({ session_id: "session_fixture" });
+  });
+
+  it("never picks an organization for an unconfigured, unlisted or different login", async () => {
+    for (const [organizationId, user, reason] of [[undefined, undefined, "sign_in_organization"], ["org_unlisted", undefined, "sign_in_organization"],
+      ["org_fixture", { id: "user_wrong", email: input.email }, "sign_in_identity"]] as const) {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(selection(user));
+      const failure = await gate0SignIn({ ...input, ...(organizationId ? { organizationId } : {}) }, fetchImpl).catch((error: Error) => error);
+      expect(String(failure)).toContain(reason);
+      expect(String(failure)).not.toMatch(new RegExp(`${pending}|${input.password}`));
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    }
+    // A selected session must belong to the requested organization.
+    const switched = vi.fn<typeof fetch>().mockResolvedValueOnce(selection())
+      .mockResolvedValueOnce(Response.json({ ...grant(), organization_id: "org_other" })).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await expect(gate0SignIn({ ...input, organizationId: "org_fixture" }, switched)).rejects.toThrow("sign_in_identity");
+    expect(String(switched.mock.calls[2]![0])).toContain("sessions/revoke");
+  });
 });
