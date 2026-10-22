@@ -2,8 +2,10 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import { EventEmitter } from "node:events";
+import { AsyncResource } from "node:async_hooks";
 import type pg from "pg";
 import { PostgresSecurityEventBroker } from "../security-events.js";
+import { assertWorkOSProviderLockHeld, withHeldWorkOSProviderLock, WorkOSProviderLockLostError } from "../workos-provider-lock-context.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOUD_V2_BRIDGE_PROTOCOL, CloudV2Relay, type CloudV2RelayDeps } from "./relay.js";
 import type { CloudV2Workspace } from "./store.js";
@@ -44,12 +46,14 @@ describe("cloud v2 relay", () => {
   let authorized: boolean;
   let loginRevision: string;
   let ticketWake: boolean;
+  let ticketSession: string;
+  const revokedSessions = new Set<string>();
   let broker: PostgresSecurityEventBroker;
   let notification: EventEmitter;
   const sockets: WebSocket[] = [];
 
   beforeEach(async () => {
-    state = "running"; accessEpoch = "0"; ticketWake = true;
+    state = "running"; accessEpoch = "0"; ticketWake = true; ticketSession = "session-a"; revokedSessions.clear();
     workerServer = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2.worker" });
     await new Promise<void>(resolve => workerServer.once("listening", resolve));
     workerUrl = `http://127.0.0.1:${(workerServer.address() as AddressInfo).port}`;
@@ -65,9 +69,10 @@ describe("cloud v2 relay", () => {
     broker = new PostgresSecurityEventBroker({ connect: async () => notification } as unknown as pg.Pool);
     deps = {
       store: {
-        consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId, accessEpoch, wake: ticketWake } : null),
+        consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId, accessEpoch, wake: ticketWake, sessionId: ticketSession } : null),
         get: vi.fn(async () => workspace(state)),
         accessEpoch: vi.fn(async () => authorized ? accessEpoch : null),
+        appAccessSnapshot: vi.fn(async (_id, sessions) => authorized ? { accessEpoch, activeSessionIds: sessions.filter(id => !revokedSessions.has(id)) } : null),
         loginRevision: vi.fn(async () => loginRevision),
       },
       securityEvents: broker,
@@ -160,7 +165,7 @@ describe("cloud v2 relay", () => {
     await vi.waitFor(() => expect(w.readyState).toBe(WebSocket.CLOSED));
   });
 
-  it.each(["membership", "session", "account"])("revokes connected rooms on %s security notifications, without a client request", async () => {
+  it.each(["membership", "account"])("revokes connected rooms on %s security notifications, without a client request", async () => {
     const w = await worker();
     const openFrame = nextMessage(w);
     const a = await app(); await openFrame;
@@ -168,6 +173,43 @@ describe("cloud v2 relay", () => {
     notification.emit("notification", { channel: "zeros_security_event" });
     await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
     await vi.waitFor(() => expect(w.readyState).toBe(WebSocket.CLOSED));
+  });
+
+  it("removes a signed-out client's queued work while allowing another session to wake and drain", async () => {
+    state = "starting";
+    const a = await app();
+    a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "revoked-prompt" }));
+    await vi.waitFor(() => expect(deps.answerOffline).toHaveBeenCalledOnce());
+    ticketSession = "session-b";
+    const b = await app();
+    b.send(JSON.stringify({ type: "AGENT_PROMPT", id: "kept-prompt" }));
+    await vi.waitFor(() => expect(deps.answerOffline).toHaveBeenCalledTimes(2));
+    revokedSessions.add("session-a");
+    notification.emit("notification", { channel: "zeros_security_event" });
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    const frames: any[] = [];
+    workerServer.once("connection", socket => socket.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    state = "running";
+    await vi.waitFor(() => expect(frames.some(frame => frame.frame?.id === "kept-prompt")).toBe(true));
+    expect(frames.filter(frame => frame.t === "open")).toHaveLength(1);
+    expect(frames.some(frame => frame.frame?.id === "revoked-prompt")).toBe(false);
+  });
+
+  it("revalidates the sender's session when a notification is lost", async () => {
+    const w = await worker(), opens: any[] = [];
+    w.on("message", raw => opens.push(JSON.parse(String(raw))));
+    const a = await app();
+    await vi.waitFor(() => expect(opens.some(frame => frame.t === "open")).toBe(true));
+    ticketSession = "session-b";
+    const b = await app();
+    await vi.waitFor(() => expect(opens.filter(frame => frame.t === "open")).toHaveLength(2));
+    revokedSessions.add("session-a");
+    a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "after-signout" }));
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    expect(w.readyState).toBe(WebSocket.OPEN);
+    expect(opens.some(frame => frame.frame?.id === "after-signout")).toBe(false);
   });
 
   it("fences a queued frame when authority is revoked during an offline read", async () => {
@@ -182,6 +224,111 @@ describe("cloud v2 relay", () => {
     release();
     await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
     expect(deps.wake).not.toHaveBeenCalled();
+  });
+
+  it("revalidates in relay scope when the notification socket inherited a released WorkOS lock", async () => {
+    const w = await worker(), a = sockets[0]!;
+    const open = nextMessage(w);
+    ticketSession = "session-b";
+    const b = await app(); await open;
+    const original = vi.mocked(deps.store.appAccessSnapshot).getMockImplementation()!;
+    vi.mocked(deps.store.appAccessSnapshot).mockImplementation(async (id, sessions) => {
+      assertWorkOSProviderLockHeld();
+      return original(id, sessions);
+    });
+    const lock = new AbortController();
+    const socket = await withHeldWorkOSProviderLock(lock.signal, async () => new AsyncResource("fixture-pg-notification"));
+    lock.abort(new WorkOSProviderLockLostError());
+    revokedSessions.add("session-a");
+    try { socket.runInAsyncScope(() => notification.emit("notification", { channel: "zeros_security_event" })); }
+    finally { socket.emitDestroy(); }
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    expect(w.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("does not let a signed-out pending admission disturb a sibling's running worker", async () => {
+    state = "starting";
+    const starting = workspace(state);
+    let release!: () => void;
+    vi.mocked(deps.store.get).mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(starting); }));
+    const pending = app();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    state = "running"; ticketSession = "session-b";
+    const b = await app();
+    await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+    const w = connectedWorkers[0]!;
+    revokedSessions.add("session-a");
+    notification.emit("notification", { channel: "zeros_security_event" });
+    release();
+    const a = await pending;
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    expect(w.readyState).toBe(WebSocket.OPEN);
+    expect(connectedWorkers).toHaveLength(1);
+  });
+
+  it("does not apply an older session snapshot to a newly admitted sibling", async () => {
+    const w = await worker();
+    const frames: any[] = [];
+    w.on("message", raw => frames.push(JSON.parse(String(raw))));
+    const a = await app();
+    await vi.waitFor(() => expect(frames.some(frame => frame.t === "open")).toBe(true));
+    let release!: () => void;
+    const original = vi.mocked(deps.store.appAccessSnapshot).getMockImplementation()!;
+    vi.spyOn(deps.store, "appAccessSnapshot").mockImplementationOnce(async (id, sessions) => {
+      const captured = await original(id, sessions);
+      await new Promise<void>(resolve => { release = resolve; });
+      return captured;
+    });
+    a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "held-proof" }));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    ticketSession = "session-b";
+    const b = await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "open")).toHaveLength(2));
+    release();
+    await vi.waitFor(() => expect(frames.some(frame => frame.frame?.id === "held-proof")).toBe(true));
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    expect(w.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("rechecks a delayed admission proof when sign-out commits during the read", async () => {
+    let release!: () => void;
+    const original = vi.mocked(deps.store.appAccessSnapshot).getMockImplementation()!;
+    vi.mocked(deps.store.appAccessSnapshot).mockImplementationOnce(async (id, sessions) => {
+      const captured = await original(id, sessions);
+      await new Promise<void>(resolve => { release = resolve; });
+      return captured;
+    });
+    const a = await app();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    ticketSession = "session-b";
+    const b = await app();
+    await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+    revokedSessions.add("session-a");
+    notification.emit("notification", { channel: "zeros_security_event" });
+    release();
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    expect(connectedWorkers[0]!.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("drops work held in an offline read when only its session signs out", async () => {
+    state = "stopped"; ticketWake = false;
+    let release!: () => void;
+    vi.mocked(deps.answerOffline).mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(null); }));
+    const a = await app();
+    ticketSession = "session-b";
+    const b = await app();
+    a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "held-after-signout" }));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    revokedSessions.add("session-a");
+    notification.emit("notification", { channel: "zeros_security_event" });
+    release();
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    expect(deps.wake).not.toHaveBeenCalled();
+    expect(connectedWorkers).toHaveLength(0);
   });
 
   it("fences an app upgrade that was awaiting its workspace when revocation committed", async () => {

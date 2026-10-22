@@ -139,7 +139,7 @@ d("cloud v2 store", () => {
     const other = await create();
     const { token } = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator, ttlMs: 60_000 });
     expect(await store.consumeConnectTicket(token, other.id)).toBeNull();
-    expect(await store.consumeConnectTicket(token, workspace.id)).toEqual({ userId: creator, accessEpoch: "0", wake: true });
+    expect(await store.consumeConnectTicket(token, workspace.id)).toEqual({ userId: creator, accessEpoch: "0", wake: true, sessionId: null });
     expect(await store.consumeConnectTicket(token, workspace.id)).toBeNull();
     const expired = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator, ttlMs: -1 });
     expect(await store.consumeConnectTicket(expired.token, workspace.id)).toBeNull();
@@ -177,7 +177,7 @@ d("cloud v2 store", () => {
     else expect(after).toMatchObject({ state: "starting", archivedAt: null });
     const { protocols } = await response.json();
     const token = protocols[1].slice("ticket.".length);
-    expect(await store.consumeConnectTicket(token, created.id)).toEqual({ userId: creator, accessEpoch: "0", wake: wake !== false });
+    expect(await store.consumeConnectTicket(token, created.id)).toEqual({ userId: creator, accessEpoch: "0", wake: wake !== false, sessionId: null });
     expect(await store.consumeConnectTicket(token, created.id)).toBeNull();
   });
 
@@ -203,7 +203,7 @@ d("cloud v2 store", () => {
     expect((await store.get(w.id, creator)).state).toBe("stopping");
   });
 
-  it("limits a device sign-out to app admission while keeping the running worker and proxy", async () => {
+  it("never treats a session event without a sid as account-wide sign-out", async () => {
     const w = await create();
     await store.transition(w.id, ["creating"], "running");
     const worker = await store.rotateWorkerToken(w.id);
@@ -213,8 +213,8 @@ d("cloud v2 store", () => {
     await pool.query("INSERT INTO security_events (kind, user_id) VALUES ('session.revoked', $1)", [creator]);
     expect(await store.byWorkerToken(worker)).toMatchObject({ id: w.id, state: "running" });
     expect(await store.verifyProxyToken(proxy.token)).toMatchObject({ id: w.id });
-    expect(await store.accessEpoch(w.id)).toBe(String(BigInt(epoch!) + 1n));
-    expect(await store.consumeConnectTicket(ticket.token, w.id)).toBeNull();
+    expect(await store.accessEpoch(w.id)).toBe(epoch);
+    expect(await store.consumeConnectTicket(ticket.token, w.id)).toMatchObject({ userId: creator, sessionId: null });
   });
 
   it("refuses existing worker and proxy credentials when membership disappears without a notification", async () => {

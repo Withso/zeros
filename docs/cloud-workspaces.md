@@ -41,6 +41,13 @@ role needs no app affinity. Multiple app connections can attach, and losing
 one does not stop a turn. The control plane never dials a stopped workspace;
 Boat's route hangs rather than refusing while the VM sleeps.
 
+App tickets and open clients retain the creator's verified WorkOS session ID.
+Signing out closes only that session's clients and expires its unused tickets;
+other devices, running turns and worker credentials remain live. Admission,
+app requests and security notifications recheck that session in the database,
+with the relay heartbeat repairing missed notifications. Account, organization
+and workspace authorization loss still revoke the whole workspace room.
+
 The worker keeps outbound HTTPS to the control plane under
 `/v2/cloud/worker/*` for work that continues without an attached app: `hello`
 and configuration, the history mirror, activity reports and GitHub

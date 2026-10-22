@@ -79,6 +79,96 @@ d("cloud access through membership routes and security publication", () => {
     return { app, worker, token, proxy: proxy.token };
   }
 
+  async function anotherSession() {
+    const sessionId = `session_${randomUUID()}`;
+    await pool.query(`INSERT INTO auth_sessions (provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at)
+      VALUES ($1,$2,$3,'desktop',now()+interval '1 hour')`, [sessionId, creator.identity.subject, creator.id]);
+    return { ...creator, authentication: { ...creator.authentication, sessionId } };
+  }
+
+  const ticketFor = (authority: AuthedUser) => store.issueToken({ workspaceId: workspace.id,
+    kind: "connect", userId: authority.id, ttlMs: 60_000, authority });
+  async function attach(authority: AuthedUser) {
+    const ticket = await ticketFor(authority);
+    const app = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/v2/cloud/workspaces/${workspace.id}/bridge`,
+      [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`]);
+    sockets.push(app); await new Promise<void>((resolve, reject) => { app.once("open", resolve); app.once("error", reject); });
+    return app;
+  }
+  async function signOut(authority: AuthedUser) {
+    const now = new Date().toISOString();
+    expect(await ingestWorkOSManagementEvent(pool, { id: `event_${randomUUID()}`, createdAt: now, event: "session.revoked",
+      data: { id: authority.authentication.sessionId, userId: authority.identity.subject, status: "revoked",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(), updatedAt: now } }, "webhook")).toEqual({ status: "applied" });
+  }
+
+  it("revokes only one of two already-open sessions for the same creator", async () => {
+    const live = await connected(), other = await anotherSession(), sibling = await attach(other);
+    const frames = workerFrames.get(live.worker)!;
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "open")).toHaveLength(2));
+    const siblingId = frames.filter(frame => frame.t === "open")[1].clientId;
+    const epoch = await store.accessEpoch(workspace.id);
+    const revokedTicket = await ticketFor(creator), keptTicket = await ticketFor(other);
+    live.app.send(JSON.stringify({ type: "AGENT_PROMPT", id: "in-progress" }));
+    await vi.waitFor(() => expect(frames.some(frame => frame.frame?.id === "in-progress")).toBe(true));
+    await signOut(creator);
+    await vi.waitFor(() => expect(live.app.readyState).toBe(WebSocket.CLOSED));
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "close")).toHaveLength(1));
+    expect(sibling.readyState).toBe(WebSocket.OPEN);
+    expect(live.worker.readyState).toBe(WebSocket.OPEN);
+    expect(await store.accessEpoch(workspace.id)).toBe(epoch);
+    expect(await store.consumeConnectTicket(revokedTicket.token, workspace.id)).toBeNull();
+    expect(await store.consumeConnectTicket(keptTicket.token, workspace.id)).toMatchObject({ userId: creator.id });
+    const completion = new Promise(resolve => sibling.once("message", raw => resolve(JSON.parse(String(raw)))));
+    live.worker.send(JSON.stringify({ t: "frame", clientId: siblingId, frame: { type: "AGENT_PROMPT_COMPLETE", requestId: "in-progress" } }));
+    expect(await completion).toMatchObject({ type: "AGENT_PROMPT_COMPLETE", requestId: "in-progress" });
+    sibling.send(JSON.stringify({ type: "AGENT_PROMPT", id: "sibling-next" }));
+    await vi.waitFor(() => expect(frames.some(frame => frame.frame?.id === "sibling-next")).toBe(true));
+    expect((await store.get(workspace.id, creator.id)).state).toBe("running");
+    expect(await store.byWorkerToken(live.token)).not.toBeNull();
+    expect(await store.verifyProxyToken(live.proxy)).not.toBeNull();
+  });
+
+  it.each(["revoked", "expired", "different user"])("rechecks a %s session during ticket consumption without a security notification", async state => {
+    const other = await anotherSession(), revoked = await ticketFor(creator), kept = await ticketFor(other);
+    if (state === "revoked") await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=now() WHERE provider_session_id=$1", [creator.authentication.sessionId]);
+    else if (state === "expired") await pool.query("UPDATE auth_sessions SET provider_session_expires_at=now()-interval '1 second' WHERE provider_session_id=$1", [creator.authentication.sessionId]);
+    else await pool.query("UPDATE auth_sessions SET user_id=$2 WHERE provider_session_id=$1", [creator.authentication.sessionId, owner.id]);
+    expect(await store.consumeConnectTicket(revoked.token, workspace.id)).toBeNull();
+    expect(await store.consumeConnectTicket(kept.token, workspace.id)).toMatchObject({ userId: creator.id });
+  });
+
+  it("retires an expired open session without waiting for a notification or closing its sibling", async () => {
+    const live = await connected(), other = await anotherSession(), sibling = await attach(other);
+    const frames = workerFrames.get(live.worker)!;
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "open")).toHaveLength(2));
+    await pool.query("UPDATE auth_sessions SET provider_session_expires_at=now()-interval '1 second' WHERE provider_session_id=$1", [creator.authentication.sessionId]);
+    sibling.send(JSON.stringify({ type: "AGENT_PROMPT", id: "after-expiry" }));
+    await vi.waitFor(() => expect(frames.some(frame => frame.frame?.id === "after-expiry")).toBe(true));
+    await vi.waitFor(() => expect(live.app.readyState).toBe(WebSocket.CLOSED));
+    expect(sibling.readyState).toBe(WebSocket.OPEN);
+    expect(live.worker.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("fences a consumed ticket that was waiting for its workspace at sign-out", async () => {
+    const live = await connected(), other = await anotherSession(), sibling = await attach(other);
+    const frames = workerFrames.get(live.worker)!;
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "open")).toHaveLength(2));
+    const running = await store.get(workspace.id, creator.id);
+    let release!: () => void, entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(store, "get").mockImplementationOnce(async () => {
+      entered(); await new Promise<void>(resolve => { release = resolve; }); return running;
+    });
+    const pending = attach(creator);
+    await waiting;
+    try { await signOut(creator); } finally { release(); }
+    const stale = await pending;
+    await vi.waitFor(() => expect(stale.readyState).toBe(WebSocket.CLOSED));
+    expect(sibling.readyState).toBe(WebSocket.OPEN);
+    expect(frames.filter(frame => frame.t === "open")).toHaveLength(2);
+  });
+
   it("ends the signed-out app session without stopping its VM, revoking its worker, or interrupting an existing turn", async () => {
     const live = await connected(), now = new Date().toISOString();
     live.app.send(JSON.stringify({ type: "AGENT_PROMPT", id: "running-turn" }));
@@ -104,10 +194,10 @@ d("cloud access through membership routes and security publication", () => {
     const ticket = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator.id, ttlMs: 60_000, authority: second });
     const app = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/v2/cloud/workspaces/${workspace.id}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`]);
     sockets.push(app); await new Promise<void>(resolve => app.once("open", resolve));
-    await vi.waitFor(() => expect(workerFrames.size).toBe(2));
+    await vi.waitFor(() => expect(workerFrames.size).toBe(1));
     const connection = [...workerFrames.keys()].at(-1)!;
-    await vi.waitFor(() => expect(workerFrames.get(connection)!.some(frame => frame.t === "open")).toBe(true));
-    const clientId = workerFrames.get(connection)!.find(frame => frame.t === "open").clientId;
+    await vi.waitFor(() => expect(workerFrames.get(connection)!.filter(frame => frame.t === "open")).toHaveLength(2));
+    const clientId = workerFrames.get(connection)!.filter(frame => frame.t === "open").at(-1)!.clientId;
     const completion = new Promise(resolve => app.once("message", raw => resolve(JSON.parse(String(raw)))));
     connection.send(JSON.stringify({ t: "frame", clientId, frame: { type: "AGENT_PROMPT_COMPLETE", requestId: "running-turn" } }));
     expect(await completion).toEqual({ type: "AGENT_PROMPT_COMPLETE", requestId: "running-turn" });
