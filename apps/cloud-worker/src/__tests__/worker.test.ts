@@ -394,7 +394,7 @@ describe("worker bridge routing through a fake relay", () => {
   it("exposes the deferred chat operations as explicit unsupported errors", async () => {
     const { op } = await setup();
     expect(UNSUPPORTED_CHAT_OPS).toEqual([
-      "messages.clear", "messages.truncateFrom", "chats.summariesForFolder", "turns.list", "turns.get", "turns.diff", "turns.reset", "turns.undoReset", "messages.search", "chats.titleSeeds",
+      "messages.clear", "messages.truncateFrom", "turns.list", "turns.get", "turns.diff", "turns.reset", "turns.undoReset", "messages.search",
     ]);
     for (const name of UNSUPPORTED_CHAT_OPS) expect(await op(name)).toMatchObject({ type: "WORKSPACE_ERROR", code: "CLOUD_V2_UNSUPPORTED", op: name });
   });

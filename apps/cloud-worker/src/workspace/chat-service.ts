@@ -5,7 +5,7 @@ import type { SessionStore } from "../sessions/session-store";
 import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./scope";
 
 export const UNSUPPORTED_CHAT_OPS = [
-  "messages.clear", "messages.truncateFrom", "chats.summariesForFolder", "turns.list", "turns.get", "turns.diff", "turns.reset", "turns.undoReset", "messages.search", "chats.titleSeeds",
+  "messages.clear", "messages.truncateFrom", "turns.list", "turns.get", "turns.diff", "turns.reset", "turns.undoReset", "messages.search",
 ] as const;
 
 export class ChatService {
@@ -18,6 +18,8 @@ export class ChatService {
     const chatId = () => reqString(params, "chatId");
     switch (op) {
       case "chats.list": return this.store.list();
+      case "chats.titleSeeds": return { seeds: this.store.titleSeeds(Array.isArray(params.chatIds) ? params.chatIds.filter((id): id is string => typeof id === "string") : []) };
+      case "chats.summariesForFolder": return { summaries: this.store.summariesForFolder(this.scope.folder(reqString(params, "folder")), typeof params.excludeChatId === "string" ? params.excludeChatId : undefined) };
       case "chats.upsert": {
         const chat = this.chat(params.chat);
         if (chat) await this.store.upsert(chat);

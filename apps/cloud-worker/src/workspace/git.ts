@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { boundedInteger, commandRunner, safeRef, type CommandOptions, type CommandRunner } from "./commands";
 import { bucketPorcelain, parseNameStatus, parseNumstat, parseUnifiedDiff, type DiffFileSummary } from "./git-parsers";
 import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./scope";
+import { CheckedFiles } from "./checked-files";
 
 type ConflictState = "merge" | "rebase" | "cherry-pick" | "revert" | null;
 interface GitOptions {
@@ -12,8 +13,8 @@ interface GitOptions {
   setBaseBranch?: (branch: string) => Promise<void>;
   changed?: () => void;
 }
-const WRITE_OPS = new Set(["git.stage", "git.unstage", "git.discard", "git.commit", "git.push", "git.pull", "git.rebase", "git.fetch", "git.stashSave", "git.stashPop", "git.stashApply", "git.stashDrop", "git.checkoutBranch", "git.createBranch", "git.renameBranch", "git.changeTarget", "git.merge", "git.cherryPick", "git.revert", "git.continue", "git.abort", "git.deleteBranch", "git.tagCreate", "git.tagDelete"]);
-export const DEFERRED_GIT_OPS = ["git.reset", "git.restore", "git.clean", "git.stageHunk", "git.unstageHunk", "git.discardHunk", "git.initInPlace", "git.repoBranchCatalog", "git.listAllBranches"] as const;
+const WRITE_OPS = new Set(["git.stage", "git.unstage", "git.discard", "git.clean", "git.commit", "git.push", "git.pull", "git.rebase", "git.fetch", "git.stashSave", "git.stashPop", "git.stashApply", "git.stashDrop", "git.checkoutBranch", "git.createBranch", "git.renameBranch", "git.changeTarget", "git.merge", "git.cherryPick", "git.revert", "git.continue", "git.abort", "git.deleteBranch", "git.tagCreate", "git.tagDelete"]);
+export const DEFERRED_GIT_OPS = ["git.reset", "git.restore", "git.stageHunk", "git.unstageHunk", "git.discardHunk", "git.initInPlace", "git.repoBranchCatalog", "git.listAllBranches"] as const;
 
 /** One checkout-scoped writer queue. Ordinary reads never wait behind a
  * fetch, push or editor operation; every comparison has its own Git baseline. */
@@ -231,6 +232,21 @@ export class GitService {
 
   private async write(op: string, params: Record<string, unknown>): Promise<unknown> {
     switch (op) {
+      case "git.clean": {
+        const paths = this.paths(params.paths), literal = this.literal(paths);
+        if (!paths.length || params.confirm !== true) throw new WorkspaceError("VALIDATION_FAILED", "Cleaning requires confirmed, explicit file paths.");
+        const untracked = new Set((await this.git(["ls-files", "--others", "--exclude-standard", "-z", "--", ...literal], { readOnly: true })).split("\0").filter(Boolean));
+        if (paths.some(path => !untracked.has(path))) throw new WorkspaceError("VALIDATION_FAILED", "Only untracked files can be cleaned.");
+        const checked = new CheckedFiles(this.scope), handles = [];
+        try {
+          // This file action never expands directories or pathspec programs.
+          // Validate the whole batch, including symlink resolution, first.
+          for (const path of paths) handles.push(await checked.file(path));
+          for (const handle of handles) await checked.assertDescriptor(handle);
+          const output = await this.git(["clean", "-f", "--", ...literal]);
+          return { removed: output.split("\n").map(line => line.replace(/^Removing /, "").trim()).filter(Boolean) };
+        } finally { await Promise.all(handles.map(handle => handle.close())); }
+      }
       case "git.stage": case "git.unstage": case "git.discard": {
         const paths = this.paths(params.paths); if (!paths.length) return { ok: true };
         const literal = this.literal(paths);
