@@ -367,6 +367,19 @@ interface StatusSource extends WorkbenchSource {
 
 /** One frame owns its exact target's sources. Old callbacks hold the old
  * instance, so late results cannot set or clear a new owner's banner. */
+// The cloud worker answers reads it doesn't serve yet (turns, review hunks,
+// setup and run logs, pull requests) with CLOUD_V2_UNSUPPORTED. That is a
+// missing feature, not a failed read: Retry can't change it.
+const CLOUD_UNAVAILABLE = /\b(?:is not|isn't|are not|aren't) available in cloud workspaces\b/i;
+const CLOUD_UNAVAILABLE_NOTICE: WorkbenchNotice = { tone: "neutral", message: "This isn't available in cloud workspaces yet." };
+
+export function isCloudUnavailable(error: unknown): boolean {
+  if (!error) return false;
+  if (typeof error === "object" && (error as { code?: unknown }).code === "CLOUD_V2_UNSUPPORTED") return true;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return CLOUD_UNAVAILABLE.test(message);
+}
+
 export class WorkbenchStatusSources {
   private sources = new Map<string, StatusSource>();
   private listeners = new Set<() => void>();
@@ -391,7 +404,12 @@ export class WorkbenchStatusSources {
       this.listeners.delete(listener);
     };
   };
-  update(id: string, source: WorkbenchSource): void {
+  update(id: string, reported: WorkbenchSource): void {
+    // An unavailable cloud feature is absent beside other content, and a
+    // neutral note when it is the tab's own read.
+    const source: WorkbenchSource = isCloudUnavailable(reported.error)
+      ? { ...reported, error: undefined, ...(reported.primary && !reported.hasContent ? { notice: reported.notice ?? CLOUD_UNAVAILABLE_NOTICE } : {}) }
+      : reported;
     const previous = this.sources.get(id);
     const error = source.error || (source.pending ? previous?.error : null);
     // One failed read is transient until its single silent, exact-key retry
