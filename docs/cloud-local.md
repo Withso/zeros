@@ -54,14 +54,16 @@ Build the Linux x64 worker runtime and publish it to the profile's runtime store
 
 ```sh
 node apps/cloud-worker/scripts/package-runtime.mjs --out /tmp/worker-runtime.tar.gz
-pnpm --dir apps/control-plane cloud-v2:publish-runtime --artifact /tmp/worker-runtime.tar.gz
+pnpm --dir apps/control-plane cloud-v2:publish-runtime --local --artifact /tmp/worker-runtime.tar.gz
 ```
 
 The packager builds natively on Linux x64 with Node 24. Elsewhere it builds in
 Docker (`node:24-bookworm`, `linux/amd64`) from a filtered copy of the source,
 without the checkout, private profile or installed dependencies; `--docker`
 forces that path. Publishing checks the archive and stores it under its
-SHA-256, which it prints. Pass that SHA to `--runtime`.
+SHA-256, which it prints. `--local` reads the same private profile as the
+launcher, including the `ZEROS_DEV_PROFILE_PATH` override, and uses its
+`storage` section. Pass the printed SHA to `--runtime`.
 
 ## Commands
 
