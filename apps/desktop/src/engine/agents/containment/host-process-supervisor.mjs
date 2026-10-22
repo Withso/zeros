@@ -5,8 +5,7 @@
 // This process does not apply a sandbox, rewrite provider configuration, or
 // alter the selected target's environment. It publishes a durable process-group
 // claim before the target starts, keeps the target in the same process group,
-// and kills that group if the owning engine disappears. A cloud-only launch
-// self-enters the shared workload cgroup before restoring the target environment.
+// and kills that group if the owning engine disappears.
 
 import { spawn } from "node:child_process";
 import {
@@ -29,10 +28,6 @@ const VERSION = 1;
 const INTERNAL_ENV_PREFIX = "ZEROS_HOST_SUPERVISOR_";
 const MAX_PENDING_BYTES = 64 * 1024;
 const targetSeparator = process.argv.indexOf("--");
-const cloudFlags = targetSeparator >= 0
-  ? process.argv.slice(2, targetSeparator).filter((arg) => arg === "--cloud-workload")
-  : [];
-const cloudWorkload = cloudFlags.length > 0;
 
 function fail(message) {
   process.stderr.write(`[zeros-host-supervisor] ${message}\n`);
@@ -92,9 +87,6 @@ function validatePrivatePath(file, parent, suffix) {
 
 function restoreTargetEnvironment() {
   const encoded = process.env[`${INTERNAL_ENV_PREFIX}ORIGINAL_ENV`];
-  if (cloudWorkload && !encoded) {
-    throw new Error("missing original environment descriptor");
-  }
   let original = {};
   if (encoded) {
     const decoded = JSON.parse(
@@ -105,10 +97,9 @@ function restoreTargetEnvironment() {
     }
     original = decoded;
   }
-  // Cloud startup contains only trusted loader settings. The selected target
-  // environment is restored in full after self-entry; Local keeps its original
-  // overlay behavior, including user-owned reserved-prefix values.
-  const target = cloudWorkload ? Object.create(null) : { ...process.env };
+  // Local keeps its original overlay behavior, including user-owned
+  // reserved-prefix values.
+  const target = { ...process.env };
   for (const name of Object.keys(target)) {
     if (name.startsWith(INTERNAL_ENV_PREFIX)) delete target[name];
   }
@@ -121,9 +112,7 @@ function restoreTargetEnvironment() {
     ) {
       throw new Error("invalid original environment entry");
     }
-    if (!cloudWorkload || !name.startsWith(INTERNAL_ENV_PREFIX)) {
-      target[name] = value;
-    }
+    target[name] = value;
   }
   if (original.ELECTRON_RUN_AS_NODE === undefined) {
     delete target.ELECTRON_RUN_AS_NODE;
@@ -132,7 +121,6 @@ function restoreTargetEnvironment() {
 }
 
 async function run() {
-  if (cloudFlags.length > 1) throw new Error("duplicate cloud launch flag");
   const pendingPath = option("--pending");
   const claimPath = option("--claim");
   const domainPath = option("--domain");
@@ -159,7 +147,6 @@ async function run() {
     expectedParentPid <= 0 ||
     process.ppid !== expectedParentPid ||
     (priority !== undefined && priority !== "below-normal") ||
-    (priority !== undefined && cloudWorkload) ||
     typeof targetCommand !== "string" ||
     targetCommand.length === 0 ||
     targetCommand.includes("\0") ||
@@ -225,24 +212,6 @@ async function run() {
   chmodSync(temporaryDomain, 0o600);
   renameSync(temporaryDomain, domainPath);
   unlinkSync(claimPath);
-
-  if (cloudWorkload) {
-    const assertOriginalOwner = () => {
-      let ownerAlive = true;
-      try {
-        process.kill(expectedOwnerPid, 0);
-      } catch (error) {
-        ownerAlive = error?.code === "EPERM";
-      }
-      if (process.ppid !== expectedParentPid || !ownerAlive) {
-        throw new Error("cloud launch owner retired");
-      }
-    };
-    const { enterCloudHostWorkload } = await import("./cloud-host-workload-entry.mjs");
-    assertOriginalOwner();
-    enterCloudHostWorkload(process.env[`${INTERNAL_ENV_PREFIX}WORKLOAD_ENTRY`]);
-    assertOriginalOwner();
-  }
 
   const targetEnv = restoreTargetEnvironment();
   let child;
@@ -334,7 +303,5 @@ async function run() {
 }
 
 await run().catch((error) => {
-  fail(cloudWorkload
-    ? "cloud_containment_environment_not_ready: Cloud workload entry is unavailable."
-    : error instanceof Error ? error.message.slice(0, 1_000) : String(error));
+  fail(error instanceof Error ? error.message.slice(0, 1_000) : String(error));
 });

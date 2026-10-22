@@ -127,7 +127,7 @@ export default defineConfig({
     // jose is ESM-only while Electron main is bundled as CommonJS. It is pure
     // JavaScript, so bundling keeps JWT verification boot-safe.
     "jose",
-    /^@zeros\/(?:cloud-client|design-core|design-web|protocol)/,
+    /^@zeros\/(?:design-core|design-web|protocol)/,
   ],
   // Banner runs BEFORE any import resolution — lets us log and
   // catch uncaught exceptions even when one of the imported native

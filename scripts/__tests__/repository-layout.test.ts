@@ -654,7 +654,9 @@ describe("repository layout contracts", () => {
   it("keeps the standalone cloud worker independent of the retired engine images", () => {
     expect(existsSync("apps/cloud-worker/package.json")).toBe(true);
     expect(existsSync("scripts/cloud-workspace-validation")).toBe(false);
-    expect(existsSync("packages/cloud-client")).toBe(false);
+    // An install can leave an untracked node_modules behind the removed package.
+    expect(existsSync("packages/cloud-client/package.json")).toBe(false);
+    expect(existsSync("packages/cloud-client/src")).toBe(false);
     const rootPackage = JSON.parse(read("package.json"));
     expect(rootPackage.scripts["typecheck:packages"]).not.toContain("@zeros/cloud-client");
     expect(read("vitest.config.ts")).not.toContain("packages/cloud-client");
