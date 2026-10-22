@@ -31,12 +31,13 @@ export class HistoryMirror {
   }
 
   disconnect(): void { this.online = false; this.epoch++; this.pending.clear(); clearTimeout(this.timer); this.timer = undefined; }
-  async flush(): Promise<void> {
+  async flush(): Promise<boolean> {
     do {
       for (const pending of this.pending.values()) pending.due = 0;
       this.drain();
       await this.sending;
     } while (this.sending || (this.online && this.pending.size));
+    return this.online;
   }
   async dispose(): Promise<void> { this.unsubscribe(); await this.flush(); this.disconnect(); }
 

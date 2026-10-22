@@ -21,11 +21,10 @@ import type { Config } from "./config.js";
 import { DatabaseAcquireTimeoutError } from "./db.js";
 import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
-import { createHash } from "node:crypto";
 import { createAuthMiddleware } from "./auth.js";
 import { createCloudV2ProxyRoutes, CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./cloud/proxy.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./cloud/routes.js";
-import { rateLimit } from "./ratelimit.js";
+import { createPrivateRateLimitKey, rateLimit } from "./ratelimit.js";
 import { clientAddress } from "./client-address.js";
 import { createChatTitleRoutes } from "./chat-titles.js";
 import { createRoutes } from "./routes.js";
@@ -80,6 +79,8 @@ export type CreateAppDependencies = {
 export type ControlPlaneApp = Hono & {
   readonly requestCostObserverStatus?: () => RequestCostObserverStatus;
 };
+
+const cloudTokenBucket = createPrivateRateLimitKey();
 
 function isCloudWorkspaceApiPath(path: string): boolean {
   return path === "/v1/auth/snapshot" || path === "/v1/auth/events" || path.startsWith("/v1/cloud-v2/") || path.startsWith("/v2/cloud/") ||
@@ -179,7 +180,7 @@ export function createApp(
     // Workspace proxy tokens, not user sessions, authenticate the model proxy.
     // Keyed per workspace token: many VMs can share one provider egress address.
     app.use(`${CLOUD_V2_PROXY_PREFIX}/*`, rateLimit("cloud-v2-proxy", 600, 60_000,
-      c => createHash("sha256").update(c.req.header("authorization") ?? c.req.header("x-api-key") ?? "").digest("base64url")));
+      c => cloudTokenBucket(c.req.header("authorization") ?? c.req.header("x-api-key") ?? "")));
     app.route("/", createCloudV2ProxyRoutes(dependencies.cloudV2.proxy));
   }
   const workosProvider =

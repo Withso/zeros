@@ -18,6 +18,7 @@ const ALLOWED: Record<string, string> = {
   "src/app.ts#createApp": "Health and readiness probes run SELECT 1 only.",
   "src/postgres-notifications.ts#acquire": "Dedicated LISTEN session; it issues only LISTEN/UNLISTEN.",
   "src/workos-provider-locks.ts#connectBeforeDeadline": "Session holder for WorkOS advisory locks; it never reads tables.",
+  "src/cloud/computer.ts#withBuildLock": "Session holder for Computer build/erasure advisory locks only; table access uses separate withSystemTx connections.",
   "src/development-environment.ts#assertHostedDatabaseOwnership":
     "Reads zeros_development_identity (no RLS) and pg_roles to prove runtime privileges.",
   "src/dev-connections/bootstrap.ts#bootstrapDevConnectionDatabase":

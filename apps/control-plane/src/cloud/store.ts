@@ -127,7 +127,7 @@ export class CloudV2Store {
   createWorkspaceOnce(input: CreateWorkspace, key: string, hash: string,
     response: (workspace: CloudV2Workspace) => Record<string, unknown>): Promise<CreateReceipt> {
     return withSystemTx(this.pool, async tx => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-v2-create:${input.creatorUserId}:${key}`]);
+      await tx.query("/* lock_purpose='cloud-v2-workspace-create' */ SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-v2-create:${input.creatorUserId}:${key}`]);
       const previous = await this.createReceipt(tx, input.creatorUserId, key, hash);
       if (previous) return previous;
       const workspace = await this.insertWorkspace(tx, input);
