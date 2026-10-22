@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WorkbenchStatusSources, describeWorkbenchFailure } from "../../../shell/workbench/tab-status-model";
 
 const fixture = vi.hoisted(() => ({ effects: [] as Array<() => void | (() => void)>, read: vi.fn() }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
@@ -54,12 +55,52 @@ describe("Local inline review activity", () => {
     expect(Fixture().snapshot).toBe(retained);
     await vi.advanceTimersByTimeAsync(0); expect(fixture.read).toHaveBeenCalledTimes(2);
   });
-  it.each(["hidden", "blurred"])("preserves cloud behavior while %s", async mode => {
+  it.each(["hidden", "blurred", "visible"])("keeps unavailable cloud inline review inert while %s", async mode => {
     if (mode === "hidden") page.visibilityState = "hidden";
     else focused = false;
-    Fixture("cloud://organization/workspace", "cloud://organization/workspace");
+    const review = Fixture("cloud://organization/workspace", "cloud://organization/workspace");
+    await review.refresh();
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(fixture.read).toHaveBeenCalledTimes(mode === "hidden" ? 0 : 2);
-    expect(vi.getTimerCount()).toBe(1);
+    expect(fixture.read).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(review.source).toBeUndefined();
+  });
+
+  it.each([
+    ["cloud://organization/workspace", "workspace"],
+    ["/checkout", "cloud://organization/workspace"],
+    ["/checkout", "cloud:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:workspace"],
+  ])("does not publish stale unsupported errors for %s / %s", async (cwd, workspaceId) => {
+    const { githubReviewCache, githubReviewKey } = await import("../github-review-cache");
+    await githubReviewCache.load(githubReviewKey(workspaceId, 42), async () => {
+      throw new Error("CLOUD_V2_UNSUPPORTED");
+    }).catch(() => {});
+    const review = Fixture(cwd, workspaceId);
+    const status = new WorkbenchStatusSources();
+    status.update("changes", { primary: true, hasContent: true, pending: false });
+    status.update("comparison-sources", { error: review.source?.error, pending: false });
+    expect(status.snapshot()).toMatchObject({ hasContent: true, failure: null, pending: false });
+    expect(review.source).toBeUndefined();
+    // Genuine Git failures still own the banner even with loaded diffs.
+    status.update("changes", { primary: true, hasContent: true, pending: false, error: "Git read failed" });
+    expect(describeWorkbenchFailure("changes", status.snapshot().failure)).toMatchObject({
+      message: "Couldn't load changes.", action: "Retry", diagnostic: "Git read failed",
+    });
+  });
+
+  it.each(["/personal/project", "/organization/project"])("keeps real inline-review failures visible in %s", async cwd => {
+    fixture.read.mockRejectedValue(new Error("GitHub read denied"));
+    Fixture(cwd); await vi.advanceTimersByTimeAsync(0); unmount();
+    expect(Fixture(cwd).source?.error).toBe("GitHub read denied");
+    expect(fixture.read).toHaveBeenCalled();
+  });
+
+  it("restores exact Local review data across a cloud visit without a cloud read", async () => {
+    Fixture(); await vi.advanceTimersByTimeAsync(0); unmount();
+    const confirmed = Fixture().snapshot; unmount();
+    expect(Fixture("cloud://organization/workspace", "cloud://organization/workspace").source).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(0); unmount();
+    expect(Fixture().snapshot).toBe(confirmed);
+    expect(fixture.read).toHaveBeenCalledExactlyOnceWith({ workspaceId: "personal-workspace", prNumber: 42 });
   });
 });
