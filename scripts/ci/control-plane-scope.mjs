@@ -38,6 +38,8 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   // Dev provisioning modules used by the integration suites.
   "scripts/dev-environment/",
   "scripts/dev-ports.mjs",
+  // The launcher's process supervision reuses the Local process-group helper.
+  "scripts/electron-local-process-group.mjs",
   // The worker's history window rules, which the mirror parity suite imports.
   "apps/cloud-worker/src/sessions/chat-history.ts",
   // The operator publisher invokes the portable runtime packager.
