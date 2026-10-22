@@ -28,6 +28,7 @@ import { MessageView, type RendererContext } from "./renderers";
 import { TurnContainer, TurnPromptHeader, type EditAgentContext } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
 import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
+import { messageEditAvailable } from "./chat-feature-availability";
 import type { Turn } from "./turn-grouping";
 import type { AgentMessage, AgentSessionState, AgentTextMessage } from "./use-agent-session";
 
@@ -142,7 +143,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
   const promptId = prompt?.id;
   const promptText = prompt?.text;
   const editable =
-    !!prompt &&
+    !!prompt && messageEditAvailable(shared.folder) &&
     !(shared.transcriptReadOnly || prompt.autoAction || prompt.localFrom || prompt.queued || turn.isSteer);
   const onEdit = useCallback(
     (editedText: string, attachments: ComposerAttachment[], segments: ComposerSegment[]) =>

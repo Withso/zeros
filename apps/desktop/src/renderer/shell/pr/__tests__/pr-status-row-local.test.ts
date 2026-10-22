@@ -33,3 +33,14 @@ it("keeps the Local PR island exclusive and never mounts the cloud history reade
   expect(render({ prNumber: 42 })).toBe("<span>PR 42</span>");
   expect(fixture.notice).not.toHaveBeenCalled();
 });
+
+it("keeps the cloud target branch but offers no PR island or creation until cloud serves pull requests", () => {
+  const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+  for (const prNumber of [null, 7]) {
+    const html = render({ id: cloud, path: cloud, placement: "cloud", prNumber });
+    expect(html).toContain("<button>Target</button>");
+    expect(html).toContain("Pull requests aren&#x27;t available in cloud workspaces yet.");
+    expect(html).not.toContain("Create PR");
+    expect(html).not.toContain("PR 7");
+  }
+});

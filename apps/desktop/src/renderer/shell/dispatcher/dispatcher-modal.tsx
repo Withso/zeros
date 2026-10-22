@@ -733,6 +733,7 @@ function ActiveDispatcherPage({
               busy={busy || designBusy}
               disabled={(!selectedProject && !cloud.computerRepository) || Boolean(placementReason)}
               mode={mode}
+              permissionModes={placement !== "cloud"}
               design={{
                 projectName: cloud.computerRepository?.name ?? selectedProject?.name ?? null,
                 target: designTarget.data,

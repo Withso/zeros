@@ -1,6 +1,7 @@
 import { gitLog, type Commit } from "@/renderer/platform/git";
 import { turnsList, type TurnInfo } from "@/renderer/platform/turns";
 import type { TurnHistoryCursor } from "@zeros/protocol/changes-history";
+import { isCloudWorkspace } from "@/renderer/platform/bridge/cloud-workspace-key";
 
 const PAGE_SIZE = 500;
 
@@ -29,6 +30,8 @@ export async function loadChangesCommits(
 export async function loadChangesTurns(
   workspaceId: string,
 ): Promise<TurnInfo[]> {
+  // Turn checkpoints are Local-only for now; cloud v2 serves no turn records.
+  if (isCloudWorkspace(workspaceId)) return [];
   const turns = new Map<string, TurnInfo>();
   let before: number | undefined;
   let after: TurnHistoryCursor | undefined;

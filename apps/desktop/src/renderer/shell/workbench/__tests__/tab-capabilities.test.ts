@@ -60,4 +60,13 @@ describe("Review tab availability", () => {
     expect(restored).not.toContain(terminal);
     expect(tabs).toEqual(original);
   });
+  it("hides Review for a cloud workspace even with a GitHub remote", () => {
+    const { tabs } = defaultTabs();
+    const github = "https://github.com/example/project.git";
+    const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    expect(availableWorkspaceTabs(tabs, { isGitRepository: true, originUrl: github, repoRoot: cloud })
+      .some((tab) => tab.type === "review")).toBe(false);
+    expect(availableWorkspaceTabs(tabs, { isGitRepository: true, originUrl: github, repoRoot: "/Users/me/project" })
+      .some((tab) => tab.type === "review")).toBe(true);
+  });
 });

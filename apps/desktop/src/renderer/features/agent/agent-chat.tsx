@@ -126,6 +126,7 @@ import { ComposerDesignFrame, useComposerDesignFrame } from "./composer-design-f
 import { prepareDesignFrameAttachments } from "./design-frame-attachment";
 import { hasDesignFrameAttachmentSelection } from "./design-frame-selection";
 import { setComposerMode } from "./composer-mode";
+import { permissionModesAvailable, turnCheckpointsAvailable } from "./chat-feature-availability";
 import {
   Conversation,
   ConversationContent,
@@ -1283,14 +1284,15 @@ function AgentChatBody({
 
   // Show the composer permission toggle when the agent has a native-mode
   // vocabulary. Includes Cursor (Ask/Edit).
-  const showPermissionToggle = agentHasPermissionMenu(
+  const permissionModes = permissionModesAvailable(chatThread?.folder);
+  const showPermissionToggle = permissionModes && agentHasPermissionMenu(
     chatAgentId,
     chatThread?.model ?? null,
   );
 
   // Dashed composer frame for the guarded "propose, don't act" modes — Claude
   // Plan, Codex Ask for approval, and Cursor Ask.
-  const composerGuarded = permissionModeShowsFrame(
+  const composerGuarded = permissionModes && permissionModeShowsFrame(
     chatAgentId,
     currentPermissionModeId,
   );
@@ -3283,7 +3285,7 @@ function AgentChatBody({
   const preparationTurn = turns.at(-1);
   const preparationTurnRead = useCachedRead(
     turnRowCache,
-    !readOnly && !provisionalTranscript && chatId && preparationTurn?.recordedTurnId &&
+    !readOnly && !provisionalTranscript && chatId && turnCheckpointsAvailable(chatId) && preparationTurn?.recordedTurnId &&
       session.status === "failed" && session.failure?.stage !== "prompt"
       ? turnRowKey(chatId, preparationTurn.recordedTurnId)
       : null,

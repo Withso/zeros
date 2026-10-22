@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentFailure } from "../../../platform/bridge/failure";
 import { isRecoverable, isTransportShaped } from "../../../platform/bridge/failure";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { turnCheckpointsAvailable } from "../chat-feature-availability";
 import { turnFailureForCard } from "../turn-failure";
 import { groupMessagesIntoTurns } from "../turn-grouping";
 import { tailTurnInFlight } from "../tail-indicators";
@@ -42,7 +43,7 @@ function mounted(folder: string, history?: { status: string; stopReason?: string
     session = { ...session, ...next };
     let index = 0;
     return script.runInNewContext({ session, chatId, interactive, chatThread: { folder }, cloudComputerV2: true,
-      isErrorState: ["failed", "auth-required"].includes(session.status), isTransportShaped, isRecoverable, isCloudWorkspace,
+      isErrorState: ["failed", "auth-required"].includes(session.status), isTransportShaped, isRecoverable, isCloudWorkspace, turnCheckpointsAvailable,
       readOnly: history?.readOnly ?? false,
       turns: history ? groupMessagesIntoTurns([
         { id: "earlier-prompt", kind: "text", role: "user", text: "Earlier request", createdAt: 1,

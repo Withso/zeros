@@ -74,6 +74,7 @@ import {
   type WorkspaceFileDiffQuery,
 } from "@/renderer/shell/workspace-file-data-cache";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { turnCheckpointsAvailable } from "./chat-feature-availability";
 
 const PILL_PAGE = 10;
 
@@ -435,11 +436,12 @@ export const TurnFooter = memo(function TurnFooter({
   // `enabled` keeps a LIVE turn from reading a row that is still being written;
   // the fetch runs as soon as it settles. A missing row (null) is a legitimate
   // value — turns predating recording, or non-git chats.
+  const checkpoints = turnCheckpointsAvailable(chatId);
   const turnRead = useCachedRead(
     turnRowCache,
-    turnId ? turnRowKey(chatId, turnId) : null,
+    turnId && checkpoints ? turnRowKey(chatId, turnId) : null,
     () => turnGet(chatId, turnId),
-    { maxAgeMs: TURN_ROW_MAX_AGE_MS, enabled: !live && surfaceActive },
+    { maxAgeMs: TURN_ROW_MAX_AGE_MS, enabled: !live && surfaceActive && checkpoints },
   );
   const turn = turnRead.data ?? null;
 
@@ -679,7 +681,7 @@ export const TurnFooter = memo(function TurnFooter({
             )}
           </IconButton>
         </Tooltip>
-        {!readOnly && (
+        {!readOnly && (onFork || checkpoints) && (
           <DropdownMenu>
             <Tooltip label="Turn actions">
               <DropdownMenuTrigger asChild>
@@ -719,18 +721,20 @@ export const TurnFooter = memo(function TurnFooter({
                   Fork to new tab
                 </DropdownMenuItem>
               )}
-              <DropdownMenuItem
-                disabled={resetting}
-                onSelect={() => {
-                  // Defer so the menu finishes closing (and returns focus) before
-                  // the dialog mounts and traps focus — avoids the Radix
-                  // menu→dialog race that would otherwise dismiss the dialog.
-                  window.setTimeout(() => setConfirmOpen(true), 0);
-                }}
-              >
-                <RotateCcw className="size-3.5" />
-                Reset to this point
-              </DropdownMenuItem>
+              {checkpoints && (
+                <DropdownMenuItem
+                  disabled={resetting}
+                  onSelect={() => {
+                    // Defer so the menu finishes closing (and returns focus) before
+                    // the dialog mounts and traps focus — avoids the Radix
+                    // menu→dialog race that would otherwise dismiss the dialog.
+                    window.setTimeout(() => setConfirmOpen(true), 0);
+                  }}
+                >
+                  <RotateCcw className="size-3.5" />
+                  Reset to this point
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}

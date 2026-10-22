@@ -28,6 +28,7 @@ import { CreatePrButton } from "./create-pr-button";
 import { TargetBranchButton } from "./target-branch-select";
 import { useWorkspaceHasChanges } from "./use-workspace-has-changes";
 import { isGithubDotComRemote } from "./github-url";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
 
 export function PrStatusRow({
@@ -47,6 +48,20 @@ export function PrStatusRow({
   // Tri-state hook; this row wants the plain boolean (unknown → treated as
   // "nothing to PR yet", preserving the prior disabled-button behavior).
   const hasChanges = useWorkspaceHasChanges(prWorkspace, active) ?? false;
+  // Cloud v2 serves no GitHub PR operations yet; the target branch still works.
+  const cloud = isCloudWorkspace(prWorkspace?.path) || isCloudWorkspace(prWorkspace?.id);
+
+  if (prWorkspace && cloud) {
+    return (
+      <PanelHeader size="window" className="gap-2">
+        <TargetBranchButton workspace={prWorkspace} disabled={!nativeReady} />
+        <div className="flex-1" />
+        <span className="text-fg3 min-w-0 truncate text-xs">
+          Pull requests aren't available in cloud workspaces yet.
+        </span>
+      </PanelHeader>
+    );
+  }
 
   if (prWorkspace && prWorkspace.prNumber != null) {
     // key: reset island state on workspace switch (same as the old render site).
