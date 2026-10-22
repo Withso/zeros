@@ -43,9 +43,10 @@ build pinned by its SHA-256.
   an agent already published.
 - For seeding and agent checks, `.env.agent` entries: `ZEROS_DEV_REPOSITORY` and
   `ZEROS_DEV_GITHUB_INSTALLATION_ID` (the test repository and its Alpha GitHub App
-  installation), optionally `ZEROS_DEV_PASSWORD` (the Alpha test user's password,
-  for headless sign-in), and test agent keys `ANTHROPIC_API_KEY` or
-  `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY` and `CURSOR_API_KEY`.
+  installation), `ZEROS_DEV_PASSWORD` (the fixture user's Alpha WorkOS password;
+  required for headless seeding and gate0, optional when you sign in to the app),
+  and test agent keys `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
+  `OPENAI_API_KEY` and `CURSOR_API_KEY`.
 
 ## Worker runtime
 
@@ -89,8 +90,9 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --agents codex,claude,curso
 ```
 
 gate0 derives its signer from this checkout's private state and checks the
-running stack's owner and run before it creates one workspace. It needs the
-seeded organization's Cloud Computer to be built.
+running stack's owner and run before it creates one workspace. It signs in with
+`ZEROS_DEV_PASSWORD` and needs the seeded organization's Cloud Computer to be
+built.
 
 ## Data and cleanup
 
