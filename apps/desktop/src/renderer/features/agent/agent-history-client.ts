@@ -52,6 +52,7 @@ import {
   type ChatSnapshotWire,
   type MessageWindowSnapshot,
 } from "../../platform/bridge/workspace-bridge";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 export type { MessageSearchHit, DbPullResult, ChatMessageDelta };
 
@@ -364,11 +365,13 @@ export async function listChatSummariesForFolder(args: {
   excludeChatId?: string;
 }): Promise<ChatSummaryWire[]> {
   if (!args.folder) return [];
-  return bridgeChatSummaries(
+  const read = bridgeChatSummaries(
     requireBridge("list chat summaries"),
     args.folder,
     args.excludeChatId,
   );
+  // A stopped cloud workspace is not woken for this optional row.
+  return isCloudWorkspace(args.folder) ? read.catch(() => []) : read;
 }
 
 export type { AttachmentWriteResult } from "@zeros/protocol/attachment-policy";

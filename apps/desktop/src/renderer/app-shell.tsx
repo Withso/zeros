@@ -60,7 +60,7 @@ import { AgentSessionsProvider } from "./features/agent/sessions-provider";
 import { startChatUnreadTracking } from "./features/agent/chat-unread";
 import { requestAiChatTitle } from "./features/agent/chat-title";
 import { startChatTitleBackfill } from "./features/agent/chat-title-backfill";
-import { bridgeChatTitleSeeds } from "./platform/bridge/workspace-bridge";
+import { bridgeChatTitleSeedsByOwner } from "./platform/bridge/workspace-bridge";
 import { useAgentSessions } from "./features/agent/sessions-hooks";
 import {
   getAgentsSnapshot,
@@ -475,7 +475,7 @@ function ChatTitleBackfill() {
         }),
       onDbChanged: (listener) => bridge.on("DB_CHANGED", listener),
       connected: () => bridge.status === "connected",
-      seeds: (chatIds) => bridgeChatTitleSeeds(bridge, chatIds),
+      seeds: (chatIds) => bridgeChatTitleSeedsByOwner(bridge, chatIds),
       request: requestAiChatTitle,
       dispatch,
     });

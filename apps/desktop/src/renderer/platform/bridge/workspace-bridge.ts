@@ -19,7 +19,7 @@ import type {
 // ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
-import { parseCloudScopedId } from "./cloud-workspace-key";
+import { cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
 import type {
@@ -717,9 +717,12 @@ export interface ChatTitleSeedWire {
 export async function bridgeChatTitleSeeds(
   bridge: RuntimeClient,
   chatIds: readonly string[],
+  workspaceId?: string,
 ): Promise<ChatTitleSeedWire[]> {
   if (chatIds.length === 0) return [];
-  const r = (await workspaceOp(bridge, "chats.titleSeeds", { chatIds: chatIds.slice(0, 50) })) as
+  const r = (await workspaceOp(bridge, "chats.titleSeeds", {
+    chatIds: chatIds.slice(0, 50), ...(workspaceId ? { workspaceId } : {}),
+  })) as
     | { seeds?: unknown }
     | undefined;
   // An older engine does not know the op (it throws); a shape it never sent
@@ -732,6 +735,26 @@ export async function bridgeChatTitleSeeds(
       typeof (seed as ChatTitleSeedWire).prompt === "string" &&
       typeof (seed as ChatTitleSeedWire).answered === "boolean",
   );
+}
+
+/** Local chats ask the Local engine; each cloud workspace's chats ask its own
+ * worker. A stopped workspace is never woken for titles: its chats get seeds
+ * once it next connects. */
+export async function bridgeChatTitleSeedsByOwner(
+  bridge: RuntimeClient,
+  chatIds: readonly string[],
+): Promise<ChatTitleSeedWire[]> {
+  const local: string[] = [];
+  const cloud = new Map<string, string[]>();
+  for (const id of chatIds) {
+    const owner = parseCloudScopedId(id);
+    if (!owner) { local.push(id); continue; }
+    const key = cloudWorkspaceKey(owner);
+    cloud.set(key, [...(cloud.get(key) ?? []), id]);
+  }
+  const reads = [bridgeChatTitleSeeds(bridge, local)];
+  for (const [key, ids] of cloud) reads.push(bridgeChatTitleSeeds(bridge, ids, key).catch(() => []));
+  return (await Promise.all(reads)).flat();
 }
 
 // ── Incremental delta sync ──────────────────────────────────

@@ -201,6 +201,8 @@ export function cloudOutgoing(
       params.sessionIds = original.sessionIds.map((id) =>
         nativeValue(scope, id),
       );
+    if (Array.isArray(original.chatIds))
+      params.chatIds = original.chatIds.map((id) => nativeValue(scope, id));
     out.params = params;
   }
   // Host executable paths and directory grants cannot describe a cloud
@@ -235,6 +237,8 @@ export function cloudIncoming(
   }
   if (message.result && typeof message.result === "object") {
     const result = mapFields(scope, record(message.result), "in");
+    if (message.op === "chats.titleSeeds" && Array.isArray(result.seeds))
+      result.seeds = result.seeds.map((seed) => mapFields(scope, record(seed), "in"));
     if (message.op === "turns.reset" && typeof result.resetId === "string")
       result.resetId = cloudScopedId(scope, result.resetId);
     if (message.op === "turns.get" && result.turn)
