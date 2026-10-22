@@ -1,8 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
-import { gate0DevTarget, gate0SignIn } from "./gate0-cli.js";
+import { gate0DevTarget, gate0LocalTarget, gate0LocalIdentity, gate0SignIn } from "./gate0-cli.js";
 
 const owner = "a".repeat(24);
 describe("gate0 Dev identity and sign-in", () => {
+  const local = { owner, runId: "11111111-1111-4111-8111-111111111111", apiPort: 23456 };
+  it("binds local gate0 to the saved instance's tunnel or loopback port", () => {
+    expect(gate0LocalTarget(undefined, "example.test", local)).toEqual({ origin: `https://api-dev-${owner}.example.test`, owner });
+    for (const host of ["127.0.0.1", "localhost"]) {
+      expect(gate0LocalTarget(`http://${host}:23456`, "example.test", local)).toEqual({ origin: `http://${host}:23456`, owner });
+    }
+    for (const target of ["https://api-alpha.example.test", "http://127.0.0.1:23457", "http://127.0.0.2:23456",
+      `https://api-dev-${"b".repeat(24)}.example.test`, "http://localhost:23456/?ticket=private", "http://private@localhost:23456"]) {
+      expect(() => gate0LocalTarget(target, "example.test", local)).toThrow("local_target");
+    }
+  });
+
+  it("requires the saved local run ID and refuses a hosted generation before using credentials", () => {
+    expect(() => gate0LocalIdentity({ ok: true, development: { owner, runId: local.runId } }, local)).not.toThrow();
+    for (const health of [
+      { ok: false, development: { owner, runId: local.runId } },
+      { ok: true, development: { owner, runId: "22222222-2222-4222-8222-222222222222" } },
+      { ok: true, development: { owner: "b".repeat(24), runId: local.runId } },
+      { ok: true, development: { owner, runId: local.runId, generation: local.runId } },
+    ]) expect(() => gate0LocalIdentity(health, local)).toThrow("local_identity");
+  });
+
   it("accepts only the selected profile's workspace-specific Dev origin", () => {
     expect(gate0DevTarget(`https://api-dev-${owner}.example.test`, "example.test")).toEqual({ origin: `https://api-dev-${owner}.example.test`, owner });
     for (const target of ["https://api-alpha.example.test", "https://api.example.test", `http://api-dev-${owner}.example.test`,

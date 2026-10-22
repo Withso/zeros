@@ -5,8 +5,8 @@ import { run } from "./processes.mjs";
 import { privateDirectory, saveWorkspace, systemEnvironment, writePrivateFile } from "./state.mjs";
 import { portFree } from "../dev-ports.mjs";
 
-export async function databaseCommand(workspace, ports, repositoryRoot, action) {
-  const input = { action, owner: workspace.state.owner, port: ports.database,
+export async function databaseCommand(workspace, ports, repositoryRoot, action, details = {}) {
+  const input = { ...details, action, owner: workspace.state.owner, instanceId: workspace.state.instanceId, port: ports.database,
     migrationUrl: databaseUrl(workspace, ports.database, "migration"), runtimeUrl: databaseUrl(workspace, ports.database) };
   const output = await run(process.execPath, [path.join(repositoryRoot, "scripts/dev-environment/database.mjs")], {
     cwd: repositoryRoot, env: systemEnvironment(), input: JSON.stringify(input), timeout: 180_000, label: `Development database ${action}`,
