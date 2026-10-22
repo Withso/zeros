@@ -6565,8 +6565,7 @@ export function AgentSessionsProvider({
           }
           return false;
         };
-        let promise: Promise<boolean>;
-        promise = (async () => {
+        const promise: Promise<boolean> = (async () => {
           if (!bridge || !agentId) return unconfirmed();
           const activity = closeActivityForSession(slot, { localSendInFlight: sendingChatsRef.current.has(chatId),
             queuedCount: sendQueueRef.current.get(chatId)?.length ?? 0 });

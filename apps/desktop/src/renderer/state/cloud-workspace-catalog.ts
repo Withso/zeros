@@ -491,7 +491,9 @@ export async function waitForCloudWorkspaceLifecycle(
     let settled = false;
     let reading = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let safety: ReturnType<typeof setTimeout> | undefined;
+    const safety = setTimeout(() => fail(new Error(
+      "The cloud workspace operation is still running. Its status will update when it finishes.",
+    )), 60_000);
     const cleanup = () => {
       settled = true;
       clearTimeout(timer);
@@ -535,9 +537,6 @@ export async function waitForCloudWorkspaceLifecycle(
     };
     // Exact catalog events can finish even while the fallback read is hung.
     const off = subscribeCloudWorkspaces(observe);
-    safety = setTimeout(() => fail(new Error(
-      "The cloud workspace operation is still running. Its status will update when it finishes.",
-    )), 60_000);
     observe();
     if (!settled) poll();
   });
