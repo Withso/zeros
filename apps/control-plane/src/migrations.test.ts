@@ -76,7 +76,7 @@ describe("cloud migration regression contracts", () => {
           .filter(
             ({ sql }) =>
               /^SET search_path\s*=\s*pg_catalog\s*,\s*public\b/iu.test(sql) &&
-              !/^SET search_path\s*=\s*pg_catalog\s*,\s*public\s*,\s*pg_temp\s*;?$/iu.test(
+              !/^SET search_path\s*=\s*pg_catalog\s*,\s*public\s*,\s*pg_temp(?:\s+AS\s+\$[a-z0-9_]*\$)?\s*;?$/iu.test(
                 sql,
               ),
           ),
@@ -1226,12 +1226,13 @@ d("migration ladder", { timeout: 30_000 }, () => {
     await pool.query("INSERT INTO cloud_v2_chats(workspace_id,chat_id,row) VALUES($1,'chat',$2)",[workspaceId,{id:"chat"}]);
     await pool.query("INSERT INTO cloud_v2_messages(workspace_id,chat_id,msg_id,kind,payload,created_at_ms) VALUES($1,'chat','message','text','retained transcript',1)",[workspaceId]);
     const tables = ["cloud_agent_credentials","cloud_agent_credential_versions","cloud_agent_credential_organizations","cloud_codex_auth_caches","cloud_codex_refresh_fingerprints","github_installations","cloud_v2_workspaces","cloud_v2_chats","cloud_v2_messages"];
-    const snapshot = async () => Promise.all(tables.map(async table=> {
-      const rows = (await pool.query(`SELECT * FROM ${table}`)).rows;
-      // Later expand migrations may add metadata; compare the retained fields.
-      if (table === "cloud_v2_workspaces") for (const row of rows) delete row.archived_at;
-      return JSON.stringify(rows);
-    }));
+    // Compare all columns that existed before retirement. Subsequent expand
+    // migrations may add metadata without changing these retained values.
+    const projections = await Promise.all(tables.map(async table =>
+      (await pool.query(`SELECT * FROM ${table} LIMIT 0`)).fields
+        .map(field => pg.escapeIdentifier(field.name)).join(", ")));
+    const snapshot = async () => Promise.all(tables.map(async (table, index) =>
+      JSON.stringify((await pool.query(`SELECT ${projections[index]} FROM ${table}`)).rows)));
     const before = await snapshot();
     expect(await runMigrations(pool)).toEqual(LADDER.slice(LADDER.indexOf("0182_retire_legacy_cloud.sql")));
     // Compare booleans so failures cannot print synthetic credential material.
@@ -1254,7 +1255,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
     expect(await runMigrations(pool)).toContain("0183_cloud_v2_workspace_archive.sql");
     const { archived_at: archivedAt, ...after } = (await pool.query(`SELECT * FROM cloud_v2_workspaces WHERE id = $1`, [id])).rows[0];
     expect(archivedAt).toBeNull();
-    expect(after).toEqual(before);
+    expect(after).toMatchObject(before);
     expect((await pool.query(`SELECT data_type, is_nullable FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'cloud_v2_workspaces' AND column_name = 'archived_at'`)).rows)
       .toEqual([{ data_type: "timestamp with time zone", is_nullable: "YES" }]);

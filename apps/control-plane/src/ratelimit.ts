@@ -11,10 +11,17 @@
 // ──────────────────────────────────────────────────────────
 
 import type { Context, MiddlewareHandler } from "hono";
+import { createHmac, randomBytes } from "node:crypto";
 import { HttpError } from "./authz.js";
 
 type Bucket = { count: number; resetAt: number };
 const windows = new Map<string, Bucket>();
+
+/** Equality keys for an in-memory limiter, never stored credential hashes. */
+export function createPrivateRateLimitKey(): (credential: string) => string {
+  const key = randomBytes(32);
+  return credential => createHmac("sha256", key).update(credential).digest("base64url");
+}
 
 // Bounded cleanup: drop expired buckets when the map grows, so a churn of
 // distinct users can't leak memory unboundedly.

@@ -186,17 +186,19 @@ export class CloudV2Computers {
   }
 
   /** One provider operation owner per build. Session locks do not hold a long
-   * transaction or block the deletion request; cleanup tries again next tick. */
+   * transaction or block the deletion request; cleanup tries again next tick.
+   * This connection issues advisory SQL only. Every table access during work
+   * uses its own withSystemTx connection and RLS context. */
   async withBuildLock(id: string, work: (assertHeld: () => void) => Promise<void>): Promise<void> {
     const client = await this.pool.connect();
     let lost = false, held = false;
     const onLost = () => { lost = true; };
     client.on("error", onLost); client.on("end", onLost);
     try {
-      held = (await client.query<{ held: boolean }>("SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS held", [`cloud-v2-build:${id}`])).rows[0]!.held;
+      held = (await client.query<{ held: boolean }>("/* lock_purpose='cloud-v2-computer-build' */ SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS held", [`cloud-v2-build:${id}`])).rows[0]!.held;
       if (held) await work(() => { if (lost) throw new Error("Computer resource lock was lost"); });
     } finally {
-      if (held && !lost) await client.query("SELECT pg_advisory_unlock(hashtextextended($1,0))", [`cloud-v2-build:${id}`]).catch(() => { lost = true; });
+      if (held && !lost) await client.query("/* lock_purpose='cloud-v2-computer-build' */ SELECT pg_advisory_unlock(hashtextextended($1,0))", [`cloud-v2-build:${id}`]).catch(() => { lost = true; });
       client.off("error", onLost); client.off("end", onLost); client.release(lost);
     }
   }

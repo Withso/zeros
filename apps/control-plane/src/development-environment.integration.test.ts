@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import { createPool, withSystemTx } from "./db.js";
 import { ensureUser } from "./auth.js";
 import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import { assertHostedDatabaseOwnership } from "./development-environment.js";
 import { bindFixture, seedHostedFixture } from "../../../scripts/dev-environment/hosted-fixtures.mjs";
 import { grantHostedRuntimeAuthority, repairHostedRuntimeAuthority } from "../../../scripts/dev-environment/hosted-database.mjs";
@@ -118,8 +119,10 @@ database("hosted Dev database ownership", () => {
     let runtime: pg.Pool | undefined;
     let databaseCreated = false, roleCreated = false;
     try {
-      // Global setup already migrated the shared database. This test needs an
-      // empty branch with its marker present before migrations, not that baseline.
+      // Other serial suites may leave an intermediate migration revision.
+      // Restore the shared baseline before proving this separate branch's
+      // migrations leave it untouched.
+      await resetMigratedTestDatabase(cluster);
       const baselineSql = "SELECT 'public'::regnamespace::oid AS public_oid, count(*)::int AS migrations FROM public.schema_migrations";
       const baseline = (await cluster.query(baselineSql)).rows;
       expect(baseline[0].migrations).toBeGreaterThan(0);
