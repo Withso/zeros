@@ -26,6 +26,37 @@ const prose = (events: SessionNotification[]) => events.flatMap(({ update }) =>
   update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? [update.content.text] : []).join("");
 
 describe("Codex driver with an offline app-server process", () => {
+  it("pins the Luna model and low effort on the native turn request", async () => {
+    const { driver, events } = setup();
+    await driver.open({ ...openInput, model: "gpt-6-luna", effort: "low" });
+    await driver.prompt(content("cost-configuration"));
+    expect(JSON.parse(prose(events))).toEqual({ model: "gpt-6-luna", effort: "low", reasoningEffort: "low", effectiveEffort: "low" });
+  });
+
+  it.each([
+    ["minimal", "minimal"], ["medium", "medium"], ["HIGH", "high"], [" xhigh ", "xhigh"],
+    ["max", "max"], ["ultracode", "ultra"], ["ultra", "ultra"],
+    [undefined, undefined], ["", undefined], ["unknown", undefined],
+  ])("maps Codex effort %s exactly as Local does", async (effort, expected) => {
+    const { driver, events } = setup();
+    await driver.open({ ...openInput, effort });
+    await driver.prompt(content("cost-configuration"));
+    expect(JSON.parse(prose(events))).toEqual({ model: openInput.model, reasoningEffort: expected ?? null,
+      ...(expected ? { effort: expected, effectiveEffort: expected } : {}) });
+  });
+
+  it("preserves effort for the same model and clears it for a different model", async () => {
+    const { driver, events } = setup();
+    await driver.open({ ...openInput, model: "gpt-6-luna", effort: "low" });
+    await driver.setModel("gpt-6-luna");
+    await driver.prompt(content("cost-configuration"));
+    expect(JSON.parse(prose(events))).toEqual({ model: "gpt-6-luna", effort: "low", reasoningEffort: "low", effectiveEffort: "low" });
+    events.length = 0;
+    await driver.setModel("fixture-next-model");
+    await driver.prompt(content("cost-configuration"));
+    expect(JSON.parse(prose(events))).toEqual({ model: "fixture-next-model", reasoningEffort: null });
+  });
+
   it("keeps worker and other-agent credentials out of the native process", async () => {
     const { driver, events } = setup({ environment: {
       ZEROS_WORKER_TOKEN: "fixture-worker", CURSOR_API_KEY: "fixture-cursor", ANTHROPIC_AUTH_TOKEN: "fixture-claude",

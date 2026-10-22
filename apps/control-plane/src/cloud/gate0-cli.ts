@@ -7,11 +7,19 @@ import { pathToFileURL } from "node:url";
 import { parseArgs, parseEnv } from "node:util";
 import { decodeJwt } from "jose";
 import { z } from "zod";
-import { GATE0_AGENTS, Gate0Failure, runCloudV2Gate0 } from "./gate0.js";
+import { GATE0_AGENTS, GATE0_DEFAULT_MODELS, Gate0Failure, runCloudV2Gate0 } from "./gate0.js";
 import { BoatApiClient } from "./boat-client.js";
 import { BoatCloudV2Compute } from "./boat.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { createGate0TransportProbe } from "./gate0-transport.js";
+
+export function gate0ModelsFromEnv(env: NodeJS.Dict<string>): Record<typeof GATE0_AGENTS[number], string> {
+  return {
+    codex: env.ZEROS_GATE0_CODEX_MODEL?.trim() || GATE0_DEFAULT_MODELS.codex,
+    claude: env.ZEROS_GATE0_CLAUDE_MODEL?.trim() || GATE0_DEFAULT_MODELS.claude,
+    cursor: env.ZEROS_GATE0_CURSOR_MODEL?.trim() || GATE0_DEFAULT_MODELS.cursor,
+  };
+}
 
 export function gate0DevTarget(input: string, domain: string): { origin: string; owner: string } {
   try {
@@ -113,6 +121,7 @@ async function main() {
   if (values.help) {
     console.log("cloud-v2:gate0 [--local | --api <Dev API origin>] [--profile <private JSON>] [--agent-env <private .env.agent>] [--organization <UUID>] [--repository owner/name] [--runtime <sha256>] [--agents codex,claude,cursor] [--keep]");
     console.log("--local uses the running cloud:local instance and its private signing key; --api may select its exact loopback port. Hosted mode reads the encrypted Dev registry. Requires an installed Computer, connected provider logins and the dedicated .env.agent test password. Creates one workspace and deletes it unless --keep is set.");
+    console.log("Models: gpt-6-luna, claude-haiku-5-5, Cursor default. Override in .env.agent with ZEROS_GATE0_{CODEX,CLAUDE,CURSOR}_MODEL. All probe chats select low effort; Cursor Auto has no native effort control.");
     return;
   }
   const root = resolve(import.meta.dirname, "../../../..");
@@ -182,7 +191,7 @@ async function main() {
     if (!loginResponse.ok) { await loginResponse.body?.cancel(); throw new Gate0Failure("provider_logins"); }
     const logins = z.object({ connections: z.array(z.object({ provider: z.string(), connected: z.boolean() })) }).parse(await loginResponse.json());
     for (const agent of agents) if (!logins.connections.some(row => row.provider === agent && row.connected)) throw new Gate0Failure(`agent_${agent}_login`);
-    const result = await runCloudV2Gate0({ apiOrigin: target.origin, organizationId, repository, accessToken: session.accessToken, agents, transportProbe,
+    const result = await runCloudV2Gate0({ apiOrigin: target.origin, organizationId, repository, accessToken: session.accessToken, agents, models: gate0ModelsFromEnv(env), transportProbe,
       ...(values.runtime ? { runtimeSha: values.runtime } : {}), ...(values.keep ? { keep: true } : {}), log: message => console.log(`[gate0] ${message}`) });
     const skipped = GATE0_AGENTS.filter(agent => !agents.includes(agent));
     if (skipped.length) console.log(`[gate0] Not checked: ${skipped.join(", ")}`);

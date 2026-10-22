@@ -1,8 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { gate0DevTarget, gate0LocalTarget, gate0LocalIdentity, gate0SignIn } from "./gate0-cli.js";
+import { gate0DevTarget, gate0LocalTarget, gate0LocalIdentity, gate0ModelsFromEnv, gate0SignIn } from "./gate0-cli.js";
 
 const owner = "a".repeat(24);
 describe("gate0 Dev identity and sign-in", () => {
+  it("reads only explicit gate0 model overrides and keeps cheap defaults for empty placeholders", () => {
+    expect(gate0ModelsFromEnv({ OPENAI_MODEL: "expensive-ambient-model", ZEROS_GATE0_CLAUDE_MODEL: "" })).toEqual({
+      codex: "gpt-6-luna", claude: "claude-haiku-5-5", cursor: "default",
+    });
+    expect(gate0ModelsFromEnv({ ZEROS_GATE0_CODEX_MODEL: "fixture-codex", ZEROS_GATE0_CLAUDE_MODEL: "fixture-claude", ZEROS_GATE0_CURSOR_MODEL: "fixture-cursor" })).toEqual({
+      codex: "fixture-codex", claude: "fixture-claude", cursor: "fixture-cursor",
+    });
+  });
   const local = { owner, runId: "11111111-1111-4111-8111-111111111111", apiPort: 23456 };
   it("binds local gate0 to the saved instance's tunnel or loopback port", () => {
     expect(gate0LocalTarget(undefined, "example.test", local)).toEqual({ origin: `https://api-dev-${owner}.example.test`, owner });

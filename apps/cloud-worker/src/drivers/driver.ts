@@ -5,6 +5,8 @@ interface DriverSession {
   sessionId: string;
   cwd: string;
   model?: string;
+  /** Persisted chat selection. Each driver maps only its supported native values. */
+  effort?: string;
   nativeSessionId?: string;
 }
 

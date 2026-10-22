@@ -49,6 +49,35 @@ async function setup(driverSetup?: (driver: FakeDriver) => void) {
 }
 
 describe("worker bridge routing through a fake relay", () => {
+  it.each(["low", "high", "max", "ultracode"])("opens a pinned chat with its %s effort at the native driver", async effort => {
+    const { relay, drivers, op } = await setup();
+    await op("chats.upsert", { chat: { id: "cheap-chat", folder: WORKSPACE_KEY, agentId: "codex", model: "gpt-6-luna", effort } });
+    const request = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "cheap-chat", cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID });
+    await relay.request(CLIENT_A, request);
+    expect(relay.response(request.id)?.type).toBe("AGENT_SESSION_CREATED");
+    expect(drivers[0].opened).toMatchObject({ model: "gpt-6-luna", effort });
+  });
+
+  it("does not resurrect effort after a model change, credential refresh or session reopen", async () => {
+    const { relay, drivers, op } = await setup();
+    await op("chats.upsert", { chat: { id: "cheap-chat", folder: WORKSPACE_KEY, agentId: "codex", model: "gpt-6-luna", effort: "low" } });
+    const request = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "cheap-chat", cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID });
+    await relay.request(CLIENT_A, request);
+    const { session } = relay.response(request.id) as Extract<BridgeMessage, { type: "AGENT_SESSION_CREATED" }>;
+    await relay.request(CLIENT_A, browserFrame("AGENT_SET_MODEL", { agentId: "codex", sessionId: session.sessionId, model: "fixture-next-model" }));
+    expect(drivers[0].model).toBe("fixture-next-model");
+    await relay.receive({ ...config, loginRevision: "1", agents: { codex: { ...config.agents.codex!, token: "fixture-replacement-proxy" } } });
+    await relay.request(CLIENT_A, browserFrame("AGENT_LOAD_SESSION", { agentId: "codex", chatId: "cheap-chat", sessionId: session.sessionId, adoptOnly: true }));
+    expect(drivers).toHaveLength(2);
+    expect(drivers[1].opened?.model).toBe("fixture-next-model");
+    expect(drivers[1].opened?.effort).toBeUndefined();
+    await relay.request(CLIENT_A, browserFrame("AGENT_CLOSE_SESSION", { agentId: "codex", chatId: "cheap-chat", sessionId: session.sessionId, userStop: true }));
+    await relay.request(CLIENT_A, { ...request, id: randomUUID() });
+    expect(drivers).toHaveLength(3);
+    expect(drivers[2].opened?.model).toBe("fixture-next-model");
+    expect(drivers[2].opened?.effort).toBeUndefined();
+  });
+
   it("acknowledges VM Stop only after cancelling the turn and committing the final mirror", async () => {
     const { worker, relay, drivers, chat, prompt } = await setup();
     const sessionId = await chat(), request = prompt(sessionId);

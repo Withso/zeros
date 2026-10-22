@@ -14,11 +14,13 @@ export class Channel<T> implements AsyncIterable<T> {
 
 export class FakeQuery extends Channel<unknown> {
   closed = false; interrupts = 0; models: string[] = [];
+  flagSettings: Record<string, unknown>[] = [];
   private readonly input: AsyncIterator<SDKUserMessage>;
   constructor(readonly args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) { super(); this.input = args.prompt[Symbol.asyncIterator](); }
   async read(): Promise<SDKUserMessage> { const next = await this.input.next(); if (next.done) throw new Error("Input ended"); return next.value; }
   async interrupt(): Promise<void> { this.interrupts++; }
   async setModel(model: string): Promise<void> { this.models.push(model); }
+  async applyFlagSettings(settings: Record<string, unknown>): Promise<void> { this.flagSettings.push(settings); }
   close(): void { this.closed = true; this.end(); }
 }
 

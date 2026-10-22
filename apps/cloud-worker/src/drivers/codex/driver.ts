@@ -45,6 +45,7 @@ export class CodexDriver implements Driver {
   private input?: DriverOpen;
   private nativeSessionId?: string;
   private model?: string;
+  private effort?: ReturnType<typeof codexEffort>;
   private active?: Turn;
   private lastTurnId?: string;
   private state: "new" | "opening" | "ready" | "closed" = "new";
@@ -61,6 +62,7 @@ export class CodexDriver implements Driver {
     this.state = "opening";
     this.input = input;
     this.model = input.model;
+    this.effort = codexEffort(input.effort);
     this.mapper = new CodexEventMapper({ sessionId: input.sessionId, resumed: !!input.nativeSessionId, emit: (event) => {
       // A configured proxy token must never escape through provider error text
       // or transcript metadata. Native stderr is not observed at all.
@@ -123,6 +125,12 @@ export class CodexDriver implements Driver {
     this.mapper!.startTurn();
     void this.rpc!.request<{ turn: { id: string; status?: string } }>("turn/start", {
       threadId: this.nativeSessionId, input, ...(turn.model ? { model: turn.model } : {}),
+      ...(this.effort ? { effort: this.effort } : {}),
+      // Match Local's complete default-mode settings. Omitting turn.effort
+      // alone retains the previous thread override after a model change.
+      ...(turn.model ? { collaborationMode: { mode: "default", settings: {
+        model: turn.model, reasoning_effort: this.effort ?? null, developer_instructions: null,
+      } } } : {}),
       approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" },
     }).then((response) => {
       if (this.active !== turn) return;
@@ -159,6 +167,7 @@ export class CodexDriver implements Driver {
     this.assertReady();
     if (!model.trim() || model.length > 200 || /\s/.test(model)) throw new Error("Invalid Codex model.");
     // turn/start owns model changes. A currently running turn keeps its model.
+    if (this.model !== model) this.effort = undefined;
     this.model = model;
   }
 
@@ -269,6 +278,21 @@ export class CodexDriver implements Driver {
     const pkg = require(manifest) as { version: string };
     if (pkg.version !== CODEX_VERSION) throw new Error("Codex package version does not match the worker pin.");
     return join(dirname(manifest), "bin/codex.js");
+  }
+}
+
+// Local's mapCodexEffortFromEnv, copied here to keep the VM runtime standalone.
+// The native schema accepts a string; never forward an unrecognized value.
+function codexEffort(value: string | undefined): "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | undefined {
+  switch (value?.trim().toLowerCase()) {
+    case "minimal": return "minimal";
+    case "low": return "low";
+    case "medium": return "medium";
+    case "high": return "high";
+    case "xhigh": return "xhigh";
+    case "max": return "max";
+    case "ultracode": case "ultra": return "ultra";
+    default: return undefined;
   }
 }
 

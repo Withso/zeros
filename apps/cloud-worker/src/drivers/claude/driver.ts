@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options, type Query, type Settings, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { providerBindingForResume } from "@zeros/protocol/identities";
@@ -15,7 +15,10 @@ import { hasClaudeModelContent } from "./first-content";
 import { normalizeProviderError } from "../shared/provider-error";
 
 export const CLAUDE_VERSION = "0.3.296";
-interface NativeQuery extends AsyncIterable<unknown> { interrupt(): Promise<unknown>; setModel(model: string): Promise<void>; close(): void }
+interface NativeQuery extends AsyncIterable<unknown> {
+  interrupt(): Promise<unknown>; setModel(model: string): Promise<void>; close(): void;
+  applyFlagSettings: Query["applyFlagSettings"];
+}
 interface ClaudeOptions {
   query?: (args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => NativeQuery;
   executable?: string;
@@ -38,6 +41,7 @@ export class ClaudeDriver implements Driver {
   private nativeSessionId?: string;
   private resumed = false;
   private model?: string;
+  private effort?: string;
   private mapper?: ClaudeStreamTranslator;
   private process?: Process;
   private active?: Turn;
@@ -52,6 +56,7 @@ export class ClaudeDriver implements Driver {
     if (input.proxy || !!input.oauthToken === !!input.apiKey) throw new Error("Provide one Claude OAuth token or API key.");
     if (input.nativeSessionId && !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(input.nativeSessionId)) throw new Error("Invalid Claude session id.");
     this.input = input; this.nativeSessionId = input.nativeSessionId ?? randomUUID(); this.resumed = !!input.nativeSessionId; this.model = input.model;
+    this.effort = input.effort;
     this.mapper = new ClaudeStreamTranslator({ sessionId: input.sessionId, streamPartials: true, emit: event => this.emit(event) });
     return { nativeSessionId: this.nativeSessionId, ...(!this.resumed ? { provisional: true } : {}) };
   }
@@ -79,10 +84,16 @@ export class ClaudeDriver implements Driver {
   async setModel(model: string): Promise<void> {
     this.ready();
     if (!model.trim() || model.length > 200 || /\s/.test(model)) throw new Error("Invalid Claude model.");
-    const process = this.process;
-    try { await process?.query.setModel(model); } catch (error) { throw this.error(error); }
+    const process = this.process, changed = this.model !== model;
+    try {
+      await process?.query.setModel(model);
+      // Omission shallow-merges in the SDK. Null resets even a creation-time
+      // max effort to the new model's default; false revokes ultracode.
+      if (changed) await process?.query.applyFlagSettings({ effortLevel: null, ultracode: false });
+    } catch (error) { throw this.error(error); }
     if (this.disposed || (process && process !== this.process)) throw new Error("Claude session changed during model selection.");
     this.model = model;
+    if (changed) this.effort = undefined;
   }
 
   interrupt(): Promise<void> {
@@ -122,6 +133,7 @@ export class ClaudeDriver implements Driver {
     const session = this.input!, input = new InputQueue<SDKUserMessage>();
     const options: Options = {
       cwd: session.cwd, ...(this.model ? { model: this.model } : {}),
+      ...claudeEffort(this.effort),
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
       env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, this.options.gitEnvironment),
       permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
@@ -253,6 +265,18 @@ export class ClaudeDriver implements Driver {
     return token ? message.split(token).join("[redacted]").split(JSON.stringify(token).slice(1, -1)).join("[redacted]") : message;
   }
   private error(error: unknown): Error { return new Error(this.redact(error instanceof Error ? error.message : typeof error === "string" ? error : "Claude request failed.")); }
+}
+
+// Local's effort mapping, without importing the desktop runtime. The SDK's
+// ultracode setting grants dynamic workflows; it is distinct from plain xhigh.
+function claudeEffort(value: string | undefined): Pick<Options, "effort" | "settings"> {
+  const effort = value?.trim(), ultracode = effort === "ultracode";
+  const effortLevel: Settings["effortLevel"] = ultracode ? "xhigh"
+    : effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" ? effort : undefined;
+  return {
+    settings: { ...(effortLevel ? { effortLevel } : {}), ultracode },
+    ...(effort === "max" ? { effort: "max" } : {}),
+  };
 }
 
 function pinnedExecutable(): string {

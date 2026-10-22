@@ -10,7 +10,7 @@ export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
 interface Waiter { client: AppClient; requestId: string }
 interface Runtime {
-  id: string; chatId: string; agentId: CloudV2Agent; model?: string;
+  id: string; chatId: string; agentId: CloudV2Agent; model?: string; effort?: string;
   driver?: Driver; unsubscribe?: () => void; login?: string; opening?: Promise<void>;
   preparing?: Promise<void>;
   cancelling?: Promise<"succeeded" | "failed" | "cancelled">;
@@ -77,7 +77,14 @@ export class Agents {
           const route = this.route(message);
           await this.ensureDriver(route);
           await route.driver!.setModel(message.model);
-          route.model = message.model;
+          if (route.model !== message.model) {
+            route.model = message.model; route.effort = undefined;
+            // Keep a credential refresh or VM restart from restoring the old
+            // model's effort. The native driver clears its live override too.
+            await this.store.update(route.chatId, draft => {
+              draft.chat!.model = message.model; draft.chat!.effort = "";
+            });
+          }
           return;
         }
         case "AGENT_CLOSE_SESSION": {
@@ -153,7 +160,9 @@ export class Agents {
     if (!route) {
       // Publish the route before any durable write yields. Stop by chatId
       // must find a creation even before its initial metadata is on disk.
-      route = { id: randomUUID(), chatId, agentId, model: metadata?.chat?.model ?? undefined, events: Promise.resolve(), stopping: 0, closed: false, waiters: new Map(), steers: new Map() };
+      route = { id: randomUUID(), chatId, agentId, model: metadata?.chat?.model ?? undefined,
+        effort: metadata?.chat?.effort || undefined,
+        events: Promise.resolve(), stopping: 0, closed: false, waiters: new Map(), steers: new Map() };
       this.chats.set(chatId, route); this.routes.set(route.id, route);
       if (!metadata) route.preparing = this.store.upsert({ id: chatId, folder: this.scope.root, agentId, createdAt: Date.now(), updatedAt: Date.now() });
     }
@@ -204,7 +213,7 @@ export class Agents {
         if (!this.hasBackground(route) && !route.active) this.pump(route);
       });
       try {
-        const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model,
+        const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort,
           nativeSessionId: this.store.metadata(route.chatId)?.nativeSessionId,
           ...("oauthToken" in login ? { oauthToken: login.oauthToken } : "apiKey" in login
             ? { apiKey: login.apiKey } : { proxy: { baseUrl: login.baseUrl, token: login.token } }) });
