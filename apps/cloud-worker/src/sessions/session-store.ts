@@ -190,7 +190,7 @@ export class SessionStore {
       // characters. Bound the wire payload to that same input, without secrets
       // or full transcripts leaving the VM just to name a chat.
       const chars = Array.from(first.text.trim());
-      const prompt = chars.length <= 500 ? first.text : chars.slice(0, 400).join("") + chars.slice(-100).join("");
+      const prompt = chars.length <= 500 ? chars.join("") : chars.slice(0, 400).join("") + chars.slice(-100).join("");
       return [{ chatId, messageId: first.id, prompt, answered }];
     });
   }

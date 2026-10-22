@@ -35,6 +35,14 @@ it("marks a failed first turn answered even when the provider emitted no content
   expect(await service.handle("chats.titleSeeds", { chatIds: ["failed"] })).toEqual({ seeds: [{ chatId: "failed", messageId: "prompt", prompt: "Go", answered: true }] });
 });
 
+it("bounds title seeds when a short prompt has large surrounding whitespace", async () => {
+  const { store, service, chat } = await setup(); await chat("padded");
+  await store.importMessages("padded", [row("prompt", "user", " \n".repeat(1_000) + "Make a change" + " \n".repeat(1_000))]);
+  const result = await service.handle("chats.titleSeeds", { chatIds: ["padded"] }) as { seeds: { prompt: string }[] };
+  expect(result.seeds[0]!.prompt.length).toBeLessThanOrEqual(500);
+  expect(result.seeds[0]!.prompt).toBe("Make a change");
+});
+
 it("returns Local summary rows in creation order, includes archived chats, and honors folder/exclusion", async () => {
   const { store, service, chat, root, state, scope } = await setup();
   await chat("first", { title: "First", createdAt: 100, updatedAt: 900 });
