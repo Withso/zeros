@@ -4,7 +4,8 @@ Use `pnpm electron:local` on a Mac for UI and local feature testing without a
 Zeros account. It opens the real desktop shell in the device-local organization
 using the existing engine, SQLite database, Git, worktree, terminal, browser and
 provider integrations. Renderer edits retain Vite HMR; engine and native edits
-use the existing development watchers and main supervisor.
+use the existing development watchers and main supervisor. To test a branch's
+cloud workspaces before merge, use [`pnpm cloud:local`](cloud-local.md).
 
 `pnpm electron:dev` remains the complete hosted application for sign-in,
 organizations, billing, cloud workspaces and integration testing. Its launcher,

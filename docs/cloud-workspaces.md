@@ -70,6 +70,12 @@ worker fetches origin and switches to the workspace branch, creating it from
 the selected base only when absent; it never resets an existing branch.
 Runtime updates do not require rebuilding the Cloud Computer.
 
+## Testing a branch
+
+[`pnpm cloud:local`](cloud-local.md) runs a branch's control plane, worker
+runtime and desktop app together, with an isolated database and a named
+tunnel for Boat VMs. Agents run it headless and then gate0 with `--local`.
+
 ## Credentials and history
 
 Settings → Agents stores encrypted logins in the control plane. The creator's
