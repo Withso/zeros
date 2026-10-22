@@ -10,6 +10,9 @@ import type { Gate0TransportWorkspace } from "./gate0-transport.js";
 
 export const GATE0_AGENTS = ["codex", "claude", "cursor"] as const;
 type Agent = typeof GATE0_AGENTS[number];
+export const GATE0_DEFAULT_MODELS: Readonly<Record<Agent, string>> = Object.freeze({
+  codex: "gpt-6-luna", claude: "claude-haiku-5-5", cursor: "default",
+});
 const FrameSchema = z.object({ type: z.string(), requestId: z.string().optional() }).passthrough();
 type Frame = z.infer<typeof FrameSchema>;
 const WorkspaceSchema = z.object({ id: z.string().uuid(), name: z.string(), repository: z.string(), branch: z.string(), baseBranch: z.string(), state: z.string(), boatSandboxId: z.string().nullable().optional() });
@@ -97,6 +100,7 @@ export type CloudV2Gate0Options = {
   transportProbe?(workspace: Gate0TransportWorkspace): Promise<void>;
   accessToken(): Promise<string>;
   agents?: readonly Agent[];
+  models?: Partial<Record<Agent, string>>;
   keep?: boolean;
   fetch?: typeof fetch;
   log?(message: string): void;
@@ -108,7 +112,7 @@ function hasAnswer(rows: MessageRows, marker: string): boolean {
   return rows.some(row => {
     try {
       const payload = JSON.parse(row.payload);
-      return row.kind === "text" && payload.role === "agent" && typeof payload.text === "string" && payload.text.includes(marker);
+      return row.kind === "text" && payload.role === "agent" && typeof payload.text === "string" && payload.text.trim() === marker;
     } catch { return false; }
   });
 }
@@ -119,9 +123,12 @@ function sameRows(left: MessageRows, right: MessageRows): boolean {
 export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ workspaceId: string; agents: readonly Agent[]; deleted: boolean }> {
   const agents = options.agents ?? GATE0_AGENTS;
   requireCheck(agents.length > 0 && agents.every(agent => GATE0_AGENTS.includes(agent)) && new Set(agents).size === agents.length, "agent_selection");
+  const models = { ...GATE0_DEFAULT_MODELS, ...options.models };
+  requireCheck(GATE0_AGENTS.every(agent => typeof models[agent] === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._:/[\]-]{0,199}$/.test(models[agent])), "model_configuration");
   requireCheck(options.runtimeSha === undefined || /^[a-f0-9]{64}$/.test(options.runtimeSha), "runtime_pin");
   const timeoutMs = options.timeoutMs ?? 600_000, pollMs = options.pollMs ?? 1_000;
   const fetchImpl = options.fetch ?? fetch, log = options.log ?? (() => {});
+  for (const agent of agents) log(`${agent} model=${models[agent]} effort=low${agent === "cursor" ? " (no native effort control)" : ""}`);
   const runId = randomUUID(), name = `gate0-${runId}`;
   const api = options.apiOrigin.replace(/\/+$/, ""), base = "/v1/cloud-v2/workspaces";
   const request = async (path: string, stage: string, method = "GET", body?: unknown, allowMissing = false): Promise<unknown> => {
@@ -197,13 +204,13 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
 
     const transcripts = new Map<string, MessageRows>();
     for (const agentId of agents) {
-      const chatId = `gate0-${agentId}-${runId}`, marker = `zeros-gate0-${randomUUID()}`;
-      await bridge.op("chats.upsert", { chat: { id: chatId, folder: root, agentId, title: "Gate0", createdAt: Date.now() } });
+      const chatId = `gate0-${agentId}-${runId}`, marker = "ok";
+      await bridge.op("chats.upsert", { chat: { id: chatId, folder: root, agentId, model: models[agentId], effort: "low", title: "Gate0", createdAt: Date.now() } });
       const opened = parse(z.object({ type: z.literal("AGENT_SESSION_CREATED"), session: z.object({ sessionId: z.string() }) }),
         await bridge.request("AGENT_NEW_SESSION", { ...scope, agentId, chatId }, `agent_${agentId}_session`), `agent_${agentId}_session`);
       const sessionId = opened.session.sessionId;
       const done = await bridge.request("AGENT_PROMPT", { agentId, sessionId, userMessageId: randomUUID(),
-        prompt: [{ type: "text", text: `Reply with exactly ${marker}. Do not use tools or change files.` }] }, `agent_${agentId}_turn`);
+        prompt: [{ type: "text", text: "Reply with exactly: ok. Do not use tools or read files." }] }, `agent_${agentId}_turn`);
       requireCheck(done.type === "AGENT_PROMPT_COMPLETE", `agent_${agentId}_turn`);
       requireCheck(bridge.frames.some(frame => frame.type === "AGENT_SESSION_UPDATE" && frame.chatId === chatId), `agent_${agentId}_stream`);
       const rows = parse(Rows, await bridge.op("messages.window", { chatId }), `agent_${agentId}_history`).messages;
@@ -213,13 +220,13 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
 
     // A separate chat keeps earlier updates/receipts from satisfying Stop.
     // Wait for native activity, not our own recorded user row or running state.
-    const agentId = agents[0]!, chatId = `gate0-stop-${runId}`;
-    await bridge.op("chats.upsert", { chat: { id: chatId, folder: root, agentId, title: "Gate0 Stop", createdAt: Date.now() } });
+    const agentId = (["claude", "codex", "cursor"] as const).find(agent => agents.includes(agent))!, chatId = `gate0-stop-${runId}`;
+    await bridge.op("chats.upsert", { chat: { id: chatId, folder: root, agentId, model: models[agentId], effort: "low", title: "Gate0 Stop", createdAt: Date.now() } });
     const opened = parse(z.object({ type: z.literal("AGENT_SESSION_CREATED"), session: z.object({ sessionId: z.string() }) }),
       await bridge.request("AGENT_NEW_SESSION", { ...scope, agentId, chatId }, "agent_stop_session"), "agent_stop_session");
     const sessionId = opened.session.sessionId;
     const promptId = bridge.send("AGENT_PROMPT", { agentId, sessionId, userMessageId: randomUUID(),
-      prompt: [{ type: "text", text: "Run the read-only shell command `sleep 60` in the foreground, then reply done. Do not change files or run other commands." }] });
+      prompt: [{ type: "text", text: "Run only `sleep 60`, then reply ok. Do not read or edit files." }] });
     const terminalReply = (frame: Frame) => frame.requestId === promptId && ["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED", "AGENT_ERROR"].includes(frame.type);
     const nativeActivity = (frame: Frame) => frame.type === "AGENT_SESSION_UPDATE" && frame.chatId === chatId && ProviderActivity.safeParse(frame).success;
     const live = await bridge.wait(frame => terminalReply(frame) || nativeActivity(frame), "agent_stop_live");

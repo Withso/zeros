@@ -116,7 +116,7 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
           if (faults.completedBeforeStop) { activePrompts.delete(frame.sessionId); reply("AGENT_PROMPT_COMPLETE", { stopReason: "end_turn" }); }
           return;
         }
-        const marker = /zeros-gate0-[a-f0-9-]+/.exec(frame.prompt[0].text)![0];
+        const marker = /^Reply with exactly:? ([^.\n]+)/.exec(frame.prompt[0].text)![1];
         chats.set(chatId, [
           { msgId: frame.userMessageId, kind: "text", payload: JSON.stringify({ role: "user", text: frame.prompt[0].text }), createdAt: 1 },
           { msgId: randomUUID(), kind: "text", payload: JSON.stringify({ role: "agent", text: marker }), createdAt: 2 },
@@ -148,10 +148,49 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
   });
   const options = { apiOrigin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, organizationId, repository,
     accessToken: async () => "synthetic-gate0-access", log: (line: string) => logs.push(line), pollMs: 1, timeoutMs: 2_000 };
-  return { options, calls, frames, logs, connections: () => connections, state: () => state };
+  return { options, calls, frames, logs, sessions, connections: () => connections, state: () => state };
 }
 
 describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
+  it.each([undefined, { codex: "fixture-codex", claude: "fixture-claude", cursor: "fixture-cursor" }])(
+    "pins every created and prompted chat to a model and low effort, including Stop (%j)", async models => {
+      const f = await fixture();
+      await runCloudV2Gate0({ ...f.options, models });
+      const expected = models ?? { codex: "gpt-6-luna", claude: "claude-haiku-5-5", cursor: "default" };
+      const chats = f.frames.filter(frame => frame.type === "WORKSPACE_REQUEST" && frame.op === "chats.upsert").map(frame => frame.params.chat);
+      expect(chats).toHaveLength(4);
+      for (const chat of chats) expect(chat).toMatchObject({ model: expected[chat.agentId as keyof typeof expected], effort: "low" });
+      const prompts = f.frames.filter(frame => frame.type === "AGENT_PROMPT");
+      expect(prompts).toHaveLength(4);
+      for (const prompt of prompts) {
+        const chat = chats.find(chat => chat.id === f.sessions.get(prompt.sessionId));
+        expect(chat).toMatchObject({ model: expected[prompt.agentId as keyof typeof expected], effort: "low" });
+        if (!chat.id.startsWith("gate0-stop-")) expect(prompt.prompt).toEqual([{ type: "text", text: "Reply with exactly: ok. Do not use tools or read files." }]);
+      }
+      expect(f.frames.filter(frame => frame.type === "AGENT_CANCEL")).toHaveLength(1);
+    },
+  );
+
+  it("refuses an invalid model override before spending a workspace start", async () => {
+    const f = await fixture();
+    await expect(runCloudV2Gate0({ ...f.options, models: { codex: " " } })).rejects.toThrow("model_configuration");
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it.each([undefined, { codex: "fixture-codex", claude: "fixture-claude", cursor: "fixture-cursor" }])(
+    "logs resolved models and effort before the first turn (%j)", async models => {
+      const f = await fixture(), beforeTurns: string[] = [];
+      await runCloudV2Gate0({ ...f.options, models, log: line => {
+        f.options.log(line);
+        if (!f.frames.some(frame => frame.type === "AGENT_PROMPT")) beforeTurns.push(line);
+      } });
+      const expected = models ?? { codex: "gpt-6-luna", claude: "claude-haiku-5-5", cursor: "default" };
+      for (const agent of ["codex", "claude", "cursor"] as const) {
+        expect(beforeTurns).toContain(`${agent} model=${expected[agent]} effort=low${agent === "cursor" ? " (no native effort control)" : ""}`);
+      }
+    },
+  );
+
   it("checks the existing VM's hybrid route on create and wake, within the one-workspace budget", async () => {
     const f = await fixture(), transportProbe = vi.fn(async (_workspace: unknown) => {});
     const result = await runCloudV2Gate0({ ...f.options, transportProbe });
@@ -172,10 +211,10 @@ describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
     const handshakes = f.frames.filter(frame => frame.type === "CONNECTED");
     expect(handshakes).toHaveLength(2);
     for (const frame of handshakes) expect(frame).toMatchObject({ source: "browser", protocolVersion, capabilities: [] });
-    expect(f.frames.filter(f => f.type === "AGENT_PROMPT").map(f => f.agentId)).toEqual(["codex", "claude", "cursor", "codex"]);
+    expect(f.frames.filter(f => f.type === "AGENT_PROMPT").map(f => f.agentId)).toEqual(["codex", "claude", "cursor", "claude"]);
     const cancel = f.frames.filter(frame => frame.type === "AGENT_CANCEL");
     expect(cancel).toHaveLength(1);
-    expect(cancel[0]).toMatchObject({ agentId: "codex", chatId: expect.stringMatching(/^gate0-stop-/) });
+    expect(cancel[0]).toMatchObject({ agentId: "claude", chatId: expect.stringMatching(/^gate0-stop-/) });
     expect(f.calls.filter(c => c.path.endsWith("/history") && c.body.op === "messages.windowOlder")).toHaveLength(4);
     expect(f.frames.filter(f => f.type === "WORKSPACE_REQUEST").map(f => f.op)).toEqual(expect.arrayContaining(["file.write", "file.read", "git.status", "git.stage", "git.diff", "git.unstage"]));
     expect(f.calls.some(c => c.path.includes("/builds"))).toBe(false);
@@ -204,11 +243,16 @@ describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
     expect(f.state()).toBe("deleted");
   });
 
-  it("uses the first selected provider for Stop without another workspace or wake", async () => {
+  it.each([
+    { agents: ["claude"], stop: "claude" },
+    { agents: ["cursor", "claude", "codex"], stop: "claude" },
+    { agents: ["cursor", "codex"], stop: "codex" },
+    { agents: ["cursor"], stop: "cursor" },
+  ] as const)("uses $stop for the sole Stop turn among $agents", async ({ agents, stop }) => {
     const f = await fixture();
-    await runCloudV2Gate0({ ...f.options, agents: ["claude"] });
-    expect(f.frames.filter(frame => frame.type === "AGENT_PROMPT").map(frame => frame.agentId)).toEqual(["claude", "claude"]);
-    expect(f.frames.find(frame => frame.type === "AGENT_CANCEL")).toMatchObject({ agentId: "claude" });
+    await runCloudV2Gate0({ ...f.options, agents });
+    expect(f.frames.filter(frame => frame.type === "AGENT_PROMPT").map(frame => frame.agentId)).toEqual([...agents, stop]);
+    expect(f.frames.filter(frame => frame.type === "AGENT_CANCEL")).toEqual([expect.objectContaining({ agentId: stop })]);
     expect(f.calls.filter(c => c.method === "POST" && c.path === "/v1/cloud-v2/workspaces")).toHaveLength(1);
     expect(f.calls.filter(c => c.path.endsWith("/start"))).toHaveLength(1);
   });

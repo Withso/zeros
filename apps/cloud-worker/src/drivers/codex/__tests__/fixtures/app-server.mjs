@@ -6,6 +6,7 @@ const output = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const reply = (id, result) => output({ id, result });
 const notify = (method, params) => output({ method, params });
 let threadId = "native-chat";
+let threadEffort;
 let turnId;
 let nextTurn = 0;
 let mode;
@@ -42,6 +43,10 @@ input.on("line", async (line) => {
       reply(frame.id, { thread: { id: threadId }, model: params.model ?? "fixture-model" });
       return;
     case "turn/start": {
+      // turn/start overrides persist on the native thread. Local clears them
+      // through the complete default collaboration settings on the next turn.
+      if (params.effort !== undefined) threadEffort = params.effort;
+      if (params.collaborationMode?.settings) threadEffort = params.collaborationMode.settings.reasoning_effort ?? undefined;
       turnId = `turn-${++nextTurn}`;
       mode = params.input.map((part) => part.text ?? "").join("");
       if (mode === "crash") { process.exit(23); }
@@ -66,6 +71,12 @@ input.on("line", async (line) => {
       }
       if (mode === "configuration") {
         text(JSON.stringify({ worker: "ZEROS_WORKER_TOKEN" in process.env, cursor: "CURSOR_API_KEY" in process.env, claude: "ANTHROPIC_AUTH_TOKEN" in process.env, own: !!process.env.ZEROS_CLOUD_PROXY_TOKEN, tokenInArgs: process.argv.some((arg) => arg.includes(process.env.ZEROS_CLOUD_PROXY_TOKEN)) }));
+        complete();
+        return;
+      }
+      if (mode === "cost-configuration") {
+        text(JSON.stringify({ model: params.model, effort: params.effort,
+          reasoningEffort: params.collaborationMode?.settings.reasoning_effort, effectiveEffort: threadEffort }));
         complete();
         return;
       }

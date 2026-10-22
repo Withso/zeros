@@ -14,6 +14,62 @@ function setup() {
   drivers.push(driver); return { driver, ...h };
 }
 
+it("passes the pinned Haiku model and low effort to the native query", async () => {
+  const { driver, queries } = setup();
+  await driver.open({ ...input, model: "claude-haiku-5-5", effort: "low" });
+  const turn = driver.prompt(text("ok")), query = queries[0], sent = await query.read();
+  query.push(result(sent.uuid)); await turn;
+  expect(query.args.options).toMatchObject({ model: "claude-haiku-5-5", settings: { effortLevel: "low" } });
+  expect(query.args.options).not.toHaveProperty("effort");
+});
+
+it.each([
+  { effort: "medium", settings: { effortLevel: "medium", ultracode: false } },
+  { effort: " high ", settings: { effortLevel: "high", ultracode: false } },
+  { effort: "xhigh", settings: { effortLevel: "xhigh", ultracode: false } },
+  { effort: "ultracode", settings: { effortLevel: "xhigh", ultracode: true } },
+  { effort: "max", settings: { ultracode: false }, topLevel: "max" },
+  ...[undefined, "", "unknown", "LOW", "minimal", "ultra"].map(effort => ({ effort, settings: { ultracode: false } })),
+])("maps Claude effort $effort exactly as Local does", async ({ effort, settings, ...expected }) => {
+  const { driver, queries } = setup();
+  await driver.open({ ...input, effort });
+  const turn = driver.prompt(text("ok")), query = queries[0], sent = await query.read();
+  query.push(result(sent.uuid)); await turn;
+  expect(query.args.options.settings).toEqual(settings);
+  if ("topLevel" in expected) expect(query.args.options.effort).toBe(expected.topLevel);
+  else expect(query.args.options).not.toHaveProperty("effort");
+});
+
+it.each(["low", "max", "ultracode"])("clears %s on a model change for the live query and later resume", async effort => {
+  const { driver, queries } = setup();
+  await driver.open({ ...input, effort });
+  const first = driver.prompt(text("one")), query = queries[0], sent = await query.read();
+  query.push(result(sent.uuid)); await first;
+  await driver.setModel(input.model);
+  expect(query.flagSettings).toEqual([]);
+  await driver.setModel("claude-haiku-5-5");
+  expect(query.flagSettings).toEqual([{ effortLevel: null, ultracode: false }]);
+  const next = driver.prompt(text("two")), second = await query.read();
+  query.push(result(second.uuid)); await next;
+  expect(queries).toHaveLength(1);
+  query.end(); await tick();
+  const resumed = driver.prompt(text("three")), replacement = queries[1], third = await replacement.read();
+  replacement.push(result(third.uuid)); await resumed;
+  expect(replacement.args.options).toMatchObject({ model: "claude-haiku-5-5", resume: nativeId, settings: { ultracode: false } });
+  expect(replacement.args.options).not.toHaveProperty("effort");
+  expect(replacement.args.options.settings).not.toHaveProperty("effortLevel");
+});
+
+it("clears effort when the model changes before the first query", async () => {
+  const { driver, queries } = setup();
+  await driver.open({ ...input, effort: "low" });
+  await driver.setModel("claude-haiku-5-5");
+  const turn = driver.prompt(text("ok")), query = queries[0], sent = await query.read();
+  query.push(result(sent.uuid)); await turn;
+  expect(query.args.options).not.toHaveProperty("effort");
+  expect(query.args.options.settings).not.toHaveProperty("effortLevel");
+});
+
 it("keeps one persistent query across prompts and changes the model through native control", async () => {
   const { driver, queries } = setup(); await driver.open(input);
   const first = driver.prompt(text("one")), query = queries[0], sent = await query.read();
