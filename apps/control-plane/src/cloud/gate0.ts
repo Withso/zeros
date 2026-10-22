@@ -14,6 +14,9 @@ const WorkspaceSchema = z.object({ id: z.string().uuid(), name: z.string(), repo
 const WorkspaceReply = z.object({ workspace: WorkspaceSchema });
 const Rows = z.object({ messages: z.array(z.object({ msgId: z.string(), kind: z.string(), payload: z.string() }).passthrough()) });
 type MessageRows = z.infer<typeof Rows>["messages"];
+const ProviderActivity = z.object({ notification: z.object({ update: z.object({
+  sessionUpdate: z.enum(["agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update"]),
+}) }) });
 
 /** Deliberately excludes response bodies, socket errors, URLs and credentials. */
 export class Gate0Failure extends Error {
@@ -204,6 +207,30 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
       transcripts.set(chatId, rows); log(`${agentId} turn passed`);
     }
 
+    // A separate chat keeps earlier updates/receipts from satisfying Stop.
+    // Wait for native activity, not our own recorded user row or running state.
+    const agentId = agents[0]!, chatId = `gate0-stop-${runId}`;
+    await bridge.op("chats.upsert", { chat: { id: chatId, folder: root, agentId, title: "Gate0 Stop", createdAt: Date.now() } });
+    const opened = parse(z.object({ type: z.literal("AGENT_SESSION_CREATED"), session: z.object({ sessionId: z.string() }) }),
+      await bridge.request("AGENT_NEW_SESSION", { ...scope, agentId, chatId }, "agent_stop_session"), "agent_stop_session");
+    const sessionId = opened.session.sessionId;
+    const promptId = bridge.send("AGENT_PROMPT", { agentId, sessionId, userMessageId: randomUUID(),
+      prompt: [{ type: "text", text: "Run the read-only shell command `sleep 60` in the foreground, then reply done. Do not change files or run other commands." }] });
+    const terminalReply = (frame: Frame) => frame.requestId === promptId && ["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED", "AGENT_ERROR"].includes(frame.type);
+    const nativeActivity = (frame: Frame) => frame.type === "AGENT_SESSION_UPDATE" && frame.chatId === chatId && ProviderActivity.safeParse(frame).success;
+    const live = await bridge.wait(frame => terminalReply(frame) || nativeActivity(frame), "agent_stop_live");
+    requireCheck(nativeActivity(live) && !bridge.frames.some(terminalReply), "agent_stop_live");
+    const stopped = parse(z.object({ type: z.literal("WORKSPACE_RESPONSE"), op: z.literal("AGENT_CANCEL"),
+      result: z.object({ conversationId: z.string(), state: z.literal("cancelled") }) }),
+    await bridge.request("AGENT_CANCEL", { agentId, sessionId, chatId }, "agent_stop_ack"), "agent_stop_ack");
+    // Both the WebSocket and HTTP probe speak native ids. The Mac wire maps
+    // this conversationId back to the scoped renderer id.
+    requireCheck(stopped.result.conversationId === chatId, "agent_stop_ack");
+    const cancelled = await bridge.wait(terminalReply, "agent_stop_complete");
+    requireCheck(cancelled.type === "AGENT_PROMPT_COMPLETE" && cancelled.stopReason === "cancelled", "agent_stop_complete");
+    transcripts.set(chatId, parse(Rows, await bridge.op("messages.window", { chatId }), "agent_stop_history").messages);
+    log("live turn Stop passed");
+
     // Wait for every final row to reach the mirror before a deliberate stop.
     for (const [chatId, rows] of transcripts) await until("history_mirror", timeoutMs, pollMs, async () => {
       const mirrored = parse(z.object({ result: Rows }), await request(`${base}/${workspace!.id}/history`, "history_mirror", "POST", { op: "messages.window", params: { chatId } }), "history_mirror");
@@ -217,6 +244,11 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
     for (const [chatId, rows] of transcripts) {
       const mirrored = parse(z.object({ result: Rows }), await request(`${base}/${workspace.id}/history`, "offline_messages", "POST", { op: "messages.window", params: { chatId } }), "offline_messages");
       requireCheck(sameRows(rows, mirrored.result.messages), "offline_messages");
+      const beforeMsgId = rows.at(-1)?.msgId, limit = 2;
+      requireCheck(beforeMsgId, "offline_messages_older");
+      const older = parse(z.object({ result: Rows }), await request(`${base}/${workspace.id}/history`, "offline_messages_older", "POST",
+        { op: "messages.windowOlder", params: { chatId, beforeMsgId, limit } }), "offline_messages_older");
+      requireCheck(sameRows(rows.slice(Math.max(0, rows.length - 1 - limit), -1), older.result.messages), "offline_messages_older");
     }
     requireCheck((await current("offline_stays_stopped")).state === "stopped", "offline_stays_stopped"); log("stop and offline history passed");
     await request(`${base}/${workspace.id}/start`, "wake", "POST"); await waitState("running");
