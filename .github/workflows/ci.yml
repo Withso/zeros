@@ -1142,6 +1142,10 @@ jobs:
           cache: pnpm
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
+      # The hybrid-transport suites drive the real control-plane relay and
+      # signer against the worker, so the control plane's packages must resolve.
+      - name: Install control-plane dependencies
+        run: pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Typecheck, lint and test the worker
         run: |
           set -euo pipefail
