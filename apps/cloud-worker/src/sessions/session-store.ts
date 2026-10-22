@@ -149,6 +149,14 @@ export class SessionStore {
     return structuredClone(this.sessions.get(chatId)?.inbox.find((entry) => entry.requestId === requestId));
   }
 
+  latestReceipt(chatId: string): InboxEntry | undefined {
+    const inbox = this.sessions.get(chatId)?.inbox;
+    for (let i = (inbox?.length ?? 0) - 1; i >= 0; i--) {
+      if (inbox![i].state !== "queued") return structuredClone(inbox![i]);
+    }
+    return undefined;
+  }
+
   steerReceipt(chatId: string, executionId: string, attemptId: string): SteerReceipt | undefined {
     return structuredClone(this.sessions.get(chatId)?.steers.find((entry) => entry.executionId === executionId && entry.attemptId === attemptId));
   }

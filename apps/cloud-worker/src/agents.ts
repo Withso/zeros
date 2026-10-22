@@ -13,6 +13,7 @@ interface Runtime {
   id: string; chatId: string; agentId: CloudV2Agent; model?: string;
   driver?: Driver; unsubscribe?: () => void; login?: string; opening?: Promise<void>;
   preparing?: Promise<void>;
+  cancelling?: Promise<"succeeded" | "failed" | "cancelled">;
   active?: InboxEntry; nativeRunning?: boolean; background?: BackgroundTasksUpdate;
   pumping?: Promise<void>; events: Promise<void>; stopping: number; closed: boolean;
   settling?: Promise<void>; steers: Map<string, Promise<SteerReceipt>>;
@@ -64,7 +65,12 @@ export class Agents {
         case "AGENT_STEER": return await this.steer(client, message);
         case "AGENT_CANCEL": {
           const route = this.route(message);
-          await this.stop(route);
+          route.cancelling ??= this.cancel(route);
+          try {
+            const state = await route.cancelling;
+            await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: message.id,
+              op: "AGENT_CANCEL", result: { conversationId: message.chatId ?? route.chatId, state } }));
+          } finally { route.cancelling = undefined; }
           return;
         }
         case "AGENT_SET_MODEL": {
@@ -211,6 +217,9 @@ export class Agents {
 
   private async prompt(client: AppClient, message: AgentPromptMessage): Promise<void> {
     const route = this.route(message);
+    // A new Send resumes the paused inbox only after the pending Stop has a
+    // terminal receipt; it must not prolong or be interrupted by that Stop.
+    await route.cancelling;
     const { entry } = await this.store.enqueue(route.chatId, {
       requestId: message.id, userMessageId: message.userMessageId ?? message.id, prompt: message.prompt, bubble: message.bubble,
       startedAt: message.startedAt ?? Date.now(), promptId: message.promptId,
@@ -226,7 +235,7 @@ export class Agents {
   private pump(route: Runtime): void {
     if (route.pumping || route.closed || this.hasBackground(route)) return;
     route.pumping = (async () => {
-      while (!route.closed && !this.hasBackground(route)) {
+      while (!route.closed && !route.cancelling && !this.hasBackground(route)) {
         const stopping = route.stopping;
         const entry = await this.store.claim(route.chatId);
         if (!entry) break;
@@ -278,10 +287,23 @@ export class Agents {
     }
   }
 
+  private async cancel(route: Runtime): Promise<"succeeded" | "failed" | "cancelled"> {
+    const pumping = route.pumping;
+    const running = !!route.nativeRunning || this.hasBackground(route);
+    await this.stop(route);
+    // Preparation is fenced by stopping/paused; no native turn was admitted.
+    // A live turn, however, must retire and persist before its Stop is confirmed.
+    if (running) { await pumping; await route.events; }
+    const receipt = this.store.latestReceipt(route.chatId);
+    return receipt?.state === "completed" ? "succeeded"
+      : receipt?.state === "failed" || receipt?.state === "interrupted" ? "failed" : "cancelled";
+  }
+
   private async stop(route: Runtime): Promise<void> {
     route.stopping++;
+    await route.preparing;
     await this.store.stop(route.chatId);
-    await route.driver?.interrupt().catch(() => {});
+    await route.driver?.interrupt();
   }
 
   private async steer(client: AppClient, message: AgentSteerMessage): Promise<void> {
