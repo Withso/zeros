@@ -13,6 +13,7 @@ interface Runtime {
   id: string; chatId: string; agentId: CloudV2Agent; model?: string; effort?: string;
   driver?: Driver; unsubscribe?: () => void; login?: string; opening?: Promise<void>;
   preparing?: Promise<void>;
+  retiring?: Promise<void>; pendingNative?: string; admitting: number;
   cancelling?: Promise<"succeeded" | "failed" | "cancelled">;
   active?: InboxEntry; nativeRunning?: boolean; background?: BackgroundTasksUpdate;
   pumping?: Promise<void>; events: Promise<void>; stopping: number; closed: boolean;
@@ -22,6 +23,7 @@ interface Runtime {
 
 const VERSIONS = { codex: "0.162.1", claude: "0.3.296", cursor: "1.0.37" };
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+const MODEL_ENV = { codex: "OPENAI_MODEL", claude: "ANTHROPIC_MODEL", cursor: "CURSOR_MODEL" };
 const initialized = (agentId: CloudV2Agent): InitializeResponse => ({
   protocolVersion: 1, agentInfo: { name: NAMES[agentId], version: VERSIONS[agentId] },
   authMethods: [], agentCapabilities: { loadSession: true, steering: true, promptCapabilities: { image: true } },
@@ -76,12 +78,15 @@ export class Agents {
         case "AGENT_SET_MODEL": {
           const route = this.route(message);
           await this.ensureDriver(route);
+          this.assertCurrent(route);
           await route.driver!.setModel(message.model);
+          this.assertCurrent(route);
           if (route.model !== message.model) {
             route.model = message.model; route.effort = undefined;
             // Keep a credential refresh or VM restart from restoring the old
             // model's effort. The native driver clears its live override too.
             await this.store.update(route.chatId, draft => {
+              this.assertCurrent(route);
               draft.chat!.model = message.model; draft.chat!.effort = "";
             });
           }
@@ -94,7 +99,7 @@ export class Agents {
           // Closing a view is not Stop in a shared headless workspace. The
           // explicit userStop flag also covers Stop before creation replied.
           if (route && message.userStop) await this.closeChat(route.chatId);
-          else if (!route && message.chatId && message.userStop && this.store.metadata(message.chatId)?.chat) await this.store.stop(message.chatId);
+          else if (!id && !route && message.chatId && message.userStop && this.store.metadata(message.chatId)?.chat?.agentId === message.agentId) await this.store.stop(message.chatId);
           await client.send(createMessage({ type: "AGENT_SESSION_CLOSED", source: "engine", requestId: message.id, agentId: message.agentId,
             ...(id ? { sessionId: id, executionId: id } : {}), ...(message.chatId ? { chatId: message.chatId } : {}) }));
           return;
@@ -110,15 +115,23 @@ export class Agents {
   async closeChat(chatId: string): Promise<void> {
     const route = this.chats.get(chatId);
     if (!route) return;
-    route.closed = true; route.stopping++;
-    await this.store.stop(chatId);
-    route.unsubscribe?.();
-    await route.driver?.dispose();
-    await route.opening?.catch(() => {});
-    await route.pumping;
-    await route.events;
-    this.routes.delete(route.id); this.chats.delete(chatId);
+    await this.retire(route);
+    if (this.store.metadata(chatId)?.chat) await this.store.stop(chatId, () => this.chats.get(chatId) === route);
+    if (this.chats.get(chatId) === route) this.chats.delete(chatId);
     this.activity();
+  }
+
+  private retire(route: Runtime): Promise<void> {
+    if (route.retiring) return route.retiring;
+    route.closed = true; route.stopping++; route.unsubscribe?.();
+    this.routes.delete(route.id);
+    return route.retiring = (async () => {
+      await route.driver?.dispose();
+      await route.preparing?.catch(() => {});
+      await route.opening?.catch(() => {});
+      await route.pumping;
+      await route.events;
+    })();
   }
 
   async flush(): Promise<void> {
@@ -139,6 +152,10 @@ export class Agents {
     return route;
   }
 
+  private assertCurrent(route: Runtime): void {
+    if (route.closed || this.chats.get(route.chatId) !== route) throw new WorkspaceError("session-expired", "This execution has ended. Reopen the conversation to continue.");
+  }
+
   private async open(client: AppClient, message: AgentNewSessionMessage | AgentLoadSessionMessage): Promise<void> {
     this.scope.folder(message.cwd, true); this.scope.assertId(message.workspaceId);
     if (message.type === "AGENT_NEW_SESSION" && message.agentRole === "design") throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Design is not available in cloud workspaces.");
@@ -149,28 +166,46 @@ export class Agents {
     if (!chatId) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "A conversation is required.");
     if (found && found.chatId !== chatId) throw new WorkspaceError("session-expired", "The execution belongs to a different conversation.");
     let route = this.chats.get(chatId);
-    if (!route && message.type === "AGENT_LOAD_SESSION" && message.adoptOnly) throw new WorkspaceError("session-expired", "No live execution for this conversation.");
+    if (message.type === "AGENT_LOAD_SESSION" && message.adoptOnly &&
+        (!route || route.closed || route.agentId !== agentId || (requested && route.id !== requested)))
+      throw new WorkspaceError("session-expired", "No live execution for this conversation.");
     const metadata = this.store.metadata(chatId);
     if (metadata?.chat === null || (!metadata && message.type !== "AGENT_NEW_SESSION" && !route?.preparing))
       throw new WorkspaceError("WORKSPACE_NOT_FOUND", "Cloud conversation is unavailable.");
     if (metadata?.chat) {
       this.scope.folder(metadata.chat.folder);
-      if (metadata.chat.agentId && metadata.chat.agentId !== agentId) throw new WorkspaceError("session-expired", "This conversation belongs to another agent.");
     }
-    if (!route) {
+    if ((metadata?.chat?.agentId && metadata.chat.agentId !== agentId) || (route && route.agentId !== agentId)) {
+      if (!this.store.canRebind(chatId) || (route && (route.admitting || route.active || route.nativeRunning || route.steers.size || route.cancelling || this.hasBackground(route))))
+        throw new WorkspaceError("session-expired", "This conversation belongs to another agent.");
+    }
+    if (!route || route.closed || route.agentId !== agentId) {
+      const retiring = route ? this.retire(route) : undefined;
       // Publish the route before any durable write yields. Stop by chatId
       // must find a creation even before its initial metadata is on disk.
-      route = { id: randomUUID(), chatId, agentId, model: metadata?.chat?.model ?? undefined,
-        effort: metadata?.chat?.effort || undefined,
+      route = { id: randomUUID(), chatId, agentId, admitting: 0,
         events: Promise.resolve(), stopping: 0, closed: false, waiters: new Map(), steers: new Map() };
       this.chats.set(chatId, route); this.routes.set(route.id, route);
-      if (!metadata) route.preparing = this.store.upsert({ id: chatId, folder: this.scope.root, agentId, createdAt: Date.now(), updatedAt: Date.now() });
+      const selected = route;
+      selected.preparing = (async () => {
+        await retiring;
+        const chat = await this.store.selectAgent({ id: chatId, folder: this.scope.root, agentId, agentName: NAMES[agentId],
+          // These existing open couriers carry selections only. Credentials
+          // always come from the control plane, never the caller's env.
+          model: message.env?.[MODEL_ENV[agentId]] || undefined, effort: message.env?.ZEROS_THINKING_EFFORT || undefined,
+        }, () => this.assertCurrent(selected));
+        selected.model = chat.model ?? undefined; selected.effort = chat.effort || undefined;
+      })();
     }
-    if (route.agentId !== agentId) throw new WorkspaceError("session-expired", "This conversation belongs to another agent.");
-    await route.preparing;
+    try { await route.preparing; }
+    catch (error) {
+      await this.retire(route);
+      if (this.chats.get(chatId) === route) this.chats.delete(chatId);
+      throw error;
+    }
     route.preparing = undefined;
     await this.ensureDriver(route);
-    if (route.closed) throw new WorkspaceError("session-expired", "This execution has ended.");
+    this.assertCurrent(route);
     const chat = this.store.metadata(chatId)!.chat!;
     const session = { sessionId: route.id, executionId: route.id, ...(chat.providerBinding ? { providerBinding: chat.providerBinding } : {}), ...(route.background ? { backgroundTasks: route.background } : {}) };
     if (message.type === "AGENT_NEW_SESSION") await client.send(createMessage({ type: "AGENT_SESSION_CREATED", source: "engine", requestId: message.id, agentId, session, initialize: initialized(agentId) }));
@@ -181,7 +216,7 @@ export class Agents {
   }
 
   private async ensureDriver(route: Runtime): Promise<void> {
-    if (route.closed) throw new WorkspaceError("session-expired", "This execution has ended.");
+    this.assertCurrent(route);
     if (route.opening) return route.opening;
     const login = this.config.agents[route.agentId];
     const key = JSON.stringify(login);
@@ -192,9 +227,9 @@ export class Agents {
     route.opening = (async () => {
       route.unsubscribe?.();
       await route.driver?.dispose();
-      if (route.closed) throw new WorkspaceError("session-expired", "This execution has ended.");
+      this.assertCurrent(route);
       const driver = factory();
-      route.driver = driver; route.login = key;
+      route.driver = driver; route.login = key; route.pendingNative = undefined;
       route.unsubscribe = driver.onEvent((event) => {
         if (route.closed || route.driver !== driver) return;
         const notification = { ...event, sessionId: route.id };
@@ -202,23 +237,32 @@ export class Agents {
           route.background = notification.update; this.activity();
         }
         route.events = route.events.then(async () => {
+          // A replacement must not inherit queued events from the old agent.
+          // Stop of this same execution still saves everything already received.
+          if (this.chats.get(route.chatId) !== route) return;
           if (notification.update.sessionUpdate === "provider_binding_update") {
             const binding = notification.update.providerBinding;
             if (binding.providerId !== route.agentId || binding.kind !== "native") throw new Error("Invalid native provider binding.");
+            if (this.store.canRebind(route.chatId)) { route.pendingNative = binding.resumeId; return; }
             await this.store.bind(route.chatId, route.agentId, binding.resumeId);
           }
           await this.store.fold(route.chatId, notification);
           await this.update(route, notification);
-        }).catch(async () => { await this.stop(route); });
+        }).catch(async () => { if (!route.closed) await this.stop(route); });
         if (!this.hasBackground(route) && !route.active) this.pump(route);
       });
       try {
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort,
-          nativeSessionId: this.store.metadata(route.chatId)?.nativeSessionId,
+          nativeSessionId: this.store.metadata(route.chatId)?.nativeSessionId ?? this.store.metadata(route.chatId)?.chat?.providerBinding?.resumeId,
           ...("oauthToken" in login ? { oauthToken: login.oauthToken } : "apiKey" in login
             ? { apiKey: login.apiKey } : { proxy: { baseUrl: login.baseUrl, token: login.token } }) });
         if (route.closed) { await driver.dispose(); throw new WorkspaceError("session-expired", "This execution has ended."); }
-        if (!native.provisional) await this.store.bind(route.chatId, route.agentId, native.nativeSessionId);
+        // Codex and Cursor can reserve a native session during open. Until a
+        // user turn exists it must not pin an otherwise empty chat to an agent.
+        if (!native.provisional) {
+          if (this.store.canRebind(route.chatId)) route.pendingNative = native.nativeSessionId;
+          else await this.store.bind(route.chatId, route.agentId, native.nativeSessionId);
+        }
       } catch (error) { route.unsubscribe?.(); await driver.dispose(); route.driver = undefined; throw error; }
     })();
     try { await route.opening; } finally { route.opening = undefined; }
@@ -228,17 +272,25 @@ export class Agents {
     const route = this.route(message);
     // A new Send resumes the paused inbox only after the pending Stop has a
     // terminal receipt; it must not prolong or be interrupted by that Stop.
-    await route.cancelling;
-    const { entry } = await this.store.enqueue(route.chatId, {
-      requestId: message.id, userMessageId: message.userMessageId ?? message.id, prompt: message.prompt, bubble: message.bubble,
-      startedAt: message.startedAt ?? Date.now(), promptId: message.promptId,
-    });
-    const waiter = { client, requestId: message.id };
-    if (entry.state !== "queued" && entry.state !== "running") return this.receipt(route, entry, waiter);
-    const waiters = route.waiters.get(entry.requestId) ?? [];
-    if (!waiters.some((value) => value.client === client && value.requestId === message.id)) waiters.push(waiter);
-    route.waiters.set(entry.requestId, waiters);
-    this.pump(route);
+    route.admitting++;
+    try {
+      await route.cancelling;
+      const { entry } = await this.store.enqueue(route.chatId, {
+        requestId: message.id, userMessageId: message.userMessageId ?? message.id, prompt: message.prompt, bubble: message.bubble,
+        startedAt: message.startedAt ?? Date.now(), promptId: message.promptId,
+      }, () => {
+        this.assertCurrent(route);
+        if (this.store.metadata(route.chatId)?.chat?.agentId !== route.agentId)
+          throw new WorkspaceError("session-expired", "Reopen the conversation with its selected agent before sending.");
+      });
+      this.assertCurrent(route);
+      const waiter = { client, requestId: message.id };
+      if (entry.state !== "queued" && entry.state !== "running") return this.receipt(route, entry, waiter);
+      const waiters = route.waiters.get(entry.requestId) ?? [];
+      if (!waiters.some((value) => value.client === client && value.requestId === message.id)) waiters.push(waiter);
+      route.waiters.set(entry.requestId, waiters);
+      this.pump(route);
+    } finally { route.admitting--; }
   }
 
   private pump(route: Runtime): void {
@@ -255,7 +307,15 @@ export class Agents {
         try {
           await this.ensureDriver(route);
           if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
-          else { route.nativeRunning = true; response = await route.driver!.prompt(entry.prompt); }
+          else {
+            if (route.pendingNative) {
+              await this.store.bind(route.chatId, route.agentId, route.pendingNative);
+              route.pendingNative = undefined;
+              await this.update(route, { sessionId: route.id, update: { sessionUpdate: "provider_binding_update", providerBinding: this.store.metadata(route.chatId)!.chat!.providerBinding! } });
+            }
+            if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
+            else { route.nativeRunning = true; response = await route.driver!.prompt(entry.prompt); }
+          }
         } catch (failure) { error = publicError(failure); }
         finally { route.nativeRunning = false; }
         route.settling = (async () => {
@@ -311,7 +371,8 @@ export class Agents {
   private async stop(route: Runtime): Promise<void> {
     route.stopping++;
     await route.preparing;
-    await this.store.stop(route.chatId);
+    this.assertCurrent(route);
+    await this.store.stop(route.chatId, () => !route.closed && this.chats.get(route.chatId) === route);
     await route.driver?.interrupt();
   }
 
@@ -332,7 +393,7 @@ export class Agents {
             const result: SteerReceipt = { requestId: message.id, attemptId, executionId: route.id,
               userMessageId: message.userMessageId ?? attemptId, prompt: message.prompt, bubble: message.bubble,
               createdAt: Date.now(), turnId: accepting?.userMessageId, outcome: "pending" };
-            await this.store.update(route.chatId, (draft) => { draft.steers.push(result); });
+            await this.store.update(route.chatId, (draft) => { this.assertCurrent(route); draft.steers.push(result); });
             let outcome: SteerOutcome = "queued";
             if (route.closed) outcome = "interrupted";
             else if (accepting && route.active === accepting && route.stopping === stopping && route.driver) {

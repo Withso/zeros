@@ -8,6 +8,7 @@ import type { AgentPromptBubble, SteerOutcome } from "@zeros/protocol/messages";
 import { CloudV2MessageRowSchema, type CloudV2MessageRow } from "@zeros/protocol/cloud-v2-relay";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import { coerceChat, messageWindow, upsertRows, type ChatRow, type MessageWindow } from "./chat-history";
+import { WorkspaceError } from "../workspace/scope";
 
 export interface PromptInput {
   requestId: string;
@@ -53,6 +54,11 @@ export interface SessionChange {
   /** A durable control/turn boundary must flush any pending mirrored rows. */
   flush?: true;
 }
+
+const established = (data: SessionData | undefined): boolean => !!data && !!(
+  data.nativeSessionId || data.chat?.providerBinding || data.chat?.sessionId ||
+  data.rows.length || data.inbox.length || data.steers.length
+);
 
 export function userMessage(input: PromptInput, steeredTurnId?: string): AgentTextMessage {
   const { bubble } = input;
@@ -147,6 +153,11 @@ export class SessionStore {
 
   history(chatId: string): readonly CloudV2MessageRow[] { return this.sessions.get(chatId)?.rows ?? []; }
 
+  canRebind(chatId: string): boolean {
+    const data = this.sessions.get(chatId);
+    return data?.chat !== null && !established(data);
+  }
+
   hasQueued(chatId: string): boolean {
     const value = this.sessions.get(chatId);
     return !!value?.chat && !value.paused && value.inbox.some((entry) => entry.state === "queued");
@@ -214,11 +225,31 @@ export class SessionStore {
     await this.change(chat.id, (draft) => {
       const previous = draft.chat;
       if (previous) {
-        if (draft.nativeSessionId && chat.agentId !== previous.agentId) throw new Error("This chat belongs to a different agent.");
+        if (established(draft) && chat.agentId !== previous.agentId) throw new Error("This chat belongs to a different agent.");
         draft.chat = { ...chat, createdAt: previous.createdAt, composerModeRevision: previous.composerModeRevision,
           sessionId: previous.sessionId, providerBinding: previous.providerBinding, providerMetadata: previous.providerMetadata };
       } else draft.chat = chat;
     }, chat);
+  }
+
+  /** Serialize selection with the inbox and imported history. Only untouched
+   * conversations may change provider; a queued first Send already owns it. */
+  async selectAgent(input: { id: string; folder: string; agentId: string; agentName: string; model?: string; effort?: string }, admit: () => void): Promise<ChatRow> {
+    const initial = coerceChat({ ...input, createdAt: Date.now(), updatedAt: Date.now() })!;
+    return this.change(input.id, (draft) => {
+      admit();
+      const chat = draft.chat!;
+      if (chat.agentId !== input.agentId) {
+        if (established(draft)) throw new WorkspaceError("session-expired", "This conversation belongs to another agent.");
+        chat.agentId = input.agentId; chat.agentName = input.agentName;
+        chat.model = input.model ?? null; chat.effort = input.effort ?? "";
+        chat.updatedAt = Date.now();
+      } else if (!established(draft)) {
+        if (input.model !== undefined && input.model !== chat.model) { chat.model = input.model; chat.effort = ""; }
+        if (input.effort !== undefined) chat.effort = input.effort;
+      }
+      return chat;
+    }, initial);
   }
 
   async bind(chatId: string, agentId: string, nativeSessionId: string): Promise<void> {
@@ -306,8 +337,9 @@ export class SessionStore {
     });
   }
 
-  async enqueue(chatId: string, input: PromptInput): Promise<{ entry: InboxEntry; duplicate: boolean }> {
+  async enqueue(chatId: string, input: PromptInput, admit?: () => void): Promise<{ entry: InboxEntry; duplicate: boolean }> {
     return this.change(chatId, (draft) => {
+      admit?.();
       const existing = draft.inbox.find((entry) => entry.requestId === input.requestId || entry.userMessageId === input.userMessageId);
       if (existing) {
         if (JSON.stringify(existing.prompt) !== JSON.stringify(input.prompt) || JSON.stringify(existing.bubble) !== JSON.stringify(input.bubble))
@@ -344,8 +376,9 @@ export class SessionStore {
     });
   }
 
-  async stop(chatId: string): Promise<void> {
+  async stop(chatId: string, current: () => boolean = () => true): Promise<void> {
     await this.update(chatId, (draft) => {
+      if (!current()) return;
       draft.paused = true;
       for (const entry of draft.inbox) if (entry.state === "running") entry.cancelRequested = true;
     });
