@@ -98,3 +98,20 @@ it("waits for a stubborn owned process tree after escalation without waiting for
     else expect(() => process.kill(pid, 0)).toThrow();
   } finally { controller.abort(); await result; fs.rmSync(directory, { recursive: true, force: true }); }
 });
+
+it("keeps a long-running service's output in a private log and retains the previous run's", async () => {
+  const { DevelopmentProcesses } = await import("../dev-environment/processes.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-service-log-"));
+  const logFile = path.join(directory, "control-plane.log");
+  const processes = new DevelopmentProcesses();
+  try {
+    fs.writeFileSync(logFile, "earlier run\n", { mode: 0o600 });
+    const child = processes.start("Service", process.execPath, ["-e", "console.log('service-out');console.error('service-err')"], { logFile });
+    await new Promise(resolve => child.once("exit", resolve));
+    const log = fs.readFileSync(logFile, "utf8");
+    expect(log).toContain("service-out");
+    expect(log).toContain("service-err");
+    expect(fs.statSync(logFile).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(path.join(directory, "control-plane.previous.log"), "utf8")).toBe("earlier run\n");
+  } finally { await processes.stop(); fs.rmSync(directory, { recursive: true, force: true }); }
+});

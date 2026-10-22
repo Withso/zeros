@@ -97,7 +97,9 @@ built.
 ## Data and cleanup
 
 State persists between runs under `~/.zeros-dev/environments/<owner>/`: the
-database, the derived keys and the desktop profile. Because the worker signing
+database, the derived keys and the desktop profile. Service output stays in
+private logs there: `logs/control-plane.log`, `logs/auth-web.log` and
+`logs/cloudflared.log`, with the previous run's copy as `*.previous.log`. Because the worker signing
 key derives from that state, VMs keep trusting the control plane across
 restarts. Boat sandbox, builder and snapshot names carry the checkout's owner,
 so two checkouts never share a provider resource.

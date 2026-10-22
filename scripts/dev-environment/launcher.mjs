@@ -111,10 +111,10 @@ async function start(workspace, profile) {
     await configureTunnel(workspace, profile.cloudflare, ports); signal.throwIfAborted();
     await ensureWorkosWebhook(workspace, profile); signal.throwIfAborted();
     const apiEnv = { ...env, ...backendEnvironment(workspace, profile, ports, runId) };
-    const apiCwd = path.join(root, "apps/control-plane");
+    const apiCwd = path.join(root, "apps/control-plane"), logs = privateDirectory(workspace.directory, "logs");
     processes.start("Control plane", process.execPath, watch
       ? [path.join(apiCwd, "node_modules/tsx/dist/cli.mjs"), "watch", "--clear-screen=false", "src/index.ts"]
-      : [path.join(apiCwd, "dist/index.js")], { cwd: apiCwd, env: apiEnv });
+      : [path.join(apiCwd, "dist/index.js")], { cwd: apiCwd, env: apiEnv, logFile: path.join(logs, "control-plane.log") });
     const healthy = async response => {
       if (!response.ok) return false;
       const health = await response.json();
@@ -135,10 +135,10 @@ async function start(workspace, profile) {
       "--inspector-port", "0", "--compatibility-date", "2026-07-10", "--kv", "SESSIONS",
       "--persist-to", privateDirectory(webRoot, "state"), "--log-level", "error",
       ...Object.entries(webEnvironment(workspace, profile, ports.api)).flatMap(([key, value]) => ["--binding", `${key}=${value}`]),
-    ], { cwd: webRoot, env: { ...env, WRANGLER_SEND_METRICS: "false" } });
+    ], { cwd: webRoot, env: { ...env, WRANGLER_SEND_METRICS: "false" }, logFile: path.join(logs, "auth-web.log") });
     await waitForHttp(`http://127.0.0.1:${ports.web}/`, { signal, label: "Auth web facade" });
     processes.start("Cloudflare connector", "cloudflared", ["tunnel", "--no-autoupdate", "--metrics", `127.0.0.1:${ports.tunnelMetrics}`,
-      "run", "--token-file", tunnel.tokenFile], { cwd: root, env });
+      "run", "--token-file", tunnel.tokenFile], { cwd: root, env, logFile: path.join(logs, "cloudflared.log") });
     const publicProfile = publicDevProfile(workspace, profile);
     await waitForHttp(`${publicProfile.apiOrigin}/healthz`, { signal, timeout: 120_000, accept: healthy, label: "Control plane through the tunnel" });
     await waitForDevSignIn(publicProfile, { signal, timeout: 120_000 });

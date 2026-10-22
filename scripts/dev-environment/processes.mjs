@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { spawn, execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -118,9 +119,17 @@ export class DevelopmentProcesses {
   children = new Set();
   controller = new AbortController();
   stopping = false;
-  start(label, command, args, options) {
+  start(label, command, args, { logFile, ...options }) {
     if (this.stopping) throw new Error("Development launch was cancelled");
-    const child = spawn(command, args, { ...options, stdio: options.stdio ?? "ignore" });
+    // A service's own output stays in a private log; the previous run's is kept once.
+    let log;
+    if (logFile) {
+      if (fs.existsSync(logFile)) fs.renameSync(logFile, logFile.replace(/\.log$/, ".previous.log"));
+      log = fs.openSync(logFile, "a", 0o600);
+    }
+    let child;
+    try { child = spawn(command, args, { ...options, stdio: log === undefined ? options.stdio ?? "ignore" : ["ignore", log, log] }); }
+    finally { if (log !== undefined) fs.closeSync(log); }
     this.children.add(child);
     child.once("error", () => this.controller.abort(new Error(`${label} could not start`)));
     child.once("exit", () => {
