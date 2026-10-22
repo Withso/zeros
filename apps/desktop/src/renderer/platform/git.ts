@@ -351,6 +351,9 @@ export interface PR {
   headBranch: string;
   /** Absent when connected to an older engine build. */
   headSha?: string;
+  /** owner/name of the head branch's repository: another repository for a fork
+   *  pull request, null when GitHub no longer has it, absent on older engines. */
+  headRepository?: string | null;
   mergeableState: string;
   isMergeable: boolean | null;
   /** Commits the BASE has that this PR's head doesn't (GitHub compare).

@@ -79,6 +79,17 @@ export function computerBranchBase(name: string): DispatcherBase {
     source: "github",
   };
 }
+/** The worker creates the workspace branch from origin/<head branch> of the
+ * installed repository, so only that repository's own pull requests are valid
+ * sources. Fork pull requests come later; an unknown head repository is refused. */
+export function computerPrSupported(
+  row: { headRepository?: string | null },
+  repository: { owner: string; name: string },
+): boolean {
+  return typeof row.headRepository === "string" &&
+    row.headRepository.toLowerCase() === `${repository.owner}/${repository.name}`.toLowerCase();
+}
+
 /** A cloud workspace starts at the pull request's head branch. */
 export function computerPrBase(row: { number: number; title: string; url: string; headBranch: string }): DispatcherBase {
   return {
@@ -144,7 +155,11 @@ export function CloudComputerSourcePicker({
     branches.data ?? EMPTY_BRANCHES,
     defaultBranch,
   ).filter((row) => row.name.toLowerCase().includes(q));
-  const prRows = (prs.data ?? []).filter((row) =>
+  const supportedPrs = repository
+    ? (prs.data ?? []).filter((row) => computerPrSupported(row, repository))
+    : [];
+  const hiddenForkPrs = (prs.data?.length ?? 0) - supportedPrs.length;
+  const prRows = supportedPrs.filter((row) =>
     `${row.title} ${row.headBranch} ${row.number}`.toLowerCase().includes(q),
   );
   const pick = (base: DispatcherBase) => {
@@ -310,6 +325,11 @@ export function CloudComputerSourcePicker({
                       : "No open pull requests on this repo."
                   }
                 />
+                {hiddenForkPrs > 0 && (
+                  <p className="text-fg3 px-3 pb-2 text-xs" role="note">
+                    Pull requests from forks aren't supported in cloud workspaces yet.
+                  </p>
+                )}
               </ReadState>
             </TabsContent>
           </div>

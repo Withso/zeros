@@ -210,6 +210,9 @@ export interface PR {
   headBranch: string;
   /** Exact PR head generation from GitHub. */
   headSha?: string;
+  /** owner/name of the head branch's repository; differs from the base for a
+   *  fork pull request and is null when GitHub no longer has that repository. */
+  headRepository?: string | null;
   /** "clean" | "dirty" | "blocked" | "unknown" — mirrors Octokit's
    *  pulls.get(mergeable_state). */
   mergeableState: string;

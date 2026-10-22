@@ -91,7 +91,7 @@ interface PrPayload {
   body: string | null;
   user: { login: string } | null;
   base: { ref: string };
-  head: { ref: string; label: string; sha: string };
+  head: { ref: string; label: string; sha: string; repo?: { full_name: string } | null };
   mergeable?: boolean | null;
   mergeable_state?: string;
   created_at: string;
@@ -157,6 +157,7 @@ function makeOctokitMock() {
             ref: args.head,
             label: `test-user:${args.head}`,
             sha: "a".repeat(40),
+            repo: { full_name: "Acme/example" },
           },
           mergeable: true,
           mergeable_state: "clean",
@@ -819,6 +820,7 @@ describe("github", () => {
       );
       expect(pr.baseBranch).toBe(ws.baseBranch);
       expect(pr.headBranch).toBe(ws.branch);
+      expect(pr.headRepository).toBe("Acme/example");
 
       const refreshed = getWorkspace(workspaceId);
       expect(refreshed.status).toBe("in-review");

@@ -1120,7 +1120,7 @@ function octoPrToPr(p: {
   body: string | null;
   user: { login: string } | null;
   base: { ref: string };
-  head: { ref: string; sha: string };
+  head: { ref: string; sha: string; repo?: { full_name?: string | null } | null };
   mergeable?: boolean | null;
   mergeable_state?: string;
   created_at: string;
@@ -1143,6 +1143,7 @@ function octoPrToPr(p: {
     baseBranch: p.base.ref,
     headBranch: p.head.ref,
     headSha: p.head.sha,
+    headRepository: p.head.repo?.full_name ?? null,
     mergeableState: p.mergeable_state ?? "unknown",
     isMergeable: p.mergeable ?? null,
     createdAt: new Date(p.created_at).getTime(),
