@@ -136,9 +136,11 @@ export const CloudV2ConnectSchema = z.object({
   protocols: z.tuple([z.literal("zeros.cloud.v2"), z.string().regex(/^ticket\.zw2c_[A-Za-z0-9_-]{43}$/)]),
   expiresAt: z.string(),
 });
-export async function connectCloudV2Workspace(target: CloudWorkspaceTarget) {
+/** `wake: false` asks for a ticket that leaves a stopped VM stopped. Explicit
+ * work sent over the bridge still starts it. */
+export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, options: { wake: boolean }) {
   return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect`, CloudV2ConnectSchema,
-    { body: {}, idempotencyKey: key() });
+    { body: { wake: options.wake }, idempotencyKey: key() });
 }
 
 /** Chat history from the control plane's mirror, readable while the VM sleeps. */

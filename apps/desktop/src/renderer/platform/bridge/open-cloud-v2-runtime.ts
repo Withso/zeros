@@ -12,8 +12,8 @@ import { bridgeWorkspaceList } from "./workspace-bridge";
 
 const CONNECT_TIMEOUT_MS = 3 * 60_000;
 
-async function ticketTarget(target: CloudWorkspaceTarget, sequence: number): Promise<CloudV2ConnectionTarget> {
-  const ticket = await connectCloudV2Workspace(target);
+async function ticketTarget(target: CloudWorkspaceTarget, sequence: number, wake: boolean): Promise<CloudV2ConnectionTarget> {
+  const ticket = await connectCloudV2Workspace(target, { wake });
   return {
     kind: "cloud",
     channel: "v2-websocket",
@@ -59,11 +59,13 @@ export async function openCloudV2Runtime(
     if (account !== cloudCatalogGeneration()) throw new Error("Cloud account changed while connecting");
   };
   let sequence = 1;
-  const client = new RuntimeClient(await ticketTarget(target, sequence), {
-    // Each reconnect presents a fresh ticket; the relay wakes a stopped VM.
+  const client = new RuntimeClient(await ticketTarget(target, sequence, options?.wake === true), {
+    // Each reconnect presents a fresh ticket. A reconnect after a laptop wake,
+    // network drop or control-plane deploy is not explicit work, so it never
+    // restarts a VM that stopped meanwhile; queued work over the bridge does.
     refreshCloudConnectionTarget: async () => {
       assertAccount();
-      return ticketTarget(target, ++sequence);
+      return ticketTarget(target, ++sequence, false);
     },
   });
   try {
