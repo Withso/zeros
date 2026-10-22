@@ -146,6 +146,23 @@ describe("Design catalog service authority", () => {
       ).toBe(before);
     },
   );
+  it("requires server connection authority and rejects an unqualified remote read", async () => {
+    insert(root);
+    await expect(
+      service.handle(DESIGN_CATALOG_READ_OPERATION, params),
+    ).rejects.toThrow(/connection/);
+    expect(
+      await service.handle(DESIGN_CATALOG_READ_OPERATION, params, {
+        catalogAdmission: { ...admission, authorized: () => false },
+      }),
+    ).toMatchObject({ reason: "authority-lost" });
+    await expect(
+      service.handle(DESIGN_CATALOG_READ_OPERATION, params, {
+        remote: true,
+        catalogAdmission: admission,
+      }),
+    ).rejects.toThrow();
+  });
   it("revalidates root replacement and catalog revision on continuation", async () => {
     insert(root);
     const first = designCatalogReplySchema.parse(
