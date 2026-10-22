@@ -53,8 +53,9 @@ for limits and the closed error codes.
 
 ## Live cloud checks on Alpha
 
-Cloud workspaces run one Boat VM each, with a dial-out worker behind the
-control-plane relay. Before a live run, run the offline suites:
+Cloud workspaces run one Boat VM each. The control plane connects in to the
+worker through a protected Boat port route; the worker keeps outbound HTTPS for
+history, activity and credentials. Before a live run, run the offline suites:
 
 - `apps/cloud-worker` (`pnpm --dir apps/cloud-worker test`);
 - `pnpm test:control-plane`, with real PostgreSQL for store tests;

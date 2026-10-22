@@ -11,7 +11,7 @@ Only the workspace creator can list, connect to or manage it, and they must
 still belong to that organization. Organization admins manage the shared
 Cloud Computer; ordinary members can read its installed repository list.
 
-## VM, relay and runtime
+## VM, connections and runtime
 
 The worker and native Claude, Codex and Cursor drivers run as Boat's stock
 `user`, with Node 24 and checkouts at `/home/user/<owner>/<name>`. Agents have
@@ -19,28 +19,47 @@ full permissions inside the VM. The VM is the isolation boundary; session
 directories and environment allowlists do not isolate conversations from one
 another. The worker never imports the Local engine runtime.
 
-The worker dials out to `/v2/cloud/worker`; the app obtains a short-lived
-connection ticket through `/v1/cloud-v2/workspaces/:id/connect`. The control
-plane relays existing bridge frames with a client identity. Multiple app
-connections can attach, and losing an app connection does not stop a turn.
-No inbound VM port is needed. The worker validates bridge messages; the
-renderer translates native checkout paths and IDs into scoped `cloud://`
-identities. A worker `workspace.list` row uses native paths and the workspace
-UUID, not the HTTP workspace document shape.
+The worker listens only on `127.0.0.1:41783`. On create and on every wake,
+the control plane registers that port with Boat as a protected route
+(`POST /sandboxes/{id}/host` with `localhost: true`). Boat serves it at
+`https://<subdomain>-41783.on.boat.dev` and refuses any request without the
+route's `_port_auth` cookie. The control plane stores the route URL and the
+envelope-encrypted route token; neither appears in workspace documents or
+reaches the Mac.
 
-Relay routing is held in memory: a worker socket and every app socket for its
-workspace must reach the same control-plane process. Run the realtime role as
-exactly one replica. Scaling it out first needs workspace affinity or a shared
-routing layer; the API and lifecycle roles scale independently.
+The app obtains a short-lived connection ticket through
+`/v1/cloud-v2/workspaces/:id/connect` and opens
+`/v2/cloud/workspaces/:id/bridge` on the control plane, as before. The control
+plane connects in to the worker's `/v2/worker/bridge` through the Boat route
+and relays existing bridge frames with a client identity. Before upgrading,
+the worker verifies a single-use Ed25519 grant in `X-Zeros-Worker-Auth`, signed
+by the control plane for this workspace and this worker boot and valid for at
+most 60 seconds. Anything in the VM can read the route token, so the grant, not
+the cookie, is the authority. Any control-plane replica can serve any
+workspace: each dials the worker while it has app clients, so the realtime
+role needs no app affinity. Multiple app connections can attach, and losing
+one does not stop a turn. The control plane never dials a stopped workspace;
+Boat's route hangs rather than refusing while the VM sleeps.
+
+The worker keeps outbound HTTPS to the control plane under
+`/v2/cloud/worker/*` for work that continues without an attached app: `hello`
+and configuration, the history mirror, activity reports and GitHub
+installation tokens. Each request carries the worker credential and the
+worker's boot identity; history batches are sequenced per boot so a retried
+batch is a no-op. A renderer `workspace.list` row from the worker uses native
+paths and the workspace UUID, not the HTTP workspace document shape; the
+renderer translates native checkout paths and IDs into scoped `cloud://`
+identities.
 
 On create and wake, the control plane installs its selected runtime tarball
 from object storage, verifies its SHA-256 and caches it under
 `/opt/zeros/runtime/<sha256>`. `/opt/zeros/worker` points to that directory.
 The runtime is root-owned; `zeros-worker.service` runs `worker.mjs` as `user`.
-The control plane delivers the worker credential to
-`/home/user/.config/zeros/worker-token` with mode `0600`. The worker rereads it
-on every connection attempt. Checkout and provider configuration arrive over
-the authenticated relay after `hello`.
+The same step writes the control plane's public verification keys to
+root-owned `/opt/zeros/worker-auth.json`. Every wake rotates the worker
+credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
+restarts the worker, which registers a new boot identity in `hello` before the
+control plane dials it. The worker rereads the credential on every request.
 
 Each organization has one Cloud Computer: a recipe and an active named snapshot.
 A build starts from Boat's stock image, installs the runtime, clones the
@@ -90,9 +109,10 @@ The control plane reads these names in
 
 | Environment variable | Purpose |
 | --- | --- |
-| `CLOUD_V2_ENABLED` | Enables the v2 routes, relay and lifecycle roles. |
+| `CLOUD_V2_ENABLED` | Enables the v2 routes, the app bridge relay and lifecycle roles. |
 | `BOAT_API_KEY`, optional `BOAT_BILLING_ORG` | Boat provisioning and billing. |
-| `CLOUD_V2_API_URL`, `CLOUD_V2_REALTIME_URL` | Public HTTPS API and WSS relay origins. |
+| `CLOUD_V2_API_URL`, `CLOUD_V2_REALTIME_URL` | Public HTTPS API (also the worker's outbound origin) and the app's WSS bridge origin. |
+| `CLOUD_V2_WORKER_SIGNING_KEY`, optional `CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS` | Ed25519 PKCS#8 private key (base64 DER) that signs worker grants. VMs trust both public keys after their next create or wake, so a rotation keeps the previous key until every running VM has woken with the new trust file. |
 | `CLOUD_V2_RUNTIME_SHA256` | Published runtime archive digest. |
 | `CLOUD_V2_RUNTIME_STORE_ENDPOINT`, `CLOUD_V2_RUNTIME_STORE_BUCKET` | Runtime object storage. |
 | `CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID`, `CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY` | Server-side storage credentials. |
@@ -105,15 +125,17 @@ required. Agent vault keys retain their persisted deployment names:
 `CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION`. Keep old key versions
 available to decrypt existing records.
 
-The worker receives only the non-secret boot settings `ZEROS_WORKER_URL` and
-`ZEROS_WORKSPACE_ID` in its `worker.env`; its credential comes from the token
-file. The Dev hosted-profile launcher takes `ZEROS_CLOUD_V2_RUNTIME_SHA256`
-and maps it to the control-plane runtime pin.
+The worker receives only the non-secret boot settings `CLOUD_V2_API_URL`,
+`CLOUD_V2_RUNTIME_SHA256` and `ZEROS_WORKSPACE_ID` in its `worker.env`; its
+credential comes from the token file. The Dev hosted-profile launcher takes
+`ZEROS_CLOUD_V2_RUNTIME_SHA256` and maps it to the control-plane runtime pin,
+and derives each Dev generation's worker signing key.
 
 `pnpm --filter @zeros/cloud-worker build` produces a self-contained `dist/`.
 `pnpm --dir apps/control-plane cloud-v2:publish-runtime` builds, packages and
 uploads it from a clean Linux x64 checkout. Set the returned archive digest
 in the target deployment. Publishing an archive alone does not change running
 workspaces; create and wake apply the
-configured pin. Tests use fake relays and native provider streams; live
-verification must also cover stop, offline history, wake and deletion.
+configured pin. Tests use fake worker connections and native provider streams;
+live verification must also cover the private route, stop, offline history, wake
+and deletion.

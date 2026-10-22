@@ -120,6 +120,7 @@ performed by this code.
 ## Cloud capability boundary
 
 Cloud v2 hides Design, browser and simulators. Terminal, file and Git operations
-use the worker relay; the retired preview grants, SSH access broker and desktop
+go through the control plane's connection into the worker; the retired preview
+grants, SSH access broker and desktop
 port-forwarding runtime are removed. Local browser and preview behavior stays
 with the Local engine. See [Cloud workspaces](cloud-workspaces.md).

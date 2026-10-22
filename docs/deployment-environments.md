@@ -437,7 +437,8 @@ engine and Electron compile steps; each artifact bakes it, and Electron pins
 the child environment to the same decision. Leave it unset or set it to `false`
 until the channel is approved. Enabling only the backend does not activate a
 desktop client, and enabling only the desktop does not bypass backend admission.
-Cloud v2 uses the worker relay for agents, files, Git and terminals. Design,
+Cloud v2 relays agents, files, Git and terminals through the control plane's
+connection into each worker. Design,
 browser, simulators, old preview grants and SSH gateway configuration are not
 part of this release path.
 

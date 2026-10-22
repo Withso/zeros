@@ -58,8 +58,11 @@ These instructions apply to the entire repository. Read and follow
 
 Each cloud workspace has one Boat VM. Its standalone worker, agents, tools and
 terminals run as the stock non-root user `user`, in `/home/user/<owner>/<name>`,
-with full permissions inside the VM. The worker dials out to the control-plane
-relay and never imports the Local engine runtime. The VM is the isolation
+with full permissions inside the VM. The control plane connects in to the
+worker through Boat's protected port route; the worker listens on loopback
+only, checks a short-lived grant the control plane signs, keeps outbound HTTPS
+for history, activity and credentials, and never imports the Local engine
+runtime. The VM is the isolation
 boundary; session directories and child environment allowlists do not isolate
 agents from other sessions or credentials delivered to that VM. Claude and
 Cursor receive their selected credentials; Codex uses the control-plane proxy.
