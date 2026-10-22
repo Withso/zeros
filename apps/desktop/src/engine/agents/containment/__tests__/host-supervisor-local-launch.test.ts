@@ -85,11 +85,15 @@ async function localLaunch() {
     const order = await readFile(path.join(directory, "order.log"), "utf8").catch(() => "");
     return { exit, stdout, stderr, order, supervisorPid, targetArgs, targetEnv, directory };
   } finally {
-    if (child?.pid && child.exitCode === null && child.signalCode === null) {
-      try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
-    }
+    retire(child);
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+/** Kill only this fixture's own supervisor group if it is still running. */
+function retire(child: ReturnType<typeof spawn> | undefined) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
 }
 
 describe.runIf(process.platform === "linux")("actual Local Host supervisor", () => {
