@@ -11,6 +11,7 @@ import { seedLocalFixture } from "../../../../scripts/dev-environment/local-fixt
 import { drainLocalCloudResources } from "../../../../scripts/dev-environment/local-cleanup.mjs";
 import { inventoryLocalWorkspaces } from "../../../../scripts/dev-environment/database.mjs";
 import { cloudV2SandboxName, cloudV2SnapshotName } from "./resource-names.js";
+import { manageStaffRole, validateStaffRoleRequest } from "../manage-staff.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const owner = "a".repeat(24), instanceId = "11111111-1111-4111-8111-111111111111";
@@ -52,7 +53,7 @@ database("electron:cloud seed and confirmed resource drain", () => {
   function seedRequest() {
     const fixture = bindFixture({}, { workosUserId: "user_localfixture", workosOrganizationId: "org_localfixture",
       expectedEmail: "local-fixture@example.test", expectedOrganizationSlug: "local-fixture", computeAllowance: "pro-monthly", bootstrapOrganization: true });
-    return { owner, instanceId, fixture, encryptionKey,
+    return { owner, instanceId, fixture, encryptionKey, migrationUrl: process.env.TEST_DATABASE_URL!,
       fixtureProof: { userId: fixture.workosUserId, email: fixture.expectedEmail, organizationId: fixture.workosOrganizationId,
         externalId: organizationId, name: "Local fixture", membershipId: "om_localfixture", membershipUpdatedAt: new Date().toISOString(), verifiedAt: Date.now() },
       githubProof: { installationId: 123, appId: 456, repository: "example/project", accountLogin: "example", accountType: "Organization",
@@ -64,7 +65,8 @@ database("electron:cloud seed and confirmed resource drain", () => {
       ],
     };
   }
-  const seed = (request = seedRequest()) => seedLocalFixture({ runtime, migration: pool, withSystemTx, request, vault, models: cloudAgentModels });
+  const seed = (request = seedRequest()) => seedLocalFixture({ runtime, migration: pool, withSystemTx, request, vault, models: cloudAgentModels,
+    staff: { manageStaffRole, validateStaffRoleRequest } });
   const signIn = () => ensureUser(pool, { provider: "workos", providerSubject: "user_localfixture", email: "local-fixture@example.test", displayName: "Fixture" });
 
   it("waits for normal sign-in, then seeds an idempotent bounded fixture through the real vault", async () => {
@@ -72,7 +74,7 @@ database("electron:cloud seed and confirmed resource drain", () => {
     await expect(seed(request)).resolves.toEqual({ seeded: false, needsSignIn: true });
     expect((await pool.query("SELECT count(*)::int AS n FROM users")).rows[0].n).toBe(0);
     const user = await signIn();
-    const result = { seeded: true, userId: user.id, organizationId, providers: ["claude", "codex", "cursor"] };
+    const result = { seeded: true, userId: user.id, organizationId, providers: ["claude", "codex", "cursor"], staffRole: "developer" };
     await expect(seed(request)).resolves.toEqual(result);
     const first = await vault.organizationConnections(user.id, organizationId);
     expect(first.connections).toHaveLength(3);
@@ -86,12 +88,43 @@ database("electron:cloud seed and confirmed resource drain", () => {
     expect((await pool.query("SELECT role,workos_membership_id FROM organization_members WHERE org_id=$1", [organizationId])).rows).toEqual([{ role: "owner", workos_membership_id: "om_localfixture" }]);
     expect((await pool.query("SELECT count(*)::int AS n FROM teams WHERE org_id=$1", [organizationId])).rows[0].n).toBe(1);
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_github_connections WHERE org_id=$1", [organizationId])).rows[0].n).toBe(1);
-    expect((await pool.query("SELECT staff_role FROM users WHERE id=$1", [user.id])).rows[0].staff_role).toBeNull();
+    expect((await pool.query("SELECT staff_role FROM users WHERE id=$1", [user.id])).rows[0].staff_role).toBe("developer");
+    expect((await pool.query("SELECT next_role,deployment_channel,actor_user_id FROM staff_role_changes WHERE subject_user_id=$1", [user.id])).rows)
+      .toEqual([{ next_role: "developer", deployment_channel: "development", actor_user_id: user.id }]);
+    expect((await pool.query("SELECT count(*)::int AS n FROM security_events WHERE user_id=$1 AND payload->>'reason'='staff_role_changed'", [user.id])).rows[0].n).toBe(1);
     expect((await pool.query("SELECT valid_until FROM account_entitlements WHERE user_id=$1", [user.id])).rows[0].valid_until.toISOString()).toBe(request.fixture.endsAt);
     const connection = first.connections.find(row => row.provider === "claude")!;
     await vault.setOrganizationConnection(user.id, organizationId, "claude", { expectedRevision: connection.revision, credentialId: null });
     await seed(request);
     expect((await vault.organizationConnections(user.id, organizationId)).connections.find(row => row.provider === "claude")?.credentialId).toBeNull();
+  });
+
+  it("refuses staff seeding for a remote target or another instance and leaves other users unchanged", async () => {
+    const user = await signIn();
+    const other = await ensureUser(pool, { provider: "workos", providerSubject: "user_otherfixture", email: "other@example.test", displayName: "Other" });
+    const request = seedRequest(), remote = new URL(request.migrationUrl); remote.hostname = "alpha.example.test";
+    await expect(seed({ ...request, migrationUrl: remote.toString() })).rejects.toThrow(/local|loopback/i);
+    const otherDatabase = new URL(request.migrationUrl); otherDatabase.pathname = "/different";
+    await expect(seed({ ...request, migrationUrl: otherDatabase.toString() })).rejects.toThrow(/target/i);
+    await pool.query("UPDATE zeros_cloud_local_identity SET instance_id=$1", [randomUUID()]);
+    await expect(seed(request)).rejects.toThrow(/instance/i);
+    expect((await pool.query("SELECT count(*)::int AS n FROM staff_role_changes")).rows[0].n).toBe(0);
+    await pool.query("UPDATE zeros_cloud_local_identity SET instance_id=$1", [instanceId]);
+    await seed(request);
+    expect((await pool.query("SELECT staff_role FROM users WHERE id=$1", [other.id])).rows[0].staff_role).toBeNull();
+    expect((await pool.query("SELECT staff_role FROM users WHERE id=$1", [user.id])).rows[0].staff_role).toBe("developer");
+  });
+
+  it("keeps a fixture's explicitly granted platform owner role", async () => {
+    const user = await signIn(), request = seedRequest();
+    await seed(request);
+    const input = { databaseUrl: request.migrationUrl, channel: "development", execute: false,
+      subjectUserId: user.id, expectedEmail: request.fixture.expectedEmail, actorUserId: user.id,
+      nextRole: "platform_owner", reason: "Explicit local fixture owner authority" };
+    const plan = await manageStaffRole(pool, validateStaffRoleRequest(input));
+    await manageStaffRole(pool, validateStaffRoleRequest({ ...input, execute: true, approval: plan.approval! }));
+    await expect(seed(request)).resolves.toMatchObject({ staffRole: "platform_owner" });
+    expect((await pool.query("SELECT count(*)::int AS n FROM staff_role_changes WHERE subject_user_id=$1", [user.id])).rows[0].n).toBe(2);
   });
 
   it("refuses expired provider proofs and conflicting local ownership", async () => {

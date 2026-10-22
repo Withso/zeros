@@ -10,6 +10,36 @@ const uuid = value => {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
 
+export async function assertLocalDatabaseOwner(pool, request) {
+  const { rows } = await pool.query("SELECT owner,instance_id FROM public.zeros_cloud_local_identity");
+  if (rows.length !== 1 || rows[0].owner !== request.owner || rows[0].instance_id !== request.instanceId)
+    throw new Error("The local database belongs to another instance; existing resources were preserved");
+}
+
+async function assertLocalStaffTarget(migration, request) {
+  let target;
+  try { target = new URL(request.migrationUrl); } catch { /* Refuse without echoing a connection string. */ }
+  if (!target || !["postgres:", "postgresql:"].includes(target.protocol) || target.hostname !== "127.0.0.1")
+    throw new Error("The local staff seed requires a loopback database");
+  await assertLocalDatabaseOwner(migration, request);
+  const { rows } = await migration.query("SELECT current_database() AS database,host(inet_server_addr()) AS address,inet_server_port() AS port");
+  if (rows[0]?.database !== decodeURIComponent(target.pathname.slice(1)) || rows[0]?.address !== "127.0.0.1" ||
+      rows[0]?.port !== Number(target.port || 5432)) throw new Error("The local staff seed database does not match its target");
+}
+
+async function grantLocalStaff(migration, request, userId, organizationId, staff) {
+  const input = { databaseUrl: request.migrationUrl, channel: "development", execute: false,
+    subjectUserId: userId, expectedEmail: request.fixture.expectedEmail, actorUserId: userId,
+    nextRole: "developer", ownerOrganizationId: organizationId,
+    reason: `Isolated electron:cloud fixture for instance ${request.instanceId}` };
+  const plan = await staff.manageStaffRole(migration, staff.validateStaffRoleRequest(input));
+  // Preserve a stronger role explicitly granted by this instance's operator.
+  if (plan.previousRole === "platform_owner") return "platform_owner";
+  if (plan.state !== "unchanged") await staff.manageStaffRole(migration,
+    staff.validateStaffRoleRequest({ ...input, execute: true, approval: plan.approval }));
+  return "developer";
+}
+
 /** Read-only proof that this Alpha App installation includes the selected
  * repository. The App key never leaves the caller or enters the local DB. */
 export async function verifyLocalGithub({ installationId, repository, appId }, request) {
@@ -42,8 +72,8 @@ async function grantLocalPro(migration, { userId, fixture, source }) {
     await client.query("BEGIN; SELECT set_config('app.system','on',true)");
     const authority = await client.query("SELECT current_user=pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid='public.account_entitlements'::regclass");
     if (authority.rows[0]?.owner !== true) throw new Error("Local fixture requires the database migration owner");
-    // A bounded test entitlement in this isolated database, without a staff
-    // role or a billing/provider write. Repeated seed never extends its period.
+    // A bounded test entitlement in this isolated database, without a
+    // billing/provider write. Repeated seed never extends its period.
     await client.query(`INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source,source_reference,valid_from,valid_until)
       VALUES($1,'pro','active',true,'operator',$2,$3,$4) ON CONFLICT(user_id) DO NOTHING`,
     [userId, source, fixture.startsAt, fixture.endsAt]);
@@ -57,7 +87,9 @@ async function grantLocalPro(migration, { userId, fixture, source }) {
 /** Called only after database.mjs proves the local DB's owner/instance marker.
  * WorkOS identity must already exist from normal sign-in. Material enters the
  * same validated, encrypted vault API that Settings uses, never raw SQL. */
-export async function seedLocalFixture({ runtime, migration, withSystemTx, request, vault, models }) {
+export async function seedLocalFixture({ runtime, migration, withSystemTx, request, vault, models, staff }) {
+  await assertLocalStaffTarget(migration, request);
+  await assertLocalDatabaseOwner(runtime, request);
   const { fixture, fixtureProof: proof, githubProof: github } = request;
   if (fixtureIssues(fixture).length || fixture?.bootstrapOrganization !== true || fixture.computeAllowance !== "pro-monthly" ||
       !/^[a-f0-9]{24}$/.test(request.owner ?? "") || !UUID.test(request.instanceId ?? "") ||
@@ -77,6 +109,7 @@ export async function seedLocalFixture({ runtime, migration, withSystemTx, reque
   [fixture.workosUserId, proof.externalId, fixture.expectedEmail.toLowerCase()])).rows[0]);
   if (!row) throw new Error("The local signed-in identity changed; seed stopped");
   const userId = row.user_id, organizationId = proof.externalId;
+  const staffRole = await grantLocalStaff(migration, request, userId, organizationId, staff);
   await grantLocalPro(migration, { userId, fixture, source: `cloud-local:${request.owner}:${request.instanceId}` });
   await withSystemTx(runtime, async tx => {
     const installation = await tx.query(`INSERT INTO github_installations(github_installation_id,app_variant,owner_user_id,
@@ -111,5 +144,5 @@ export async function seedLocalFixture({ runtime, migration, withSystemTx, reque
     }
     providers.push(provider);
   }
-  return { seeded: true, userId, organizationId, providers };
+  return { seeded: true, userId, organizationId, providers, staffRole };
 }

@@ -81,7 +81,11 @@ file watching.
 
 On its first healthy start, the stack seeds its database once: the verified
 WorkOS test user and organization, the Alpha GitHub installation and test
-repository, and the test agent keys through the vault. Without
+repository, and the test agent keys through the vault. The exact fixture user
+also receives the `developer` staff role through the audited staff-management
+path, enabling Settings' Internal tab in this local database. Existing fixture
+receipts are upgraded once on the next start; a stronger staff role is kept.
+Alpha's database is never changed. Without
 `ZEROS_DEV_PASSWORD`, sign in to the app first and then run `--seed`. A missing
 input is reported without stopping the stack.
 
