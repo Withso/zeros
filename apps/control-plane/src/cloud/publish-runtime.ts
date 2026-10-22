@@ -1,18 +1,17 @@
-// Builds the cloud worker runtime, packs it and stores it under its sha256,
-// then prints the CLOUD_V2_RUNTIME_SHA256 the control plane should run.
+// Publishes a Linux x64 worker archive under its sha256. Without --artifact,
+// builds first (native Linux Node 24, or an isolated Docker build on a Mac).
 //
 //   pnpm --dir apps/control-plane cloud-v2:publish-runtime
 //
-// Runs on Linux x64, the platform of Boat VMs, from a clean checkout. The
 // store comes from CLOUD_V2_RUNTIME_STORE_{ENDPOINT,BUCKET,ACCESS_KEY_ID,SECRET_ACCESS_KEY}.
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { createReadStream, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, copyFileSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pipeline } from "node:stream/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
 import { HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { cloudV2RuntimeKey } from "./runtime.js";
+import { inspectRuntimeArchive } from "./runtime-artifact.js";
 
 const root = resolve(import.meta.dirname, "../../../..");
 const required = (name: string) => {
@@ -22,35 +21,44 @@ const required = (name: string) => {
 };
 
 async function main() {
-  if (process.platform !== "linux" || process.arch !== "x64") throw new Error("Publish the runtime on Linux x64, the platform Boat VMs run");
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
-  if (git("status", "--porcelain", "--", "apps/cloud-worker", "packages/protocol") && !process.argv.includes("--allow-dirty"))
-    throw new Error("The worker or protocol has uncommitted changes; commit them or pass --allow-dirty");
-  execFileSync("pnpm", ["--filter", "@zeros/cloud-worker", "build"], { cwd: root, stdio: "inherit" });
-  const dist = join(root, "apps/cloud-worker/dist");
-  writeFileSync(join(dist, "BUILD.json"), `${JSON.stringify({ commit: git("rev-parse", "HEAD"), builtAt: new Date().toISOString() })}\n`);
-
+  const { values } = parseArgs({ options: { artifact: { type: "string" }, docker: { type: "boolean" }, "allow-dirty": { type: "boolean" }, help: { type: "boolean" } } });
+  if (values.help) {
+    console.log("cloud-v2:publish-runtime [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. Uses CLOUD_V2_RUNTIME_STORE_*; the SHA pin and immutable runtime key are unchanged.");
+    return;
+  }
+  if (values.artifact && (values.docker || values["allow-dirty"])) throw new Error("Choose either an existing artifact or build options");
+  const store = { region: "auto", endpoint: required("CLOUD_V2_RUNTIME_STORE_ENDPOINT"), forcePathStyle: true,
+    credentials: { accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY") } };
+  const bucket = required("CLOUD_V2_RUNTIME_STORE_BUCKET");
   const work = mkdtempSync(join(tmpdir(), "zeros-runtime-"));
+  let client: S3Client | undefined;
   try {
     const archive = join(work, "runtime.tar.gz");
-    execFileSync("tar", ["--sort=name", "--owner=0", "--group=0", "--numeric-owner", "-czf", archive, "-C", dist, "."]);
-    const hash = createHash("sha256");
-    await pipeline(createReadStream(archive), hash);
-    const sha256 = hash.digest("hex");
-    const client = new S3Client({
-      region: "auto", endpoint: required("CLOUD_V2_RUNTIME_STORE_ENDPOINT"), forcePathStyle: true,
-      credentials: { accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY") },
-    });
-    const target = { Bucket: required("CLOUD_V2_RUNTIME_STORE_BUCKET"), Key: cloudV2RuntimeKey(sha256) };
+    if (values.artifact) {
+      const source = lstatSync(values.artifact);
+      if (!source.isFile() || source.isSymbolicLink()) throw new Error("Runtime archive must be a regular file");
+      // Hash and upload the same private copy even if the caller replaces
+      // their original archive while storage is being contacted.
+      copyFileSync(values.artifact, archive);
+    } else {
+      const { packageRuntime } = await import(pathToFileURL(join(root, "apps/cloud-worker/scripts/package-runtime.mjs")).href);
+      await packageRuntime({ repository: root, output: archive, docker: values.docker, allowDirty: values["allow-dirty"] });
+    }
+    const { sha256, bytes } = await inspectRuntimeArchive(archive);
+    client = new S3Client(store);
+    const target = { Bucket: bucket, Key: cloudV2RuntimeKey(sha256) };
     const stored = await client.send(new HeadObjectCommand(target)).then(() => true, () => false);
     if (!stored) await client.send(new PutObjectCommand({
-      ...target, Body: createReadStream(archive), ContentLength: statSync(archive).size, ContentType: "application/gzip",
+      ...target, Body: createReadStream(archive), ContentLength: bytes, ContentType: "application/gzip",
     }));
-    console.log(`${stored ? "already stored" : "stored"} ${(statSync(archive).size / 1e6).toFixed(0)} MB`);
+    console.log(`${stored ? "already stored" : "stored"} ${(bytes / 1e6).toFixed(0)} MB`);
     console.log(`CLOUD_V2_RUNTIME_SHA256=${sha256}`);
   } finally {
+    client?.destroy();
     rmSync(work, { recursive: true, force: true });
   }
 }
 
-main().catch(error => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(() => { console.error("Runtime publication failed; check the Linux archive/build and CLOUD_V2_RUNTIME_STORE_* configuration. No new pin was emitted."); process.exitCode = 1; });
+}
