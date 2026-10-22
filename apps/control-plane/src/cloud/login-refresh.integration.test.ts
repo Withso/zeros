@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import pg from "pg";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { Hono } from "hono";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../config.js";
@@ -12,13 +12,15 @@ import { seedCredentialOwner } from "../agent-credentials/test-fixtures.js";
 import { DatabaseCloudAgentCredentialService } from "../agent-credentials/agent-credentials.js";
 import { createCloudAgentCredentialRoutes } from "../agent-credentials/agent-credential-routes.js";
 import { createCloudV2 } from "./composition.js";
+import { sealPortToken } from "./worker-port-token.js";
+import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const key = Buffer.alloc(32, 7).toString("base64url");
 const token = (name: string) => `synthetic-setup-token-${name}`;
 suite("Settings changes reach connected cloud workers", () => {
   let pool: pg.Pool, listener: pg.Pool, runtime: NonNullable<ReturnType<typeof createCloudV2>>;
-  let server: Server, worker: WebSocket, settings: Hono, owner: Awaited<ReturnType<typeof seedCredentialOwner>>;
+  let server: Server, workerServer: WebSocketServer, app: WebSocket, worker: WebSocket, settings: Hono, owner: Awaited<ReturnType<typeof seedCredentialOwner>>;
   let workspaceId: string;
   let frames: { t: string; agents?: { claude?: { oauthToken: string } } }[];
   beforeAll(() => {
@@ -36,6 +38,7 @@ suite("Settings changes reach connected cloud workers", () => {
     settings.route("/", createCloudAgentCredentialRoutes(service));
     runtime = createCloudV2({ deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: key }, cloudV2: {
       boat: { apiKey: "synthetic-boat-key-never-used" }, apiUrl: "https://example.test", realtimeUrl: "wss://example.test",
+      workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
       runtime: { sha256: "b".repeat(64), store: { endpoint: "https://storage.example.test", bucket: "test", accessKeyId: "fixture", secretAccessKey: "fixture" } },
     } } as Config, pool, { relay: true, lifecycle: false }, undefined, listener)!;
     await runtime.loginChanges?.start();
@@ -43,20 +46,25 @@ suite("Settings changes reach connected cloud workers", () => {
       repository: "example/project", branch: "zeros/test", baseBranch: "main", name: "Test", computerBuildId: null });
     workspaceId = workspace.id;
     const workerToken = await runtime.store.rotateWorkerToken(workspace.id);
+    workerServer = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2.worker" });
+    await new Promise<void>(resolve => workerServer.once("listening", resolve));
+    frames = [];
+    workerServer.on("connection", socket => { worker = socket; socket.on("message", raw => frames.push(JSON.parse(String(raw)))); });
+    await runtime.store.transition(workspace.id, ["creating"], "creating", { boatSandboxId: "bx_fixture" });
+    await runtime.store.setWorkerRoute(workspace.id, "bx_fixture", `http://127.0.0.1:${(workerServer.address() as AddressInfo).port}`,
+      sealPortToken("synthetic-private-port-token", workspace.id, { currentKeyVersion: 1, keys: { 1: key } }));
+    await runtime.store.acceptWorkerHello(workerToken, randomUUID());
     server = createServer();
     server.on("upgrade", (req, socket, head) => runtime.relay!.handleUpgrade(req, socket, head));
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    frames = [];
-    worker = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/v2/cloud/worker`, { headers: { authorization: `Bearer ${workerToken}` } });
-    worker.on("message", raw => frames.push(JSON.parse(String(raw))));
-    await new Promise<void>((resolve, reject) => { worker.once("open", resolve); worker.once("error", reject); });
-    worker.send(JSON.stringify({ t: "hello", protocol: 1, workerVersion: "fixture", capabilities: {
-      design: false, browser: false, simulators: false, files: true, git: true, terminal: true, agents: ["claude"],
-    } }));
-    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    const ticket = await runtime.store.issueToken({ workspaceId, kind: "connect", userId: owner.userId, ttlMs: 60_000 });
+    app = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/v2/cloud/workspaces/${workspaceId}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`]);
+    await new Promise<void>((resolve, reject) => { app.once("open", resolve); app.once("error", reject); });
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
   });
   afterEach(async () => {
-    worker?.terminate(); runtime?.relay?.close(); await runtime?.loginChanges?.stop();
+    app?.terminate(); worker?.terminate(); runtime?.connections?.close(); await runtime?.loginChanges?.stop();
+    if (workerServer) await new Promise(resolve => workerServer.close(resolve));
     if (server) await new Promise(resolve => server.close(resolve));
   });
   async function put(id: string, revision = 0, name = "first") {

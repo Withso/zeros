@@ -24,6 +24,7 @@ import { ClientCompatibility, createClientCompatibilityMiddleware } from "./clie
 import { createAuthMiddleware } from "./auth.js";
 import { createCloudV2ProxyRoutes, CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./cloud/proxy.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./cloud/routes.js";
+import { createCloudV2WorkerRoutes, CLOUD_V2_WORKER_API, type CloudV2WorkerRouteDeps } from "./cloud/worker-routes.js";
 import { createPrivateRateLimitKey, rateLimit } from "./ratelimit.js";
 import { clientAddress } from "./client-address.js";
 import { createChatTitleRoutes } from "./chat-titles.js";
@@ -67,7 +68,7 @@ import { cloudAgentCredentialKeys } from "./agent-credentials/agent-credentials.
 
 export type CreateAppDependencies = {
   /** Cloud workspace v2: creator routes under /v1 and the worker model proxy. */
-  cloudV2?: { routes: CloudV2RouteDeps; proxy: CloudV2ProxyDeps };
+  cloudV2?: { routes: CloudV2RouteDeps; proxy: CloudV2ProxyDeps; workers: CloudV2WorkerRouteDeps };
   zerosDevAuth?: ZerosDevAuthDependencies;
   requestCostObserver?: (cost: RequestDatabaseCost) => void | Promise<void>;
   clientCompatibility?: ClientCompatibility;
@@ -177,6 +178,9 @@ export function createApp(
     });
   }
   if (dependencies.cloudV2) {
+    app.use(`${CLOUD_V2_WORKER_API}/*`, rateLimit("cloud-v2-worker", 600, 60_000,
+      c => cloudTokenBucket(c.req.header("authorization") ?? "")));
+    app.route("/", createCloudV2WorkerRoutes(dependencies.cloudV2.workers));
     // Workspace proxy tokens, not user sessions, authenticate the model proxy.
     // Keyed per workspace token: many VMs can share one provider egress address.
     app.use(`${CLOUD_V2_PROXY_PREFIX}/*`, rateLimit("cloud-v2-proxy", 600, 60_000,

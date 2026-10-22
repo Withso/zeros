@@ -22,6 +22,9 @@ import { CloudV2Relay } from "./relay.js";
 import { cloudV2Runtime } from "./runtime.js";
 import type { CloudV2RouteDeps } from "./routes.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
+import { CloudV2WorkerSigner } from "./worker-auth.js";
+import { openPortToken, sealPortToken } from "./worker-port-token.js";
+import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 /** Boat stock image home; repositories live at <home>/<owner>/<name>. */
@@ -67,6 +70,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     apiKey: v2.boat.apiKey, timeoutMs: 120_000, ...(v2.boat.billingOrg ? { billingOrg: v2.boat.billingOrg } : {}),
   }));
   const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null);
+  if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
+  const signer = new CloudV2WorkerSigner(v2.workerSigningKey, v2.workerSigningKeyPrevious);
   const logins: CloudV2AgentLogins = keys ? createCloudV2AgentLogins(pool, keys) : async () => null;
   const githubToken = config.github ? createCloudV2GithubTokens(pool, config.github) : async () => {
     throw new HttpError(409, "github_unavailable", "GitHub is not configured");
@@ -88,6 +93,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
     return {
       t: "config",
+      loginRevision: await store.loginRevision(workspace.id) ?? "0",
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
         checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
@@ -103,14 +109,20 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     bridgeBaseUrl: v2.realtimeUrl,
   };
   const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
-  const relay = roles.relay ? new CloudV2Relay({
+  const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
     store, ...(securityEvents ? { securityEvents } : {}),
     config: workerConfig,
-    githubToken,
+    workerRoute: async id => {
+      const route = await store.workerRoute(id);
+      return route ? { ...route, token: route.portToken ? openPortToken(route.portToken, id, keys) : null } : null;
+    },
+    mintWorkerToken: (id, boot) => signer.mint(id, boot),
     wake: async workspace => { await store.transition(workspace.id, ["stopped"], "starting"); },
     answerOffline: (workspace, frame) => answerCloudV2Offline(store, workspace, frame),
     logger: console,
   }) : null;
+  const relay = roles.relay ? connections : null;
+  const workers: CloudV2WorkerRouteDeps = { store, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256 };
   const loginChanges = relay ? postgresNotificationSubscription(listenerPool, {
     channels: ["zeros_cloud_v2_logins"],
     onReady: () => { void relay.refreshLogins(); },
@@ -137,9 +149,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     store,
     compute,
     runtime,
-    bootEnv: workspace => ({ ZEROS_WORKER_URL: `${v2.realtimeUrl}/v2/cloud/worker`, ZEROS_WORKSPACE_ID: workspace.id }),
+    publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
+    stopWorker: workspace => connections!.stopWorkspace(workspace),
+    bootEnv: workspace => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: v2.runtime.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: workspace => `zeros-${config.deploymentChannel}-ws-${workspace.id.slice(0, 8)}`,
     logger: console,
   }) : null;
-  return { store, compute, routes, proxy, relay, lifecycle, loginChanges };
+  return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges };
 }

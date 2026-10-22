@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { CloudV2Compute } from "./boat.js";
 import { CLOUD_V2_IDLE_STOP_MS, CLOUD_V2_WORKER_TOKEN_PATH, CloudV2Lifecycle, deliverWorkerTokenCommand, type CloudV2LifecycleDeps } from "./lifecycle.js";
 import type { CloudV2Workspace } from "./store.js";
+import { generateKeyPairSync } from "node:crypto";
 
 const NOW = Date.parse("2026-10-21T12:00:00Z");
 const token = `zw2w_${"a".repeat(43)}`;
 const runtime = `/opt/zeros/runtime/${"b".repeat(64)}`;
+const publicKeys = [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()];
 
 function workspace(state: CloudV2Workspace["state"], extra: Partial<CloudV2Workspace> = {}): CloudV2Workspace & { attempts: number } {
   return {
@@ -25,6 +27,7 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
     execLong: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })),
     saveSnapshot: vi.fn(async () => {}),
     deleteSnapshot: vi.fn(async () => {}),
+    hostPort: vi.fn(async () => ({ url: "https://fixture-41783.on.boat.dev", token: "synthetic-port-token" })),
   };
   const store: CloudV2LifecycleDeps["store"] = {
     claimPending: vi.fn(async () => claimed),
@@ -34,23 +37,47 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
     computerSnapshot: vi.fn(async () => options.snapshot === undefined ? "cv2-alpha-org-1" : options.snapshot),
     revoke: vi.fn(async () => {}),
     idleSince: vi.fn(async () => options.idle ?? []),
+    setWorkerRoute: vi.fn(async () => true),
   };
+  const stopWorker = vi.fn(async () => true);
   const lifecycle = new CloudV2Lifecycle({
     store, compute, now: () => NOW, sleep: async () => {},
+    publicKeys, sealPortToken: () => ({ encrypted: true }), stopWorker,
     runtime: { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" },
-    bootEnv: ws => ({ ZEROS_WORKER_URL: "wss://relay/v2/cloud/worker", ZEROS_WORKSPACE_ID: ws.id }),
+    bootEnv: ws => ({ CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: ws.id }),
     sandboxName: ws => `zeros-alpha-${ws.id.slice(0, 8)}`,
   });
-  return { lifecycle, compute, store };
+  return { lifecycle, compute, store, stopWorker };
 }
 
 describe("cloud v2 lifecycle", () => {
+  it("persists an encrypted protected route before delivering a boot token, on both create and wake", async () => {
+    for (const state of ["creating", "starting"] as const) {
+      const f = setup([workspace(state, { boatSandboxId: "bx_test" })]);
+      await f.lifecycle.tick();
+      expect(f.compute.hostPort).toHaveBeenCalledWith("bx_test", { port: 41783, localhost: true, title: "Zeros worker" });
+      expect(f.store.setWorkerRoute).toHaveBeenCalledWith(expect.any(String), "bx_test", "https://fixture-41783.on.boat.dev", { encrypted: true });
+      expect(vi.mocked(f.store.setWorkerRoute).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(f.store.rotateWorkerToken).mock.invocationCallOrder[0]!);
+      expect(vi.mocked(f.compute.exec).mock.calls[0]![1]).toContain("worker-auth.json");
+    }
+  });
+
+  it("waits for the worker's final history acknowledgement before stopping Boat", async () => {
+    const f = setup([workspace("stopping", { boatSandboxId: "bx_test" })]);
+    let release!: (value: boolean) => void;
+    vi.mocked(f.stopWorker).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const step = f.lifecycle.tick();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(f.compute.stop).not.toHaveBeenCalled();
+    release(true); await step;
+    expect(f.compute.stop).toHaveBeenCalledWith("bx_test");
+  });
   it("creates the VM from the org snapshot with the workspace id as idempotency key, then delivers the token", async () => {
     const { lifecycle, compute, store } = setup([workspace("creating")]);
     await lifecycle.tick();
     expect(compute.create).toHaveBeenCalledWith({
       key: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", from: "cv2-alpha-org-1", name: "zeros-alpha-6f2b7c1e", // gitleaks:allow
-      env: { ZEROS_WORKER_URL: "wss://relay/v2/cloud/worker", ZEROS_WORKSPACE_ID: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11" },
+      env: { CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11" },
     });
     expect(JSON.stringify(vi.mocked(compute.create).mock.calls)).not.toContain(token);
     expect(vi.mocked(compute.exec).mock.calls[0]![0]).toBe("bx_new1");
@@ -96,12 +123,12 @@ describe("cloud v2 lifecycle", () => {
     expect(store.revoke).toHaveBeenCalledWith("7f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", true);
   });
 
-  it("resumes a stopped VM, lets its worker reconnect with its own credential, then re-delivers one", async () => {
+  it("resumes a stopped VM and delivers a fresh credential on every retry", async () => {
     const fresh = setup([workspace("starting", { boatSandboxId: "bx_abc1", updatedAt: new Date(NOW - 5_000).toISOString() })]);
     await fresh.lifecycle.tick();
     expect(fresh.compute.resume).toHaveBeenCalledWith("bx_abc1");
-    // Only the runtime check runs: an unchanged runtime leaves the worker alone.
-    expect(fresh.compute.exec).toHaveBeenCalledTimes(1);
+    // Every wake installs verification keys and restarts with a rotated token.
+    expect(fresh.compute.exec).toHaveBeenCalledTimes(2);
     expect(vi.mocked(fresh.compute.exec).mock.calls[0]![1]).toContain(runtime);
     expect(fresh.store.defer).toHaveBeenLastCalledWith(expect.any(String), "starting", 30_000);
     // A first delivery that failed while the VM restored is retried, never dropped.
@@ -115,7 +142,7 @@ describe("cloud v2 lifecycle", () => {
     const restoring = setup([workspace("starting", { boatSandboxId: "bx_abc1", updatedAt: new Date(NOW - 5_000).toISOString() })]);
     vi.mocked(restoring.compute.exec).mockRejectedValueOnce(Object.assign(new Error("restoring"), { code: "provider_request_failed" }));
     await restoring.lifecycle.tick();
-    expect(restoring.compute.exec).toHaveBeenCalledTimes(2);
+    expect(restoring.compute.exec).toHaveBeenCalledTimes(3);
     expect(restoring.store.defer).toHaveBeenLastCalledWith(expect.any(String), "starting", 30_000);
   });
 

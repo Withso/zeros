@@ -84,6 +84,25 @@ it("routes Stop acknowledgements to the requesting replica only", async () => {
   expect(two.frames).toEqual([]);
 });
 
+it("closes quiesced replicas after Stop, preserving each outstanding Stop acknowledgement", async () => {
+  const f = await fixture(), one = await f.connect(), two = await f.connect(), idle = await f.connect();
+  const ids = [randomUUID(), randomUUID()];
+  one.ws.send(JSON.stringify({ t: "stop", id: ids[0] }));
+  await expect.poll(() => f.incoming.length).toBe(1);
+  two.ws.send(JSON.stringify({ t: "stop", id: ids[1] }));
+  await expect.poll(() => f.incoming.length).toBe(2);
+  const stops = f.incoming.filter(frame => frame.t === "stop");
+  await f.listener.send({ t: "stop-ack", id: stops[0]!.id });
+  await expect.poll(() => idle.ws.readyState).toBe(WebSocket.CLOSED);
+  // The second requester still needs its correlated ack before it can close.
+  expect(two.ws.readyState).toBe(WebSocket.OPEN);
+  await f.listener.send({ t: "stop-ack", id: stops[1]!.id });
+  await expect.poll(() => one.frames.length + two.frames.length).toBe(2);
+  expect(one.frames[0]).toEqual({ t: "stop-ack", id: ids[0] });
+  expect(two.frames[0]).toEqual({ t: "stop-ack", id: ids[1] });
+  await expect.poll(() => two.ws.readyState).toBe(WebSocket.CLOSED);
+});
+
 it("bounds connections and failed authentication without parsing untrusted bodies", async () => {
   const f = await fixture({ failedAuthLimit: 3 });
   for (let i = 0; i < 8; i++) await f.connect();
@@ -91,4 +110,10 @@ it("bounds connections and failed authentication without parsing untrusted bodie
   for (let i = 0; i < 3; i++) expect(await f.refusal("invalid")).toBe(401);
   expect(await f.refusal("invalid")).toBe(429);
   expect(f.incoming).toEqual([]);
+});
+
+it("admits a valid control-plane grant even after the failed-auth limit is exhausted", async () => {
+  const f = await fixture();
+  for (let i = 0; i < 40; i++) expect(await f.refusal("invalid")).toBe(i < 32 ? 401 : 429);
+  expect(await f.refusal(token())).toBe(101);
 });

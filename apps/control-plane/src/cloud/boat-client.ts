@@ -358,7 +358,11 @@ export class BoatApiClient {
           retryOptions,
         );
       }
-      if (!value || value.ok !== true)
+      // Hosting returns the route fields at the top level; unlike the older
+      // endpoints it does not promise an `ok` envelope. Its caller validates
+      // the private/protected/localhost fields before using the route.
+      const hostPort = input.method === "POST" && /^\/sandboxes\/[a-zA-Z0-9_-]+\/host$/.test(path);
+      if (!value || (value.ok !== true && !(hostPort && value.ok === undefined)))
         throw new CloudProviderError(
           "provider_response_invalid",
           "Boat returned an invalid response",

@@ -50,6 +50,7 @@ export class CloudWorker {
   private disposed = false;
   private started = false;
   private stopping?: Promise<void>;
+  private configurationRevision?: bigint;
   private idle?: boolean;
   private heartbeat?: ReturnType<typeof setInterval>;
   private unsubscribers: Array<() => void> = [];
@@ -114,7 +115,7 @@ export class CloudWorker {
     const message = parsed.data;
     if (message.t === "config") {
       this.configuring = this.configuring.catch(() => {}).then(() => this.configure(message));
-      await this.configuring.catch(() => { this.options.onError?.("configuration"); });
+      await this.configuring.catch(error => { this.options.onError?.("configuration"); throw error; });
       return;
     }
     // Checkout preparation can be waiting for this reply. Never queue control
@@ -125,6 +126,10 @@ export class CloudWorker {
       // mirror. Keep the transport alive until this correlated ack is sent.
       this.stopping ??= this.prepareStop();
       await this.stopping;
+      // A lost HTTPS response may need a retry after quiescing. Do not cache a
+      // mirror failure in the promise that prevents new work from starting.
+      await this.flush();
+      if (this.history && !await this.history.flush()) throw new Error("History mirror is unavailable.");
       await this.send({ t: "stop-ack", id: message.id });
       return;
     }
@@ -176,6 +181,8 @@ export class CloudWorker {
   }
 
   private async configure(config: WorkerConfig): Promise<void> {
+    const revision = BigInt(config.loginRevision);
+    if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
@@ -207,6 +214,7 @@ export class CloudWorker {
       }));
     } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); this.agents!.configure(config); }
     this.history!.connect();
+    this.configurationRevision = revision;
     await this.reportIdle(true);
   }
 
@@ -216,8 +224,6 @@ export class CloudWorker {
     await this.configuring;
     await this.agents?.dispose();
     await this.terminals?.dispose();
-    await this.flush();
-    if (this.history && !await this.history.flush()) throw new Error("History mirror is unavailable.");
   }
   private async send(frame: CloudV2WorkerFrame): Promise<boolean> {
     if (!this.online) return false;

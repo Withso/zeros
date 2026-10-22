@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { createHash } from "node:crypto";
 import { withSystemTx, type Tx } from "../db.js";
 import type { AuthedUser } from "../auth.js";
 import { securityStreamAuthority } from "../security-events.js";
@@ -17,6 +18,11 @@ type CreateWorkspace = {
   baseBranch: string; computerBuildId: string | null;
 };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
+type HistoryInput = {
+  chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
+  messages?: { chatId: string; rows: readonly CloudV2MessageRow[] } | undefined;
+};
+export type CloudV2WorkerSession = CloudV2Workspace & { accessEpoch: string; loginRevision: string };
 
 export type CloudV2Workspace = {
   id: string;
@@ -154,7 +160,8 @@ export class CloudV2Store {
   }
 
   /** Serialize a creator's intent with lifecycle progress. Flag-only changes
-   * advance the document version without rescheduling a pending stop. */
+   * advance the document version without rescheduling a pending stop. A wake
+   * revokes the suspended boot before Boat can resume its old service. */
   async requestLifecycle(id: string, userId: string, action: "start" | "stop" | "archive"):
     Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
     return withSystemTx(this.pool, async tx => {
@@ -172,6 +179,8 @@ export class CloudV2Store {
            archived_at = CASE WHEN $3::boolean THEN coalesce(archived_at, clock_timestamp()) ELSE NULL END,
            attempts = CASE WHEN state <> $2 THEN 0 ELSE attempts END,
            next_attempt_at = CASE WHEN state <> $2 THEN NULL ELSE next_attempt_at END,
+           worker_token_hash = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_token_hash END,
+           worker_boot_id = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_boot_id END,
            updated_at = clock_timestamp(),
            state = $2
          WHERE id = $1 RETURNING ${COLUMNS}`,
@@ -188,7 +197,8 @@ export class CloudV2Store {
       `UPDATE cloud_v2_workspaces SET state = $3,
          boat_sandbox_id = CASE WHEN $4::boolean THEN $5 ELSE boat_sandbox_id END,
          error_code = CASE WHEN $6::boolean THEN $7 ELSE error_code END,
-         worker_token_hash = CASE WHEN $3 = 'deleted' THEN NULL ELSE worker_token_hash END,
+         worker_token_hash = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_token_hash END,
+         worker_boot_id = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_boot_id END,
          active_at = CASE WHEN $3 = 'running' THEN clock_timestamp() ELSE active_at END,
          archived_at = CASE WHEN $3 = 'starting' THEN NULL ELSE archived_at END,
          attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
@@ -216,9 +226,68 @@ export class CloudV2Store {
     return rows[0]?.access_epoch ?? null;
   }
 
+  /** Internal only: private route data is deliberately absent from workspace(). */
+  async workerRoute(id: string): Promise<{ workspace: CloudV2Workspace; accessEpoch: string; url: string | null; portToken: unknown; bootId: string | null } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; worker_route_url: string | null; worker_port_token: unknown; worker_boot_id: string | null }>(
+      `SELECT ${COLUMNS}, access_epoch::text, worker_route_url, worker_port_token, worker_boot_id
+       FROM cloud_v2_workspaces w WHERE id=$1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`, [id]));
+    const row = rows[0];
+    return row ? { workspace: workspace(row), accessEpoch: row.access_epoch, url: row.worker_route_url, portToken: row.worker_port_token, bootId: row.worker_boot_id } : null;
+  }
+
+  async setWorkerRoute(id: string, sandboxId: string, url: string, portToken: unknown): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET worker_route_url=$3, worker_port_token=$4
+       WHERE id=$1 AND boat_sandbox_id=$2 AND state IN ('creating','starting')`, [id, sandboxId, url, JSON.stringify(portToken)]));
+    return Boolean(result.rowCount);
+  }
+
+  async acceptWorkerHello(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+      `UPDATE cloud_v2_workspaces w SET
+         worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
+         worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
+         worker_boot_id=$2, state='running', attempts=0, next_attempt_at=NULL,
+         active_at=CASE WHEN state='running' THEN active_at ELSE clock_timestamp() END,
+         updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END
+       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
+       RETURNING ${COLUMNS}, access_epoch::text, login_revision::text`, [hashCloudV2Token(token), bootId]));
+    const row = rows[0];
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+  }
+
+  async workerSession(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+      `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+       WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
+      [hashCloudV2Token(token), bootId]));
+    const row = rows[0];
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+  }
+
+  /** Sequence and rows commit together. A retry after a lost HTTP response is
+   * a no-op, while a gap or a conflicting reuse cannot overwrite newer rows. */
+  async writeWorkerHistory(token: string, bootId: string, sequence: number, input: HistoryInput): Promise<void> {
+    const digest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+    await withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ id: string; worker_boot_id: string | null; worker_history_sequence: string; worker_history_digest: string | null }>(
+        `SELECT id, worker_boot_id, worker_history_sequence::text, worker_history_digest FROM cloud_v2_workspaces w
+         WHERE worker_token_hash=$1 AND state IN ('running','stopping') AND ${LIVE_ACCESS} FOR UPDATE`, [hashCloudV2Token(token)]);
+      const row = rows[0];
+      if (!row || row.worker_boot_id !== bootId) throw new HttpError(401, "worker_boot_changed", "Worker authorization changed");
+      const previous = Number(row.worker_history_sequence);
+      if (sequence === previous && digest !== row.worker_history_digest) throw new HttpError(409, "history_sequence_conflict", "History request was already used");
+      if (sequence <= previous) return;
+      if (sequence !== previous + 1) throw new HttpError(409, "history_sequence_gap", "History sequence is not contiguous");
+      await this.mirrorHistory(tx, row.id, input);
+      await tx.query("UPDATE cloud_v2_workspaces SET worker_history_sequence=$2, worker_history_digest=$3 WHERE id=$1", [row.id, sequence, digest]);
+    });
+  }
+
   async markActive(id: string): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET active_at = clock_timestamp() WHERE id = $1`, [id]));
+      `UPDATE cloud_v2_workspaces SET active_at = clock_timestamp() WHERE id = $1 AND state='running'
+       AND coalesce(active_at,'-infinity') < clock_timestamp() - interval '30 seconds'`, [id]));
   }
 
   /** Workspaces running with no activity since `before`. */
@@ -311,7 +380,8 @@ export class CloudV2Store {
   async rotateWorkerToken(id: string): Promise<string> {
     const worker = newCloudV2Token("worker");
     const changed = await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces w SET worker_token_hash = $2 WHERE id = $1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`,
+      `UPDATE cloud_v2_workspaces w SET worker_token_hash = $2, worker_boot_id = NULL
+       WHERE id = $1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`,
       [id, worker.hash],
     ));
     if (!changed.rowCount) throw notFound();
@@ -351,6 +421,7 @@ export class CloudV2Store {
   /** Revokes a stopped or deleted workspace's tokens; deletion also drops its history. */
   async revoke(id: string, history: boolean): Promise<void> {
     await withSystemTx(this.pool, async tx => {
+      await tx.query(`UPDATE cloud_v2_workspaces SET worker_token_hash = NULL, worker_boot_id = NULL WHERE id = $1`, [id]);
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE workspace_id = $1`, [id]);
       if (!history) return;
       await tx.query(`DELETE FROM cloud_v2_messages WHERE workspace_id = $1`, [id]);
@@ -359,11 +430,11 @@ export class CloudV2Store {
   }
 
   /** Mirror of the worker's history; the same rows Local persists. */
-  async writeHistory(workspaceId: string, input: {
-    chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
-    messages?: { chatId: string; rows: readonly CloudV2MessageRow[] } | undefined;
-  }): Promise<void> {
-    await withSystemTx(this.pool, async tx => {
+  async writeHistory(workspaceId: string, input: HistoryInput): Promise<void> {
+    await withSystemTx(this.pool, tx => this.mirrorHistory(tx, workspaceId, input));
+  }
+
+  private async mirrorHistory(tx: Tx, workspaceId: string, input: HistoryInput): Promise<void> {
       for (const chat of input.chats ?? []) {
         await tx.query(
           `INSERT INTO cloud_v2_chats (workspace_id, chat_id, row) VALUES ($1, $2, $3)
@@ -392,7 +463,6 @@ export class CloudV2Store {
           })))],
         );
       }
-    });
   }
 
   async listChats(workspaceId: string): Promise<{ chats: unknown[]; chatDeletions: string[] }> {

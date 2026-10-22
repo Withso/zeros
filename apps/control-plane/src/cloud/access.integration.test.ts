@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import pg from "pg";
 import { Hono } from "hono";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureUser, type AuthedUser } from "../auth.js";
 import { createRoutes } from "../routes.js";
@@ -17,7 +17,9 @@ const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("cloud access through membership routes and security publication", () => {
   let pool: pg.Pool, store: CloudV2Store, owner: AuthedUser, creator: AuthedUser;
   let org: string, workspace: CloudV2Workspace, relay: CloudV2Relay, server: Server;
-  let broker: PostgresSecurityEventBroker;
+  let broker: PostgresSecurityEventBroker, workerServer: WebSocketServer;
+  const workerFrames = new Map<WebSocket, any[]>();
+  const bootId = randomUUID();
   const sockets: WebSocket[] = [];
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 5 }); });
   afterAll(async () => pool.end());
@@ -41,10 +43,16 @@ d("cloud access through membership routes and security publication", () => {
       name: "w", repository: "fixture/repo", branch: "zeros/w", baseBranch: "main", computerBuildId: null });
     await store.transition(workspace.id, ["creating"], "running");
     broker = new PostgresSecurityEventBroker(pool);
+    workerServer = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2.worker" });
+    await new Promise<void>(resolve => workerServer.once("listening", resolve));
+    workerFrames.clear();
+    workerServer.on("connection", ws => { const frames: any[] = []; workerFrames.set(ws, frames); ws.on("message", raw => frames.push(JSON.parse(String(raw)))); });
     relay = new CloudV2Relay({ store, securityEvents: broker, wake: async () => {}, answerOffline: async () => null,
-      config: async w => ({ t: "config", workspace: { id: w.id, organizationId: org, repository: w.repository,
+      config: async w => ({ t: "config", loginRevision: "0", workspace: { id: w.id, organizationId: org, repository: w.repository,
         checkoutPath: "/home/user/fixture/repo", branch: w.branch, baseBranch: w.baseBranch }, agents: {} }),
-      githubToken: async () => { throw new Error("Not used"); } });
+      mintWorkerToken: () => "synthetic-grant",
+      workerRoute: async id => { const route = await store.workerRoute(id); return route ? { ...route,
+        url: `http://127.0.0.1:${(workerServer.address() as AddressInfo).port}`, token: "synthetic-port-token" } : null; } });
     server = createServer();
     server.on("upgrade", (req, socket, head) => { if (!relay.handleUpgrade(req, socket, head)) socket.destroy(); });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -53,6 +61,7 @@ d("cloud access through membership routes and security publication", () => {
     for (const socket of sockets.splice(0)) socket.terminate();
     relay?.close(); await broker?.stop();
     if (server) await new Promise<void>(resolve => server.close(() => resolve()));
+    if (workerServer) { for (const socket of workerServer.clients) socket.terminate(); await new Promise<void>(resolve => workerServer.close(() => resolve())); }
   });
 
   async function connected() {
@@ -60,21 +69,54 @@ d("cloud access through membership routes and security publication", () => {
     const token = await store.rotateWorkerToken(workspace.id);
     const proxy = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: 60_000 });
     const ticket = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator.id, ttlMs: 60_000, authority: creator });
-    const worker = new WebSocket(`${url}/v2/cloud/worker`, { headers: { authorization: `Bearer ${token}` } });
-    sockets.push(worker);
-    await new Promise<void>(resolve => worker.once("open", resolve));
-    const configured = new Promise(resolve => worker.once("message", resolve));
-    worker.send(JSON.stringify({ t: "hello", protocol: 1, workerVersion: "test", capabilities: {
-      design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex"],
-    } }));
-    await configured;
+    await store.acceptWorkerHello(token, bootId);
     const app = new WebSocket(`${url}/v2/cloud/workspaces/${workspace.id}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`]);
     sockets.push(app);
     await new Promise<void>(resolve => app.once("open", resolve));
+    await vi.waitFor(() => expect(workerFrames.size).toBe(1));
+    const worker = [...workerFrames.keys()][0]!;
+    await vi.waitFor(() => expect(workerFrames.get(worker)!.some(frame => frame.t === "open")).toBe(true));
     return { app, worker, token, proxy: proxy.token };
   }
 
-  it.each(["member route", "WorkOS membership", "session revocation"])("retires an already-open room after %s", async path => {
+  it("ends the signed-out app session without stopping its VM, revoking its worker, or interrupting an existing turn", async () => {
+    const live = await connected(), now = new Date().toISOString();
+    live.app.send(JSON.stringify({ type: "AGENT_PROMPT", id: "running-turn" }));
+    await vi.waitFor(() => expect(workerFrames.get(live.worker)!.some(frame => frame.frame?.id === "running-turn")).toBe(true));
+    const before = (await pool.query("SELECT worker_token_hash FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].worker_token_hash;
+    const unused = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator.id, ttlMs: 60_000, authority: creator });
+    expect(await ingestWorkOSManagementEvent(pool, { id: `event_${randomUUID()}`, createdAt: now, event: "session.revoked",
+      data: { id: creator.authentication.sessionId, userId: creator.identity.subject, status: "revoked",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(), updatedAt: now } }, "webhook")).toEqual({ status: "applied" });
+    await vi.waitFor(() => expect(live.app.readyState).toBe(WebSocket.CLOSED));
+    expect((await store.get(workspace.id, creator.id)).state).toBe("running");
+    expect((await pool.query("SELECT worker_token_hash FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].worker_token_hash).toEqual(before);
+    expect(await store.byWorkerToken(live.token)).not.toBeNull();
+    expect(await store.verifyProxyToken(live.proxy)).not.toBeNull();
+    expect(await store.consumeConnectTicket(unused.token, workspace.id)).toBeNull();
+    await expect(store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator.id, ttlMs: 60_000, authority: creator }))
+      .rejects.toMatchObject({ code: "session_revoked" });
+
+    const secondSession = `session_${randomUUID()}`;
+    await pool.query(`INSERT INTO auth_sessions (provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at)
+      VALUES ($1,$2,$3,'desktop',now()+interval '1 hour')`, [secondSession, creator.identity.subject, creator.id]);
+    const second = { ...creator, authentication: { ...creator.authentication, sessionId: secondSession } };
+    const ticket = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator.id, ttlMs: 60_000, authority: second });
+    const app = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/v2/cloud/workspaces/${workspace.id}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`]);
+    sockets.push(app); await new Promise<void>(resolve => app.once("open", resolve));
+    await vi.waitFor(() => expect(workerFrames.size).toBe(2));
+    const connection = [...workerFrames.keys()].at(-1)!;
+    await vi.waitFor(() => expect(workerFrames.get(connection)!.some(frame => frame.t === "open")).toBe(true));
+    const clientId = workerFrames.get(connection)!.find(frame => frame.t === "open").clientId;
+    const completion = new Promise(resolve => app.once("message", raw => resolve(JSON.parse(String(raw)))));
+    connection.send(JSON.stringify({ t: "frame", clientId, frame: { type: "AGENT_PROMPT_COMPLETE", requestId: "running-turn" } }));
+    expect(await completion).toEqual({ type: "AGENT_PROMPT_COMPLETE", requestId: "running-turn" });
+    // The same worker credential can still commit the turn's final HTTP rows.
+    await store.writeWorkerHistory(live.token, bootId, 1, { chats: [{ id: "completed-chat" }] });
+    expect((await store.listChats(workspace.id)).chats).toEqual([{ id: "completed-chat" }]);
+  });
+
+  it.each(["member route", "WorkOS membership"])("retires an already-open room after %s", async path => {
     const live = await connected();
     if (path === "member route") {
       const app = new Hono();
@@ -103,9 +145,6 @@ d("cloud access through membership routes and security publication", () => {
     await vi.waitFor(() => expect(live.worker.readyState).toBe(WebSocket.CLOSED));
     expect(await store.byWorkerToken(live.token)).toBeNull();
     expect(await store.verifyProxyToken(live.proxy)).toBeNull();
-    if (path === "session revocation") {
-      await expect(store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator.id, ttlMs: 60_000, authority: creator }))
-        .rejects.toMatchObject({ code: "session_revoked" });
-    }
+
   });
 });

@@ -6,6 +6,7 @@
 // downloads anything.
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createPublicKey } from "node:crypto";
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const URL_TTL_SECONDS = 15 * 60;
@@ -36,6 +37,7 @@ After=network-online.target
 Wants=network-online.target
 # The control plane writes the credential after boot and then starts the unit.
 ConditionPathExists=/home/user/.config/zeros/worker-token
+ConditionPathExists=/opt/zeros/worker-auth.json
 
 [Service]
 Type=simple
@@ -58,12 +60,15 @@ const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 /** Installs the runtime if this VM does not have it, points the worker at it
  * and restarts a running worker onto it. Prints `runtime-changed` when it
  * switched versions. Root owns the runtime, so agents cannot modify it. */
-export function installRuntimeCommand(runtime: { sha256: string; url: string }): string {
+export function installRuntimeCommand(runtime: { sha256: string; url: string; publicKeys?: readonly string[] }): string {
   if (!SHA256.test(runtime.sha256)) throw new Error("Invalid runtime sha256");
   const url = new URL(runtime.url);
   if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid runtime URL");
   const dir = `${RUNTIMES}/${runtime.sha256}`;
   const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
+  const keys = runtime.publicKeys;
+  if (keys && (!keys.length || keys.length > 4 || keys.some(key => key.length > 4096 || createPublicKey(key).asymmetricKeyType !== "ed25519")))
+    throw new Error("Invalid worker verification keys");
   const script = [
     "set -eu",
     `dir=${dir}`,
@@ -76,6 +81,10 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string }):
     `  sudo -n chown -R root:root "$dir.partial" && sudo -n chmod -R a+rX,go-w "$dir.partial"`,
     `  sudo -n touch "$dir.partial/.complete" && sudo -n rm -rf "$dir" && sudo -n mv "$dir.partial" "$dir"`,
     "fi",
+    ...(keys ? [
+      `printf %s ${quote(b64(JSON.stringify(keys)))} | base64 -d | sudo -n tee /opt/zeros/worker-auth.json.next >/dev/null`,
+      "sudo -n chown root:root /opt/zeros/worker-auth.json.next && sudo -n chmod 0644 /opt/zeros/worker-auth.json.next && sudo -n mv -T /opt/zeros/worker-auth.json.next /opt/zeros/worker-auth.json",
+    ] : []),
     `unit=$(printf %s ${quote(b64(UNIT))} | base64 -d)`,
     `if [ "$(cat /etc/systemd/system/zeros-worker.service 2>/dev/null)" != "$unit" ]; then`,
     `  printf '%s\\n' "$unit" | sudo -n tee /etc/systemd/system/zeros-worker.service >/dev/null`,

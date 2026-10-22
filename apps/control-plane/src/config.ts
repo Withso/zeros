@@ -8,7 +8,6 @@ import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type Clo
 // WorkOS and future providers must supply the exact issuer/JWKS contract.
 // ──────────────────────────────────────────────────────────
 
-import { createPrivateKey } from "node:crypto";
 import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
@@ -23,6 +22,7 @@ import { BOAT_BILLING_ORG_PATTERN } from "./cloud/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { loadWorkerPollIntervals, type WorkerPollIntervals } from "./worker-polling-config.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
+import { CloudV2WorkerSigner } from "./cloud/worker-auth.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -253,8 +253,10 @@ export type CloudV2Config = {
   boat: { apiKey: string; billingOrg?: string };
   /** https:// origin of the API service; agents reach the model proxy here. */
   apiUrl: string;
-  /** wss:// origin of the realtime service; workers and the app connect here. */
+  /** wss:// origin of the realtime service; the Mac app connects here. */
   realtimeUrl: string;
+  workerSigningKey: string;
+  workerSigningKeyPrevious?: string;
   /** The worker runtime every VM runs, by sha256, and where it is stored. */
   runtime: { sha256: string; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
 };
@@ -287,8 +289,11 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
   };
   const endpoint = required("CLOUD_V2_RUNTIME_STORE_ENDPOINT");
   if (!endpoint.startsWith("https://")) throw new Error("Invalid environment: CLOUD_V2_RUNTIME_STORE_ENDPOINT must be https");
+  const workerSigningKey = required("CLOUD_V2_WORKER_SIGNING_KEY"), previous = env.CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS?.trim();
+  new CloudV2WorkerSigner(workerSigningKey, previous);
   return {
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
+    workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
     runtime: { sha256, store: {

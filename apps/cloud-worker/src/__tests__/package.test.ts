@@ -1,5 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { once } from "node:events";
 import { createReadStream } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
@@ -7,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { WebSocketServer } from "ws";
+import WebSocket from "ws";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { CLIENT_A, WORKSPACE_ID, browserFrame, config } from "./worker-fixtures";
@@ -139,52 +141,77 @@ it("resolves askpass and gh wrappers through a runtime symlink, including spaces
   } finally { await broker.dispose(); }
 });
 
-it("boots the relocated entry, waits for a token, connects to a fake relay, and shuts down", async () => {
+it("boots through the runtime symlink, waits for a token, serves a dial-in PTY and mirrors over HTTP", async () => {
   const { root, scope, git } = await repositoryFixture();
   const origin = join(directory, "origin.git"); await git("clone", "--bare", root, origin); await git("remote", "add", "origin", origin);
-  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" }); await once(server, "listening");
-  const address = server.address(); if (!address || typeof address === "string") throw new Error("No relay fixture address.");
   const tokenFile = join(directory, "token"), state = join(directory, "state");
-  const messages: Array<Record<string, unknown>> = []; let authenticated = false;
-  server.on("connection", (socket, request) => {
-    authenticated = request.headers.authorization === "Bearer fixture-package-worker";
-    socket.on("message", raw => {
-      const message = JSON.parse(raw.toString()); messages.push(message);
-      if (message.t === "hello") {
-        socket.send(JSON.stringify({ ...config, workspace: scope.workspace, agents: {} }));
-        socket.send(JSON.stringify({ t: "open", clientId: CLIENT_A }));
-      }
-      if (message.t === "frame" && message.frame.type === "ENGINE_READY")
-        socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_CREATE", { sessionId: "package-shell" }) }));
-      if (message.t === "frame" && message.frame.type === "PTY_CREATED")
-        socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId: "package-shell", data: "printf 'BUNDLED_PTY_OK\\n'\n" }) }));
-    });
+  const keys = generateKeyPairSync("ed25519");
+  const publicKeys = [keys.publicKey.export({ type: "spki", format: "pem" }).toString()];
+  // Reserve an ephemeral test port; production has no bind-address override.
+  const reservation = createServer(); await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
+  const port = (reservation.address() as AddressInfo).port; await new Promise<void>(resolve => reservation.close(() => resolve()));
+  const messages: any[] = [], requests: Array<{ path: string; authenticated: boolean }> = [];
+  let expectedToken = "fixture-package-worker", bootId = "";
+  const server = createServer(async (request, response) => {
+    const path = request.url!.split("/").at(-1)!;
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+    requests.push({ path, authenticated: request.headers.authorization === `Bearer ${expectedToken}` });
+    if (path === "hello") bootId = body.bootId;
+    const value = path === "hello" || path === "config" ? { config: { ...config, workspace: scope.workspace, agents: {} } }
+      : path === "history" ? { sequence: body.sequence }
+      : path === "activity" ? { state: "running", loginRevision: "0" }
+      : { token: "fixture-package-github", expiresAt: Date.now() + 60_000 };
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(value));
   });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
   const harness = join(dist, "boot-smoke.mjs");
-  await writeFile(harness, `import { startWorker, readBootEnvironment } from './worker.mjs';\nstartWorker({...readBootEnvironment(),tokenFile:${JSON.stringify(tokenFile)},directory:${JSON.stringify(state)}});\n`);
-  let child: ChildProcess | undefined; let output = "";
+  await writeFile(harness, `import { startWorker, readBootEnvironment } from './worker.mjs';\nstartWorker({...readBootEnvironment(),tokenFile:${JSON.stringify(tokenFile)},directory:${JSON.stringify(state)},publicKeys:${JSON.stringify(publicKeys)},port:${port}});\n`);
+  let child: ChildProcess | undefined, socket: WebSocket | undefined; let output = "";
   try {
-    child = spawn(process.execPath, [harness], { cwd: directory, env: { ...workerChildEnvironment(), HOME: root, ZEROS_WORKER_URL: `ws://127.0.0.1:${address.port}/v2/cloud/worker`, ZEROS_WORKSPACE_ID: WORKSPACE_ID }, stdio: ["ignore", "pipe", "pipe"] });
+    child = spawn(process.execPath, [harness], { cwd: directory, env: { ...workerChildEnvironment(), HOME: root,
+      CLOUD_V2_API_URL: `http://127.0.0.1:${address.port}`, CLOUD_V2_RUNTIME_SHA256: "a".repeat(64), ZEROS_WORKSPACE_ID: WORKSPACE_ID }, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
     await expect.poll(() => output.includes("credential-unavailable")).toBe(true);
-    expect(child.exitCode).toBeNull(); expect(messages).toEqual([]);
-    await writeFile(tokenFile, "fixture-package-worker", { mode: 0o600 }); await chmod(tokenFile, 0o600);
-    await expect.poll(() => messages.length > 0, { timeout: 5000 }).toBe(true);
-    expect(authenticated).toBe(true); expect(messages[0]).toMatchObject({ t: "hello", protocol: 1 });
-    await expect.poll(() => messages.some(message => message.t === "frame" && (message.frame as { type: string; data?: string }).type === "PTY_DATA"
-      && (message.frame as { data: string }).data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
+    expect(child.exitCode).toBeNull(); expect(requests).toEqual([]);
+    await writeFile(tokenFile, expectedToken, { mode: 0o600 }); await chmod(tokenFile, 0o600);
+    await expect.poll(() => bootId, { timeout: 5000 }).not.toBe("");
+    const now = Math.floor(Date.now() / 1000);
+    const payload = `v1.${Buffer.from(JSON.stringify({ iss: "zeros-cp", aud: WORKSPACE_ID, boot: bootId, iat: now, exp: now + 60, jti: randomUUID() })).toString("base64url")}`;
+    const grant = `${payload}.${sign(null, Buffer.from(payload), keys.privateKey).toString("base64url")}`;
+    socket = new WebSocket(`ws://127.0.0.1:${port}/v2/worker/bridge`, "zeros.cloud.v2.worker", { headers: { "X-Zeros-Worker-Auth": grant, Cookie: "_port_auth=fixture-private-route-token" } });
+    socket.on("message", raw => {
+      const message = JSON.parse(raw.toString()); messages.push(message);
+      if (message.t === "frame" && message.frame.type === "ENGINE_READY")
+        socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_CREATE", { sessionId: "package-shell" }) }));
+      if (message.t === "frame" && message.frame.type === "PTY_CREATED")
+        socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId: "package-shell", data: "printf 'BUNDLED_PTY_OK\\n'\n" }) }));
+    });
+    await once(socket, "open");
+    socket.send(JSON.stringify({ t: "open", clientId: CLIENT_A }));
+    await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_DATA"
+      && message.frame.data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
+    expectedToken = "fixture-rotated-package-worker"; await writeFile(tokenFile, expectedToken, { mode: 0o600 });
+    const histories = requests.filter(request => request.path === "history").length;
+    socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("WORKSPACE_REQUEST", { op: "chats.upsert", params: {
+      chat: { id: "package-chat", folder: root, agentId: "codex", title: "Fixture", createdAt: 100 },
+    } }) }));
+    await expect.poll(() => requests.filter(request => request.path === "history").length).toBeGreaterThan(histories);
+    expect(requests.every(request => request.authenticated)).toBe(true);
     const exited = once(child, "exit"); child.kill("SIGTERM"); await exited;
-    expect(child.exitCode).toBe(0); expect(output).not.toContain("fixture-package-worker");
+    expect(child.exitCode).toBe(0);
+    for (const secret of ["fixture-package-worker", expectedToken, "fixture-private-route-token", grant]) expect(output.includes(secret)).toBe(false);
   } finally {
     if (child?.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; }
-    for (const client of server.clients) client.terminate(); await new Promise<void>(resolve => server.close(() => resolve()));
+    socket?.terminate(); await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(harness, { force: true });
   }
 });
 
 it("rejects invalid boot configuration without printing its contents", async () => {
   const result = await exec(process.execPath, [join(dist, "worker.mjs")], { cwd: directory,
-    env: { ...workerChildEnvironment(), ZEROS_WORKER_URL: "wss://fixture-login:fixture-secret@example.invalid", ZEROS_WORKSPACE_ID: WORKSPACE_ID }, timeout: 10_000,
+    env: { ...workerChildEnvironment(), CLOUD_V2_API_URL: "https://fixture-login:fixture-secret@example.invalid", CLOUD_V2_RUNTIME_SHA256: "a".repeat(64), ZEROS_WORKSPACE_ID: WORKSPACE_ID }, timeout: 10_000,
   }).then(() => undefined, error => error as { code: number; stderr: string });
   expect(result).toMatchObject({ code: 1, stderr: "cloud-worker invalid-boot-configuration\n" });
 });

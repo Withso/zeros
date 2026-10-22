@@ -21,6 +21,9 @@ export class HistoryMirror {
   }
 
   connect(): void {
+    // Replica attaches and login pushes do not reconnect the HTTPS mirror.
+    // Backfill only after an actual loss of its durable delivery channel.
+    if (this.online) return;
     this.online = true;
     this.epoch++;
     this.pending.clear();

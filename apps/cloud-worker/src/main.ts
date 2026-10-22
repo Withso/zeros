@@ -1,27 +1,30 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { CloudWorker } from "./worker";
-import { RelayTransport, WORKER_TOKEN_FILE } from "./relay-transport";
+import { HybridTransport } from "./hybrid-transport";
+import { WORKER_TOKEN_FILE } from "./worker-token";
 
 export const WORKER_STATE_DIRECTORY = "/home/user/.local/share/zeros/cloud-worker";
-interface BootOptions { url: string; workspaceId: string; tokenFile?: string; directory?: string }
+interface BootOptions { apiUrl: string; workspaceId: string; runtimeSha256: string; tokenFile?: string; directory?: string; publicKeys?: readonly string[]; port?: number }
 
 /** The service receives only non-secret boot configuration. Model configuration
- * and the checkout arrive over the authenticated relay after hello. */
+ * and the checkout arrive over authenticated HTTPS after hello. */
 export function readBootEnvironment(environment: NodeJS.ProcessEnv = process.env): BootOptions {
-  const url = environment.ZEROS_WORKER_URL, workspaceId = environment.ZEROS_WORKSPACE_ID;
-  if (!url || !workspaceId || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(workspaceId))
+  const apiUrl = environment.CLOUD_V2_API_URL, workspaceId = environment.ZEROS_WORKSPACE_ID, runtimeSha256 = environment.CLOUD_V2_RUNTIME_SHA256;
+  if (!apiUrl || !runtimeSha256 || !/^[a-f0-9]{64}$/.test(runtimeSha256) || !workspaceId || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(workspaceId))
     throw new Error("Worker boot configuration is missing or invalid.");
-  return { url, workspaceId };
+  return { apiUrl, workspaceId, runtimeSha256 };
 }
 
 export function startWorker(options: BootOptions): { worker: CloudWorker; stop: (code?: number) => Promise<void> } {
   let stopping: Promise<void> | undefined;
   const log = (event: string) => { process.stdout.write(`cloud-worker ${event}\n`); };
-  const transport = new RelayTransport({ url: options.url, tokenFile: options.tokenFile ?? WORKER_TOKEN_FILE,
+  const transport = new HybridTransport({ apiUrl: options.apiUrl, workspaceId: options.workspaceId, runtimeSha256: options.runtimeSha256,
+    ...(options.publicKeys ? { publicKeys: options.publicKeys } : {}), ...(options.port === undefined ? {} : { port: options.port }),
+    tokenFile: options.tokenFile ?? WORKER_TOKEN_FILE,
     onStatus: status => {
       log(status);
-      if (["superseded", "stopped", "protocol-error"].includes(status)) void stop(status === "protocol-error" ? 1 : 0);
+      if (["unauthorized", "stopped", "protocol-error"].includes(status)) void stop(status === "protocol-error" ? 1 : 0);
     },
   });
   const worker = new CloudWorker({ directory: options.directory ?? WORKER_STATE_DIRECTORY, workspaceId: options.workspaceId, transport,

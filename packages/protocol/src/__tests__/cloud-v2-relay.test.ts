@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   CLOUD_V2_MAX_HISTORY_ROWS,
+  CLOUD_V2_RELAY_PROTOCOL,
+  CloudV2WorkerHelloSchema,
+  CloudV2WorkerHistorySchema,
+  CloudV2WorkerActivityReplySchema,
   CloudV2CapabilitiesSchema,
   CloudV2ControlFrameSchema,
   CloudV2WorkerFrameSchema,
@@ -12,10 +16,22 @@ const capabilities = { design: false, browser: false, simulators: false, termina
 
 describe("cloud v2 relay contract", () => {
   it("accepts a worker hello and never lets a worker claim Design, browser or simulators", () => {
-    expect(CloudV2WorkerFrameSchema.parse({ t: "hello", protocol: 1, workerVersion: "0.1.0", capabilities }).t).toBe("hello");
+    expect(CloudV2WorkerFrameSchema.parse({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.1.0", capabilities }).t).toBe("hello");
     for (const tab of ["design", "browser", "simulators"]) {
       expect(CloudV2CapabilitiesSchema.safeParse({ ...capabilities, [tab]: true }).success).toBe(false);
     }
+  });
+
+  it("fences HTTPS requests by protocol, boot and bounded history sequence", () => {
+    const hello = { protocol: CLOUD_V2_RELAY_PROTOCOL, bootId: id, runtimeSha256: "a".repeat(64) };
+    expect(CloudV2WorkerHelloSchema.safeParse(hello).success).toBe(true);
+    expect(CloudV2WorkerHelloSchema.safeParse({ ...hello, protocol: 1 }).success).toBe(false);
+    expect(CloudV2WorkerHelloSchema.safeParse({ ...hello, runtimeSha256: "latest" }).success).toBe(false);
+    expect(CloudV2WorkerHistorySchema.safeParse({ t: "history", bootId: id, sequence: 1, chats: [{ id: "chat" }] }).success).toBe(true);
+    for (const sequence of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])
+      expect(CloudV2WorkerHistorySchema.safeParse({ t: "history", bootId: id, sequence }).success).toBe(false);
+    expect(CloudV2WorkerActivityReplySchema.safeParse({ loginRevision: "2", state: "running" }).success).toBe(true);
+    expect(CloudV2WorkerActivityReplySchema.safeParse({ loginRevision: "-1", state: "running" }).success).toBe(false);
   });
 
   it("forwards bridge frames opaquely and allows a broadcast target", () => {
@@ -46,7 +62,7 @@ describe("cloud v2 relay contract", () => {
   it("delivers a Codex proxy login, direct Claude login and Cursor key, nothing else", () => {
     const proxy = { baseUrl: "https://api.zeros.build/v2/cloud/proxy/openai", token: "z".repeat(32), expiresAt: 2 };
     const config = {
-      t: "config",
+      t: "config", loginRevision: "0",
       workspace: { id, organizationId: id, checkoutPath: "/home/user/withso/zeros", repository: "withso/zeros", branch: "zeros/cloud-1", baseBranch: "main" },
       agents: { codex: proxy, claude: { oauthToken: "offline-oauth-placeholder" }, cursor: { apiKey: "key" } },
     };
@@ -58,7 +74,7 @@ describe("cloud v2 relay contract", () => {
 
   it.each(["oauthToken", "apiKey"])("accepts only one bounded Claude %s credential", (field) => {
     const config = {
-      t: "config",
+      t: "config", loginRevision: "0",
       workspace: { id, organizationId: id, checkoutPath: "/home/user/fixture/repo", repository: "fixture/repo", branch: "workspace/fixture", baseBranch: "main" },
     };
     for (const length of [16, 16384])

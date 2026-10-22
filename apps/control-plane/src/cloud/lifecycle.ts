@@ -6,6 +6,7 @@
 import type { CloudV2Compute, CloudV2CommandResult } from "./boat.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
+import { CLOUD_V2_WORKER_PORT } from "./contract.js";
 
 const BATCH = 10;
 const LEASE_MS = 2 * 60_000;
@@ -22,10 +23,13 @@ export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token
 export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
 export type CloudV2LifecycleDeps = {
-  store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince">;
+  store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute">;
   compute: CloudV2Compute;
   /** The worker runtime every VM must run; installed on create and on wake. */
   runtime: CloudV2Runtime;
+  publicKeys: readonly string[];
+  sealPortToken(token: string, workspaceId: string): unknown;
+  stopWorker(workspace: CloudV2Workspace): Promise<boolean>;
   /** Non-secret boot settings, e.g. the relay URL and workspace id. */
   bootEnv(workspace: CloudV2Workspace): Record<string, string>;
   sandboxName(workspace: CloudV2Workspace): string;
@@ -48,7 +52,7 @@ function errorCode(error: unknown): string {
 export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Record<string, string>> = {}): string {
   if (!/^zw2w_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("Invalid worker token");
   for (const [name, value] of Object.entries(bootEnv))
-    if (!/^ZEROS_[A-Z0-9_]{1,64}$/.test(name) || !/^[\x21-\x7e]{1,2048}$/.test(value)) throw new Error("Invalid worker boot setting");
+    if (!["CLOUD_V2_API_URL", "CLOUD_V2_RUNTIME_SHA256", "ZEROS_WORKSPACE_ID"].includes(name) || !/^[\x21-\x7e]{1,2048}$/.test(value)) throw new Error("Invalid worker boot setting");
   const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
   const dir = CLOUD_V2_WORKER_TOKEN_PATH.slice(0, CLOUD_V2_WORKER_TOKEN_PATH.lastIndexOf("/"));
   const envFile = Object.entries(bootEnv).map(([name, value]) => `${name}=${value}\n`).join("");
@@ -122,6 +126,7 @@ export class CloudV2Lifecycle {
           await store.defer(workspace.id, "creating", 0, { boatSandboxId: sandboxId });
         }
         await this.ensureRuntime(sandboxId);
+        if (!await this.host(workspace, sandboxId)) return;
         await this.deliverToken(workspace, sandboxId);
         await store.defer(workspace.id, "creating", HELLO_POLL_MS);
         return;
@@ -136,17 +141,21 @@ export class CloudV2Lifecycle {
           await store.transition(workspace.id, ["starting"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
-        // Resume is idempotent. The resumed worker reconnects with the
-        // credential it kept; only one that has not gets a fresh credential.
+        // Resume and protected hosting are idempotent. Rotate the HTTP token
+        // and restart every wake to register a new process boot identity.
         await compute.resume(workspace.boatSandboxId);
         // A runtime shipped while the VM slept is installed now.
         await this.ensureRuntime(workspace.boatSandboxId);
-        if (waking >= HELLO_POLL_MS) await this.deliverToken(workspace, workspace.boatSandboxId);
+        if (!await this.host(workspace, workspace.boatSandboxId)) return;
+        await this.deliverToken(workspace, workspace.boatSandboxId);
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
       }
       case "stopping":
-        if (workspace.boatSandboxId) await compute.stop(workspace.boatSandboxId);
+        if (workspace.boatSandboxId) {
+          await this.deps.stopWorker(workspace);
+          await compute.stop(workspace.boatSandboxId);
+        }
         await store.revoke(workspace.id, false);
         await store.transition(workspace.id, ["stopping"], "stopped");
         return;
@@ -166,10 +175,15 @@ export class CloudV2Lifecycle {
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });
   }
 
+  private async host(workspace: CloudV2Workspace, sandboxId: string): Promise<boolean> {
+    const route = await this.deps.compute.hostPort(sandboxId, { port: CLOUD_V2_WORKER_PORT, localhost: true, title: "Zeros worker" });
+    return this.deps.store.setWorkerRoute(workspace.id, sandboxId, route.url, this.deps.sealPortToken(route.token, workspace.id));
+  }
+
   /** Quick when the VM already has the runtime; otherwise downloads it. */
   private async ensureRuntime(sandboxId: string): Promise<void> {
     const { runtime } = this.deps;
-    const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url() }), 300);
+    const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url(), publicKeys: this.deps.publicKeys }), 300);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
   }
 
