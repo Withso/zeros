@@ -32,6 +32,8 @@ const b = {
   organizationId,
   workspaceId: "33333333-3333-4333-8333-333333333333",
 };
+/** The control-plane mirror holds the worker's native rows under this checkout. */
+const MIRROR_ROOT = "/home/user/Owner/repo";
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => {
@@ -347,7 +349,7 @@ describe("workspace runtime routing", () => {
     const readHistory = vi.fn(async (_target, op) => op === "chats.list"
       ? { chats: [], chatDeletions: [], revision: 1 } : remote);
     const open = vi.fn(async () => peer.peer);
-    const client = new WorkspaceRuntimeClient({ open, readHistory, workspaces: () => [] });
+    const client = new WorkspaceRuntimeClient({ open, readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
     const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window", params: { chatId: cloudScopedId(a, "chat"), limit: 100 } };
     try {
       expect(await client.request(request)).toMatchObject({ result: remote });
@@ -367,7 +369,7 @@ describe("workspace runtime routing", () => {
   it("rejects an attached history response after its workspace connection is retired", async () => {
     const peer = fakePeer(a), pending = deferred<Record<string, unknown>>();
     const readHistory = vi.fn(async () => ({ chats: [], chatDeletions: [], revision: 1 }));
-    const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, readHistory, workspaces: () => [] });
+    const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
     try {
       await client.warmWorkspace(a);
       peer.request.mockReturnValueOnce(pending.promise);
@@ -382,10 +384,10 @@ describe("workspace runtime routing", () => {
     let now = 1_000, revision = 1;
     vi.spyOn(Date, "now").mockImplementation(() => now);
     const open = vi.fn();
-    const readHistory = vi.fn(async (target: CloudWorkspaceTarget) => ({
-      revision, chats: [{ id: cloudScopedId(target, "saved"), folder: cloudWorkspaceKey(target) }], chatDeletions: [],
+    const readHistory = vi.fn(async (_target: CloudWorkspaceTarget) => ({
+      revision, chats: [{ id: "saved", folder: MIRROR_ROOT }], chatDeletions: [],
     }));
-    const client = new WorkspaceRuntimeClient({ open, readHistory, workspaces: () => [] });
+    const client = new WorkspaceRuntimeClient({ open, readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
     const changed = vi.fn();
     client.on("DB_CHANGED", changed);
     try {
@@ -422,7 +424,7 @@ describe("workspace runtime routing", () => {
   it("fences a late history warm after account replacement without disturbing its replacement read", async () => {
     const old = deferred<Record<string, unknown>>(), next = deferred<Record<string, unknown>>();
     const readHistory = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise);
-    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, workspaces: () => [] });
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
     const changed = vi.fn();
     client.on("DB_CHANGED", changed);
     try {
@@ -449,9 +451,9 @@ describe("workspace runtime routing", () => {
       type: "WORKSPACE_RESPONSE", result: { chats: [{ id: "local-chat" }], chatDeletions: [] },
     } as unknown as BridgeMessage);
     const readHistory = vi.fn(async (_target: CloudWorkspaceTarget, op: string) => op === "chats.list"
-      ? { chats: [{ id: cloudScopedId(a, "saved"), folder: cloudWorkspaceKey(a) }], chatDeletions: [] }
+      ? { chats: [{ id: "saved", folder: MIRROR_ROOT }], chatDeletions: [] }
       : { messages: [{ msgId: "tool", kind: "tool_call", payload: '{"status":"completed"}', createdAt: 1 }] });
-    const client = new WorkspaceRuntimeClient({ open, readHistory, workspaces: () => [] });
+    const client = new WorkspaceRuntimeClient({ open, readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
     try {
       await client.warmHistoryWorkspace(a);
       expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(true);
@@ -468,7 +470,7 @@ describe("workspace runtime routing", () => {
   it("shares history reads by workspace and fences account replacement", async () => {
     const pending = deferred<Record<string, unknown>>();
     const readHistory = vi.fn(() => pending.promise);
-    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, workspaces: () => [] });
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
     const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window", params: { chatId: cloudScopedId(a, "saved"), limit: 100 } };
     const first = client.request(request), second = client.request(request);
     const rejected = Promise.allSettled([first, second]);
@@ -483,7 +485,7 @@ describe("workspace runtime routing", () => {
   it("denies cloud history after access is revoked without returning its warm cache", async () => {
     let allowed = true;
     const client = new WorkspaceRuntimeClient({ open: vi.fn(), workspaces: () => [], canAccess: () => allowed,
-      readHistory: async () => ({ messages: [{ msgId: "saved" }] }) });
+      readHistory: async () => ({ messages: [{ msgId: "saved" }] }), historyRoot: () => MIRROR_ROOT });
     const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window", params: { chatId: cloudScopedId(a, "saved"), limit: 100 } };
     await client.request(request);
     allowed = false;
@@ -987,7 +989,7 @@ describe("cloud v2 history ownership", () => {
     peer.request.mockImplementation(async (message: Record<string, unknown>) => ({ type: "WORKSPACE_RESPONSE", op: message.op,
       result: message.op === "chats.list" ? { chats: [{ id: "live" }], chatDeletions: [] } : {} }));
     const readHistory = vi.fn(async () => ({ chats: [{ id: "mirrored" }], chatDeletions: [] }));
-    const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, readHistory, workspaces: () => [] });
+    const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
     try {
       // Before any connection the mirror answers, without opening a peer.
       const offline = await client.request({ type: "WORKSPACE_REQUEST", op: "chats.list", params: { workspaceId: cloudWorkspaceKey(a) } } as never);

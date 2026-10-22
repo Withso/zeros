@@ -48,8 +48,12 @@ export interface WorkspaceRuntimeOptions {
   workspacesConfirmed?: () => boolean;
   canAccess?: (target: CloudWorkspaceTarget) => boolean;
   manage?: (target: CloudWorkspaceTarget, op: string, params?: WireRecord) => Promise<WireRecord>;
-  /** Authorized database reads that do not require a worker connection. */
+  /** Authorized database reads that do not require a worker connection. The
+   * mirror stores the worker's native rows, so they are scoped like its replies. */
   readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<WireRecord>;
+  /** The workspace's native checkout path, used to scope mirror rows before a
+   * worker has confirmed it in this session. */
+  historyRoot?: (target: CloudWorkspaceTarget) => string | undefined;
 }
 interface WakeOwner { account: string; generation: number; stopVersion: number; lifecyclePending?: boolean; retargetVersion?: number }
 class CloudAdmissionGenerationChangedError extends Error {
@@ -121,6 +125,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     weightOf: value => JSON.stringify(value).length * 2,
   });
   private readonly historyWorkspaces = new Map<string, CloudWorkspaceTarget>();
+  /** Checkout roots confirmed by a worker's own workspace row. */
+  private readonly confirmedRoots = new Map<string, string>();
   private readonly historyWarmups = new Map<string, Promise<WireRecord>>();
   private localEpoch = 0;
   private readonly localLists = new Map<string, LocalListEntry>();
@@ -469,6 +475,13 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return flight;
   }
 
+  private mirrorScope(target: CloudWorkspaceTarget): CloudRuntimeScope {
+    const root = this.confirmedRoots.get(cloudWorkspaceKey(target)) ?? this.routing.historyRoot?.(target);
+    if (!root?.startsWith("/")) throw new Error("Cloud history is unavailable for this workspace");
+    // A v2 worker reports its control-plane workspace ID as the native row ID.
+    return { ...target, root, engineWorkspaceId: target.workspaceId };
+  }
+
   private historyKey(target: CloudWorkspaceTarget, op: string, params: WireRecord): string {
     return `${cloudWorkspaceKey(target)}\0${this.identity(target)}\0${op}\0${JSON.stringify(params)}`;
   }
@@ -501,7 +514,13 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         if (response.type !== "WORKSPACE_RESPONSE" || !Array.isArray(record(record(response).result)[rows]))
           throw cloudHistoryReadError(response, "Could not read the current cloud transcript");
         result = record(cloudIncoming(peer.scope, response as unknown as WireRecord).result);
-      } else result = await this.routing.readHistory!(target, op, params);
+      } else {
+        // Translate exactly as for the worker: the mirror holds its native rows.
+        const scope = this.mirrorScope(target);
+        const native = record(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op, params }).params);
+        const reply = await this.routing.readHistory!(target, op, native);
+        result = record(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op, result: reply }).result);
+      }
       assertAccess();
       if (op === "chats.list") {
         const previous = this.history.peekSnapshot(this.historyKey(target, op, params)).data;
@@ -760,6 +779,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           retired: false,
         };
         this.peers.set(key, entry);
+        this.confirmedRoots.delete(key);
+        this.confirmedRoots.set(key, entry.scope.root);
+        while (this.confirmedRoots.size > 64) this.confirmedRoots.delete(this.confirmedRoots.keys().next().value!);
         for (const type of this.routedHandlers.keys()) this.attach(entry, type);
         entry.stopStatus = entry.client.onStatusChange((status) => {
           if (!entry.retired && status === "disconnected" && entry.client.lastRejection) this.retirePeer(entry);
@@ -882,9 +904,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     message: Message,
     options: number | RequestOptions,
   ): Promise<BridgeMessage> {
+    // Search is not part of cloud v2 yet; never open, wake or read the mirror for it.
+    if (message.type === "WORKSPACE_REQUEST" && (message as unknown as WireRecord).op === "messages.search")
+      throw Object.assign(new Error("Search isn't available in cloud workspaces yet."), { code: "CLOUD_V2_UNSUPPORTED" });
     if (this.routing.readHistory && message.type === "WORKSPACE_REQUEST") {
       const wire = message as unknown as WireRecord;
-      if (["chats.list", "messages.window", "messages.windowOlder", "messages.search"].includes(String(wire.op)))
+      if (["chats.list", "messages.window", "messages.windowOlder"].includes(String(wire.op)))
         return { type: "WORKSPACE_RESPONSE", op: wire.op,
           result: await this.readHistory(target, String(wire.op), wire.op === "chats.list" ? {} : record(wire.params)),
         } as unknown as BridgeMessage;
@@ -1078,6 +1103,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     this.historyIntents.clear();
     for (const key of this.history.keys()) this.history.forget(key);
     this.historyWorkspaces.clear();
+    this.confirmedRoots.clear();
   }
 
   pruneCloudConnections(): void {

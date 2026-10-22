@@ -31,6 +31,9 @@ const scope = {
 };
 const folder = cloudWorkspaceKey(scope);
 const chatId = cloudScopedId(scope, "cloud-chat");
+/** The control-plane mirror holds the worker's native rows. */
+const nativeRoot = "/home/user/Owner/repo";
+const nativeHistory = async () => ({ chats: [{ id: "cloud-chat", folder: nativeRoot }], chatDeletions: [] });
 const clients: WorkspaceRuntimeClient[] = [];
 function runtime() {
   const request = vi.fn(
@@ -151,10 +154,8 @@ it("confirmed cloud history remains readable while the Local engine is disconnec
   const client = new WorkspaceRuntimeClient({
     open: vi.fn(),
     workspaces: () => [],
-    readHistory: async () => ({
-      chats: [{ id: chatId, folder }],
-      chatDeletions: [],
-    }),
+    readHistory: nativeHistory,
+    historyRoot: () => nativeRoot,
   });
   clients.push(client);
   await client.warmHistoryWorkspace(scope);
@@ -324,10 +325,8 @@ it("publishes confirmed cloud lists without waiting for a stalled Local read", a
   const client = new WorkspaceRuntimeClient({
     open: vi.fn(),
     workspaces: () => [{ id: folder, repoSlug: "cloud-fixture" }],
-    readHistory: async () => ({
-      chats: [{ id: chatId, folder }],
-      chatDeletions: [],
-    }),
+    readHistory: nativeHistory,
+    historyRoot: () => nativeRoot,
   });
   clients.push(client);
   await client.warmHistoryWorkspace(scope);

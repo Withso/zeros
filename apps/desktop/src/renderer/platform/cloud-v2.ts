@@ -79,6 +79,12 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
   };
 }
 
+/** The worker's native checkout, as the control plane configures it
+ * (`CLOUD_V2_HOME/<repository>`). Mirror rows carry this path. */
+export function cloudV2CheckoutPath(document: Pick<CloudWorkspaceDocument, "repository">): string {
+  return `/home/user/${document.repository.owner}/${document.repository.name}`;
+}
+
 const one = z.object({ workspace: CloudV2WorkspaceSchema });
 const key = () => crypto.randomUUID();
 

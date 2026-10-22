@@ -31,7 +31,7 @@ import { wireGithubCredentialWriteback } from "./github-token-sync";
 import { nativeListen, useNativeRuntime } from "../runtime";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
 import { openCloudV2Runtime } from "./open-cloud-v2-runtime";
-import { readCloudV2History } from "../cloud-v2";
+import { cloudV2CheckoutPath, readCloudV2History } from "../cloud-v2";
 import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, cloudWorkspaceStopVersion, getCloudWorkspaceRows, isCloudWorkspaceLifecyclePending } from "../../state/cloud-workspace-catalog";
 import { wireWorkbenchConnectionRejection } from "../../state/workbench-availability";
 
@@ -71,6 +71,10 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         // History comes from the worker when connected and from the control
         // plane's mirror otherwise; neither read wakes the VM.
         readHistory: readCloudV2History,
+        historyRoot: target => {
+          const doc = cloudWorkspaceDocument(target);
+          return doc ? cloudV2CheckoutPath(doc) : undefined;
+        },
       }),
   );
   const nativeRuntime = useNativeRuntime();
