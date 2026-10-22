@@ -1,6 +1,9 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket from "ws";
+import { EventEmitter } from "node:events";
+import type pg from "pg";
+import { PostgresSecurityEventBroker } from "../security-events.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOUD_V2_BRIDGE_PROTOCOL, CloudV2Relay, type CloudV2RelayDeps } from "./relay.js";
 import type { CloudV2Workspace } from "./store.js";
@@ -36,19 +39,27 @@ describe("cloud v2 relay", () => {
   let url: string;
   let state: CloudV2Workspace["state"];
   let deps: CloudV2RelayDeps;
+  let authorized: boolean;
+  let broker: PostgresSecurityEventBroker;
+  let notification: EventEmitter;
   const sockets: WebSocket[] = [];
 
   beforeEach(async () => {
     state = "running";
+    authorized = true;
+    notification = Object.assign(new EventEmitter(), { query: vi.fn(async () => ({ rows: [] })), release: vi.fn() });
+    broker = new PostgresSecurityEventBroker({ connect: async () => notification } as unknown as pg.Pool);
     deps = {
       store: {
-        byWorkerToken: vi.fn(async token => token === workerToken ? workspace(state) : null),
-        consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId } : null),
+        byWorkerToken: vi.fn(async token => token === workerToken ? { ...workspace(state), accessEpoch: "0" } : null),
+        consumeConnectTicket: vi.fn(async (value, id) => value === ticket && id === workspaceId ? { userId: workspaceId, accessEpoch: "0" } : null),
         get: vi.fn(async () => workspace(state)),
+        accessEpoch: vi.fn(async () => authorized ? "0" : null),
         transition: vi.fn(async (_id, from: readonly string[], to) => from.includes(state) ? workspace(state = to) : null),
         markActive: vi.fn(async () => {}),
         writeHistory: vi.fn(async () => {}),
       },
+      securityEvents: broker,
       config: vi.fn(async ws => ({
         t: "config" as const,
         workspace: { id: ws.id, organizationId: ws.organizationId, checkoutPath: "/home/user/o/r", repository: ws.repository, branch: ws.branch, baseBranch: "main" },
@@ -68,6 +79,7 @@ describe("cloud v2 relay", () => {
   afterEach(async () => {
     for (const socket of sockets.splice(0)) socket.terminate();
     relay.close();
+    await broker.stop();
     await new Promise(resolve => server.close(resolve));
   });
 
@@ -100,6 +112,55 @@ describe("cloud v2 relay", () => {
     const reply = nextMessage(a);
     w.send(JSON.stringify({ t: "frame", clientId: open.clientId, frame: { type: "WORKSPACE_RESPONSE", requestId: "r1" } }));
     expect(await reply).toEqual({ type: "WORKSPACE_RESPONSE", requestId: "r1" });
+  });
+
+  it("revalidates an already-open app socket before forwarding after membership removal", async () => {
+    const w = await worker();
+    const openFrame = nextMessage(w);
+    const a = await app(); await openFrame;
+    const frames: unknown[] = [];
+    w.on("message", data => frames.push(JSON.parse(String(data))));
+    authorized = false;
+    a.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "after-removal", op: "file.write", params: { path: "file.txt", content: "changed" } }));
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(frames).toEqual([]);
+    await vi.waitFor(() => expect(w.readyState).toBe(WebSocket.CLOSED));
+  });
+
+  it.each(["membership", "session", "account"])("revokes connected rooms on %s security notifications, without a client request", async () => {
+    const w = await worker();
+    const openFrame = nextMessage(w);
+    const a = await app(); await openFrame;
+    authorized = false;
+    notification.emit("notification", { channel: "zeros_security_event" });
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    await vi.waitFor(() => expect(w.readyState).toBe(WebSocket.CLOSED));
+  });
+
+  it("fences a queued frame when authority is revoked during an offline read", async () => {
+    let release!: () => void;
+    vi.mocked(deps.answerOffline).mockImplementation(async () => new Promise(resolve => { release = () => resolve(null); }));
+    const a = await app();
+    a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "waiting" }));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    authorized = false;
+    notification.emit("notification", { channel: "zeros_security_event" });
+    release();
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(deps.wake).not.toHaveBeenCalled();
+  });
+
+  it("fences an app upgrade that was awaiting its workspace when revocation committed", async () => {
+    let release!: () => void;
+    vi.mocked(deps.store.get).mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(workspace("running")); }));
+    const connecting = app();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    authorized = false;
+    notification.emit("notification", { channel: "zeros_security_event" });
+    release();
+    const a = await connecting;
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(deps.wake).not.toHaveBeenCalled();
   });
 
   it("refuses a worker without a valid token and an app without a ticket", async () => {

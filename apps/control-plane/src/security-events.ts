@@ -126,7 +126,7 @@ function cursor(value: string | null | undefined): number {
 
 /** Streams outlive their HTTP authentication. Recheck the exact identity and
  * session in the same snapshot as each replay batch, including token expiry. */
-async function securityStreamAuthority(tx:Tx,user:AuthedUser):Promise<boolean> {
+export async function securityStreamAuthority(tx:Tx,user:AuthedUser):Promise<boolean> {
   const result=await tx.query<{live:boolean}>(`SELECT EXISTS (
     SELECT 1 FROM users account JOIN user_identities identity ON identity.user_id=account.id
     WHERE account.id=$1 AND account.auth_status='active' AND account.deleted_at IS NULL

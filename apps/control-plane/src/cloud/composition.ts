@@ -3,6 +3,7 @@
 // model proxy (API role). index.ts only starts and stops what this returns.
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { Config } from "../config.js";
 import { HttpError } from "../authz.js";
 import { BoatApiClient } from "../cloud/boat-client.js";
@@ -56,7 +57,7 @@ export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats"
   return { type: "WORKSPACE_RESPONSE", id: randomUUID(), source: "engine", timestamp: Date.now(), requestId: request.id, op: request.op, result };
 }
 
-export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }) {
+export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker) {
   const v2 = config.cloudV2;
   if (!v2) return null;
   const store = new CloudV2Store(pool);
@@ -101,7 +102,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   };
   const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const relay = roles.relay ? new CloudV2Relay({
-    store,
+    store, ...(securityEvents ? { securityEvents } : {}),
     config: workerConfig,
     githubToken,
     wake: async workspace => { await store.transition(workspace.id, ["stopped"], "starting"); },

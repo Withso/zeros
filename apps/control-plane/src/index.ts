@@ -97,7 +97,7 @@ const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.s
 const cloudV2 = runtimeReady ? createCloudV2(config, workerPool ?? pool, {
   relay: processRole === "realtime" || processRole === "combined",
   lifecycle: processRole === "worker" || processRole === "combined",
-}) : null;
+}, securityEventBroker) : null;
 const stopCloudV2Lifecycle = cloudV2?.lifecycle?.start() ?? (async () => {});
 const app = createApp(config, pool, emailConfig, {
   ...(cloudV2 && servesHttpApi ? { cloudV2: { routes: cloudV2.routes, proxy: cloudV2.proxy } } : {}),

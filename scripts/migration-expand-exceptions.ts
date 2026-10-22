@@ -166,6 +166,10 @@ END $$;`],
     "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_initial_delete_capture_source(uuid,boolean),guard_cloud_initial_delete_capture(),
   require_cloud_initial_delete_capture(),admit_cloud_initial_delete_capture(uuid,bytea,boolean) FROM PUBLIC;`],
   },
+  "0184_cloud_v2_live_authority.sql": {
+    // The function is new and trigger-only; no existing caller loses a grant.
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION revoke_cloud_v2_security_access() FROM PUBLIC;"],
+  },
   "0180_cloud_initial_delete_periodic_checkpoint.sql": {},
   "0178_cloud_owner_existing_delete.sql": {},
   "0177_cloud_owner_discard_delete.sql": {

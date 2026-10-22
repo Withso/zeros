@@ -92,7 +92,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const workspace = await deps.store.get(id.data, userId);
     if (workspace.state === "deleting" || workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
     if (workspace.state === "stopped") await deps.store.transition(workspace.id, ["stopped"], "starting");
-    const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS });
+    const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user") });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
