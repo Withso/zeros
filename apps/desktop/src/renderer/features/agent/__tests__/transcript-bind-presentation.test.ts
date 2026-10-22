@@ -14,18 +14,40 @@ import { shouldCancelStalledSessionAdmission } from "../session-admission-policy
 const ast = ts.createSourceFile("sessions-provider.tsx", readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8"),
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const callbacks: Record<string, string> = {};
+let failureSource = "";
 function visit(node: ts.Node) {
+  if (ts.isFunctionDeclaration(node) && node.name?.getText(ast) === "failureFromAgentError") failureSource = node.getText(ast);
   if (ts.isVariableDeclaration(node) && ["loadIntoChat", "ensureSession"].includes(node.name.getText(ast)) && node.initializer && ts.isCallExpression(node.initializer))
     callbacks[node.name.getText(ast)] = node.initializer.arguments[0].getText(ast);
   ts.forEachChild(node, visit);
 }
 visit(ast);
 if (Object.keys(callbacks).length !== 2) throw new Error("Admission callback missing");
-const code = ts.transpileModule(Object.entries(callbacks).map(([name, callback]) => `globalThis.${name} = ${callback};`).join("\n"),
+const code = ts.transpileModule(failureSource + "\n" + Object.entries(callbacks).map(([name, callback]) => `globalThis.${name} = ${callback};`).join("\n"),
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 afterEach(() => { useSessionsStore.getState().clearAll(); vi.restoreAllMocks(); });
 
 describe("transcript presentation during session reattachment", () => {
+  it.each([true, false])("a binding-free cloud probe falls back to create only for a typed miss (%s)", async typed => {
+    const cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", chatId = "fresh", agentId = "claude";
+    const bridge = { request: vi.fn(async () => ({ type: "AGENT_ERROR", agentId, code: "session-expired", message: "No live execution for this conversation.",
+      ...(typed ? { failure: { kind: "session-expired", stage: "loadSession", agentId, message: "No live execution for this conversation." } } : {}) })) };
+    const context: Record<string, unknown> = { BLANK, isCloudWorkspace, cancelGeneration, cancelledSince, executionActorForRecovery,
+      Error, classifyRpcError, bindFailureWasSuperseded, shouldCancelStalledSessionAdmission, statusForFailure, resumeFailureInvalidatesBinding,
+      getStore: useSessionsStore.getState, bridge, ensureInFlightRef: { current: new Map() },
+      loadFlightAdoptOnlyRef: { current: new Map() }, loadFlightKeysRef: { current: new Map() }, cancelGenerationsRef: { current: new Map() },
+      resolveSpawnCwd: () => cwd, resolveSpawnWorkspaceId: async () => "workspace", evictUnretainedTranscripts: vi.fn(), drainOrDropQueue: vi.fn() };
+    vm.runInNewContext(code, context);
+    const adopted = await (context.loadIntoChat as (...args: unknown[]) => Promise<boolean>)(chatId, agentId, null, { cwd });
+    expect(adopted).toBe(!typed);
+    expect(bridge.request).toHaveBeenCalledOnce();
+    expect(bridge.request).toHaveBeenCalledWith(expect.objectContaining({ type: "AGENT_LOAD_SESSION", chatId, agentId }), expect.any(Number));
+    if (typed) {
+      expect(useSessionsStore.getState().sessions[chatId]).toMatchObject({ status: "warming", error: null, failure: null });
+      expect(context.drainOrDropQueue).not.toHaveBeenCalled();
+    } else expect(useSessionsStore.getState().sessions[chatId].error).toBe("No live execution for this conversation.");
+  });
+
   it.each(["/personal/project", "/organization/project"])("reattaches silently when startup retires the workspace lookup for %s", async cwd => {
     const chatId = "chat", agentId = "claude";
     const messages = [{ id: "prior", kind: "text" as const, role: "agent" as const, text: "Prior output", createdAt: 1 }];

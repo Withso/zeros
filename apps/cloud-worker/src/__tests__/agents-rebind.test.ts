@@ -50,6 +50,67 @@ function session(frame: BridgeMessage) {
   return frame.session;
 }
 
+it("treats a first conversation probe before chats.upsert as a typed miss, then opens the same chat", async () => {
+  const f = await setup();
+  const probe = await f.request("AGENT_LOAD_SESSION", { agentId: "claude", chatId: "chat", cwd: WORKSPACE_KEY });
+  expect(probe).toMatchObject({ type: "AGENT_ERROR", code: "session-expired", requestId: expect.any(String),
+    failure: { kind: "session-expired", stage: "loadSession", agentId: "claude" } });
+  expect(f.drivers).toHaveLength(0);
+  expect(await f.chat()).toBeUndefined();
+  const created = session(await f.open("claude"));
+  // The renderer's independent metadata save can finish after admission.
+  await f.op("chats.upsert", { chat: { id: "chat", folder: WORKSPACE_KEY, agentId: "claude", title: "Untitled" } });
+  expect((await f.op("chats.list") as { chats: ChatRow[] }).chats).toHaveLength(1);
+  expect(f.drivers).toHaveLength(1);
+  expect(await f.request("AGENT_LOAD_SESSION", { agentId: "claude", chatId: "chat", cwd: WORKSPACE_KEY }))
+    .toMatchObject({ type: "AGENT_SESSION_LOADED", sessionId: created.sessionId });
+});
+
+it("opens the first default chat in either order relative to chats.upsert", async () => {
+  const f = await setup();
+  for (const before of [true, false]) {
+    const chatId = `first-${before}`;
+    const save = () => f.op("chats.upsert", { chat: { id: chatId, folder: WORKSPACE_KEY, agentId: "claude", title: "Untitled" } });
+    if (before) await save();
+    session(await f.open("claude", chatId));
+    if (!before) await save();
+    expect(await f.chat(chatId)).toMatchObject({ id: chatId, agentId: "claude" });
+  }
+  expect(f.drivers).toHaveLength(2);
+});
+
+it.each(["providerBinding", "sessionId", "executionId", "deleted", "foreign"])(
+  "does not turn a %s refusal into a fresh-chat probe miss", async reason => {
+    const f = await setup();
+    if (reason === "deleted") {
+      session(await f.open("claude"));
+      await f.op("chats.delete", { id: "chat" });
+    }
+    const reply = await f.request("AGENT_LOAD_SESSION", { agentId: "claude", chatId: "chat", cwd: WORKSPACE_KEY,
+      ...(reason === "providerBinding" ? { providerBinding: providerBindingForResume("claude", "missing-native") } : {}),
+      ...(["sessionId", "executionId"].includes(reason) ? { [reason]: "missing-execution" } : {}),
+      ...(reason === "foreign" ? { workspaceId: "another-workspace" } : {}) });
+    expect(reply).toMatchObject({ type: "AGENT_ERROR" });
+    expect(reply).not.toHaveProperty("failure.kind", "session-expired");
+    expect(f.drivers).toHaveLength(reason === "deleted" ? 1 : 0);
+  },
+);
+
+it("adopts a first open whose metadata write is still preparing", async () => {
+  const f = await setup(), held = gate(), select = SessionStore.prototype.selectAgent;
+  let entered = false;
+  vi.spyOn(SessionStore.prototype, "selectAgent").mockImplementation(async function (this: SessionStore, ...args) {
+    entered = true; await held.promise; return select.apply(this, args);
+  });
+  const opening = f.open("claude");
+  await expect.poll(() => entered).toBe(true);
+  const loading = f.request("AGENT_LOAD_SESSION", { agentId: "claude", chatId: "chat", cwd: WORKSPACE_KEY });
+  held.release();
+  const created = session(await opening);
+  expect(await loading).toMatchObject({ type: "AGENT_SESSION_LOADED", sessionId: created.sessionId });
+  expect(f.drivers).toHaveLength(1);
+});
+
 it("rebinds Cursor → Claude → Cursor in one untouched chat, resetting settings and retiring only its driver", async () => {
   const f = await setup();
   await f.op("chats.upsert", { chat: { id: "chat", folder: WORKSPACE_KEY, agentId: "cursor", model: "old-model", effort: "high", title: "Untitled", createdAt: 100 } });

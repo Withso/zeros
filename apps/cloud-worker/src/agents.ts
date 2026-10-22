@@ -174,6 +174,17 @@ export class Agents {
         (!route || route.closed || route.agentId !== agentId || (requested && route.id !== requested)))
       throw new WorkspaceError("session-expired", "No live execution for this conversation.");
     const metadata = this.store.metadata(chatId);
+    // A first-tab/reconnect probe can beat the renderer's chats.upsert. With
+    // no durable locator this is an ordinary adoption miss: the renderer may
+    // issue NEW_SESSION for the same chat. Deleted chats and explicit missing
+    // bindings remain refusals, and an in-flight creation is adopted below.
+    if (!metadata && !route && message.type === "AGENT_LOAD_SESSION" && !requested && !message.providerBinding) {
+      const failure = { kind: "session-expired" as const, stage: "loadSession" as const, agentId,
+        message: "No live execution for this conversation." };
+      await client.send(createMessage({ type: "AGENT_ERROR", source: "engine", requestId: message.id,
+        agentId, code: failure.kind, message: failure.message, failure }));
+      return;
+    }
     if (metadata?.chat === null || (!metadata && message.type !== "AGENT_NEW_SESSION" && !route?.preparing))
       throw new WorkspaceError("WORKSPACE_NOT_FOUND", "Cloud conversation is unavailable.");
     if (metadata?.chat) {
