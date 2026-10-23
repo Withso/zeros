@@ -2,7 +2,7 @@
   "id": "review-comment-observation",
   "kind": "replay",
   "area": "renderer",
-  "fixedBy": "pending",
+  "fixedBy": "pr:706",
   "symptom": "Changes displayed a loading-only comment row, cloud consumers opened unsupported review connections, and Local GitHub consumers kept duplicate timers while hidden.",
   "rule": "Gate comments with one placement capability and share a foreground next-due observer per workspace/PR; remove loading-only feedback and count hidden callbacks. See agents/zstack/changes/review-comment-observation.md.",
   "check": "pnpm vitest run apps/desktop/src/renderer/features/code-review/__tests__/review-feedback.test.ts apps/desktop/src/renderer/features/code-review/__tests__/review-availability.test.ts apps/desktop/src/renderer/features/code-review/__tests__/github-review-observation.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/code-review-bridge.test.ts"
