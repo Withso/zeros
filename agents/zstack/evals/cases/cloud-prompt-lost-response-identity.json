@@ -1,0 +1,9 @@
+{
+  "id": "cloud-prompt-lost-response-identity",
+  "kind": "seeded",
+  "area": "renderer",
+  "fixedBy": "pr:690",
+  "symptom": "Retrying a cloud prompt with a new message ID after a lost committed response can run the same user intent twice.",
+  "rule": "Keep private commit, CP receipt, VM inbox ACK and provider acceptance distinct. Repair uncertain delivery with the original message ID and bytes, including after app restart. See agents/zstack/skills/zstack-review/SKILL.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/agent/__tests__/cloud-prompt-channel.test.ts"
+}

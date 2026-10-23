@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/features/agent/cloud-prompt-channel.ts",
+  "before": "const receipt = await this.api.enqueue(entry.payload); this.ownsReceipt(receipt, id);",
+  "after": "const receipt = await this.api.enqueue({ ...entry.payload, userMessageId: crypto.randomUUID() }); this.ownsReceipt(receipt, id);"
+}

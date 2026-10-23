@@ -25,6 +25,19 @@ const run = "fb87f8dd-6161-463b-981c-d039c675e0ca";
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe("electron:cloud control plane", () => {
+  it("enables durable cloud sends locally and honors an explicit rollout override", () => {
+    const { workspace: w, profile: p } = fixture();
+    const runtime = { ZEROS_CLOUD_V2_RUNTIME_SHA256: RUNTIME };
+    expect(backendEnvironment(w, p, ports, run, runtime).CLOUD_V2_PROMPT_OUTBOX_ENABLED).toBe("true");
+    expect(backendEnvironment(w, p, ports, run, { ...runtime, CLOUD_V2_PROMPT_OUTBOX_ENABLED: "false" })
+      .CLOUD_V2_PROMPT_OUTBOX_ENABLED).toBe("false");
+    expect(backendEnvironment(w, p, ports, run, { ...runtime, CLOUD_V2_PROMPT_OUTBOX_ENABLED: "true" })
+      .CLOUD_V2_PROMPT_OUTBOX_ENABLED).toBe("true");
+    // The server's advertised capability owns rollout, never a desktop flag.
+    expect(desktopEnvironment(w, p)).not.toHaveProperty("CLOUD_V2_PROMPT_OUTBOX_ENABLED");
+    expect(webEnvironment(w, p, ports.api)).not.toHaveProperty("CLOUD_V2_PROMPT_OUTBOX_ENABLED");
+  });
+
   it("runs cloud v2 on this workspace's tunnel origin with its own stable keys", () => {
     const { workspace: w, profile: p } = fixture();
     const api = backendEnvironment(w, p, ports, run, { ZEROS_CLOUD_V2_RUNTIME_SHA256: RUNTIME });

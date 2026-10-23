@@ -650,7 +650,17 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   is not a failure and shows no banner. The engine's typed `activeTurn`
   returns it to the follow-up queue behind that turn, whose terminal
   `turn_state` sends it next (or Send now steers it); the running turn's output
-  stays under its own prompt. Cloud placements keep their admission queue.
+  stays under its own prompt. Cloud workspaces without the durable prompt
+  capability keep their admission queue. With `promptOutbox: 1`, saved prompts
+  appear immediately as ordinary bubbles while the VM is running, including
+  behind another turn. Queue cards describe unavailable compute only. Future
+  bubbles are separate from native rows; activity and the working footer belong
+  to the actual provider turn, even when it is not the visual tail. A receipt
+  for a refused or interrupted send keeps that bubble and an explicit Retry
+  action visible; it never disappears or leaves later sends paused. Worker
+  restart settles it once as “The worker restarted before this turn finished”.
+  Inbox delivery is not provider acceptance and cannot settle a legacy bridge
+  turn without that turn's own confirmation.
   Provider facts (model fallback, usage limits) stay plain inline text.
 - Authentication failures have one product Sign in notice. In history, show a
   compact **Sign-in required** status until a later turn in that conversation

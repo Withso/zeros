@@ -74,6 +74,10 @@ failing input, or a reproduction. Drop anything you can't substantiate.
 - When absence permits a legacy path, look up immutable evidence before
   filtering eligibility or revocation. A recorded rejection must not become
   absence, and a selected attempt cannot downgrade after a later read fails.
+- A durable-delivery rollout can overlap an older bridge turn. An empty outbox
+  cannot retire that turn; require its exact native confirmation. Keep journal
+  commit, server receipt, VM inbox ACK and provider acceptance separate, and
+  mutation-test that a lost response reuses the original message ID and bytes.
 
 **Tests**
 - Bug fixes include a regression that fails without the fix.

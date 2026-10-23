@@ -29,6 +29,16 @@ After merge, Alpha is the shared cloud environment.
 Boat VMs are real and billed while they run. The worker runtime is a published
 build pinned by its SHA-256.
 
+This local control plane enables
+[durable prompt delivery](cloud-workspaces.md#durable-prompt-delivery) by default.
+Use `CLOUD_V2_PROMPT_OUTBOX_ENABLED=false pnpm electron:cloud` to exercise the
+legacy bridge send path. This override stays in the backend; the desktop follows
+the workspace capability. Hosted deployments keep the default off until their
+compatible runtime rollout. An older `--runtime` override cannot start against
+an enabled outbox: publish/select this branch's worker or disable the flag for
+that compatibility check. Refresh existing VMs after their turns settle so they
+receive the new runtime and configuration.
+
 ## Prerequisites
 
 - macOS: `brew install postgresql@18 cloudflared`, plus Docker (Docker Desktop or
@@ -127,6 +137,13 @@ gate0 derives its signer from this checkout's private state and checks the
 running stack's owner and run before it creates one workspace. It signs in with
 `ZEROS_DEV_PASSWORD` and needs the seeded organization's Cloud Computer to be
 built.
+
+gate0's provider turns use the bridge path. To qualify the outbox, separately
+check HTTP receipt latency and the app's running-VM Send presentation, quit and
+reopen with pending messages, Stop during wake, and a worker restart during a
+turn. The last case must settle as interrupted without automatically repeating
+provider work. Use the same cheap model/effort pins and count every explicit
+test turn; a gate0 pass alone does not qualify the new HTTP send path.
 
 ## Data and cleanup
 

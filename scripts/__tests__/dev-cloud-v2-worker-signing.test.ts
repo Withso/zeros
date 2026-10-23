@@ -19,6 +19,11 @@ function fixture() {
 }
 
 describe("hosted Dev cloud v2 worker signing key", () => {
+  it("leaves durable prompt rollout to the hosted deployment configuration", () => {
+    const { state, profile, source, env } = fixture();
+    expect(hostedBackendEnvironment(state, profile, source, undefined, env)).not.toHaveProperty("CLOUD_V2_PROMPT_OUTBOX_ENABLED");
+  });
+
   it("supplies one stable Ed25519 PKCS8 key per generation, only to the backend", () => {
     const { state, profile, source, env } = fixture();
     const first = hostedBackendEnvironment(state, profile, source, undefined, env).CLOUD_V2_WORKER_SIGNING_KEY;
