@@ -93,6 +93,9 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 
 ## Gotchas already paid for
 
+- Qualify a CLI by running the exact command advertised to agents from a task
+  workspace. Calling its internal handler misses dropped source entries and
+  runtime loaders; cover Node source, Bun source and the compiled executable.
 - A pipe through `sed`/`grep` buffers output. Use `sed -u` or
   `--line-buffered` when a later step needs a line immediately, such as a URL
   the owner must open.

@@ -659,7 +659,12 @@ The existing engine CLI now implements:
 ```
 
 Prompt/frame context supplies the actual executable command and local URL. The
-Node dev bundle and compiled sidecar use the same CLI entrypoint. Optional
+Node and Bun source engines retain their entry file and runtime loader arguments;
+the compiled sidecar runs directly. Both Design verification and the Local CLI
+use the shared runtime invocation resolver, with loader paths resolved against
+the engine installation so commands work from a task's checkout. Command tests
+execute the emitted shell prefix, including paths with spaces and quotes.
+Optional
 `--revision` requires an exact render revision; omit it after an edit to validate
 and capture current source. Validation reports existing file/line diagnostics
 without healing source and exits nonzero for errors. Capture writes an ordinary
