@@ -243,17 +243,17 @@ function capMessages(messages: AgentMessage[]): AgentMessage[] {
   return messages.slice(-MAX_MESSAGES_PER_CHAT);
 }
 
-/** Keep a Local slot's leading prompt consistent with the front of its window
+/** Keep a slot's leading prompt consistent with the front of its window
  *  through every trim, prepend and replacement (transcript-leading-prompt.ts).
  *  `proposed` is an explicit value from a window read; undefined derives it.
- *  Cloud slots never carry one. O(1) unless the window's first row changed. */
+ *  Legacy unscoped cloud slots cannot carry one. O(1) unless the front changed. */
 function settleSlotLeadingPrompt(
   chatId: string,
   previous: AgentSessionState | undefined,
   next: AgentSessionState,
   proposed: AgentSessionState["leadingPrompt"],
 ): AgentSessionState {
-  if (parseCloudScopedId(chatId) || isCloudWorkspace(next.cwd)) {
+  if (!parseCloudScopedId(chatId) && isCloudWorkspace(next.cwd)) {
     return next.leadingPrompt == null ? next : { ...next, leadingPrompt: null };
   }
   const leadingPrompt = settleLeadingPrompt(
@@ -575,6 +575,7 @@ function reduceTranscriptUpdate(state: SessionsStoreState, chatId: string, notif
   if (messages === slot.messages) return state;
   return { ...state, sessions: { ...state.sessions, [chatId]: settleSlotLeadingPrompt(chatId, slot, {
     ...slot, messages, transcriptPresentation: null,
+    ...(parseCloudScopedId(chatId) ? { transcriptSource: "worker" as const } : {}),
     hasTranscript: slot.hasTranscript || hasDurableMessages(messages),
   }, undefined) } };
 }
@@ -686,6 +687,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         normalized = { ...normalized, executionId, sessionId: executionId };
       }
       const previous = state.sessions[chatId];
+      if (normalized.transcriptSource === undefined && previous?.transcriptSource &&
+          previous.cwd === normalized.cwd && previous.messages === normalized.messages)
+        normalized = { ...normalized, transcriptSource: previous.transcriptSource };
+      if (!Object.hasOwn(slot, "transcriptContentSignatures") && previous?.transcriptContentSignatures &&
+          previous.cwd === normalized.cwd && previous.messages === normalized.messages)
+        normalized = { ...normalized, transcriptContentSignatures: previous.transcriptContentSignatures };
       if (!normalized.cloudOutbox && previous?.cloudOutbox && isCloudWorkspace(normalized.cwd) &&
           previous.cwd === normalized.cwd && previous.agentId === normalized.agentId)
         normalized = { ...normalized, cloudOutbox: previous.cloudOutbox };

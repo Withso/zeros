@@ -15,6 +15,7 @@ import { loadCloudCatalogPresentation, persistCloudCatalogPresentation } from ".
 import { completeCloudChatCacheRestore, loadCloudChatCache, pruneCloudChatCache, setCloudChatCacheOwner } from "./cloud-chat-cache";
 import { pruneOrganizationDestinations } from "./organization-destination-cache";
 import { folderIsWithinRoot } from "./workspace-resolution";
+import { cloudTranscriptCache } from "./local-transcript-cache";
 
 let offCatalog: (() => void) | undefined;
 
@@ -24,6 +25,7 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
   const owner = user && CONTROL_PLANE_URL ? accountPresentationOwner(CONTROL_PLANE_URL, user.accountId ?? user.sub) : null;
   const { changed, retire } = bindAccountPresentationOwner(owner);
   if (!changed) return;
+  cloudTranscriptCache.bindOwner(owner, retire);
   offCatalog?.();
   offCatalog = undefined;
   setCloudChatCacheOwner(null);
@@ -64,11 +66,18 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
   setCloudChatCacheOwner(owner);
   state.dispatch({ type: "MERGE_CHATS", chats: loadCloudChatCache() });
   completeCloudChatCacheRestore(owner);
+  // Begin disk I/O during stored-identity bootstrap, before token refresh or
+  // VM admission. ChatView consumes the memory hit or shares the pending read.
+  const boot = useWorkspaceStore.getState();
+  const active = boot.chats.find(chat => chat.id === boot.activeChatId);
+  if (active && !active.archived && active.kind !== "terminal") cloudTranscriptCache.prefetch([active.id]);
   const offDocuments = subscribeCloudWorkspaces(() => persistCloudCatalogPresentation(
     owner, getCloudWorkspaceDocuments().filter(canReadCloudWorkspace), selectActiveFolder(useWorkspaceStore.getState()),
   ));
   const offRows = subscribeCloudWorkspaceRows(change => {
     pruneCloudChatCache(change.removedWorkspaceIds);
+    if (change.removedWorkspaceIds.length) cloudTranscriptCache.retain((_chatId, folder) =>
+      !change.removedWorkspaceIds.includes(folder));
     if (change.removedWorkspaceIds.length) pruneOrganizationDestinations(destination =>
       change.removedWorkspaceIds.some(folder => folderIsWithinRoot(destination.folder, folder)));
   });

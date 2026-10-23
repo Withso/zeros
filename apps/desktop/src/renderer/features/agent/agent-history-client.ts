@@ -124,7 +124,7 @@ export async function windowMessages(
 
 export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "turnOpening"> & {
   messages: AgentMessage[];
-  /** Local only: the opening prompt of the turn the window starts inside. */
+  /** The opening prompt of the turn the window starts inside. */
   leadingPrompt?: AgentTextMessage;
 };
 
@@ -152,7 +152,8 @@ export async function windowMessagesSnapshot(
     .map(fromPersistedMessage)
     .filter((m): m is AgentMessage => m !== null);
   const leadingPrompt = leadingPromptFromWire(turnOpening, messages);
-  return { ...rest, messages, ...(leadingPrompt ? { leadingPrompt } : {}) };
+  return { ...rest, messages, ...(rest.complete !== undefined ? { complete: rest.complete && messages.length === page.messages.length } : {}),
+    ...(leadingPrompt ? { leadingPrompt } : {}) };
 }
 
 /** Fetch the next page of older messages relative to the oldest

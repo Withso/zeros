@@ -1,7 +1,7 @@
 import type { AgentSessionState } from "./use-agent-session";
 
 /** Display readiness is deliberately weaker than transcript authority. Only
- * an eligible Local cached window or a Local chat known to be empty can
+ * an eligible cached window or a Local chat known to be empty can
  * bypass a loading presentation. */
 export function hasTranscriptPresentation(slot: AgentSessionState | undefined): boolean {
   return !!slot && (slot.transcriptState === "resident" || slot.transcriptState === "loading" &&

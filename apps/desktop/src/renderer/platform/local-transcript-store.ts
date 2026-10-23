@@ -1,10 +1,10 @@
 // ──────────────────────────────────────────────────────────
-// Local transcript store — IndexedDB backend for the boot cache
+// Transcript store — IndexedDB backend for the boot presentation caches
 // ──────────────────────────────────────────────────────────
 //
 // The engine's zeros.db is the transcript authority. This store only keeps a
-// bounded presentation copy of recently opened Local chats so a restart, an
-// engine respawn or a cold tab can paint before the engine answers. It lives
+// bounded presentation copy of recently opened chats in separate Local/cloud
+// namespaces, so a cold tab can paint before authoritative history answers. It lives
 // in Chromium's session profile, which Electron main relocates to the
 // purgeable OS cache directory (`relocateChromiumCache`): losing it costs one
 // cold read, never data. Policy (bounds, eligibility, scheduling) lives in
@@ -25,6 +25,7 @@ export interface LocalTranscriptRecord {
 export interface LocalTranscriptIndexEntry {
   chatId: string;
   folder: string;
+  /** Serialized character count; the original Local v1 accounting unit. */
   bytes: number;
   savedAt: number;
   readAt: number;
@@ -35,13 +36,13 @@ export interface LocalTranscriptStore {
   read(chatId: string): Promise<LocalTranscriptRecord | null>;
   /** Replace records and index rows, and delete `remove`, in one transaction. */
   commit(change: {
+    clear?: boolean;
     put?: Array<{ record: LocalTranscriptRecord; entry: LocalTranscriptIndexEntry }>;
     touch?: LocalTranscriptIndexEntry[];
     remove?: string[];
   }): Promise<void>;
 }
 
-const DATABASE = "zeros:local-transcripts:v1";
 const WINDOWS = "windows";
 
 function isIndexEntry(value: unknown): value is LocalTranscriptIndexEntry {
@@ -63,10 +64,12 @@ export function createIndexedDbTranscriptStore(
   factory: IDBFactory | undefined = typeof indexedDB === "undefined"
     ? undefined
     : indexedDB,
+  namespace: "local" | "cloud" = "local",
 ): LocalTranscriptStore | null {
   const store = createIndexedDbRecordStore<LocalTranscriptRecord, LocalTranscriptIndexEntry>({
     factory,
-    database: DATABASE,
+    // The Local database name is a compatibility contract.
+    database: `zeros:${namespace}-transcripts:v1`,
     records: WINDOWS,
     keyPath: "chatId",
     isEntry: isIndexEntry,

@@ -131,6 +131,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   /** Checkout roots confirmed by a worker's own workspace row. */
   private readonly confirmedRoots = new Map<string, string>();
   private readonly historyWarmups = new Map<string, Promise<WireRecord>>();
+  private readonly historySources = new WeakMap<object, "worker" | "control-plane">();
+
+  /** Provenance belongs to this renderer's router, never a response field. */
+  historySource(snapshot: object): "worker" | "control-plane" | undefined {
+    return this.historySources.get(snapshot);
+  }
   private localEpoch = 0;
   private readonly localLists = new Map<string, LocalListEntry>();
   private readonly cloudRepositorySlugs = new Set<string>();
@@ -525,6 +531,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         result = record(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op, result: reply }).result);
       }
       assertAccess();
+      this.historySources.set(result, peer ? "worker" : "control-plane");
       if (op === "chats.list") {
         const previous = this.history.peekSnapshot(this.historyKey(target, op, params)).data;
         if (previous && JSON.stringify(previous) === JSON.stringify(result)) return previous;
@@ -936,7 +943,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed before the response arrived");
     this.assertCurrent(entry);
-    return cloudIncoming(entry.scope, response as unknown as WireRecord) as unknown as BridgeMessage;
+    const incoming = cloudIncoming(entry.scope, response as unknown as WireRecord);
+    if (historyRead) this.historySources.set(record(incoming.result), "worker");
+    return incoming as unknown as BridgeMessage;
   }
 
   /** The worker keeps one live turn per chat and reattaches it on load, so

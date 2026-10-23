@@ -156,13 +156,29 @@ If it shared a read that retired after that cleanup, it retries once after the
 read releases its identity. This recovery must not start an agent, wake a VM,
 poll on ordinary failures, or reactivate a hidden surface.
 
-Cloud v2 workspaces keep no renderer cache of native transcript pages. A running
-workspace's worker and a stopped workspace's control-plane history mirror both
-answer with authoritative pages. The durable prompt retry journal is separate:
-its saved user bubbles project beside those pages until exact message IDs
-reconcile. It never substitutes locally cached provider output for native history.
-The v1 native cloud cache, its immutable-head provenance rules and its paint
-smoke were retired with the v1 runtime.
+Cloud v2 chats keep their last confirmed window in a separate instance of the
+shared transcript presentation cache. Its versioned IndexedDB namespace is keyed
+by backend/account presentation owner, a durable retirement lifetime, and the
+exact organization/workspace/native-chat scoped ID. Identity bootstrap begins
+the selected chat's disk read before token refresh or VM admission. Memory hits
+paint synchronously; disk hits paint as soon as they arrive. Provisional
+`transcriptPresentation` grants no send, queue-drain, edit, retry, fork or
+completion authority, and the composer remains editable. The durable prompt
+retry journal stays separate; unconfirmed/queued prompts never enter this cache.
+
+Revalidation uses existing worker/control-plane history windows, preserving
+unchanged message references and replacing edited rows by stable ID. Only a
+complete window can discard its missing prefix or confirm an empty transcript;
+partial tails retain the known prefix. Router-owned provenance prevents a
+lagging mirror from replacing a known worker tail: it must contain that tail ID
+and match overlapping rows or prove newer native update stamps. Shortened rows
+keep bounded original-content signatures; a displayed prefix alone cannot prove
+catch-up. Without a server revision cursor, a mirror-only deletion of that tail cannot prove
+catch-up; keep the worker presentation until a qualifying read. Account/backend
+replacement and sign-out rotate the durable lifetime before serializing a purge
+after pending writes; async reads/writes are generation-fenced. Confirmed chat
+and workspace deletions prune exact entries. Passive reads never wake a VM,
+hidden views start no reads, and retries use existing connection/data edges.
 
 Local presentation readiness: Local Personal and organization-local chats keep
 their last confirmed window in a bounded Local transcript cache: the exact
@@ -182,14 +198,22 @@ provisionally (`transcriptPresentation.empty`) instead of "Loading
 conversation…" while the engine starts. Any message or history hint removes
 the id synchronously, and the engine read still confirms the paint. Copies are written once
 a turn settles or a window leaves memory, never per streamed chunk; reset,
-delete and the authoritative chat snapshot prune them. Cloud chats never enter
-this cache. A confirmed empty resident window invalidates both cache tiers
+delete and the authoritative chat snapshot prune them. Cloud has its own additive
+allowance: 8 chats / 8 MiB memory and 48 chats / 20 MiB disk. The combined budgets
+are 24 chats / 24 MiB memory and 144 chats / 60 MiB disk. Both use Local's original
+character accounting: estimated characters in memory and serialized character
+length in the disk index's `bytes` field. Each disk window targets 200 rows /
+768 KiB, keeping its leading prompt; cloud additionally checks the final encoded
+character length. Cloud pending captures share its bounded memory entries.
+Local pending writes still survive memory eviction/release, and its lazy index
+load, lenient decoder, database name and record format remain unchanged.
+A confirmed empty resident window invalidates both cache tiers
 immediately, before eviction or app shutdown can bypass a delayed capture.
 An empty cold or loading slot is not confirmation and cannot erase the cache.
 
-A Local window can begin inside one long turn: the engine snaps a tail window
+A history window can begin inside one long turn: the engine snaps a tail window
 back to its opening prompt only within its 1000-row budget. Beyond that, the
-Local engine reports the opening beside the contiguous rows (`turnOpening`),
+Local engine and cloud history sources report the opening beside the contiguous rows (`turnOpening`),
 and the slot keeps it as `leadingPrompt`, outside `messages`, so paging
 cursors, caps and equality keep their meaning. Every front trim, older-page
 prepend and window replacement re-derives it, editing it cuts every resident
@@ -674,7 +698,7 @@ Escape, native overlay intent cleanup and reduced motion.
 - Settings/repository retention: bounded visited-section decks in `apps/desktop/src/renderer/features/settings/settings-page.tsx` and `apps/desktop/src/renderer/features/repositories/repo-page.tsx`.
 - One-paint transition suppression: `apps/desktop/src/renderer/shared/ui/use-instant-view-switch.ts`.
 - Chat structural sharing: `apps/desktop/src/renderer/features/agent/stable-turns.ts`.
-- Local transcript cache: policy in `apps/desktop/src/renderer/state/local-transcript-cache.ts`, IndexedDB records in `apps/desktop/src/renderer/platform/local-transcript-store.ts`, provisional paint and fresh chats in `apps/desktop/src/renderer/features/agent/local-transcript-presentation.ts`.
+- Local/cloud transcript caches: shared policy in `apps/desktop/src/renderer/state/local-transcript-cache.ts`, separate IndexedDB namespaces in `apps/desktop/src/renderer/platform/local-transcript-store.ts`, provisional paint and Local fresh chats in `apps/desktop/src/renderer/features/agent/local-transcript-presentation.ts`.
 - Empty-chat transcript row: shared Local folder list, persisted paint and pending prompts in `apps/desktop/src/renderer/features/agent/use-chat-transcript-summaries.ts`; the grace in `agent-chat.tsx`.
 - Long-turn opening prompt: `windowChatMessagesPage` in `apps/desktop/src/engine/db/messages.ts` and `apps/desktop/src/renderer/features/agent/transcript-leading-prompt.ts`.
 - Engine start attribution: `apps/desktop/src/engine/boot-phase-timer.ts` names slow phases on the "Engine ready" line.

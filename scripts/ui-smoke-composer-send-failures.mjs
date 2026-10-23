@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
 import { checkOptimisticSendPresentation } from "./ui-smoke-optimistic-send.mjs";
 import { checkLocalTranscriptPaint } from "./ui-smoke-local-transcript-paint.mjs";
+import { checkCloudTranscriptPaint } from "./ui-smoke-cloud-transcript-paint.mjs";
 import { checkEmptyChatTranscriptRow } from "./ui-smoke-transcript-row.mjs";
 import { checkTranscriptResumePresentation } from "./ui-smoke-transcript-resume.mjs";
 import { checkAgentPreparationFailures } from "./ui-smoke-agent-preparation.mjs";
@@ -19,6 +20,7 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await checkTranscriptResumePresentation({ page, check, screenshotDir });
   await open();
   await checkLocalTranscriptPaint({ page, check, screenshotDir });
+  await checkCloudTranscriptPaint({ page, check, harnessBase, screenshotDir });
   await checkEmptyChatTranscriptRow({ page, check, harnessBase, screenshotDir });
   await open();
   await checkOptimisticSendPresentation({ page, check, screenshotDir });

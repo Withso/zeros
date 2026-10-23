@@ -11,6 +11,8 @@
 // ──────────────────────────────────────────────────────────
 
 export interface IndexedDbRecordStoreChange<R, E> {
+  /** Retire a cache namespace atomically, including malformed index rows. */
+  clear?: boolean;
   put?: Array<{ record: R; entry: E }>;
   touch?: E[];
   remove?: string[];
@@ -134,6 +136,10 @@ export function createIndexedDbRecordStore<R, E>(
       const write = transaction(db, [records, INDEX], "readwrite");
       const recordStore = write.objectStore(records);
       const index = write.objectStore(INDEX);
+      if (change.clear) {
+        recordStore.clear();
+        index.clear();
+      }
       for (const key of change.remove ?? []) {
         recordStore.delete(key);
         index.delete(key);

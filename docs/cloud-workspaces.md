@@ -194,6 +194,51 @@ such a result is incomplete and may update known rows, but cannot prove an
 omitted workspace was deleted. Only complete observations or exact deletion
 evidence prune missing destinations. Restoring metadata never wakes a VM.
 
+Cloud transcripts have a separate, disposable presentation cache in
+`zeros:cloud-transcripts:v1` IndexedDB. Keys contain the backend/account owner,
+a durable retirement lifetime, and the exact organization/workspace/native-chat
+scoped ID. The shared implementation gives cloud an additive 8 windows / about
+8 MiB in memory and 48 windows / 20 MiB on disk. Local keeps its original
+16 windows / 16 MiB memory and 96 windows / 40 MiB disk budgets; the combined
+budgets are 24 windows / 24 MiB memory and 144 windows / 60 MiB disk. Sizes use
+Local's original character accounting, including serialized character length
+for the disk index's `bytes` field. Each cloud disk window keeps up to 200 rows
+and 768 KiB in those units, preserving its leading prompt and checking the final
+encoded length. LRU eviction bounds both cloud tiers; cloud pending captures
+share its memory budget. Local retains its lazy index load, lenient decoder,
+record format and pending writes through memory eviction/release. Writes coalesce
+after settlement or view eviction, never per streamed chunk. Malformed or
+oversized cloud records are misses; unavailable disk and quota failures leave
+the authoritative history untouched.
+
+Stored identity starts the boot transcript read before token or VM waits.
+Memory hits paint in the first visible frame and disk hits paint upon arrival,
+as provisional `transcriptPresentation`. Cached rows authorize no send,
+queue-drain, edit, retry, fork or completion; the composer stays editable. The
+private prompt retry journal is unchanged and unconfirmed prompts are excluded
+from the transcript cache. Revalidation reads the existing history window and
+merges by stable message ID: unchanged rows retain references, edits replace
+rows, and complete windows remove missing rows, including a confirmed empty
+window. Partial windows retain the known prefix. Router-owned worker/mirror
+provenance prevents a lagging mirror from replacing a known worker tail; it must
+include that tail ID with matching content or newer native update stamps on
+changed overlapping rows. Without a revision cursor, mirror-only tail deletion
+cannot prove catch-up, so the worker presentation remains provisional until a
+qualifying read. No cache read wakes a VM or activates a hidden view.
+Shortened worker rows retain a bounded signature of their original content for
+this comparison; a matching displayed prefix alone never proves catch-up. The
+existing cloud `turnOpening` field supplies long turns' opening prompts, including
+when revalidation edits only that prompt.
+
+Sign-out and account/backend replacement rotate the durable lifetime before
+purging the cloud namespace, even if IndexedDB deletion fails. Generation
+fences discard pending reads/index loads and old writes; serialized mutations
+order purge after already-started writes and before the next lifetime's writes.
+Confirmed workspace/chat deletion prunes exact entries without crossing owners.
+An empty cold/loading session cannot erase a confirmed cached window. Local
+Personal and organization-local history retain their device-owned authority and
+startup behavior.
+
 A transactional change feed remains a follow-up: catalog/history writes and
 deletion tombstones would advance a sequence in the same database transaction,
 with scoped cursors and a bounded snapshot fallback after cursor expiry. This

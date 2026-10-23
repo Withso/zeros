@@ -76,7 +76,7 @@ import { onNativeBeforeQuit } from "../platform/runtime";
 import { startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
 import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
-import { localTranscriptCache } from "./local-transcript-cache";
+import { localTranscriptCache, cloudTranscriptCache } from "./local-transcript-cache";
 import { loadProjects } from "./projects-store";
 import { pruneOrganizationDestinations } from "./organization-destination-cache";
 import {
@@ -2308,6 +2308,13 @@ function noteChatTranscriptLifecycle(state: WorkspaceState, action: Action): voi
     forgetFreshLocalChat(action.id);
     forgetFreshCloudChat(action.id);
     localTranscriptCache.forget(action.id);
+    cloudTranscriptCache.forget(action.id);
+  } else if (action.type === "HYDRATE_CHATS" && action.confirmedCloudWorkspaces?.length) {
+    const confirmed = new Set(action.confirmedCloudWorkspaces);
+    const known = new Set(action.chats.map(chat => chat.id));
+    cloudTranscriptCache.retain((chatId, folder) => !confirmed.has(folder) || known.has(chatId));
+  } else if (action.type === "PRUNE_CLOUD_WORKSPACES") {
+    cloudTranscriptCache.retain((_chatId, folder) => !action.folders.includes(folder));
   }
 }
 

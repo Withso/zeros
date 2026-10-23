@@ -43,3 +43,29 @@
   is cold. Record the outgoing owner against current metadata in the switch
   callback too; retain the regression where metadata arrives without another
   workspace or chat selection.
+- Transcript follow-up: a cache is presentation, never send/queue/edit authority.
+  Exercise the real ChatView/provider with every network/native promise held at
+  first paint, plus stable row/DOM references and draft retention after edits
+  and deletions (`ui-smoke-cloud-transcript-paint.mjs`, both themes).
+- Router provenance must survive provider reattachment when the exact same
+  window survives. A lagging mirror cannot replace a known worker tail; a partial
+  or invalid empty window cannot erase cached history. These regressions live in
+  `transcript-bind-presentation.test.ts` and `cloud-transcript-hydrate.test.ts`.
+- Async generation fences alone do not cover a failed disk purge followed by a
+  renderer restart. Rotate a durable lifetime before purge, serialize mutations,
+  and hold reads, index loads and writes across account A → B → A. Keep a failed
+  purge/restart regression in `cloud-transcript-cache.test.ts`.
+- Generalizing a cache must preserve the existing placement's behavior, not
+  only its record namespace. Review caught reduced Local budgets, doubled size
+  accounting, stricter decoding and lost pending writes. Keep Local's original
+  character units, lazy index load, decoder and writes through memory eviction;
+  give cloud an explicit additive budget through constructor options. The
+  separate `local-transcript-cache-compatibility.test.ts` covers those contracts
+  without changing the original Local tests. Cloud alone bounds pending captures
+  through held I/O/release and validates nested rows, oversized replacements and
+  same-length edits in `cloud-transcript-cache.test.ts`.
+- Size truncation must not prevent mirror catch-up or let a matching prefix
+  stand in for original content. Preserve a bounded original-row signature with
+  provisional worker presentation. Carry the existing cloud `turnOpening`
+  through hydration and reconcile prompt-only edits even when tail rows match;
+  cover both cases in the cloud hydrate and real router tests.

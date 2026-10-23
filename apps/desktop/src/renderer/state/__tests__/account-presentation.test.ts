@@ -133,6 +133,46 @@ it("does not clear restored metadata when the same stored identity is read again
   expect(m.workspace.useWorkspaceStore.getState().chats).toBe(chats);
 });
 
+it("starts the boot transcript disk read during identity installation before asking for a live session", async () => {
+  await seed();
+  vi.resetModules(); vi.clearAllMocks();
+  const m = await modules();
+  const { cloudTranscriptCache } = await import("../local-transcript-cache");
+  const read = vi.spyOn(cloudTranscriptCache, "read").mockImplementation(() => new Promise(() => {}));
+  m.identity.installAccountPresentationIdentity(user);
+  expect(read).toHaveBeenCalledWith(id);
+  expect(io.me).not.toHaveBeenCalled();
+  expect(m.workspace.useWorkspaceStore.getState().activeChatId).toBe(id);
+});
+
+it("retires cloud transcripts with account presentation while preserving Local transcripts", async () => {
+  const m = await seed();
+  const { cloudTranscriptCache, localTranscriptCache } = await import("../local-transcript-cache");
+  cloudTranscriptCache.bindOwner(m.account.getAccountPresentationOwner(), false);
+  const messages = [{ id: "answer", kind: "text" as const, role: "agent" as const, text: "Saved answer", createdAt: 1 }];
+  cloudTranscriptCache.remember(id, folder, { messages, leadingPrompt: null });
+  localTranscriptCache.remember("local", "/local", { messages, leadingPrompt: null });
+  m.identity.installAccountPresentationIdentity(null);
+  expect(cloudTranscriptCache.peek(id)).toBeNull();
+  expect(localTranscriptCache.peek("local")?.messages).toBe(messages);
+});
+
+it.each(["chat", "workspace", "chat snapshot"])("prunes the exact cloud transcript on confirmed %s deletion", async boundary => {
+  const m = await seed();
+  const { cloudTranscriptCache } = await import("../local-transcript-cache");
+  cloudTranscriptCache.bindOwner(m.account.getAccountPresentationOwner(), false);
+  const other = { ...target, organizationId: organizations[1]!.id };
+  const otherId = cloudScopedId(other, "chat");
+  const messages = [{ id: "answer", kind: "text" as const, role: "agent" as const, text: "Saved answer", createdAt: 1 }];
+  cloudTranscriptCache.remember(id, folder, { messages, leadingPrompt: null });
+  cloudTranscriptCache.remember(otherId, cloudWorkspaceKey(other), { messages, leadingPrompt: null });
+  if (boundary === "workspace") m.catalog.acceptCloudWorkspaceDocument({ ...doc, version: 2, status: "deleted", deletedAt: "2026-10-23T00:00:00Z" });
+  else if (boundary === "chat") m.workspace.useWorkspaceStore.getState().dispatch({ type: "DELETE_CHAT", id });
+  else m.workspace.useWorkspaceStore.getState().dispatch({ type: "HYDRATE_CHATS", chats: [], activeChatId: null, confirmedCloudWorkspaces: [folder], confirmedLocalChats: false });
+  expect(cloudTranscriptCache.peek(id)).toBeNull();
+  expect(cloudTranscriptCache.peek(otherId)?.messages).toBe(messages);
+});
+
 it("prunes only the deleted workspace's durable chat metadata even with identical native IDs", async () => {
   const m = await seed();
   const other = { organizationId: organizations[1]!.id, workspaceId: target.workspaceId };
