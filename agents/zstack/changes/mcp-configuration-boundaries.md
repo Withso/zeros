@@ -69,12 +69,21 @@ the supported Transform destroy hook stops readable flow before close cleanup.
 Use distinct MCP protocol type names so they cannot shadow Web Request globals
 in analysis; the worker type alias correction preserves emitted JavaScript.
 
-An OAuth identity includes a client secret, so its fingerprint uses a separate
-server-keyed purpose. Compare the complete decrypted identity before retaining
-an opaque binding: rotating the current server key must not revoke unchanged
-grants or strand ordinary members. A supplied sign-in attempt still needs exact
-actor, organization, live state, server and revision admission, even when its
-identity matches. Compare canonical stored UUIDs, keep draft reads free of
-mutation locks, and reconcile a validated attempt only inside the save
-transaction. Real-PostgreSQL regressions cover rotation, old opaque bindings,
-retired keys, refusal rollback, uppercase IDs and unchanged-member access.
+OAuth bindings are random opaque identity markers. Compare the complete
+canonical identity against authenticated decrypted material before reusing a
+saved or admitted-attempt marker. Independent creation events receive distinct
+markers; restoring a historical configuration creates a fresh marker. Historical
+SHA/HMAC values stay opaque, so key rotation and retirement do not revoke an
+unchanged grant after its envelope has been re-encrypted. A supplied sign-in
+attempt still needs exact actor, organization, live state, server and revision
+admission. Compare canonical stored UUIDs, keep draft reads free of mutation
+locks, and reconcile a validated attempt only inside the save transaction.
+Owner and repository changes independently revoke grants. Real-PostgreSQL
+regressions cover marker lifetime, rotation, historical values, retired keys,
+refusal rollback, uppercase IDs and unchanged-member access.
+
+A generic password-hash analysis can flag keyed HMAC when credential content
+enters its input. Keep identifier generation independent of credentials; helper
+indirection and algorithm substitution do not establish that boundary. Retain
+observable behavior regressions and wait for the separate CodeQL alert check
+as well as the successful analysis workflow.

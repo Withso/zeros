@@ -1,8 +1,7 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
-import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { McpUuidSchema } from "../cloud/contract.js";
-import { fingerprintMcpOAuthIdentity } from "./envelope.js";
 
 export const SECRET_REF = "${zeros.secret}";
 const text = z.string().max(16384).refine(value => !value.includes("\0"));
@@ -110,11 +109,28 @@ export function materializeMcp(config: McpConfig, secrets: McpSecrets): McpConfi
   return { ...config, ...(config.env ? { env: variables as Record<string, string> } : {}), ...(Object.keys(resolved).length ? { headers: resolved } : {}) };
 }
 
-export function oauthBinding(config: McpConfig, secrets: McpSecrets, keys: CloudAgentCredentialKeys): string {
-  return fingerprintMcpOAuthIdentity(JSON.stringify(config.transport === "stdio" ? [config.transport] : [
+/** Each new identity gets an independent opaque marker, never a credential digest. */
+export function newOAuthBinding(): string {
+  return randomBytes(32).toString("hex");
+}
+
+type OAuthIdentity = { config: McpConfig; secrets: McpSecrets };
+function oauthIdentityBytes({ config, secrets }: OAuthIdentity): Buffer {
+  return Buffer.from(JSON.stringify(config.transport === "stdio" ? [config.transport] : [
     config.transport, config.url, config.auth ?? "none", oauthClientMode(config), config.oauth_client_id ?? "",
     [...new Set(config.oauth_scopes ?? [])].sort(), secrets.oauthClientSecret ?? "",
-  ]), keys);
+  ]));
+}
+
+/** Retain historical markers only after comparing the complete identity against
+ * authenticated decrypted material. Clear temporary secret-bearing bytes. */
+export function sameOAuthIdentity(left: OAuthIdentity, right: OAuthIdentity): boolean {
+  const leftBytes = oauthIdentityBytes(left);
+  let rightBytes: Buffer | undefined;
+  try {
+    rightBytes = oauthIdentityBytes(right);
+    return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+  } finally { leftBytes.fill(0); rightBytes?.fill(0); }
 }
 
 export function selectMcpEntries<T extends { id: string; ownerUserId: string | null; repository: string | null; config: McpConfig }>(

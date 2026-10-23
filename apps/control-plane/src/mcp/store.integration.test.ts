@@ -70,12 +70,44 @@ d("organization MCP store", () => {
     expect((await store.draft(org, admin, { ...draft, config: { ...entry.config, url: "https://different.example.test/mcp" } })).config).toMatchObject({ url: "https://different.example.test/mcp" });
   });
 
-  it.each(["current", "legacy"])("retains an unchanged %s OAuth binding for members and saves across server-key rotation", async format => {
+  it("allocates fresh 32-byte opaque markers for independent identical drafts and saved configurations", async () => {
+    const oauthConfig = { name: "shared", transport: "http" as const, url: "https://shared.example.test/mcp", auth: "oauth" as const,
+      oauth_client_id: "fixture-client", oauth_scopes: ["read"] };
+    const secrets = { oauthClientSecret: "fixture-secret" };
+    const first = await store.draft(org, admin, { config: oauthConfig, secrets });
+    const second = await store.draft(org, admin, { config: oauthConfig, secrets });
+    const shared = await store.put(org, admin, randomUUID(), { ...input("organization"), config: oauthConfig, secrets });
+    const privateEntry = await store.put(org, member, randomUUID(), { ...input("user"), config: oauthConfig, secrets });
+    const bindings = [first.binding, second.binding, (await store.get(org, admin, shared.id)).oauth_binding,
+      (await store.get(org, member, privateEntry.id)).oauth_binding];
+    for (const binding of bindings) expect(binding).toMatch(/^[a-f0-9]{64}$/);
+    expect(new Set(bindings).size).toBe(4);
+  });
+
+  it("keeps unchanged markers but never regenerates a historical marker when an OAuth identity returns", async () => {
+    const oauthConfig = { name: "shared", transport: "http" as const, url: "https://shared.example.test/mcp", auth: "oauth" as const,
+      oauth_client_id: "fixture-client", oauth_scopes: ["read"] };
+    const entry = await store.put(org, admin, randomUUID(), { ...input("organization"), config: oauthConfig, secrets: { oauthClientSecret: "fixture-secret" } });
+    const original = (await store.get(org, admin, entry.id)).oauth_binding;
+    const unchanged = { ...oauthConfig, name: "renamed", oauth_client_mode: "custom", oauth_scopes: ["read", "read"] };
+    await store.put(org, admin, entry.id, { ...input("organization"), expectedRevision: 1, config: unchanged });
+    expect((await store.get(org, admin, entry.id)).oauth_binding).toBe(original);
+    await store.put(org, admin, entry.id, { ...input("organization"), expectedRevision: 2, config: { ...unchanged, url: "https://changed.example.test/mcp" } });
+    const changed = (await store.get(org, admin, entry.id)).oauth_binding;
+    expect(changed).not.toBe(original);
+    await store.put(org, admin, entry.id, { ...input("organization"), expectedRevision: 3, config: unchanged });
+    const returned = (await store.get(org, admin, entry.id)).oauth_binding;
+    expect(returned).toMatch(/^[a-f0-9]{64}$/);
+    expect(returned).not.toBe(changed);
+    expect(returned).not.toBe(original);
+  });
+
+  it.each(["current", "legacy", "hmac"])("retains an unchanged %s OAuth binding for members and saves across server-key rotation", async format => {
     const entry = await store.put(org, admin, randomUUID(), { ...input("organization"), config: {
       name: "shared", transport: "http", url: "https://shared.example.test/mcp", auth: "oauth", oauth_client_id: "fixture-client", oauth_scopes: ["b", "a"],
     }, secrets: { oauthClientSecret: "fixture-secret" } });
-    // Legacy bindings are opaque: compatibility never generates a new unkeyed secret digest.
-    if (format === "legacy") await pool.query("UPDATE organization_extensions SET oauth_binding=$2 WHERE id=$1", [entry.id, "ab".repeat(32)]);
+    // Historical SHA/HMAC values are opaque fixtures; never generate a credential digest.
+    if (format !== "current") await pool.query("UPDATE organization_extensions SET oauth_binding=$2 WHERE id=$1", [entry.id, (format === "legacy" ? "ab" : "cd").repeat(32)]);
     const previous = await store.get(org, admin, entry.id);
     const rotatedKeys = { currentKeyVersion: 2, keys: { ...keys.keys, 2: randomBytes(32).toString("base64url") } };
     const rotated = new McpStore(pool, rotatedKeys, async () => ["org/repo"]);

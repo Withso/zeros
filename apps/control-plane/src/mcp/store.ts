@@ -6,7 +6,7 @@ import { McpUuidSchema, type RuntimeMcpServer } from "../cloud/contract.js";
 import { openMcpMaterial, sealMcpMaterial, type McpBinding, type McpEnvelope } from "./envelope.js";
 import type { McpRepository } from "./repositories.js";
 import { McpConfigSchema, McpDraftSchema, McpRepositorySchema, McpSecretsPatchSchema, McpWriteSchema,
-  materializeMcp, mergeMcpSecrets, oauthBinding, selectMcpEntries, type McpConfig, type McpDraft, type McpSecrets } from "./model.js";
+  materializeMcp, mergeMcpSecrets, newOAuthBinding, sameOAuthIdentity, selectMcpEntries, type McpConfig, type McpDraft, type McpSecrets } from "./model.js";
 
 export interface McpRow {
   id: string; org_id: string; owner_user_id: string | null; kind: "mcp"; repository: string | null; revision: number;
@@ -75,7 +75,7 @@ export class McpStore {
     return material as McpSecrets;
   }
   private async attemptBinding(tx: Tx, organizationId: string, userId: string, attemptId: string,
-    target: { extensionId: string | undefined; expectedRevision: number | null | undefined; fingerprint: string; retainedBinding: string | undefined },
+    target: { extensionId: string | undefined; expectedRevision: number | null | undefined; config: McpConfig; secrets: McpSecrets; retainedBinding: string | undefined },
     save = false): Promise<string> {
     const invalid = () => save ? new HttpError(422, "mcp_oauth_failed", "MCP sign-in could not complete. Check the client configuration and try again.")
       : new HttpError(409, "mcp_auth_required", "Sign in to this MCP server");
@@ -83,12 +83,12 @@ export class McpStore {
       `SELECT extension_id,expected_revision,binding,envelope FROM organization_mcp_oauth_attempts
        WHERE id=$1 AND org_id=$2 AND owner_user_id=$3 AND status='connected' AND expires_at>clock_timestamp() ${save ? "FOR UPDATE" : ""}`,
       [uuid(attemptId), uuid(organizationId), uuid(userId)])).rows[0];
-    // A supplied attempt must be admitted, even when its fresh fingerprint
-    // happens to match. It cannot bypass a stale revision or another row.
+    // A supplied attempt must be admitted before considering its identity.
+    // It cannot bypass a stale revision or another row.
     if (!attempt || (attempt.extension_id !== null && (attempt.extension_id !== target.extensionId || attempt.expected_revision !== target.expectedRevision))) throw invalid();
     const material = openMcpMaterial(attempt.envelope,
       { organizationId, ownerUserId: userId, id: attemptId, revision: 1, purpose: "attempt" }, this.keys) as { config: McpConfig; secrets: McpSecrets };
-    if (oauthBinding(material.config, material.secrets, this.keys) !== target.fingerprint) throw invalid();
+    if (!sameOAuthIdentity(material, target)) throw invalid();
     // Drafts only read. Saving can reconcile a fresh same-identity attempt to
     // the saved row's opaque binding, preserving every other member's grant.
     // The caller's mutation transaction rolls this back if attach refuses it.
@@ -140,12 +140,11 @@ export class McpStore {
           WHERE org_id=$1 AND owner_user_id IS NOT DISTINCT FROM $2::uuid AND id<>$3`, [organizationId, ownerUserId, id]);
         if (count.rows[0]!.count >= 64) throw new HttpError(409, "mcp_limit", "This owner already has 64 MCP configurations");
         const previous = existing ? this.secrets(existing) : {}, next = mergeMcpSecrets(input.config, input.secrets ?? {}, previous);
-        const fingerprint = oauthBinding(next.config, next.secrets, this.keys);
-        // Compare full decrypted identities under the current key before
-        // retaining an old binding, including those created before HMAC.
-        const retainedBinding = existing && oauthBinding(existing.config, previous, this.keys) === fingerprint ? existing.oauth_binding : undefined;
+        // Historical SHA/HMAC markers stay opaque; only decrypted identity
+        // equality permits retention, independently of the current server key.
+        const retainedBinding = existing && sameOAuthIdentity({ config: existing.config, secrets: previous }, next) ? existing.oauth_binding : undefined;
         const binding = input.oauthAttemptId ? await this.attemptBinding(tx, organizationId, userId, input.oauthAttemptId,
-          { extensionId: id, expectedRevision: input.expectedRevision, fingerprint, retainedBinding }, true) : retainedBinding ?? fingerprint;
+          { extensionId: id, expectedRevision: input.expectedRevision, ...next, retainedBinding }, true) : retainedBinding ?? newOAuthBinding();
         const revision = (existing?.revision ?? 0) + 1;
         const names = { env: Object.keys(next.secrets.env ?? {}), headers: Object.keys(next.secrets.headers ?? {}), oauthClientSecret: !!next.secrets.oauthClientSecret };
         const envelope = sealMcpMaterial(next.secrets, { organizationId, ownerUserId, id, revision, purpose: "config" }, this.keys);
@@ -188,14 +187,13 @@ export class McpStore {
       const row = input.extensionId ? await this.read(tx, organizationId, userId, input.extensionId) : undefined;
       if (row && row.revision !== input.expectedRevision) throw mcpConflict();
       const previous = row ? this.secrets(row) : {}, next = mergeMcpSecrets(input.config, input.secrets ?? {}, previous);
-      const fingerprint = oauthBinding(next.config, next.secrets, this.keys);
-      const retainedBinding = row && oauthBinding(row.config, previous, this.keys) === fingerprint ? row.oauth_binding : undefined;
+      const retainedBinding = row && sameOAuthIdentity({ config: row.config, secrets: previous }, next) ? row.oauth_binding : undefined;
       // Members can sign in to the shared definition. Redirecting its retained
       // credentials or changing its OAuth identity requires edit authority.
       if (row?.owner_user_id === null && !roleAtLeast(role, "admin") && !retainedBinding)
         throw new HttpError(403, "forbidden", "Requires admin role to change this shared server");
       const binding = input.oauthAttemptId ? await this.attemptBinding(tx, organizationId, userId, input.oauthAttemptId,
-        { extensionId: row?.id, expectedRevision: input.expectedRevision, fingerprint, retainedBinding }) : retainedBinding ?? fingerprint;
+        { extensionId: row?.id, expectedRevision: input.expectedRevision, ...next, retainedBinding }) : retainedBinding ?? newOAuthBinding();
       return { input, ...next, binding };
     });
   }

@@ -219,13 +219,32 @@ d("durable organization MCP OAuth", () => {
     await expect(write(randomUUID(), { config: { ...config, name: "other" }, oauthAttemptId: attempt.attemptId })).rejects.toMatchObject({ code: "mcp_oauth_failed" });
   });
 
-  it.each(["current", "legacy"])("preserves personal grants and unchanged member admission for a %s binding across server-key rotation", async format => {
+  it("gives independent identical sign-ins fresh opaque markers and retains each through probe and save", async () => {
+    const attempts = [await connect(), await connect()];
+    for (const attempt of attempts) await oauth.callback(attempt.state, "fixture-code");
+    const bindings: string[] = [];
+    for (const [index, attempt] of attempts.entries()) {
+      const binding = (await pool.query<{ binding: string }>("SELECT binding FROM organization_mcp_oauth_attempts WHERE id=$1", [attempt.attemptId])).rows[0]!.binding;
+      expect(binding).toMatch(/^[a-f0-9]{64}$/);
+      bindings.push(binding);
+      const draft = await store.draft(org, admin, { config, oauthAttemptId: attempt.attemptId });
+      expect(draft.binding).toBe(binding);
+      expect((await oauth.draftAuthorization(org, admin, attempt.attemptId, draft.binding)).headers.Authorization).toBe("Bearer fixture-access");
+      const id = randomUUID();
+      expect((await write(id, { config: { ...config, name: `independent-${index}` }, oauthAttemptId: attempt.attemptId })).oauth.status).toBe("connected");
+      expect((await store.get(org, admin, id)).oauth_binding).toBe(binding);
+    }
+    expect(new Set(bindings).size).toBe(2);
+  });
+
+  it.each(["current", "legacy", "hmac"])("preserves personal grants and unchanged member admission for a %s binding across server-key rotation", async format => {
     const id = await signedIn();
     const memberAttempt = await oauth.start(org, member, { config, extensionId: id, expectedRevision: 1 });
     await oauth.callback(new URL(memberAttempt.authorizationUrl).searchParams.get("state")!, "fixture-code");
-    if (format === "legacy") {
-      await pool.query("UPDATE organization_extensions SET oauth_binding=$2 WHERE id=$1", [id, "ab".repeat(32)]);
-      await pool.query("UPDATE organization_mcp_oauth SET binding=$2 WHERE extension_id=$1", [id, "ab".repeat(32)]);
+    if (format !== "current") {
+      const binding = (format === "legacy" ? "ab" : "cd").repeat(32);
+      await pool.query("UPDATE organization_extensions SET oauth_binding=$2 WHERE id=$1", [id, binding]);
+      await pool.query("UPDATE organization_mcp_oauth SET binding=$2 WHERE extension_id=$1", [id, binding]);
     }
     const previous = await store.get(org, admin, id);
     rotateServerKey();
@@ -263,11 +282,39 @@ d("durable organization MCP OAuth", () => {
     expect((await pool.query("SELECT status,envelope FROM organization_mcp_oauth_attempts WHERE id=$1", [attempt.attemptId])).rows).toEqual([{ status: "used", envelope: {} }]);
   });
 
-  it("atomically reconciles a fresh same-identity attempt without replacing another member's retained binding", async () => {
+  it("retains a re-encrypted historical attempt marker after retiring its original envelope key", async () => {
+    const attempt = await connect(), historical = "ef".repeat(32);
+    await pool.query("UPDATE organization_mcp_oauth_attempts SET binding=$2 WHERE id=$1", [attempt.attemptId, historical]);
+    rotateServerKey();
+    await oauth.callback(attempt.state, "fixture-code");
+    expect((await pool.query("SELECT envelope->>'keyVersion' AS key_version FROM organization_mcp_oauth_attempts WHERE id=$1", [attempt.attemptId])).rows)
+      .toEqual([{ key_version: "2" }]);
+    store = new McpStore(pool, { currentKeyVersion: 2, keys: { 2: store.keys.keys[2]! } }, async () => ["org/repo"]);
+    oauth = new McpOAuth(store, "https://api.example.test", fetcher);
+    const draft = await store.draft(org, admin, { config, oauthAttemptId: attempt.attemptId });
+    expect(draft.binding).toBe(historical);
+    expect((await oauth.draftAuthorization(org, admin, attempt.attemptId, draft.binding)).headers.Authorization).toBe("Bearer fixture-access");
+    const id = randomUUID();
+    expect((await write(id, { oauthAttemptId: attempt.attemptId })).oauth.status).toBe("connected");
+    expect((await store.get(org, admin, id)).oauth_binding).toBe(historical);
+  });
+
+  it.each(["owner", "repository"])("invalidates all personal grants on %s changes despite retaining the unchanged identity marker", async scope => {
     const id = await signedIn(), previous = await store.get(org, admin, id);
     const memberAttempt = await oauth.start(org, member, { config, extensionId: id, expectedRevision: 1 });
     await oauth.callback(new URL(memberAttempt.authorizationUrl).searchParams.get("state")!, "fixture-code");
-    rotateServerKey();
+    const saved = await write(id, { expectedRevision: 1, ...(scope === "owner" ? { owner: "user" } : { repository: "org/repo" }) });
+    expect((await store.get(org, admin, id)).oauth_binding).toBe(previous.oauth_binding);
+    expect(saved.oauth.status).toBe("needs-auth");
+    expect((await pool.query("SELECT * FROM organization_mcp_oauth WHERE extension_id=$1", [id])).rowCount).toBe(0);
+    await expect(oauth.authorizationForRepository(org, admin, "org/repo", id)).rejects.toMatchObject({ code: "mcp_auth_required" });
+  });
+
+  it.each([false, true])("atomically reconciles a fresh same-identity attempt with server-key rotation %s without replacing another member's retained binding", async rotated => {
+    const id = await signedIn(), previous = await store.get(org, admin, id);
+    const memberAttempt = await oauth.start(org, member, { config, extensionId: id, expectedRevision: 1 });
+    await oauth.callback(new URL(memberAttempt.authorizationUrl).searchParams.get("state")!, "fixture-code");
+    if (rotated) rotateServerKey();
     const fresh = await connect(); await oauth.callback(fresh.state, "fixture-code");
     const freshBinding = (await pool.query<{ binding: string }>("SELECT binding FROM organization_mcp_oauth_attempts WHERE id=$1", [fresh.attemptId])).rows[0]!.binding;
     expect(freshBinding).not.toBe(previous.oauth_binding);
