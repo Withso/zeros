@@ -21,4 +21,11 @@
   mounted. Cause: its sessions fixture was an empty type assertion. Rule: a
   shared row's new reads must also be provided by its existing harnesses.
   Encoded in the draft-indicator fixture's passive history method and its
-  existing browser smoke.
+  existing browser smoke. Typecheck the final fixture edit too: adding one
+  method to an empty type assertion makes TypeScript check its overlap with
+  the full actions contract; explicit partial fixtures use the existing
+  `unknown` conversion convention.
+- The full Linux unit run's login-shell PATH assertion also failed on a clean
+  base checkout: the host prepended its tool paths even with a minimal child
+  environment. Preserve that baseline evidence instead of changing unrelated
+  shell behavior to accommodate the host.
