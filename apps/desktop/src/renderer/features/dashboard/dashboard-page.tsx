@@ -1,17 +1,12 @@
 import { useOrganizationProjects } from "../../state/use-organization-projects";
 // ──────────────────────────────────────────────────────────
-// Dashboard page — cross-repo kanban board of live workspaces
+// Dashboard page — shared board and list of owner-scoped workspaces
 // ──────────────────────────────────────────────────────────
 //
 // Full-window page (peer of HistoryPage) reached via activePage === "dashboard".
-// Lists NON-archived workspaces across every repo, grouped into the five
-// lifecycle columns (Backlog / In progress / In review / Done / Cancelled), with
-// an "All projects" + per-repo filter. Each card opens the workspace on click,
-// exposes a state-appropriate primary action (Create PR / Merge / Archive), and
-// carries the same right-click "Set status / Archive" menu as workspace tabs.
-//
-// Status is the persisted `workspace.status`; archiving a card moves it out of
-// the board into History (archived is the orthogonal `archivedAt` flag).
+// Both views share search, repository/archive filters, ordering and metadata.
+// The board groups by persisted lifecycle status; archive is an independent
+// flag. Rows preserve the workspace's normal open, history and lifecycle actions.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
@@ -27,6 +22,7 @@ import {
   GitMerge,
   GitPullRequestArrow,
   Trash2,
+  RotateCcw,
 } from "lucide-react";
 
 import { cn } from "../../shared/ui/cn";
@@ -34,11 +30,14 @@ import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { toast } from "../../shared/ui/primitives/elements";
 import { StatusIcon } from "../../shared/ui/primitives/status-icon";
 import { WorkspaceContextMenu } from "../../shared/ui/workspace-context-menu";
-import { Switch } from "../../shared/ui/primitives/switch";
-import { LIFECYCLE_STATUSES } from "../../shared/lib/workspace-status";
+import {
+  LIFECYCLE_STATUSES,
+  statusMeta,
+} from "../../shared/lib/workspace-status";
 import { resolveCardActionKind } from "../../shared/lib/workspace-card-action";
 import { useActivePage, useChats } from "../../state/store";
 import { Button } from "../../shared/ui/primitives/button";
+import { IconButton } from "../../shared/ui/primitives/icon-button";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -80,12 +79,42 @@ import {
 } from "../../state/pending-workspaces";
 import { useWorkspaceHasChanges } from "../../shell/pr/use-workspace-has-changes";
 import { useOpenWorkspace } from "../../state/use-open-workspace";
-import { saveDashboardRepoFilter, useDashboardRepoFilter } from "./preferences";
+import {
+  saveDashboardRepoFilter,
+  useDashboardRepoFilter,
+  useDashboardPreferences,
+  updateDashboardPreferences,
+  type DashboardDisplay,
+  type DashboardView,
+} from "./preferences";
+import {
+  dashboardRowBuilder,
+  dashboardRowsForArchive,
+  dashboardPendingLabel,
+  filterDashboardRows,
+  filterDashboardPending,
+  type DashboardRow as BoardRow,
+} from "./dashboard-model";
+import { DashboardToolbar, DashboardViewToggle } from "./dashboard-toolbar";
+import {
+  DashboardList,
+  DashboardListRow,
+  PendingDashboardListRow,
+} from "./dashboard-list";
+import {
+  DashboardRepositoryIcon,
+  DashboardLineChanges,
+  DashboardCost,
+  DashboardPlacement,
+} from "./dashboard-metadata";
+import { useSidebarWorkspaceActivity } from "../../shell/sidebar-workspace-activity";
+import { useDocumentActive } from "../../state/use-document-active";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { prefetchWorkspaceSurface } from "../../shell/prefetch-workspace-surface";
 import {
   restoreWorkspaceWithFeedback,
   useArchiveWorkspace,
 } from "../../state/archive-actions";
-import { branchDisplayName } from "../../shared/lib/branch-name";
 import { formatCompactAge } from "../agent/format-age";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import {
@@ -96,53 +125,17 @@ import {
 } from "../../platform/git";
 import { useActiveOrganization } from "../team/team-store";
 import { filterRowsForOrganization } from "../team/organization-capabilities";
-import {
-  projectInitial,
-  RepositoryIcon,
-} from "../repositories/repository-icon";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useFolderWorkspaces } from "../../state/use-folder-workspaces";
 import type { Project } from "../../state/projects-store";
-import { selectWorkspaceHistory } from "../../state/workspace-history";
-
-const REPO_CHIP_CLS =
-  "inline-flex size-5 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium leading-none text-fg2";
-
-// Compact secondary action button on a card — transparent fill so it blends
-// with the card's surface (matches the secondary button family).
-const CARD_ACTION_CLS =
-  "inline-flex items-center gap-1.5 rounded-sm border border-border3 bg-transparent px-2 py-1 text-xs font-medium text-fg1 transition-colors hover:bg-bg2-hover disabled:pointer-events-none disabled:opacity-60";
-
-// The "Archived" toggle persists across reloads (the Archived column is heavy,
-// so remember the user's choice) — localStorage, best-effort.
-const SHOW_ARCHIVED_KEY = "zeros:dashboard-show-archived";
-function readShowArchived(): boolean {
-  try {
-    return localStorage.getItem(SHOW_ARCHIVED_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-// Branch → workspace name goes through the shared branchDisplayName (see
-// renderer/shared/lib/branch-name.ts). The private `zeros/`-literal strip that used to
-// live here stopped being correct when Settings → Git made the prefix a
-// choice: a workspace on `jordan/Cream` showed its whole ref where every other
-// surface showed `Cream`.
+import {
+  selectWorkspaceHistory,
+  workspaceIsReadOnly,
+} from "../../state/workspace-history";
 
 /** Stable empty list so non-Backlog columns don't allocate a new array each
  *  render (the pending placeholders only ever appear under Backlog). */
 const EMPTY_PENDING_ROWS: PendingWorkspaceCreate[] = [];
-
-interface BoardRow {
-  workspace: Workspace;
-  project: Project | null;
-  repoName: string;
-  /** Owning-chat title if present, else the (prefix-stripped) branch. */
-  title: string;
-  branch: string;
-  hidden?: boolean;
-}
 
 export function DashboardPage() {
   const { projects } = useOrganizationProjects();
@@ -160,13 +153,35 @@ export function DashboardPage() {
     () => filterRowsForOrganization(rawPending, activeOrganization),
     [activeOrganization, rawPending],
   );
-  const { workspaces: rawArchivedWorkspaces } = useArchivedWorkspaces();
+  const {
+    workspaces: rawArchivedWorkspaces,
+    loading: archivesLoading,
+    error: archivesError,
+    refresh: refreshArchives,
+  } = useArchivedWorkspaces();
   const visibility = useWorkspaceVisibility();
   const showHidden = useShowHiddenWorkspaces();
   const [autoHide] = useExperimentalFeature(
     "hideArchivedWorkspacesAfter15Days",
   );
   const activePage = useActivePage();
+  const active = useDocumentActive(activePage === "dashboard");
+  const owner = activeOrganization?.isPersonal
+    ? "local"
+    : (activeOrganization?.id ?? "local");
+  const preferences = useDashboardPreferences();
+  const includesArchives = preferences.archive !== "active";
+  const archiveError = includesArchives ? archivesError : null;
+  const loadingVisibleWorkspaces =
+    (preferences.archive !== "archived" && loading) ||
+    (includesArchives && archivesLoading);
+  const [search, setSearch] = useState({ owner, query: "" });
+  const query = search.owner === owner ? search.query : "";
+  const setQuery = (value: string) => setSearch({ owner, query: value });
+  const ownerName = (workspace: Workspace) =>
+    !workspace.organizationId || activeOrganization?.isPersonal
+      ? "Local"
+      : (activeOrganization?.name ?? "Organization");
   const [now, setNow] = useState(Date.now);
   // One deadline for the aggregate; no per-card polling. Re-evaluate on app
   // resume, and detach timers/listeners while the retained page is inactive.
@@ -212,14 +227,8 @@ export function DashboardPage() {
       ? requestedRepoFilter
       : null;
   const setRepoFilter = saveDashboardRepoFilter;
-  const [showArchived, setShowArchived] = useState<boolean>(readShowArchived);
-  useEffect(() => {
-    try {
-      localStorage.setItem(SHOW_ARCHIVED_KEY, showArchived ? "1" : "0");
-    } catch {
-      /* storage disabled (private mode) — non-fatal */
-    }
-  }, [showArchived]);
+  const showArchived = preferences.archive !== "active";
+  const revealArchived = () => updateDashboardPreferences({ archive: "all" });
 
   // Reconcile external merges: a workspace whose PR was merged on github.com (not
   // via our Merge button) is still recorded "in-review". ghPrSync now detects a
@@ -227,8 +236,13 @@ export function DashboardPage() {
   // accurate without hammering the API on every refetch.
   const syncedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    if (!active) return;
+    const liveIds = new Set(workspaces.map((workspace) => workspace.id));
+    for (const id of syncedRef.current)
+      if (!liveIds.has(id)) syncedRef.current.delete(id);
     for (const w of workspaces) {
       if (
+        !isCloudWorkspace(w.path) &&
         w.status === "in-review" &&
         w.prNumber != null &&
         !syncedRef.current.has(w.id)
@@ -243,45 +257,30 @@ export function DashboardPage() {
           });
       }
     }
-  }, [workspaces]);
+  }, [workspaces, active]);
 
-  // A row-builder: join repo name by slug + derive a title from the owning chat
-  // (most-recently-updated chat in the worktree folder), else the branch. Reused
-  // for BOTH live and archived rows — archive doesn't move the chat's folder, so
-  // titleByFolder still resolves for an archived workspace's (now-gone) path.
+  const historyWorkspaces = useMemo(
+    () => selectWorkspaceHistory(accessibleLiveWorkspaces, archivedWorkspaces),
+    [accessibleLiveWorkspaces, archivedWorkspaces],
+  );
+  const activityWorkspaces = useMemo(
+    () => [...workspaces, ...historyWorkspaces],
+    [workspaces, historyWorkspaces],
+  );
+  const activity = useSidebarWorkspaceActivity(
+    owner,
+    activityWorkspaces,
+    chats,
+    active,
+  );
   const projectBySlug = useMemo(
     () => new Map(projects.map((project) => [project.repoSlug, project])),
     [projects],
   );
-  const toRow = useMemo(() => {
-    const titleByFolder = new Map<
-      string,
-      { title: string; updatedAt: number }
-    >();
-    for (const c of chats) {
-      const folder = c.folder;
-      const title = (c.title ?? "").trim();
-      if (!folder || !title || title === "Untitled") continue;
-      const prev = titleByFolder.get(folder);
-      const updatedAt = c.updatedAt ?? 0;
-      if (!prev || updatedAt > prev.updatedAt)
-        titleByFolder.set(folder, { title, updatedAt });
-    }
-    return (w: Workspace): BoardRow => {
-      const branch = branchDisplayName(w.branch);
-      const project = projectBySlug.get(w.repoSlug) ?? null;
-      return {
-        workspace: w,
-        project,
-        repoName: project?.name ?? w.repoSlug,
-        title: isLocalMainWorkspace(w)
-            ? branch
-            : titleByFolder.get(w.path)?.title || branch,
-        branch,
-      };
-    };
-  }, [chats, projectBySlug]);
-
+  const toRow = useMemo(
+    () => dashboardRowBuilder(projects, chats, activity),
+    [projects, chats, activity],
+  );
   const rows = useMemo(() => workspaces.map(toRow), [workspaces, toRow]);
   // In-flight optimistic creates as board placeholders, deduped against the real
   // union so a placeholder vanishes the instant its real row lands.
@@ -291,17 +290,22 @@ export function DashboardPage() {
   );
   const pendingRows = useMemo(
     () =>
-      repoFilter
-        ? dedupedPending.filter((p) => p.repoSlug === repoFilter)
-        : dedupedPending,
-    [dedupedPending, repoFilter],
+      preferences.archive === "archived"
+        ? EMPTY_PENDING_ROWS
+        : filterDashboardPending(
+            dedupedPending,
+            projectBySlug,
+            repoFilter,
+            query,
+          ),
+    [dedupedPending, projectBySlug, repoFilter, query, preferences.archive],
   );
   // Confirmed archived and missing rows share this column. Archive intent
   // alone never inserts a row; its confirmed commit removes the live card
   // and publishes history atomically.
   const archivedRows = useMemo(
     () =>
-      selectWorkspaceHistory(accessibleLiveWorkspaces, archivedWorkspaces)
+      historyWorkspaces
         .map((workspace) => ({
           ...toRow(workspace),
           hidden: workspaceIsHidden(
@@ -311,14 +315,9 @@ export function DashboardPage() {
             activePage === "dashboard" ? Math.max(now, Date.now()) : now,
           ),
         }))
-        .filter((row) => showHidden || !row.hidden)
-        .sort(
-          (a, b) =>
-            (b.workspace.archivedAt ?? 0) - (a.workspace.archivedAt ?? 0),
-        ),
+        .filter((row) => showHidden || !row.hidden),
     [
-      archivedWorkspaces,
-      accessibleLiveWorkspaces,
+      historyWorkspaces,
       toRow,
       visibility,
       autoHide,
@@ -328,57 +327,90 @@ export function DashboardPage() {
     ],
   );
 
-  const filtered = useMemo(
+  const allRows = useMemo(
+    () => [...rows, ...archivedRows],
+    [rows, archivedRows],
+  );
+  const visibleRows = useMemo(
     () =>
-      repoFilter
-        ? rows.filter((r) => r.workspace.repoSlug === repoFilter)
-        : rows,
-    [rows, repoFilter],
+      filterDashboardRows(
+        dashboardRowsForArchive(allRows, preferences.archive),
+        repoFilter,
+        query,
+        preferences.sort,
+      ),
+    [allRows, preferences.archive, preferences.sort, repoFilter, query],
   );
   const filteredArchived = useMemo(
-    () =>
-      repoFilter
-        ? archivedRows.filter((r) => r.workspace.repoSlug === repoFilter)
-        : archivedRows,
-    [archivedRows, repoFilter],
+    () => visibleRows.filter((row) => row.workspace.archivedAt != null),
+    [visibleRows],
   );
-
   const byStatus = useMemo(() => {
     const map = new Map<string, BoardRow[]>();
-    for (const s of LIFECYCLE_STATUSES) map.set(s.value, []);
-    for (const r of filtered) map.get(r.workspace.status)?.push(r);
+    for (const status of LIFECYCLE_STATUSES) map.set(status.value, []);
+    for (const row of visibleRows)
+      if (row.workspace.archivedAt == null)
+        map.get(statusMeta(row.workspace.status).value)?.push(row);
     return map;
-  }, [filtered]);
-
-  const showRepoChip = repoFilter === null;
-
+  }, [visibleRows]);
+  const showRepoChip = preferences.display.repositoryIcon;
+  const count = visibleRows.length + pendingRows.length;
+  const renderRow = (row: BoardRow, rowIndex?: number) =>
+    workspaceIsReadOnly(row.workspace) ? (
+      <ArchivedCard
+        key={row.workspace.id}
+        row={row}
+        showRepoChip={showRepoChip}
+        active={active}
+        view={preferences.view}
+        display={preferences.display}
+        ownerName={ownerName(row.workspace)}
+        rowIndex={rowIndex}
+      />
+    ) : (
+      <DashboardCard
+        key={row.workspace.id}
+        row={row}
+        showRepoChip={showRepoChip}
+        active={active}
+        view={preferences.view}
+        display={preferences.display}
+        ownerName={ownerName(row.workspace)}
+        rowIndex={rowIndex}
+        onOpen={() => openWorkspace(row.workspace)}
+        onArchived={revealArchived}
+      />
+    );
   return (
     <div className="bg-bg1 flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-      {/* The app sidebar owns native title-bar spacing. */}
       <div
-        className="flex shrink-0 items-center gap-3 px-6 pt-4 pb-4"
+        className="flex shrink-0 items-center gap-3 px-6 pt-4 pb-3"
         data-tauri-drag-region
       >
         <h1 className="text-fg1 text-base font-medium">Dashboard</h1>
-        {!loading && filtered.length + pendingRows.length > 0 && (
-          <span className="text-fg2 text-sm tabular-nums">
-            {filtered.length + pendingRows.length}
+        {!loadingVisibleWorkspaces && (
+          <span
+            className="text-muted-fg text-sm tabular-nums"
+            data-dashboard-count
+            aria-label={`${count} workspaces`}
+          >
+            {count}
           </span>
         )}
-        {/* Archived toggle — reveals the Archived column (first, before Backlog).
-            Archived isn't a status; it's an orthogonal flag, so it's opt-in. */}
-        <div className="text-fg2 ml-auto flex items-center gap-2 text-sm select-none">
-          <span>Archived</span>
-          <Switch
-            checked={showArchived}
-            onCheckedChange={setShowArchived}
-            aria-label="Show archived workspaces"
-          />
-        </div>
+        <DashboardViewToggle view={preferences.view} />
       </div>
-
-      {/* Project filter tabs. */}
-      <div className="flex shrink-0 items-center gap-1 overflow-x-auto px-6 pb-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <DashboardToolbar
+        key={owner}
+        preferences={preferences}
+        query={query}
+        onQueryChange={setQuery}
+        active={active}
+      />
+      <div
+        className="flex shrink-0 items-center gap-1 overflow-x-auto px-6 pb-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        role="group"
+        aria-label="Filter by repository"
+      >
         <FilterTab
           active={repoFilter === null}
           onClick={() => setRepoFilter(null)}
@@ -392,77 +424,142 @@ export function DashboardPage() {
             onClick={() => setRepoFilter(p.repoSlug)}
           >
             <DashboardRepositoryIcon project={p} name={p.name} />
-            <span className="truncate">{p.name}</span>
+            <span className="max-w-48 truncate">{p.name}</span>
           </FilterTab>
         ))}
       </div>
-
-      {/* Board — five columns, horizontally scrollable with an always-visible
-          bottom scrollbar. The inner row is `w-max` (sizes to its content) so its
-          `px-6` becomes part of the scroll width — that's what makes BOTH the left
-          and right gutters scroll into view (a plain width:100% flex lets the
-          columns overflow past its padding, collapsing the right gutter). */}
-      <div className="zeros-hscroll min-h-0 flex-1 overflow-x-auto overflow-y-hidden pb-3">
-        <div className="flex h-full min-h-0 w-max gap-4 px-6">
-          {showArchived && (
-            <ArchivedColumn
-              rows={filteredArchived}
-              showRepoChip={showRepoChip}
-              active={activePage === "dashboard"}
+      {archiveError && count > 0 && (
+        <div
+          className="text-fg3 flex shrink-0 items-center gap-3 px-6 pb-3 text-xs"
+          role="status"
+        >
+          <span>Couldn't load archived workspaces</span>
+          <Button
+            variant="ghost"
+            size="compact"
+            onClick={refreshArchives}
+            aria-label="Retry loading archived workspaces"
+          >
+            Retry
+          </Button>
+        </div>
+      )}
+      {count === 0 ? (
+        <div
+          className="text-fg3 flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 pb-12"
+          role="status"
+        >
+          <Folder
+            className="text-muted-fg size-8"
+            strokeWidth={1.5}
+            aria-hidden="true"
+          />
+          <p className="text-fg2 text-sm">
+            {loadingVisibleWorkspaces
+              ? "Loading workspaces…"
+              : archiveError
+                ? "Couldn't load archived workspaces"
+                : query.trim() || repoFilter
+                  ? "No matching workspaces"
+                  : preferences.archive === "archived"
+                    ? "No archived workspaces"
+                    : "No workspaces yet"}
+          </p>
+          {archiveError && !loadingVisibleWorkspaces && (
+            <Button
+              variant="secondary"
+              onClick={refreshArchives}
+              aria-label="Retry loading archived workspaces"
+            >
+              Retry
+            </Button>
+          )}
+          {(query || repoFilter) && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setQuery("");
+                setRepoFilter(null);
+              }}
+            >
+              Clear filters
+            </Button>
+          )}
+        </div>
+      ) : preferences.view === "list" ? (
+        <DashboardList
+          rows={visibleRows}
+          pending={pendingRows}
+          display={preferences.display}
+          active={active}
+          renderRow={renderRow}
+          renderPending={(pending, rowIndex) => (
+            <PendingDashboardListRow
+              key={pending.token}
+              label={dashboardPendingLabel(pending)}
+              display={preferences.display}
+              rowIndex={rowIndex}
             />
           )}
-          {LIFECYCLE_STATUSES.map((s) => {
-            const items = byStatus.get(s.value) ?? [];
-            // Optimistic creates live in Backlog until their real row lands.
-            const pendingHere =
-              s.value === "backlog" ? pendingRows : EMPTY_PENDING_ROWS;
-            return (
-              <div
-                key={s.value}
-                className="flex h-full min-h-0 w-72 shrink-0 flex-col px-3"
-              >
-                <div className="mb-3 flex shrink-0 items-center gap-2">
-                  <StatusIcon status={s.value} className="size-4" />
-                  <span className="text-fg1 text-sm font-medium">
-                    {s.label}
-                  </span>
-                  <span className="text-fg2 text-xs tabular-nums">
-                    {items.length + pendingHere.length}
-                  </span>
-                </div>
-                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                  {pendingHere.map((pending) => (
-                    <PendingDashboardCard
-                      key={pending.token}
-                      label={
-                        pending.label ?? (pending.branch
-                          ? branchDisplayName(pending.branch)
-                          : "New workspace")
-                      }
-                      repoName={
-                        projectBySlug.get(pending.repoSlug)?.name ??
-                        pending.repository?.name ??
-                        pending.repoSlug
-                      }
-                      project={projectBySlug.get(pending.repoSlug) ?? null}
-                      showRepoChip={showRepoChip}
-                    />
-                  ))}
-                  {items.map((row) => (
-                    <DashboardCard
-                      key={row.workspace.id}
-                      row={row}
-                      showRepoChip={showRepoChip}
-                      onOpen={() => openWorkspace(row.workspace)}
-                      onArchived={() => setShowArchived(true)}
-                    />
-                  ))}
-                </div>
-              </div>
-            );
-          })}
+        />
+      ) : (
+        <div
+          className="zeros-hscroll min-h-0 flex-1 overflow-x-auto overflow-y-hidden pb-3"
+          data-dashboard-view="board"
+        >
+          <div className="flex h-full min-h-0 w-max gap-4 px-6">
+            {showArchived && (
+              <ArchivedColumn
+                rows={filteredArchived}
+                showRepoChip={showRepoChip}
+                active={active}
+                display={preferences.display}
+                ownerName={ownerName}
+              />
+            )}
+            {preferences.archive !== "archived" &&
+              LIFECYCLE_STATUSES.map((status) => {
+                const items = byStatus.get(status.value) ?? [];
+                const pendingHere =
+                  status.value === "backlog" ? pendingRows : EMPTY_PENDING_ROWS;
+                return (
+                  <div
+                    key={status.value}
+                    className="flex h-full min-h-0 w-72 shrink-0 flex-col px-3"
+                    role="group"
+                    aria-label={`${status.label} workspaces`}
+                  >
+                    <div className="mb-3 flex shrink-0 items-center gap-2">
+                      <StatusIcon status={status.value} className="size-4" />
+                      <span className="text-fg1 text-sm font-medium">
+                        {status.label}
+                      </span>
+                      <span className="text-muted-fg text-xs tabular-nums">
+                        {items.length + pendingHere.length}
+                      </span>
+                    </div>
+                    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                      {pendingHere.map((pending) => (
+                        <PendingDashboardCard
+                          key={pending.token}
+                          label={dashboardPendingLabel(pending)}
+                          repoName={
+                            projectBySlug.get(pending.repoSlug)?.name ??
+                            pending.repository?.name ??
+                            pending.repoSlug
+                          }
+                          project={projectBySlug.get(pending.repoSlug) ?? null}
+                          showRepoChip={showRepoChip}
+                        />
+                      ))}
+                      {items.map((row) => renderRow(row))}
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -477,49 +574,37 @@ function FilterTab({
   children: React.ReactNode;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
+      aria-pressed={active}
       onClick={onClick}
       className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 rounded-sm px-2.5 py-1 text-sm transition-colors",
+        "shrink-0 gap-1.5 px-2",
         active
           ? "bg-bg2-hover text-fg1"
           : "text-fg2 hover:bg-bg1-hover hover:text-fg1",
       )}
     >
       {children}
-    </button>
-  );
-}
-
-function DashboardRepositoryIcon({
-  project,
-  name,
-}: {
-  project: Project | null;
-  name: string;
-}) {
-  return (
-    <span className={REPO_CHIP_CLS} aria-hidden="true">
-      {project ? (
-        <RepositoryIcon project={project} className="size-full rounded-sm" />
-      ) : (
-        projectInitial(name)
-      )}
-    </span>
+    </Button>
   );
 }
 
 // The Archived pseudo-column — archived is an orthogonal flag, not a status, so
-// it renders first (before Backlog) only when the header toggle is on.
+// it renders first (before Backlog) when the archive filter includes it.
 function ArchivedColumn({
   rows,
   showRepoChip,
   active,
+  display,
+  ownerName,
 }: {
   rows: BoardRow[];
   showRepoChip: boolean;
   active: boolean;
+  display: DashboardDisplay;
+  ownerName: (workspace: Workspace) => string;
 }) {
   // A dotted outline (no fill) sets the Archived column apart — archived isn't a
   // status, so it reads as a different kind of column without adding weight.
@@ -539,6 +624,9 @@ function ArchivedColumn({
             row={row}
             showRepoChip={showRepoChip}
             active={active}
+            view="board"
+            display={display}
+            ownerName={ownerName(row.workspace)}
           />
         ))}
       </div>
@@ -550,10 +638,18 @@ function ArchivedCard({
   row,
   showRepoChip,
   active,
+  view,
+  display,
+  ownerName,
+  rowIndex,
 }: {
   row: BoardRow;
   showRepoChip: boolean;
   active: boolean;
+  view: DashboardView;
+  display: DashboardDisplay;
+  ownerName: string;
+  rowIndex?: number;
 }) {
   const warmHistory = useWarmWorkspaceHistory();
   const w = row.workspace;
@@ -609,109 +705,158 @@ function ArchivedCard({
       onRestored: (result) => openWorkspace(result.workspace),
     });
   };
-  // Opens saved chats directly. Outlined, no
-  // fill (just a border1) so archived reads as distinct from the filled live cards.
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      aria-label={`Open ${row.title} history`}
-      onPointerEnter={() => warmHistory(w)}
-      onFocus={() => warmHistory(w)}
-      onClick={() => openWorkspace(w)}
-      onKeyDown={(event) => {
-        if (event.target !== event.currentTarget) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          openWorkspace(w);
-        }
-      }}
-      className="border-border1 hover:bg-bg1-hover flex cursor-pointer flex-col rounded-lg border p-3 text-left select-none"
-    >
-      <div className="flex items-center gap-2">
-        {showRepoChip && (
-          <DashboardRepositoryIcon project={row.project} name={row.repoName} />
-        )}
-        <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
-          {row.branch}
-        </span>
-        {/* Its preserved lifecycle status, dimmed — restore returns it here. */}
-        <StatusIcon status={w.status} className="size-3.5 opacity-60" />
-      </div>
-      <div className="text-fg1 mt-1.5 truncate text-sm font-medium">
-        {row.title}
-      </div>
-      <div className="text-fg2 mt-1 text-xs">
-        {w.archivedAt == null ? "Folder missing" : "Archived"}
-      </div>
-      <div
-        className="mt-2.5 flex items-center gap-2"
-        onClick={(event) => event.stopPropagation()}
-      >
-        {w.archivedAt != null && (
+  const actions = (
+    <>
+      {w.archivedAt != null &&
+        (view === "list" ? (
           <Tooltip label="Unarchive">
-            <Button
-              variant="secondary"
-              size="sm"
+            <IconButton
+              size="compact"
+              label={`Unarchive ${row.title}`}
               onClick={unarchive}
               disabled={restoring || deletingSnapshot}
             >
-              {restoring && <ZerosSpinner size={14} />}
-              <span>{restoring ? "Restoring…" : "Unarchive"}</span>
-            </Button>
+              {restoring ? (
+                <ZerosSpinner size={14} />
+              ) : (
+                <RotateCcw className="size-3.5" />
+              )}
+            </IconButton>
           </Tooltip>
-        )}
-        {row.hidden && (
-          <Tooltip label="Hidden workspace">
-            <span
-              className="text-muted-fg inline-flex"
-              role="img"
-              aria-label="Hidden workspace"
+        ) : (
+          <Button
+            variant="secondary"
+            size="compact"
+            onClick={unarchive}
+            disabled={restoring || deletingSnapshot}
+          >
+            {restoring && <ZerosSpinner size={14} />}
+            <span>{restoring ? "Restoring…" : "Unarchive"}</span>
+          </Button>
+        ))}
+      {row.hidden && (
+        <Tooltip label="Hidden workspace">
+          <span
+            className="text-muted-fg inline-flex"
+            role="img"
+            aria-label="Hidden workspace"
+          >
+            <EyeOff size={14} aria-hidden="true" />
+          </span>
+        </Tooltip>
+      )}
+      {w.archivedAt != null && (
+        <DropdownMenu open={active && menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <IconButton
+              size="compact"
+              label={`Options for ${row.title}`}
+              disabled={restoring || deletingSnapshot}
             >
-              <EyeOff size={14} aria-hidden="true" />
+              <Ellipsis size={14} aria-hidden="true" />
+            </IconButton>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onSelect={() => setWorkspaceHidden(w, !row.hidden)}
+            >
+              {row.hidden ? <Eye /> : <EyeOff />}
+              {row.hidden ? "Unhide" : "Hide"}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-red-primary focus:text-red-primary"
+              disabled={!w.archiveSnapshot}
+              onSelect={() => {
+                if (w.archiveSnapshot && w.archivedAt != null)
+                  setSnapshotToDelete({
+                    archiveSnapshot: w.archiveSnapshot,
+                    archivedAt: w.archivedAt,
+                  });
+              }}
+            >
+              <Trash2 />
+              Delete saved snapshot…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+    </>
+  );
+  return (
+    <>
+      {view === "list" ? (
+        <DashboardListRow
+          row={row}
+          aria-rowindex={rowIndex}
+          display={display}
+          ownerName={ownerName}
+          active={active}
+          onOpen={() => openWorkspace(w)}
+          onWarm={() => warmHistory(w)}
+          actions={actions}
+          busy={restoring || deletingSnapshot}
+        />
+      ) : (
+        <div
+          role="button"
+          tabIndex={0}
+          aria-label={`Open ${row.title} history`}
+          data-dashboard-workspace={w.id}
+          onPointerEnter={() => {
+            if (active) warmHistory(w);
+          }}
+          onFocus={() => {
+            if (active) warmHistory(w);
+          }}
+          onClick={() => {
+            if (active) openWorkspace(w);
+          }}
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget || !active) return;
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openWorkspace(w);
+            }
+          }}
+          className="border-border1 hover:bg-bg1-hover focus-visible:outline-highlighted-bright flex cursor-pointer flex-col rounded-lg border p-3 text-left select-none focus-visible:outline-2 focus-visible:-outline-offset-2"
+        >
+          <div className="flex items-center gap-2">
+            {showRepoChip && (
+              <DashboardRepositoryIcon
+                project={row.project}
+                name={row.repoName}
+              />
+            )}
+            <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
+              {row.branch}
             </span>
-          </Tooltip>
-        )}
-        {w.archivedAt != null && (
-          <DropdownMenu open={active && menuOpen} onOpenChange={setMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Options for ${row.title}`}
-                disabled={restoring || deletingSnapshot}
-              >
-                <Ellipsis size={14} aria-hidden="true" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              <DropdownMenuItem
-                onSelect={() => setWorkspaceHidden(w, !row.hidden)}
-              >
-                {row.hidden ? <Eye /> : <EyeOff />}
-                {row.hidden ? "Unhide" : "Hide"}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                className="text-red-primary focus:text-red-primary"
-                disabled={!w.archiveSnapshot}
-                onSelect={() => {
-                  if (w.archiveSnapshot && w.archivedAt != null)
-                    setSnapshotToDelete({
-                      archiveSnapshot: w.archiveSnapshot,
-                      archivedAt: w.archivedAt,
-                    });
-                }}
-              >
-                <Trash2 />
-                Delete saved snapshot…
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-        <span className="text-fg2 ml-auto text-xs tabular-nums">
-          {formatCompactAge(w.archivedAt ?? w.createdAt)}
-        </span>
-      </div>
+            <StatusIcon status={w.status} className="size-3.5" />
+          </div>
+          <div className="text-fg1 mt-1.5 truncate text-sm font-medium">
+            {row.title}
+          </div>
+          <div className="text-fg3 mt-1 text-xs">
+            {w.archivedAt == null ? "Folder missing" : "Archived"}
+          </div>
+          <DashboardCardMetadata
+            row={row}
+            display={display}
+            ownerName={ownerName}
+            active={active}
+          />
+          <div
+            className="mt-2.5 flex items-center gap-2"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {actions}
+            {display.lastActive && (
+              <span className="text-muted-fg ml-auto text-xs tabular-nums">
+                {formatCompactAge(row.lastActiveAt)}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
       <Dialog
         open={active && snapshotToDelete !== null}
         onOpenChange={(open) => {
@@ -752,6 +897,44 @@ function ArchivedCard({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </>
+  );
+}
+
+function DashboardCardMetadata({
+  row,
+  display,
+  ownerName,
+  active,
+}: {
+  row: BoardRow;
+  display: DashboardDisplay;
+  ownerName: string;
+  active: boolean;
+}) {
+  if (
+    !display.repository &&
+    !display.lineChanges &&
+    !display.cost &&
+    !display.owner
+  )
+    return null;
+  return (
+    <div className="text-fg3 text-3xxs mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+      {display.repository && (
+        <span className="max-w-24 truncate" title={row.repoName}>
+          {row.repoName}
+        </span>
+      )}
+      {display.lineChanges && (
+        <DashboardLineChanges workspace={row.workspace} active={active} />
+      )}
+      {display.cost && <DashboardCost />}
+      {display.owner && (
+        <span className="ml-auto max-w-24 truncate" title={ownerName}>
+          {ownerName}
+        </span>
+      )}
     </div>
   );
 }
@@ -798,11 +981,21 @@ function DashboardCard({
   showRepoChip,
   onOpen,
   onArchived,
+  active,
+  view,
+  display,
+  ownerName,
+  rowIndex,
 }: {
   row: BoardRow;
   showRepoChip: boolean;
   onOpen: () => void;
   onArchived: () => void;
+  active: boolean;
+  view: DashboardView;
+  display: DashboardDisplay;
+  ownerName: string;
+  rowIndex?: number;
 }) {
   const w = row.workspace;
   const archiveWorkspace = useArchiveWorkspace();
@@ -812,9 +1005,14 @@ function DashboardCard({
   // column). `undefined` until the first probe resolves → resolveCardActionKind
   // shows NO button rather than a possibly-wrong destructive Merge.
   const localFolder = isLocalMainWorkspace(w);
-  const hasChanges = useWorkspaceHasChanges(localFolder ? null : w, !localFolder, {
-    probeWithPr: true,
-  });
+  const cloud = isCloudWorkspace(w.path);
+  const probedChanges = useWorkspaceHasChanges(
+    localFolder || cloud ? null : w,
+    active && view === "board" && !localFolder && !cloud,
+    { probeWithPr: true },
+  );
+  // Home is passive. A cloud card must never attach to or wake a VM for its PR action.
+  const hasChanges = cloud ? undefined : probedChanges;
   // Missing or broken Git metadata keeps the workspace reachable for recovery.
   const missing = w.present === false;
 
@@ -915,30 +1113,79 @@ function DashboardCard({
       : action?.busyKey != null && busy === action.busyKey;
   const ActionIcon = action?.icon;
 
-  const stop = (e: React.MouseEvent) => e.stopPropagation();
-
-  return (
-    <WorkspaceContextMenu
-      workspace={w}
-      onArchive={archive}
-      archiveDisabled={mutating}
-    >
+  const stop = (event: React.MouseEvent) => event.stopPropagation();
+  const warm = () => {
+    if (active && !cloud) prefetchWorkspaceSurface(w);
+  };
+  const prLink =
+    w.prNumber != null && w.prUrl ? (
+      <Tooltip label="Open PR">
+        <a
+          href={w.prUrl}
+          target="_blank"
+          rel="noreferrer"
+          onClick={stop}
+          className="text-fg3 hover:text-fg1 inline-flex items-center gap-0.5 text-xs"
+        >
+          #{w.prNumber}
+          <ExternalLink className="size-3" />
+        </a>
+      </Tooltip>
+    ) : null;
+  const content =
+    view === "list" ? (
+      <DashboardListRow
+        row={row}
+        aria-rowindex={rowIndex}
+        display={display}
+        ownerName={ownerName}
+        active={active}
+        onOpen={onOpen}
+        onWarm={warm}
+        busy={mutating}
+        actions={
+          <>
+            {prLink}
+            {!localFolder && (
+              <Tooltip label="Archive">
+                <IconButton
+                  size="compact"
+                  label={`Archive ${row.title}`}
+                  disabled={mutating}
+                  onClick={() => void archive()}
+                >
+                  {mutating ? (
+                    <ZerosSpinner size={14} />
+                  ) : (
+                    <ArchiveIcon className="size-3.5" />
+                  )}
+                </IconButton>
+              </Tooltip>
+            )}
+          </>
+        }
+      />
+    ) : (
       <div
         role="button"
         tabIndex={0}
+        data-dashboard-workspace={w.id}
+        aria-label={`Open ${row.title}`}
+        onPointerEnter={warm}
+        onFocus={warm}
         onClick={() => {
-          if (!mutating) onOpen();
+          if (!mutating && active) onOpen();
         }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget || !active) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
             if (!mutating) onOpen();
           }
         }}
         aria-busy={mutating || undefined}
-        className="border-border1 bg-bg2 hover:border-border3 flex cursor-pointer flex-col rounded-lg border p-3 text-left transition-colors select-none"
+        className="border-border1 bg-bg2 hover:border-border3 focus-visible:outline-highlighted-bright flex cursor-pointer flex-col rounded-lg border p-3 text-left transition-colors select-none focus-visible:outline-2 focus-visible:-outline-offset-2"
       >
-        {/* Top: repo chip (all-projects view) + branch + status glyph. */}
         <div className="flex items-center gap-2">
           {showRepoChip && (
             <DashboardRepositoryIcon
@@ -949,71 +1196,73 @@ function DashboardCard({
           <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
             {row.branch}
           </span>
+          <DashboardPlacement workspace={w} active={active} />
           {localFolder ? (
             <Folder className="text-fg2 size-3.5" strokeWidth={1.5} />
           ) : missing ? (
-            <Tooltip label="Worktree folder deleted on disk">
-              <FolderX
-                className="text-red-fg size-3.5 shrink-0"
-                aria-label="Worktree missing"
-              />
-            </Tooltip>
+            <FolderX
+              className="text-red-primary size-3.5"
+              aria-label="Worktree missing"
+            />
           ) : (
             <StatusIcon status={w.status} className="size-3.5" />
           )}
         </div>
-
-        {/* Title. */}
         <div className="text-fg1 mt-1.5 truncate text-sm font-medium">
           {row.title}
         </div>
         {missing && (
-          <div className="text-red-fg mt-1 text-xs">Worktree missing</div>
+          <div className="text-red-primary mt-1 text-xs">Worktree missing</div>
         )}
-
-        {/* Bottom: primary action + PR link + last-active. */}
+        <DashboardCardMetadata
+          row={row}
+          display={display}
+          ownerName={ownerName}
+          active={active}
+        />
         <div className="mt-2.5 flex items-center gap-2">
           {action && ActionIcon && (
-            <button
-              type="button"
-              className={CARD_ACTION_CLS}
-              onClick={(e) => {
-                stop(e);
+            <Button
+              variant="secondary"
+              size="compact"
+              onClick={(event) => {
+                stop(event);
                 action?.run();
               }}
               disabled={busy !== null || mutating}
             >
               {spinning ? (
                 <ZerosSpinner size={14} />
-              ) : ActionIcon ? (
+              ) : (
                 <ActionIcon className="size-3.5" />
-              ) : null}
+              )}
               <span>
                 {mutating && action.busyKey === "archive"
                   ? "Archiving…"
                   : action.label}
               </span>
-            </button>
+            </Button>
           )}
-          <div className="text-fg2 ml-auto flex items-center gap-2 text-xs tabular-nums">
-            {w.prNumber != null && w.prUrl && (
-              <Tooltip label="Open PR">
-                <a
-                  href={w.prUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  onClick={stop}
-                  className="hover:text-fg1 inline-flex items-center gap-0.5"
-                >
-                  #{w.prNumber}
-                  <ExternalLink className="size-3" />
-                </a>
-              </Tooltip>
+          <div className="text-muted-fg ml-auto flex items-center gap-2 text-xs tabular-nums">
+            {prLink}
+            {display.lastActive && (
+              <span>{formatCompactAge(row.lastActiveAt)}</span>
             )}
-            <span>{formatCompactAge(w.lastActiveAt ?? w.createdAt)}</span>
           </div>
         </div>
       </div>
+    );
+  // Removing the cheap menu boundary while hidden dismisses its portal and
+  // keyboard handlers immediately; no hidden retained context menu survives.
+  return active ? (
+    <WorkspaceContextMenu
+      workspace={w}
+      onArchive={archive}
+      archiveDisabled={mutating}
+    >
+      {content}
     </WorkspaceContextMenu>
+  ) : (
+    content
   );
 }

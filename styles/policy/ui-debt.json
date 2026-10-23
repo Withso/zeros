@@ -424,9 +424,6 @@
       "apps/desktop/src/renderer/features/browser/browser-variant-frame.tsx": {
         "button": 2
       },
-      "apps/desktop/src/renderer/features/dashboard/dashboard-page.tsx": {
-        "button": 2
-      },
       "apps/desktop/src/renderer/features/design-workspace/design-auto-layout-controls.tsx": {
         "button": 3,
         "input": 1

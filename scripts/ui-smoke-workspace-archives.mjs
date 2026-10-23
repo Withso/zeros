@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDashboardSmoke } from "./ui-smoke-dashboard.mjs";
 
 // Focus arrives before Radix registers a menu as its active dismissable layer.
 // Wait for that layer to accept input before sending Escape.
@@ -11,6 +12,7 @@ async function dismissMenu(page) {
 }
 
 export async function runWorkspaceArchivesSmoke({ page, check }) {
+  await runDashboardSmoke({ page, check });
   const fixtureUrl = `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-workspace-archives.html`;
   const readOutputFormatting = (surface) =>
     surface

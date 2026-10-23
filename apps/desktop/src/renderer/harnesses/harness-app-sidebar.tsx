@@ -116,10 +116,27 @@ const changeLines: Record<string, { additions: number; deletions: number }> = {
   "ws-paris-mumbai-city-docs": { additions: 87, deletions: 0 },
   "ws-atlanta": { additions: 12, deletions: 3 },
 };
+if (params.has("dashboard")) {
+  const epoch = Number(sessionStorage.getItem("fixture:dashboard-epoch")) || Date.now();
+  sessionStorage.setItem("fixture:dashboard-epoch", String(epoch));
+  const statuses = ["backlog", "in-progress", "in-review", "done", "cancelled"] as const;
+  rows.forEach((row, index) => {
+    rows[index] = { ...row, status: statuses[index % statuses.length], createdAt: epoch - (index + 1) * 86400000,
+      lastActiveAt: epoch - (index + 1) * 3600000, present: true,
+      ...(index === 2 ? { prNumber: 42, prState: "ready", prUrl: "https://github.com/example/ocolors/pull/42" } : {}) };
+  });
+  rows.push({ ...rows[0], id: "ws-archived", branch: "zeros/archived", path: "/fixture-workspaces/zeros/archived",
+    status: "done", createdAt: epoch - 10 * 86400000, archivedAt: epoch - 3 * 86400000, present: false, archiveSnapshot: "a".repeat(40) });
+  rows.push({ ...rows[0], id: "ws-missing", branch: "zeros/missing", path: "/fixture-workspaces/zeros/missing", present: false });
+  if (params.has("large-dashboard")) rows.push(...Array.from({ length: 250 }, (_, index) => ({ ...rows[0],
+    id: `ws-bulk-${index}`, branch: `zeros/task-${String(index).padStart(3, "0")}`, path: `/fixture-workspaces/zeros/bulk-${index}` })));
+}
 const runningIds = new Set(["ws-boston"]);
 const requests: { op: string; params?: Record<string, unknown> }[] = [];
 let deferChangeLines = false;
 const pendingChangeLines: (() => void)[] = [];
+let deferDashboardArchives = params.has("defer-dashboard-archives");
+const pendingDashboardArchives: { resolve: () => void; reject: (error: Error) => void }[] = [];
 const resourceTotals = params.has("resource-pressure")
   ? {
       cpuPercent: 149.7,
@@ -267,13 +284,28 @@ setActiveBridge({
     requests.push(message);
     let result: unknown = {};
     if (message.op === "workspace.list") {
+      if (deferDashboardArchives && message.params?.archived === true)
+        await new Promise<void>((resolve, reject) => pendingDashboardArchives.push({ resolve, reject }));
       const slug = message.params?.repoSlug;
       result = {
         workspaces:
-          message.params?.archived === true
-            ? []
-            : rows.filter((row) => !slug || row.repoSlug === slug),
+          rows.filter((row) => (!slug || row.repoSlug === slug) &&
+            (message.params?.archived === true ? row.archivedAt != null : row.archivedAt == null)),
       };
+    }
+    if (params.has("dashboard") && ["workspace.archive", "workspace.restore", "workspace.setStatus"].includes(message.op)) {
+      const index = rows.findIndex(row => row.id === message.params?.workspaceId);
+      if (index < 0) throw new Error("Unknown fixture workspace");
+      rows[index] = { ...rows[index],
+        ...(message.op === "workspace.archive" ? { archivedAt: Date.now(), present: false } :
+          message.op === "workspace.restore" ? { archivedAt: null, present: true } : { status: message.params?.status as Workspace["status"] }) };
+      result = message.op === "workspace.restore"
+        ? { workspace: rows[index], restoredAt: Date.now(), path: rows[index].path, branch: rows[index].branch, conflicts: [], adaptations: [] }
+        : { workspace: rows[index], archivedAt: rows[index].archivedAt, stashRef: null };
+    }
+    if (params.has("dashboard") && message.op === "git.hasChanges") {
+      const counts = changeLines[String(message.params?.workspaceId)];
+      result = { hasChanges: !!counts && counts.additions + counts.deletions > 0 };
     }
     if (message.op === "git.changeLineCounts") {
       result = changeLines[String(message.params?.workspaceId)] ?? {
@@ -356,9 +388,17 @@ const chats = rows.map(
       agentName: "Claude",
       model: null,
       effort: "high",
-      title: "Chat",
+      title: params.has("dashboard") ? ({
+        "ws-atlanta": "Refine Home dashboard",
+        "ws-boston": "Improve workspace startup",
+        "ws-seville": "Add keyboard shortcuts",
+        "ws-paris-mumbai-city-docs": "Polish repository icons",
+        "ws-new-york": "Update release notes",
+        "ws-archived": "Review pull request workflow",
+        "ws-missing": "Recover workspace files",
+      }[row.id] ?? row.branch.replace("zeros/", "")) : "Chat",
       createdAt: 1,
-      updatedAt: 1,
+      updatedAt: params.has("dashboard") ? row.lastActiveAt ?? row.createdAt : 1,
       archived: false,
       messages: [],
     }) as unknown as ChatThread,
@@ -421,6 +461,21 @@ const auth = {
 } as AuthContextValue;
 
 Object.assign(window, {
+  dashboardReleaseArchives: (fail = false) => {
+    deferDashboardArchives = false;
+    for (const read of pendingDashboardArchives.splice(0))
+      if (fail) read.reject(new Error("Archive list unavailable"));
+      else read.resolve();
+  },
+  dashboardPendingArchiveReads: () => pendingDashboardArchives.length,
+  dashboardAddPending: async () => {
+    const { beginPendingCreate } = await import("../state/pending-workspaces");
+    return beginPendingCreate({ repoRoot: projects[0].repoRoot, repoSlug: projects[0].repoSlug, label: "Prepare integration tests" });
+  },
+  dashboardFinishPending: async (token: string) => {
+    const { finishPendingCreate } = await import("../state/pending-workspaces");
+    finishPendingCreate(token);
+  },
   appSidebarUpdateWorkspace: (id: string, patch: Partial<Workspace>) => {
     const index = rows.findIndex(row => row.id === id);
     if (index < 0) throw new Error("Unknown fixture workspace");

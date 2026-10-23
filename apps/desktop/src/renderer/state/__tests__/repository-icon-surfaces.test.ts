@@ -19,7 +19,10 @@ describe("repository icon surface coverage", () => {
       "apps/desktop/src/renderer/features/dashboard/dashboard-page.tsx",
     );
 
-    expect(dashboard).toContain("<RepositoryIcon project={project}");
+    const metadata = source(
+      "apps/desktop/src/renderer/features/dashboard/dashboard-metadata.tsx",
+    );
+    expect(metadata).toContain("<RepositoryIcon project={project}");
     expect(dashboard).toContain("<DashboardRepositoryIcon project={p}");
     expect(dashboard).toMatch(
       /<DashboardRepositoryIcon\s+project=\{row\.project\}/,
@@ -37,7 +40,9 @@ describe("repository icon surface coverage", () => {
       "apps/desktop/src/renderer/shell/dispatcher/create-from-source.tsx",
     );
 
-    expect(dispatcher).not.toMatch(/<RepositoryIcon\s+project=\{selectedProject\}/);
+    expect(dispatcher).not.toMatch(
+      /<RepositoryIcon\s+project=\{selectedProject\}/,
+    );
     expect(dispatcher).toMatch(/<RepositoryIcon\s+project=\{p\}/);
     expect(dispatcher).not.toMatch(/(?:selectedProject\?\.name|p\.name)\[0\]/);
     expect(createFromSource).toMatch(/<RepositoryIcon\s+project=\{project\}/);

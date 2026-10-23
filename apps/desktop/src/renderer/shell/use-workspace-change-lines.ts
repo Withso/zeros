@@ -31,57 +31,22 @@ import { isLocalMainWorkspace } from "../state/local-main-workspace";
 import { LatestGenerationFlight } from "../shared/lib/latest-generation-flight";
 import { useGitRefreshKey } from "./use-git-refresh-key";
 
-/** The shared "nothing to show" value. Frozen and module-level so a tab that
- *  has no numbers never re-renders on a fresh object identity. */
-export const NO_CHANGE_LINES: ChangeLineCounts = Object.freeze({
-  additions: 0,
-  deletions: 0,
-});
-
-// Bounded by the number of workspaces a session realistically visits; the
-// oldest entry is dropped once the bound is reached (insertion order is the
-// LRU queue, refreshed on every write).
-export const MAX_REMEMBERED_CHANGE_LINE_WORKSPACES = 128;
-const lastKnownChangeLines = new Map<string, ChangeLineCounts>();
-
-/** Record a target's last CONFIRMED pair and return the CANONICAL object for
- *  it. Only a successful read may call this — a failed refresh must leave the
- *  previous answer standing.
- *
- *  An unchanged pair keeps its previous identity, which is what lets a tab sit
- *  out the re-render: every Git refresh generation re-reads every visible
- *  workspace, and almost none of them have actually moved. */
-export function rememberChangeLines(
-  target: string,
-  counts: ChangeLineCounts,
-): ChangeLineCounts {
-  const previous = lastKnownChangeLines.get(target);
-  const canonical =
-    previous &&
-    previous.additions === counts.additions &&
-    previous.deletions === counts.deletions
-      ? previous
-      : counts;
-  lastKnownChangeLines.delete(target);
-  lastKnownChangeLines.set(target, canonical);
-  while (lastKnownChangeLines.size > MAX_REMEMBERED_CHANGE_LINE_WORKSPACES) {
-    const oldest = lastKnownChangeLines.keys().next().value as
-      | string
-      | undefined;
-    if (oldest === undefined) break;
-    lastKnownChangeLines.delete(oldest);
-  }
-  return canonical;
-}
-
-/** The last confirmed pair for a target, or the shared zero pair when that
- *  target has never resolved (or was evicted). Never allocates. */
-export function lastConfirmedChangeLines(
-  target: string | null,
-): ChangeLineCounts {
-  if (!target) return NO_CHANGE_LINES;
-  return lastKnownChangeLines.get(target) ?? NO_CHANGE_LINES;
-}
+import {
+  beginChangeLineObservation,
+  confirmedChangeLinesForBase,
+  lastConfirmedChangeLines,
+  NO_CHANGE_LINES,
+  rememberChangeLines,
+  resetConfirmedChangeLinesForTests,
+} from "./workspace-change-line-cache";
+export {
+  confirmedChangeLinesForBase,
+  lastConfirmedChangeLines,
+  MAX_REMEMBERED_CHANGE_LINE_WORKSPACES,
+  NO_CHANGE_LINES,
+  rememberChangeLines,
+  subscribeConfirmedChangeLines,
+} from "./workspace-change-line-cache";
 
 // Coalesce before taking a global slot: one busy workspace must not enqueue
 // every intermediate file-watcher generation ahead of the other workspaces.
@@ -96,6 +61,7 @@ let changeLineRequests = new LatestGenerationFlight<ChangeLineCounts>();
 export const MAX_CONCURRENT_CHANGE_LINE_READS = 4;
 let activeChangeLineReads = 0;
 const waitingChangeLineReads: Array<() => void> = [];
+const observations = new WeakMap<Promise<ChangeLineCounts>, number>();
 
 /** Resolves once a read slot is free. Never rejects, so the paired release in
  *  the request's `finally` can only run after a slot was actually taken. */
@@ -122,17 +88,21 @@ function releaseChangeLineSlot(): void {
 export function changeLineCountsForGeneration(
   target: string,
   refreshKey: number,
+  baseBranch?: string,
 ): Promise<ChangeLineCounts> {
-  return changeLineRequests.run(target, refreshKey, async () => {
+  const key = JSON.stringify([target, baseBranch ?? null]);
+  const request = changeLineRequests.run(key, refreshKey, async () => {
     // Start the bridge timeout only after acquiring a slot. Every running
     // read has a finite budget, so a stalled engine still releases its slot.
     await acquireChangeLineSlot();
+    observations.set(request, beginChangeLineObservation());
     try {
       return await gitChangeLineCounts(target);
     } finally {
       releaseChangeLineSlot();
     }
   });
+  return request;
 }
 
 /** The Git target for a workspace's own comparison: a real worktree is
@@ -162,29 +132,43 @@ export function useWorkspaceChangeLines(
   active = true,
 ): ChangeLineCounts {
   const target = workspaceChangeLinesTarget(workspace);
+  const baseBranch = workspace?.baseBranch;
   const refreshKey = useGitRefreshKey(workspace?.path, target, active);
   // The resolved pair carries its target so a workspace switch can never show
   // another workspace's numbers for a frame.
   const [live, setLive] = useState<{
     target: string;
+    baseBranch?: string;
     counts: ChangeLineCounts;
   } | null>(null);
 
   useEffect(() => {
     if (!active || !target) return;
     let cancelled = false;
-    void changeLineCountsForGeneration(target, refreshKey)
+    const request = changeLineCountsForGeneration(
+      target,
+      refreshKey,
+      baseBranch,
+    );
+    void request
       .then((counts) => {
         if (cancelled) return;
         // A superseded read must not regress the shared snapshot that a
         // returning Summary or workspace tab restores synchronously.
-        const canonical = rememberChangeLines(target, counts);
+        const canonical = rememberChangeLines(
+          target,
+          counts,
+          baseBranch,
+          observations.get(request),
+        );
         // Same target, same numbers → keep the exact state object so React
         // bails out instead of re-rendering the whole strip on every refresh.
         setLive((current) =>
-          current?.target === target && current.counts === canonical
+          current?.target === target &&
+          current.baseBranch === baseBranch &&
+          current.counts === canonical
             ? current
-            : { target, counts: canonical },
+            : { target, baseBranch, counts: canonical },
         );
       })
       .catch(() => {
@@ -193,16 +177,19 @@ export function useWorkspaceChangeLines(
     return () => {
       cancelled = true;
     };
-  }, [active, target, refreshKey]);
+  }, [active, target, refreshKey, baseBranch]);
 
   if (!target) return NO_CHANGE_LINES;
-  if (live && live.target === target) return live.counts;
-  return lastConfirmedChangeLines(target);
+  if (live && live.target === target && live.baseBranch === baseBranch)
+    return live.counts;
+  return baseBranch === undefined
+    ? lastConfirmedChangeLines(target)
+    : (confirmedChangeLinesForBase(target, baseBranch) ?? NO_CHANGE_LINES);
 }
 
 /** Test-only reset so a suite's remembered pairs cannot leak between cases. */
 export function resetWorkspaceChangeLinesForTests(): void {
-  lastKnownChangeLines.clear();
+  resetConfirmedChangeLinesForTests();
   changeLineRequests = new LatestGenerationFlight<ChangeLineCounts>();
   activeChangeLineReads = 0;
   waitingChangeLineReads.length = 0;
