@@ -144,5 +144,7 @@ it("stills timelines with one definition in both capture hosts and the canvas ru
   // reload; two copies could drift and show two different moments.
   expect(DESIGN_STATIC_RENDER_SCRIPT).toBe(`(${DESIGN_STILL_TIMELINES_SOURCE})()`);
   expect(DESIGN_RUNTIME_SOURCE).toContain(DESIGN_STILL_TIMELINES_SOURCE);
-  expect(DESIGN_RUNTIME_SOURCE.match(/pauseAnimations\(\)/g)).toHaveLength(1);
+  // Playback resumes SVG timelines with unpauseAnimations(); that is not
+  // another definition of the shared stilling call.
+  expect(DESIGN_RUNTIME_SOURCE.match(/\bpauseAnimations\(\)/g)).toHaveLength(1);
 });

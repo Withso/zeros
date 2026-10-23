@@ -1,10 +1,15 @@
 import { expect } from "@playwright/test";
+import { runDesignSavedEditingRaceSmoke, runDesignSavedEditingRevisionSmoke } from "./ui-smoke-design-saved-editing.mjs";
 
 /* global window, getComputedStyle */
 
 /** Real canvas controls, opaque production runtime and retained-surface lifecycle. */
 export async function runDesignFramePlaybackSmoke({ page, check }) {
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await runDesignSavedEditingRevisionSmoke({ page, check });
+  // A folder change must retire the editing document as well as a playing
+  // document, including any pending restoration of advisory stylesheets.
+  await runDesignSavedEditingRaceSmoke({ page, check, changes: ["root-ABA"] });
   await page.goto(
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?frameMotion&framePlayback`,
     { waitUntil: "networkidle" },

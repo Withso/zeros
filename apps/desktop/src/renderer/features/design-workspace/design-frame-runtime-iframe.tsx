@@ -313,22 +313,28 @@ function DesignFrameDocumentBuffer({
         await syncStylesheetPreviews(connection);
         assertCurrent();
         if (appliedSheetsRef.current.sheets.size) throw new Error("The advisory stylesheet could not be restored.");
-        const snapshot = await connection.getSnapshot();
-        assertCurrent();
-        onSnapshot(snapshot);
-        await settleDesignSelectionDetails(workspaceId, frame.file, sourceVersion);
-        assertCurrent();
         const selectedIds = () => designWorkspaceView(workspaceId).selectedTargets
           .filter((target) => target.frame === frame.file && target.nodeId)
           .map((target) => target.nodeId!);
-        const nodeIds = selectedIds();
-        const details = await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId)));
-        const confirmed = await connection.getSnapshot();
-        assertCurrent();
-        if (confirmed.revision !== snapshot.revision || JSON.stringify(selectedIds()) !== JSON.stringify(nodeIds))
-          throw new Error("The selected geometry changed while restoring saved pixels.");
-        for (const detail of details)
-          useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, latestRef.current.folder, frame.file, detail, sourceVersion);
+        // A late theme/stylesheet acknowledgement can advance the same
+        // document while geometry is being read. Revalidate that generation
+        // instead of permanently refusing editing; never publish mixed reads.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const snapshot = await connection.getSnapshot();
+          assertCurrent();
+          onSnapshot(snapshot);
+          await settleDesignSelectionDetails(workspaceId, frame.file, sourceVersion);
+          assertCurrent();
+          const nodeIds = selectedIds();
+          const details = await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId)));
+          const confirmed = await connection.getSnapshot();
+          assertCurrent();
+          if (confirmed.revision !== snapshot.revision || JSON.stringify(selectedIds()) !== JSON.stringify(nodeIds)) continue;
+          for (const detail of details)
+            useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, latestRef.current.folder, frame.file, detail, sourceVersion);
+          return;
+        }
+        throw new Error("The selected geometry changed while restoring saved pixels.");
       })();
       const preparation = { connection, sourceVersion, theme: preparedTheme, session: savedEditingSession, promise };
       savedPreparationRef.current = preparation;
@@ -622,9 +628,11 @@ export function DesignFrameRuntimeIframe(props: DesignFrameRuntimeIframeProps) {
   // immutable URL; reload the current generation and negotiate readiness anew.
   // A fresh document on each side of Play discards native form, details,
   // scroll and contenteditable state without ever writing authored source.
+  // A changed workspace folder also retires pending saved-pixel preparation;
+  // even identical frame bytes belong to a new document owner.
   return (
     <DesignFrameRuntimeSession
-      key={`${props.workspaceId}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}\u0000${props.playbackSessionId ?? "editing"}`}
+      key={`${props.workspaceId}\u0000${props.folder}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}\u0000${props.playbackSessionId ?? "editing"}`}
       {...props}
     />
   );
