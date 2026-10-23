@@ -5,6 +5,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { McpStore } from "./store.js";
 import { McpOAuth } from "./oauth.js";
 import { createMcpPublicRoutes } from "./routes.js";
+import { openMcpMaterial, sealMcpMaterial } from "./envelope.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -52,6 +53,14 @@ d("durable organization MCP OAuth", () => {
     const id = randomUUID(); await write(id);
     const attempt = await connect(id); await oauth.callback(attempt.state, "fixture-code");
     return id;
+  }
+  function rotateServerKey() {
+    store = new McpStore(pool, { currentKeyVersion: 2, keys: { ...keys.keys, 2: randomBytes(32).toString("base64url") } }, async () => ["org/repo"]);
+    oauth = new McpOAuth(store, "https://api.example.test", fetcher);
+  }
+  async function authorizeDraft(organizationId: string, userId: string, raw: object, attemptId: string) {
+    const draft = await store.draft(organizationId, userId, { ...raw, oauthAttemptId: attemptId });
+    return oauth.draftAuthorization(organizationId, userId, attemptId, draft.binding);
   }
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 6, options: "-c lock_timeout=500" }); });
   afterAll(async () => pool.end());
@@ -210,6 +219,131 @@ d("durable organization MCP OAuth", () => {
     await expect(write(randomUUID(), { config: { ...config, name: "other" }, oauthAttemptId: attempt.attemptId })).rejects.toMatchObject({ code: "mcp_oauth_failed" });
   });
 
+  it.each(["current", "legacy"])("preserves personal grants and unchanged member admission for a %s binding across server-key rotation", async format => {
+    const id = await signedIn();
+    const memberAttempt = await oauth.start(org, member, { config, extensionId: id, expectedRevision: 1 });
+    await oauth.callback(new URL(memberAttempt.authorizationUrl).searchParams.get("state")!, "fixture-code");
+    if (format === "legacy") {
+      await pool.query("UPDATE organization_extensions SET oauth_binding=$2 WHERE id=$1", [id, "ab".repeat(32)]);
+      await pool.query("UPDATE organization_mcp_oauth SET binding=$2 WHERE extension_id=$1", [id, "ab".repeat(32)]);
+    }
+    const previous = await store.get(org, admin, id);
+    rotateServerKey();
+    expect((await store.draft(org, member, { config, extensionId: id, expectedRevision: 1 })).binding).toBe(previous.oauth_binding);
+    const reconnect = await oauth.start(org, member, { config, extensionId: id, expectedRevision: 1 });
+    await oauth.callback(new URL(reconnect.authorizationUrl).searchParams.get("state")!, "fixture-code");
+    expect((await write(id, { expectedRevision: 1, config: { ...config, name: "renamed", disabled_tools: ["hidden"] } })).oauth.status).toBe("connected");
+    expect((await store.get(org, admin, id)).oauth_binding).toBe(previous.oauth_binding);
+    expect((await store.list(org, member))[0]?.oauth.status).toBe("connected");
+    expect((await oauth.authorizationForRepository(org, member, "org/repo", id)).headers.Authorization).toBe("Bearer fixture-access");
+    onToken = async body => {
+      expect(body.get("grant_type")).toBe("refresh_token");
+      return Response.json({ access_token: "fixture-renewed", refresh_token: "fixture-renewed-refresh", token_type: "Bearer", expires_in: 3600 });
+    };
+    expect((await oauth.authorizationForRepository(org, admin, "org/repo", id, true, true)).headers.Authorization).toBe("Bearer fixture-renewed");
+    expect((await pool.query("SELECT binding,envelope->>'keyVersion' AS key_version FROM organization_mcp_oauth WHERE extension_id=$1", [id])).rows)
+      .toEqual(expect.arrayContaining([{ binding: previous.oauth_binding, key_version: "2" }]));
+  });
+
+  it.each(["pending", "connected", "legacy"])("retains a %s unsaved attempt's identity through rotation, probe and atomic save", async phase => {
+    const attempt = await connect();
+    if (phase !== "pending") await oauth.callback(attempt.state, "fixture-code");
+    if (phase === "legacy") await pool.query("UPDATE organization_mcp_oauth_attempts SET binding=$2 WHERE id=$1", [attempt.attemptId, "cd".repeat(32)]);
+    const previous = (await pool.query<{ binding: string }>("SELECT binding FROM organization_mcp_oauth_attempts WHERE id=$1", [attempt.attemptId])).rows[0]!.binding;
+    rotateServerKey();
+    if (phase === "pending") await oauth.callback(attempt.state, "fixture-code");
+    expect((await store.draft(org, admin, { config })).binding).not.toBe(previous);
+    const draft = await store.draft(org, admin, { config, oauthAttemptId: attempt.attemptId });
+    expect(draft.binding).toBe(previous);
+    expect((await oauth.draftAuthorization(org, admin, attempt.attemptId, draft.binding)).headers.Authorization).toBe("Bearer fixture-access");
+    const id = randomUUID();
+    expect((await write(id, { oauthAttemptId: attempt.attemptId })).oauth.status).toBe("connected");
+    expect((await store.get(org, admin, id)).oauth_binding).toBe(previous);
+    expect((await oauth.authorization(org, admin, id)).headers.Authorization).toBe("Bearer fixture-access");
+    expect((await pool.query("SELECT status,envelope FROM organization_mcp_oauth_attempts WHERE id=$1", [attempt.attemptId])).rows).toEqual([{ status: "used", envelope: {} }]);
+  });
+
+  it("atomically reconciles a fresh same-identity attempt without replacing another member's retained binding", async () => {
+    const id = await signedIn(), previous = await store.get(org, admin, id);
+    const memberAttempt = await oauth.start(org, member, { config, extensionId: id, expectedRevision: 1 });
+    await oauth.callback(new URL(memberAttempt.authorizationUrl).searchParams.get("state")!, "fixture-code");
+    rotateServerKey();
+    const fresh = await connect(); await oauth.callback(fresh.state, "fixture-code");
+    const freshBinding = (await pool.query<{ binding: string }>("SELECT binding FROM organization_mcp_oauth_attempts WHERE id=$1", [fresh.attemptId])).rows[0]!.binding;
+    expect(freshBinding).not.toBe(previous.oauth_binding);
+    const locker = await pool.connect();
+    try {
+      await locker.query("BEGIN");
+      await locker.query("SELECT 1 FROM organization_mcp_oauth_attempts WHERE id=$1 FOR UPDATE", [fresh.attemptId]);
+      expect((await authorizeDraft(org, admin, { config, extensionId: id, expectedRevision: 1 }, fresh.attemptId)).headers.Authorization).toBe("Bearer fixture-access");
+    } finally { await locker.query("ROLLBACK"); locker.release(); }
+    expect((await pool.query("SELECT binding FROM organization_mcp_oauth_attempts WHERE id=$1", [fresh.attemptId])).rows).toEqual([{ binding: freshBinding }]);
+    const envelope = (await pool.query("SELECT envelope FROM organization_mcp_oauth_attempts WHERE id=$1", [fresh.attemptId])).rows[0]!.envelope;
+    const associated = { organizationId: org, ownerUserId: admin, id: fresh.attemptId, revision: 1, purpose: "attempt" as const };
+    const material = openMcpMaterial(envelope, associated, store.keys) as { material: { tokens: { token_type: string } } };
+    material.material.tokens.token_type = "unsupported-fixture-type";
+    const refusedEnvelope = sealMcpMaterial(material, associated, store.keys);
+    await pool.query("UPDATE organization_mcp_oauth_attempts SET envelope=$2 WHERE id=$1", [fresh.attemptId, refusedEnvelope]);
+    const grants = (await pool.query("SELECT * FROM organization_mcp_oauth WHERE extension_id=$1 ORDER BY owner_user_id", [id])).rows;
+    await expect(write(id, { expectedRevision: 1, oauthAttemptId: fresh.attemptId })).rejects.toMatchObject({ code: "mcp_oauth_failed" });
+    expect(await store.get(org, admin, id)).toEqual(previous);
+    expect((await pool.query("SELECT * FROM organization_mcp_oauth WHERE extension_id=$1 ORDER BY owner_user_id", [id])).rows).toEqual(grants);
+    expect((await pool.query("SELECT status,binding,envelope FROM organization_mcp_oauth_attempts WHERE id=$1", [fresh.attemptId])).rows)
+      .toEqual([{ status: "connected", binding: freshBinding, envelope: refusedEnvelope }]);
+    await pool.query("UPDATE organization_mcp_oauth_attempts SET envelope=$2 WHERE id=$1", [fresh.attemptId, envelope]);
+    expect((await write(id, { expectedRevision: 1, oauthAttemptId: fresh.attemptId })).oauth.status).toBe("connected");
+    expect((await store.get(org, admin, id)).oauth_binding).toBe(previous.oauth_binding);
+    expect((await store.list(org, member))[0]?.oauth.status).toBe("connected");
+    expect((await oauth.authorization(org, member, id)).headers.Authorization).toBe("Bearer fixture-access");
+    expect((await pool.query("SELECT status,binding FROM organization_mcp_oauth_attempts WHERE id=$1", [fresh.attemptId])).rows)
+      .toEqual([{ status: "used", binding: previous.oauth_binding }]);
+  });
+
+  it.each(["actor", "organization", "extension", "revision", "expired", "cancelled", "used"].flatMap(boundary => [false, true].map(rotated => [boundary, rotated] as const)))(
+  "refuses a wrong or retired %s attempt with server-key rotation %s", async (boundary, rotated) => {
+    let targetId = randomUUID(), expectedRevision: number | null = null;
+    if (boundary === "extension" || boundary === "revision") {
+      await write(targetId); expectedRevision = 1;
+    }
+    const attempt = await connect(expectedRevision ? targetId : undefined);
+    await oauth.callback(attempt.state, "fixture-code");
+    if (boundary === "expired") await pool.query("UPDATE organization_mcp_oauth_attempts SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [attempt.attemptId]);
+    if (boundary === "cancelled") await oauth.cancel(org, admin, attempt.attemptId);
+    if (boundary === "used") await write(randomUUID(), { oauthAttemptId: attempt.attemptId });
+    if (boundary === "extension") { targetId = randomUUID(); await write(targetId, { config: { ...config, name: "target" } }); }
+    if (boundary === "revision") { await write(targetId, { expectedRevision: 1, config: { ...config, name: "target" } }); expectedRevision = 2; }
+    let targetOrg = org;
+    if (boundary === "organization") {
+      targetOrg = randomUUID();
+      await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal) VALUES($1,$2,'Fixture',$3,false)", [targetOrg, `org-${targetOrg}`, admin]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [targetOrg, admin]);
+    }
+    const actor = boundary === "actor" ? member : admin;
+    if (rotated) rotateServerKey();
+    const targetConfig = { ...config, name: "target" };
+    const draft = { config: targetConfig, ...(expectedRevision ? { extensionId: targetId, expectedRevision } : {}) };
+    await expect(authorizeDraft(targetOrg, actor, draft, attempt.attemptId)).rejects.toMatchObject({ code: "mcp_auth_required" });
+    const before = (await pool.query("SELECT id,revision,oauth_binding FROM organization_extensions ORDER BY id")).rows;
+    await expect(store.put(targetOrg, actor, targetId, { kind: "mcp", owner: "user", repository: null, expectedRevision, config: targetConfig, oauthAttemptId: attempt.attemptId }))
+      .rejects.toMatchObject({ code: "mcp_oauth_failed" });
+    expect((await pool.query("SELECT id,revision,oauth_binding FROM organization_extensions ORDER BY id")).rows).toEqual(before);
+  });
+
+  it("never lets an actor-owned connected attempt authorize a changed shared definition", async () => {
+    const id = randomUUID(); await write(id);
+    const changed = { ...config, oauth_scopes: ["tools:write"] };
+    const attempt = await oauth.start(org, member, { config: changed });
+    await oauth.callback(new URL(attempt.authorizationUrl).searchParams.get("state")!, "fixture-code");
+    rotateServerKey();
+    await expect(store.draft(org, member, { config: changed, extensionId: id, expectedRevision: 1, oauthAttemptId: attempt.attemptId })).rejects.toMatchObject({ status: 403 });
+    await expect(store.put(org, member, id, { kind: "mcp", owner: "organization", repository: null, expectedRevision: 1, config: changed, oauthAttemptId: attempt.attemptId })).rejects.toMatchObject({ status: 403 });
+    await expect(authorizeDraft(org, member, { config }, attempt.attemptId)).rejects.toMatchObject({ code: "mcp_auth_required" });
+    await expect(store.put(org, member, randomUUID(), { kind: "mcp", owner: "user", repository: null, expectedRevision: null, config, oauthAttemptId: attempt.attemptId }))
+      .rejects.toMatchObject({ code: "mcp_oauth_failed" });
+    expect((await store.get(org, admin, id)).revision).toBe(1);
+    expect(await oauth.status(org, member, attempt.attemptId)).toEqual({ status: "connected" });
+  });
+
   it("marks an expired access-only grant as needing connection", async () => {
     const id = await signedIn(0, false);
     expect((await store.list(org, admin))[0]?.oauth.status).toBe("needs-auth");
@@ -221,6 +355,8 @@ d("durable organization MCP OAuth", () => {
     const attempt = await oauth.start(org.toUpperCase(), admin, { config, extensionId: id.toUpperCase(), expectedRevision: 1 });
     await oauth.callback(new URL(attempt.authorizationUrl).searchParams.get("state")!, "fixture-code");
     expect((await oauth.authorizationForRepository(org.toUpperCase(), admin, "org/repo", id.toUpperCase())).headers.Authorization).toBe("Bearer fixture-access");
+    expect((await authorizeDraft(org.toUpperCase(), admin.toUpperCase(), { config, extensionId: id.toUpperCase(), expectedRevision: 1 }, attempt.attemptId.toUpperCase()))
+      .headers.Authorization).toBe("Bearer fixture-access");
   });
 
   it.each(["cancel", "edit", "remove", "membership", "expire"])("fences %s while the provider exchanges a code", async change => {

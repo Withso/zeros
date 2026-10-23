@@ -50,3 +50,31 @@ without dropping the active or newest complete snapshot.
 The browser bridge fixture copies tool arrays like real IPC; sharing its mutable
 input array hid a refreshed name behind a memoized projection. Toast captures
 also honor the shared six-second error lifetime instead of a shorter wait.
+
+Full PR CI also reaches engine-level lifecycle fixtures, beyond the MCP module
+tests. When adding owned services, update prototype-backed fixtures with those
+services and retain every cleanup/failure assertion; cover scoped cleanup and
+pending probe cancellation too. An existing explicit gateway setter remains an
+active-endpoint contract even without a project resolver. Keep that fallback
+separate from retained empty project listeners, and test both collision
+reservation and the absence of cross-project fallback. The engine startup,
+stop, catalog and per-session MCP regressions encode these checks.
+
+Run stream lifecycle regressions on every supported server/CI Node major.
+Node 24's guarded Web-stream adapter masked queued data arriving after cancel
+on Node 22. Retain deterministic buffered body/reader cancellation and real
+socket cleanup, and treat unhandled errors as failures even when every
+assertion passes. The safe-fetch regressions reproduce both supported majors;
+the supported Transform destroy hook stops readable flow before close cleanup.
+Use distinct MCP protocol type names so they cannot shadow Web Request globals
+in analysis; the worker type alias correction preserves emitted JavaScript.
+
+An OAuth identity includes a client secret, so its fingerprint uses a separate
+server-keyed purpose. Compare the complete decrypted identity before retaining
+an opaque binding: rotating the current server key must not revoke unchanged
+grants or strand ordinary members. A supplied sign-in attempt still needs exact
+actor, organization, live state, server and revision admission, even when its
+identity matches. Compare canonical stored UUIDs, keep draft reads free of
+mutation locks, and reconcile a validated attempt only inside the save
+transaction. Real-PostgreSQL regressions cover rotation, old opaque bindings,
+retired keys, refusal rollback, uppercase IDs and unchanged-member access.

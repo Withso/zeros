@@ -6,7 +6,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { InitializeRequestSchema, ListToolsResultSchema, McpError, ResultSchema, type Notification, type Request, type Result } from "@modelcontextprotocol/sdk/types.js";
+import { InitializeRequestSchema, ListToolsResultSchema, McpError, ResultSchema, type Notification, type Request as McpRequest, type Result } from "@modelcontextprotocol/sdk/types.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { RuntimeMcpServerSchema, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
 import { McpHttpLauncher, resolveMcpCwd } from "./launcher";
@@ -26,7 +26,7 @@ interface Entry {
   sessions: Set<Session>;
 }
 interface Session {
-  entry: Entry; client: Client<Request, Notification, Result>; server?: Server<Request, Notification, Result>;
+  entry: Entry; client: Client<McpRequest, Notification, Result>; server?: Server<McpRequest, Notification, Result>;
   transport?: StreamableHTTPServerTransport; controller: AbortController; closed?: Promise<void>;
 }
 const failed = () => new McpError(-32603, "MCP request could not complete. Check the server connection.");
@@ -146,7 +146,7 @@ export class McpGateway {
         });
       await session.client.connect(upstream, { signal, timeout: 20_000 });
       signal.throwIfAborted();
-      const server = new Server<Request, Notification, Result>({ name: config.name, version: "1.0.0" }, {
+      const server = new Server<McpRequest, Notification, Result>({ name: config.name, version: "1.0.0" }, {
         capabilities: session.client.getServerCapabilities() ?? {}, instructions: this.redact(entry, { instructions: session.client.getInstructions() }).instructions,
       });
       session.server = server;

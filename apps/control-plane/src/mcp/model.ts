@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
+import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { McpUuidSchema } from "../cloud/contract.js";
+import { fingerprintMcpOAuthIdentity } from "./envelope.js";
 
 export const SECRET_REF = "${zeros.secret}";
 const text = z.string().max(16384).refine(value => !value.includes("\0"));
@@ -109,11 +110,11 @@ export function materializeMcp(config: McpConfig, secrets: McpSecrets): McpConfi
   return { ...config, ...(config.env ? { env: variables as Record<string, string> } : {}), ...(Object.keys(resolved).length ? { headers: resolved } : {}) };
 }
 
-export function oauthBinding(config: McpConfig, secrets: McpSecrets): string {
-  return createHash("sha256").update(JSON.stringify(config.transport === "stdio" ? [config.transport] : [
+export function oauthBinding(config: McpConfig, secrets: McpSecrets, keys: CloudAgentCredentialKeys): string {
+  return fingerprintMcpOAuthIdentity(JSON.stringify(config.transport === "stdio" ? [config.transport] : [
     config.transport, config.url, config.auth ?? "none", oauthClientMode(config), config.oauth_client_id ?? "",
     [...new Set(config.oauth_scopes ?? [])].sort(), secrets.oauthClientSecret ?? "",
-  ])).digest("hex");
+  ]), keys);
 }
 
 export function selectMcpEntries<T extends { id: string; ownerUserId: string | null; repository: string | null; config: McpConfig }>(

@@ -4135,7 +4135,9 @@ export class AgentGateway {
       const gatewayUrl = this.scopedMcpGateway
         ? await this.scopedMcpGateway(mainRepoRoot ?? cwd, gatewayBackends)
         : this.gatewayServerUrl;
-      if (gatewayUrl && gatewayBackends.length) {
+      // A retained project listener can have an empty catalog. The legacy
+      // setter itself controls whether its explicitly supplied URL is active.
+      if (gatewayUrl && (!this.scopedMcpGateway || gatewayBackends.length > 0)) {
         injected.push({
           name: "zeros-gateway",
           transport: "http",

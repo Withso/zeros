@@ -74,6 +74,30 @@ export class McpStore {
       throw new Error("Invalid stored MCP secret material");
     return material as McpSecrets;
   }
+  private async attemptBinding(tx: Tx, organizationId: string, userId: string, attemptId: string,
+    target: { extensionId: string | undefined; expectedRevision: number | null | undefined; fingerprint: string; retainedBinding: string | undefined },
+    save = false): Promise<string> {
+    const invalid = () => save ? new HttpError(422, "mcp_oauth_failed", "MCP sign-in could not complete. Check the client configuration and try again.")
+      : new HttpError(409, "mcp_auth_required", "Sign in to this MCP server");
+    const attempt = (await tx.query<{ extension_id: string | null; expected_revision: number | null; binding: string; envelope: McpEnvelope }>(
+      `SELECT extension_id,expected_revision,binding,envelope FROM organization_mcp_oauth_attempts
+       WHERE id=$1 AND org_id=$2 AND owner_user_id=$3 AND status='connected' AND expires_at>clock_timestamp() ${save ? "FOR UPDATE" : ""}`,
+      [uuid(attemptId), uuid(organizationId), uuid(userId)])).rows[0];
+    // A supplied attempt must be admitted, even when its fresh fingerprint
+    // happens to match. It cannot bypass a stale revision or another row.
+    if (!attempt || (attempt.extension_id !== null && (attempt.extension_id !== target.extensionId || attempt.expected_revision !== target.expectedRevision))) throw invalid();
+    const material = openMcpMaterial(attempt.envelope,
+      { organizationId, ownerUserId: userId, id: attemptId, revision: 1, purpose: "attempt" }, this.keys) as { config: McpConfig; secrets: McpSecrets };
+    if (oauthBinding(material.config, material.secrets, this.keys) !== target.fingerprint) throw invalid();
+    // Drafts only read. Saving can reconcile a fresh same-identity attempt to
+    // the saved row's opaque binding, preserving every other member's grant.
+    // The caller's mutation transaction rolls this back if attach refuses it.
+    if (save && target.retainedBinding && attempt.binding !== target.retainedBinding) {
+      await tx.query("UPDATE organization_mcp_oauth_attempts SET binding=$2 WHERE id=$1", [attemptId, target.retainedBinding]);
+      return target.retainedBinding;
+    }
+    return attempt.binding;
+  }
   async read(tx: Tx, organizationId: string, userId: string, id: string, lock = false): Promise<McpRow> {
     const result = await tx.query<McpRow>(`SELECT * FROM organization_extensions WHERE id=$1 AND org_id=$2
       AND (owner_user_id IS NULL OR owner_user_id=$3) ${lock ? "FOR UPDATE" : ""}`, [uuid(id), uuid(organizationId), uuid(userId)]);
@@ -115,8 +139,14 @@ export class McpStore {
         const count = await tx.query<{ count: number }>(`SELECT count(*)::int AS count FROM organization_extensions
           WHERE org_id=$1 AND owner_user_id IS NOT DISTINCT FROM $2::uuid AND id<>$3`, [organizationId, ownerUserId, id]);
         if (count.rows[0]!.count >= 64) throw new HttpError(409, "mcp_limit", "This owner already has 64 MCP configurations");
-        const next = mergeMcpSecrets(input.config, input.secrets ?? {}, existing ? this.secrets(existing) : {});
-        const revision = (existing?.revision ?? 0) + 1, binding = oauthBinding(next.config, next.secrets);
+        const previous = existing ? this.secrets(existing) : {}, next = mergeMcpSecrets(input.config, input.secrets ?? {}, previous);
+        const fingerprint = oauthBinding(next.config, next.secrets, this.keys);
+        // Compare full decrypted identities under the current key before
+        // retaining an old binding, including those created before HMAC.
+        const retainedBinding = existing && oauthBinding(existing.config, previous, this.keys) === fingerprint ? existing.oauth_binding : undefined;
+        const binding = input.oauthAttemptId ? await this.attemptBinding(tx, organizationId, userId, input.oauthAttemptId,
+          { extensionId: id, expectedRevision: input.expectedRevision, fingerprint, retainedBinding }, true) : retainedBinding ?? fingerprint;
+        const revision = (existing?.revision ?? 0) + 1;
         const names = { env: Object.keys(next.secrets.env ?? {}), headers: Object.keys(next.secrets.headers ?? {}), oauthClientSecret: !!next.secrets.oauthClientSecret };
         const envelope = sealMcpMaterial(next.secrets, { organizationId, ownerUserId, id, revision, purpose: "config" }, this.keys);
         const result = await tx.query<McpRow>(`INSERT INTO organization_extensions(id,org_id,owner_user_id,kind,repository,revision,config,secret_names,secret_envelope,oauth_binding)
@@ -157,12 +187,15 @@ export class McpStore {
       const role = await this.member(tx, organizationId, userId);
       const row = input.extensionId ? await this.read(tx, organizationId, userId, input.extensionId) : undefined;
       if (row && row.revision !== input.expectedRevision) throw mcpConflict();
-      const next = mergeMcpSecrets(input.config, input.secrets ?? {}, row ? this.secrets(row) : {});
-      const binding = oauthBinding(next.config, next.secrets);
+      const previous = row ? this.secrets(row) : {}, next = mergeMcpSecrets(input.config, input.secrets ?? {}, previous);
+      const fingerprint = oauthBinding(next.config, next.secrets, this.keys);
+      const retainedBinding = row && oauthBinding(row.config, previous, this.keys) === fingerprint ? row.oauth_binding : undefined;
       // Members can sign in to the shared definition. Redirecting its retained
       // credentials or changing its OAuth identity requires edit authority.
-      if (row?.owner_user_id === null && !roleAtLeast(role, "admin") && binding !== row.oauth_binding)
+      if (row?.owner_user_id === null && !roleAtLeast(role, "admin") && !retainedBinding)
         throw new HttpError(403, "forbidden", "Requires admin role to change this shared server");
+      const binding = input.oauthAttemptId ? await this.attemptBinding(tx, organizationId, userId, input.oauthAttemptId,
+        { extensionId: row?.id, expectedRevision: input.expectedRevision, fingerprint, retainedBinding }) : retainedBinding ?? fingerprint;
       return { input, ...next, binding };
     });
   }

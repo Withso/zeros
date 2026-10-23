@@ -1,7 +1,9 @@
+import { createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { McpConfigSchema, mergeMcpSecrets, materializeMcp, selectMcpEntries, SECRET_REF, oauthBinding } from "./model.js";
 
 describe("organization MCP configuration", () => {
+  const keys = { currentKeyVersion: 1, keys: { 1: randomBytes(32).toString("base64url") } };
   it("seals every new variable/header and retains only explicit same-row references", () => {
     const config = McpConfigSchema.parse({ name: "tool", transport: "http", url: "https://tools.example.test/mcp", auth: "header",
       env: { KEY: "fixture-value" }, headers: { Authorization: "Bearer fixture-token", "X-Context": "fixture-context" } });
@@ -37,10 +39,31 @@ describe("organization MCP configuration", () => {
 
   it("binds OAuth to resource, client strategy, scopes and client secret", () => {
     const config = McpConfigSchema.parse({ name: "a", transport: "http", auth: "oauth", url: "https://example.test/mcp", oauth_client_id: "client", oauth_scopes: ["b", "a"] });
-    expect(oauthBinding(config, {})).toBe(oauthBinding({ ...config, oauth_scopes: ["a", "b", "a"] }, {}));
-    expect(oauthBinding(config, {})).toBe(oauthBinding({ ...config, oauth_client_mode: "custom" }, {}));
+    expect(oauthBinding(config, {}, keys)).toBe(oauthBinding({ ...config, oauth_scopes: ["a", "b", "a"] }, {}, keys));
+    expect(oauthBinding(config, {}, keys)).toBe(oauthBinding({ ...config, oauth_client_mode: "custom" }, {}, keys));
     for (const next of [{ ...config, url: "https://example.test/other" }, { ...config, oauth_client_mode: "dynamic" as const }, { ...config, oauth_client_id: "other" }])
-      expect(oauthBinding(config, {})).not.toBe(oauthBinding(next, {}));
-    expect(oauthBinding(config, {})).not.toBe(oauthBinding(config, { oauthClientSecret: "secret" }));
+      expect(oauthBinding(config, {}, keys)).not.toBe(oauthBinding(next, {}, keys));
+    expect(oauthBinding(config, {}, keys)).not.toBe(oauthBinding(config, { oauthClientSecret: "fixture-secret" }, keys));
+  });
+
+  it("keys OAuth fingerprints to the current server key without changing their stored format", () => {
+    const config = McpConfigSchema.parse({ name: "a", transport: "http", auth: "oauth", url: "https://example.test/mcp", oauth_client_id: "client" });
+    const secrets = { oauthClientSecret: "fixture-secret" }, secondKey = randomBytes(32).toString("base64url");
+    const binding = oauthBinding(config, secrets, keys);
+    expect(binding).toMatch(/^[a-f0-9]{64}$/);
+    expect(oauthBinding(config, secrets, { currentKeyVersion: 1, keys: { 1: secondKey } })).not.toBe(binding);
+    const rotated = { currentKeyVersion: 2, keys: { ...keys.keys, 2: secondKey } };
+    expect(oauthBinding(config, secrets, rotated)).not.toBe(binding);
+    expect(oauthBinding(config, secrets, rotated)).toBe(oauthBinding(config, secrets, { currentKeyVersion: 2, keys: { 2: secondKey } }));
+    // The existing envelope encryption domain must not double as a fingerprint key.
+    const envelopeKey = hkdfSync("sha256", Buffer.from(keys.keys[1], "base64url"), Buffer.alloc(0), "zeros-organization-mcp-v1", 32);
+    const identity = JSON.stringify(["http", "https://example.test/mcp", "oauth", "custom", "client", [], "fixture-secret"]);
+    expect(binding).not.toBe(createHmac("sha256", Buffer.from(envelopeKey)).update(identity).digest("hex"));
+  });
+
+  it("refuses to fingerprint OAuth secrets without valid current server key material", () => {
+    const config = McpConfigSchema.parse({ name: "a", transport: "http", auth: "oauth", url: "https://example.test/mcp", oauth_client_id: "client" });
+    for (const invalidKeys of [{ currentKeyVersion: 2, keys: keys.keys }, { currentKeyVersion: 1, keys: { 1: "invalid-fixture-key" } }])
+      expect(() => oauthBinding(config, { oauthClientSecret: "fixture-secret" }, invalidKeys)).toThrow();
   });
 });

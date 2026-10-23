@@ -69,4 +69,53 @@ d("organization MCP store", () => {
     await expect(store.draft(org, member, { ...draft, config: { ...entry.config, url: "https://different.example.test/mcp" } })).rejects.toMatchObject({ status: 403 });
     expect((await store.draft(org, admin, { ...draft, config: { ...entry.config, url: "https://different.example.test/mcp" } })).config).toMatchObject({ url: "https://different.example.test/mcp" });
   });
+
+  it.each(["current", "legacy"])("retains an unchanged %s OAuth binding for members and saves across server-key rotation", async format => {
+    const entry = await store.put(org, admin, randomUUID(), { ...input("organization"), config: {
+      name: "shared", transport: "http", url: "https://shared.example.test/mcp", auth: "oauth", oauth_client_id: "fixture-client", oauth_scopes: ["b", "a"],
+    }, secrets: { oauthClientSecret: "fixture-secret" } });
+    // Legacy bindings are opaque: compatibility never generates a new unkeyed secret digest.
+    if (format === "legacy") await pool.query("UPDATE organization_extensions SET oauth_binding=$2 WHERE id=$1", [entry.id, "ab".repeat(32)]);
+    const previous = await store.get(org, admin, entry.id);
+    const rotatedKeys = { currentKeyVersion: 2, keys: { ...keys.keys, 2: randomBytes(32).toString("base64url") } };
+    const rotated = new McpStore(pool, rotatedKeys, async () => ["org/repo"]);
+    const unchanged = { ...entry.config, oauth_client_mode: "custom", oauth_scopes: ["a", "b", "a"], disabled_tools: ["disabled"] };
+    const draft = await rotated.draft(org, member, { extensionId: entry.id, expectedRevision: 1, config: unchanged });
+    expect(draft.binding).toBe(previous.oauth_binding);
+    expect(draft.secrets.oauthClientSecret).toBe("fixture-secret");
+    const saved = await rotated.put(org, admin, entry.id, { ...input("organization"), expectedRevision: 1, config: unchanged });
+    const row = await rotated.get(org, admin, entry.id);
+    expect(row.oauth_binding).toBe(previous.oauth_binding);
+    expect(row.secret_envelope.keyVersion).toBe(2);
+    expect(rotated.secrets(row)).toEqual({ oauthClientSecret: "fixture-secret" });
+    const oldCurrent = new McpStore(pool, { ...rotatedKeys, currentKeyVersion: 1 }, async () => ["org/repo"]);
+    expect((await oldCurrent.draft(org, member, { extensionId: entry.id, expectedRevision: saved.revision, config: saved.config })).binding).toBe(previous.oauth_binding);
+    const retiredOldKey = new McpStore(pool, { currentKeyVersion: 2, keys: { 2: rotatedKeys.keys[2] } }, async () => ["org/repo"]);
+    expect((await retiredOldKey.draft(org, member, { extensionId: entry.id, expectedRevision: saved.revision, config: saved.config })).binding).toBe(previous.oauth_binding);
+    const fresh = await rotated.put(org, member, randomUUID(), { ...input("user"), config: unchanged, secrets: { oauthClientSecret: "fixture-secret" } });
+    expect((await rotated.get(org, member, fresh.id)).oauth_binding).not.toBe(previous.oauth_binding);
+  });
+
+  it("keeps every canonical OAuth identity change outside unchanged-member admission after rotation", async () => {
+    const oauthConfig = { name: "shared", transport: "http" as const, url: "https://shared.example.test/mcp", auth: "oauth" as const,
+      oauth_client_mode: "custom" as const, oauth_client_id: "fixture-client", oauth_scopes: ["read"] };
+    const rotated = new McpStore(pool, { currentKeyVersion: 2, keys: { ...keys.keys, 2: randomBytes(32).toString("base64url") } }, async () => ["org/repo"]);
+    const changes = [
+      { config: { ...oauthConfig, url: "https://changed.example.test/mcp" } },
+      { config: { ...oauthConfig, transport: "sse" } },
+      { config: { ...oauthConfig, auth: "none" } },
+      { config: { ...oauthConfig, oauth_client_mode: "dynamic" } },
+      { config: { ...oauthConfig, oauth_client_id: "changed-client" } },
+      { config: { ...oauthConfig, oauth_scopes: ["write"] } },
+      { config: oauthConfig, secrets: { oauthClientSecret: "changed-fixture-secret" } },
+    ];
+    for (const [index, change] of changes.entries()) {
+      const entry = await store.put(org, admin, randomUUID(), { ...input("organization"), config: { ...oauthConfig, name: `shared-${index}` }, secrets: { oauthClientSecret: "fixture-secret" } });
+      const before = await store.get(org, admin, entry.id);
+      const changed = { ...change, config: { ...change.config, name: `shared-${index}` } };
+      await expect(rotated.draft(org, member, { extensionId: entry.id, expectedRevision: 1, ...changed })).rejects.toMatchObject({ status: 403 });
+      await rotated.put(org, admin, entry.id, { ...input("organization"), expectedRevision: 1, ...changed });
+      expect((await rotated.get(org, admin, entry.id)).oauth_binding).not.toBe(before.oauth_binding);
+    }
+  });
 });

@@ -1,4 +1,4 @@
-import { hkdfSync } from "node:crypto";
+import { createHmac, hkdfSync } from "node:crypto";
 import { z } from "zod";
 import { openCredentialBytes, sealCredentialBytes, type CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 
@@ -14,14 +14,21 @@ function associated(binding: McpBinding, keyVersion: number): Buffer {
   return Buffer.from(JSON.stringify([purpose, binding.purpose, binding.organizationId.toLowerCase(), binding.ownerUserId?.toLowerCase() ?? null,
     binding.id.toLowerCase(), binding.revision, keyVersion]));
 }
-function derive(keys: CloudAgentCredentialKeys, version: number): Buffer {
+function derive(keys: CloudAgentCredentialKeys, version: number, domain = purpose): Buffer {
   const encoded = keys.keys[version];
   if (!encoded) throw new Error("MCP secret key unavailable");
   const root = Buffer.from(encoded, "base64url");
   try {
     if (root.length !== 32 || root.toString("base64url") !== encoded) throw new Error("Invalid MCP secret key");
-    return Buffer.from(hkdfSync("sha256", root, Buffer.alloc(0), purpose, 32));
+    return Buffer.from(hkdfSync("sha256", root, Buffer.alloc(0), domain, 32));
   } finally { root.fill(0); }
+}
+/** OAuth identity comparisons use server material, never a client-secret key
+ * or the envelope encryption key. The persisted fingerprint stays opaque. */
+export function fingerprintMcpOAuthIdentity(identity: string, keys: CloudAgentCredentialKeys): string {
+  const key = derive(keys, keys.currentKeyVersion, "zeros-organization-mcp-oauth-binding-v1");
+  try { return createHmac("sha256", key).update(identity).digest("hex"); }
+  finally { key.fill(0); }
 }
 export function sealMcpMaterial(value: unknown, binding: McpBinding, keys: CloudAgentCredentialKeys): McpEnvelope {
   const version = keys.currentKeyVersion, key = derive(keys, version), bytes = Buffer.from(JSON.stringify(value));

@@ -9,7 +9,7 @@
 // state.db lookup; without a workspaceId the cwd doubles as the repo root,
 // the same fallback mergeSpawnEnv uses).
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -221,5 +221,39 @@ describe("AgentGateway per-session MCP resolution", () => {
       },
       { name: "ctx7", transport: "stdio", command: "npx" },
     ]);
+  });
+
+  it("uses the project's gateway and reserves its name when that project has backends", async () => {
+    writeUser(
+      `[[mcp.servers]]\nname = "zeros-gateway"\ntransport = "http"\nurl = "https://squat/mcp"\n\n` +
+        `[[mcp.servers]]\nname = "ctx7"\ntransport = "stdio"\ncommand = "npx"\n`,
+    );
+    writeRepoFile(
+      "settings.local.toml",
+      `[[mcp.servers]]\nname = "project"\ntransport = "http"\nurl = "https://project/mcp"\nauth = "oauth"\n`,
+    );
+    const scoped = vi.fn(async () => "http://127.0.0.1:39218/mcp");
+    const servers = await newSessionWith(repoDir, gw => {
+      gw.setGatewayServer("http://127.0.0.1:39217/mcp");
+      gw.setScopedMcpGateway(scoped);
+    });
+    expect(scoped).toHaveBeenCalledExactlyOnceWith(repoDir, [
+      expect.objectContaining({ name: "project", url: "https://project/mcp" }),
+    ]);
+    expect(servers).toEqual([
+      { name: "zeros-gateway", transport: "http", url: "http://127.0.0.1:39218/mcp" },
+      { name: "ctx7", transport: "stdio", command: "npx" },
+    ]);
+  });
+
+  it.each([null, "http://127.0.0.1:39218/mcp"])("omits an empty project gateway without falling back to the global endpoint (%s)", async retained => {
+    writeUser(`[[mcp.servers]]\nname = "ctx7"\ntransport = "stdio"\ncommand = "npx"\n`);
+    const scoped = vi.fn(async () => retained);
+    const servers = await newSessionWith(repoDir, gw => {
+      gw.setGatewayServer("http://127.0.0.1:39217/mcp");
+      gw.setScopedMcpGateway(scoped);
+    });
+    expect(scoped).toHaveBeenCalledExactlyOnceWith(repoDir, []);
+    expect(servers).toEqual([{ name: "ctx7", transport: "stdio", command: "npx" }]);
   });
 });

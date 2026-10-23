@@ -1,10 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
-import { createServer, request as httpRequest } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
 import type { request as httpsRequest } from "node:https";
+import { PassThrough, Writable } from "node:stream";
 // This fixture must never use a real public socket, including on a red run
 // before the injected request seam exists.
 vi.mock("node:https", () => ({ request: vi.fn(() => { throw new Error("Unexpected network I/O in MCP fixture"); }) }));
 import { mcpPublicAddress, mcpPublicUrl, safeMcpFetch } from "./safe-fetch.js";
+
+function bufferedResponse(bytes: number, end = false) {
+  const source = Object.assign(new PassThrough(), { statusCode: 200, headers: {} });
+  const closed = new Promise<void>(resolve => source.once("close", resolve));
+  let outgoing: Writable | undefined;
+  const request = vi.fn(((_url, _options, callback: (response: IncomingMessage) => void) => {
+    const req = new Writable({ autoDestroy: false, final(done) {
+      callback(source as unknown as IncomingMessage);
+      // Buffer bytes before the fetch continuation can cancel, so the Node
+      // readable's queued resume still has data when cancellation wins.
+      source.write(Buffer.alloc(bytes, "x"));
+      if (end) source.end();
+      done();
+    } });
+    outgoing = req;
+    return Object.assign(req, { setTimeout: () => req });
+  }) as typeof httpsRequest);
+  return { source, closed, request, get outgoing() { return outgoing; },
+    close() { source.destroy(); outgoing?.destroy(); },
+    fetch: () => safeMcpFetch("https://example.test/mcp", {}, { request, lookup: async () => [{ address: "8.8.8.8", family: 4 }] }) };
+}
 
 describe("control-plane MCP network boundary", () => {
   it("rejects private, mapped, translated and reserved addresses", () => {
@@ -33,9 +55,43 @@ describe("control-plane MCP network boundary", () => {
     finally { release([{ address: "8.8.8.8", family: 4 }]); await pending; }
   });
 
-  it("pins validated DNS in the real request options and closes the source socket when its consumer cancels", async () => {
+  it.each(["body", "reader"])("cancels a buffered %s before queued Node flow without a late enqueue", async consumer => {
+    const fixture = bufferedResponse(64);
+    try {
+      const response = await fixture.fetch();
+      const reader = consumer === "reader" ? response.body!.getReader() : undefined;
+      try { await (reader ? reader.cancel() : response.body!.cancel()); }
+      finally { reader?.releaseLock(); }
+      await fixture.closed;
+      expect(fixture.source.destroyed).toBe(true);
+      expect(fixture.outgoing?.destroyed).toBe(true);
+    } finally { fixture.close(); }
+  });
+
+  it.each([2_000_000, 2_000_001])("preserves the response byte bound for %i buffered bytes and closes both streams", async bytes => {
+    const fixture = bufferedResponse(bytes, true);
+    try {
+      const response = await fixture.fetch();
+      if (bytes > 2_000_000) await expect(response.arrayBuffer()).rejects.toThrow("MCP response too large");
+      else expect((await response.arrayBuffer()).byteLength).toBe(bytes);
+      await fixture.closed;
+      expect(fixture.outgoing?.destroyed).toBe(true);
+    } finally { fixture.close(); }
+  });
+
+  it("rejects an oversized outgoing body before DNS or socket creation", async () => {
+    const lookup = vi.fn(async () => [{ address: "8.8.8.8", family: 4 }]);
+    const request = vi.fn<typeof httpsRequest>();
+    await expect(safeMcpFetch("https://example.test/mcp", { method: "POST", body: "x".repeat(1_000_001) }, { lookup, request }))
+      .rejects.toThrow("MCP request too large");
+    expect(lookup).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel", "abort"])("pins validated DNS in the real request options and closes the source socket on %s", async action => {
     let sourceClosed = false;
-    const server = createServer((req, res) => { req.once("close", () => { sourceClosed = true; }); res.writeHead(200); res.write("fixture"); });
+    const controller = new AbortController();
+    const server = createServer((req, res) => { req.socket.once("close", () => { sourceClosed = true; }); res.writeHead(200); res.write("fixture"); });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const request = vi.fn(((url: string | URL, options: import("node:https").RequestOptions, callback: (res: import("node:http").IncomingMessage) => void) => {
       expect(new URL(String(url)).hostname).toBe("example.test");
@@ -46,8 +102,12 @@ describe("control-plane MCP network boundary", () => {
       return httpRequest({ ...options, hostname: "127.0.0.1", host: "127.0.0.1", port: (server.address() as { port: number }).port, path: "/" }, callback);
     }) as typeof httpsRequest);
     try {
-      const response = await safeMcpFetch("https://example.test/mcp", {}, { request, lookup: async () => [{ address: "8.8.8.8", family: 4 }] });
-      await response.body?.cancel();
+      const response = await safeMcpFetch("https://example.test/mcp", { signal: controller.signal }, { request, lookup: async () => [{ address: "8.8.8.8", family: 4 }] });
+      if (action === "abort") {
+        const body = response.text();
+        controller.abort();
+        await expect(body).rejects.toThrow();
+      } else await response.body?.cancel();
       await vi.waitFor(() => expect(sourceClosed).toBe(true), { timeout: 500 });
       expect(request).toHaveBeenCalledOnce();
     } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }

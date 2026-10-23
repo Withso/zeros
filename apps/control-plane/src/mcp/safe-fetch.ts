@@ -75,6 +75,11 @@ export async function safeMcpFetch(input: string | URL | Request, init: RequestI
           bytes += chunk.length;
           if (bytes > 2_000_000) { done(new Error("MCP response too large")); req.destroy(); }
           else done(null, chunk);
+        }, destroy(error, done) {
+          // Node 22's Web adapter may drain buffered data after cancellation
+          // closes its controller. Stop queued flow before asynchronous close.
+          this.pause();
+          done(error);
         } });
         res.on("error", error => limit.destroy(error));
         // Cancelling a Web response closes its Transform. Also retire the
