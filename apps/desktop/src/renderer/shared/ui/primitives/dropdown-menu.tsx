@@ -3,6 +3,7 @@ import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import { Check, ChevronRight, Circle } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import {
   MENU_ITEM_ICON,
   MENU_ITEM_RADIUS,
@@ -11,25 +12,40 @@ import {
   MENU_SURFACE_RADIUS,
 } from "@/renderer/shared/ui/menu-surface";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
+import { useOverlayEscape } from "@/renderer/shared/ui/overlay-escape";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
+
+const DropdownMenuOpenContext = React.createContext<
+  ((open: boolean) => void) | null
+>(null);
+const useClientLayoutEffect =
+  typeof window === "undefined" ? React.useEffect : React.useLayoutEffect;
 
 function DropdownMenu({
   onOpenChange,
+  open: controlledOpen,
+  defaultOpen = false,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
+  const [internalOpen, setInternalOpen] = React.useState(defaultOpen);
+  const open = controlledOpen ?? internalOpen;
   const publishOverlay = useNativeSurfaceOverlayIntent();
-  React.useEffect(() => {
+  const setOpen = React.useCallback(
+    (next: boolean) => {
+      setInternalOpen(next);
+      publishOverlay(next);
+      onOpenChange?.(next);
+    },
+    [onOpenChange, publishOverlay],
+  );
+  useClientLayoutEffect(() => {
     // A controlled owner can close the menu without Radix's callback.
-    if (props.open !== undefined) publishOverlay(props.open);
-  }, [props.open, publishOverlay]);
+    publishOverlay(open);
+  }, [open, publishOverlay]);
   return (
-    <DropdownMenuPrimitive.Root
-      {...props}
-      onOpenChange={(open) => {
-        publishOverlay(open);
-        onOpenChange?.(open);
-      }}
-    />
+    <DropdownMenuOpenContext.Provider value={setOpen}>
+      <DropdownMenuPrimitive.Root {...props} open={open} onOpenChange={setOpen} />
+    </DropdownMenuOpenContext.Provider>
   );
 }
 
@@ -90,28 +106,44 @@ DropdownMenuSubTrigger.displayName =
 const DropdownMenuSubContent = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.SubContent>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubContent>
->(({ className, ...props }, ref) => (
-  <DropdownMenuPrimitive.Portal>
-    <DropdownMenuPrimitive.SubContent
-      ref={ref}
-      collisionPadding={8}
-      className={cn(
-        "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-dropdown min-w-[min(8rem,var(--radix-dropdown-menu-content-available-width))] max-w-(--radix-dropdown-menu-content-available-width) max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
-        MENU_SURFACE_RADIUS,
-        MENU_SURFACE_INSET,
-        className,
-      )}
-      {...props}
-    />
-  </DropdownMenuPrimitive.Portal>
-));
+>(({ className, onEscapeKeyDown, onKeyDown, ...props }, ref) => {
+  const setOpen = React.useContext(DropdownMenuOpenContext);
+  const escapeHandlers = useOverlayEscape({
+    onEscapeKeyDown,
+    onKeyDown,
+    onDismiss: () => setOpen?.(false),
+  });
+  return (
+    <DropdownMenuPrimitive.Portal>
+      <DropdownMenuPrimitive.SubContent
+        ref={ref}
+        collisionPadding={8}
+        className={cn(
+          ANCHORED_OVERLAY_MOTION,
+          "bg-bg3 text-fg1 border-border2 z-dropdown min-w-[min(8rem,var(--radix-dropdown-menu-content-available-width))] max-w-(--radix-dropdown-menu-content-available-width) max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
+          MENU_SURFACE_RADIUS,
+          MENU_SURFACE_INSET,
+          className,
+        )}
+        {...props}
+        {...escapeHandlers}
+      />
+    </DropdownMenuPrimitive.Portal>
+  );
+});
 DropdownMenuSubContent.displayName =
   DropdownMenuPrimitive.SubContent.displayName;
 
 const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
->(({ className, sideOffset = 4, onCloseAutoFocus, ...props }, ref) => {
+>(({ className, sideOffset = 4, onCloseAutoFocus, onEscapeKeyDown, onKeyDown, ...props }, ref) => {
+  const setOpen = React.useContext(DropdownMenuOpenContext);
+  const escapeHandlers = useOverlayEscape({
+    onEscapeKeyDown,
+    onKeyDown,
+    onDismiss: () => setOpen?.(false),
+  });
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const initializedNodesRef = React.useRef(new WeakSet<HTMLDivElement>());
   const composedRef = React.useCallback(
@@ -147,12 +179,12 @@ const DropdownMenuContent = React.forwardRef<
       <DropdownMenuPrimitive.Content
         collisionPadding={8}
         {...props}
+        {...escapeHandlers}
         ref={composedRef}
         sideOffset={sideOffset}
         onPointerDownOutside={(event) => {
-          // Radix retains a closing menu through its exit animation. Its
-          // outside listener must not dismiss a fresh open from the same
-          // trigger, whose pointer handler already owns toggling the menu.
+          // The trigger's pointer handler owns toggling. The outside listener
+          // must not dismiss an opening from that same pointer event.
           const content = contentRef.current;
           const triggerId = content?.getAttribute("aria-labelledby");
           const trigger = triggerId
@@ -177,7 +209,8 @@ const DropdownMenuContent = React.forwardRef<
           onCloseAutoFocus?.(event);
         }}
         className={cn(
-          "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-dropdown min-w-[min(8rem,var(--radix-dropdown-menu-content-available-width))] max-w-(--radix-dropdown-menu-content-available-width) max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
+          ANCHORED_OVERLAY_MOTION,
+          "bg-bg3 text-fg1 border-border2 z-dropdown min-w-[min(8rem,var(--radix-dropdown-menu-content-available-width))] max-w-(--radix-dropdown-menu-content-available-width) max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
           MENU_SURFACE_RADIUS,
           MENU_SURFACE_INSET,
           className,

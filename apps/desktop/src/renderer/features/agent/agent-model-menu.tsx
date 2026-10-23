@@ -675,6 +675,17 @@ export function AgentModelMenu({
                 )}
                 onOpenAutoFocus={(event) => event.preventDefault()}
                 onCloseAutoFocus={(event) => event.preventDefault()}
+                onFocusOutside={(event) => {
+                  // Favoriting after editing restores the parent search caret.
+                  // It belongs to this model browser; that focus handoff must
+                  // not dismiss the catalog. Pointer-outside still dismisses.
+                  if (
+                    event.target ===
+                    contentRef.current?.querySelector("[cmdk-input]")
+                  ) {
+                    event.preventDefault();
+                  }
+                }}
                 onPointerEnter={cancelCatalogClose}
                 onPointerLeave={scheduleCatalogClose}
               >

@@ -4,6 +4,7 @@ import { Slot } from "@radix-ui/react-slot";
 import { ChevronRight } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import {
   MENU_ITEM_ICON,
   MENU_ITEM_RADIUS,
@@ -12,6 +13,7 @@ import {
   MENU_SURFACE_RADIUS,
 } from "@/renderer/shared/ui/menu-surface";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
+import { useOverlayEscape } from "@/renderer/shared/ui/overlay-escape";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 import {
   createMenuAnchor,
@@ -253,23 +255,33 @@ ContextMenuSubTrigger.displayName = ContextMenuPrimitive.SubTrigger.displayName;
 const ContextMenuSubContent = React.forwardRef<
   React.ComponentRef<typeof ContextMenuPrimitive.SubContent>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.SubContent>
->(({ className, ...props }, ref) => (
-  <ContextMenuPrimitive.Portal>
-    <ContextMenuPrimitive.SubContent
-      ref={ref}
-      collisionPadding={8}
-      updatePositionStrategy="always"
-      className={cn(
-        MENU_SURFACE_RADIUS,
-        "border-border2 bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-dropdown max-h-(--radix-popper-available-height) max-w-(--radix-popper-available-width) min-w-[min(8rem,var(--radix-popper-available-width))] overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
-        MENU_SURFACE_INSET,
-        className,
-      )}
-      {...props}
-      style={{ ...props.style, ...CONTEXT_MENU_VARIABLES }}
-    />
-  </ContextMenuPrimitive.Portal>
-));
+>(({ className, onEscapeKeyDown, onKeyDown, ...props }, ref) => {
+  const context = React.useContext(MenuAnchorContext);
+  const escapeHandlers = useOverlayEscape({
+    onEscapeKeyDown,
+    onKeyDown,
+    onDismiss: () => context?.setOpen(false),
+  });
+  return (
+    <ContextMenuPrimitive.Portal>
+      <ContextMenuPrimitive.SubContent
+        ref={ref}
+        collisionPadding={8}
+        updatePositionStrategy="always"
+        className={cn(
+          MENU_SURFACE_RADIUS,
+          ANCHORED_OVERLAY_MOTION,
+          "border-border2 bg-bg3 text-fg1 z-dropdown max-h-(--radix-popper-available-height) max-w-(--radix-popper-available-width) min-w-[min(8rem,var(--radix-popper-available-width))] overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
+          MENU_SURFACE_INSET,
+          className,
+        )}
+        {...props}
+        {...escapeHandlers}
+        style={{ ...props.style, ...CONTEXT_MENU_VARIABLES }}
+      />
+    </ContextMenuPrimitive.Portal>
+  );
+});
 ContextMenuSubContent.displayName = ContextMenuPrimitive.SubContent.displayName;
 
 const ContextMenuContent = React.forwardRef<
@@ -289,7 +301,11 @@ const ContextMenuContent = React.forwardRef<
   ) => {
     const context = React.useContext(MenuAnchorContext);
     const interactedOutside = React.useRef(false);
-    const escapeEvents = React.useRef<WeakSet<Event>>(new WeakSet());
+    const escapeHandlers = useOverlayEscape({
+      onEscapeKeyDown,
+      onKeyDown,
+      onDismiss: () => context?.setOpen(false),
+    });
     return (
       <ContextMenuPrimitive.Portal>
         <ContextMenuPrimitive.Content
@@ -312,36 +328,11 @@ const ContextMenuContent = React.forwardRef<
             if (!event.defaultPrevented && !context?.modal)
               interactedOutside.current = true;
           }}
-          onEscapeKeyDown={(event) => {
-            if (escapeEvents.current.has(event)) return;
-            escapeEvents.current.add(event);
-            onEscapeKeyDown?.(event);
-          }}
-          onKeyDown={(event) => {
-            onKeyDown?.(event);
-            if (
-              event.defaultPrevented ||
-              event.key !== "Escape" ||
-              // React events from separately portaled overlays also bubble here.
-              !event.currentTarget.contains(event.target as Node)
-            )
-              return;
-            const nativeEvent = event.nativeEvent;
-            if (
-              nativeEvent.defaultPrevented ||
-              escapeEvents.current.has(nativeEvent)
-            )
-              return;
-            // First-focus Escape can precede Radix's document listener.
-            escapeEvents.current.add(nativeEvent);
-            onEscapeKeyDown?.(nativeEvent);
-            if (event.defaultPrevented || nativeEvent.defaultPrevented) return;
-            event.preventDefault();
-            context?.setOpen(false);
-          }}
+          {...escapeHandlers}
           className={cn(
             MENU_SURFACE_RADIUS,
-            "border-border2 bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-dropdown max-h-(--radix-popper-available-height) max-w-(--radix-popper-available-width) min-w-[min(9rem,var(--radix-popper-available-width))] overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
+            ANCHORED_OVERLAY_MOTION,
+            "border-border2 bg-bg3 text-fg1 z-dropdown max-h-(--radix-popper-available-height) max-w-(--radix-popper-available-width) min-w-[min(9rem,var(--radix-popper-available-width))] overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
             MENU_SURFACE_INSET,
             className,
           )}

@@ -1,0 +1,9 @@
+{
+  "id": "overlay-first-focus-escape",
+  "kind": "scenario",
+  "area": "renderer-shared-ui",
+  "fixedBy": "pr:703",
+  "symptom": "DropdownMenu, Popover and context-menu submenus could miss Escape immediately after focusing their content, before Radix installed its document listener.",
+  "rule": "changes/anchored-overlay-dismissal.md: dispatch Escape from first focus, preserve cancellation and child portal boundaries, and invoke the consumer guard once per native event.",
+  "check": "pnpm test:ui-smoke --shard=3/3"
+}

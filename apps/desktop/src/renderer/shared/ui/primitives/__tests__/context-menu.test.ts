@@ -55,7 +55,10 @@ function keyEvent(key = "Escape", inside = true) {
     target,
     nativeEvent,
     defaultPrevented: false,
-    currentTarget: { contains: (node: unknown) => inside && node === target },
+    currentTarget: {
+      dataset: { state: "open" },
+      contains: (node: unknown) => inside && node === target,
+    },
     preventDefault() {
       this.defaultPrevented = true;
       nativeEvent.preventDefault();
@@ -146,6 +149,31 @@ describe("ContextMenuContent Escape", () => {
     bubble(event);
     expect(onEscapeKeyDown).toHaveBeenCalledTimes(1);
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("does not replay the guard if the document listener follows the fallback", () => {
+    const onEscapeKeyDown = vi.fn();
+    const onOpenChange = renderMenu({ onEscapeKeyDown });
+    const event = keyEvent();
+    bubble(event);
+    const radixEscape = captured.contentProps?.onEscapeKeyDown as (
+      nativeEvent: typeof event.nativeEvent,
+    ) => void;
+    radixEscape(event.nativeEvent);
+    expect(onEscapeKeyDown).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(event.nativeEvent.defaultPrevented).toBe(true);
+  });
+
+  it("does not claim Escape from force-mounted closed content", () => {
+    const onEscapeKeyDown = vi.fn();
+    const onOpenChange = renderMenu({ onEscapeKeyDown });
+    const event = keyEvent();
+    event.currentTarget.dataset.state = "closed";
+    bubble(event);
+    expect(onEscapeKeyDown).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(event.nativeEvent.defaultPrevented).toBe(false);
   });
 
   it("leaves portaled overlays and submenu ArrowLeft with their own handlers", () => {

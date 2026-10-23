@@ -2,6 +2,7 @@ import * as React from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
@@ -138,7 +139,8 @@ const TooltipContent = React.forwardRef<
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
       className={cn(
-        "z-dropdown w-fit max-w-xs overflow-hidden rounded-sm border border-border2/50 bg-bg2/40 px-2 py-1 text-3xxs text-fg1 shadow-[var(--shadow-dropdown)] backdrop-blur-[10px] backdrop-saturate-[1.7] animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+        ANCHORED_OVERLAY_MOTION,
+        "z-dropdown w-fit max-w-xs overflow-hidden rounded-sm border border-border2/50 bg-bg2/40 px-2 py-1 text-3xxs text-fg1 shadow-[var(--shadow-dropdown)] backdrop-blur-[10px] backdrop-saturate-[1.7]",
         className,
       )}
       {...props}
