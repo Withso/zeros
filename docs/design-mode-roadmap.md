@@ -129,8 +129,11 @@ readable. `Zeros Design/` is the unconfigured pointer default; the explicit
 Create Design directory action creates `<repo name> -
 Design/` when no Design folder exists. Opening the tab alone does not create
 files. A single discovered folder is reused. The Design directory menu selects
-a workspace-local stable ID; Settings manages repository defaults and rename.
-Source remains materialized and readable from both surfaces.
+a workspace-local stable ID. Repository settings no longer expose Design mode,
+Directory or Preferences tabs. Their former management links are removed;
+directory management UI may be added inside the Design tab in a future change.
+Existing private defaults, registrations and lifecycle operations remain
+compatible. Source remains materialized and readable from both surfaces.
 
 #### Shared workbench navigation
 
@@ -269,14 +272,14 @@ folder is created without `.gitkeep`; a fresh clone may omit it, and its first
 frame write recreates it. Uncommitted work is local to the checkout. Registration
 and generated rules are managed by Zeros lifecycle operations.
 
-Repository Settings → Design → Directory scans the main checkout, including
-untracked Zeros manifests, without requiring any worktrees. Its folder list
-supports inline rename (double-click or the pencil; Enter/blur saves and Escape
-cancels) and choosing an existing folder. Rename preserves the selected directory
-when another row is renamed.
+Directory discovery scans the checkout, including untracked Zeros manifests.
+The Design workbench still lists and selects registered directories. The former
+repository settings UI for rename, adoption and removal is retired; the engine's
+explicit lifecycle operations remain available for compatibility. Rename
+preserves the selected directory when another row is renamed.
 
-The trash action is **Remove Design registration**, with an explicit confirmation.
-It preserves the directory and all authored source/assets, removes only its
+The registration-removal operation preserves the directory and all authored
+source/assets, removes only its
 `meta/design.toml` registration (or its legacy root manifest), legacy registry
 entry/document metadata, and unmodified generated rules,
 and forgets this checkout's remembered registration. Custom rules are preserved.
@@ -318,7 +321,7 @@ private. The scene example and bounds follow below.
 Discovery validates `format = "zeros-design"`; a file named `design.toml` alone
 does not make a folder Design territory. Working-tree discovery is bounded,
 skips private storage, dependencies and nested repositories, and refreshes on
-Design entry, Settings listing and watcher recognition changes. Exact Git index
+Design entry, directory-menu reads and watcher recognition changes. Exact Git index
 and HEAD manifests also preserve ownership of old paths during moves. A moved
 folder retains its ID. Duplicated IDs, overlapping folders, unsafe paths,
 symlinks, hard links, malformed metadata and competing copies pause writes.
@@ -333,8 +336,8 @@ metadata without changing filenames still updates the split. An unrelated
 `design.toml` never establishes ownership. Older engines that omit the ownership
 field retain the legacy canvas-marker fallback.
 
-Repository Settings → Design → Directory → **Use existing folder** explicitly adopts a source folder
-inside the repository. The preview first uses existing metadata, then looks for
+The retained directory-adoption lifecycle operation explicitly adopts a source
+folder inside the repository. The preview first uses existing metadata, then looks for
 saved metadata in the index and HEAD (including older formats). Without saved
 metadata it creates the v3 layout and rebuilds frame information from source;
 registered frame HTML moves into its page folder with reference rebasing.

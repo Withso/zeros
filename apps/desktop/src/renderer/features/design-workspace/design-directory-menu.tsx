@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ChevronDown, Check, Folder, Settings } from "lucide-react";
+import { ChevronDown, Check, Folder } from "lucide-react";
 import type { Workspace } from "../../platform/git";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { bridgeDesignListDirectories } from "../../platform/bridge/design-bridge";
@@ -9,14 +9,11 @@ import {
   designDirectoryListingCache,
   invalidateDesignDirectoryTargetReadCache,
 } from "../../state/read-caches";
-import { useWorkspaceDispatch } from "../../state/store";
-import { useProjectForFolder } from "../../state/use-projects";
 import { Tooltip } from "../../shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import {
@@ -27,7 +24,6 @@ import { triggerGitRefresh } from "../../shell/use-git-refresh-key";
 import { reportDesignDirectoryFailure } from "./design-directory-failure";
 
 /** Selecting a directory changes only this workspace's personal pointer.
- * Rename/adoption remain explicit repository lifecycle actions in Settings.
  * The trigger lives in the canvas's floating directory pill. */
 export function DesignDirectoryMenu({
   workspace,
@@ -42,8 +38,6 @@ export function DesignDirectoryMenu({
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const project = useProjectForFolder(workspace.path);
-  const dispatch = useWorkspaceDispatch();
   const listing = useCachedRead(
     designDirectoryListingCache,
     workspace.id,
@@ -124,23 +118,6 @@ export function DesignDirectoryMenu({
             {directory === name && <Check className="size-3" />}
           </DropdownMenuItem>
         ))}
-        {project && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onSelect={() =>
-                dispatch({
-                  type: "OPEN_REPO_PAGE",
-                  projectId: project.id,
-                  view: "design-preferences",
-                })
-              }
-            >
-              <Settings className="size-3" />
-              Manage directories…
-            </DropdownMenuItem>
-          </>
-        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

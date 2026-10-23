@@ -652,7 +652,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
         : `${copy[type][0]} took too long to load.`,
     );
     await expect(
-      page.getByText("Choose a Design directory in repository settings.", {
+      page.getByText("No Design directory available.", {
         exact: true,
       }),
     ).not.toBeVisible();

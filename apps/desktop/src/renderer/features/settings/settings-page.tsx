@@ -415,9 +415,10 @@ function parseSelection(active: string): Selection {
       // Legacy persisted ids still parse as a repo selection so the redirect
       // effect lands them on the repo page: the former Scripts / run-actions
       // views folded into Environment; MCP left the repo sections entirely
-      // (2026-07-17) and also lands on the default Environment view.
+      // (2026-07-17). Retired Design settings also land on Environment.
       const maybeSection =
-        raw === "scripts" || raw === "run-actions" || raw === "mcp"
+        raw === "scripts" || raw === "run-actions" || raw === "mcp" ||
+        raw === "design" || raw === "design-preferences"
           ? "environment"
           : raw;
       if (isRepoPage(maybeSection)) {

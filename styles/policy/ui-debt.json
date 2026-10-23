@@ -91,9 +91,6 @@
       "apps/desktop/src/renderer/features/design-workspace/design-workspace-overlays.tsx": {
         "rounded-[1px]": 1
       },
-      "apps/desktop/src/renderer/features/repositories/design-section.tsx": {
-        "text-[13px]": 2
-      },
       "apps/desktop/src/renderer/features/repositories/files-to-copy-section.tsx": {
         "text-[14px]": 2
       },
@@ -483,9 +480,6 @@
         "button": 5
       },
       "apps/desktop/src/renderer/features/design-workspace/design-workspace-sidebar-panels.tsx": {
-        "button": 1
-      },
-      "apps/desktop/src/renderer/features/repositories/design-section.tsx": {
         "button": 1
       },
       "apps/desktop/src/renderer/features/repositories/files-to-copy-section.tsx": {

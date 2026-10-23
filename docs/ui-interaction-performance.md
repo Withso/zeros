@@ -23,7 +23,7 @@ round trip to restore it. Key it by the smallest semantic owner that can vary:
 | Selection                                                        | Owner key                            |
 | ---------------------------------------------------------------- | ------------------------------------ |
 | Home destination or app-wide presentation preference             | app                                  |
-| Repository hub mode and each mode's selected tab                 | project id                           |
+| Repository hub selected tab                                     | project id                           |
 | Selected workspace                                               | repository root                      |
 | Active chat, workbench tabs, Changes/Review choices, terminal tab | workspace folder                    |
 | Open file and explicit viewer mode                                | workbench tab id inside the workspace |
@@ -33,6 +33,11 @@ Restore durable selections synchronously from the destination's first store
 snapshot. Do not seed a repository/workspace-scoped tab from component-local
 `useState`, one global settings key, or a passive-effect hand-off. An explicit
 deep link publishes route, owner identity, and nested destination together.
+
+Repository settings have one tab strip. Retired `design` and
+`design-preferences` selections restore the same repository's remembered Code
+tab, or Environment when none is valid. The former per-mode map is migration
+input only; old settings deep links also resolve to Environment.
 
 Persisted owner maps are a storage/cache surface: type-guard them, give them a
 hard bound, and prune entries when their repository/workspace is removed. A
