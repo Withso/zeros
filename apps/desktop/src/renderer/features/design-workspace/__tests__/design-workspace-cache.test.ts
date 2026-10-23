@@ -83,8 +83,6 @@ import {
   applyDesignEditCached,
   applyDesignTransactionCached,
   prepareDesignMovementFrame,
-  designFrameDocumentCache,
-  designFrameDocumentKey,
   designFoundationCache,
   designFoundationKey,
   designWorkspaceSnapshotCache,
@@ -99,7 +97,6 @@ import {
   updateDesignNodeStylesCached,
   updateDesignTokenCached,
   updateDesignFrameGeometryCached,
-  warmDesignFrameDocument,
   createDesignFrameAndRefresh,
   duplicateDesignFrameCached,
   createDesignPageCached,
@@ -2335,30 +2332,6 @@ describe("design workspace cache", () => {
         ),
       ).toEqual(before.map((version) => version + 1));
     }
-  });
-
-  it("warms one exact frame document and deduplicates intent reads", async () => {
-    const current = snapshot();
-    const frame = current.frames[0]!;
-    const document = {
-      ...frame,
-      source: "<!doctype html><html></html>",
-      srcDoc: "<!doctype html><html></html>",
-      tree: [],
-    };
-    platformMocks.frame.mockResolvedValue(document);
-
-    warmDesignFrameDocument("ws_design", frame.file, frame.sourceVersion);
-    warmDesignFrameDocument("ws_design", frame.file, frame.sourceVersion);
-
-    await vi.waitFor(() =>
-      expect(platformMocks.frame).toHaveBeenCalledTimes(1),
-    );
-    expect(
-      designFrameDocumentCache.getSnapshot(
-        designFrameDocumentKey("ws_design", frame.file, frame.sourceVersion),
-      ).data,
-    ).toBe(document);
   });
 
   it("invalidates retained foundations when external workspace state changes", () => {

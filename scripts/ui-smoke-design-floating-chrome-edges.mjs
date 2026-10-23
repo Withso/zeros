@@ -264,50 +264,6 @@ export async function runDesignFloatingChromeEdgesSmoke({
       !stolen,
     );
 
-    // Source must remain readable around every floating island, including at
-    // its scroll limits and while the panel/timeline changes size.
-    await open(1100, 780);
-    await page.getByRole("button", { name: "Toggle frame source" }).click();
-    const source = page.locator("[data-design-source-view]");
-    await source.locator("pre").waitFor();
-    const sourceIsClear = () => source.evaluate((element) => {
-      const viewport = element.querySelector("[data-radix-scroll-area-viewport]");
-      const bounds = viewport.getBoundingClientRect();
-      const overlaps = (selector) => {
-        const island = document.querySelector(selector);
-        if (!island || !island.getClientRects().length) return false;
-        const rect = island.getBoundingClientRect();
-        return bounds.left < rect.right && bounds.right > rect.left &&
-          bounds.top < rect.bottom && bounds.bottom > rect.top;
-      };
-      return bounds.width > 0 && bounds.height > 0 && ![
-        "[data-design-directory-header]",
-        '[role="toolbar"][aria-label="Canvas tools"]',
-        "[data-design-floating-panel]",
-        "[data-design-motion-timeline]",
-      ].some(overlaps);
-    });
-    check("Source's filename and text clear the floating chrome", await sourceIsClear());
-    await openMotion();
-    check("Source stays above the open Motion timeline", await sourceIsClear());
-    await source.locator("pre").evaluate((pre) => {
-      pre.parentElement.scrollLeft = pre.parentElement.scrollWidth;
-      const viewport = pre.closest("[data-radix-scroll-area-viewport]");
-      viewport.scrollTop = viewport.scrollHeight;
-    });
-    check("Source's scroll limits stay clear of chrome", await sourceIsClear());
-    await page.getByRole("separator", { name: "Resize Style panel" }).press("Shift+ArrowLeft");
-    check("Source follows a resized inspector", await sourceIsClear());
-    const sourceWidth = (await source.locator("[data-radix-scroll-area-viewport]").boundingBox()).width;
-    await page.getByRole("button", { name: "Toggle Layers and Inspector" }).click();
-    check(
-      "Source reclaims the space of a hidden inspector",
-      await sourceIsClear() &&
-        (await source.locator("[data-radix-scroll-area-viewport]").boundingBox()).width > sourceWidth,
-    );
-    await page.getByRole("button", { name: "Toggle Layers and Inspector" }).click();
-    await page.getByRole("button", { name: "Toggle frame source" }).click();
-
     // A post-adoption runtime refresh can reorder containers without moving
     // selected layers between them. Neither folds nor the reveal nonce move.
     await open(1440, 900);

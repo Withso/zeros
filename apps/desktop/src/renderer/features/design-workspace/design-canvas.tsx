@@ -19,7 +19,6 @@ import {
 // --- IMPORTS ---
 
 import {
-  Code2,
   Diamond,
   Frame,
   Image as ImageIcon,
@@ -65,9 +64,7 @@ import {
   ContextMenuSeparator,
 } from "../../shared/ui/primitives/context-menu";
 import {
-  CodeBlock,
   Input,
-  ScrollArea,
   Toolbar,
   toast,
 } from "../../shared/ui/primitives";
@@ -250,7 +247,6 @@ import {
   updateDesignFrameGeometryCached,
   moveDesignFramesCached,
   updateDesignNodeStylesCached,
-  warmDesignFrameDocument,
 } from "./state/design-workspace-cache";
 import {
   designWorkspaceView,
@@ -260,7 +256,6 @@ import {
   useDesignWorkspaceView,
 } from "./state/design-workspace-ui";
 import { useDesignFoundation } from "./state/use-design-foundation";
-import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
 import { useDesignSavedEditing } from "./design-saved-editing";
@@ -455,7 +450,7 @@ function useDelayedColdBusy(loading: boolean): boolean {
 
 // ============================================
 // COMPONENT: DesignCanvas
-// PURPOSE: Pan, zoom, select, create, move, resize, rename, and inspect source
+// PURPOSE: Pan, zoom, select, create, move, resize, and rename
 // USED IN: DesignWorkspaceColumn
 // ============================================
 
@@ -481,7 +476,6 @@ export function DesignCanvas({
   const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}\0${view.activePageId ?? ""}`;
   const canvasDocumentOwnerRef = useRef(canvasDocumentOwner);
   canvasDocumentOwnerRef.current = canvasDocumentOwner;
-  const setCodeView = useDesignWorkspaceUiStore((state) => state.setCodeView);
   const setActiveTheme = useDesignWorkspaceUiStore(
     (state) => state.setActiveTheme,
   );
@@ -503,20 +497,6 @@ export function DesignCanvas({
     selectedFrame?.sourceVersion,
     active && Boolean(selectedFrame),
   );
-  const selectedFrameDocument = useDesignFrameDocument(
-    workspaceId ?? "",
-    selectedFrame?.file ?? "",
-    selectedFrame?.sourceVersion ?? "",
-    active && Boolean(workspaceId && selectedFrame),
-  );
-  const warmSelectedFrameDocument = useCallback(() => {
-    if (!active || !workspaceId || !selectedFrame) return;
-    warmDesignFrameDocument(
-      workspaceId,
-      selectedFrame.file,
-      selectedFrame.sourceVersion,
-    );
-  }, [active, selectedFrame, workspaceId]);
   const selectedNodeDetails = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame || !view.selectedNodeId) return null;
     return (
@@ -1227,17 +1207,16 @@ export function DesignCanvas({
   }, [previewItems]);
   const previewDemand = useMemo(
     () =>
-      active && previewOwner && !view.codeView && previewItems.length
+      active && previewOwner && previewItems.length
         ? { owner: previewOwner, theme: frameTheme, items: previewItems }
         : null,
-    [active, frameTheme, previewItems, previewOwner, view.codeView],
+    [active, frameTheme, previewItems, previewOwner],
   );
   useDesignFramePreviewDemand(previewDemand);
   const highResolutionTiles = useMemo(() => {
     const result = new Map<string, DesignHighResolutionViewportTile>();
     if (
       !active ||
-      view.codeView ||
       view.zoom < HIGH_RESOLUTION_ZOOM_THRESHOLD ||
       viewportSize.width <= 0 ||
       viewportSize.height <= 0
@@ -1285,7 +1264,6 @@ export function DesignCanvas({
     active,
     selectedFrame?.file,
     snapshot?.frames,
-    view.codeView,
     view.panX,
     view.panY,
     view.zoom,
@@ -7116,11 +7094,11 @@ export function DesignCanvas({
     (event: React.WheelEvent<HTMLDivElement>) => {
       if (!active || !workspaceId) return;
       // Chrome inside the viewport owns its wheel: the tool rail never pans
-      // the canvas, and the Motion timeline and source view scroll themselves.
+      // the canvas, and the Motion timeline scrolls itself.
       if (
         event.target instanceof Element &&
         event.target.closest(
-          "[data-design-canvas-tools-rail], [data-design-motion-timeline], [data-design-source-view]",
+          "[data-design-canvas-tools-rail], [data-design-motion-timeline]",
         )
       ) {
         return;
@@ -8065,29 +8043,6 @@ export function DesignCanvas({
           aria-hidden="true"
         />
 
-        {view.codeView &&
-        selectedFrame &&
-        (selectedFrameDocument.data || selectedFrameDocument.error) ? (
-          <div
-            data-design-controls
-            data-design-source-view=""
-            data-motion-open={motionTimelineOpen ? "" : undefined}
-            className="zd-design-source-view bg-bg1 absolute inset-0 overflow-hidden"
-          >
-            <ScrollArea className="h-full">
-              <CodeBlock
-                language="html"
-                filename={`Zeros Design/${selectedFrame.file}`}
-              >
-                <pre>
-                  {selectedFrameDocument.data?.source ??
-                    "The frame source could not be loaded."}
-                </pre>
-              </CodeBlock>
-            </ScrollArea>
-          </div>
-        ) : null}
-
         {!snapshot && showColdBusy ? (
           <div className="text-muted-fg pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
             Loading design…
@@ -8268,20 +8223,6 @@ export function DesignCanvas({
               <Type />
             </DesignToolbarButton>
             <span className="zd-canvas-toolbar-divider" aria-hidden="true" />
-            <DesignToolbarButton
-              label="Toggle frame source"
-              tooltip="Source"
-              tooltipSide="right"
-              pressed={view.codeView}
-              disabled={!workspaceId || !selectedFrame}
-              onPointerEnter={warmSelectedFrameDocument}
-              onFocus={warmSelectedFrameDocument}
-              onClick={() => {
-                if (workspaceId) setCodeView(workspaceId, !view.codeView);
-              }}
-            >
-              <Code2 />
-            </DesignToolbarButton>
             <DesignToolbarButton
               ref={themeEditorTriggerRef}
               data-design-theme-trigger

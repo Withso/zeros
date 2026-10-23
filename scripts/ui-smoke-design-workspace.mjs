@@ -4538,13 +4538,12 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         .getAttribute("aria-pressed")) === "true",
   );
 
-  const codeToggle = page.getByRole("button", { name: "Toggle frame source" });
-  await codeToggle.click();
   check(
-    "code tool opens authored frame source",
-    await page.getByText("Zeros Design/home.html").isVisible(),
+    "selected frames stay on the canvas without a source toggle or overlay",
+    (await page.getByRole("button", { name: "Toggle frame source" }).count()) === 0 &&
+      (await page.locator("[data-design-source-view]").count()) === 0 &&
+      (await homeFrame.locator("iframe[data-design-document-ready]").isVisible()),
   );
-  await codeToggle.click();
 
   const canvasFocusTarget = page.getByLabel("Design canvas");
   const selectedLayer = (nodeId) =>

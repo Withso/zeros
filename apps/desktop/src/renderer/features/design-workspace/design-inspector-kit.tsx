@@ -441,7 +441,7 @@ interface DesignToolbarButtonProps extends React.ButtonHTMLAttributes<HTMLButton
   shortcut?: React.ReactNode;
   pressed?: boolean;
   /** A modal canvas tool paints its active state in the design accent;
-   * panel toggles (source, themes, motion) stay neutral. */
+   * panel toggles (themes, motion) stay neutral. */
   tool?: boolean;
   /** The vertical tool rail opens its tooltips beside it, not over a tool. */
   tooltipSide?: "top" | "right" | "bottom" | "left";

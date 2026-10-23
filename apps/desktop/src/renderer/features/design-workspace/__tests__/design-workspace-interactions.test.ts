@@ -571,18 +571,6 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain('"animation-duration": null');
   });
 
-  it("warms frame source on code-view intent without a loading waterfall", () => {
-    expect(source).toContain("onPointerEnter={warmSelectedFrameDocument}");
-    expect(source).toContain("onFocus={warmSelectedFrameDocument}");
-    expect(source).not.toContain("Loading frame source…");
-    expect(source).toContain(
-      "active && Boolean(workspaceId && selectedFrame),",
-    );
-    expect(source).not.toContain(
-      "active && Boolean(workspaceId && selectedFrame && view.codeView),",
-    );
-  });
-
   it("keeps the theme editor non-modal, draggable, and isolated from canvas wheel input", () => {
     expect(themeSource).toContain("modal={false}");
     expect(themeSource).toContain('data-design-theme-drag-handle=""');

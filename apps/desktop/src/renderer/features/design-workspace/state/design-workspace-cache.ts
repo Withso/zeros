@@ -604,21 +604,6 @@ export async function fetchDesignFrameDocument(
   return document;
 }
 
-/** Warm one exact rendered source on selection or explicit pointer/focus
- * intent. Concurrent iframe/code-view consumers share the same request. */
-export function warmDesignFrameDocument(
-  workspaceId: string,
-  frame: string,
-  sourceVersion: string,
-): void {
-  const key = designFrameDocumentKey(workspaceId, frame, sourceVersion);
-  void designFrameDocumentCache
-    .load(key, () => fetchDesignFrameDocument(key), {
-      maxAgeMs: DESIGN_FRAME_DOCUMENT_MAX_AGE_MS,
-    })
-    .catch(() => {});
-}
-
 export function designFoundationKey(
   workspaceId: string,
   frame: string,

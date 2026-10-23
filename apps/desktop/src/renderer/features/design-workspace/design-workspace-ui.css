@@ -605,19 +605,6 @@
   --zd-design-panel-inset: calc(var(--zd-design-panel-width) + 8px);
 }
 
-/* Source covers the canvas, but its scroll viewport clears the floating
- * chrome. Keep the wrapper full width so the shared percentage cap resolves
- * against the same surface as the panel, including during a width drag. */
-.zd-design-source-view {
-  /* A 40px pill/rail, with an 8px gutter on each side. */
-  padding: calc(40px + 16px) calc(var(--zd-design-panel-inset) + 8px) 8px
-    calc(40px + 16px);
-}
-
-.zd-design-source-view[data-motion-open] {
-  padding-bottom: calc(var(--zeros-design-motion-height, 240px) + 16px);
-}
-
 /* The canvas tools: a 40px floating bar of 32px tools. The active modal
  * tool (move, frame, text) wears the design accent, as on the canvas; panel
  * toggles stay neutral. */
