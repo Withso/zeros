@@ -228,7 +228,7 @@ function RepoWorkspaceRow({
           <span>{w.archivedAt == null ? "Folder missing" : "Archived"}</span>
         )}
         {!historyOnly && w.prNumber != null && w.prUrl && (
-          <Tooltip label="Open PR on GitHub">
+          <Tooltip label="Open PR">
             <a
               href={w.prUrl}
               target="_blank"

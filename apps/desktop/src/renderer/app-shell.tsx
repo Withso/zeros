@@ -1314,7 +1314,7 @@ export function AppShellBody() {
     // Repository panel's SidebarProvider previously supplied this app-wide provider as
     // a hidden side effect. Keep it at the actual app root now that the
     // sidebar is gone; every shell surface (including Settings) uses Tooltip.
-    <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+    <TooltipProvider>
       <BridgeProvider>
         <AgentSessionsProvider>
           {/* persisted activePage in `zeros:ui-state:v1` restores

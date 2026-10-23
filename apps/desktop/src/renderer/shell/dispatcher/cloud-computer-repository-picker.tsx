@@ -1,7 +1,6 @@
 import { ChevronDown, Plus } from "lucide-react";
 import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 import { Button, GithubIcon } from "../../shared/ui";
-import { Tooltip } from "../../shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,31 +36,29 @@ export function CloudComputerRepositoryPicker({
       open={active && !disabled && open}
       onOpenChange={onOpenChange}
     >
-      <Tooltip label="Choose project">
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            aria-label="Choose project"
-            disabled={disabled}
-            onPointerEnter={() => {
-              if (active && selected) warm(selected);
-            }}
-            onFocus={() => {
-              if (active && selected) warm(selected);
-            }}
-            className="text-fg2 h-7 min-w-0 gap-1.5 px-2 text-sm font-normal hover:bg-transparent"
-          >
-            <GithubIcon className="size-3.5 shrink-0" aria-hidden="true" />
-            <span className="max-w-[180px] truncate">
-              {selected
-                ? `${selected.owner}/${selected.name}`
-                : "Add repository"}
-            </span>
-            <ChevronDown size={12} className="text-fg2 opacity-70" />
-          </Button>
-        </DropdownMenuTrigger>
-      </Tooltip>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          aria-label="Choose project"
+          disabled={disabled}
+          onPointerEnter={() => {
+            if (active && selected) warm(selected);
+          }}
+          onFocus={() => {
+            if (active && selected) warm(selected);
+          }}
+          className="text-fg2 h-7 min-w-0 gap-1.5 px-2 text-sm font-normal hover:bg-transparent"
+        >
+          <GithubIcon className="size-3.5 shrink-0" aria-hidden="true" />
+          <span className="max-w-[180px] truncate">
+            {selected
+              ? `${selected.owner}/${selected.name}`
+              : "Add repository"}
+          </span>
+          <ChevronDown size={12} className="text-fg2 opacity-70" />
+        </Button>
+      </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
         sideOffset={4}

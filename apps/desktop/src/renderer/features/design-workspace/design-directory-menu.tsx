@@ -9,7 +9,6 @@ import {
   designDirectoryListingCache,
   invalidateDesignDirectoryTargetReadCache,
 } from "../../state/read-caches";
-import { Tooltip } from "../../shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -76,22 +75,20 @@ export function DesignDirectoryMenu({
   };
   return (
     <DropdownMenu open={active && open} onOpenChange={setOpen}>
-      <Tooltip label="Switch Design directory" side="bottom">
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            disabled={!active || busy}
-            className="zd-design-directory-trigger"
-            aria-label="Choose Design directory"
-          >
-            <Folder aria-hidden="true" />
-            <span data-design-directory-name="" className="min-w-0 truncate">
-              {name}
-            </span>
-            <ChevronDown aria-hidden="true" />
-          </button>
-        </DropdownMenuTrigger>
-      </Tooltip>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={!active || busy}
+          className="zd-design-directory-trigger"
+          aria-label="Choose Design directory"
+        >
+          <Folder aria-hidden="true" />
+          <span data-design-directory-name="" className="min-w-0 truncate">
+            {name}
+          </span>
+          <ChevronDown aria-hidden="true" />
+        </button>
+      </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-w-sm" onKeyDown={(event) => {
         // First-focus Escape can precede Radix's document listener setup.
         if (event.key !== "Escape" || event.defaultPrevented) return;

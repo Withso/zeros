@@ -306,6 +306,7 @@ function MotionDiamond({
       label={
         active ? `Add ${label} keyframe at the playhead` : `Animate ${label}`
       }
+      tooltip={active ? "Add keyframe" : "Animate"}
       className={active ? "text-[var(--design-selection-stroke)]" : undefined}
       disabled={disabled}
       onClick={() => motion.onRequest(property, value)}
@@ -776,7 +777,6 @@ export function DesignTransformSection({
                   />
                   <InspectorIconButton
                     label="Edit transform"
-                    tooltip="Add transform"
                     aria-haspopup="dialog"
                     aria-expanded={open}
                     disabled={disabled}
@@ -954,6 +954,7 @@ function DesignTransformEditor({
           <span className="zd-popover-title">Transform</span>
           <InspectorIconButton
             label="Reset transform"
+            tooltip="Reset transform"
             onClick={() => {
               const next = parseDesignTransform("none");
               setTransform(next);

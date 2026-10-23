@@ -132,7 +132,7 @@ export function WorkspaceModeToggleView({
           const creationReady = createDesignDirectory.state === "ready";
           return (
             <DropdownMenu key={option.mode}>
-              <Tooltip label={`${option.label} mode`} side="bottom">
+              <Tooltip label={option.label} side="bottom" delayDuration={1500}>
                 <DropdownMenuTrigger asChild>
                   {React.cloneElement(button, {
                     "data-workspace-mode-create": "",
@@ -178,7 +178,7 @@ export function WorkspaceModeToggleView({
         return (
           <Tooltip
             key={option.mode}
-            label={`${option.label} mode`}
+            label={option.label}
             side="bottom"
           >
             {React.cloneElement(button, {

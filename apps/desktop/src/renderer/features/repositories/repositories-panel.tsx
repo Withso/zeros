@@ -638,40 +638,36 @@ function EnvVarRow({
       {(onEdit || onRemove) && (
         <div className="flex shrink-0 items-center gap-0.5">
           {onEdit && (
-            <Tooltip label="Edit secret">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onEdit}
-                disabled={disabled}
-                aria-label={`Edit ${name}`}
-                className="text-fg2 hover:text-fg1"
-              >
-                <Pencil
-                  className="size-3.5"
-                  strokeWidth={1}
-                  aria-hidden="true"
-                />
-              </Button>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onEdit}
+              disabled={disabled}
+              aria-label={`Edit ${name}`}
+              className="text-fg2 hover:text-fg1"
+            >
+              <Pencil
+                className="size-3.5"
+                strokeWidth={1}
+                aria-hidden="true"
+              />
+            </Button>
           )}
           {onRemove && (
-            <Tooltip label="Remove secret">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onRemove}
-                disabled={disabled}
-                aria-label={`Remove ${name}`}
-                className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
-              >
-                <Trash2
-                  className="size-3.5"
-                  strokeWidth={1}
-                  aria-hidden="true"
-                />
-              </Button>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onRemove}
+              disabled={disabled}
+              aria-label={`Remove ${name}`}
+              className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
+            >
+              <Trash2
+                className="size-3.5"
+                strokeWidth={1}
+                aria-hidden="true"
+              />
+            </Button>
           )}
         </div>
       )}

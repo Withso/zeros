@@ -75,7 +75,7 @@ describe("chat composer responsive contract", () => {
     expect(pills).toContain('feedbackPlacement === "right"');
     expect(pills).toContain("left-full");
     expect(pills).toContain("bottom-full");
-    expect(pills).toContain("delayDuration={0}");
+    expect(pills).not.toContain("delayDuration={0}");
     expect(pills).toContain("open={labelVisible ? false : tooltipOpen}");
     expect(agentChat).toContain("data-permission-feedback-boundary");
     expect(agentChat).toContain("data-composer-toolbar-actions");

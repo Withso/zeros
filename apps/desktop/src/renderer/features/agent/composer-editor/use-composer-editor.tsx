@@ -39,7 +39,6 @@ import { Placeholder, UndoRedo } from "@tiptap/extensions";
 import { closeHistory } from "@tiptap/pm/history";
 import { X as XIcon } from "lucide-react";
 
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import "./composer-editor.css";
 import { MentionNode, AttachmentNode } from "./nodes";
 import { LocalLinkNode, localLinkPasteSlice } from "./local-link-node";
@@ -1292,22 +1291,20 @@ export function useComposerEditor(
                 if (e.target === e.currentTarget) closePreview();
               }}
             >
-              <Tooltip label="Close">
-                <button
-                  type="button"
-                  className={
-                    // bg3 fill is intentional: a floating control OVER the
-                    // lightbox scrim, not a chip on an app surface — the
-                    // veil beneath it is never bg1/bg2 in either theme.
-                    // check:ui ignore-next (floating control over the scrim)
-                    "border-border1 bg-bg3 text-fg1 hover:bg-bg2-hover absolute top-4 right-4 inline-flex size-8 cursor-pointer items-center justify-center rounded-sm border"
-                  }
-                  onClick={closePreview}
-                  aria-label="Close preview"
-                >
-                  <XIcon size={16} />
-                </button>
-              </Tooltip>
+              <button
+                type="button"
+                className={
+                  // bg3 fill is intentional: a floating control OVER the
+                  // lightbox scrim, not a chip on an app surface — the
+                  // veil beneath it is never bg1/bg2 in either theme.
+                  // check:ui ignore-next (floating control over the scrim)
+                  "border-border1 bg-bg3 text-fg1 hover:bg-bg2-hover absolute top-4 right-4 inline-flex size-8 cursor-pointer items-center justify-center rounded-sm border"
+                }
+                onClick={closePreview}
+                aria-label="Close preview"
+              >
+                <XIcon size={16} />
+              </button>
               <img
                 src={previewSrc}
                 alt=""

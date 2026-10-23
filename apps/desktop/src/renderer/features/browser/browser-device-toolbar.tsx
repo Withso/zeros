@@ -419,7 +419,7 @@ export function BrowserDeviceToolbar({
       </Tooltip>
 
       <DropdownMenu>
-        <Tooltip label="Zoom">
+        <Tooltip label="Zoom" delayDuration={1500}>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
@@ -464,17 +464,15 @@ export function BrowserDeviceToolbar({
       </DropdownMenu>
 
       <div className="min-w-0 flex-1" />
-      <Tooltip label="Close device toolbar">
-        <Button
-          variant="ghost"
-          size="icon-compact"
-          className="text-fg2 hover:text-fg1 shrink-0"
-          onClick={onClose}
-          aria-label="Close device toolbar"
-        >
-          <X aria-hidden="true" />
-        </Button>
-      </Tooltip>
+      <Button
+        variant="ghost"
+        size="icon-compact"
+        className="text-fg2 hover:text-fg1 shrink-0"
+        onClick={onClose}
+        aria-label="Close device toolbar"
+      >
+        <X aria-hidden="true" />
+      </Button>
     </div>
   );
 }

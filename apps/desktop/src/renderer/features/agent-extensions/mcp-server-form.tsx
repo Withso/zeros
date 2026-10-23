@@ -176,17 +176,15 @@ function ArgRow({
         className="font-mono text-sm"
         aria-label="Argument"
       />
-      <Tooltip label="Remove">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={onRemove}
-          className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary shrink-0"
-          aria-label="Remove argument"
-        >
-          <Trash2 className="size-3.5" aria-hidden="true" />
-        </Button>
-      </Tooltip>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        onClick={onRemove}
+        className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary shrink-0"
+        aria-label="Remove argument"
+      >
+        <Trash2 className="size-3.5" aria-hidden="true" />
+      </Button>
     </div>
   );
 }
@@ -226,17 +224,15 @@ function KvRow({
         aria-label="Value"
         autoComplete="off"
       />
-      <Tooltip label="Remove">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={onRemove}
-          className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
-          aria-label="Remove"
-        >
-          <Trash2 className="size-3.5" aria-hidden="true" />
-        </Button>
-      </Tooltip>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        onClick={onRemove}
+        className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
+        aria-label="Remove"
+      >
+        <Trash2 className="size-3.5" aria-hidden="true" />
+      </Button>
     </div>
   );
 }
@@ -690,7 +686,7 @@ export function McpServerFormPage({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <Tooltip label="Paste a JSON MCP config">
+            <Tooltip label="Paste JSON">
               <Button
                 variant="secondary"
                 size="sm"

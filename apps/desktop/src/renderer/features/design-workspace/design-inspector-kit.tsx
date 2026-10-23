@@ -68,8 +68,9 @@ export function InspectorSection({
 // --- ACTIONS ---
 
 interface InspectorIconButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  /** Accessible name and tooltip text. */
+  /** Accessible name, independent of optional hover help. */
   label: string;
+  /** Opt in for unfamiliar icons; routine add/remove actions stay quiet. */
   tooltip?: React.ReactNode;
   shortcut?: React.ReactNode;
   /** 24px for headers and trailing row actions, 28px for a row control. */
@@ -77,7 +78,7 @@ interface InspectorIconButtonProps extends React.ButtonHTMLAttributes<HTMLButton
   pressed?: boolean;
 }
 
-/** A quiet 24/28px glyph button that always carries a name and a tooltip. It
+/** A quiet 24/28px glyph button with a name and optional hover help. It
  * forwards its ref so Popover/DropdownMenu triggers can wrap it. */
 export const InspectorIconButton = React.forwardRef<
   HTMLButtonElement,
@@ -96,7 +97,14 @@ export const InspectorIconButton = React.forwardRef<
   ref,
 ) {
   return (
-    <Tooltip label={tooltip ?? label} shortcut={shortcut}>
+    <Tooltip
+      label={tooltip}
+      shortcut={shortcut}
+      delayDuration={props["aria-haspopup"] ? 1500 : undefined}
+      disabled={
+        props["aria-expanded"] === true || props["aria-expanded"] === "true"
+      }
+    >
       <button
         ref={ref}
         type="button"
@@ -465,7 +473,15 @@ export const DesignToolbarButton = React.forwardRef<
   ref,
 ) {
   return (
-    <Tooltip label={tooltip ?? label} shortcut={shortcut} side={tooltipSide}>
+    <Tooltip
+      label={tooltip ?? label}
+      shortcut={shortcut}
+      side={tooltipSide}
+      delayDuration={props["aria-haspopup"] ? 1500 : undefined}
+      disabled={
+        props["aria-expanded"] === true || props["aria-expanded"] === "true"
+      }
+    >
       <button
         ref={ref}
         type="button"

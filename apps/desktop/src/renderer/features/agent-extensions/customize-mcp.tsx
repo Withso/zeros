@@ -301,7 +301,7 @@ function ServerRow({
                 {name}
               </span>
               {repoScope && gatewayManaged && (
-                <Tooltip label="Gateway auth (OAuth / brokered header) works for User servers only — this entry is ignored here. Move it to the User scope.">
+                <Tooltip label="Requires user scope">
                   <span className="border-red-primary/40 text-red-primary text-xxs shrink-0 rounded-sm border px-1 py-px font-medium select-none">
                     User-only auth
                   </span>
@@ -348,28 +348,26 @@ function ServerRow({
               </Tooltip>
             ))}
           {!repoScope && isOauth && gateway && !gwDown && st === "needs-auth" && (
-            <Tooltip label="Sign in">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={gateway.onSignIn}
-                disabled={gateway.signInBlocked || busy}
-              >
-                {gateway.signingIn ? (
-                  <ZerosSpinner size={16} />
-                ) : (
-                  <LogIn className="size-3.5" aria-hidden="true" />
-                )}
-                Sign in
-              </Button>
-            </Tooltip>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={gateway.onSignIn}
+              disabled={gateway.signInBlocked || busy}
+            >
+              {gateway.signingIn ? (
+                <ZerosSpinner size={16} />
+              ) : (
+                <LogIn className="size-3.5" aria-hidden="true" />
+              )}
+              Sign in
+            </Button>
           )}
           {!repoScope &&
             isOauth &&
             gateway?.onBeginHeadless &&
             !gwDown &&
             st === "needs-auth" && (
-              <Tooltip label="Authorize on another device">
+              <Tooltip label="Device login">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -390,29 +388,25 @@ function ServerRow({
             aria-label={enabled ? "Disable server" : "Enable server"}
             className="mr-1"
           />
-          <Tooltip label="Edit">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={onEdit}
-              disabled={busy}
-              aria-label="Edit server"
-            >
-              <Pencil className="size-3.5" aria-hidden="true" />
-            </Button>
-          </Tooltip>
-          <Tooltip label="Remove">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={onRemove}
-              disabled={busy}
-              className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
-              aria-label="Remove server"
-            >
-              <Trash2 className="size-3.5" aria-hidden="true" />
-            </Button>
-          </Tooltip>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onEdit}
+            disabled={busy}
+            aria-label="Edit server"
+          >
+            <Pencil className="size-3.5" aria-hidden="true" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onRemove}
+            disabled={busy}
+            className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
+            aria-label="Remove server"
+          >
+            <Trash2 className="size-3.5" aria-hidden="true" />
+          </Button>
         </div>
       </div>
       {showTools && canExpand && (
@@ -472,7 +466,7 @@ function InheritedServerRow({
           <div className="text-fg2 truncate font-mono text-xs">{endpoint}</div>
         </div>
       </div>
-      <Tooltip label="Copy into your user servers to edit">
+      <Tooltip label="Copy server">
         <Button
           variant="secondary"
           size="sm"
@@ -804,7 +798,7 @@ export function CustomizeMcpSection({
         description={scopeBlurb}
         action={
           isUser ? (
-            <Tooltip label="Import servers found in Cursor / Claude / Codex configs">
+            <Tooltip label="Import servers">
               <Button
                 variant="secondary"
                 size="sm"

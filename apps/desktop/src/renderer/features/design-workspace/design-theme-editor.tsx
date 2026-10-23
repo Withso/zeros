@@ -920,9 +920,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                 Theme editor
               </DialogPrimitive.Title>
             </div>
-            <Tooltip className="zd-theme-tooltip" label="Close theme editor">
-              <DialogCloseButton aria-label="Close theme editor" />
-            </Tooltip>
+            <DialogCloseButton aria-label="Close theme editor" />
             <DialogPrimitive.Description className="sr-only">
               Edit CSS variables and preview themes on the canvas.
             </DialogPrimitive.Description>
@@ -1037,21 +1035,19 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                         <ClipboardPaste />
                       </Button>
                     </Tooltip>
-                    <Tooltip className="zd-theme-tooltip" label="New variable">
-                      <Button
-                        ref={newVariableTriggerRef}
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="zd-icon-button"
-                        data-size="row"
-                        aria-label="New variable"
-                        aria-expanded={newVariableOpen}
-                        onClick={toggleNewVariable}
-                      >
-                        <Plus />
-                      </Button>
-                    </Tooltip>
+                    <Button
+                      ref={newVariableTriggerRef}
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="zd-icon-button"
+                      data-size="row"
+                      aria-label="New variable"
+                      aria-expanded={newVariableOpen}
+                      onClick={toggleNewVariable}
+                    >
+                      <Plus />
+                    </Button>
                   </>
                 )}
               </div>
@@ -1182,7 +1178,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                         ) : (
                           <Tooltip
                             className="zd-theme-tooltip"
-                            label="Double-click to rename"
+                            label="Rename"
                             shortcut="F2"
                           >
                             <button

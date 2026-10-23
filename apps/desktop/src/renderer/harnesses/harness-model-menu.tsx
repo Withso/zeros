@@ -232,7 +232,7 @@ async function main() {
 
     return (
       <AuthContext.Provider value={auth}><ActionsCtx.Provider value={sessions}>
-      <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+      <TooltipProvider delayDuration={query.has("tooltip-policy") ? undefined : 500} skipDelayDuration={0}>
         <ComposerConcealedContext.Provider value={false}>
           {SettingsPage ? <div id="default-model-settings" className="bg-bg1 text-fg1 flex h-screen flex-col"><SettingsPage /></div> :
           <div

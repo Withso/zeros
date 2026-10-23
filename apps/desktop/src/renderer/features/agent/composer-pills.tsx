@@ -289,7 +289,7 @@ export function EffortPill({
   const next = levels[(idx + 1) % levels.length];
 
   return (
-    <Tooltip label="Adjust effort level">
+    <Tooltip label="Reasoning">
       <button
         type="button"
         onClick={() => {
@@ -336,7 +336,7 @@ export function FastPill({
   onToggle: () => void;
 }) {
   return (
-    <Tooltip label={active ? "Disable fast mode" : "Enable fast mode"}>
+    <Tooltip label="Fast mode">
       <button
         type="button"
         onClick={onToggle}
@@ -538,7 +538,7 @@ export function PermissionToggle({
     <span className="relative inline-flex shrink-0 items-center">
       <Tooltip
         label={current.label}
-        delayDuration={0}
+        disabled={labelVisible}
         open={labelVisible ? false : tooltipOpen}
         onOpenChange={setTooltipOpen}
       >

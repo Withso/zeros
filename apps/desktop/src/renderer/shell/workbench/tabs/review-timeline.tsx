@@ -334,7 +334,7 @@ function TimelineCard({
         </span>
         <div className="flex-1" />
         {item.body && !optimistic && (
-          <Tooltip label="Quote this in the chat composer">
+          <Tooltip label="Quote">
             <button
               type="button"
               onClick={() =>

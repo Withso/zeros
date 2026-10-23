@@ -687,7 +687,7 @@ export function FileViewer({
         {/* Viewed — when the file has changes. Dims its Changes-list row and
           auto-advances to the next change (D3). */}
         {hasDiff && (
-          <Tooltip label={viewed ? "Mark as not viewed" : "Mark as viewed"}>
+          <Tooltip label={viewed ? "Mark unviewed" : "Mark viewed"}>
             <button
               type="button"
               onClick={toggleViewed}
@@ -709,7 +709,7 @@ export function FileViewer({
           with uncommitted work (discardable) and a writable target. */}
         {discardable && !sourceReadOnly && (!fileMissing || diffAvailable) && (
           <Tooltip
-            label={isNewFile ? "Delete untracked file" : "Discard changes"}
+            label={isNewFile ? "Delete file" : "Discard changes"}
           >
             <button
               type="button"

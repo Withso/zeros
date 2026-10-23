@@ -144,7 +144,7 @@ export function InlineLoginTerminal({
           )}
         </span>
         {loginProvider && (
-          <Tooltip label="Paste into terminal">
+          <Tooltip label="Paste">
             <Button
               type="button"
               variant="ghost"
@@ -169,18 +169,16 @@ export function InlineLoginTerminal({
             </Button>
           </Tooltip>
         )}
-        <Tooltip label="Close terminal">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Close terminal"
-            onClick={onClose}
-            className="shrink-0"
-          >
-            <X className="size-4" aria-hidden="true" />
-          </Button>
-        </Tooltip>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Close terminal"
+          onClick={onClose}
+          className="shrink-0"
+        >
+          <X className="size-4" aria-hidden="true" />
+        </Button>
       </div>
       {pasteError && (
         <p className="text-fg2 px-3 pt-2 text-xs" role="alert">

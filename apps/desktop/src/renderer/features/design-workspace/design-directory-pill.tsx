@@ -53,8 +53,8 @@ export function DesignDirectoryPill({
         label="Toggle Layers and Inspector"
         tooltip={
           panelVisible
-            ? "Hide Layers and Inspector"
-            : "Show Layers and Inspector"
+            ? "Hide panels"
+            : "Show panels"
         }
         shortcut={"⌘\\"}
         tooltipSide="bottom"

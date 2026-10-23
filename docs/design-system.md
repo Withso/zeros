@@ -267,6 +267,24 @@ toasts) · `rounded-full` (true circles). Derived surface recipes:
 8 · 10 · 12, plus `px`. Half steps (2/6/10/14px) belong inside controls and dense
 rows; layout gaps prefer `gap-1` `gap-2` `gap-3` `gap-4` `gap-6`.
 
+**Tooltips:** use the shared `Tooltip` only when it adds useful information:
+an unfamiliar icon, a shortcut, a disabled-action reason, or hidden/truncated
+content. Visible labels, repository row actions, Design layers and property
+add/remove buttons, routine plus/close/overflow controls, and standard browser
+navigation stay quiet. Keep accessible names and keyboard shortcuts on controls
+even when removing their hover hint. Inspector icon buttons opt in with
+`tooltip`; a `label` alone supplies their accessible name.
+
+Tooltip text uses `text-3xxs` (12px), `px-2 py-1` (8px horizontal / 4px vertical)
+and `rounded-sm` (4px). Ordinary hints wait 1000ms; retained menu/popover hints
+wait 1500ms and are suppressed while the popup is open. Each hint owns its hover
+delay so moving between neighbors never warms an instant-open group. Keyboard
+focus still exposes help, Escape dismisses it, and pointer-driven focus does
+not open it. Prefer one or two words in sentence case; preserve meaningful
+paths, values and failure explanations rather than shortening away information.
+`scripts/ui-smoke-tooltips.mjs` checks timing, geometry in both themes, focus,
+surface replacement, and Local/organization-local/cloud composer behavior.
+
 **Feedback:** outcomes of user actions (save, discard, merge, fork) use the
 single app-wide toast surface — `toast` / `toast.error` / `toast.success` from
 `shared/ui/primitives/elements`. Persistent state stays with its owner: a form

@@ -883,7 +883,7 @@ export function ChangesSurface({
   );
 
   const sidebarToggle = (
-    <Tooltip label={sidebarVisible ? "Hide changes list" : "Show changes list"}>
+    <Tooltip label={sidebarVisible ? "Hide changes" : "Show changes"}>
       <Button
         variant="ghost"
         size="icon-sm"

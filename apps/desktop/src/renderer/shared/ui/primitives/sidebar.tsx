@@ -128,7 +128,7 @@ function SidebarProvider({
 
   return (
     <SidebarContext.Provider value={contextValue}>
-      <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+      <TooltipProvider>
         <div
           data-slot="sidebar-wrapper"
           style={
@@ -283,7 +283,7 @@ function SidebarRail({ className, ...props }: React.ComponentProps<"button">) {
   const { toggleSidebar } = useSidebar()
 
   return (
-    <Tooltip label="Toggle Sidebar">
+    <Tooltip label="Sidebar">
       <button
         data-sidebar="rail"
         data-slot="sidebar-rail"

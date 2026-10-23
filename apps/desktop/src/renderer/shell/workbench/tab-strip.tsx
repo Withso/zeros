@@ -380,7 +380,7 @@ function TabPill({
       )}
       {browserWorking ? (
         <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-9 items-center justify-end bg-gradient-to-l from-55% to-transparent pr-1.5 pl-3">
-          <Tooltip label="Stop agent browser work">
+          <Tooltip label="Stop browser">
             <IconButton
               type="button"
               onClick={stopAgentBrowser}
@@ -403,23 +403,17 @@ function TabPill({
         // shift. focus-within keeps it visible for keyboard users. Reveal keys
         // off the strip-driven data-hovered, not :hover (sticky-strip rule).
         <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1.5 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100">
-          <Tooltip
-            label={
-              tab.type === "files" && tab.fixed ? "Close file" : "Close tab"
-            }
+          <IconButton
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose(e, browserActivity?.browserSessionId);
+            }}
+            label={`Close ${tab.title}`}
+            className="pointer-events-auto shrink-0"
           >
-            <IconButton
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onClose(e, browserActivity?.browserSessionId);
-              }}
-              label={`Close ${tab.title}`}
-              className="pointer-events-auto shrink-0"
-            >
-              <X className="size-3.5" />
-            </IconButton>
-          </Tooltip>
+            <X className="size-3.5" />
+          </IconButton>
         </div>
       ) : null}
     </div>

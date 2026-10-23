@@ -51,20 +51,18 @@ export function AddedDirectories({ dirs, onRemove }: AddedDirectoriesProps) {
           >
             <Folder size={13} className="shrink-0 text-fg2" />
             <span className="min-w-0 truncate text-fg1">{baseName(dir)}</span>
-            <Tooltip label="Remove">
-              <Button
-                type="button"
-                variant="ghost"
-                aria-label={`Remove directory access: ${dir}`}
-                onClick={() => onRemove(dir)}
-                className={cn(
-                  "flex size-4 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 text-fg2",
-                  "hover:bg-bg1-hover hover:text-fg1",
-                )}
-              >
-                <X size={12} />
-              </Button>
-            </Tooltip>
+            <Button
+              type="button"
+              variant="ghost"
+              aria-label={`Remove directory access: ${dir}`}
+              onClick={() => onRemove(dir)}
+              className={cn(
+                "flex size-4 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 text-fg2",
+                "hover:bg-bg1-hover hover:text-fg1",
+              )}
+            >
+              <X size={12} />
+            </Button>
           </span>
         </Tooltip>
       ))}

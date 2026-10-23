@@ -883,7 +883,7 @@ function ProviderCard({
             <span className="text-fg1 block pr-9 text-xs break-all">
               {agent.installHint.command}
             </span>
-            <Tooltip label="Copy install command">
+            <Tooltip label="Copy command">
               <button
                 type="button"
                 onClick={() => void handleCopyInstall()}

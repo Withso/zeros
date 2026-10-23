@@ -786,21 +786,19 @@ export function TerminalPanel({
           onClose={handleClose}
           onAdd={handleAddTerminal}
           leading={
-            <Tooltip label={expanded ? "Collapse panel" : "Expand panel"}>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="text-fg2 hover:text-fg1 size-7 shrink-0"
-                aria-label={expanded ? "Collapse panel" : "Expand panel"}
-                onClick={() => setExpanded(!expanded)}
-              >
-                {expanded ? (
-                  <ChevronDown className="text-fg2" size={14} />
-                ) : (
-                  <ChevronUp className="text-fg2" size={14} />
-                )}
-              </Button>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-fg2 hover:text-fg1 size-7 shrink-0"
+              aria-label={expanded ? "Collapse panel" : "Expand panel"}
+              onClick={() => setExpanded(!expanded)}
+            >
+              {expanded ? (
+                <ChevronDown className="text-fg2" size={14} />
+              ) : (
+                <ChevronUp className="text-fg2" size={14} />
+              )}
+            </Button>
           }
           trailing={
             <>
@@ -819,7 +817,7 @@ export function TerminalPanel({
                     onStop={() => stopRun(panelEntry.runActionId!)}
                   />
                 )}
-              <Tooltip label="Move terminal to tab bar">
+              <Tooltip label="Undock terminal">
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -1537,17 +1535,15 @@ function TerminalSubTabStrip({
         {/* The "+" sits OUTSIDE the scroll lane: it hugs the last tab while
             they fit, then stays put while only the tabs scroll. */}
         <div className="flex h-full shrink-0 items-center">
-          <Tooltip label="New terminal">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="text-fg2 hover:text-fg1 size-7 shrink-0"
-              aria-label="New terminal"
-              onClick={onAdd}
-            >
-              <Plus className="text-fg2" size={14} />
-            </Button>
-          </Tooltip>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-fg2 hover:text-fg1 size-7 shrink-0"
+            aria-label="New terminal"
+            onClick={onAdd}
+          >
+            <Plus className="text-fg2" size={14} />
+          </Button>
         </div>
         <div className="min-w-0 flex-1" aria-hidden="true" />
       </div>
