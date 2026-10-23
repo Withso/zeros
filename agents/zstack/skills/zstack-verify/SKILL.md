@@ -139,7 +139,9 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   each concurrent agent its own PostgreSQL 18 server, not only its own
   database: migration 0004 creates the cluster-wide `zeros_app` role with a
   check-then-create race. Without Docker or sudo, signature-verified PGDG
-  packages unpacked with `dpkg -x` run as an unprivileged user.
+  packages unpacked with `dpkg -x` run as an unprivileged user. On Amazon
+  Linux, install `postgresql18-server` and `postgresql18-contrib`: without
+  contrib, migration 0001 fails creating `citext` (SQLSTATE 0A000).
 - Parallel schema resets in separate databases on one retained test server
   still share PostgreSQL's lock table. Size `max_locks_per_transaction` for
   that concurrency before sharding; `out of shared memory` at reset is a

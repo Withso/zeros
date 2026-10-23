@@ -20,6 +20,9 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
   can change from task to task.
   - The master owns Git, integration and the final review of every diff.
   - Subagents return frozen patches with a SHA and evidence, not commits.
+  - A subagent's hand-picked test selection is not evidence. Require whole
+    touched test directories, and run the full suite yourself before each
+    commit: suites coupled by source text or CI scope fail far from the edit.
   - Never start agents or sessions the user did not authorize.
   - When a subagent's progress feed is quiet for longer than its usual
     cadence, check its session status through the host and send its next
