@@ -22,12 +22,16 @@ import type {
   ResourceLinkContent,
 } from "./agent-events";
 
+import type { TurnSummary } from "./turns";
+
 export type AgentMessageRole = "user" | "agent" | "thought" | "system";
 
 export interface AgentTextMessage {
   id: string;
   kind: "text";
   role: AgentMessageRole;
+  /** Worker-recorded changes, mirrored with the opening user prompt. */
+  turnSummary?: TurnSummary;
   text: string;
   /** Payload-free durable tombstone for an explicitly withdrawn native frame. */
   retracted?: true;

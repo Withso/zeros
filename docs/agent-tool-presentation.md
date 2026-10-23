@@ -958,7 +958,23 @@ Regression coverage must include Stop with multiple follow-ups, selected sends,
 new composer sends, edit holds, duplicate clicks, lost/late acknowledgements,
 query replacement, host disposal, buffered input, and native cancellation receipts.
 
-## Turn usage in the output footer
+## Turn changes and usage in the output footer
+
+Keep duration, copy and the action menu in the settled turn's toolbar. Below
+it, recorded changes use one `bg1-highlight` card with a `border2` outline:
+filename/icon on the left and additions/deletions on the right. Show four
+files initially, followed by **Show N more** when needed. Expanded files use
+a ten-row (280px) scroll area; the header and **Review** stay visible. Keyboard
+expansion moves focus to the first newly revealed file, and changing turns
+resets the disclosure.
+
+Review publishes the Changes tab with the explicit selected turn range,
+including for the latest turn, so later work cannot retarget it. File rows
+retain their exact historical diff navigation. Apply this to Claude, Codex
+and Cursor in Personal Local, organization-local and cloud workspaces. Local
+uses keyed turn records; cloud uses the worker's mirrored opening-message
+summary, without waking the VM for passive transcript reads or hover previews.
+No recorded changes means no card; raw tool proposals are never a fallback.
 
 The timer is the only usage-card trigger. Show Input, Output, Cache read and
 one Total cost with agent/start/end details. Keep unknown distinct from zero,
