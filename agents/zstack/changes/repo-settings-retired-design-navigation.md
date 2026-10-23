@@ -14,3 +14,7 @@
 - Fixture lesson: cloud repository IDs come from the cloud catalog; the Local
   registry intentionally excludes cloud roots. Seed that catalog for reload
   coverage instead of assigning a fresh Local project ID on each load.
+- CI caught an old accessible-label selector in the plain-folder browser smoke.
+  Trace accessible names as well as imports when retiring a navigation mode;
+  `scripts/ui-smoke-folder-workspace.mjs` retains the capability checks and now
+  also asserts that plain-folder settings have no retired Design controls.

@@ -161,14 +161,25 @@ export async function runFolderWorkspaceSmoke({ page, check }) {
     .getByRole("button", { name: "Show folder settings", exact: true })
     .click();
   const tabs = page.getByRole("tablist", {
-    name: "Code repository settings",
+    name: "Repository settings",
     exact: true,
   });
-  for (const hidden of ["Workspaces", "Git", "Files"]) {
+  for (const hidden of [
+    "Workspaces",
+    "Git",
+    "Files",
+    "Directory",
+    "Preferences",
+  ]) {
     await expect(
       tabs.getByRole("tab", { name: hidden, exact: true }),
     ).toHaveCount(0);
   }
+  await expect(
+    page.locator("[data-repo-settings-navigation]").getByRole("button", {
+      name: /Code mode|Design mode/,
+    }),
+  ).toHaveCount(0);
   await expect(
     tabs.getByRole("tab", { name: "Environment", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
