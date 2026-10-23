@@ -144,7 +144,7 @@ export const designDirectoryTargetCache = new KeyedAsyncCache<{
   directory: string;
   exists: boolean;
 } | null>(64);
-/** Personal repository Design settings, including stable registry IDs. */
+/** Design workbench directory choices, including stable registration IDs. */
 export const designDirectoryListingCache = new KeyedAsyncCache<
   Awaited<ReturnType<typeof bridgeDesignListDirectories>>
 >(32);

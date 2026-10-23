@@ -66,7 +66,7 @@ describe("Design workbench status", () => {
   it("never claims configuration is missing before the first lookup", () => {
     const html = markup();
     expect(html).toContain("Checking Design directory…");
-    expect(html).not.toContain("Choose a Design directory");
+    expect(html).not.toContain("No Design directory available.");
     expect(html).not.toContain("Design settings");
   });
   it("publishes a lookup failure and keeps the centre neutral without actions", () => {
@@ -108,15 +108,16 @@ describe("Design workbench status", () => {
       "ws:status-workspace",
     );
   });
-  it("retains a confirmed unknown directory and its settings action during failed revalidation", () => {
+  it("retains a confirmed unknown directory during failed revalidation without a retired settings action", () => {
     mocks.target.data = null;
     mocks.checkout.data = { conflicts: [], paused: false, operation: null };
     mocks.target.error = new Error("engine disconnected");
-    expect(markup()).toContain("Choose a Design directory");
-    expect(markup()).toContain("Design settings");
+    expect(markup()).toContain("No Design directory available.");
+    expect(markup()).not.toContain("Design settings");
   });
-  it("preserves the Local main settings action while workspace lookup is inapplicable", () => {
+  it("keeps the Local main workspace guidance without a retired settings action", () => {
     mocks.localMain = true;
-    expect(markup()).toContain("Design settings");
+    expect(markup()).toContain("Open a workspace to edit Design.");
+    expect(markup()).not.toContain("Design settings");
   });
 });

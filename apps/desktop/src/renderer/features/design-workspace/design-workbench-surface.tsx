@@ -10,7 +10,6 @@ import type {
 } from "../../platform/git";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
-import { useWorkspaceDispatch } from "../../state/store";
 import { useProjectForFolder } from "../../state/use-projects";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import {
@@ -56,7 +55,6 @@ export function DesignWorkbenchSurface({
   );
   const refreshTarget = target.refresh;
   const project = useProjectForFolder(folder);
-  const dispatch = useWorkspaceDispatch();
   const [creating, setCreating] = useState(false);
   const loadError = target.error ?? checkout.error;
   useWorkbenchStatusSource(
@@ -176,23 +174,8 @@ export function DesignWorkbenchSurface({
           ? "Open a workspace to edit Design."
           : target.data !== null || target.loading || checkout.loading
             ? "Checking Design directory…"
-            : "Choose a Design directory in repository settings."}
+            : "No Design directory available."}
       </p>
-      {project && (localMain || target.data !== undefined) && target.data?.exists !== false && (
-        <Button
-          variant="ghost"
-          disabled={!active || creating}
-          onClick={() =>
-            dispatch({
-              type: "OPEN_REPO_PAGE",
-              projectId: project.id,
-              view: "design-preferences",
-            })
-          }
-        >
-          Design settings
-        </Button>
-      )}
     </div>
   );
 }

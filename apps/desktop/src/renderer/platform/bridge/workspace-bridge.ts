@@ -2759,15 +2759,11 @@ export async function bridgeSettingsWrite(
   layer: Exclude<SettingsLayer, "managed">,
   patch: SettingsDoc,
   repoRoot?: string,
-  options: { confirmDesignDirectoryChange?: boolean } = {},
 ): Promise<SettingsWriteWire> {
   return (await workspaceOp(bridge, "settings.write", {
     layer,
     patch,
     ...(repoRoot ? { repoRoot } : {}),
-    ...(options.confirmDesignDirectoryChange
-      ? { confirmDesignDirectoryChange: true }
-      : {}),
   })) as SettingsWriteWire;
 }
 

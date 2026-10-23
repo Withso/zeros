@@ -33,8 +33,6 @@ describe("repository settings capabilities", () => {
     "environment",
     "actions",
     "paths",
-    "design",
-    "design-preferences",
   ])("keeps %s available without Git", (view) => {
     expect(isRepoPageViewAvailable(folder, view)).toBe(true);
     expect(effectiveRepoPageView(folder, view)).toBe(view);

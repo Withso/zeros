@@ -267,8 +267,6 @@ describe("loadPersistedUiState — scoped navigation", () => {
       "git",
       "actions",
       "files",
-      "design",
-      "design-preferences",
       "paths",
     ] as const;
     localStorage.setItem(
@@ -309,56 +307,104 @@ describe("loadPersistedUiState — scoped navigation", () => {
     });
   });
 
-  it("restores mode-specific repository tabs and rejects tabs in the wrong mode", () => {
-    localStorage.setItem(
-      KEY,
-      JSON.stringify({
-        activePage: "repo",
-        activeRepoId: "project-a",
-        repoPageViewByProject: { "project-a": "design-preferences" },
-        repoPageViewByModeByProject: {
-          "project-a": { code: "git", design: "design-preferences" },
-          "project-b": { code: "design", design: "files" },
-          "project-c": { code: "paths", design: "unknown" },
-          "project-d": null,
-          "project-e": ["git"],
-          "": { code: "git" },
-        },
-      }),
-    );
-    expect(loadPersistedUiState()).toMatchObject({
-      activePage: "repo",
-      activeRepoId: "project-a",
-      repoPageViewByProject: { "project-a": "design-preferences" },
-      repoPageViewByModeByProject: {
-        "project-a": { code: "git", design: "design-preferences" },
-        "project-c": { code: "paths" },
-      },
-    });
-    expect(
-      Object.keys(loadPersistedUiState().repoPageViewByModeByProject!),
-    ).toHaveLength(2);
-  });
+  it.each(["design", "design-preferences"])(
+    "migrates retired repository Design destination %s within each owner",
+    (view) => {
+      localStorage.setItem(
+        KEY,
+        JSON.stringify({
+          activePage: "repo",
+          activeRepoId: "cloud-project",
+          repoPageViewByProject: {
+            "local-project": view,
+            "organization-local-project": view,
+            "cloud-project": view,
+            "unchanged-project": "files",
+          },
+          repoPageViewByModeByProject: {
+            "local-project": { code: "git", design: view },
+            "organization-local-project": { code: "paths", design: view },
+            "cloud-project": { code: "design", design: view },
+            "unchanged-project": { code: "git", design: view },
+          },
+        }),
+      );
 
-  it("bounds repository mode memories to the newest 128 owners", () => {
+      const restored = loadPersistedUiState();
+      expect(restored).toMatchObject({
+        activePage: "repo",
+        activeRepoId: "cloud-project",
+        repoPageViewByProject: {
+          "local-project": "git",
+          "organization-local-project": "paths",
+          "cloud-project": "environment",
+          "unchanged-project": "files",
+        },
+      });
+      expect(restored).not.toHaveProperty("repoPageViewByModeByProject");
+    },
+  );
+
+  it.each([
+    undefined,
+    null,
+    [],
+    { project: null },
+    { project: ["git"] },
+    { project: { code: "unknown" } },
+  ])(
+    "falls back from retired repository Design tabs with malformed mode memory %j",
+    (modeMemory) => {
+      localStorage.setItem(
+        KEY,
+        JSON.stringify({
+          repoPageViewByProject: { project: "design" },
+          repoPageViewByModeByProject: modeMemory,
+        }),
+      );
+      expect(loadPersistedUiState().repoPageViewByProject).toEqual({
+        project: "environment",
+      });
+    },
+  );
+
+  it.each(["design", "design-preferences"])(
+    "migrates retired repository Design global selection %s",
+    (view) => {
+      localStorage.setItem(
+        KEY,
+        JSON.stringify({ activePage: "repo", activeRepoId: "project-a" }),
+      );
+      localStorage.setItem("zeros-repo-page:view", JSON.stringify(view));
+      expect(loadPersistedUiState().repoPageViewByProject).toEqual({
+        "project-a": "environment",
+      });
+    },
+  );
+
+  it("bounds migrated repository tabs to the newest 128 owners", () => {
+    const owners = Array.from(
+      { length: 140 },
+      (_, index) => `project-${index}`,
+    );
     localStorage.setItem(
       KEY,
       JSON.stringify({
+        repoPageViewByProject: Object.fromEntries(
+          owners.map((id) => [id, "design-preferences"]),
+        ),
         repoPageViewByModeByProject: Object.fromEntries(
-          Array.from({ length: 140 }, (_, index) => [
-            `project-${index}`,
+          owners.map((id) => [
+            id,
             { code: "git", design: "design-preferences" },
           ]),
         ),
       }),
     );
-    const restored = loadPersistedUiState().repoPageViewByModeByProject!;
+    const restored = loadPersistedUiState().repoPageViewByProject!;
     expect(Object.keys(restored)).toHaveLength(128);
     expect(restored["project-0"]).toBeUndefined();
-    expect(restored["project-139"]).toEqual({
-      code: "git",
-      design: "design-preferences",
-    });
+    expect(restored["project-139"]).toBe("git");
   });
 
   it("attributes the former global repo view to the active repo on upgrade", () => {

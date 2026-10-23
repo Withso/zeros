@@ -1106,8 +1106,7 @@ export async function bridgeDesignCommit(
 
 /** Every design folder in a checkout (recognized by its committed
  *  `.zeros-canvas.json` marker) plus the resolved `[design] directory`
- *  pointer. `workspaceId` may be a workspace id or a known repo root — the
- *  repo settings Design tab passes the main checkout. */
+ *  pointer. `workspaceId` may be a workspace id or a known repo root. */
 export interface DesignDirectoryListingWire {
   /** Stable identities from this checkout's tracked registry. */
   directoryIds?: Record<string, string>;
@@ -1131,50 +1130,4 @@ export async function bridgeDesignListDirectories(
   return (await workspaceOp(bridge, "design.listDirectories", {
     workspaceId,
   })) as DesignDirectoryListingWire;
-}
-
-/** Rename the Design folder in one explicit main-checkout commit. Compatible
- * live workspaces keep their own checkout paths through stable directory IDs. */
-export async function bridgeDesignRenameDirectory(
-  bridge: RuntimeClient,
-  args: { repoRoot: string; from: string; to: string },
-): Promise<{ committedPointer: boolean }> {
-  return (await workspaceOp(bridge, "design.renameDirectory", {
-    ...args,
-  })) as { committedPointer: boolean };
-}
-
-export async function bridgeDesignRemoveDirectory(
-  bridge: RuntimeClient,
-  args: { repoRoot: string; directory: string },
-): Promise<void> {
-  await workspaceOp(bridge, "design.removeDirectory", { ...args });
-}
-
-export interface DesignFolderPreviewWire {
-  directory: string;
-  metadataSource: "folder" | "git" | "rebuild";
-  frameCount: number;
-  revision: string;
-}
-export async function bridgePreviewExistingDesignDirectory(
-  bridge: RuntimeClient,
-  repoRoot: string,
-  folder: string,
-): Promise<DesignFolderPreviewWire> {
-  return (await workspaceOp(bridge, "design.previewExistingDirectory", {
-    repoRoot,
-    folder,
-  })) as DesignFolderPreviewWire;
-}
-export async function bridgeAdoptDesignDirectory(
-  bridge: RuntimeClient,
-  repoRoot: string,
-  preview: DesignFolderPreviewWire,
-): Promise<{ selected: boolean }> {
-  return (await workspaceOp(bridge, "design.adoptDirectory", {
-    repoRoot,
-    folder: preview.directory,
-    revision: preview.revision,
-  })) as { selected: boolean };
 }

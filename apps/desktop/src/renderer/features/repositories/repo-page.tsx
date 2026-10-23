@@ -5,9 +5,8 @@
 // PAGE: RepoPage
 // ROUTE: activePage === "repo" (store.activeRepoId picks the project)
 // PURPOSE: The Home surface's per-repository hub. A centered page column shows
-//          the repo's logo + name on top, with Code/Design modes beside the
-//          tabs. Code holds Workspaces, Environment, Git, Actions, Files and
-//          Paths; Design holds Directory and Preferences. Scripts and run actions live INSIDE the
+//          the repo's logo + name above Workspaces, Environment, Git, Actions,
+//          Files and Paths tabs. Scripts and run actions live INSIDE the
 //          Environment view (below Secrets). No inner section
 //          nav, no per-page sidebar; Paths carries the repo's identity/paths/
 //          remove-repository content. The only header chrome is the
@@ -42,11 +41,9 @@ import { branchDisplayName } from "../../shared/lib/branch-name";
 import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
 import { StatusIcon } from "../../shared/ui/primitives/status-icon";
 import { WorkspaceContextMenu } from "../../shared/ui/workspace-context-menu";
-import { WorkspaceModeToggleView } from "../../shared/ui/workspace-mode-header";
 import {
   effectiveRepoPageView,
   isRepoPageViewAvailable,
-  repoPageModeForView,
 } from "../../state/repo-page-mode";
 import { RepositoryIcon } from "./repository-icon";
 import {
@@ -101,7 +98,7 @@ import {
 
 // ── View model ───────────────────────────────────────────
 //
-// Each mode has its own tabs, with selection memory owned by the repository.
+// Tab selection memory is owned by the repository.
 // MCP is not a view — it lives on the Customize page (repo scope). Paths IS
 // one: it holds the repo identity (Name / Slug / Origin / Root path), the
 // workspaces-path editor, and Remove repository.
@@ -111,8 +108,6 @@ const CONFIG_VIEW_IDS = [
   "git",
   "actions",
   "files",
-  "design",
-  "design-preferences",
   "paths",
 ] as const satisfies readonly RepoSectionId[];
 
@@ -124,14 +119,8 @@ function isConfigViewId(value: string): value is RepoConfigViewId {
   return (CONFIG_VIEW_IDS as readonly string[]).includes(value);
 }
 
-/** The toggle entries for the settings views, in REPO_SECTIONS order. */
+/** The settings tabs, in REPO_SECTIONS order. */
 const CONFIG_VIEWS = REPO_SECTIONS.filter((s) => isConfigViewId(s.id));
-const CODE_CONFIG_VIEWS = CONFIG_VIEWS.filter(
-  (s) => repoPageModeForView(s.id) === "code",
-);
-const DESIGN_CONFIG_VIEWS = CONFIG_VIEWS.filter(
-  (s) => repoPageModeForView(s.id) === "design",
-);
 /** Retain common repo/view pairs without keeping every repository form alive. */
 const MAX_RETAINED_REPO_VIEWS = 8;
 
@@ -140,7 +129,7 @@ export const DEFAULT_REPO_SETTINGS_VIEW: RepoPageView = "environment";
 
 /** Map a (possibly legacy) settings-section id to a page view. Scripts and
  *  run-actions now live under Environment; MCP has no repo page UI (it lives
- *  on the Customize page) and also lands on the default Environment view. */
+ *  on the Customize page). Retired Design sections also land on Environment. */
 export function repoPageViewForSection(
   section: string | null | undefined,
 ): RepoPageView {
@@ -486,10 +475,9 @@ export function RepoPage({ project }: { project: Project }) {
     selectRepoPageView(state, project.id),
   );
   const view = effectiveRepoPageView(project, persistedView);
-  const mode = repoPageModeForView(view);
-  const configViews = (
-    mode === "code" ? CODE_CONFIG_VIEWS : DESIGN_CONFIG_VIEWS
-  ).filter((section) => isRepoPageViewAvailable(project, section.id));
+  const configViews = CONFIG_VIEWS.filter((section) =>
+    isRepoPageViewAvailable(project, section.id),
+  );
 
   // Recently visited repo/view trees survive repository and section switches.
   // This retains local form state and Keychain-backed rows; the shared settings
@@ -572,7 +560,7 @@ export function RepoPage({ project }: { project: Project }) {
         <OpenRepoSettingsButton repoRoot={project.repoRoot} />
       </div>
 
-      {/* Left-aligned page column: logo + name, the mode toggle and tabs, then the
+      {/* Left-aligned page column: logo + name, the tabs, then the
           active view. The left gutter is responsive, growing with the window
           width but capped at 100px so the content hugs the left on wide screens. */}
       <div ref={pageScrollRef} className="min-h-0 flex-1 overflow-y-auto">
@@ -597,38 +585,23 @@ export function RepoPage({ project }: { project: Project }) {
               className="flex w-full min-w-0 items-center gap-1"
               data-repo-settings-navigation=""
             >
-              <WorkspaceModeToggleView
-                mode={mode}
-                disabled={!pageActive}
-                switching={false}
-                ariaLabel="Repository settings mode"
-                onModeChange={(next) =>
-                  dispatch({
-                    type: "SET_REPO_PAGE_MODE",
-                    projectId: project.id,
-                    mode: next,
-                  })
-                }
-              />
               <Tabs
-                key={mode}
                 value={view}
                 onValueChange={(v) => setView(v as RepoPageView)}
                 className="min-w-0 overflow-x-auto"
               >
                 <TabsList
                   className="h-7"
-                  aria-label={`${mode === "code" ? "Code" : "Design"} repository settings`}
+                  aria-label="Repository settings"
                 >
-                  {mode === "code" &&
-                    isRepoPageViewAvailable(project, "workspaces") && (
-                      <TabsTrigger
-                        value="workspaces"
-                        className="py-0.5 text-xs"
-                      >
-                        Workspaces
-                      </TabsTrigger>
-                    )}
+                  {isRepoPageViewAvailable(project, "workspaces") && (
+                    <TabsTrigger
+                      value="workspaces"
+                      className="py-0.5 text-xs"
+                    >
+                      Workspaces
+                    </TabsTrigger>
+                  )}
                   {configViews.map((s) => (
                     <TabsTrigger
                       key={s.id}

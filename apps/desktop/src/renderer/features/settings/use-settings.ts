@@ -256,10 +256,7 @@ export interface UseSettingsLayer {
    *  engine now echoes back to the writer too (dbChangedIncludesOriginator).
    *  A caller holding optimistic state should therefore yield it when a NEW
    *  resolved snapshot arrives, not when this promise settles. */
-  write: (
-    patch: SettingsDoc,
-    options?: { confirmDesignDirectoryChange?: boolean },
-  ) => Promise<void>;
+  write: (patch: SettingsDoc) => Promise<void>;
   /** Overwrite this layer's file with RAW TOML text (the "Edit settings.toml"
    *  editor). Validated server-side; rejects unparseable TOML. Desktop-only. */
   writeRaw: (text: string) => Promise<void>;
@@ -314,10 +311,7 @@ export function useSettingsLayer(
   useSettingsChanged(refreshFromBroadcast);
 
   const write = useCallback(
-    async (
-      patch: SettingsDoc,
-      options: { confirmDesignDirectoryChange?: boolean } = {},
-    ) => {
+    async (patch: SettingsDoc) => {
       if (!bridge || bridgeStatus !== "connected")
         throw new Error("engine bridge not connected");
       if (layerName === "managed")
@@ -327,7 +321,6 @@ export function useSettingsLayer(
         layerName,
         patch,
         repoRoot,
-        options,
       );
       settingsLayerCache.setData(key, {
         layer: layerName,

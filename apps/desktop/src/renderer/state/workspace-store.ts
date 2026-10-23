@@ -77,7 +77,6 @@ import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fres
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
 import { localTranscriptCache } from "./local-transcript-cache";
 import { loadProjects } from "./projects-store";
-import { DEFAULT_REPO_MODE_VIEWS, repoPageModeForView } from "./repo-page-mode";
 import {
   findProjectForFolder,
   folderIsOwnedByProject,
@@ -101,7 +100,6 @@ import type {
   PendingChatSubmission,
   PendingComposerAppend,
   ProjectConnection,
-  RepoPageMode,
   RepoPageView,
   WorkspacePage,
   WorkspaceState,
@@ -195,11 +193,6 @@ export type Action =
       type: "SET_REPO_PAGE_VIEW";
       projectId: string;
       view: RepoPageView;
-    }
-  | {
-      type: "SET_REPO_PAGE_MODE";
-      projectId: string;
-      mode: RepoPageMode;
     }
   | {
       type: "REMOVE_REPO_UI_STATE";
@@ -541,8 +534,6 @@ const initialState: WorkspaceState = {
   // page without an id falls back to the Dashboard on read).
   activeRepoId: persistedUiState.activeRepoId ?? null,
   repoPageViewByProject: persistedUiState.repoPageViewByProject ?? {},
-  repoPageViewByModeByProject:
-    persistedUiState.repoPageViewByModeByProject ?? {},
   isLoading: false,
   aiSettings: loadAiSettings(),
   // The validated local snapshot is available before React mounts. SQLite is
@@ -650,30 +641,19 @@ export function selectRepoPageView(
   return s.repoPageViewByProject[projectId] ?? "workspaces";
 }
 
-/** Keep the active destination and both mode memories in the same snapshot.
- * The previous active view seeds mode memory for older persisted snapshots. */
+/** Remember the active destination for this exact repository. */
 function rememberRepoPageView(
   state: WorkspaceState,
   projectId: string,
   view: RepoPageView,
 ): WorkspaceState {
   if (state.repoPageViewByProject[projectId] === view) return state;
-  const previous = selectRepoPageView(state, projectId);
   return {
     ...state,
     repoPageViewByProject: setBoundedRecord(
       state.repoPageViewByProject,
       projectId,
       view,
-    ),
-    repoPageViewByModeByProject: setBoundedRecord(
-      state.repoPageViewByModeByProject,
-      projectId,
-      {
-        ...state.repoPageViewByModeByProject[projectId],
-        [repoPageModeForView(previous)]: previous,
-        [repoPageModeForView(view)]: view,
-      },
     ),
   };
 }
@@ -1100,17 +1080,6 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "SET_REPO_PAGE_VIEW": {
       return rememberRepoPageView(state, action.projectId, action.view);
     }
-    case "SET_REPO_PAGE_MODE": {
-      if (
-        repoPageModeForView(selectRepoPageView(state, action.projectId)) ===
-        action.mode
-      )
-        return state;
-      const view =
-        state.repoPageViewByModeByProject[action.projectId]?.[action.mode] ??
-        DEFAULT_REPO_MODE_VIEWS[action.mode];
-      return rememberRepoPageView(state, action.projectId, view);
-    }
     case "REMOVE_REPO_UI_STATE": {
       const removedFolders = [
         action.repoRoot,
@@ -1165,10 +1134,6 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             ? null
             : state.activeChatId,
         repoPageViewByProject,
-        repoPageViewByModeByProject: removeRecordKey(
-          state.repoPageViewByModeByProject,
-          action.projectId,
-        ),
         lastWorkspaceByRepoRoot,
         lastWorkspaceFolder,
         newAgentFolder:
@@ -2366,7 +2331,6 @@ useWorkspaceStore.subscribe((s, prev) => {
     s.lastHomePage !== prev.lastHomePage ||
     s.activeRepoId !== prev.activeRepoId ||
     s.repoPageViewByProject !== prev.repoPageViewByProject ||
-    s.repoPageViewByModeByProject !== prev.repoPageViewByModeByProject ||
     s.activeChatId !== prev.activeChatId ||
     s.newAgentFolder !== prev.newAgentFolder ||
     s.lastWorkspaceFolder !== prev.lastWorkspaceFolder ||

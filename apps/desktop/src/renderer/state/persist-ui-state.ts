@@ -4,12 +4,10 @@
 
 import type {
   HomePage,
-  RepoPageModeViews,
   RepoPageView,
   WorkspacePage,
   WorkspaceState,
 } from "./store";
-import { repoPageModeForView } from "./repo-page-mode";
 import {
   parseWorkspaceListFilter,
   type WorkspaceListFilter,
@@ -34,7 +32,6 @@ export interface PersistedUiState {
   activeRepoId: string | null;
   /** Per-repository hub tab, keyed by stable project id. */
   repoPageViewByProject: Record<string, RepoPageView>;
-  repoPageViewByModeByProject: Record<string, RepoPageModeViews>;
   newAgentFolder: string | null;
   /** The workspace folder the user was last viewing — restored on boot so the
    *  app reopens on the same workspace instead of "No workspace selected". */
@@ -61,8 +58,6 @@ const VALID_REPO_VIEWS = new Set<RepoPageView>([
   "git",
   "actions",
   "files",
-  "design",
-  "design-preferences",
   "paths",
 ]);
 /** Persisted navigation identity is useful, but must not grow forever. */
@@ -111,41 +106,40 @@ function parseBoundedStringMap(
   return Object.fromEntries(entries);
 }
 
-function parseRepoViewMap(raw: unknown): Record<string, RepoPageView> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const entries = Object.entries(raw as Record<string, unknown>)
-    .filter(
-      (entry): entry is [string, RepoPageView] =>
-        entry[0].length > 0 &&
-        typeof entry[1] === "string" &&
-        VALID_REPO_VIEWS.has(entry[1] as RepoPageView),
-    )
-    .slice(-MAX_SCOPED_NAV_ENTRIES);
-  return Object.fromEntries(entries);
+function parseRepoView(raw: unknown): RepoPageView | null {
+  return typeof raw === "string" && VALID_REPO_VIEWS.has(raw as RepoPageView)
+    ? (raw as RepoPageView)
+    : null;
 }
 
-function parseRepoModeViewMap(raw: unknown): Record<string, RepoPageModeViews> {
+/** Retired Design tabs restore this repository's last Code destination. Keep
+ * the old mode map as migration input only, with Environment as the fallback. */
+function parseRepoViewMap(
+  raw: unknown,
+  legacyModes: unknown,
+): Record<string, RepoPageView> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const entries: Array<[string, RepoPageModeViews]> = [];
+  const modeMap =
+    legacyModes &&
+    typeof legacyModes === "object" &&
+    !Array.isArray(legacyModes)
+      ? (legacyModes as Record<string, unknown>)
+      : {};
+  const entries: Array<[string, RepoPageView]> = [];
   for (const [projectId, value] of Object.entries(raw)) {
-    if (
-      !projectId ||
-      !value ||
-      typeof value !== "object" ||
-      Array.isArray(value)
-    )
-      continue;
-    const views: RepoPageModeViews = {};
-    for (const mode of ["code", "design"] as const) {
-      const view = (value as Record<string, unknown>)[mode];
-      if (
-        typeof view === "string" &&
-        VALID_REPO_VIEWS.has(view as RepoPageView) &&
-        repoPageModeForView(view as RepoPageView) === mode
-      )
-        views[mode] = view as RepoPageView;
+    if (!projectId) continue;
+    let view = parseRepoView(value);
+    if (value === "design" || value === "design-preferences") {
+      const modes = Object.hasOwn(modeMap, projectId)
+        ? modeMap[projectId]
+        : null;
+      const code =
+        modes && typeof modes === "object" && !Array.isArray(modes)
+          ? (modes as Record<string, unknown>).code
+          : null;
+      view = parseRepoView(code) ?? "environment";
     }
-    if (Object.keys(views).length) entries.push([projectId, views]);
+    if (view) entries.push([projectId, view]);
   }
   return Object.fromEntries(entries.slice(-MAX_SCOPED_NAV_ENTRIES));
 }
@@ -188,7 +182,13 @@ function readLegacySettingString(key: string): string {
  * resetting the user's current destination while the new scoped map takes over. */
 function readLegacyRepoView(): RepoPageView | null {
   const raw = readLegacySettingString("repo-page:view");
-  if (raw === "scripts" || raw === "run-actions") return "environment";
+  if (
+    raw === "scripts" ||
+    raw === "run-actions" ||
+    raw === "design" ||
+    raw === "design-preferences"
+  )
+    return "environment";
   if (VALID_REPO_VIEWS.has(raw as RepoPageView)) return raw as RepoPageView;
   if (readLegacySettingString("repo-page:tab") !== "settings") return null;
   const section = readLegacySettingString("repo-page:section");
@@ -261,10 +261,6 @@ export function loadPersistedUiState(): Partial<PersistedUiState> {
     if ("repoPageViewByProject" in parsed) {
       out.repoPageViewByProject = parseRepoViewMap(
         parsed.repoPageViewByProject,
-      );
-    }
-    if ("repoPageViewByModeByProject" in parsed) {
-      out.repoPageViewByModeByProject = parseRepoModeViewMap(
         parsed.repoPageViewByModeByProject,
       );
     }
@@ -344,7 +340,6 @@ export function schedulePersistUiState(state: WorkspaceState): void {
     lastHomePage: state.lastHomePage,
     activeRepoId: state.activeRepoId,
     repoPageViewByProject: state.repoPageViewByProject,
-    repoPageViewByModeByProject: state.repoPageViewByModeByProject,
     newAgentFolder: state.newAgentFolder,
     lastWorkspaceFolder: state.lastWorkspaceFolder,
     lastWorkspaceByRepoRoot: state.lastWorkspaceByRepoRoot,

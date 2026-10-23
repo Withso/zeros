@@ -153,7 +153,7 @@ export async function validateDesignDirectoryPointerTarget(
       code: "VALIDATION_FAILED",
       message: `The Design folder "${name}" does not exist in this checkout.`,
       remediation:
-        "Choose a folder listed in the Design settings, or initialize it through Design mode first.",
+        "Choose a registered Design directory, or create one from the Design tab.",
     });
   }
   if (
@@ -785,7 +785,7 @@ export async function previewDesignDirectoryForEnter(
             code: "VALIDATION_FAILED",
             message: `The first-use Design folder "${firstUseName}" already exists and is not an empty reservation or recognized Design document.`,
             remediation:
-              "Move or rename that folder, or select a recognized Design folder in this repository's Design settings.",
+              "Move or rename that folder before creating a Design directory.",
             cause,
           });
         }
