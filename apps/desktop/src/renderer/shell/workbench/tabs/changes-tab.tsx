@@ -75,6 +75,7 @@ import { useWorkspaceDispatch } from "@/renderer/state/store";
 import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { LatestGenerationFlight } from "@/renderer/shared/lib/latest-generation-flight";
+import { beginChangeLineObservation } from "../../workspace-change-line-cache";
 import { registerReviewCacheForget } from "@/renderer/features/code-review/review-cache-forget";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useAddProject } from "../../add-project-provider";
@@ -653,6 +654,7 @@ export interface ChangesModel {
 interface LoadedChangesSection {
   files: ChangedFile[];
   kind: SectionKind;
+  observation: number;
 }
 
 const changesSectionRequests =
@@ -759,7 +761,7 @@ export function useChangesModel({
   );
   const sections = useMemo(() => cachedSections ?? [], [cachedSections]);
   const setSections = useCallback(
-    (next: React.SetStateAction<Section[]>) => {
+    (next: React.SetStateAction<Section[]>, observation?: number) => {
       const current = readChangesSections(sectionKey) ?? [];
       const resolved = typeof next === "function" ? next(current) : next;
       writeChangesSections(
@@ -767,6 +769,7 @@ export function useChangesModel({
         scope,
         stableSections(current, resolved),
         baseBranch,
+        observation,
       );
     },
     [scope, sectionKey, workspaceId, baseBranch],
@@ -957,10 +960,11 @@ export function useChangesModel({
     setLoading(true);
     setError(null);
     try {
-      const { files, kind } = await changesSectionRequests.run(
+      const { files, kind, observation } = await changesSectionRequests.run(
         sectionKey,
         refreshKey,
         async () => {
+          const observation = beginChangeLineObservation();
           let files: ChangedFile[] = [];
           let kind: SectionKind = "changes";
           if (
@@ -1075,7 +1079,7 @@ export function useChangesModel({
             }));
             kind = "committed";
           }
-          return { files, kind };
+          return { files, kind, observation };
         },
       );
       if (
@@ -1116,7 +1120,7 @@ export function useChangesModel({
         files.map((f) => ({ path: f.path, hash: f.hash ?? "" })),
         scope.kind === "all",
       );
-      setSections(files.length ? [{ kind, title: null, files }] : []);
+      setSections(files.length ? [{ kind, title: null, files }] : [], observation);
     } catch (e) {
       if (
         requestId !== reloadRequest.current ||

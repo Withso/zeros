@@ -18,6 +18,8 @@ const {
   rememberChangeLines,
   resetWorkspaceChangeLinesForTests,
   workspaceChangeLinesTarget,
+  confirmedChangeLinesForBase,
+  subscribeConfirmedChangeLines,
 } = await import("../use-workspace-change-lines");
 
 afterEach(() => {
@@ -26,6 +28,53 @@ afterEach(() => {
 });
 
 describe("workspace change-line generations", () => {
+  it.each(["ws-a", "cloud://org/workspace"])(
+    "starts a separate read when %s changes base during an in-flight comparison",
+    async (target) => {
+      let finish!: (counts: { additions: number; deletions: number }) => void;
+      gitChangeLineCounts
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        )
+        .mockResolvedValueOnce({ additions: 40, deletions: 2 });
+      const main = changeLineCountsForGeneration(target, 1, "main");
+      await flushMicrotasks();
+      const release = changeLineCountsForGeneration(target, 1, "release");
+      await flushMicrotasks();
+      const started = gitChangeLineCounts.mock.calls.length;
+      finish({ additions: 3, deletions: 1 });
+      await expect(main).resolves.toEqual({ additions: 3, deletions: 1 });
+      await expect(release).resolves.toEqual({ additions: 40, deletions: 2 });
+      expect(started).toBe(2);
+    },
+  );
+
+  it("shares confirmed counts with passive Home observers without another read", () => {
+    const changed = vi.fn();
+    const unsubscribe = subscribeConfirmedChangeLines("ws-a", changed);
+    expect(confirmedChangeLinesForBase("ws-a", "main")).toBeUndefined();
+    const counts = { additions: 12, deletions: 3 };
+    rememberChangeLines("ws-a", counts, "main");
+    expect(confirmedChangeLinesForBase("ws-a", "main")).toBe(counts);
+    expect(confirmedChangeLinesForBase("ws-a", "release")).toBeUndefined();
+    expect(
+      confirmedChangeLinesForBase("cloud://org/other", "main"),
+    ).toBeUndefined();
+    expect(changed).toHaveBeenCalledTimes(1);
+    rememberChangeLines("ws-a", { ...counts }, "main");
+    expect(changed).toHaveBeenCalledTimes(1);
+    rememberChangeLines("ws-a", { ...counts }, "release");
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect(confirmedChangeLinesForBase("ws-a", "main")).toBeUndefined();
+    expect(gitChangeLineCounts).not.toHaveBeenCalled();
+    unsubscribe();
+    rememberChangeLines("ws-a", { additions: 0, deletions: 0 }, "release");
+    expect(changed).toHaveBeenCalledTimes(2);
+  });
+
   it("serves every caller of one generation from a single engine read", async () => {
     gitChangeLineCounts.mockResolvedValue({ additions: 9, deletions: 2 });
 

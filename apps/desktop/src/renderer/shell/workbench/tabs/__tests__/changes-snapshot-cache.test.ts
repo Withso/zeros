@@ -2,6 +2,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import type { ChangedFile } from "../changes-parse";
 import {
+  beginChangeLineObservation,
+  confirmedChangeLinesForBase,
+  rememberChangeLines,
+} from "../../../workspace-change-line-cache";
+import {
   beginChangesSectionsRequest,
   changesSnapshotCacheLimits,
   changesSnapshotKey,
@@ -41,6 +46,83 @@ function changedFile(path = "src/app.tsx"): ChangedFile {
 beforeEach(installStorage);
 
 describe("Changes snapshot persistence", () => {
+  it.each(["local-count-race", "cloud://org/count-race"])(
+    "keeps the newest observation when %s count and full-comparison reads finish out of order",
+    (target) => {
+      const oldCountRead = beginChangeLineObservation();
+      const fullRead = beginChangeLineObservation();
+      const sections = [
+        { kind: "changes" as const, title: null, files: [changedFile()] },
+      ];
+      writeChangesSections(target, { kind: "all" }, sections, "main", fullRead);
+      rememberChangeLines(
+        target,
+        { additions: 40, deletions: 20 },
+        "main",
+        oldCountRead,
+      );
+      expect(confirmedChangeLinesForBase(target, "main")).toEqual({
+        additions: 3,
+        deletions: 1,
+      });
+
+      const newerCountRead = beginChangeLineObservation();
+      rememberChangeLines(
+        target,
+        { additions: 5, deletions: 2 },
+        "main",
+        newerCountRead,
+      );
+      writeChangesSections(target, { kind: "all" }, [], "main", fullRead);
+      expect(confirmedChangeLinesForBase(target, "main")).toEqual({
+        additions: 5,
+        deletions: 2,
+      });
+
+      // Stable section identity is still a newer confirmed observation. A
+      // subsequent old count response must not replace these same totals.
+      const delayedCountRead = beginChangeLineObservation();
+      writeChangesSections(target, { kind: "all" }, sections, "main");
+      writeChangesSections(target, { kind: "all" }, sections, "main");
+      rememberChangeLines(
+        target,
+        { additions: 9, deletions: 9 },
+        "main",
+        delayedCountRead,
+      );
+      expect(confirmedChangeLinesForBase(target, "main")).toEqual({
+        additions: 3,
+        deletions: 1,
+      });
+    },
+  );
+
+  it.each(["local-home-counts", "cloud://org/home-counts"])(
+    "publishes new All Changes totals for %s without substituting staged or other-base counts",
+    (target) => {
+      rememberChangeLines(target, { additions: 12, deletions: 3 }, "main");
+      const sections = [
+        { kind: "changes" as const, title: null, files: [changedFile()] },
+      ];
+      writeChangesSections(target, { kind: "all" }, sections, "main");
+      expect(confirmedChangeLinesForBase(target, "main")).toEqual({
+        additions: 3,
+        deletions: 1,
+      });
+      expect(confirmedChangeLinesForBase(target, "release")).toBeUndefined();
+      writeChangesSections(target, { kind: "staged" }, [], "main");
+      expect(confirmedChangeLinesForBase(target, "main")).toEqual({
+        additions: 3,
+        deletions: 1,
+      });
+      writeChangesSections(target, { kind: "all" }, [], "main");
+      expect(confirmedChangeLinesForBase(target, "main")).toEqual({
+        additions: 0,
+        deletions: 0,
+      });
+    },
+  );
+
   it("keeps Branch and All Commits snapshots separate for each comparison base", () => {
     for (const scope of [
       { kind: "all" as const },
