@@ -7,7 +7,7 @@ import { z } from "zod";
 import { createProviders } from "./providers";
 import { githubClient } from "./github";
 import { assertCheckout, migrationManifest } from "./source";
-import { command } from "./io";
+import { migrationReceipt } from "./migration-command";
 
 const FailedMigration = z.object({ backup: z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/), state: z.string().max(32) }).nullable(),
   applied: z.array(z.string().regex(/^\d{4}_[a-z0-9_]+\.sql$/)).nullable(), roleDeleted: z.boolean() });
@@ -43,10 +43,8 @@ async function main() {
       assertCurrent: async () => { await github.assertRequiredChecks(); await github.assertCurrent(); },
       // Only the execute step receives approvals; the strict migrator applies
       // exactly those controlled boundaries and nothing a plan did not list.
-      migration: async execute => JSON.parse(await command("pnpm", ["exec", "tsx", "scripts/release/migration-cli.ts", execute ? "--execute" : "--plan"], {
-        env: { ...process.env, NODE_ENV: "production", CONTROL_PLANE_MIGRATION_APPROVALS: execute ? approvals.join(",") : "",
-          MIGRATION_FAILURE_FILE: execute ? failureFile : "" }, timeout: 50 * 60_000,
-      })),
+      migration: execute => migrationReceipt(execute, { ...process.env, NODE_ENV: "production", CONTROL_PLANE_MIGRATION_APPROVALS: execute ? approvals.join(",") : "",
+        MIGRATION_FAILURE_FILE: execute ? failureFile : "" }),
       migrationFailure: async () => {
         const parsed = FailedMigration.safeParse(JSON.parse(await readFile(failureFile, "utf8")));
         return parsed.success ? parsed.data : undefined;
