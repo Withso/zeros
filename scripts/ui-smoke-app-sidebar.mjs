@@ -2,8 +2,8 @@ import { expect } from "@playwright/test";
 import { runSidebarWorkspaceFilters } from "./ui-smoke-sidebar-filters.mjs";
 import { appSidebarRegressionChecks } from "./ui-smoke-app-sidebar-regressions.mjs";
 
-// App sidebar contract: Grouped by default with every workspace under its
-// repository; Grouped/Ungrouped are the only presentations; repository headers
+// App sidebar contract: Repository grouping by default with every workspace under
+// its repository; Status and None are also available; repository headers
 // swap their icon for a disclosure chevron on hover, keep + visible, and reveal
 // settings and ⋯ (Create workspace / Create from… / Configuration / Remove
 // repository); collapse is persisted per repository and never hides the
@@ -59,7 +59,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   ]);
   expect((await state()).filter).toBe("grouped");
   check(
-    "Grouped is the default and lists each workspace under its repository",
+    "Repository is the default grouping and lists each workspace under its repository",
     true,
   );
 

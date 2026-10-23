@@ -293,11 +293,11 @@ owner removal. Missing paths, permission/config failures and unavailable Git
 are errors, not evidence that Git or an origin was removed. Both Review entry
 points (summary and tab strip) share the same capability predicate.
 
-Legacy plain folders are standalone sidebar rows in both Grouped and
-Ungrouped: never paint a repository header or group for them, because the
-folder row already names the repository. A folder without workspace history
-opens its settings directly; listing or selecting it never creates a workspace
-or chat. Ungrouped places these unopened folders after workspace rows, in
+Legacy plain folders are standalone sidebar rows in Repository and None, and
+join their lifecycle group in Status. Never paint a repository header for them,
+because the folder row already names the repository. A folder without workspace
+history opens its settings directly; listing or selecting it never creates a workspace
+or chat. None and Status place these unopened folders after workspace rows, in
 registration order. Their settings expose Environment, Actions,
 and Paths; Workspaces, Git, Files-to-copy, worktree lifecycle scripts, workspace
 storage paths, and the archive picker require Git. File browsing remains

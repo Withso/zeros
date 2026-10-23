@@ -3,7 +3,7 @@ import { useOrganizationProjects } from "../state/use-organization-projects";
 // COMPONENT: AppSidebar
 // PURPOSE: The app's single left navigation — window chrome, organization,
 //          Home destinations, Create, and every workspace, grouped by
-//          repository (default) or as one mixed list.
+//          repository (default), lifecycle status or as one mixed list.
 // USED IN: MainShellBody (app-shell.tsx) on every page. Settings takes the
 //          sidebar's place with its own section nav, so the sidebar stays
 //          mounted but hidden and inert there.
@@ -14,8 +14,8 @@ import { useOrganizationProjects } from "../state/use-organization-projects";
 //   │ ▭ Local ⌄                     │  organization switcher
 //   │ Home · Customize · Create     │  destinations (Create is an action)
 //   │ ───────────────────────────── │
-//   │ Workspaces                [⋯] │  Grouped / Ungrouped
-//   │ [W] Zeros          [⚙][⋯] [+] │  repository header (Grouped)
+//   │ Workspaces                [⋯] │  Group / Filter / Sort by
+//   │ [W] Zeros          [⚙][⋯] [+] │  Repository grouping
 //   │     ⎇ atlanta          +12 ✎  │  workspace rows
 //   │ ───────────────────────────── │
 //   │ (A) you@example.com       [⚙] │  profile + Settings

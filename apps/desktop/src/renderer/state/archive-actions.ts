@@ -202,7 +202,7 @@ function detachWorkspaceRuntimeState(
 
 /** If we just archived/deleted the workspace whose chat is the active target,
  *  its worktree is going away — repoint the active selection to the neighbor
- *  painted by the current Grouped/Ungrouped/Active/repository filter so the
+ *  painted by the sidebar's current grouping, repository filter and sort so the
  *  (possibly
  *  hidden) open chat isn't stranded on a deleted folder. Lands on a REAL chat at the target when one
  *  exists (last-viewed, else most-recent) — a null selection renders a dead

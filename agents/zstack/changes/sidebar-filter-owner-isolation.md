@@ -24,3 +24,17 @@
   retain row provenance through shared-cache equality and compare metadata only
   after both snapshots are confirmed. Encoded in
   `state/__tests__/cloud-workspace-catalog.test.ts`.
+- Symptom: CI still expected 30px rows after the approved 32px change. Cause:
+  shared Surface equivalence tests also pin the sidebar recipes. Rule: trace
+  geometry contracts beyond the shell suite; keep
+  `shared/ui/primitives/__tests__/surface.test.ts` aligned with approved layout.
+- Symptom: folder smoke scenarios timed out looking for the retired grouping
+  menu labels. Cause: multiple feature scenarios share the sidebar controls.
+  Rule: search all smoke callers when changing a control's label or role, and
+  retain their behavioral assertions across every supported grouping. Encoded
+  in `scripts/ui-smoke-folder-workspace.mjs` and `scripts/ui-smoke-folder-review.mjs`.
+- Symptom: a local browser comparison loaded two optimized React copies and
+  failed before the changed interaction. Cause: concurrent checkout servers
+  shared a dependency cache. Rule: give comparison servers separate Vite
+  `cacheDir` values and restart a stale server before interpreting browser
+  failures. A fresh cache passed all three folder scenarios unchanged.
