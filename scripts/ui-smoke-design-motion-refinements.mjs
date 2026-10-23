@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDesignFramePlaybackSmoke } from "./ui-smoke-design-playback.mjs";
 
 export async function runDesignFrameMotionSmoke({ page, check }) {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -1182,6 +1183,7 @@ export async function runDesignMotionDirectoryAcknowledgementIsolationSmoke({
 
 export async function runDesignMotionRefinementsSmoke(context) {
   await runDesignFrameMotionSmoke(context);
+  await runDesignFramePlaybackSmoke(context);
   await runDesignDocumentMotionSmoke(context);
   await runDesignMotionPauseWithInvalidDraftSmoke(context);
   await runDesignMotionPauseAfterFieldCommitSmoke(context);

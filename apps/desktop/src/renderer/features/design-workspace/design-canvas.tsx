@@ -24,6 +24,7 @@ import {
   Image as ImageIcon,
   MousePointer2,
   Palette,
+  Play,
   Type,
 } from "lucide-react";
 import React, {
@@ -850,11 +851,21 @@ export function DesignCanvas({
   const [renamingFrame, setRenamingFrame] = useState<string | null>(null);
   // Keeps the draft isolated from the authoritative frame title.
   const [renameDraft, setRenameDraft] = useState("");
+  // One explicit playback session; it never survives an owner, source or
+  // editing-intent change. A token also fences late iframe stop/error replies.
+  const [playbackSession, setPlaybackSession] = useState<{
+    id: string;
+    owner: string;
+    file: string;
+    sourceVersion: string;
+    selectionEvent: number | undefined;
+  } | null>(null);
   // Tool choice is interaction-local; only semantic frame/node selection is durable.
   const [activeTool, setActiveTool] = useState<DesignCanvasTool>("select");
   const activeToolRef = useRef<DesignCanvasTool>("select");
   activeToolRef.current = activeTool;
   const activateTool = useCallback((tool: DesignCanvasTool) => {
+    setPlaybackSession(null);
     activeToolRef.current = tool;
     setActiveTool(tool);
   }, []);
@@ -1090,6 +1101,39 @@ export function DesignCanvas({
       false,
     );
   }, [view.panX, view.panY, view.zoom]);
+  const playbackOwner = `${canvasDocumentOwner}\0${folder ?? ""}\0${view.ownerRevision ?? 0}\0${snapshot?.protocolCapability ?? "bridge"}`;
+  const playbackFrame = playbackSession && snapshot?.frames.find((frame) =>
+    frame.file === playbackSession.file && frame.sourceVersion === playbackSession.sourceVersion);
+  const currentPlayback =
+    active && playbackSession?.owner === playbackOwner && playbackFrame &&
+    activeTool === "select" && !inlineTextEdit && !renamingFrame && !motionTimelineOpen &&
+    view.selectionEvent === playbackSession.selectionEvent && view.selectedTargets.length === 0 &&
+    designViewportShowsAnyRect(view, viewportSize, [playbackFrame])
+      ? playbackSession
+      : null;
+  const currentPlaybackRef = useRef(currentPlayback);
+  currentPlaybackRef.current = currentPlayback;
+  useLayoutEffect(() => {
+    if (playbackSession && !currentPlayback) setPlaybackSession(null);
+  }, [currentPlayback, playbackSession]);
+  const stopFramePlayback = useCallback((sessionId: string, error?: Error) => {
+    const current = currentPlaybackRef.current;
+    if (current?.id !== sessionId) return;
+    currentPlaybackRef.current = null;
+    setPlaybackSession(null);
+    if (!document.hidden) viewportRef.current?.querySelector<HTMLButtonElement>(
+      `[data-design-frame-play="${CSS.escape(current.file)}"]`,
+    )?.focus({ preventScroll: true });
+    if (error) toast.error("Couldn't play this frame", { description: errorMessage(error) });
+  }, []);
+  useEffect(() => {
+    if (!currentPlayback) return;
+    const hide = () => {
+      if (document.hidden) stopFramePlayback(currentPlayback.id);
+    };
+    document.addEventListener("visibilitychange", hide);
+    return () => document.removeEventListener("visibilitychange", hide);
+  }, [currentPlayback, stopFramePlayback]);
   const liveFrameFilesRef = useRef<{
     owner: string;
     files: ReadonlySet<string>;
@@ -1126,13 +1170,14 @@ export function DesignCanvas({
   }, [paintNestTarget]);
   const layersOpenFiles = useMemo(
     () => [
+      ...(currentPlayback ? [currentPlayback.file] : []),
       ...Object.entries(layerDisclosures)
         .filter(([, disclosure]) => disclosure.treeExpanded)
         .map(([file]) => file),
       ...agentDraftFiles,
       ...(nestLiveFile ? [nestLiveFile] : []),
     ],
-    [agentDraftFiles, layerDisclosures, nestLiveFile],
+    [agentDraftFiles, currentPlayback, layerDisclosures, nestLiveFile],
   );
   // Saved pictures of this directory's frames. A frame painted no larger
   // than its picture shows the picture instead of running its document.
@@ -5751,6 +5796,14 @@ export function DesignCanvas({
             "[data-design-motion-timeline], [data-design-motion-settings]",
           ))
       ) return;
+      if (event.key === "Escape" && currentPlaybackRef.current) {
+        event.preventDefault();
+        stopFramePlayback(currentPlaybackRef.current.id);
+        return;
+      }
+      // The toggle owns native Space/Enter activation, even though it sits
+      // inside the canvas that normally uses Space to pan.
+      if (event.target instanceof Element && event.target.closest("[data-design-frame-play]")) return;
       const editableTarget = isEditableHotkeyTarget(event.target);
       // Option measures; it never types, moves, or deletes anything. Reading it
       // outside the canvas's own focus scope is what makes the overlay appear
@@ -6048,6 +6101,7 @@ export function DesignCanvas({
     finishNodeNudge,
     fitFrames,
     hitStackMenu,
+    stopFramePlayback,
     nudgeSelectedNode,
     motionTimelineOpen,
     motionTargetSelected,
@@ -7196,6 +7250,7 @@ export function DesignCanvas({
           style={designCanvasCameraStyle(view)}
         >
           {snapshot?.frames.map((frame) => {
+            const framePlaying = currentPlayback?.file === frame.file;
             const paintedFrame = frameGeometryPreviewsRef.current.get(
               `${canvasDocumentOwner}\0${frame.file}`,
             )?.geometry;
@@ -7266,6 +7321,7 @@ export function DesignCanvas({
                 key={`${workspaceId ?? "pending"}:${frame.file}`}
                 data-design-frame={frame.file}
                 data-design-frame-kind={frame.kind ?? "frame"}
+                data-design-frame-playing={framePlaying ? "" : undefined}
                 className={cn(
                   "pointer-events-auto absolute outline",
                   frame.kind === "text" ? "bg-transparent" : "bg-bg1",
@@ -7290,6 +7346,7 @@ export function DesignCanvas({
                 onPointerDown={(event) => {
                   if (
                     !active ||
+                    framePlaying ||
                     !event.isPrimary ||
                     event.button !== 0 ||
                     spacePressedRef.current
@@ -7376,6 +7433,7 @@ export function DesignCanvas({
                 }}
                 onDoubleClick={(event) => {
                   if (
+                    framePlaying ||
                     event.shiftKey ||
                     event.metaKey ||
                     event.ctrlKey ||
@@ -7391,9 +7449,9 @@ export function DesignCanvas({
                     event.clientY,
                   );
                 }}
-                onPointerMove={(event) => scheduleCanvasHover(event, frame)}
+                onPointerMove={(event) => { if (!framePlaying) scheduleCanvasHover(event, frame); }}
                 onPointerLeave={() => clearCanvasHover(frame)}
-                onContextMenu={(event) => openHitStack(event, frame)}
+                onContextMenu={(event) => { if (!framePlaying) openHitStack(event, frame); }}
                 onDragOver={(event) => {
                   if (!hasDesignAssetDrag(event.dataTransfer)) return;
                   event.preventDefault();
@@ -7416,67 +7474,110 @@ export function DesignCanvas({
                 }}
               >
                 {frame.kind !== "text" ? (
-                  <div
-                    data-design-controls
-                    className="absolute bottom-full left-0 flex origin-bottom-left items-center"
-                    style={
-                      {
-                        "--design-frame-label-max-width": `calc(${frame.width}px * var(--design-canvas-zoom))`,
-                        maxWidth: "var(--design-frame-label-max-width)",
-                        transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
-                      } as React.CSSProperties
-                    }
-                  >
-                    {renamingFrame === frame.file ? (
-                      <Input
-                        autoFocus
-                        value={renameDraft}
-                        className="h-6 w-48"
-                        aria-label={`Rename ${frame.title}`}
-                        onChange={(event) => setRenameDraft(event.target.value)}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onBlur={() => void commitRename(frame)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            void commitRename(frame);
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            renameSettledRef.current = true;
-                            setRenamingFrame(null);
+                  <>
+                    <div
+                      data-design-controls
+                      className="absolute bottom-full left-0 flex h-7 origin-bottom-left items-center"
+                      style={
+                        {
+                          // Reserve the 28px Play control and its 12px gap in screen space.
+                          "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 40px))`,
+                          maxWidth: "var(--design-frame-label-max-width)",
+                          transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+                        } as React.CSSProperties
+                      }
+                    >
+                      {renamingFrame === frame.file ? (
+                        <Input
+                          autoFocus
+                          value={renameDraft}
+                          className="h-6 w-48 min-w-0 max-w-full"
+                          aria-label={`Rename ${frame.title}`}
+                          onChange={(event) => setRenameDraft(event.target.value)}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onBlur={() => void commitRename(frame)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void commitRename(frame);
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              renameSettledRef.current = true;
+                              setRenamingFrame(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          data-design-frame-label=""
+                          title={frame.title}
+                          className={cn(
+                            "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
+                            frameSelectedOnly
+                              ? "text-[var(--design-selection-stroke)]"
+                              : "text-muted-fg hover:text-fg2",
+                          )}
+                          onPointerDown={(event) =>
+                            startFrameGesture(event, frame, "move")
                           }
-                        }}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        data-design-frame-label=""
-                        title={frame.title}
-                        className={cn(
-                          "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
-                          frameSelectedOnly
-                            ? "text-[var(--design-selection-stroke)]"
-                            : "text-muted-fg hover:text-fg2",
-                        )}
-                        onPointerDown={(event) =>
-                          startFrameGesture(event, frame, "move")
-                        }
-                        onDoubleClick={(event) => {
+                          onDoubleClick={(event) => {
+                            event.stopPropagation();
+                            renameSettledRef.current = false;
+                            setRenameDraft(frame.title);
+                            setRenamingFrame(frame.file);
+                          }}
+                        >
+                          <span
+                            data-design-frame-name=""
+                            className="block max-w-full overflow-hidden text-ellipsis"
+                          >
+                            {frame.title}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                    <div
+                      data-design-controls
+                      className="absolute right-0 bottom-full origin-bottom-right"
+                      style={{ transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
+                    >
+                      <DesignToolbarButton
+                        data-design-frame-play={frame.file}
+                        label={`Play ${frame.title}`}
+                        tooltip={framePlaying ? "Stop playback (Esc)" : "Play frame"}
+                        className="zd-frame-play"
+                        tool
+                        pressed={framePlaying}
+                        disabled={!active || !workspaceId || !folder || Boolean(inlineTextEdit || renamingFrame)}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onDoubleClick={(event) => event.stopPropagation()}
+                        onClick={(event) => {
                           event.stopPropagation();
-                          renameSettledRef.current = false;
-                          setRenameDraft(frame.title);
-                          setRenamingFrame(frame.file);
+                          if (currentPlayback?.file === frame.file) {
+                            stopFramePlayback(currentPlayback.id);
+                            return;
+                          }
+                          if (!workspaceId || !canvasPageOwner) return;
+                          gestureCancelRef.current?.();
+                          activateTool("select");
+                          onMotionTimelineOpenChange(false);
+                          setHitStackMenu(null);
+                          clearCanvasHover(frame);
+                          // Selection is published synchronously before its
+                          // durable bridge write; Play never waits on that I/O.
+                          void selectDesignFrame(workspaceId, frame, { selected: false, owner: canvasPageOwner }).catch(() => {});
+                          const session = { id: crypto.randomUUID(), owner: playbackOwner,
+                            file: frame.file, sourceVersion: frame.sourceVersion,
+                            selectionEvent: designWorkspaceView(workspaceId).selectionEvent };
+                          currentPlaybackRef.current = session;
+                          setPlaybackSession(session);
                         }}
                       >
-                        <span
-                          data-design-frame-name=""
-                          className="block max-w-full overflow-hidden text-ellipsis"
-                        >
-                          {frame.title}
-                        </span>
-                      </button>
-                    )}
-                  </div>
+                        <Play />
+                      </DesignToolbarButton>
+                    </div>
+                  </>
                 ) : null}
 
                 {workspaceId && folder ? (
@@ -7486,7 +7587,9 @@ export function DesignCanvas({
                     folder={folder}
                     frame={frame}
                     active={active}
-                    selected={selected}
+                    playbackSessionId={framePlaying ? currentPlayback.id : null}
+                    onPlaybackStopped={stopFramePlayback}
+                    selected={selected && !framePlaying}
                     selectedNodeIds={
                       selected ? view.selectedNodeIds : EMPTY_NODE_IDS
                     }
@@ -7496,7 +7599,7 @@ export function DesignCanvas({
                       highResolutionTiles.get(frame.file) ?? null
                     }
                     highResolutionDisabled={
-                      inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
+                      framePlaying || inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
                     }
                     designDirectory={snapshot.directory}
                     previewOwner={previewOwner}
@@ -7508,7 +7611,7 @@ export function DesignCanvas({
                   </div>
                 )}
 
-                {workspaceId && frame.kind !== "text" ? (
+                {workspaceId && !framePlaying && frame.kind !== "text" ? (
                   <DesignAgentDraftFrameOverlay
                     workspaceId={workspaceId}
                     directory={snapshot.directory}
@@ -7571,7 +7674,7 @@ export function DesignCanvas({
                   </div>
                 ) : null}
 
-                {workspaceId ? (
+                {workspaceId && !framePlaying ? (
                   <DesignLayerHoverOverlay
                     workspaceId={workspaceId}
                     frame={frame.file}

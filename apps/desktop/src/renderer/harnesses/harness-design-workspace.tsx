@@ -87,6 +87,7 @@ const layoutGestureHarness = new URLSearchParams(window.location.search).has(
 const frameMotionHarness = new URLSearchParams(window.location.search).has(
   "frameMotion",
 );
+const framePlaybackHarness = new URLSearchParams(window.location.search).has("framePlayback");
 // `?designTokens`: the home frame is styled by an imported source and the
 // linked tokens.css, as a composed document carries them, so the inspector
 // can name tokens and their sources.
@@ -157,6 +158,11 @@ const homeSource = designTokensHarness
       p { max-width: 620px; margin: 0; color: dimgray; font-size: 24px; line-height: 1.5; }
       .button { width: fit-content; border-radius: 999px; background: black; color: white; padding: 16px 24px; }
       .harness-layer { display: none; }
+      ${framePlaybackHarness ? `
+      .playback-controls { display: flex; align-items: center; gap: 32px; font-size: 20px; }
+      .playback-hover { padding: 16px 24px; border: 1px solid; border-radius: 0; transition: border-radius .2s; }
+      .playback-hover:hover { border-radius: 24px; }
+      ` : ""}
       ${frameMotionHarness ? `
       main { animation: wash 18s linear infinite; }
       @keyframes wash { from { opacity: 0.6; } to { opacity: 1; } }
@@ -170,6 +176,7 @@ const homeSource = designTokensHarness
         <h1 data-oid="home-heading">Make the next move unmistakable.</h1>
         <p data-oid="home-copy">A decisive launch surface for teams building products that deserve attention.</p>
         <span data-oid="home-action" class="button">Explore the system →</span>
+        ${framePlaybackHarness ? `<div class="playback-controls"><label><input type="checkbox">Try this control</label><button class="playback-hover">Hover preview</button></div>` : ""}
         ${Array.from(
           { length: HARNESS_LAYER_COUNT },
           (_, index) =>
@@ -1989,6 +1996,12 @@ async function main() {
     const [surfaceActive, setSurfaceActive] = React.useState(true);
     React.useLayoutEffect(() => {
       const controls = {
+        // Use the stores that seeded this rendered fixture. A direct browser
+        // import after Vite HMR can create a second, unobserved module instance.
+        ui: useDesignWorkspaceUiStore,
+        snapshots: designWorkspaceSnapshotCache,
+        documents: designFrameDocumentCache,
+        documentKey: designFrameDocumentKey,
         owner(id: string) {
           if (id !== workspaceId) {
             const ownerPath = `${workspacePath}-${id}`;

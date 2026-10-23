@@ -871,6 +871,13 @@
   opacity: 0.4;
 }
 
+/* Frame chrome stays 28 screen pixels at every canvas zoom. */
+.zd-canvas-tool.zd-frame-play {
+  width: 28px;
+  height: 28px;
+  background-color: var(--bg2-hover);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .zd-canvas-tool {
     transition: none;

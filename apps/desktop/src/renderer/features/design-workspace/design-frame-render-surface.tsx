@@ -60,6 +60,8 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   folder,
   frame,
   active,
+  playbackSessionId,
+  onPlaybackStopped,
   selected,
   selectedNodeIds,
   live,
@@ -75,6 +77,8 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   folder: string;
   frame: DesignCanvasFrameWire;
   active: boolean;
+  playbackSessionId?: string | null;
+  onPlaybackStopped?: (sessionId: string, error?: Error) => void;
   selected: boolean;
   selectedNodeIds: readonly string[];
   live: boolean;
@@ -237,9 +241,11 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         folder={folder}
         frame={frame}
         active={active}
+        playbackSessionId={playbackSessionId}
+        onPlaybackStopped={onPlaybackStopped}
         selected={selected}
         selectedNodeIds={selectedNodeIds}
-        autoCapture={designFrameAutoCapture(selected, picture)}
+        autoCapture={!playbackSessionId && designFrameAutoCapture(selected, picture)}
         theme={theme}
         transitionCover={
           currentScreenshot ??

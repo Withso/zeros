@@ -1806,7 +1806,25 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   A cold read is shared with the inspector, keeps the captured edit targets,
   and cannot be overtaken by later writes or Undo. Document read failures and
   transaction conflicts retain their normal error and recovery handling.
-- **Motion:** node-local keyframe tracks, preview, playback, and paths exist only
+- **Frame Play:** each artboard has one Play toggle above its top-right corner,
+  at a constant screen size. Its Play glyph stays visible on the blue pressed
+  control. One frame at a time plays its authored CSS animations (including
+  root and pseudo-element motion, delays and infinite loops), SVG timelines,
+  hover transitions and supported native HTML controls. Authored paused and
+  reduced-motion styles retain browser behavior. Clicking again or pressing
+  Escape restores the saved, still editing document; temporary form, scroll,
+  details and contenteditable state never changes source. Starting Play closes
+  the Motion timeline and clears editing selection while retaining its drafts.
+  Source or engine-capability replacement, editing intent, hidden surfaces, offscreen frames, page,
+  directory and workspace changes retire playback. Session tokens and exact
+  source versions fence late replies. The playing frame stays in bounded live
+  admission, with screenshot tiles, captures and editing overlays disabled.
+  The private runtime method is opt-in for v2 compatibility; an older engine
+  reports that a restart is needed. Authored scripts, external navigation,
+  form submission and network capabilities remain blocked by the existing
+  sanitizer, CSP and opaque iframe sandbox. Local Personal and organization
+  workspaces share this behavior; cloud still has no Design capability.
+- **Motion:** node-local keyframe tracks, timeline playback, and paths exist only
   in explicit Motion mode. Selecting an outer frame targets its authored frame
   root or document body, matching the inspector, for opening, previewing, saving
   and deleting motion. Foundation reads keyframes from CSS files and authored

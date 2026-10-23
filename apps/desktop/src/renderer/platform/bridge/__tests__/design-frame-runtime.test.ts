@@ -66,6 +66,42 @@ function snapshot(
 }
 
 describe("design frame runtime client", () => {
+  it("negotiates frame playback and source-fences lifecycle events on its private port", async () => {
+    const source = { postMessage: vi.fn() };
+    const onPlaybackStopped = vi.fn();
+    const connection = connectDesignFrameRuntime("playback-workspace", "home.html", SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement, { onPlaybackStopped },
+      { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() });
+    const port = source.postMessage.mock.calls[0][1].transfer[0] as MessagePort;
+    const requests: Array<Record<string, unknown>> = [];
+    port.onmessage = ({ data }) => {
+      requests.push(data);
+      if (data.type === "request") port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION,
+        type: "response", requestId: data.requestId, ok: true,
+        result: { playing: data.args.playing, sessionId: data.args.playing ? data.args.sessionId : null } });
+    };
+    port.start();
+    try {
+      // Older engines must fail honestly before any request is sent.
+      await expect(connection.setPlayback("first", true)).rejects.toMatchObject({ code: "METHOD_NOT_SUPPORTED" });
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
+        payload: { sourceVersion: SOURCE_VERSION, capabilities: { ...capabilities, methods: [...capabilities.methods, "setPlayback"] }, snapshot: snapshot(1) } });
+      await vi.waitFor(() => expect(connection.supports("setPlayback")).toBe(true));
+      await connection.setPlayback("first", true);
+      expect(requests).toContainEqual(expect.objectContaining({ sourceVersion: SOURCE_VERSION, method: "setPlayback", args: { sessionId: "first", playing: true } }));
+      const stop = (version: string, sessionId: string) => port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION,
+        type: "event", event: "playbackStopped", payload: { sourceVersion: version, sessionId, reason: "escape" } });
+      stop(NEXT_SOURCE_VERSION, "foreign");
+      stop(SOURCE_VERSION, "first");
+      await vi.waitFor(() => expect(onPlaybackStopped).toHaveBeenCalledTimes(1));
+      expect(onPlaybackStopped).toHaveBeenCalledWith({ sourceVersion: SOURCE_VERSION, sessionId: "first", reason: "escape" });
+      await connection.setPlayback("first", false);
+    } finally {
+      connection.destroy();
+      port.close();
+    }
+  });
+
   it("publishes only ready connections and keeps the painted runtime during replacement", async () => {
     const host = { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() };
     const source = { postMessage: vi.fn() };
@@ -150,7 +186,7 @@ describe("design frame runtime client", () => {
       sourceVersion: SOURCE_VERSION,
       // Opt-in methods: a runtime advertises them only when asked, so a host
       // that predates one still accepts the runtime's capabilities.
-      features: ["previewStylesheet"],
+      features: ["previewStylesheet", "setPlayback"],
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
     const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;
