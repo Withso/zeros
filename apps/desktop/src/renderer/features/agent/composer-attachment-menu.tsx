@@ -8,7 +8,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 
 interface ComposerAttachmentMenuProps {
   concealed: boolean;
@@ -58,21 +57,19 @@ export const ComposerAttachmentMenu = memo(function ComposerAttachmentMenu({
 
   return (
     <DropdownMenu open={open && !concealed} onOpenChange={setOpen}>
-      <Tooltip label="Attach or link">
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            type="button"
-            aria-label="Add attachment or link a workspace"
-            className="rounded-sm"
-            onPointerEnter={onIntent}
-            onFocus={onIntent}
-          >
-            <Plus size={14} />
-          </Button>
-        </DropdownMenuTrigger>
-      </Tooltip>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          type="button"
+          aria-label="Add attachment or link a workspace"
+          className="rounded-sm"
+          onPointerEnter={onIntent}
+          onFocus={onIntent}
+        >
+          <Plus size={14} />
+        </Button>
+      </DropdownMenuTrigger>
       <DropdownMenuContent
         data-composer-attachment-menu=""
         align="start"

@@ -21,7 +21,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { parseRunActions, type RunAction } from "@zeros/protocol/run-actions";
 
 import { Button } from "../../shared/ui";
-import { CodeTextarea, Input, Switch, Tooltip } from "../../shared/ui/primitives";
+import { CodeTextarea, Input, Switch } from "../../shared/ui/primitives";
 import { toast } from "../../shared/ui/primitives/elements";
 import { IconPicker } from "../../shared/ui/icon-picker";
 import { DEFAULT_RUN_ICON } from "../../shared/ui/icon-registry";
@@ -425,18 +425,16 @@ function ActionCard({
             </label>
           </div>
           <Inline gap={1} align="center" className="shrink-0">
-            <Tooltip label="Delete action">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Delete ${draft.name || "action"}`}
-                onClick={onDelete}
-                disabled={busy}
-                className="text-fg2 hover:text-red-primary"
-              >
-                <Trash2 strokeWidth={1} />
-              </Button>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Delete ${draft.name || "action"}`}
+              onClick={onDelete}
+              disabled={busy}
+              className="text-fg2 hover:text-red-primary"
+            >
+              <Trash2 strokeWidth={1} />
+            </Button>
             <Button
               variant="secondary"
               size="sm"

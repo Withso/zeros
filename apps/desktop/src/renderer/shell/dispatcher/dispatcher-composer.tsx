@@ -35,7 +35,6 @@ import {
 } from "lucide-react";
 
 import { Button } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -413,20 +412,18 @@ export function DispatcherComposer({
                   Actions deferred past menu-close so the file dialog / modal
                   don't fight Radix's focus-restore. */}
               <DropdownMenu>
-                <Tooltip label="Attach or link">
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      type="button"
-                      aria-label="Add attachment or link a workspace"
-                      disabled={busy}
-                      className="rounded-sm"
-                    >
-                      <Plus size={14} />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </Tooltip>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    type="button"
+                    aria-label="Add attachment or link a workspace"
+                    disabled={busy}
+                    className="rounded-sm"
+                  >
+                    <Plus size={14} />
+                  </Button>
+                </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" side="top">
                   <DropdownMenuItem
                     onSelect={() =>
@@ -481,31 +478,24 @@ export function DispatcherComposer({
                 />
               )}
             </PromptInputTools>
-            <Tooltip
-              label={
-                designMode ? "Create design workspace" : "Create workspace"
+            <Button
+              variant="default"
+              size="sm"
+              type="submit"
+              className="h-7 gap-1.5"
+              disabled={
+                busy || readingAttachments || disabled || (!designMode && !selection)
               }
-              shortcut="↵"
             >
-              <Button
-                variant="default"
-                size="sm"
-                type="submit"
-                className="h-7 gap-1.5"
-                disabled={
-                  busy || readingAttachments || disabled || (!designMode && !selection)
-                }
-              >
-                {busy || readingAttachments ? (
-                  <ZerosSpinner size={16} tone="inverted" />
-                ) : (
-                  <>
-                    <span>Create</span>
-                    <CornerDownLeft className="size-3" />
-                  </>
-                )}
-              </Button>
-            </Tooltip>
+              {busy || readingAttachments ? (
+                <ZerosSpinner size={16} tone="inverted" />
+              ) : (
+                <>
+                  <span>Create</span>
+                  <CornerDownLeft className="size-3" />
+                </>
+              )}
+            </Button>
           </PromptInputToolbar>
         </PromptInputBody>
       </PromptInput>

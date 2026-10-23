@@ -85,7 +85,6 @@ import {
 } from "../../state/read-caches";
 import { Button } from "../../shared/ui";
 import { isLocalDevelopment } from "../../platform/runtime";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Switch } from "../../shared/ui/primitives/switch";
@@ -743,16 +742,14 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
             aria-label="Settings sections"
           >
             <OrganizationSwitcher />
-            <Tooltip label="Back to home">
-              <Button
-                variant="ghost"
-                className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
-                onClick={handleBack}
-              >
-                <ArrowLeft size={14} strokeWidth={1.5} />
-                <span>Back</span>
-              </Button>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
+              onClick={handleBack}
+            >
+              <ArrowLeft size={14} strokeWidth={1.5} />
+              <span>Back</span>
+            </Button>
             {SECTION_GROUPS.map((group, groupIndex) => {
               const sections = group.ids.flatMap((id) => {
                 const section = availableSections.find((s) => s.id === id);

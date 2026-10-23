@@ -45,7 +45,7 @@ import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignPageSnapshot } from "./state/design-page-projection";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
-import { Button, ScrollArea, Tooltip, toast } from "../../shared/ui/primitives";
+import { Button, ScrollArea, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import {
   designFrameLayerChildren,
@@ -1019,25 +1019,23 @@ function OwnedDesignWorkspaceSidebarPanels({
           </span>
         ) : null}
         {expanded ? (
-          <Tooltip label="Collapse all layers">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="ml-auto size-6"
-              aria-label="Collapse all layers"
-              // Anything open anywhere counts, including containers inside a
-              // frame the user has since folded — one click closes the whole
-              // workspace.
-              disabled={!hasExpandedLayers}
-              onClick={() => {
-                if (!workspaceId) return;
-                collapseAllDesignLayers(workspaceId);
-              }}
-            >
-              <ListCollapse />
-            </Button>
-          </Tooltip>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="ml-auto size-6"
+            aria-label="Collapse all layers"
+            // Anything open anywhere counts, including containers inside a
+            // frame the user has since folded — one click closes the whole
+            // workspace.
+            disabled={!hasExpandedLayers}
+            onClick={() => {
+              if (!workspaceId) return;
+              collapseAllDesignLayers(workspaceId);
+            }}
+          >
+            <ListCollapse />
+          </Button>
         ) : null}
       </div>
 
@@ -1110,75 +1108,69 @@ function OwnedDesignWorkspaceSidebarPanels({
                   const frameRowSelected =
                     targetSelected(frame.file) || (activeFrame && rootSelected);
                   return (
-                    <Tooltip
+                    <Button
                       key={row.key}
-                      label={frameLabel}
-                      side="right"
-                      align="start"
+                      type="button"
+                      role="treeitem"
+                      variant="ghost"
+                      size="sm"
+                      data-design-frame-row={frame.file}
+                      data-design-panel-row={row.key}
+                      className={cn(
+                        "zd-design-layer-row h-7 w-full min-w-0 shrink-0 justify-start gap-1 px-2 text-xs font-normal [&>svg]:size-3.5",
+                        blockRadius,
+                        frameRowSelected && "zd-design-layer-selected",
+                      )}
+                      tabIndex={rovingRowKey === row.key ? 0 : -1}
+                      aria-level={1}
+                      aria-selected={frameRowSelected}
+                      aria-expanded={row.discloses ? row.expanded : undefined}
+                      aria-keyshortcuts="Meta+C Control+C Meta+D Control+D Delete Backspace"
+                      onClick={(event) => {
+                        if (
+                          row.discloses &&
+                          (event.target as HTMLElement).closest(
+                            "[data-layer-disclosure]",
+                          )
+                        ) {
+                          toggleFrameTree(frame);
+                          return;
+                        }
+                        chooseFrame(frame, event.shiftKey);
+                      }}
+                      onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
                     >
-                      <Button
-                        type="button"
-                        role="treeitem"
-                        variant="ghost"
-                        size="sm"
-                        data-design-frame-row={frame.file}
-                        data-design-panel-row={row.key}
-                        className={cn(
-                          "zd-design-layer-row h-7 w-full min-w-0 shrink-0 justify-start gap-1 px-2 text-xs font-normal [&>svg]:size-3.5",
-                          blockRadius,
-                          frameRowSelected && "zd-design-layer-selected",
-                        )}
-                        tabIndex={rovingRowKey === row.key ? 0 : -1}
-                        aria-level={1}
-                        aria-selected={frameRowSelected}
-                        aria-expanded={row.discloses ? row.expanded : undefined}
-                        aria-keyshortcuts="Meta+C Control+C Meta+D Control+D Delete Backspace"
-                        onClick={(event) => {
-                          if (
-                            row.discloses &&
-                            (event.target as HTMLElement).closest(
-                              "[data-layer-disclosure]",
-                            )
-                          ) {
-                            toggleFrameTree(frame);
-                            return;
-                          }
-                          chooseFrame(frame, event.shiftKey);
-                        }}
-                        onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
-                      >
-                        {row.discloses ? (
-                          <span
-                            data-layer-disclosure=""
-                            className="zd-layer-disclosure"
-                          >
-                            {row.expanded ? (
-                              <ChevronDown
-                                aria-hidden="true"
-                                className={DISCLOSURE_ICON}
-                              />
-                            ) : (
-                              <ChevronRight
-                                aria-hidden="true"
-                                className={DISCLOSURE_ICON}
-                              />
-                            )}
-                          </span>
-                        ) : (
-                          <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
-                        )}
-                        {frame.kind === "text" ? (
-                          <Type />
-                        ) : (
-                          <FrameLayoutIcon
-                            kind={frameLayoutIconsByFile[frame.file] ?? "frame"}
-                          />
-                        )}
-                        <span className="min-w-0 flex-1 truncate text-left">
-                          {frameLabel}
+                      {row.discloses ? (
+                        <span
+                          data-layer-disclosure=""
+                          className="zd-layer-disclosure"
+                        >
+                          {row.expanded ? (
+                            <ChevronDown
+                              aria-hidden="true"
+                              className={DISCLOSURE_ICON}
+                            />
+                          ) : (
+                            <ChevronRight
+                              aria-hidden="true"
+                              className={DISCLOSURE_ICON}
+                            />
+                          )}
                         </span>
-                      </Button>
-                    </Tooltip>
+                      ) : (
+                        <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
+                      )}
+                      {frame.kind === "text" ? (
+                        <Type />
+                      ) : (
+                        <FrameLayoutIcon
+                          kind={frameLayoutIconsByFile[frame.file] ?? "frame"}
+                        />
+                      )}
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        {frameLabel}
+                      </span>
+                    </Button>
                   );
                 }
 
@@ -1227,106 +1219,96 @@ function OwnedDesignWorkspaceSidebarPanels({
                       });
                     }}
                   >
-                    <Tooltip label={displayName} side="right" align="start">
-                      <Button
-                        data-design-layer-select=""
-                        data-design-layer-id={layer.node.oid}
-                        data-design-panel-row={row.key}
-                        type="button"
-                        role="treeitem"
-                        variant="ghost"
-                        size="sm"
-                        className={cn(
-                          "zd-design-layer-row relative z-[1] h-7 min-w-0 flex-1 justify-start gap-1 px-2 pr-7 text-xs font-normal [&>svg]:size-3.5",
-                          blockRadius,
-                          selectedLayer && "zd-design-layer-selected",
-                          inSelectionSubtree && "zd-design-layer-in-selection",
-                          hoveredLayer &&
-                            !selectedLayer &&
-                            "zd-design-layer-hovered",
-                          dimmed && "zd-design-layer-dimmed",
-                        )}
-                        style={{
-                          // The fill spans the panel; only the row's own
-                          // content steps in, so a selection and everything it
-                          // owns share one block edge.
-                          paddingLeft: layerRowPadding(layer.depth),
-                        }}
-                        tabIndex={rovingRowKey === row.key ? 0 : -1}
-                        aria-level={layer.depth + 2}
-                        aria-selected={selectedLayer}
-                        aria-expanded={
-                          layer.hasChildren ? row.expanded : undefined
-                        }
-                        aria-keyshortcuts="Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
-                        onClick={(event) => {
-                          if (
-                            layer.hasChildren &&
-                            (event.target as HTMLElement).closest(
-                              "[data-layer-disclosure]",
-                            )
-                          ) {
-                            toggleExpanded(row);
-                            return;
-                          }
-                          chooseLayer(frame, layer, event.shiftKey);
-                        }}
-                        onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
-                      >
-                        {layer.hasChildren ? (
-                          <span
-                            data-layer-disclosure=""
-                            className="zd-layer-disclosure"
-                          >
-                            {row.expanded ? (
-                              <ChevronDown
-                                aria-hidden="true"
-                                className={DISCLOSURE_ICON}
-                              />
-                            ) : (
-                              <ChevronRight
-                                aria-hidden="true"
-                                className={DISCLOSURE_ICON}
-                              />
-                            )}
-                          </span>
-                        ) : (
-                          <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
-                        )}
-                        <LayerTypeIcon
-                          label={displayName}
-                          display={layer.node.display}
-                          flexDirection={layer.node.flexDirection}
-                        />
-                        <span className="min-w-0 flex-1 truncate text-left">
-                          {displayName}
-                        </span>
-                      </Button>
-                    </Tooltip>
-                    <Tooltip
-                      label={
-                        layer.node.visible
-                          ? "Hide on canvas · ⇧H"
-                          : "Show on canvas · ⇧H"
+                    <Button
+                      data-design-layer-select=""
+                      data-design-layer-id={layer.node.oid}
+                      data-design-panel-row={row.key}
+                      type="button"
+                      role="treeitem"
+                      variant="ghost"
+                      size="sm"
+                      className={cn(
+                        "zd-design-layer-row relative z-[1] h-7 min-w-0 flex-1 justify-start gap-1 px-2 pr-7 text-xs font-normal [&>svg]:size-3.5",
+                        blockRadius,
+                        selectedLayer && "zd-design-layer-selected",
+                        inSelectionSubtree && "zd-design-layer-in-selection",
+                        hoveredLayer &&
+                          !selectedLayer &&
+                          "zd-design-layer-hovered",
+                        dimmed && "zd-design-layer-dimmed",
+                      )}
+                      style={{
+                        // The fill spans the panel; only the row's own
+                        // content steps in, so a selection and everything it
+                        // owns share one block edge.
+                        paddingLeft: layerRowPadding(layer.depth),
+                      }}
+                      tabIndex={rovingRowKey === row.key ? 0 : -1}
+                      aria-level={layer.depth + 2}
+                      aria-selected={selectedLayer}
+                      aria-expanded={
+                        layer.hasChildren ? row.expanded : undefined
                       }
+                      aria-keyshortcuts="Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
+                      onClick={(event) => {
+                        if (
+                          layer.hasChildren &&
+                          (event.target as HTMLElement).closest(
+                            "[data-layer-disclosure]",
+                          )
+                        ) {
+                          toggleExpanded(row);
+                          return;
+                        }
+                        chooseLayer(frame, layer, event.shiftKey);
+                      }}
+                      onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
                     >
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className={cn(
-                          "absolute top-1/2 right-1 z-[2] size-6 -translate-y-1/2 [&_svg]:size-3.5",
-                          layer.node.visible
-                            ? "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
-                            : "text-muted-fg",
-                        )}
-                        tabIndex={-1}
-                        aria-label={`${layer.node.visible ? "Hide" : "Show"} ${displayName}`}
-                        onClick={() => toggleVisibility(frame, layer)}
-                      >
-                        {layer.node.visible ? <Eye /> : <EyeClosed />}
-                      </Button>
-                    </Tooltip>
+                      {layer.hasChildren ? (
+                        <span
+                          data-layer-disclosure=""
+                          className="zd-layer-disclosure"
+                        >
+                          {row.expanded ? (
+                            <ChevronDown
+                              aria-hidden="true"
+                              className={DISCLOSURE_ICON}
+                            />
+                          ) : (
+                            <ChevronRight
+                              aria-hidden="true"
+                              className={DISCLOSURE_ICON}
+                            />
+                          )}
+                        </span>
+                      ) : (
+                        <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
+                      )}
+                      <LayerTypeIcon
+                        label={displayName}
+                        display={layer.node.display}
+                        flexDirection={layer.node.flexDirection}
+                      />
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        {displayName}
+                      </span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className={cn(
+                        "absolute top-1/2 right-1 z-[2] size-6 -translate-y-1/2 [&_svg]:size-3.5",
+                        layer.node.visible
+                          ? "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
+                          : "text-muted-fg",
+                      )}
+                      tabIndex={-1}
+                      aria-label={`${layer.node.visible ? "Hide" : "Show"} ${displayName}`}
+                      onClick={() => toggleVisibility(frame, layer)}
+                    >
+                      {layer.node.visible ? <Eye /> : <EyeClosed />}
+                    </Button>
                   </div>
                 );
               })}

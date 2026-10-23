@@ -688,18 +688,16 @@ export const TurnFooter = memo(function TurnFooter({
         </Tooltip>
         {!readOnly && (onFork || checkpoints) && (
           <DropdownMenu>
-            <Tooltip label="Turn actions">
-              <DropdownMenuTrigger asChild>
-                <IconButton
-                  type="button"
-                  label="Turn actions"
-                  motion="colors"
-                  className="flex shrink-0"
-                >
-                  <MoreHorizontal className="size-4" strokeWidth={2} />
-                </IconButton>
-              </DropdownMenuTrigger>
-            </Tooltip>
+            <DropdownMenuTrigger asChild>
+              <IconButton
+                type="button"
+                label="Turn actions"
+                motion="colors"
+                className="flex shrink-0"
+              >
+                <MoreHorizontal className="size-4" strokeWidth={2} />
+              </IconButton>
+            </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
               className="w-52"

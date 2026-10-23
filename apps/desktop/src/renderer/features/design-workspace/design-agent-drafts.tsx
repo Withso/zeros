@@ -726,7 +726,7 @@ export const DesignAgentActivityChip = React.memo(function DesignAgentActivityCh
       </DesignToolbarButton>
       <DesignToolbarButton
         label="Follow the agent"
-        tooltip={following ? "Stop following" : "Follow the agent"}
+        tooltip={following ? "Stop following" : "Follow agent"}
         tooltipSide="top"
         pressed={following}
         data-design-agent-activity-follow=""

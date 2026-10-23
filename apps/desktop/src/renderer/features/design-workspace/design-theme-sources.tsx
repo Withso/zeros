@@ -76,7 +76,7 @@ export function DesignThemeSourceRail({
         {sources.length > 0 && onUpdate ? (
           <Tooltip
             className="zd-theme-tooltip"
-            label="Update sources · re-read every source and rerun its build now"
+            label="Update sources"
           >
             <Button
               type="button"
@@ -149,23 +149,18 @@ export function DesignThemeSourceRail({
         </Tooltip>
       ) : null}
       {sources.length === 0 && onAskAgent ? (
-        <Tooltip
-          className="zd-theme-tooltip"
-          label="A new chat sets up syncing with your app's stylesheets"
+        <Button
+          type="button"
+          variant="ghost"
+          className="zd-theme-filter w-full"
+          data-design-theme-ask-agent=""
+          onClick={onAskAgent}
         >
-          <Button
-            type="button"
-            variant="ghost"
-            className="zd-theme-filter w-full"
-            data-design-theme-ask-agent=""
-            onClick={onAskAgent}
-          >
-            <span className="zd-theme-source-name">
-              <MessageSquarePlus aria-hidden="true" className="size-3.5 shrink-0" />
-              <span className="truncate">Ask agent to sync</span>
-            </span>
-          </Button>
-        </Tooltip>
+          <span className="zd-theme-source-name">
+            <MessageSquarePlus aria-hidden="true" className="size-3.5 shrink-0" />
+            <span className="truncate">Ask agent to sync</span>
+          </span>
+        </Button>
       ) : null}
       {errors.length > 0 && onAskAgent ? (
         <Button

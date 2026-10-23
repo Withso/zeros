@@ -488,7 +488,7 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
         </IconButton>
       </Tooltip>
       <DropdownMenu>
-        <Tooltip label="Open in…">
+        <Tooltip label="Open in…" delayDuration={1500}>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
@@ -526,7 +526,7 @@ export function OpenInBadgeMenu({
 
   return (
     <DropdownMenu>
-      <Tooltip label="Open in…">
+      <Tooltip label="Open in…" delayDuration={1500}>
         <DropdownMenuTrigger asChild>
           <Badge
             variant="accent"
@@ -716,7 +716,7 @@ export function ConversationHeader({
           />
         ) : (
           <Tooltip
-            label={workspace ? "Click to rename" : project.isGitRepository === false ? "Project folder" : "Project main checkout"}
+            label={workspace ? "Rename" : project.isGitRepository === false ? "Project folder" : "Main checkout"}
           >
             <button
               type="button"

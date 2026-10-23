@@ -53,7 +53,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../shared/ui/primitives/dropdown-menu";
-import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { useAddProject } from "./add-project-provider";
 import { warmCreateSourceProject } from "./dispatcher/create-from-source";
 import { requestCreateFromSource } from "./dispatcher/create-source-request";
@@ -200,30 +199,26 @@ export function SidebarRepositoryHeader({
                     : "hidden group-hover/repo:flex group-has-[:focus-visible]/repo:flex",
                 )}
               >
-                <Tooltip label="Repository settings" side="bottom">
-                  <button
-                    type="button"
-                    className={SIDEBAR_ROW_ACTION_CLS}
-                    aria-label={`${project.name} settings`}
-                    onClick={openRepositoryPage}
-                  >
-                    <Settings strokeWidth={1.5} />
-                  </button>
-                </Tooltip>
+                <button
+                  type="button"
+                  className={SIDEBAR_ROW_ACTION_CLS}
+                  aria-label={`${project.name} settings`}
+                  onClick={openRepositoryPage}
+                >
+                  <Settings strokeWidth={1.5} />
+                </button>
                 <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-                  <Tooltip label="More actions" side="bottom">
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className={SIDEBAR_ROW_ACTION_CLS}
-                        aria-label={`More actions for ${project.name}`}
-                        onPointerEnter={() => warmCreateSourceProject(project)}
-                        onFocus={() => warmCreateSourceProject(project)}
-                      >
-                        <Ellipsis strokeWidth={1.5} />
-                      </button>
-                    </DropdownMenuTrigger>
-                  </Tooltip>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className={SIDEBAR_ROW_ACTION_CLS}
+                      aria-label={`More actions for ${project.name}`}
+                      onPointerEnter={() => warmCreateSourceProject(project)}
+                      onFocus={() => warmCreateSourceProject(project)}
+                    >
+                      <Ellipsis strokeWidth={1.5} />
+                    </button>
+                  </DropdownMenuTrigger>
                   <DropdownMenuContent
                     align="start"
                     className="w-52"
@@ -280,18 +275,16 @@ export function SidebarRepositoryHeader({
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
-              <Tooltip label="Create workspace" side="bottom">
-                <button
-                  type="button"
-                  className={SIDEBAR_ROW_ACTION_CLS}
-                  aria-label={`Create workspace in ${project.name}`}
-                  onPointerEnter={() => warmCreateSourceProject(project)}
-                  onFocus={() => warmCreateSourceProject(project)}
-                  onClick={openCreate}
-                >
-                  <Plus strokeWidth={1.5} />
-                </button>
-              </Tooltip>
+              <button
+                type="button"
+                className={SIDEBAR_ROW_ACTION_CLS}
+                aria-label={`Create workspace in ${project.name}`}
+                onPointerEnter={() => warmCreateSourceProject(project)}
+                onFocus={() => warmCreateSourceProject(project)}
+                onClick={openCreate}
+              >
+                <Plus strokeWidth={1.5} />
+              </button>
             </div>
           </div>
         </ContextMenuTrigger>

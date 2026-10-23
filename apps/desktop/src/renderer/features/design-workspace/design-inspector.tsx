@@ -747,11 +747,7 @@ function InspectorEditField({
             )}
           >
             <Tooltip
-              label={
-                motion.trackActive
-                  ? `Add ${label} keyframe at the playhead`
-                  : `Animate ${label}`
-              }
+              label={motion.trackActive ? "Add keyframe" : "Animate"}
             >
               <button
                 type="button"

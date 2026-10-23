@@ -34,7 +34,6 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-  Tooltip,
 } from "@/renderer/shared/ui/primitives";
 import { createBrowserTab, createEmptyFilesTab, createSimulatorTab } from "./tab-model";
 import { buildDirectFileOpenAction } from "./direct-file-open";
@@ -230,20 +229,18 @@ export function WorkbenchNewTabMenu({
         }
       }}
     >
-      <Tooltip label="New tab">
-        <PopoverTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="shrink-0"
-            aria-label="New File, Browser, or Terminal tab"
-            onPointerEnter={warm}
-            onFocus={warm}
-          >
-            <Plus className="text-fg2 size-3.5" />
-          </Button>
-        </PopoverTrigger>
-      </Tooltip>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0"
+          aria-label="New File, Browser, or Terminal tab"
+          onPointerEnter={warm}
+          onFocus={warm}
+        >
+          <Plus className="text-fg2 size-3.5" />
+        </Button>
+      </PopoverTrigger>
       <PopoverContent
         ref={menuRef}
         aria-label="New tab"

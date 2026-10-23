@@ -974,32 +974,30 @@ function DashboardCard({
         {/* Bottom: primary action + PR link + last-active. */}
         <div className="mt-2.5 flex items-center gap-2">
           {action && ActionIcon && (
-            <Tooltip label={action.label}>
-              <button
-                type="button"
-                className={CARD_ACTION_CLS}
-                onClick={(e) => {
-                  stop(e);
-                  action?.run();
-                }}
-                disabled={busy !== null || mutating}
-              >
-                {spinning ? (
-                  <ZerosSpinner size={14} />
-                ) : ActionIcon ? (
-                  <ActionIcon className="size-3.5" />
-                ) : null}
-                <span>
-                  {mutating && action.busyKey === "archive"
-                    ? "Archiving…"
-                    : action.label}
-                </span>
-              </button>
-            </Tooltip>
+            <button
+              type="button"
+              className={CARD_ACTION_CLS}
+              onClick={(e) => {
+                stop(e);
+                action?.run();
+              }}
+              disabled={busy !== null || mutating}
+            >
+              {spinning ? (
+                <ZerosSpinner size={14} />
+              ) : ActionIcon ? (
+                <ActionIcon className="size-3.5" />
+              ) : null}
+              <span>
+                {mutating && action.busyKey === "archive"
+                  ? "Archiving…"
+                  : action.label}
+              </span>
+            </button>
           )}
           <div className="text-fg2 ml-auto flex items-center gap-2 text-xs tabular-nums">
             {w.prNumber != null && w.prUrl && (
-              <Tooltip label="Open PR on GitHub">
+              <Tooltip label="Open PR">
                 <a
                   href={w.prUrl}
                   target="_blank"

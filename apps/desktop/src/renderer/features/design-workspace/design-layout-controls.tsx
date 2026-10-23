@@ -220,7 +220,7 @@ export function DesignLayoutChildren({
           <DropdownMenuTrigger asChild>
             <InspectorIconButton
               label="More layout actions"
-              tooltip={unavailable ?? "More layout actions"}
+              tooltip={unavailable}
               size="row"
               disabled={pinDisabled}
             >

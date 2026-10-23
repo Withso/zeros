@@ -36,7 +36,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, FolderOpen, Plus } from "lucide-react";
 
 import { Button, GithubIcon } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -603,22 +602,20 @@ function ActiveDispatcherPage({
               open={active && projectMenuOpen}
               onOpenChange={setProjectMenuOpen}
             >
-              <Tooltip label="Choose project">
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    aria-label="Choose project"
-                    disabled={busy || designBusy}
-                    className="text-fg2 h-7 min-w-0 gap-1.5 px-2 text-sm font-normal hover:bg-transparent"
-                  >
-                    <span className="max-w-[180px] truncate">
-                      {selectedProject?.name ?? "Add project"}
-                    </span>
-                    <ChevronDown size={12} className="text-fg2 opacity-70" />
-                  </Button>
-                </DropdownMenuTrigger>
-              </Tooltip>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  aria-label="Choose project"
+                  disabled={busy || designBusy}
+                  className="text-fg2 h-7 min-w-0 gap-1.5 px-2 text-sm font-normal hover:bg-transparent"
+                >
+                  <span className="max-w-[180px] truncate">
+                    {selectedProject?.name ?? "Add project"}
+                  </span>
+                  <ChevronDown size={12} className="text-fg2 opacity-70" />
+                </Button>
+              </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="start"
                 sideOffset={4}

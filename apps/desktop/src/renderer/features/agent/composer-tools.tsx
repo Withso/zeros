@@ -199,7 +199,7 @@ function ToolsPopover({
         if (nextOpen && enabled) onPrepare?.();
       }}
     >
-      <Tooltip label="Tools">
+      <Tooltip label="Tools" delayDuration={1500} disabled={visible}>
         <PopoverTrigger asChild>
           <Button
             type="button"

@@ -422,7 +422,7 @@ function TeamIdControl({ teamId }: { teamId: string }) {
       <span className="border-border2 bg-bg2/50 text-fg2 max-w-[300px] truncate rounded-sm border px-2 py-1 font-mono text-xs select-all">
         {teamId}
       </span>
-      <Tooltip label="Copy team ID">
+      <Tooltip label="Copy ID">
         <Button
           variant="ghost"
           size="sm"

@@ -395,18 +395,16 @@ export function CreatePrButton({
         </span>
       </Tooltip>
       <DropdownMenu>
-        <Tooltip label="More PR options">
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className={CHEVRON_BTN_CLS}
-              disabled={inert}
-              aria-label="More PR options"
-            >
-              <ChevronDown />
-            </button>
-          </DropdownMenuTrigger>
-        </Tooltip>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={CHEVRON_BTN_CLS}
+            disabled={inert}
+            aria-label="More PR options"
+          >
+            <ChevronDown />
+          </button>
+        </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"
           sideOffset={4}

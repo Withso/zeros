@@ -147,7 +147,7 @@ function CaptureCard({
             "group-focus-within/capture:pointer-events-auto group-focus-within/capture:opacity-100",
           )}
         >
-          <Tooltip label="Add to chat">
+          <Tooltip label="Attach capture">
             <IconButton
               size="compact"
               label="Add to chat"
@@ -162,15 +162,13 @@ function CaptureCard({
               )}
             </IconButton>
           </Tooltip>
-          <Tooltip label="Close">
-            <IconButton
-              size="compact"
-              label="Close"
-              onClick={() => captureThumbnails.dismiss(capture.id)}
-            >
-              <X aria-hidden />
-            </IconButton>
-          </Tooltip>
+          <IconButton
+            size="compact"
+            label="Close"
+            onClick={() => captureThumbnails.dismiss(capture.id)}
+          >
+            <X aria-hidden />
+          </IconButton>
         </Toolbar>
       </div>
     </div>

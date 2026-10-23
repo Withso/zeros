@@ -167,7 +167,7 @@ export function AgentModelMenu({
   onConfigure,
   open,
   onOpenChange,
-  triggerTooltip = "Change model",
+  triggerTooltip = "Model",
   redirectCrossAgent = false,
   selectionTiming,
   footer,
@@ -484,7 +484,7 @@ export function AgentModelMenu({
         onOpenChange(nextOpen);
       }}
     >
-      <Tooltip label={selectionTiming === "next-message" ? "Model, effort and Fast apply to the next message" : triggerTooltip}>
+      <Tooltip label={triggerTooltip} delayDuration={1500} disabled={open}>
         <PopoverTrigger asChild>{children}</PopoverTrigger>
       </Tooltip>
       <PopoverContent

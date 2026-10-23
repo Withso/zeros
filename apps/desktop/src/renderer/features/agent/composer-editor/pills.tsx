@@ -60,26 +60,24 @@ function PillRemoveButton({
   children: ReactNode;
 }) {
   return (
-    <Tooltip label="Remove">
-      <Button
-        variant="ghost"
-        type="button"
-        // Removing a pill must preserve the editor's current selection.
-        onMouseDown={(event) => event.preventDefault()}
-        disabled={disabled}
-        onClick={onRemove}
-        aria-label={`Remove ${label}`}
-        className="composer-pill-remove text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright grid size-4 shrink-0 place-items-center rounded-sm border-0 bg-transparent p-0 focus-visible:ring-1 focus-visible:outline-none"
+    <Button
+      variant="ghost"
+      type="button"
+      // Removing a pill must preserve the editor's current selection.
+      onMouseDown={(event) => event.preventDefault()}
+      disabled={disabled}
+      onClick={onRemove}
+      aria-label={`Remove ${label}`}
+      className="composer-pill-remove text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright grid size-4 shrink-0 place-items-center rounded-sm border-0 bg-transparent p-0 focus-visible:ring-1 focus-visible:outline-none"
+    >
+      <span
+        data-composer-pill-icon=""
+        className="col-start-1 row-start-1 inline-flex"
       >
-        <span
-          data-composer-pill-icon=""
-          className="col-start-1 row-start-1 inline-flex"
-        >
-          {children}
-        </span>
-        <X size={11} className="col-start-1 row-start-1" />
-      </Button>
-    </Tooltip>
+        {children}
+      </span>
+      <X size={11} className="col-start-1 row-start-1" />
+    </Button>
   );
 }
 

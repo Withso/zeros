@@ -721,7 +721,7 @@ export function DesignAutoLayoutControls({
               label="Independent padding"
               tooltip={
                 separatePadding
-                  ? "Use horizontal and vertical padding"
+                  ? "Linked padding"
                   : "Independent padding"
               }
               size="row"

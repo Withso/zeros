@@ -23,7 +23,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 
 import { Button, Input } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   Select,
   SelectContent,
@@ -438,17 +437,15 @@ function TerminalAgentCard({
 
       <SettingsActions>
         {showRemove && (
-          <Tooltip label="Remove agent">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onRemove}
-              className="text-fg2"
-              aria-label="Remove agent"
-            >
-              <Trash2 className="size-4" aria-hidden="true" />
-            </Button>
-          </Tooltip>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onRemove}
+            className="text-fg2"
+            aria-label="Remove agent"
+          >
+            <Trash2 className="size-4" aria-hidden="true" />
+          </Button>
         )}
         <Button size="sm" onClick={handleSave} disabled={!canSave}>
           {isNew ? "Add agent" : "Save changes"}

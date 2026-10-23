@@ -237,20 +237,18 @@ export function BrowserVariantFrame({
               )}
             </button>
           </Tooltip>
-          <Tooltip label="Delete variant">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(variant.id);
-              }}
-              onPointerDown={(e) => e.stopPropagation()}
-              className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex size-6 items-center justify-center rounded-sm"
-              aria-label="Delete variant"
-            >
-              <Trash2 className="size-3" />
-            </button>
-          </Tooltip>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(variant.id);
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex size-6 items-center justify-center rounded-sm"
+            aria-label="Delete variant"
+          >
+            <Trash2 className="size-3" />
+          </button>
         </div>
         {/* Fixed viewport — content scrolls inside the iframe like the live frame. */}
         <div className="relative min-h-0 flex-1 overflow-hidden">

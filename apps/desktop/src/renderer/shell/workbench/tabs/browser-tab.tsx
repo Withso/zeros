@@ -567,54 +567,48 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
     <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
       <WorkbenchTabToolbar>
         <PanelHeader size="window" className="h-9">
-          <Tooltip label="Back">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
-              disabled={
-                !browserSessionId ||
-                browserLocked ||
-                activity?.canGoBack === false
-              }
-              onClick={() => void control("back")}
-              aria-label="Back"
-            >
-              <ChevronLeft size={14} />
-            </Button>
-          </Tooltip>
-          <Tooltip label="Forward">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
-              disabled={
-                !browserSessionId ||
-                browserLocked ||
-                activity?.canGoForward === false
-              }
-              onClick={() => void control("forward")}
-              aria-label="Forward"
-            >
-              <ChevronRight size={14} />
-            </Button>
-          </Tooltip>
-          <Tooltip label={activity?.loading ? "Loading…" : "Reload"}>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
-              disabled={!browserSessionId || browserLocked}
-              onClick={() => void control("reload")}
-              aria-label="Reload"
-            >
-              {activity?.loading ? (
-                <ZerosSpinner size={16} />
-              ) : (
-                <RotateCw size={14} />
-              )}
-            </Button>
-          </Tooltip>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+            disabled={
+              !browserSessionId ||
+              browserLocked ||
+              activity?.canGoBack === false
+            }
+            onClick={() => void control("back")}
+            aria-label="Back"
+          >
+            <ChevronLeft size={14} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+            disabled={
+              !browserSessionId ||
+              browserLocked ||
+              activity?.canGoForward === false
+            }
+            onClick={() => void control("forward")}
+            aria-label="Forward"
+          >
+            <ChevronRight size={14} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+            disabled={!browserSessionId || browserLocked}
+            onClick={() => void control("reload")}
+            aria-label="Reload"
+          >
+            {activity?.loading ? (
+              <ZerosSpinner size={16} />
+            ) : (
+              <RotateCw size={14} />
+            )}
+          </Button>
           <form
             className="min-w-0 flex-1"
             onSubmit={(event) => {
@@ -657,18 +651,16 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
           {/* Appearance is a tab preference, so the menu stays available while
               the agent drives or before it opens a page. */}
           <DropdownMenu>
-            <Tooltip label="More">
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="text-fg2 hover:text-fg1 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 size-6"
-                  aria-label="More browser actions"
-                >
-                  <MoreHorizontal size={14} />
-                </Button>
-              </DropdownMenuTrigger>
-            </Tooltip>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-fg2 hover:text-fg1 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 size-6"
+                aria-label="More browser actions"
+              >
+                <MoreHorizontal size={14} />
+              </Button>
+            </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[180px]">
               <DropdownMenuItem
                 onClick={() => void control("reload")}
@@ -2384,45 +2376,39 @@ function BrowserChrome({
     // centered with breathing room.
     <PanelHeader size="window" className="h-9">
       {/* Navigation buttons */}
-      <Tooltip label="Back">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
-          disabled={!state.canGoBack}
-          onClick={back}
-          aria-label="Back"
-        >
-          <ChevronLeft size={14} />
-        </Button>
-      </Tooltip>
-      <Tooltip label="Forward">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
-          disabled={!state.canGoForward}
-          onClick={forward}
-          aria-label="Forward"
-        >
-          <ChevronRight size={14} />
-        </Button>
-      </Tooltip>
-      <Tooltip label={state.isLoading ? "Loading…" : "Reload"}>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="text-fg2 hover:text-fg1 size-6"
-          onClick={reload}
-          aria-label="Reload"
-        >
-          {state.isLoading ? (
-            <ZerosSpinner size={16} />
-          ) : (
-            <RotateCw size={14} />
-          )}
-        </Button>
-      </Tooltip>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+        disabled={!state.canGoBack}
+        onClick={back}
+        aria-label="Back"
+      >
+        <ChevronLeft size={14} />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+        disabled={!state.canGoForward}
+        onClick={forward}
+        aria-label="Forward"
+      >
+        <ChevronRight size={14} />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="text-fg2 hover:text-fg1 size-6"
+        onClick={reload}
+        aria-label="Reload"
+      >
+        {state.isLoading ? (
+          <ZerosSpinner size={16} />
+        ) : (
+          <RotateCw size={14} />
+        )}
+      </Button>
 
       {/* URL omnibox — accepts canonical or scheme-less http(s) addresses. */}
       <form onSubmit={handleSubmit} className="min-w-0 flex-1">
@@ -2483,7 +2469,7 @@ function BrowserChrome({
           BrowserTab body. Both toggles stay in place (disabled) while
           the page floats so the float button does not shift. */}
       {designModeAvailable && (
-        <Tooltip label="Design Mode" shortcut="⌘⇧D">
+        <Tooltip label="Design mode" shortcut="⌘⇧D">
           <Button
             variant="ghost"
             size="icon-sm"
@@ -2506,7 +2492,7 @@ function BrowserChrome({
         </Tooltip>
       )}
       {localToolsEnabled && (
-        <Tooltip label="Canvas Mode" shortcut={"⌘\\"}>
+        <Tooltip label="Canvas mode" shortcut={"⌘\\"}>
           <Button
             variant="ghost"
             size="icon-sm"
@@ -2526,7 +2512,7 @@ function BrowserChrome({
           </Button>
         </Tooltip>
       )}
-      <Tooltip label={floating ? "Stop floating" : "Float preview over chat"}>
+      <Tooltip label={floating ? "Stop floating" : "Float preview"}>
         <Button
           variant="ghost"
           size="icon-sm"
@@ -2547,22 +2533,20 @@ function BrowserChrome({
           over the iframe body. No more native menu, no overlay-lock,
           no screenshot backdrop. */}
       <DropdownMenu>
-        <Tooltip label="More">
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className={[
-                "text-fg2 hover:text-fg1 size-6",
-                "data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1",
-              ].join(" ")}
-              disabled={!electron}
-              aria-label="More browser actions"
-            >
-              <MoreHorizontal size={14} />
-            </Button>
-          </DropdownMenuTrigger>
-        </Tooltip>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className={[
+              "text-fg2 hover:text-fg1 size-6",
+              "data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1",
+            ].join(" ")}
+            disabled={!electron}
+            aria-label="More browser actions"
+          >
+            <MoreHorizontal size={14} />
+          </Button>
+        </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-[220px]">
           <DropdownMenuItem onClick={hardReload} disabled={!electron}>
             Hard reload
@@ -2702,7 +2686,7 @@ function CanvasHeightIndicator({
       }}
     >
       {!isDefault && (
-        <Tooltip label="Reset to default height">
+        <Tooltip label="Reset height">
           <button
             type="button"
             onClick={onReset}

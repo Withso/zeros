@@ -26,7 +26,6 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
-import { Tooltip } from "../../shared/ui/primitives";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 export interface NewChatMenuProps {
@@ -69,6 +68,7 @@ export function NewChatMenu({
       hover="subtle"
       className="shrink-0"
       label={terminalAgentsEnabled ? "New tab" : "New chat"}
+      aria-keyshortcuts={terminalAgentsEnabled ? undefined : "Meta+T"}
       onClick={terminalAgentsEnabled ? undefined : openChat}
     >
       <Plus className="size-3.5" />
@@ -78,9 +78,7 @@ export function NewChatMenu({
   if (!terminalAgentsEnabled) {
     return (
       <div className="flex shrink-0 items-center">
-        <Tooltip label="New chat" shortcut="⌘T">
-          {plusButton}
-        </Tooltip>
+        {plusButton}
       </div>
     );
   }
@@ -88,9 +86,7 @@ export function NewChatMenu({
   return (
     <div className="flex shrink-0 items-center">
       <DropdownMenu>
-        <Tooltip label="New tab">
-          <DropdownMenuTrigger asChild>{plusButton}</DropdownMenuTrigger>
-        </Tooltip>
+        <DropdownMenuTrigger asChild>{plusButton}</DropdownMenuTrigger>
         <DropdownMenuContent align="start" sideOffset={6} className="w-44">
           <DropdownMenuItem onSelect={openChat}>
             <MessageSquare className="text-fg2" />

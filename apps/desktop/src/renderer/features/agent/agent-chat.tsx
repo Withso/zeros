@@ -5463,68 +5463,66 @@ function AgentChatBody({
                     filled) when streaming. The form's onSubmit handler
                     above already calls session.cancel() when streaming, so
                     clicking the same button while in flight halts the
-                    agent — no separate destructive button. Title swaps so
+                    agent — no separate destructive button. Its name swaps so
                     the affordance still reads. */}
-                      <Tooltip
-                        label={
+                      <PromptInputSubmit
+                        aria-label={
                           composerStreaming
-                              ? "Stop agent"
-                              : editingQueuedId
-                                ? "Save message"
-                                : "Send"
-                        }
-                        shortcut={
-                          composerStreaming || sendPreparing ? undefined : "↵"
-                        }
-                      >
-                        <PromptInputSubmit
-                          // `submitted` = this send is parked on a cold
-                          // transcript read or a session (re)build with the
-                          // text still in the composer. Without it the button
-                          // looked idle-but-dead for the whole spawn, which is
-                          // what made people press Enter again and again.
-                          status={
-                            isErrorState
-                              ? "error"
-                              : composerStreaming
-                                ? "streaming"
-                                : sendPreparing
-                                  ? "submitted"
-                                  : "ready"
-                          }
-                          disabled={
-                            composerStreaming
-                              ? false
+                            ? "Stop agent"
+                            : editingQueuedId
+                              ? "Save message"
                               : sendPreparing
-                                ? true
-                                : editingQueuedId
-                                  ? !queuedEditHasContent
-                                  : !canSend
-                          }
-                          className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
-                        >
-                          {composerStreaming ? (
-                            <Square className="size-3" />
-                          ) : undefined}
-                        </PromptInputSubmit>
-                      </Tooltip>
+                                ? "Submitting"
+                                : "Send message"
+                        }
+                        aria-keyshortcuts={
+                          composerStreaming || sendPreparing ? undefined : "Enter"
+                        }
+                        // `submitted` = this send is parked on a cold
+                        // transcript read or a session (re)build with the
+                        // text still in the composer. Without it the button
+                        // looked idle-but-dead for the whole spawn, which is
+                        // what made people press Enter again and again.
+                        status={
+                          isErrorState
+                            ? "error"
+                            : composerStreaming
+                              ? "streaming"
+                              : sendPreparing
+                                ? "submitted"
+                                : "ready"
+                        }
+                        disabled={
+                          composerStreaming
+                            ? false
+                            : sendPreparing
+                              ? true
+                              : editingQueuedId
+                                ? !queuedEditHasContent
+                                : !canSend
+                        }
+                        className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
+                      >
+                        {composerStreaming ? (
+                          <Square className="size-3" />
+                        ) : undefined}
+                      </PromptInputSubmit>
                       {/* Queued-edit save tick — sits beside Stop while the
                     agent runs (the screenshot-spec layout), so saving the
                     edit and stopping the turn stay separate, unambiguous
                     targets. When idle the main submit doubles as Save; the
                     tick stays for a consistent affordance. */}
                       {editingQueuedId && (
-                        <Tooltip label="Save message" shortcut="↵">
-                          <Button
-                            type="button"
-                            onClick={() => void saveQueuedEdit()}
-                            disabled={!queuedEditHasContent}
-                            aria-label="Save queued message"
-                            className="disabled:bg-bg2-hover disabled:text-fg2 size-8 shrink-0 rounded-sm p-0 disabled:opacity-100"
-                          >
-                            <Check className="size-4" />
-                          </Button>
-                        </Tooltip>
+                        <Button
+                          type="button"
+                          onClick={() => void saveQueuedEdit()}
+                          disabled={!queuedEditHasContent}
+                          aria-label="Save queued message"
+                          aria-keyshortcuts="Enter"
+                          className="disabled:bg-bg2-hover disabled:text-fg2 size-8 shrink-0 rounded-sm p-0 disabled:opacity-100"
+                        >
+                          <Check className="size-4" />
+                        </Button>
                       )}
                     </div>
                   </PromptInputToolbar>

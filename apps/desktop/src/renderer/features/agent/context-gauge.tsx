@@ -136,7 +136,7 @@ export const ContextGauge = memo(function ContextGauge({
 
   return (
     <Popover>
-      <Tooltip label={tooltip}>
+      <Tooltip label={tooltip} delayDuration={1500}>
         <PopoverTrigger asChild>
           <button
             type="button"

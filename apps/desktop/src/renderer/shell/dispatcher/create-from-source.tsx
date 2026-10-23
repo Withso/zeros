@@ -271,6 +271,8 @@ export function CreateFromSource({
             ? `Create from ${sourceName}: ${selected.label}`
             : "Create from source"
         }
+        delayDuration={1500}
+        disabled={open}
       >
         <PopoverTrigger asChild>
           <Button

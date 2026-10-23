@@ -1,0 +1,9 @@
+{
+  "id": "tooltip-hover-intent",
+  "kind": "scenario",
+  "area": "renderer-shared-ui",
+  "fixedBy": "pr:697",
+  "symptom": "Routine controls showed redundant tooltips, permission hints opened immediately, and adjacent hover targets could skip their delay.",
+  "rule": "changes/tooltip-hover-intent.md: separate accessible names from optional hints; verify absence before each hover deadline, popup suppression, keyboard help and surface retirement.",
+  "check": "pnpm test:ui-smoke --shard=3/3"
+}

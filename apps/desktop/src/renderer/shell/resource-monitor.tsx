@@ -672,7 +672,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   return (
     <div className="flex h-full shrink-0 items-center">
       <Popover open={open} onOpenChange={setOpen}>
-        <Tooltip label={triggerLabel} side="bottom">
+        <Tooltip label={triggerLabel} side="bottom" delayDuration={1500} disabled={open}>
           <PopoverTrigger asChild>
             <Button
               type="button"
@@ -750,11 +750,11 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 label={
                   currentTerminalFilterAvailable
                     ? includesTerminal
-                      ? "Exclude terminal processes"
-                      : "Include terminal processes"
+                      ? "Exclude terminals"
+                      : "Include terminals"
                     : includeTerminal
-                      ? "Waiting for the engine's terminal inventory"
-                      : "Include terminal processes; excluded data is retained while refreshing"
+                      ? "Loading terminals"
+                      : "Include terminals"
                 }
                 side="bottom"
               >
@@ -773,8 +773,8 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
               <Tooltip
                 label={
                   stack
-                    ? "Unstack matching processes"
-                    : "Stack matching processes"
+                    ? "Ungroup processes"
+                    : "Group processes"
                 }
                 side="bottom"
               >
@@ -794,7 +794,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 </Button>
               </Tooltip>
               <Tooltip
-                label={tree ? "Use flat view" : "Use tree view"}
+                label={tree ? "Flat view" : "Tree view"}
                 side="bottom"
               >
                 <Button
@@ -809,7 +809,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 </Button>
               </Tooltip>
               <Tooltip
-                label="Copy diagnostics: processes, Mac memory and recent app logs"
+                label="Copy diagnostics"
                 side="bottom"
               >
                 <Button

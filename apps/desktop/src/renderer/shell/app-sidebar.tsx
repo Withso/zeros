@@ -802,7 +802,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             Workspaces
           </span>
           <DropdownMenu open={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
-            <Tooltip label="Filter workspaces" side="bottom">
+            <Tooltip label="Filter workspaces" side="bottom" delayDuration={1500} disabled={filterMenuOpen}>
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
@@ -939,21 +939,19 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               <span className="text-muted-fg truncate text-xs">{email}</span>
             )}
           </span>
-          <Tooltip label="Settings">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Open settings"
-              data-state={activePage === "settings" ? "active" : "inactive"}
-              className="text-fg2 hover:text-fg1 data-[state=active]:text-fg1 shrink-0"
-              onClick={() =>
-                dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" })
-              }
-            >
-              <Settings size={16} strokeWidth={1.5} />
-            </Button>
-          </Tooltip>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Open settings"
+            data-state={activePage === "settings" ? "active" : "inactive"}
+            className="text-fg2 hover:text-fg1 data-[state=active]:text-fg1 shrink-0"
+            onClick={() =>
+              dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" })
+            }
+          >
+            <Settings size={16} strokeWidth={1.5} />
+          </Button>
         </div>
       </Surface>
       {/* Right-edge resize seam — a 1px border line with a wider invisible

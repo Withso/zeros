@@ -223,8 +223,8 @@ export const FilesTab = React.memo(function FilesTab({
     <Tooltip
       label={
         sidebarMode === "tree" && layout.hasFile
-          ? "Hide file tree"
-          : "Show file tree"
+          ? "Hide files"
+          : "Show files"
       }
     >
       <Button
