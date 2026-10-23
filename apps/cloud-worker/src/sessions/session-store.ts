@@ -405,7 +405,7 @@ export class SessionStore {
     });
   }
 
-  async finish(chatId: string, requestId: string, response?: PromptResponse, error?: string): Promise<void> {
+  async finish(chatId: string, requestId: string, response?: PromptResponse, error?: string, failureNotice?: SessionNotification): Promise<void> {
     await this.update(chatId, (draft) => {
       const entry = draft.inbox.find((entry) => entry.requestId === requestId);
       if (!entry || (entry.state !== "running" && !(entry.outbox && entry.state === "queued"))) return;
@@ -413,6 +413,13 @@ export class SessionStore {
       entry.state = entry.cancelRequested || response?.stopReason === "cancelled" ? "cancelled" : error ? "failed" : "completed";
       entry.response = entry.state === "cancelled" ? { ...response, stopReason: "cancelled" } : response;
       entry.error = error;
+      if (failureNotice) {
+        // The reporter observes this terminal state as soon as change() saves
+        // it. Commit the user row and notice in that same durable snapshot.
+        const previous = new Set(draft.messages);
+        draft.messages = applyUpdate(draft.messages, failureNotice);
+        upsertRows(draft.rows, draft.messages.filter(message => !previous.has(message)).map(persisted));
+      }
     });
   }
 

@@ -473,13 +473,13 @@ export class Agents {
           await route.events;
           await Promise.all([...route.steers.values()]);
           await route.outboxSteering;
-          await this.store.finish(route.chatId, entry.requestId, response ? { ...response, userMessageId: entry.userMessageId } : undefined, error);
+          const notice: SessionNotification | undefined = entry.outbox && error && !route.turnFailureNotice
+            ? { sessionId: route.id, update: { sessionUpdate: "error_notice", noticeId: `outbox:${entry.userMessageId}`,
+                severity: "error", message: error, turnFailure: { turnId: entry.userMessageId, kind: "protocol-error" }, at: Date.now() } }
+            : undefined;
+          await this.store.finish(route.chatId, entry.requestId, response ? { ...response, userMessageId: entry.userMessageId } : undefined, error, notice);
           const receipt = this.store.receipt(route.chatId, entry.requestId)!;
-          if (entry.outbox && receipt.error && !route.turnFailureNotice) {
-            const notice: SessionNotification = { sessionId: route.id, update: { sessionUpdate: "error_notice", noticeId: `outbox:${entry.userMessageId}`,
-              severity: "error", message: receipt.error, turnFailure: { turnId: entry.userMessageId, kind: "protocol-error" }, at: Date.now() } };
-            await this.store.fold(route.chatId, notice); await this.update(route, notice);
-          }
+          if (notice && receipt.error) await this.update(route, notice);
           route.turnTiming?.mark("turn_done"); route.turnTiming = undefined;
           await this.turnState(route, entry, receipt.state === "cancelled" ? "cancelled" : receipt.state === "failed" ? "failed" : "completed", receipt.response?.stopReason);
           for (const waiter of route.waiters.get(entry.requestId) ?? []) await this.receipt(route, receipt, waiter);
