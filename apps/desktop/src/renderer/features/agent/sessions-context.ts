@@ -83,6 +83,8 @@ export interface QueuedEditPayload {
 export interface CloudQueuedPrompt {
   draft: CloudQueuedDraft;
   prepare(supportsImage: boolean): Promise<QueuedEditPayload>;
+  /** Portable bytes for capability-gated HTTPS delivery, independent of VM readiness. */
+  prepareDurable?(): Promise<QueuedEditPayload>;
 }
 export type CloudQueuedDraft = import("./composer-editor").ComposerInitialContent & {
   prepareAdditional?: () => Promise<import("./composer-attachments").ComposerAttachment[]>;
@@ -140,7 +142,7 @@ export interface SessionsActions {
   cancel(chatId: string): Promise<void>;
   /** Observe the original cloud command before an explicit Retry. False means
    * its durable terminal receipt already permits a separate user attempt. */
-  recoverCloudPrompt(chatId: string, turnId: string): Promise<boolean>;
+  recoverCloudPrompt(chatId: string, turnId: string, retry?: boolean): Promise<boolean>;
   /** Revoke only the active native Browser lease. If the official Browser
    * plugin is parked on an approval, dismiss that approval so Codex can
    * observe the stopped tool and continue the surrounding chat turn. */

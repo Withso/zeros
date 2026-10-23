@@ -104,6 +104,8 @@ export interface AgentUsage {
 }
 
 export interface AgentSessionState {
+  /** Cloud HTTP receipts, kept outside native reducers until the worker records the user row. */
+  cloudOutbox?: import("./cloud-prompt-presentation").CloudPromptView;
   /** Renderer-owned cloud FIFO readiness; Local sessions never set it. */
   cloudSendWait?: { state: "waiting" | "failed"; phase?: "sending" | "starting-workspace"; message?: string; turnId?: string; startedAt?: number };
   /** Native dispatch is pending; only an exact accepted turn starts its clock. */

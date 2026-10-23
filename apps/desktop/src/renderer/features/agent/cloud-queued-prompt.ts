@@ -1,4 +1,5 @@
 import { encodeAttachments } from "./encode-attachments";
+import { encodeCloudPromptAttachments } from "./cloud-prompt-attachments";
 import { toMessageSegments, type ComposerSerialized } from "./composer-editor/serialize";
 import type { ComposerAttachment } from "./composer-attachments";
 import type { QueuedEditPayload } from "./sessions-context";
@@ -28,6 +29,18 @@ export function cloudQueuedPrompt(input: {
     ...payload,
     cloudQueue: {
       draft: { json: input.snapshot?.json ?? null, attachments, prepareAdditional: input.prepareAdditional },
+      prepareDurable: async () => {
+        const additional = await input.prepareAdditional?.() ?? [];
+        const encoded = await encodeCloudPromptAttachments([...attachments, ...additional], input.cwd);
+        const segments = input.snapshot
+          ? toMessageSegments(input.snapshot.segments, attachments, encoded.bubbleAttachmentById)
+          : input.segments ? [...input.segments] : undefined;
+        if (segments) for (const attachment of additional) segments.push(...toMessageSegments([{
+          type: "attachment", attachmentId: attachment.id, name: attachment.name, mimeType: attachment.mimeType, kind: attachment.kind,
+        }], [attachment], encoded.bubbleAttachmentById));
+        return { text: input.text, displayText: input.displayText, attachments: [...encoded.blocks, ...(input.extraAttachments ?? [])],
+          bubbleAttachments: [...encoded.bubbleAttachments, ...(input.bubbleAttachments ?? [])], segments };
+      },
       prepare: async supportsImage => {
         const additional = await input.prepareAdditional?.() ?? [];
         const encoded = await encodeAttachments([...attachments, ...additional], {

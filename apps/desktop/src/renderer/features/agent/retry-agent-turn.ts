@@ -88,6 +88,15 @@ export async function retryAgentTurn(
   const source = deps.getChat(chatId);
   const sourceSession = deps.sessions.getSession(chatId);
   if (!source?.agentId || !sourceSession) return;
+  if (!request.newChat && isCloudWorkspace(source.folder) && sourceSession.cloudOutbox?.rows.some(row => row.id === prompt.id)) {
+    // Durable failures stay retryable even when a later message is pending.
+    // Recovery reads the original receipt first and uses the saved bytes; it
+    // neither starts a bridge request nor reconstructs files from an idle VM.
+    pending.add(chatId);
+    try { await deps.sessions.recoverCloudPrompt(chatId, prompt.id, true); }
+    finally { pending.delete(chatId); }
+    return;
+  }
   const sourceGeneration = deps.sessions.getSendGeneration(chatId);
   const ownsSource = () => {
     const chat = deps.getChat(chatId);

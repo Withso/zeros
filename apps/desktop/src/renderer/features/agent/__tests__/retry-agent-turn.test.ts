@@ -97,6 +97,16 @@ beforeEach(() => {
 });
 
 describe("explicit failed-turn recovery", () => {
+  it("retries an earlier refused durable message from its saved bytes while later work remains queued", async () => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const h = harness({ cwd: folder, status: "ready", cloudOutbox: { rows: [prompt], states: {}, pendingCount: 1, waiting: false } });
+    h.chats.set(source.id, { ...source, folder }); h.advance(); h.sessions.getCloseActivity.mockReturnValue({ running: true, queuedCount: 1 });
+    h.sessions.recoverCloudPrompt.mockResolvedValue(true);
+    await retryAgentTurn({ chatId: source.id, prompt, events: [], newChat: false }, h.dependencies);
+    expect(h.sessions.recoverCloudPrompt).toHaveBeenCalledExactlyOnceWith(source.id, prompt.id, true);
+    expect(h.sessions.ensureSession).not.toHaveBeenCalled(); expect(h.sessions.prepareForSend).not.toHaveBeenCalled();
+    expect(h.sessions.sendPrompt).not.toHaveBeenCalled(); expect(encode).not.toHaveBeenCalled();
+  });
   it.each([false, true])("observes an unconfirmed cloud command before Retry can prepare or fork (new chat: %s)", async newChat => {
     const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     const h = harness({ cwd: folder, status: "failed" }); h.chats.set(source.id, { ...source, folder });

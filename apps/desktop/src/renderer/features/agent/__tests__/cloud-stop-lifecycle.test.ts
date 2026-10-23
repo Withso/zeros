@@ -12,6 +12,7 @@ import { agentSessionHasActiveWork, BLANK, useSessionsStore } from "../sessions-
 import type { AgentSessionState } from "../use-agent-session";
 import { lastUserPrompt } from "../auth-prompt-recovery";
 import { classifyRpcError } from "../../../platform/bridge/failure";
+import { cloudPromptHasLegacyActivity } from "../cloud-prompt-presentation";
 import { canSwitchPristineChat } from "../pristine-chat";
 
 const CHAT = "11111111-1111-4111-8111-111111111111";
@@ -88,7 +89,8 @@ function harness(cwd = CLOUD, chat = CHAT) {
   const mapRef = () => ({ current: new Map() });
   const account = { value: 1 };
   const context = vm.createContext({
-    ...lifecycle, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey, cloudScopedId, hasBackgroundAgentWork, loadedBackgroundTaskState, agentSessionHasActiveWork,
+    cloudPrompts: { available: () => false }, migrateCloudSends: vi.fn(async () => {}),
+    ...lifecycle, cloudPromptHasLegacyActivity, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey, cloudScopedId, hasBackgroundAgentWork, loadedBackgroundTaskState, agentSessionHasActiveWork,
     WorkspaceRuntimeClient: RecoveryBridge, lastUserPrompt, classifyRpcError, Error,
     reconcileChatMessagesRef: { current: reconcile },
     closeActivityForSession, closeRouteForSession, invalidateTranscriptRequest, canSwitchPristineChat, BLANK,
@@ -328,6 +330,44 @@ describe("explicit cloud close renderer lifetime", () => {
 });
 
 describe("cloud Stop renderer lifetime", () => {
+  it("offers Stop for a saved running-VM message without claiming that provider work has begun", () => {
+    const h = harness(); useSessionsStore.getState().patchSession(CHAT, { status: "ready", activeTurnStartedAt: null,
+      cloudOutbox: { rows: [], states: {}, waiting: false, pendingCount: 1 } });
+    expect(showsStop(h.slot())).toBe(true);
+    expect(agentSessionHasActiveWork(h.slot(), null)).toBe(false);
+  });
+  it("still confirms native Stop for a bridge turn that predates outbox capability", async () => {
+    const h = harness(), stop = vi.fn(async () => true);
+    h.context.cloudPrompts = { available: () => true, stop };
+    const stopping = h.cancel(); await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    expect(h.bridge.request).toHaveBeenCalledOnce();
+    h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } });
+    await stopping; expect(h.slot().activeTurnStartedAt).toBeNull();
+  });
+  it("persists durable Stop without requiring a bridge or entering the legacy retry-banner path", async () => {
+    const h = harness(), stop = vi.fn(async () => true);
+    useSessionsStore.getState().patchSession(CHAT, { cloudOutbox: { rows: [], states: { "turn-1": "accepted" }, waiting: false, activeId: "turn-1", pendingCount: 1 } });
+    h.context.bridge = null; h.context.cloudPrompts = { available: () => true, stop };
+    await h.cancel(); expect(stop).toHaveBeenCalledExactlyOnceWith(CHAT);
+    expect(h.bridge.request).not.toHaveBeenCalled(); expect(h.slot().failure).toBeNull();
+  });
+  it("closes a durable chat through its confirmed fence even with no app bridge", async () => {
+    const h = harness(), confirmStop = vi.fn(() => h.gate.promise);
+    useSessionsStore.getState().patchSession(CHAT, { cloudOutbox: { rows: [], states: { "turn-1": "accepted" }, waiting: false, activeId: "turn-1", pendingCount: 1 } });
+    h.context.bridge = null; h.context.cloudPrompts = { available: () => true, confirmStop };
+    const closing = h.close();
+    expect(h.slot()).toBeDefined(); await vi.waitFor(() => expect(confirmStop).toHaveBeenCalledWith(CHAT));
+    h.gate.resolve(true); expect(await closing).toBe(true); expect(h.slot()).toBeUndefined();
+    expect(h.bridge.request).not.toHaveBeenCalled();
+  });
+  it("requires native retirement for a legacy active turn when the outbox capability arrives", async () => {
+    const h = harness(), confirmStop = vi.fn(async () => true);
+    h.context.cloudPrompts = { available: () => true, confirmStop };
+    const closing = h.close();
+    await vi.waitFor(() => expect(confirmStop).toHaveBeenCalledOnce());
+    expect(h.slot()).toBeDefined(); expect(h.bridge.request).toHaveBeenCalledOnce();
+    h.gate.resolve({ type: "AGENT_SESSION_CLOSED", agentId: "codex", chatId: CHAT, executionId: "execution-1", sessionId: "execution-1" }); expect(await closing).toBe(true); expect(h.slot()).toBeUndefined();
+  });
   it("retains the active turn and Stop control until exact retirement is confirmed", async () => {
     const h = harness();
     const pending = h.cancel();

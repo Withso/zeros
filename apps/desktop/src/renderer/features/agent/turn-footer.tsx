@@ -1,4 +1,5 @@
 import { TurnUsageCard } from "./turn-usage-card";
+import type { CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 // ──────────────────────────────────────────────────────────
 // TurnFooter — the footer below a settled turn's answer
 // ──────────────────────────────────────────────────────────
@@ -374,6 +375,8 @@ interface TurnFooterProps {
   fallbackStatusLabel?: string | null;
   failure?: AgentFailure | null;
   recoveryFailure?: { kind: string; message: string };
+  durablePrompt?: boolean;
+  receiptState?: CloudV2PromptState;
   onRetry?: () => Promise<void>;
   onRetryNewChat?: () => Promise<void>;
   onRetryNewChatIntent?: () => void;
@@ -405,6 +408,8 @@ export const TurnFooter = memo(function TurnFooter({
   fallbackStatusLabel,
   failure,
   recoveryFailure,
+  durablePrompt = false,
+  receiptState,
   onRetry,
   onRetryNewChat,
   onRetryNewChatIntent,
@@ -627,11 +632,11 @@ export const TurnFooter = memo(function TurnFooter({
     recoveryFailure,
     live,
     retrying,
-    status: turn?.status,
+    status: receiptState ?? turn?.status,
     stopReason: fallbackStopReason ?? turn?.stopReason,
   });
   // A failure card belongs to the latest turn; older turns keep one line.
-  const settledFailure = settledTurnFailurePresentation(cardFailure, !!isLastTurn);
+  const settledFailure = settledTurnFailurePresentation(cardFailure, !!isLastTurn || durablePrompt);
   const statusLabel = turnFooterStatusLabel(
     turn,
     fallbackStopReason,
@@ -649,7 +654,7 @@ export const TurnFooter = memo(function TurnFooter({
       {settledFailure.card && (
         <TurnFailureCard
           failure={settledFailure.card}
-          onRetry={!readOnly && isLastTurn ? onRetry : undefined}
+          onRetry={!readOnly && (isLastTurn || durablePrompt) ? onRetry : undefined}
           onRetryNewChat={!readOnly && isLastTurn ? onRetryNewChat : undefined}
           onRetryNewChatIntent={onRetryNewChatIntent}
         />

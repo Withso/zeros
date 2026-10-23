@@ -1,6 +1,7 @@
 // Cloud workspace v2 API. Responses map into the existing CloudWorkspaceDocument
 // so the shared workspace UI renders v2 workspaces without its own copy.
 import { z } from "zod";
+import { prepareCloudPromptErasure } from "./cloud-prompt-erasure";
 import { cloudAccountRequest } from "./cloud-workspaces";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
@@ -10,6 +11,7 @@ export const CloudV2CapabilitiesSchema = z.object({
   design: z.literal(false), browser: z.literal(false), simulators: z.literal(false),
   terminal: z.boolean(), files: z.boolean(), git: z.boolean(),
   agents: z.array(z.enum(["codex", "claude", "cursor"])),
+  promptOutbox: z.literal(1).optional(),
 });
 export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
 
@@ -59,6 +61,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     // Archiving a failed workspace marks it without a stop; both read as archived.
     status: workspace.archivedAt && (workspace.state === "stopped" || workspace.state === "failed") ? "archived" : STATUS[workspace.state],
     capabilities: {
+      ...(workspace.capabilities.promptOutbox === 1 ? { promptOutbox: 1 as const } : {}),
       canWrite: true, canEdit: true, canManage: true,
       canStart: workspace.state === "stopped",
       startUnavailableReason: workspace.state === "failed" ? "This workspace failed. Create a new one." : null,
@@ -125,10 +128,13 @@ export async function createCloudV2Workspace(input: {
 }
 
 export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "archive" | "delete"): Promise<CloudV2Workspace> {
-  const id = uuid.parse(target.workspaceId);
+  const id = uuid.parse(target.workspaceId), erase = action === "delete" && prepareCloudPromptErasure(target);
   const { workspace } = action === "delete"
     ? await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}`, one, { body: {}, idempotencyKey: key(), method: "DELETE" })
     : await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}/${action}`, one, { body: {}, idempotencyKey: key() });
+  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
+    throw new Error("Cloud workspace response changed identity");
+  if (erase) erase();
   return workspace;
 }
 

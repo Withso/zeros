@@ -485,6 +485,16 @@ describe("turn footer first paint after a reopen", () => {
     turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
     expect(renderFooter()).toContain("AGENT STOPPED");
   });
+  it.each(["interrupted", "failed"] as const)("shows one actionable cloud %s receipt even when later saved prompts exist", receiptState => {
+    const cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    useSessionsStore.setState({ sessions: { "chat-1": { ...BLANK, cwd, agentId: "codex", status: "ready" } } });
+    const message = receiptState === "interrupted" ? "The worker restarted before this turn finished" : "This message wasn't accepted. Retry to send it again.";
+    const html = renderFooter({ durablePrompt: true, receiptState, recoveryFailure: { kind: "transport-closed", message },
+      isLastTurn: false, onRetry: async () => {} });
+    expect(html).toContain(message.replaceAll("'", "&#x27;")); expect(html).toContain("Retry");
+    expect(html.match(/data-turn-failure-card/g)).toHaveLength(1);
+    expect(html).not.toContain("Retry in new chat"); expect(html).not.toContain("Working");
+  });
   it("paints a reopened failure outside activity and replaces the generic stopped pill", () => {
     turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
     const html = renderFooter({

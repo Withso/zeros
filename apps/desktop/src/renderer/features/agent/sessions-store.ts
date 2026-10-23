@@ -686,6 +686,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         normalized = { ...normalized, executionId, sessionId: executionId };
       }
       const previous = state.sessions[chatId];
+      if (!normalized.cloudOutbox && previous?.cloudOutbox && isCloudWorkspace(normalized.cwd) &&
+          previous.cwd === normalized.cwd && previous.agentId === normalized.agentId)
+        normalized = { ...normalized, cloudOutbox: previous.cloudOutbox };
       if (previous && ((previous.executionId ?? previous.sessionId) !== executionId ||
           previous.cwd !== normalized.cwd || previous.agentId !== normalized.agentId) &&
           normalized.foregroundTurnId === previous.foregroundTurnId && normalized.foregroundTurnId !== null)

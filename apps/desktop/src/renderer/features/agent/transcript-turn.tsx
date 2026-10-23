@@ -13,6 +13,8 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { memo, useCallback, useMemo } from "react";
+import type { CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
+import { promptTerminal } from "./cloud-prompt-channel";
 import type { AgentFailure } from "../../platform/bridge/failure";
 import type { BackgroundTask, WorkflowProgress } from "../../platform/bridge/agent-events";
 import { AuthenticationNotice } from "./authentication-notice";
@@ -91,6 +93,9 @@ export interface TranscriptTurnTail {
 export interface TranscriptTurnProps {
   turn: Turn;
   isVisualTail: boolean;
+  isActivityTail?: boolean;
+  durablePrompt?: boolean;
+  receiptState?: CloudV2PromptState;
   isActiveProviderSegment: boolean;
   ownsProviderFooter: boolean;
   turnIsPendingLocal: boolean;
@@ -110,6 +115,9 @@ export interface TranscriptTurnProps {
 export const TranscriptTurn = memo(function TranscriptTurn({
   turn,
   isVisualTail,
+  isActivityTail = isVisualTail,
+  durablePrompt = false,
+  receiptState,
   isActiveProviderSegment,
   ownsProviderFooter,
   turnIsPendingLocal,
@@ -240,7 +248,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               failureTurnId={!authRequired && shared.chatId ? turn.recordedTurnId ?? undefined : undefined}
               isActive={isActiveProviderSegment}
               isStreaming={turnInFlight && !authStopped}
-              showActivity={isVisualTail}
+              showActivity={isActivityTail}
               backgroundTasks={tail?.backgroundTasks}
               surfaceActive={shared.surfaceActive}
               activityEvents={turn.providerEvents}
@@ -263,7 +271,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
                 !authState &&
                 turn.recordedTurnId &&
                 shared.chatId &&
-                ownsProviderFooter ? (
+                ownsProviderFooter && (!durablePrompt || promptTerminal(receiptState) || prompt?.recoveryFailure) ? (
                   <TurnFooter
                     readOnly={shared.readOnly}
                     surfaceActive={shared.surfaceActive}
@@ -271,13 +279,15 @@ export const TranscriptTurn = memo(function TranscriptTurn({
                     turnId={turn.recordedTurnId}
                     failure={tail?.failure ?? null}
                     recoveryFailure={prompt?.recoveryFailure}
+                    durablePrompt={durablePrompt}
+                    receiptState={receiptState}
                     onRetryNewChatIntent={retryable && shared.hasChatThread ? warmRetry : undefined}
-                    onRetry={retryable && isVisualTail ? retry : undefined}
-                    onRetryNewChat={retryable && isVisualTail && !shared.designRole ? retryNewChat : undefined}
+                    onRetry={retryable && (isVisualTail || durablePrompt) ? retry : undefined}
+                    onRetryNewChat={retryable && isVisualTail && !shared.designRole && !durablePrompt ? retryNewChat : undefined}
                     events={turn.providerEvents}
                     startedAt={turn.recordedStartedAt}
-                    live={isVisualTail && turnInFlight}
-                    fallbackStopReason={tail && !tail.sessionStreaming ? tail.lastStopReason : null}
+                    live={isActivityTail && turnInFlight}
+                    fallbackStopReason={receiptState === "cancelled" ? "cancelled" : tail && !tail.sessionStreaming ? tail.lastStopReason : null}
                     fallbackStatusLabel={tail && !tail.sessionStreaming ? turnFooterFailureLabel(tail.failure) : null}
                     // "An auto-rebuild is re-running THIS turn": only while
                     // this renderer's own send owns it.

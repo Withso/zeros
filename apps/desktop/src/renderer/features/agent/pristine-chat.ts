@@ -4,7 +4,7 @@ import type { AgentSessionState } from "./use-agent-session";
 
 type Chat = Pick<ChatThread, "folder" | "title" | "sessionId" | "providerBinding">;
 type Slot = Pick<AgentSessionState, "transcriptState" | "hasTranscript" | "messages" | "providerBinding" |
-  "foregroundTurnId" | "activeTurnStartedAt" | "cloudPromptPending" | "cloudStop">;
+  "foregroundTurnId" | "activeTurnStartedAt" | "cloudPromptPending" | "cloudStop" | "cloudOutbox">;
 
 export function hasUntitledChatName(chat: Pick<Chat, "folder" | "title">): boolean {
   // The worker can create metadata before the desktop's initial upsert. Its
@@ -18,5 +18,5 @@ export function canSwitchPristineChat(chat: Chat | null | undefined, slot: Slot 
   if (!chat || !hasUntitledChatName(chat) || (slot?.transcriptState ?? "resident") !== "resident" ||
       slot?.hasTranscript || (slot?.messages.length ?? 0) !== 0) return false;
   return !isCloudWorkspace(chat.folder) || !chat.providerBinding && !chat.sessionId && !slot?.providerBinding &&
-    !slot?.foregroundTurnId && slot?.activeTurnStartedAt == null && !slot?.cloudPromptPending && !slot?.cloudStop;
+    !slot?.foregroundTurnId && slot?.activeTurnStartedAt == null && !slot?.cloudPromptPending && !slot?.cloudStop && !slot?.cloudOutbox?.rows.length;
 }

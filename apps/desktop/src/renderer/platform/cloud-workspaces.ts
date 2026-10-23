@@ -13,7 +13,7 @@ import { isFeatureEnabled } from "../config/release-channel";
 import { changeCloudV2Workspace, cloudV2Document, createCloudV2Workspace, getCloudV2Workspace, listCloudV2Workspaces } from "./cloud-v2";
 import { getTeamStoreState } from "../features/team/team-store";
 
-async function readCloudJson(response: Response): Promise<unknown> {
+async function readCloudJson(response: Response, maxBytes = 4 * 1024 * 1024): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Cloud returned an empty response");
   const decoder = new TextDecoder();
@@ -24,7 +24,7 @@ async function readCloudJson(response: Response): Promise<unknown> {
       const chunk = await reader.read();
       if (chunk.done) break;
       size += chunk.value.byteLength;
-      if (size > 4 * 1024 * 1024) {
+      if (size > maxBytes) {
         await reader.cancel();
         throw new Error("Cloud response exceeded its size limit");
       }
@@ -40,6 +40,7 @@ export async function cloudAccountRequest<T>(
   path: string,
   schema: z.ZodType<T>,
   input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
+  options?: { promptRecovery?: true },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
@@ -70,7 +71,10 @@ export async function cloudAccountRequest<T>(
   }, () => {
     if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
   });
-  const body = await readCloudJson(response);
+  // Recovery can include the outbox's bounded attachment page. Ordinary
+  // account APIs retain their smaller response budget.
+  const body = await readCloudJson(response, options?.promptRecovery && /^\/v1\/cloud-v2\/workspaces\/[^/]+\/prompts\?/.test(path)
+    ? 16 * 1024 * 1024 : 4 * 1024 * 1024);
   if (epoch !== getOrganizationStoreGeneration())
     throw new Error("Your account changed while loading cloud workspaces");
   if (!response.ok) {
