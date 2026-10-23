@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { relativeWorkspaceFilePath } from "@/renderer/platform/workspace-file-path";
-import { buildFilePillOpenAction, openFilePill } from "../file-pill-navigation";
+import {
+  buildFilePillOpenAction,
+  openFilePill,
+  warmFilePill,
+} from "../file-pill-navigation";
 import { useWorkspaceStore } from "@/renderer/state/store";
 import * as workspaces from "@/renderer/state/use-projects";
 import * as changesFilter from "../tabs/changes-filter-store";
+import * as changesSnapshots from "../tabs/changes-snapshot-cache";
+import * as fileData from "../../workspace-file-data-cache";
 import { createChangesTab, createFilesTab } from "../tab-model";
 import {
   resetWorkbenchEditorDirtyForTests,
@@ -99,6 +105,212 @@ describe("file pill paths", () => {
 });
 
 describe("file pill navigation", () => {
+  const owners = ["/personal/project", "/organization/project", cloud];
+
+  function confirmedChanges(cwd: string, paths: string[], baseBranch = "main") {
+    vi.spyOn(workspaces, "peekLiveWorkspaceUnion").mockReturnValue([
+      { id: cwd, path: cwd, baseBranch },
+    ] as never);
+    const key = changesSnapshots.changesSnapshotKey(
+      cwd,
+      { kind: "all" },
+      baseBranch,
+    );
+    return vi
+      .spyOn(changesSnapshots, "readChangesSections")
+      .mockImplementation((requested) =>
+        requested === key
+          ? [
+              {
+                kind: "committed",
+                title: null,
+                files: paths.map((path) => ({
+                  path,
+                  status: "modified",
+                  additions: 1,
+                  deletions: 1,
+                  binary: false,
+                  patch: "",
+                })),
+              },
+            ]
+          : undefined,
+      );
+  }
+
+  function recordNavigation() {
+    const dispatch = vi.fn();
+    vi.spyOn(useWorkspaceStore, "getState").mockReturnValue({
+      ...useWorkspaceStore.getState(),
+      workbenchByScope: {},
+      dispatch,
+    });
+    return dispatch;
+  }
+
+  it.each(owners)(
+    "preserves a dirty Changes editor and the nested source path in %s",
+    (root) => {
+      confirmedChanges(root, []).mockReturnValue(undefined);
+      const scope = `${root}/packages/app`;
+      const changes = { ...createChangesTab(), filePath: "draft.ts" };
+      setWorkbenchEditorDirty(changes.id, true);
+      const dispatch = vi.fn();
+      const filter = vi
+        .spyOn(changesFilter, "setChangesScope")
+        .mockImplementation(() => {});
+      vi.spyOn(useWorkspaceStore, "getState").mockReturnValue({
+        ...useWorkspaceStore.getState(),
+        dispatch,
+        workbenchByScope: {
+          [scope]: {
+            tabs: [changes],
+            activeId: changes.id,
+            recentBrowsers: [],
+          },
+        },
+      });
+      openFilePill(scope, ".context/notes.ts", "changes");
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scope,
+          tab: expect.objectContaining({
+            filePath: ".context/notes.ts",
+            diff: false,
+          }),
+        }),
+      );
+      expect(filter).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(owners)(
+    "opens the renamed diff for an old tool path in %s",
+    (cwd) => {
+      confirmedChanges(cwd, []).mockReturnValue([
+        {
+          kind: "committed",
+          title: null,
+          files: [
+            {
+              path: "src/after.ts",
+              oldPath: "src/before.ts",
+              status: "renamed",
+              additions: 0,
+              deletions: 0,
+              binary: false,
+              patch: "",
+            },
+          ],
+        },
+      ]);
+      const dispatch = recordNavigation();
+      vi.spyOn(changesFilter, "setChangesScope").mockImplementation(() => {});
+      openFilePill(cwd, "src/before.ts", "changes");
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          updates: expect.objectContaining({
+            filePath: "src/after.ts",
+            diff: true,
+          }),
+        }),
+      );
+    },
+  );
+
+  it.each(owners)(
+    "opens ignored and unchanged edit targets in Files for %s",
+    (cwd) => {
+      confirmedChanges(cwd, ["src/changed.ts"]);
+      const dispatch = recordNavigation();
+      const filter = vi
+        .spyOn(changesFilter, "setChangesScope")
+        .mockImplementation(() => {});
+      for (const path of [
+        ".context/task/fit.swift",
+        "src/unchanged.ts",
+        ".context/Shot ü #1.png",
+      ]) {
+        openFilePill(cwd, path, "changes");
+        expect(dispatch).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            scope: cwd,
+            updates: expect.objectContaining({ filePath: path, diff: false }),
+          }),
+        );
+      }
+      expect(filter).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(owners)("keeps changed edit targets in Changes for %s", (cwd) => {
+    confirmedChanges(cwd, ["src/changed.ts"]);
+    const dispatch = recordNavigation();
+    vi.spyOn(changesFilter, "setChangesScope").mockImplementation(() => {});
+    openFilePill(cwd, "src/changed.ts", "changes");
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: cwd,
+        updates: expect.objectContaining({
+          filePath: "src/changed.ts",
+          diff: true,
+          changesRequestedFile: "src/changed.ts",
+        }),
+      }),
+    );
+  });
+
+  it.each(owners)("uses only the owning branch comparison for %s", (cwd) => {
+    const snapshot = confirmedChanges(cwd, [], "release");
+    const dispatch = recordNavigation();
+    openFilePill(cwd, "README.md", "changes");
+    expect(snapshot).toHaveBeenCalledWith(
+      changesSnapshots.changesSnapshotKey(cwd, { kind: "all" }, "release"),
+    );
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        updates: expect.objectContaining({
+          filePath: "README.md",
+          diff: false,
+        }),
+      }),
+    );
+  });
+
+  it.each(owners)(
+    "keeps fallback file paths relative to the chat folder in %s",
+    (root) => {
+      confirmedChanges(root, ["src/other.ts"]);
+      const dispatch = recordNavigation();
+      openFilePill(`${root}/packages/app`, ".context/notes.md", "changes");
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scope: `${root}/packages/app`,
+          updates: expect.objectContaining({
+            filePath: ".context/notes.md",
+            diff: false,
+          }),
+        }),
+      );
+    },
+  );
+
+  it.each(owners)(
+    "warms the Files destination for an absent edit in %s",
+    (cwd) => {
+      confirmedChanges(cwd, []);
+      const read = vi
+        .spyOn(fileData, "prefetchWorkspaceFileRead")
+        .mockImplementation(() => {});
+      const diff = vi
+        .spyOn(fileData, "prefetchWorkspaceFileDiff")
+        .mockImplementation(() => {});
+      warmFilePill(cwd, ".context/notes.md", "changes");
+      expect(read).toHaveBeenCalledWith(cwd, ".context/notes.md");
+      expect(diff).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     ["/repo/nested/child", "nested", "child/src/a.ts"],
     [`${cloud}/packages/app`, cloud, "packages/app/src/a.ts"],

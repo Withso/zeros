@@ -24,6 +24,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { create } from "zustand";
+import { buildDirectFileOpenAction } from "../shell/workbench/direct-file-open";
 import { isRunSessionId } from "../platform/workspace-run-identity";
 import {
   openTerminalTab,
@@ -351,6 +352,15 @@ export type Action =
       /** Explicit persisted scope for retained Browser surfaces. Omitted by
        * ordinary active-workspace controls. */
       scope?: string;
+    }
+  | {
+      /** Consume an explicit Changes request and open its source atomically. */
+      type: "OPEN_REQUESTED_CHANGES_FILE";
+      scope: string;
+      id: string;
+      /** Git-root-relative request, and the same file relative to the chat. */
+      path: string;
+      filePath: string;
     }
   | {
       /** Update a nested destination and focus its owning tab atomically. */
@@ -1950,6 +1960,50 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           activeId: action.id,
         }),
       };
+    }
+    case "OPEN_REQUESTED_CHANGES_FILE": {
+      const cur = state.workbenchByScope[action.scope];
+      const source = cur?.tabs.find((tab) => tab.id === action.id);
+      // A completed read cannot steal focus after a tab, file or owner switch,
+      // nor replay the fallback when the user returns to Changes later.
+      if (
+        workbenchScopeKey(state) !== action.scope ||
+        cur?.activeId !== action.id ||
+        source?.type !== "changes" ||
+        source.filePath !== action.path ||
+        source.changesRequestedFile !== action.path
+      ) return state;
+      const consumed = reducer(state, {
+        type: "UPDATE_WORKBENCH_TAB",
+        scope: action.scope,
+        id: action.id,
+        updates: { changesRequestedFile: undefined },
+      });
+      const opened = reducer(
+        consumed,
+        buildDirectFileOpenAction(cur.tabs, action.filePath, {
+          scope: action.scope,
+          literalPath: true,
+        }),
+      );
+      const id = opened.workbenchByScope[action.scope].activeId;
+      if (!id) return state;
+      return reducer(opened, {
+        type: "UPDATE_WORKBENCH_TAB",
+        scope: action.scope,
+        id,
+        updates: {
+          diff: false,
+          diffScope: "all",
+          diffSha: undefined,
+          diffHistory: undefined,
+          turnChatId: undefined,
+          turnId: undefined,
+          discardable: false,
+          isNewFile: false,
+          viewerMode: undefined,
+        },
+      });
     }
     case "OPEN_WORKBENCH_TAB": {
       const scope = action.scope ?? workbenchScopeKey(state);
