@@ -52,6 +52,24 @@ beforeEach(() => {
   });
 });
 describe("PR action connection ownership", () => {
+  it.each(["/local/personal", "/local/organization", folder])("pins a preview action to its %s chat while another workspace is selected", async target => {
+    fixture.chats = [
+      { id: "chat", folder: "/selected-workspace", agentId: "codex", kind: "chat" },
+      { id: "preview-chat", folder: target, agentId: "codex", kind: "chat" },
+    ];
+    expect(useSendToActiveChat(target, "preview-chat")({ text: "Create a PR" })).toBe(true);
+    await vi.waitFor(() => expect(fixture.sendPrompt).toHaveBeenCalledOnce());
+    expect(fixture.prepareForSend).toHaveBeenCalledExactlyOnceWith("preview-chat");
+    expect(fixture.sendPrompt.mock.calls[0]).toEqual(expect.arrayContaining(["preview-chat"]));
+    expect(fixture.error).not.toHaveBeenCalled();
+  });
+
+  it("never falls back to the selected chat when a preview has no chat", () => {
+    expect(useSendToActiveChat(folder, null)({ text: "Create a PR" })).toBe(false);
+    expect(fixture.prepareForSend).not.toHaveBeenCalled();
+    expect(fixture.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it.each(["personal", "organization"])("does not add a cloud intent to a %s Local PR action", async owner => {
     const local = `/local/${owner}`;
     fixture.cloudComputerV2 = true;

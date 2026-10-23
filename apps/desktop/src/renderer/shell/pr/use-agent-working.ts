@@ -24,6 +24,8 @@ export const AGENT_WORKING_REASON =
 
 export function useWorkspaceAgentWorking(
   workspace: Workspace | null,
+  /** Background controls already own their target; unrelated active chats do not gate them. */
+  includeActiveChat = true,
 ): boolean {
   const chats = useChats();
   const activeChatId = useActiveChatId();
@@ -36,8 +38,8 @@ export function useWorkspaceAgentWorking(
     // The active chat is the prompt TARGET — normally one of the workspace's
     // own chats, but include it explicitly so a mid-turn chat can never be
     // prompted from here regardless of which folder it belongs to.
-    if (activeChatId && !ids.includes(activeChatId)) ids.push(activeChatId);
+    if (includeActiveChat && activeChatId && !ids.includes(activeChatId)) ids.push(activeChatId);
     return ids;
-  }, [chats, workspace, activeChatId]);
+  }, [chats, workspace, activeChatId, includeActiveChat]);
   return useAnyChatWorking(chatIds);
 }

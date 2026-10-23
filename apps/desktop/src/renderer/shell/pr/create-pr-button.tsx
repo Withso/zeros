@@ -82,6 +82,9 @@ const {
 
 interface CreatePrButtonProps {
   workspace: Workspace;
+  /** An explicit chat for a background workspace preview. */
+  chatId?: string | null;
+  onMenuOpenChange?: (open: boolean) => void;
   /** The owning project's origin remote (for the "Create PR manually" URL). */
   originUrl: string | null;
   /** Externally disabled (e.g. the Changes tab's PR row keeps the button
@@ -93,11 +96,13 @@ interface CreatePrButtonProps {
 
 export function CreatePrButton({
   workspace,
+  chatId,
+  onMenuOpenChange,
   originUrl,
   disabled,
   disabledReason,
 }: CreatePrButtonProps) {
-  const sendToChat = useSendToActiveChat(workspace.path);
+  const sendToChat = useSendToActiveChat(workspace.path, chatId);
   const dispatch = useWorkspaceDispatch();
   const busy = usePrCreateActionClaimed(workspace.id);
   // The repo's configured push/PR remote — the brief must name the same
@@ -106,7 +111,7 @@ export function CreatePrButton({
   // Parked while the agent has a turn in flight: the prompt would queue
   // behind the very turn still reshaping the branch, and the PR brief's
   // uncommitted/upstream counts would describe a half-done tree.
-  const workspaceAgentWorking = useWorkspaceAgentWorking(workspace);
+  const workspaceAgentWorking = useWorkspaceAgentWorking(workspace, chatId === undefined);
   const agentWorking = workspaceAgentWorking;
   const inert = busy || disabled === true || agentWorking;
   // Guards read LIVE state through a ref, not through a captured render.
@@ -394,7 +399,7 @@ export function CreatePrButton({
           </button>
         </span>
       </Tooltip>
-      <DropdownMenu>
+      <DropdownMenu onOpenChange={onMenuOpenChange}>
         <DropdownMenuTrigger asChild>
           <button
             type="button"

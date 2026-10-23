@@ -648,6 +648,8 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         grouped={grouped}
         active={active}
         surfaceActive={!hidden}
+        previewOwner={filterOwner}
+        activeAt={activeAtByWorkspaceId.get(item.workspace.id)}
         chatIds={
           chatIdsByWorkspace.get(item.workspace.id) ?? EMPTY_WORKSPACE_CHAT_IDS
         }

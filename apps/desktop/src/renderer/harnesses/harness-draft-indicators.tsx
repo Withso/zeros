@@ -358,7 +358,7 @@ function Harness() {
 }
 
 createRoot(document.getElementById("root")!).render(
-  <ActionsCtx.Provider value={{} as SessionsActions}>
+  <ActionsCtx.Provider value={{ hydrateChat: async () => {} } as SessionsActions}>
     <TooltipProvider>
       <Harness />
     </TooltipProvider>
