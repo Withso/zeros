@@ -46,19 +46,24 @@ session itself.
      - control-plane SQL, locks or imports: `src/database-lock-tags.test.ts`,
        `scripts/__tests__/control-plane-scope.test.ts` and the previous-schema
        seed tests such as `data-purge-migration.integration.test.ts`;
-     - a new VM-side module: `scripts/__tests__/cloud-computer-template-projection.test.ts`
-       plus every `scripts/__tests__/cloud-*` suite;
+     - a cloud worker change, or a Local Claude, Codex or Cursor translator
+       change: the `apps/cloud-worker` suites, whose driver parity tests read
+       the desktop adapters;
      - or the full control-plane database shards.
 8. **Don't wait for an Alpha release after every merge.** Releases are
    cumulative. Make sure a successful one exists only when live Alpha behavior
-   is needed: zeros-dev E2E, owner testing or a live qualification.
+   is needed: the cloud gate0 probe, owner testing or a live qualification.
    - **Space merges that release.** Overlapping releases can fail forward-only
      admission while another release holds the API in maintenance; the last
      release still ships everything, so read the newest run, not the first
      failure.
-   - During a canary watch, merge only between runs. A runtime-changing merge
-     must be published and qualified before the next dispatch, or that run ends
-     in `runtime_selection_changed`.
+   - A change to the cloud worker or the protocol it bundles changes its
+     runtime SHA-256. Publish the runtime
+     (`pnpm --dir apps/control-plane cloud-v2:publish-runtime --local`) and
+     start this branch with `pnpm electron:cloud --headless` before running
+     `pnpm --dir apps/control-plane cloud-v2:gate0 --local`. The launcher reads
+     `ZEROS_CLOUD_V2_RUNTIME_SHA256` (or `--runtime`) and sets the control
+     plane's `CLOUD_V2_RUNTIME_SHA256`; gate0's `--runtime` must match it.
 9. **Before a release during a freeze,** list which deployables each pending
    PR changes (control plane, cloud runtime, desktop), so the release's effect
    is known before it ships.

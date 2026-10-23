@@ -1121,170 +1121,37 @@ jobs:
             *) echo "::error::Invalid workload selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
           esac
 
-  # Advisory cloud-program lanes (wave 2, track G). They stay out of the
-  # trusted job inventory, ci-gate and the required aggregates until the owner
-  # promotes them. Each is guarded on its policy lane, so the introducing PR
-  # (whose trusted base lacks the lane) skips green, and each workload passes
-  # empty until its track lands the test files.
-  local-untouched:
-    name: local-untouched
+  cloud-v2-worker:
+    name: cloud v2 worker
     needs: scope
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.scope.result == 'success' && fromJSON(needs.scope.outputs.ledger).lanes['cloud-runtime'] == true }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-      - name: Check Local seams
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GITHUB_SHA: ${{ github.sha }}
-          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-        run: node scripts/ci/local-untouched.mjs
-
-  cloud-chaos:
-    name: cloud-chaos (advisory)
-    needs: scope
-    if: ${{ !cancelled() && needs.scope.result == 'success' && fromJSON(needs.scope.outputs.ledger).lanes['cloud-chaos'] == true }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - name: Setup Node
+        # The worker runs on Node 24 on its VM.
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/control-plane/pnpm-lock.yaml
-      - name: Install control-plane dependencies
-        working-directory: apps/control-plane
-        run: pnpm install --frozen-lockfile
-      - name: Install runtime contract dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Run chaos scenarios
-        working-directory: apps/control-plane
-        env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          tests=(src/chaos/*.integration.test.ts)
-          if [ ${#tests[@]} -eq 0 ]; then
-            echo "No chaos scenarios exist yet (track G4); the lane skeleton passes empty."
-            exit 0
-          fi
-          pnpm exec vitest run "${tests[@]}"
-
-  cloud-scale:
-    name: cloud-scale load budgets (advisory)
-    needs: scope
-    if: ${{ !cancelled() && needs.scope.result == 'success' && fromJSON(needs.scope.outputs.ledger).lanes['cloud-scale'] == true }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/control-plane/pnpm-lock.yaml
-      - name: Install control-plane dependencies
-        working-directory: apps/control-plane
-        run: pnpm install --frozen-lockfile
-      - name: Run 10x/100x load-budget scenarios
-        working-directory: apps/control-plane
-        env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          tests=(src/load-sim/*.scale.test.ts)
-          if [ ${#tests[@]} -eq 0 ]; then
-            echo "No scale scenarios exist yet (track G3); the lane skeleton passes empty."
-            exit 0
-          fi
-          pnpm exec vitest run "${tests[@]}"
-
-  cloud-client:
-    name: cloud-client SDK (advisory)
-    needs: scope
-    if: ${{ !cancelled() && needs.scope.result == 'success' && fromJSON(needs.scope.outputs.ledger).lanes['cloud-client'] == true }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
-      - name: Run the cloud client suite
-        env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # The hybrid-transport suites drive the real control-plane relay and
+      # signer against the worker, so the control plane's packages must resolve.
+      - name: Install control-plane dependencies
+        run: pnpm --dir apps/control-plane install --frozen-lockfile
+      - name: Typecheck, lint and test the worker
         run: |
           set -euo pipefail
-          if [ ! -f packages/cloud-client/package.json ]; then
-            echo "packages/cloud-client does not exist yet (track F1-1); the lane skeleton passes empty."
-            exit 0
-          fi
-          pnpm --dir packages/cloud-client test
+          pnpm --filter @zeros/cloud-worker run typecheck
+          pnpm --filter @zeros/cloud-worker run lint
+          pnpm --filter @zeros/cloud-worker run test
 
   secret-scan:
     name: secret scan (PR commit range)
@@ -1419,10 +1286,7 @@ jobs:
       - ui-smoke
       - ui-smoke-shard
       - secret-scan
-      - local-untouched
-      - cloud-chaos
-      - cloud-scale
-      - cloud-client
+      - cloud-v2-worker
     runs-on: ubuntu-latest
     steps:
       - name: Setup Node
@@ -1507,10 +1371,6 @@ jobs:
           for (const id of JOB_IDS) {
             if (needs.scope.outputs[`job-${id}`] !== String(ledger.jobs[id])) fail(`The ${id} job selection is inconsistent.`);
           }
-          // Advisory cloud-program lanes (wave 2, track G): they report on the
-          // PR but never gate it until the owner promotes them into the
-          // trusted selection above.
-          const advisory = ["cloud-chaos", "cloud-client", "cloud-scale", "local-untouched"];
           const selected = {
             scope: true,
             quality: true,
@@ -1528,10 +1388,7 @@ jobs:
             "ui-smoke": true,
             "ui-smoke-shard": ledger.jobs["ui-smoke"],
             "secret-scan": ledger.jobs["secret-scan"],
-            "local-untouched": "advisory",
-            "cloud-chaos": "advisory",
-            "cloud-scale": "advisory",
-            "cloud-client": "advisory",
+            "cloud-v2-worker": ledger.lanes["cloud-runtime"] === true,
           };
           const jobIds = Object.keys(selected);
           if (!sameKeys(needs, jobIds)) fail("The workflow job inventory is incomplete or unknown.");
@@ -1543,7 +1400,6 @@ jobs:
           selected["control-plane-database"] ||= database === "true";
           const problems = [];
           for (const id of jobIds) {
-            if (advisory.includes(id)) continue;
             const result = needs[id]?.result;
             if (result !== "success" && !(!selected[id] && result === "skipped")) {
               problems.push(`${id}: selected=${selected[id]}, result=${result || "missing"}`);
@@ -1557,29 +1413,6 @@ jobs:
           if (problems.length) fail(`CI selection failed: ${problems.join("; ")}.`);
           console.log("Every selected job succeeded; all skips were proved unselected.");
           NODE
-
-      - name: Checkout trusted hourly policy
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: .hourly-policy
-          persist-credentials: false
-      - name: Require fresh zeros-dev E2E for cloud changes
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          LEDGER_JSON: ${{ needs.scope.outputs.ledger }}
-          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
-          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GITHUB_SHA: ${{ github.sha }}
-        run: |
-          if [ ! -f .hourly-policy/scripts/ci/zeros-dev-gate.mjs ]; then
-            # The introducing PR has no live workflow at its trusted base.
-            # Every subsequent main-based PR runs only the reviewed policy.
-            echo 'zeros-dev E2E: hourly_not_live (introducing policy)'
-            exit 0
-          fi
-          node .hourly-policy/scripts/ci/zeros-dev-gate.mjs
 
   # Execute the complement of the trusted selection in this same run. Every
   # PR still gets full coverage, including all database and browser shards.

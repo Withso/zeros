@@ -1,5 +1,4 @@
 import type { AttachmentTransferOptions } from "@zeros/protocol/attachment-policy";
-import { isCloudLifecycleDeferred, type CloudLifecycleDeferred } from "../cloud-lifecycle-result";
 import type {
   ChangesHistory,
   TurnHistoryCursor,
@@ -20,10 +19,7 @@ import type {
 // ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
-import type { CloudResourceUsageConnection } from "./workspace-runtime-client";
-import { parseCloudScopedId, type CloudWorkspaceTarget } from "./cloud-workspace-key";
-import { CloudHistoryRestoreMetadataSchema, cloudHistoryFenceHasTranscript, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
-import { WorkspaceResourceUsageSchema, type WorkspaceResourceUsage } from "@zeros/protocol/workspace-resource-usage";
+import { cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
 import type {
@@ -167,26 +163,10 @@ export async function workspaceOp(
     if (tracked) trackGitOp({ op: tracked, outcome: "error", error: err });
     throw err;
   }
-  if (tracked && !isCloudLifecycleDeferred(resp.result)) trackGitOp({ op: tracked, outcome: "ok" });
+  if (tracked) trackGitOp({ op: tracked, outcome: "ok" });
   return resp.result;
 }
 
-export async function bridgeWorkspaceResourceUsage(
-  bridge: WorkspaceRuntimeClient,
-  target: CloudWorkspaceTarget,
-  connection: CloudResourceUsageConnection,
-): Promise<WorkspaceResourceUsage | null> {
-  const response = await bridge.requestCloudResourceUsage(target, connection) as WorkspaceResponseLike | WorkspaceErrorLike | null;
-  if (response === null) return null;
-  if (response.type === "WORKSPACE_ERROR") throw new WorkspaceOpError(response);
-  if (response.type !== "WORKSPACE_RESPONSE" || response.op !== "workspace.resourceUsage")
-    throw new Error("Cloud returned an invalid resource usage response");
-  const sample = WorkspaceResourceUsageSchema.parse(response.result);
-  if (sample.organizationId !== target.organizationId || sample.workspaceId !== target.workspaceId ||
-      sample.generation !== connection.generation || sample.engineInstanceId !== connection.engineInstanceId)
-    throw new Error("Cloud resource usage changed runtime identity");
-  return sample;
-}
 
 // ── Turns (v13: footer / per-turn changes / reset) ──────────
 
@@ -737,9 +717,12 @@ export interface ChatTitleSeedWire {
 export async function bridgeChatTitleSeeds(
   bridge: RuntimeClient,
   chatIds: readonly string[],
+  workspaceId?: string,
 ): Promise<ChatTitleSeedWire[]> {
   if (chatIds.length === 0) return [];
-  const r = (await workspaceOp(bridge, "chats.titleSeeds", { chatIds: chatIds.slice(0, 50) })) as
+  const r = (await workspaceOp(bridge, "chats.titleSeeds", {
+    chatIds: chatIds.slice(0, 50), ...(workspaceId ? { workspaceId } : {}),
+  })) as
     | { seeds?: unknown }
     | undefined;
   // An older engine does not know the op (it throws); a shape it never sent
@@ -752,6 +735,26 @@ export async function bridgeChatTitleSeeds(
       typeof (seed as ChatTitleSeedWire).prompt === "string" &&
       typeof (seed as ChatTitleSeedWire).answered === "boolean",
   );
+}
+
+/** Local chats ask the Local engine; each cloud workspace's chats ask its own
+ * worker. A stopped workspace is never woken for titles: its chats get seeds
+ * once it next connects. */
+export async function bridgeChatTitleSeedsByOwner(
+  bridge: RuntimeClient,
+  chatIds: readonly string[],
+): Promise<ChatTitleSeedWire[]> {
+  const local: string[] = [];
+  const cloud = new Map<string, string[]>();
+  for (const id of chatIds) {
+    const owner = parseCloudScopedId(id);
+    if (!owner) { local.push(id); continue; }
+    const key = cloudWorkspaceKey(owner);
+    cloud.set(key, [...(cloud.get(key) ?? []), id]);
+  }
+  const reads = [bridgeChatTitleSeeds(bridge, local)];
+  for (const [key, ids] of cloud) reads.push(bridgeChatTitleSeeds(bridge, ids, key).catch(() => []));
+  return (await Promise.all(reads)).flat();
 }
 
 // ── Incremental delta sync ──────────────────────────────────
@@ -813,14 +816,12 @@ export async function bridgeMessageWindow(
   before?: number,
   timeoutMs = CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
 ): Promise<PersistedMessageWire[]> {
-  return readableMessageRows(await bridgeMessageWindowSnapshot(bridge, chatId, limit, before, timeoutMs));
+  return (await bridgeMessageWindowSnapshot(bridge, chatId, limit, before, timeoutMs)).messages;
 }
 
 export type MessageWindowSnapshot = {
   messages: PersistedMessageWire[];
-  source: "local" | "native" | "control-plane" | "unknown";
-  restoreHead?: CloudHistoryRestoreFence;
-  isCurrent?: () => boolean;
+  source: "local" | "unknown";
   /** Local engines only: the opening prompt of the turn `messages[0]` belongs
    *  to, when that turn is longer than the contiguous window. */
   turnOpening?: PersistedMessageWire;
@@ -836,34 +837,12 @@ function persistedMessageWire(value: unknown): PersistedMessageWire | undefined 
     : undefined;
 }
 
-/** Bare row consumers (copy, attachments and paging) cannot distinguish a
- * missing projection from an empty conversation once its receipt is dropped. */
-function readableMessageRows(page: MessageWindowSnapshot): PersistedMessageWire[] {
-  if (page.isCurrent?.() === false)
-    throw Object.assign(new Error("Cloud history changed while loading"), { code: "cloud_history_changed" });
-  if (page.restoreHead && !page.restoreHead.head?.deleted && !cloudHistoryFenceHasTranscript(page.restoreHead) &&
-      (page.source !== "native" || page.messages.length === 0))
-    throw Object.assign(new Error("Cloud transcript is catching up"), { code: "cloud_history_incomplete" });
-  return page.messages;
-}
 
-function messageWindowSnapshot(bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
+function messageWindowSnapshot(_bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
   const target = parseCloudScopedId(chatId);
-  const receipt = target && r && bridge instanceof WorkspaceRuntimeClient ? bridge.cloudHistoryReadReceipt(r) : undefined;
-  let restoreHead: CloudHistoryRestoreFence | undefined;
-  if (target && receipt && (r?.projection !== undefined || r?.historyHeads !== undefined)) {
-    const metadata = CloudHistoryRestoreMetadataSchema.parse({ projection: r?.projection, historyHeads: r?.historyHeads });
-    if (metadata.projection.organizationId !== target.organizationId || metadata.projection.workspaceId !== target.workspaceId)
-      throw new Error("Cloud transcript page belongs to another workspace.");
-    restoreHead = { projection: metadata.projection, conversationId: target.id,
-      head: metadata.historyHeads.find(head => head.conversationId === target.id) ?? null };
-  }
-  // Cloud history keeps its own projection contract; only a Local window may
-  // carry a turn opening.
+  // Only a Local window may carry a turn opening.
   const turnOpening = target ? undefined : persistedMessageWire(r?.turnOpening);
-  return { messages: r?.messages ?? [], source: receipt?.source ?? (target ? "unknown" : "local"),
-    ...(restoreHead ? { restoreHead } : {}), ...(receipt ? { isCurrent: receipt.isCurrent } : {}),
-    ...(turnOpening ? { turnOpening } : {}) };
+  return { messages: r?.messages ?? [], source: target ? "unknown" : "local", ...(turnOpening ? { turnOpening } : {}) };
 }
 
 export async function bridgeMessageWindowSnapshot(
@@ -886,16 +865,6 @@ export async function bridgeMessageWindowSnapshot(
   return messageWindowSnapshot(bridge, chatId, r);
 }
 
-/** Explicit copy/export presentation; it cannot establish transcript authority. */
-export async function bridgeCloudCopyWindow(bridge: WorkspaceRuntimeClient, chatId: string, limit: number): Promise<MessageWindowSnapshot & { partial: boolean }> {
-  const { result, partial } = await bridge.readCloudCopyWindow(chatId, limit);
-  const page = messageWindowSnapshot(bridge, chatId, result);
-  if (page.isCurrent?.() === false)
-    throw Object.assign(new Error("Cloud history changed while copying"), { code: "cloud_history_changed" });
-  return { ...page, partial: !page.restoreHead?.head?.deleted && (partial || !!(page.restoreHead &&
-    !cloudHistoryFenceHasTranscript(page.restoreHead) && (page.source !== "native" || page.messages.length === 0))) };
-}
-
 export async function bridgeMessageWindowOlder(
   bridge: RuntimeClient,
   chatId: string,
@@ -913,7 +882,7 @@ export async function bridgeMessageWindowOlder(
     },
     timeoutMs,
   )) as MessageWindowResponse;
-  return readableMessageRows(messageWindowSnapshot(bridge, chatId, r));
+  return messageWindowSnapshot(bridge, chatId, r).messages;
 }
 
 /** Wipe a chat's transcript in the engine (reset). */
@@ -2046,13 +2015,12 @@ export async function bridgeWorkspaceCreateFromBranchStatus(
 export async function bridgeWorkspaceDelete(
   bridge: RuntimeClient,
   args: { workspaceId: string; includeBranch: boolean },
-): Promise<void | CloudLifecycleDeferred> {
+): Promise<void> {
   // Delete reaps workspace processes, evicts large ignored directories, and
   // removes the worktree before committing the row deletion. Give it the same
   // lifecycle budget as archive/restore so repository removal does not race
   // ahead merely because the generic 10s bridge timeout elapsed.
-  const result = await workspaceOp(bridge, "workspace.delete", { ...args }, 60_000);
-  if (isCloudLifecycleDeferred(result)) return result;
+  await workspaceOp(bridge, "workspace.delete", { ...args }, 60_000);
 }
 
 export async function bridgeWorkspaceSetStatus(
@@ -2104,7 +2072,7 @@ export async function bridgeWorkspaceArchive(
   archivedAt: number;
   stashRef: string | null;
   workspace?: Workspace;
-} | CloudLifecycleDeferred> {
+}> {
   // Archiving checkpoints the tree, runs the repo's archive script, evicts
   // heavy dirs, and removes the worktree — give it the same 60s budget as create
   // rather than the 10s default so a large worktree doesn't surface a timeout.
@@ -2117,7 +2085,7 @@ export async function bridgeWorkspaceArchive(
     archivedAt: number;
     stashRef: string | null;
     workspace?: Workspace;
-  } | CloudLifecycleDeferred;
+  };
 }
 
 export async function bridgeWorkspaceContinueOnNewBranch(

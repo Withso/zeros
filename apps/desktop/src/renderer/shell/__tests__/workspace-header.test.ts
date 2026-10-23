@@ -44,7 +44,7 @@ describe("workspace column header", () => {
   it("uses cloud metadata and renders the column actions once", () => {
     const html = render();
     expect(html).toContain("Cloud feature"); expect(html).not.toContain("Engine branch");
-    for (const label of ["Workspace header", "Cloud workspace details", "Share workspace", "Port forwarding", "Summary"])
+    for (const label of ["Workspace header", "Cloud workspace details", "Summary"])
       expect(html.match(new RegExp(`aria-label="${label}"`, "g"))).toHaveLength(1);
     expect(html).toContain(`data-folder="${first}"`);
   });

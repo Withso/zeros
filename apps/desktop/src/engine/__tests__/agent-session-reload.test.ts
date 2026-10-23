@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {randomUUID} from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -28,9 +27,6 @@ import {
 import { upsertChatMessagesBulk, windowChatMessages } from "../db/messages";
 import { listTurnsForChat } from "../db/turns";
 import { AgentFailureError } from "../agents/types";
-import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
-import { testCloudWorker } from "../agents/__tests__/helpers/test-cloud-runtime";
-import type { CloudCommandClaim } from "@zeros/protocol/cloud-commands";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 
 interface ActivePromptRecord {
@@ -85,10 +81,6 @@ interface TestEngineInternals {
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
   sessionLoadResponses: Map<string, LoadSessionResponse>;
-  cloudWorker: CloudWorkerConfiguration | null;
-  retireCloudCommand(claim: CloudCommandClaim): Promise<void>;
-  cancelCloudCommandConversation(conversationId: string): Promise<void>;
-  cloudCommandSessions: Map<string, { claim: CloudCommandClaim; controller: AbortController; preparation: Promise<void>; receiver: TransportClient; ownsExecution?: boolean }>;
   pendingPermissionRequests: Map<
     string,
     { agentId: string; request: RequestPermissionRequest }
@@ -178,20 +170,6 @@ describe("agent session continuity across a local renderer reload", () => {
     await state.handleMessage({type:"AGENT_SET_MODE",id:"mode-request",timestamp:Date.now(),source:"browser",agentId:"claude",sessionId:"mode-session",modeId:"auto"},peer.client);
     expect(peer.messages.find(message=>message.type === "AGENT_MODE_CHANGED")).toMatchObject({modeId:"accept-edits"});
     expect(state.sessionLoadResponses.get("mode-session")?.modes?.currentModeId).toBe("accept-edits");
-  });
-
-  it.each([false,true])("a second cloud device does not supersede command admission (provisional route: %s)",async provisional=>{
-    const engine=new ZerosEngine({root:process.cwd(),port:29880}),state=internals(engine);
-    state.cloudWorker=testCloudWorker();
-    const peer=testClient("second-device","cloud"),client:TransportClient={...peer.client,authorized:()=>true,
-      cloudActor:{sessionId:randomUUID(),deviceId:randomUUID(),role:"developer",fingerprint:"a".repeat(64)}};
-    state.router.register(client);vi.spyOn(state.workspace,"resolveCwd").mockReturnValue(process.cwd());vi.spyOn(state.pty,"isWithinAllowed").mockReturnValue(true);
-    const token=state.beginConversationBind("cloud-chat"),signal=state.conversationAdmissionSignal("cloud-chat",token);
-    const load=vi.spyOn(state.agents,"loadSession");
-    if(provisional){state.sessionChat.set("starting","cloud-chat");state.sessionAgent.set("starting","codex");state.conversationExecution.set("cloud-chat","starting");}
-    await state.handleMessage({type:"AGENT_LOAD_SESSION",id:"observer-load",source:"browser",timestamp:1,agentId:"codex",chatId:"cloud-chat",workspaceId:"workspace",adoptOnly:true},client);
-    expect(signal.aborted).toBe(false);expect(state.conversationBindTokens.get("cloud-chat")).toBe(token);expect(load).not.toHaveBeenCalled();
-    expect(peer.messages).not.toContainEqual(expect.objectContaining({type:"AGENT_SESSION_LOADED"}));
   });
   it("retains optional questions across normal completion without treating them as a parked turn", () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
@@ -798,82 +776,6 @@ describe("agent session continuity across a local renderer reload", () => {
     }
   });
 
-  it.each(["claude", "codex", "cursor"])("retires a completed cloud %s command without reporting a lost conversation", async (agentId) => {
-    const state = internals(new ZerosEngine({ root: process.cwd(), port: 0 }));
-    const { client, messages } = testClient();
-    state.router.register(client);
-    state.router.setOwner("completed-execution", client.id);
-    state.sessionAgent.set("completed-execution", agentId);
-    state.sessionChat.set("completed-execution", "completed-chat");
-    state.conversationExecution.set("completed-chat", "completed-execution");
-    const boundary: ExecutionBoundaryStatus = {
-      version: 1, actor: "agent-code", state: "revoked", backend: "zeros-srt",
-      designProtection: { required: true, enforced: true, protectedDirectoryCount: 1 },
-      parity: { level: "full", restrictions: [] }, checkedAt: Date.now(),
-    };
-    const endSession = vi.spyOn(state.agents, "endSession").mockResolvedValue(undefined);
-    endSession.mockImplementationOnce(async () => {
-      state.agents.events.onBoundaryStatusChanged(agentId, "completed-execution", boundary);
-      state.agents.events.onAgentExit(agentId, 137, "SIGKILL", "completed-execution");
-    });
-    const claim = {
-      commandId: randomUUID(), claimId: randomUUID(), conversationId: "completed-chat",
-      executionId: "completed-execution", dispatchAllowed: true,
-      payload: { agentId, agentCredentialGrantId: randomUUID(), model: "test-model", userMessageId: randomUUID(), modeRevision: 0,
-        prompt: [{ type: "text", text: "test" }] },
-    } as CloudCommandClaim;
-    // A completed command has acquired this execution during admission. A
-    // route alone also exists before admission and cannot grant retirement.
-    state.cloudCommandSessions.set(claim.commandId, {
-      claim, controller: new AbortController(), preparation: Promise.resolve(),
-      receiver: client, ownsExecution: true,
-    });
-    await state.retireCloudCommand(claim);
-    expect(messages.filter(message => ["AGENT_AGENT_EXITED", "AGENT_BOUNDARY_STATUS_CHANGED"].includes(message.type))).toEqual([]);
-    expect(endSession).toHaveBeenCalledTimes(1);
-    expect(endSession).toHaveBeenCalledWith(agentId, "completed-execution", { failClosed: true });
-    expect(state.cloudCommandSessions.has(claim.commandId)).toBe(false);
-    expect(state.conversationExecution.has("completed-chat")).toBe(false);
-    expect(state.router.ownerOf("completed-execution")).toBeUndefined();
-  });
-
-  it.each(["claude", "codex", "cursor"])("keeps a cloud %s conversation usable when Stop retires the active process", async (agentId) => {
-    const state = internals(new ZerosEngine({ root: process.cwd(), port: 0 }));
-    const { client, messages } = testClient();
-    state.router.register(client);
-    state.router.setOwner("stopped-execution", client.id);
-    state.sessionAgent.set("stopped-execution", agentId);
-    state.sessionChat.set("stopped-execution", "stopped-chat");
-    state.conversationExecution.set("stopped-chat", "stopped-execution");
-    state.activePromptContexts.set("stopped-execution", { ...activePrompt(), agentId, sessionId: "stopped-execution", chatId: "stopped-chat" });
-    const claim = {
-      commandId: randomUUID(), claimId: randomUUID(), conversationId: "stopped-chat",
-      executionId: "stopped-execution", dispatchAllowed: true,
-      payload: { agentId, agentCredentialGrantId: randomUUID(), model: "test-model", userMessageId: randomUUID(), modeRevision: 0,
-        prompt: [{ type: "text", text: "test" }] },
-    } as CloudCommandClaim;
-    const controller = new AbortController();
-    state.cloudCommandSessions.set(claim.commandId, { claim, controller, preparation: Promise.resolve(), receiver: client });
-    const cancel = vi.spyOn(state.agents, "cancel").mockResolvedValue(undefined);
-    const endSession = vi.spyOn(state.agents, "endSession").mockResolvedValue(undefined);
-    endSession.mockImplementationOnce(async () => {
-      state.agents.events.onBoundaryStatusChanged(agentId, claim.executionId, {
-        version: 1, actor: "agent-code", state: "revoked", backend: "zeros-srt",
-        designProtection: { required: true, enforced: true, protectedDirectoryCount: 1 },
-        parity: { level: "full", restrictions: [] }, checkedAt: Date.now(),
-      });
-      state.agents.events.onAgentExit(agentId, 137, "SIGKILL", claim.executionId);
-    });
-    await state.cancelCloudCommandConversation(claim.conversationId);
-    expect(controller.signal.aborted).toBe(true);
-    expect(cancel).toHaveBeenCalledWith(agentId, claim.executionId);
-    expect(messages.filter(message => ["AGENT_AGENT_EXITED", "AGENT_BOUNDARY_STATUS_CHANGED"].includes(message.type))).toEqual([]);
-    expect(endSession).toHaveBeenCalledOnce();
-    // The outstanding prompt still owns final settlement and the durable
-    // command retires its route afterward; Stop must not settle it twice.
-    expect(state.activePromptContexts.has(claim.executionId)).toBe(true);
-  });
-
   it("removes a dead idle execution before a later conversation probe", async () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_893 });
     const state = internals(engine);
@@ -1253,22 +1155,6 @@ describe("agent session continuity across a local renderer reload", () => {
 
     state.handleDisconnect(client);
 
-    expect(state.sessionAgent.get("session-1")).toBe("claude");
-  });
-
-  it("keeps an attested cloud agent alive across a transient WSS disconnect", () => {
-    const engine = new ZerosEngine({ root: process.cwd(), port: 29_882 });
-    const state = internals(engine);
-    state.cloudWorker = testCloudWorker();
-    const { client } = testClient("cloud-renderer-reload", "cloud");
-    state.router.register(client);
-    state.router.setOwner("session-1", client.id);
-    state.sessionAgent.set("session-1", "claude");
-    const cancel = vi.spyOn(state.agents, "cancel").mockResolvedValue();
-
-    state.handleDisconnect(client);
-
-    expect(cancel).not.toHaveBeenCalled();
     expect(state.sessionAgent.get("session-1")).toBe("claude");
   });
 });

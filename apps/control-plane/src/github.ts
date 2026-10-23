@@ -23,8 +23,7 @@ import type pg from "pg";
 import type { GithubBackendConfig } from "./config.js";
 import { withSystemTx, withUserTx, type Tx } from "./db.js";
 import { HttpError, requireOrganizationMembership } from "./authz.js";
-import { GithubCloudUserAccess } from "./cloud-workspaces/github-user-access.js";
-import { githubWritePreparation, type DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
+import { GithubCloudUserAccess } from "./github-user-access.js";
 import { createGithubAppJwt } from "./github-app-jwt.js";
 import { githubCommitProfile, type GithubCommitProfile } from "./github-git-author.js";
 import { rateLimit } from "./ratelimit.js";
@@ -93,7 +92,6 @@ const CloudInstallationTokenBodySchema = z
 type FetchLike = typeof fetch;
 
 export interface GithubRouteDependencies {
-  writeGrants?: DatabaseCloudGithubWriteGrants;
   fetch?: FetchLike;
   now?: () => number;
   random?: (bytes: number) => Buffer;
@@ -1007,7 +1005,7 @@ async function revokeGithubInstallationToken(
   }).catch(() => undefined);
 }
 
-async function mintGithubInstallationToken(
+export async function mintGithubInstallationToken(
   fetchImpl: FetchLike,
   config: GithubBackendConfig,
   input: {
@@ -1320,7 +1318,6 @@ export function createGithubRoutes(
   const cloudScope = { organizationId: z.string().uuid() };
   const cloudAuthority=dev?{devReference:z.string().uuid()}:{accessToken:TokenSchema};
   const cloudRequest = z.discriminatedUnion("action", [
-    githubWritePreparation.extend(cloudAuthority),
     z.object({ ...cloudScope, ...cloudAuthority, action: z.literal("catalog") }).strict(),
     z.object({ ...cloudScope, ...cloudAuthority, action: z.literal("connect"), installationId: z.string().uuid() }).strict(),
     z.object({ ...cloudScope, ...cloudAuthority, action: z.literal("repositories"), installationId: z.string().uuid(), page: z.number().int().min(1).max(100).default(1) }).strict(),
@@ -1369,26 +1366,6 @@ export function createGithubRoutes(
     };
     const fingerprint = await withSystemTx(pool, authorize);
     const live = await listGithubInstallations(fetchImpl, config, accessToken, now(), now() + GITHUB_FLOW_DEADLINE_MS, false);
-    if (body.action === "prepareWrite") {
-      if (!dependencies.writeGrants) throw new HttpError(503, "github_writes_unavailable", "Cloud GitHub writes are not configured.");
-      const { accessToken: _access, devReference: _reference, ...request } = body as typeof body & {accessToken?:string;devReference?:string};
-      return c.json(await dependencies.writeGrants.prepare(request, userId, async snapshot => {
-        const installation = live.installations.find(row => String(row.installationId) === snapshot.installationId &&
-          row.accountLogin.toLowerCase() === snapshot.owner.toLowerCase());
-        if (!installation) throw new HttpError(403, "github_cloud_write_denied", "This GitHub repository is not available to your account.");
-        const api = new GithubCloudUserAccess(config, fetchImpl);
-        await api.assertAccount(accessToken, login, installation);
-        const source = await api.source(accessToken, installation, snapshot.owner, snapshot.repository, true);
-        if(dev&&devBinding){
-          await dev.consentGithubRepository(userId,body.organizationId,devBinding,`${snapshot.owner}/${snapshot.repository}`,true);
-          await dev.githubGrant(userId,body.organizationId,{action:'github:write',workspaceId:body.workspaceId,repository:`${snapshot.owner}/${snapshot.repository}`.toLowerCase(),installationId:installation.installationId},devBinding);
-        }
-        await withSystemTx(pool, async tx => {
-          if (await authorize(tx) !== fingerprint) throw new HttpError(409, "github_authorization_changed", "GitHub connection changed. Try again.");
-        });
-        return { installationId: installation.installationId, repositoryId: source.id };
-      }, accessToken));
-    }
     const installations = await withSystemTx(pool, async tx => {
       if (await authorize(tx) !== fingerprint) throw new HttpError(409,"github_authorization_changed","GitHub connection changed. Try again.");
       await persistInstallations(tx, { ownerUserId: userId, appVariant: config.variantKey, installations: live.installations, complete: false });
@@ -1415,14 +1392,6 @@ export function createGithubRoutes(
       if (await authorize(tx) !== fingerprint) throw new HttpError(409,"github_authorization_changed","GitHub connection changed. Try again.");
       await tx.query(`INSERT INTO cloud_github_connections(org_id,owner_user_id,installation_id) VALUES($1,$2,$3)
         ON CONFLICT(org_id,owner_user_id,installation_id) DO UPDATE SET verified_at=now()`, [body.organizationId,userId,installation.id]);
-      if (source) {
-        await tx.query("DELETE FROM cloud_github_source_access WHERE owner_user_id=$1 AND expires_at<=clock_timestamp()", [userId]);
-        await tx.query(`INSERT INTO cloud_github_source_access(org_id,owner_user_id,installation_id,repository_owner,repository_name,forge_repository_id,actor_fingerprint,expires_at)
-          VALUES($1,$2,$3,lower($4),lower($5),$6,$7,clock_timestamp()+interval '2 minutes')
-          ON CONFLICT(org_id,owner_user_id,installation_id,repository_owner,repository_name) DO UPDATE SET
-          forge_repository_id=EXCLUDED.forge_repository_id,actor_fingerprint=EXCLUDED.actor_fingerprint,expires_at=EXCLUDED.expires_at`,
-        [body.organizationId,userId,installation.id,source.owner,source.name,source.id,fingerprint]);
-      }
     });
     return c.json(source ? { installationId: installation.id, repository: source } : repositories ?? { connected: true, installationId: installation.id });
   });

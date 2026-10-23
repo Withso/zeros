@@ -62,7 +62,7 @@ export async function copyChatTranscript(
   try {
     let loaded;
     try {
-      loaded = await loadFullTranscript(chatId, { allowPartialCloudCopy: true });
+      loaded = await loadFullTranscript(chatId);
     } catch (err) {
       if ((err as { code?: unknown } | null)?.code === "cloud_history_incomplete") {
         toast.info("This conversation is still syncing.", { action: { label: "Retry", onClick: () => { void copyChatTranscript(chatId, mode, meta); } } });
@@ -76,10 +76,6 @@ export async function copyChatTranscript(
       return;
     }
     const { messages, complete } = loaded;
-    if (loaded.isCurrent?.() === false) {
-      toast.info("This conversation changed while copying. Try again.", { action: { label: "Retry", onClick: () => { void copyChatTranscript(chatId, mode, meta); } } });
-      return;
-    }
     if (messages.length === 0) {
       if (complete) toast.info("This chat has no messages yet.");
       else toast.info("This conversation is still syncing.", { action: { label: "Retry", onClick: () => { void copyChatTranscript(chatId, mode, meta); } } });
@@ -110,9 +106,7 @@ export async function copyChatTranscript(
     // stopped before the start of history. Either way the user holds a partial
     // record and must not be told otherwise.
     if (truncated || !complete) {
-      toast.warning(loaded.partialCloudHistory
-        ? `${LABEL[mode]} copied — partial history · ${detail}.`
-        : `${LABEL[mode]} copied — most recent ${detail}.`);
+      toast.warning(`${LABEL[mode]} copied — most recent ${detail}.`);
     } else {
       toast.success(`${LABEL[mode]} copied — ${detail}.`);
     }

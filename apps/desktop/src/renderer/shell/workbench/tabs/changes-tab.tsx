@@ -254,9 +254,10 @@ const turnsRequests = new LatestGenerationFlight<TurnInfo[]>();
 function turnsForGeneration(
   workspaceId: string,
   refreshKey: number,
+  folder: string,
 ): Promise<TurnInfo[]> {
   return turnsRequests.run(workspaceId, refreshKey, () =>
-    loadChangesTurns(workspaceId),
+    loadChangesTurns(workspaceId, folder),
   );
 }
 
@@ -903,7 +904,7 @@ export function useChangesModel({
         loading: true,
         error: current.key === workspaceId ? current.error : null,
       }));
-      return turnsForGeneration(workspaceId, refreshKey)
+      return turnsForGeneration(workspaceId, refreshKey, folder)
         .then((t) => {
           if (cancelled) return;
           writeBoundedCache(changesTurnsCache, workspaceId, t);
@@ -935,7 +936,7 @@ export function useChangesModel({
       cancelled = true;
       retries.turns = undefined;
     };
-  }, [active, workspaceId, refreshKey]);
+  }, [active, workspaceId, refreshKey, folder]);
 
   // Build the file list, per scope:
   //  • Uncommitted / Staged / Unstaged: the full patch for that exact Git

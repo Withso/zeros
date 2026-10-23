@@ -57,7 +57,6 @@ import {
 } from "../../design/design-api";
 import { getDesignSelection } from "../../design/selection";
 import { getDesignScreenshot } from "../../design/screenshots";
-import { setDesignCaptureConfig } from "../../design/capture-client";
 import { stopDesignVerification } from "../../design/verification-service";
 import { MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES } from "../../files/context-graph";
 import { rememberRecognizedDesignDirectories } from "../../design/recognition-store";
@@ -72,7 +71,6 @@ vi.mock("../../agent-control/control-service-client", async (importOriginal) => 
 
 const PNG_1X1_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-const cloudActorIdentity = { userId: "11111111-1111-4111-8111-111111111111", deviceId: "22222222-2222-4222-8222-222222222222" };
 
 describe("WorkspaceService", () => {
   let dir: string;
@@ -125,114 +123,22 @@ describe("WorkspaceService", () => {
     expect(local!.path).toBe(dir);
   });
 
-  it("forwards explicit history recovery and preserves ordinary Local fetch options", async () => {
-    const fetch = vi.spyOn(git, "fetch").mockResolvedValue({ summary: "", historyLimited: true });
+  it("preserves ordinary Local fetch options", async () => {
+    const fetch = vi.spyOn(git, "fetch").mockResolvedValue({ summary: "" });
     try {
-      expect(await svc.handle("git.fetch", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, unshallow: true })).toEqual({ summary: "", historyLimited: true });
-      expect(fetch).toHaveBeenLastCalledWith({ workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: false, remote: undefined, unshallow: true });
-      fetch.mockResolvedValueOnce({ summary: "" });
       expect(await svc.handle("git.fetch", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: true })).toEqual({ summary: "" });
-      expect(fetch).toHaveBeenLastCalledWith({ workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: true, remote: undefined, unshallow: undefined });
+      expect(fetch).toHaveBeenLastCalledWith({ workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: true, remote: undefined });
     } finally { fetch.mockRestore(); }
   });
 
-  it("serves Design through the admitted cloud primary checkout without local resource authority", async () => {
-    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
-    const options = { remote: true, cloudWorker: true, hostLocalResources: false, cloudActorIdentity };
+  it("refuses remote Design initialization and mode changes", async () => {
     const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID };
-    const initialized = await cloud.handle("design.initialize", target, options);
-    expect(initialized).toMatchObject({ snapshot: { protocolCapability: null } });
-    const created = await cloud.handle("design.frame.create", { ...target, title: "Cloud frame" }, options) as { frame: { file: string } };
-    const discovery = vi.spyOn(designDirectories, "discoverDesignDirectories");
-    try {
-      expect(await cloud.handle("design.foundation.open", { ...target, frame: created.frame.file }, options)).toHaveProperty("summary.revision");
-      expect(await cloud.handle("design.snapshot", target, options)).toMatchObject({ snapshot: { protocolCapability: null } });
-      expect(discovery).toHaveBeenCalledTimes(2);
-    } finally { discovery.mockRestore(); }
-    fs.writeFileSync(path.join(dir, ".env"), "QUALIFICATION_SECRET=fixture\n");
-    await expect(cloud.handle("file.read", { ...target, path: ".env" }, options)).rejects.toThrow(/secret|credential/i);
-    for (const workspaceId of [dir, "/etc", "unrelated-workspace"]) {
-      await expect(cloud.handle("design.initialize", { workspaceId }, options)).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
-    }
-    await expect(cloud.handle("design.listDirectories", { ...target, repoRoot: "/etc" }, options)).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
-  });
-
-  it("does not grant relay or unqualified desktop clients cloud Design authority", async () => {
-    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
-    const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID };
-    await expect(cloud.handle("design.initialize", target, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
-    await expect(svc.handle("design.initialize", target, { remote: true, cloudWorker: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
-    await expect(cloud.handle("workspace.setMode", { ...target, mode: "design" }, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
-    await expect(cloud.handle("workspace.setMode", { ...target, mode: "design" }, { remote: true, cloudWorker: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(svc.handle("design.initialize", target, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(svc.handle("workspace.setMode", { ...target, mode: "design" }, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
     expect(fs.existsSync(path.join(dir, firstUseDesignDirectoryNameForRepo(dir)))).toBe(false);
   });
 
-  it("switches the admitted cloud primary's mode through the existing lifecycle operation", async () => {
-    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
-    const { workspaces } = await cloud.handle("workspace.list") as { workspaces: Workspace[] };
-    insertWorkspace({ ...workspaces.find(row => row.id === LOCAL_MAIN_WORKSPACE_ID)!, placement: "cloud", organizationId: cloudActorIdentity.userId, canonicalId: cloudActorIdentity.deviceId });
-    const options = { remote: true, cloudWorker: true, hostLocalResources: false, cloudActorIdentity };
-    expect(await cloud.handle("workspace.setMode", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, mode: "design" }, options)).toMatchObject({ ok: true, mode: "design", snapshot: { protocolCapability: null } });
-    expect(await cloud.handle("workspace.setMode", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, mode: "code" }, options)).toMatchObject({ ok: true, mode: "code" });
-  });
-
-  it("preserves the strict capture request when resolving an admitted cloud checkout", async () => {
-    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
-    const options = { remote: true, cloudWorker: true, hostLocalResources: false, cloudActorIdentity };
-    const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID };
-    await cloud.handle("design.initialize", target, options);
-    const created = await cloud.handle("design.frame.create", { ...target, title: "Capture" }, options) as { frame: { file: string } };
-    const opened = await cloud.handle("design.foundation.open", { ...target, frame: created.frame.file }, options) as { summary: { revision: string } };
-    setDesignCaptureConfig({ url: "http://127.0.0.1:19876", token: "a".repeat(64) });
-    const capture = vi.fn(async (_input: unknown, init?: RequestInit) => {
-      const request = JSON.parse(String(init?.body));
-      return Response.json({ version: 1, revision: request.revision, width: 1, height: 1,
-        renderer: "qualification", data: PNG_1X1_BASE64 });
-    });
-    vi.stubGlobal("fetch", capture);
-    try {
-      await expect(cloud.handle("design.capture", { ...target, frame: created.frame.file,
-        expectedRevision: opened.summary.revision, width: 1, height: 1 }, options)).resolves.toMatchObject({ mimeType: "image/png", width: 1, height: 1 });
-      expect(capture).toHaveBeenCalledOnce();
-      await expect(cloud.handle("design.review.snapshot", { ...target, scope: "uncommitted" }, options)).resolves.toMatchObject({ scope: "uncommitted" });
-    } finally { setDesignCaptureConfig(undefined); vi.unstubAllGlobals(); }
-  });
-
-  it("resolves cloud directory discovery without registering a desktop project", async () => {
-    const cloud=new WorkspaceService(dir,{primaryDesignWorkspace:true});
-    const options={remote:true,cloudWorker:true,hostLocalResources:false,cloudActorIdentity};
-    const target={workspaceId:LOCAL_MAIN_WORKSPACE_ID};
-    await cloud.handle("design.initialize",target,options);
-    const directory=designDirectoryNameFor(dir);
-    expect(await cloud.handle("design.previewExistingDirectory",{...target,folder:directory},options)).toMatchObject({directory});
-  });
-
-  it("binds cloud Design receipts and undo to the authenticated human device", async () => {
-    const cloud=new WorkspaceService(dir,{primaryDesignWorkspace:true});
-    const a={remote:true,cloudWorker:true,hostLocalResources:false,cloudActorIdentity};
-    const b={...a,cloudActorIdentity:{...cloudActorIdentity,deviceId:"33333333-3333-4333-8333-333333333333"}};
-    const target={workspaceId:LOCAL_MAIN_WORKSPACE_ID};
-    await cloud.handle("design.initialize",target,a);
-    const created=await cloud.handle("design.frame.create",{...target,title:"Shared"},a) as {frame:{file:string}};
-    const selected={...target,frame:created.frame.file};
-    const opened=await cloud.handle("design.foundation.open",selected,a) as {summary:{revision:string}};
-    const transaction={schemaVersion:1,transactionId:"shared-actor-first",documentId:`frame:${created.frame.file}`,baseRevision:opened.summary.revision,
-      actor:{kind:"agent",id:"forged-other-person"},intent:"Move frame",createdAt:1,coalesceKey:"same-drag",
-      operations:[{operationId:"move-a",type:"frame.set-geometry",frame:created.frame.file,geometry:{x:37,y:0,width:400,height:300,z:0}}]};
-    const applied=await cloud.handle("design.transaction.apply",{...selected,transaction},a) as {result:{revision:string;receipt:{actor:unknown}}};
-    expect(applied.result.receipt.actor).toEqual({kind:"human",id:`cloud:${cloudActorIdentity.userId}:${cloudActorIdentity.deviceId}`});
-    const otherUndo=await cloud.handle("design.history.undo",{...selected,expectedRevision:applied.result.revision},b) as {result:unknown};
-    expect(otherUndo.result).toBeNull();
-    const second=await cloud.handle("design.transaction.apply",{...selected,transaction:{...transaction,transactionId:"shared-actor-second",baseRevision:applied.result.revision,createdAt:2,operations:[{...transaction.operations[0],operationId:"move-b",geometry:{x:87,y:0,width:400,height:300,z:0}}]}},b) as {result:{revision:string}};
-    await expect(cloud.handle("design.history.undo",{...selected,expectedRevision:second.result.revision},a)).rejects.toThrow(/another|history/i);
-    await expect(cloud.handle("design.history.undo",{...selected,expectedRevision:applied.result.revision},b)).rejects.toThrow(/repository changed/i);
-    const undoB=await cloud.handle("design.history.undo",{...selected,expectedRevision:second.result.revision},b) as {result:{revision:string}};
-    expect((await cloud.handle("design.snapshot",target,b) as {snapshot:{frames:{x:number}[]}}).snapshot.frames[0].x).toBe(37);
-    await cloud.handle("design.history.undo",{...selected,expectedRevision:undoB.result.revision},a);
-    expect((await cloud.handle("design.snapshot",target,a) as {snapshot:{frames:{x:number}[]}}).snapshot.frames[0].x).not.toBe(37);
-  });
-
-  it.each(["chats.upsert", "chats.bulkUpsert"])("rejects stale cloud %s without clearing a deletion fence", async op => {
+  it.each(["chats.upsert", "chats.bulkUpsert"])("restores a deleted chat through a Local %s", async op => {
     const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
     const { deleteChat, getChat, wasChatDeleted } = await import("../../db/chats");
     setZerosDbPathForTesting(path.join(stateDir, "cloud-deleted.db"));
@@ -240,10 +146,7 @@ describe("WorkspaceService", () => {
       deleteChat("deleted");
       const stale = { id: "deleted", folder: dir };
       const params = op === "chats.upsert" ? { chat: stale } : { chats: [{ id: "new", folder: dir }, stale] };
-      await expect(svc.handle(op, params, { cloudWorker: true })).rejects.toThrow(/deleted/i);
       expect(wasChatDeleted("deleted")).toBe(true); expect(getChat("deleted")).toBeNull();
-      expect(getChat("new")).toBeNull();
-      // Intentional local restoration remains compatible.
       await svc.handle(op, params);
       expect(getChat("deleted")).not.toBeNull();
     } finally { closeZerosDb(); setZerosDbPathForTesting(null); }
@@ -789,7 +692,7 @@ describe("WorkspaceService", () => {
     expect(fs.existsSync(missingFolder)).toBe(false);
   });
 
-  it("reports an over-budget turn's opening prompt on Local tail windows only", async () => {
+  it("reports an over-budget turn's opening prompt on Local tail windows", async () => {
     const { upsertChatMessagesBulk } = await import("../../db/messages");
     const chatId = "long-turn";
     const row = (id: string, kind: string, extra: Record<string, unknown>) => ({
@@ -812,16 +715,6 @@ describe("WorkspaceService", () => {
     expect(local.messages).toHaveLength(200);
     expect(local.messages[0].msgId).toBe("t1000");
     expect(local.turnOpening?.msgId).toBe("u1");
-
-    // Cloud workers keep their existing wire shape; their history has its own
-    // projection/restore contract.
-    const cloud = (await svc.handle(
-      "messages.window",
-      { chatId, limit: 200 },
-      { cloudWorker: true },
-    )) as Record<string, unknown>;
-    expect(cloud.turnOpening).toBeUndefined();
-    expect((cloud.messages as unknown[]).length).toBe(200);
   });
 
   it("registers transcript-window migrations with the owning workspace barrier", async () => {
@@ -5189,23 +5082,6 @@ describe("WorkspaceService", () => {
     },
   );
 
-  // ── Remote deny-by-default allowlist (FIX 2) ──────────────────────────────
-
-  it("binds remote PR suggestions to the admitted checkout, ignoring caller repository overrides", async () => {
-    const resolve = vi.spyOn(git.githubForgeAdapter, "resolveRepository").mockResolvedValue({
-      schemaVersion: 1, forge: "github", host: "github.com", owner: "allowed", name: "project",
-    });
-    const list = vi.spyOn(git, "listPrs").mockResolvedValue([]);
-    try {
-      await svc.handle("gh.prList", {
-        workspaceId: LOCAL_MAIN_WORKSPACE_ID, originUrl: "https://github.com/unrelated/private.git",
-        owner: "unrelated", repo: "private", state: "open",
-      }, { remote: true, cloudWorker: true });
-      expect(resolve).toHaveBeenCalledWith(LOCAL_MAIN_WORKSPACE_ID);
-      expect(list).toHaveBeenCalledWith({ owner: "allowed", repo: "project", state: "open" });
-    } finally { resolve.mockRestore(); list.mockRestore(); }
-  });
-
   it("refuses remote PR discovery without a registered workspace before reaching GitHub", async () => {
     const list = vi.spyOn(git, "listPrs").mockResolvedValue([]);
     try {
@@ -5218,7 +5094,7 @@ describe("WorkspaceService", () => {
     } finally { list.mockRestore(); }
   });
 
-  it("lists checkout-free desktop GitHub branches and binds remote reads to the admitted repository", async () => {
+  it("lists checkout-free desktop GitHub branches and refuses unbound remote reads", async () => {
     const rows = [{ name: "main", isDefault: true }];
     const list = vi.spyOn(git, "listRepositoryBranches").mockResolvedValue(rows);
     const resolve = vi.spyOn(git.githubForgeAdapter, "resolveRepository").mockResolvedValue({
@@ -5227,8 +5103,6 @@ describe("WorkspaceService", () => {
     try {
       expect(await svc.handle("gh.branchList", { owner: "desktop", repo: "project" })).toEqual(rows);
       expect(list).toHaveBeenLastCalledWith({ owner: "desktop", repo: "project" });
-      await svc.handle("gh.branchList", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, owner: "unrelated", repo: "private" }, { remote: true, cloudWorker: true });
-      expect(list).toHaveBeenLastCalledWith({ owner: "allowed", repo: "project" });
       list.mockClear();
       await expect(svc.handle("gh.branchList", { owner: "unrelated", repo: "private" }, { remote: true })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
       expect(list).not.toHaveBeenCalled();
@@ -5242,11 +5116,9 @@ describe("WorkspaceService", () => {
     } finally { list.mockRestore(); }
   });
 
-  it("does not treat a cloud read credential as the actor's PR write permission", async () => {
+  it("reads PR write permission from the workspace's repository access", async () => {
     const access = vi.spyOn(git, "getWorkspaceRepoAccess").mockResolvedValue({ state: "blocked", message: "Read credential" });
     try {
-      expect(await svc.handle("gh.repoAccess", { workspaceId: dir }, { cloudWorker: true })).toEqual({ state: "unknown" });
-      expect(access).not.toHaveBeenCalled();
       expect(await svc.handle("gh.repoAccess", { workspaceId: dir })).toEqual({ state: "blocked", message: "Read credential" });
       expect(access).toHaveBeenCalledWith(dir);
     } finally { access.mockRestore(); }

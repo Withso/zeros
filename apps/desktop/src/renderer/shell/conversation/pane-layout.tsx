@@ -109,7 +109,6 @@ import {
 } from "../scroll-memory";
 import { prepareChatView } from "./chat-intent";
 import { warmCloudWorkspaceDestination } from "../../state/cloud-workspace-warmup";
-import { startCloudNavigationSpan } from "../../state/cloud-workspace-latency";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
 import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resize";
@@ -456,8 +455,6 @@ export function ConversationPaneLayout({
 
   const handleSelectChat = useCallback(
     (chatId: string) => {
-      const chat = useWorkspaceStore.getState().chats.find(row => row.id === chatId);
-      if (chat) startCloudNavigationSpan(chat.folder, "click", chatId);
       dispatch({ type: "SET_ACTIVE_CHAT", id: chatId });
     },
     [dispatch],
@@ -473,7 +470,6 @@ export function ConversationPaneLayout({
       if (document.visibilityState === "hidden") return;
       const chat = useWorkspaceStore.getState().chats.find(row => row.id === chatId);
       if (chat) {
-        startCloudNavigationSpan(chat.folder, "intent", chatId);
         void warmCloudWorkspaceDestination(chat.folder, true).catch(() => {});
       }
       void sessions.hydrateChat(chatId).catch(() => {});

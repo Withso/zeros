@@ -14,7 +14,7 @@ import type { WorkOSManagementProvider } from "./workos-provider.js";
 import { WorkOSEventsReconciler } from "./workos-sync-events.js";
 import { DeletionLifecycleProcessor } from "./deletion-lifecycle.js";
 
-import { CloudWorkerScheduler } from "./cloud-workspaces/worker-scheduler.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import {
   readWorkOSWorkerDeadlines,
   type WorkOSWork,

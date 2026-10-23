@@ -257,7 +257,7 @@ describe("full release policy isolation", () => {
   });
 
   it.each([
-    { path: ".github/workflows/cloud-worker-promotion.yml" }, { event: "workflow_dispatch" }, { head_branch: "release/1.2.3" },
+    { path: ".github/workflows/controlled-cutover.yml" }, { event: "workflow_dispatch" }, { head_branch: "release/1.2.3" },
     { head_sha: "b".repeat(40) }, { repository: { full_name: "fork/zeros" } }, { head_repository: { full_name: "fork/zeros" } },
     { id: 999 }, { run_attempt: 2 },
   ])("refuses an unauthenticated apparent automatic Alpha parent (%#)", async change => {
@@ -272,14 +272,14 @@ describe("full release policy isolation", () => {
   });
 
   it("wrong apparent automatic parent cannot fall back to green full Preflight and CodeQL proof", async () => {
-    const { client, requests } = fixture({ parent: { ...parent, path: ".github/workflows/cloud-worker-promotion.yml" },
+    const { client, requests } = fixture({ parent: { ...parent, path: ".github/workflows/controlled-cutover.yml" },
       preflight: [{ ...preflight, status: "completed", conclusion: "success" }], jobs: [] });
     await expect(client.assertRequiredChecks()).rejects.toThrow(/parent/);
     expect(requests).toEqual(["/actions/runs/300"]);
   });
   it("legitimate direct callers still accept the unchanged full Preflight and CodeQL proof", async () => {
-    const { client, requests } = fixture({ env: { GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/cloud-worker-promotion.yml@refs/heads/main` },
-      parent: { ...parent, path: ".github/workflows/cloud-worker-promotion.yml" }, preflight: [{ ...preflight, status: "completed", conclusion: "success" }], jobs: [] });
+    const { client, requests } = fixture({ env: { GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/controlled-cutover.yml@refs/heads/main` },
+      parent: { ...parent, path: ".github/workflows/controlled-cutover.yml" }, preflight: [{ ...preflight, status: "completed", conclusion: "success" }], jobs: [] });
     await expect(client.assertRequiredChecks()).resolves.toBeUndefined();
     expect(requests).toHaveLength(2);
     expect(requests.every(url => url.includes("/actions/workflows/"))).toBe(true);

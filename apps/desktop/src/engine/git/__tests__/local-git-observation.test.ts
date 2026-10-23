@@ -102,12 +102,4 @@ describe("Local engine Git observations", () => {
       expect(spawn.mock.calls[0]?.[1]).toMatchObject({ env: { GIT_OPTIONAL_LOCKS: "1" } });
     },
   );
-
-  it("leaves the qualified cloud executable and environment unchanged", async () => {
-    const spawn = vi.fn((_command: string[], _options: Record<string, unknown>) => ({ stdout: null, stderr: null, exited: Promise.resolve(0), signalCode: null, killed: false }));
-    vi.stubGlobal("Bun", { spawn });
-    const env = { PATH: "/fixture/zeros-git-auth-cloud:/usr/bin", GIT_OPTIONAL_LOCKS: "1" };
-    await runFile("git", ["status", "--short"], { env, identity: { uid: 10003, gid: 10003 } });
-    expect(spawn.mock.calls[0]).toMatchObject([["git", "status", "--short"], { env, uid: 10003, gid: 10003 }]);
-  });
 });

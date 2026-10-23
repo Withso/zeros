@@ -180,26 +180,6 @@ describe("catalog reads through the real workspace facade", () => {
     },
   );
 
-  it.each([false, true])(
-    "routes a connected cloud peer with Local connected=%s",
-    async (localConnected) => {
-      const f = await fixture(localConnected);
-      await expect(
-        bridgeDesignCatalog(f.client, input, owner),
-      ).resolves.toMatchObject({ status: "ready", owner });
-      expect(f.requestConnected).toHaveBeenCalledWith(
-        expect.objectContaining({
-          op: DESIGN_CATALOG_READ_OPERATION,
-          params: { ...input, workspaceId: scope.engineWorkspaceId },
-        }),
-        10000,
-      );
-      expect(f.localSend).not.toHaveBeenCalled();
-      expect(f.request).not.toHaveBeenCalled();
-      expect(f.open).not.toHaveBeenCalled();
-    },
-  );
-
   it.each([
     "absent",
     "retired",

@@ -45,11 +45,6 @@ import type {
   ExecutionBoundaryStatus,
 } from "./containment";
 
-import type { CloudGithubNativeGrantRequest } from "./github-auth";
-import type { CloudConversationSnapshot } from "./cloud-events";
-import type { CloudAgentBootConversation } from "./cloud-agent-bootstrap";
-import type { CloudAgentCredentialActualUse } from "./cloud-events";
-
 export type MessageSource = "browser" | "engine";
 
 // ── Agent registry entry (mirror of the engine-side shape) ─
@@ -223,8 +218,6 @@ export interface BaseMessage {
   id: string;
   source: MessageSource;
   timestamp: number;
-  /** Ordered cloud stream epoch; absent on local and ephemeral terminal frames. */
-  cloudStream?: { streamId: string; sequence: number; requiresSnapshot?: true };
 }
 
 // ── Engine → Browser ─────────────────────────────────────
@@ -241,12 +234,9 @@ export interface EngineReadyMessage extends BaseMessage {
   minProtocolVersion?: number;
   /** Additive cloud backend contracts available over the workspace bridge. */
   capabilities?: string[];
-  /** Exact activated engine-local writer, emitted only to a confirmed actor. */
-  cloudLocalCommands?: CloudAgentBootConversation;
-}
-export interface CloudAgentCredentialUsedMessage extends BaseMessage {
-  type: "CLOUD_AGENT_CREDENTIAL_USED";
-  use: CloudAgentCredentialActualUse;
+  /** A cloud worker's random per-process id. A new value means the worker
+   *  restarted, so its shells are gone; a reconnect keeps the same value. */
+  instanceId?: string;
 }
 
 /** Engine → clients broadcast: a list-changing write hit the engine DB. Clients
@@ -275,8 +265,6 @@ export interface DbChangedMessage extends BaseMessage {
    *  one. Omitted for list-only changes (chats/projects); clients pull those
    *  named lists. */
   chatIds?: string[];
-  /** Negotiated local writer only; never a substitute for client authority. */
-  cloudHistoryRestore?: import("./cloud-events").CloudAgentHistoryRestoreMetadata;
 }
 
 /** Host → engine (local Electron or an attested cloud-workspace owner):
@@ -902,9 +890,6 @@ export interface AgentForkConversationMessage extends BaseMessage {
   agentId: string;
   sourceChatId: ConversationId;
   destinationChatId: ConversationId;
-  /** Cloud can qualify the shared bounded transcript handoff independently
-   * from Codex's full native-history fork. Local keeps its existing behavior. */
-  forkStrategy?: "native" | "transcript";
   /** Engine workspace id for the destination conversation. Remote clients must
    * supply it; the engine still verifies it against the persisted chat. */
   workspaceId?: WorkspaceId;
@@ -949,7 +934,6 @@ export interface AgentSessionLoadedMessage extends BaseMessage {
   /** Correlation id for the still-running prompt, when `promptActive` is true.
    * Optional for compatibility with older engines/clients. */
   promptId?: string;
-  cloudSnapshot?: CloudConversationSnapshot;
 }
 
 export interface AgentAgentsListMessage extends BaseMessage {
@@ -964,8 +948,6 @@ export interface AgentSessionCreatedMessage extends BaseMessage {
   agentId: string;
   session: NewSessionResponse;
   initialize: InitializeResponse;
-  /** Synthetic cloud attachment publication, including retired executions. */
-  cloudSnapshot?: CloudConversationSnapshot;
 }
 
 export interface AgentAuthCompletedMessage extends BaseMessage {
@@ -1028,9 +1010,6 @@ export interface AgentBoundaryPortOpenedMessage extends BaseMessage {
   admissionUrl: string;
   /** Absolute deadline for renewing the volatile browser admission. */
   expiresAt: number;
-  /** Native cloud admission carries opaque identity, never a listener host or
-   * port. The URLs above remain bearer-free logical display URLs in this case. */
-  nativeTarget?: import("./containment").CloudAgentPreviewTarget;
 }
 
 export interface AgentPermissionRequestMessage extends BaseMessage {
@@ -1412,11 +1391,6 @@ export interface AgentBinaryResolvedMessage extends BaseMessage {
   resolvedVia: "override" | "well-known" | "path" | "fallback";
 }
 
-export interface GithubNativeGrantRequestMessage extends BaseMessage {
-  type: "GITHUB_NATIVE_GRANT_REQUEST";
-  request: CloudGithubNativeGrantRequest;
-}
-
 // ── Union ────────────────────────────────────────────────
 
 export type BridgeMessage =
@@ -1425,12 +1399,10 @@ export type BridgeMessage =
   | OwnerSignedOutMessage
   | HeartbeatMessage
   | EngineReadyMessage
-  | CloudAgentCredentialUsedMessage
   | DbChangedMessage
   | GithubTokenSetMessage
   | GithubTokenChangedMessage
   | GithubCredentialChangedMessage
-  | GithubNativeGrantRequestMessage
   | EngineErrorMessage
   // Agent (browser → engine)
   | AgentListAgentsMessage

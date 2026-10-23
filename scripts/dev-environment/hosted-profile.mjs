@@ -1,8 +1,11 @@
 import path from "node:path";
+import { cloudV2WorkerSigningKey } from "./cloud-v2-keys.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { readPrivateJson, privateDirectory, writePrivateFile } from "./state.mjs";
 import { developmentProfilePath, profileExists, PROFILE_NAME, assertIgnoredProfileDestination } from "./profile-path.mjs";
 import { publicDevProfile } from "./profile.mjs";
+
+export { cloudV2WorkerSigningKey };
 import { fixtureIssues } from "./hosted-fixtures.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -59,9 +62,7 @@ export function hostedProfileIssues(p) {
   if (!["alpha", "dev"].includes(w?.environment) || !/^client_[A-Za-z0-9_-]+$/.test(w?.webClientId ?? "") ||
       !/^client_[A-Za-z0-9_-]+$/.test(w?.desktopClientId ?? "") || w.webClientId === w.desktopClientId || !w.apiKey) issues.push("workos: configure distinct Web/Desktop clients and explicitly select alpha to reuse Alpha identity");
   if (!Number.isSafeInteger(g?.appId) || g.appId < 1 || !/^[a-zA-Z0-9-]+$/.test(g?.appSlug ?? "") || !g.clientId || !g.clientSecret || !g.privateKeyBase64) issues.push("github: configure the selected GitHub App and OAuth credentials");
-  if (!b?.apiKey || !b.billingOrg || !b.accountScope || !NAME.test(b.baseSnapshot ?? "") ||
-      !Number.isFinite(b.secondsPerDollar) || b.secondsPerDollar <= 0 ||
-      !Number.isFinite(b.builderBudgetHours) || b.builderBudgetHours <= 0 || b.builderBudgetHours > 2) issues.push("boat: configure API/billing identity, baseSnapshot, secondsPerDollar and builderBudgetHours (0–2 hours)");
+  if (!b?.apiKey || !b.billingOrg || !b.accountScope) issues.push("boat: configure API/billing identity and accountScope");
   if(p.connections && (p.connections.enabled!==true || p.connections.cutover!=="connect-once" || !UUID.test(p.connections.projectId??"") || p.connections.projectId===r?.projectId ||
       Object.keys(p.connections).some(key=>!["enabled","cutover","projectId"].includes(key)))) issues.push("connections: use a separate protected projectId and connect-once cutover; operator secrets cannot enter this profile");
   return [...issues, ...fixtureIssues(p.fixture)];
@@ -80,16 +81,21 @@ export function hostedDesktopEnvironment(state, profile, directory) {
     VITE_APP_BASE_URL: p.appOrigin, VITE_CONTROL_PLANE_URL: p.apiOrigin, ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
 }
 
-export function hostedBackendEnvironment(state, profile, source, worker) {
+/** Cloud workspace v2 worker runtime, published into this Dev's storage by
+ * `pnpm --dir apps/control-plane cloud-v2:publish-runtime`. VMs download it. */
+function cloudV2Runtime(env) {
+  if (!/^[0-9a-f]{64}$/.test(env.ZEROS_CLOUD_V2_RUNTIME_SHA256 ?? ""))
+    throw new Error("Set ZEROS_CLOUD_V2_RUNTIME_SHA256 to a runtime published with cloud-v2:publish-runtime");
+  return env.ZEROS_CLOUD_V2_RUNTIME_SHA256;
+}
+
+export function hostedBackendEnvironment(state, profile, source, _worker, env = process.env) {
   const p = hostedPublicProfile(state, profile), roles = state.resources.planetscale?.roles;
-  if (!roles?.runtime?.url || !state.resources.workos?.secret || !state.runId ||
-      worker.inputsSha256 !== source.workerInputsSha256 || !HEX.test(worker.buildSha256 ?? "")) throw new Error("Dev deployment is missing its database, webhook or qualified matching worker");
+  if (!roles?.runtime?.url || !state.resources.workos?.secret || !state.runId) throw new Error("Dev deployment is missing its database or webhook");
   const url = new URL(roles.runtime.url), key = name => Buffer.from(state.keys[name], "hex").toString("base64url");
   if(profile.connections?.enabled && (!state.connectionRegistered || !state.connectionBackendEnvironment)) throw new Error("Register the Dev connection generation before backend deployment");
   return { ...(profile.connections?.enabled?{ZEROS_DEPLOY_ENV:"dev",ZEROS_DEV_CONNECTIONS_ENABLED:"true",...state.connectionBackendEnvironment}:{}), NODE_ENV: "production", HOST: "0.0.0.0", PORT: "3000",
     ZEROS_DEV_ENVIRONMENT: "hosted", ZEROS_DEV_OWNER: state.owner, ZEROS_DEV_GENERATION: state.generation, ZEROS_DEV_RUN_ID: state.runId,
-    ...((state.fixture?.endsAt || state.expiresAt) ? { ZEROS_DEV_ADMISSION_EXPIRES_AT: new Date(Math.min(
-      ...[state.fixture?.endsAt, state.expiresAt].filter(Boolean).map(value => Date.parse(value)))).toISOString() } : {}),
     ZEROS_DEV_DOMAIN: p.domain, ZEROS_DEV_AUTH_ENVIRONMENT: p.authEnvironment,
     ZEROS_DEV_RAILWAY_PROJECT_ID: profile.railway.projectId, ZEROS_DEV_RAILWAY_ENVIRONMENT_ID: state.resources.railway.id,
     ZEROS_DEV_SOURCE_SHA256: source.sourceSha256, ZEROS_DEV_WORKER_INPUTS_SHA256: source.workerInputsSha256,
@@ -103,22 +109,20 @@ export function hostedBackendEnvironment(state, profile, source, worker) {
     GITHUB_APP_CLIENT_ID: profile.github.clientId, GITHUB_APP_CLIENT_SECRET: profile.github.clientSecret,
     GITHUB_APP_PRIVATE_KEY: Buffer.from(profile.github.privateKeyBase64, "base64").toString("utf8"),
     GITHUB_OAUTH_CALLBACK_URL: `${p.apiOrigin}/v1/github/oauth/callback`, GITHUB_COMPLETION_PAGE_URL: `${p.appOrigin}/github/connected`,
-    CLOUD_WORKSPACES_ENABLED: "true", CLOUD_WORKSPACE_PROVIDER: "boat", CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
-    CLOUD_WORKSPACE_CONTROL_PLANE_URL: p.apiOrigin, ZEROS_CLOUD_SOURCE_COMMIT: worker.sourceCommit,
-    BOAT_API_KEY: profile.boat.apiKey, BOAT_ACCOUNT_SCOPE: profile.boat.accountScope, BOAT_BILLING_ORG: profile.boat.billingOrg,
-    BOAT_SNAPSHOT_ID: worker.snapshotId, BOAT_IMAGE_BUILD_SHA256: worker.buildSha256,
-    BOAT_TTL_SECONDS: "900", BOAT_COMPUTE_POLICY_ID: "hosted-dev", BOAT_SECONDS_PER_DOLLAR: String(profile.boat.secondsPerDollar),
-    ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/amd64", CLOUD_WORKSPACE_CPU_MILLICORES: "4000", CLOUD_WORKSPACE_MEMORY_MIB: "8192",
-    CLOUD_WORKSPACE_STORAGE_MIB: String(worker.storageMiB),
-    CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"), CLOUD_WORKSPACE_OBJECT_KEY_V1: key("objects"),
+    // One Railway service serves the v2 API, worker relay and lifecycle.
+    CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: p.apiOrigin, CLOUD_V2_REALTIME_URL: p.apiOrigin.replace(/^https:/, "wss:"),
+    CLOUD_V2_RUNTIME_SHA256: cloudV2Runtime(env), CLOUD_V2_WORKER_SIGNING_KEY: cloudV2WorkerSigningKey(state),
+    CLOUD_V2_RUNTIME_STORE_ENDPOINT: profile.storage.endpoint,
+    CLOUD_V2_RUNTIME_STORE_BUCKET: profile.storage.bucket, CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: profile.storage.accessKeyId,
+    CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: profile.storage.secretAccessKey,
+    BOAT_API_KEY: profile.boat.apiKey, BOAT_BILLING_ORG: profile.boat.billingOrg,
+    // The agent login vault, unchanged from the previous cloud.
+    CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"),
     // This generation's separate agent key was reserved in the original Dev
     // receipt. Keep refresh-family fingerprints stable across redeploys and
     // independent of credential encryption key rotation.
     CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON: JSON.stringify({ 1: key("agent") }),
-    CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION: "1",
-    CLOUD_WORKSPACE_OBJECT_STORE_KIND: "s3", CLOUD_WORKSPACE_S3_ENDPOINT: profile.storage.endpoint, CLOUD_WORKSPACE_S3_BUCKET: profile.storage.bucket,
-    CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: profile.storage.accessKeyId, CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: profile.storage.secretAccessKey,
-    CLOUD_WORKSPACE_S3_KEY_PREFIX: `dev/${state.owner}/${state.generation}/` };
+    CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION: "1" };
 }
 
 export function hostedWebEnvironment(state, profile) {

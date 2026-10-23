@@ -25,8 +25,6 @@ vi.mock("../../platform/cloud-workspaces", async original => ({
   listCloudWorkspaceDocuments: api.list,
 }));
 import { wakeCloudWorkspace } from "../cloud-workspace-wake";
-import { setCloudWorkspaceStreamCoverage } from "../cloud-workspace-stream-coverage";
-import { CloudWorkspaceInteraction } from "../cloud-workspace-interaction";
 import {
   acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudWorkspaceDocument,
   refreshCloudWorkspaceCatalog, manageCloudWorkspace,
@@ -47,34 +45,14 @@ function doc(version: number, status = "stopped"): CloudWorkspaceDocument {
 }
 beforeEach(() => {
   vi.useFakeTimers(); vi.clearAllMocks(); api.enabled = true; api.signedIn = true; api.entitled = true;
-  api.rollout = false; setCloudWorkspaceStreamCoverage(null);
+  api.rollout = false;
   clearCloudWorkspaceCatalog(); acceptCloudWorkspaceDocument(doc(1));
   api.wake.mockResolvedValue(doc(2, "waking"));
   api.read.mockResolvedValue(doc(3, "ready"));
 });
-afterEach(() => { clearCloudWorkspaceCatalog(); setCloudWorkspaceStreamCoverage(null); vi.useRealTimers(); });
+afterEach(() => { clearCloudWorkspaceCatalog(); vi.useRealTimers(); });
 
 describe("explicit cloud wake readiness", () => {
-  it.each(["push", "coverage loss"])("waits through ten minutes of covered setup until %s without detail polls or another wake", async finish => {
-    api.rollout = true;
-    setCloudWorkspaceStreamCoverage({ streamId: target.organizationId, leaseId: target.workspaceId,
-      revision: 1, sequence: 1, state: "open", catalogRequired: false,
-      organizations: [{ organizationId: target.organizationId, deviceStream: true, presence: false }] });
-    const pending = wakeCloudWorkspace(target, cloudWorkspaceDocument(target)!);
-    void pending.catch(() => {});
-    try {
-      await vi.advanceTimersByTimeAsync(600_000);
-      expect(api.read).not.toHaveBeenCalled(); expect(api.wake).toHaveBeenCalledOnce();
-      if (finish === "push") acceptCloudWorkspaceDocument(doc(3, "ready"));
-      else {
-        setCloudWorkspaceStreamCoverage(null);
-        await vi.advanceTimersByTimeAsync(1_999); expect(api.read).not.toHaveBeenCalled();
-        await vi.advanceTimersByTimeAsync(1); expect(api.read).toHaveBeenCalledOnce();
-      }
-      await expect(pending).resolves.toMatchObject({ status: "ready" });
-      expect(vi.getTimerCount()).toBe(0);
-    } finally { acceptCloudWorkspaceDocument(doc(4, "ready")); await pending.catch(() => {}); }
-  });
 
   it.each(["ready", "busy"])("prepares an already-%s workspace without creating wake intents", async status => {
     acceptCloudWorkspaceDocument(doc(1, status));
@@ -85,39 +63,6 @@ describe("explicit cloud wake readiness", () => {
     }
     expect(api.wake).not.toHaveBeenCalled();
     expect(api.read).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("carries fresh input across committed idle capture and wakes only after the observed stop", async () => {
-    acceptCloudWorkspaceDocument(doc(1, "ready"));
-    api.wake.mockResolvedValue(doc(4, "waking"));
-    const key = `cloud://${target.organizationId}/${target.workspaceId}`, presence = vi.fn(() => true);
-    let pending: Promise<CloudWorkspaceDocument> | undefined;
-    const interaction = new CloudWorkspaceInteraction({
-      current: () => ({ key, document: cloudWorkspaceDocument(target)! }),
-      visible: () => true, focused: () => true, available: () => true, presence,
-      wake: async (_key, signal) => {
-        pending = wakeCloudWorkspace(target, cloudWorkspaceDocument(target)!, signal, "interaction", { id: crypto.randomUUID() });
-        await pending;
-      },
-    });
-    try {
-      interaction.interact();
-      await wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, { id: crypto.randomUUID() });
-      expect(presence).toHaveBeenCalledExactlyOnceWith(key, true);
-      expect(api.wake).not.toHaveBeenCalled();
-      acceptCloudWorkspaceDocument(doc(2, "stopping")); interaction.refresh();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(pending).toBeDefined();
-      expect(api.wake).not.toHaveBeenCalled();
-      acceptCloudWorkspaceDocument(doc(3, "stopped"));
-      await vi.advanceTimersByTimeAsync(0);
-      expect(api.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", expect.any(String), "interaction");
-      acceptCloudWorkspaceDocument(doc(5, "ready")); await pending;
-      interaction.reconnect(); interaction.refresh();
-      expect(api.wake).toHaveBeenCalledOnce();
-      expect(api.read).not.toHaveBeenCalled();
-    } finally { interaction.close(); }
     expect(vi.getTimerCount()).toBe(0);
   });
 

@@ -239,6 +239,18 @@ export function checkZerosDevValues(values) {
   const repositoryValid=repo.length===2 && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(repo[0]) &&
     /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(repo[1]) && !repo[1].endsWith(".git");
   const repositoryIdValid=/^[1-9][0-9]{0,39}$/.test(values.ZEROS_DEV_REPOSITORY_ID??"");
+  // electron:cloud reads identity from profile.fixture and verifies the numeric
+  // GitHub installation at seed time. Any supplied hosted identity field keeps
+  // the strict hosted contract below, even when that identity is incomplete.
+  const hostedIdentity = ["WORKOS_SUBJECT", "ACCOUNT_ID", "ORGANIZATION_ID", "EMAIL", "ACCESS_TOKEN", "REFRESH_TOKEN", "SESSION_ID", "TOKEN_EXPIRES_AT", "DEVICE_PRIVATE_KEY_B64"]
+    .some(name => Boolean(values[`ZEROS_DEV_${name}`]));
+  if (!hostedIdentity) {
+    const installation = values.ZEROS_DEV_GITHUB_INSTALLATION_ID ?? "";
+    if (!repositoryValid || !/^[1-9][0-9]*$/.test(installation) || !Number.isSafeInteger(Number(installation)) ||
+        (values.ZEROS_DEV_REPOSITORY_ID && !repositoryIdValid) || (values.ZEROS_DEV_PASSWORD?.length ?? 0) > 1024)
+      return fail("electron:cloud fixture incomplete or invalid; values withheld");
+    return ok("electron:cloud fixture structurally valid; identity comes from the private profile; live login not checked");
+  }
   const installationValid=uuid.test(values.ZEROS_DEV_GITHUB_INSTALLATION_ID??"");
   if(!valid || (values.ZEROS_DEV_REPOSITORY&&!repositoryValid) || (values.ZEROS_DEV_REPOSITORY_ID&&!repositoryIdValid) ||
     (values.ZEROS_DEV_GITHUB_INSTALLATION_ID&&!installationValid))return fail("zeros-dev fixture incomplete or invalid; values withheld");

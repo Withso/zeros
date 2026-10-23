@@ -9,10 +9,10 @@ WorkOS. Never use Beta or Production credentials or data.
   must stay read-only.
 - Read credentials into memory from `.env.agent`. Never pass them as
   arguments, never print them, and redact tokens from any output you keep.
-- Prefer the repository's operators (`apps/control-plane/src/manage-*.ts`,
-  the zeros-dev harness). They plan, machine-verify the exact expected
-  previous state, execute, then read back. Stop on any mismatch; never widen a
-  plan to make it pass.
+- Prefer the repository's operators (`apps/control-plane/src/manage-*.ts`).
+  They plan, machine-verify the exact expected previous state, execute, then
+  read back. Stop on any mismatch; never widen a plan to make it pass. The
+  cloud gate0 probe is the live lifecycle check (see `zstack-verify`).
 
 ## Database access
 
@@ -45,12 +45,11 @@ WorkOS. Never use Beta or Production credentials or data.
 
 ## Pins and rebuilds
 
-- Before asking anyone, the owner included, to rebuild a Computer, confirm
-  that the runtime it should pin is published and qualified: every required
-  kind enabled and cleanup confirmed. A build pins the newest qualified
-  runtime, which can be older than the one just published.
-- After the build, compare its persisted `runtime_id` with that runtime
-  before any workspace setup.
+- Every VM fetches the worker runtime at boot and checks it against the
+  control plane's `CLOUD_V2_RUNTIME_SHA256`. A runtime change needs a publish
+  and that variable, not a Computer rebuild.
+- Rebuild a Computer only when its repositories or setup change. Boot a
+  workspace from the new build before calling it ready.
 
 ## Collisions and cleanup
 

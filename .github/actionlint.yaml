@@ -1,12 +1,11 @@
 # actionlint 1.7.12 predates these GitHub-hosted labels. This configuration key
 # extends its catalog; these jobs still use GitHub-hosted runners. Keep exact
 # labels so misspellings remain errors, and remove entries as actionlint learns
-# them. Ubuntu 26.04 is exercised on every PR by cloud-runner-qualification.yml.
+# them.
 # https://github.com/actions/runner-images#available-images
 self-hosted-runner:
   labels:
     - macos-15-intel
-    - ubuntu-26.04
 
 # actionlint 1.7.12 does not know concurrency.queue. Suppress only that exact
 # diagnostic in the canary; scripts/ci/validate-concurrency.mjs and its root

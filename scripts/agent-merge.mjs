@@ -674,32 +674,11 @@ export async function runAgentMerge(
         return 1;
       }
     }
-    // Required PR checks are snapshots. Re-read the hourly main result at
-    // arming time so yesterday's green check cannot authorize a cloud merge.
-    const { evaluateHourly, cloudRequiredForFiles } = await import("./ci/zeros-dev-gate.mjs");
-    const hourly = await evaluateHourly({ get: async (endpoint, { missing = false } = {}) => {
-      if (!endpoint.startsWith(`/repos/${REPOSITORY}/`)) throw new Error("Untrusted hourly endpoint");
-      if (!missing) return json(["api", endpoint.slice(1)]);
-      // The repair contract proves that its marker was removed at this head.
-      // gh uses exit 1 for both 404 and other API failures: inspect the HTTP
-      // status, never an error message or an arbitrary response-body field.
-      const result = execute(["api", endpoint.slice(1), "--include"], [0, 1]);
-      const header = /^HTTP\/[0-9.]+ ([0-9]{3})[^\r\n]*\r?\n/.exec(result.stdout);
-      if (result.status === 1 && header?.[1] === "404") return null;
-      const boundary = /\r?\n\r?\n/.exec(result.stdout);
-      if (result.status !== 0 || header?.[1] !== "200" || !boundary) throw new Error("GitHub CLI request failed");
-      return JSON.parse(result.stdout.slice(boundary.index + boundary[0].length));
-    } }, { cloudRequired: cloudRequiredForFiles(snapshot.files, snapshot.pr.labels ?? []), number: options.number, head: snapshot.pr.headRefOid });
-    if (!hourly.allowed) {
-      stderr(`The zeros-dev E2E merge gate refused this cloud PR: ${hourly.code}.`);
-      return 1;
-    }
-    if (hourly.alert) stdout(`Noncloud PR alert: zeros-dev E2E is ${hourly.code}.`);
     if (options.immediate) {
       const viewer = readWorkspaceViewer();
       const pr = readImmediatePr();
       if (!samePr(snapshot.pr, pr))
-        throw new Error("PR changed after hourly gate");
+        throw new Error("PR changed during merge preflight");
       snapshot = { ...snapshot, viewer, pr };
       decision = decideMerge(snapshot, policy);
       if (!decision.allowed) {

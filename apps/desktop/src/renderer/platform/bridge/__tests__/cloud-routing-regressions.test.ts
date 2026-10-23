@@ -12,7 +12,6 @@ import {
 import {
   cloudScopedId,
   cloudWorkspaceKey,
-  type CloudWorkspaceTarget,
 } from "@/renderer/platform/bridge/cloud-workspace-key";
 import {
   bridgeTurnsReset,
@@ -32,6 +31,9 @@ const scope = {
 };
 const folder = cloudWorkspaceKey(scope);
 const chatId = cloudScopedId(scope, "cloud-chat");
+/** The control-plane mirror holds the worker's native rows. */
+const nativeRoot = "/home/user/Owner/repo";
+const nativeHistory = async () => ({ chats: [{ id: "cloud-chat", folder: nativeRoot }], chatDeletions: [] });
 const clients: WorkspaceRuntimeClient[] = [];
 function runtime() {
   const request = vi.fn(
@@ -152,10 +154,8 @@ it("confirmed cloud history remains readable while the Local engine is disconnec
   const client = new WorkspaceRuntimeClient({
     open: vi.fn(),
     workspaces: () => [],
-    readHistory: async () => ({
-      chats: [{ id: chatId, folder }],
-      chatDeletions: [],
-    }),
+    readHistory: nativeHistory,
+    historyRoot: () => nativeRoot,
   });
   clients.push(client);
   await client.warmHistoryWorkspace(scope);
@@ -167,29 +167,6 @@ it("confirmed cloud history remains readable while the Local engine is disconnec
       params: {},
     } as never),
   ).resolves.toMatchObject({ result: { chats: [{ id: chatId, folder }] } });
-});
-
-it("Review loads all read resources and still requires an exact write grant", async () => {
-  const { client, request } = runtime();
-  setActiveBridge(client);
-  const provider = resolveReviewProvider("github.com")!;
-  await prefetchReviewLiveData(provider, folder, 13, { force: true });
-  for (const op of ["gh.prGet", "gh.prChecks", "gh.prCommits", "gh.prReviews"])
-    expect(request.mock.calls.some(([message]) => message.op === op)).toBe(
-      true,
-    );
-  expect(
-    request.mock.calls.some(([message]) => message.op === "gh.repoAccess"),
-  ).toBe(false);
-  await expect(
-    provider.addComment(
-      { workspaceId: folder, hostOrigin: "github.com", reviewRef: "13" },
-      "comment",
-    ),
-  ).rejects.toThrow(/write authorization/);
-  expect(
-    request.mock.calls.some(([message]) => message.op === "gh.prComment"),
-  ).toBe(false);
 });
 
 it("Review retains real read-auth failures and Local still probes its own auth", async () => {
@@ -218,87 +195,6 @@ it("Review retains real read-auth failures and Local still probes its own auth",
     expect.anything(),
   );
   expect(peekReviewLiveData(provider, "/repo/local", 14).authed).toBe(false);
-});
-
-it("Local and two cloud workspaces can undo identical native reset IDs independently", async () => {
-  const other = {
-    ...scope,
-    workspaceId: "33333333-3333-4333-8333-333333333333",
-  };
-  const calls: Array<[string, Record<string, unknown>]> = [];
-  const open = vi.fn(
-    async (target: CloudWorkspaceTarget) =>
-      ({
-        scope: { ...scope, ...target },
-        release: vi.fn(),
-        runtimeId: target.workspaceId,
-        client: {
-          status: "connected",
-          on: () => () => {},
-          onStatusChange: () => () => {},
-          request: async (message: Record<string, unknown>) => {
-            calls.push([target.workspaceId, message]);
-            return {
-              type: "WORKSPACE_RESPONSE",
-              op: message.op,
-              result:
-                message.op === "chats.list"
-                  ? { chats: [], chatDeletions: [] }
-                  : { resetId: "same-native-reset", restored: [] },
-            };
-          },
-        },
-      }) as unknown as CloudPeer,
-  );
-  let allowed = true;
-  const options = { open, workspaces: () => [], canAccess: () => allowed };
-  const client = new WorkspaceRuntimeClient(options);
-  clients.push(client);
-  const local = vi
-    .spyOn(RuntimeClient.prototype, "request")
-    .mockResolvedValue({
-      type: "WORKSPACE_RESPONSE",
-      result: { resetId: "same-native-reset", restored: [] },
-    } as never);
-  const localReset = await bridgeTurnsReset(client, {
-    chatId: "local-chat",
-    turnId: "turn",
-  });
-  const aReset = await bridgeTurnsReset(client, { chatId, turnId: "turn" });
-  const bReset = await bridgeTurnsReset(client, {
-    chatId: cloudScopedId(other, "cloud-chat"),
-    turnId: "turn",
-  });
-  expect(localReset.resetId).toBe("same-native-reset");
-  expect(aReset.resetId).not.toBe(bReset.resetId);
-  await bridgeTurnsUndoReset(client, { resetId: localReset.resetId });
-  client.retireCloudRuntime(scope.workspaceId);
-  await bridgeTurnsUndoReset(client, { resetId: aReset.resetId });
-  // A serialized handle is sufficient after reload; no focus/map is authority.
-  const reloaded = new WorkspaceRuntimeClient(options);
-  clients.push(reloaded);
-  await bridgeTurnsUndoReset(reloaded, {
-    resetId: JSON.parse(JSON.stringify(bReset.resetId)),
-  });
-  expect(
-    calls.filter(([, message]) => message.op === "turns.undoReset"),
-  ).toEqual([
-    [
-      scope.workspaceId,
-      expect.objectContaining({ params: { resetId: "same-native-reset" } }),
-    ],
-    [
-      other.workspaceId,
-      expect.objectContaining({ params: { resetId: "same-native-reset" } }),
-    ],
-  ]);
-  expect(local).toHaveBeenCalledTimes(2);
-  client.clearCloudConnections();
-  allowed = false;
-  await expect(
-    bridgeTurnsUndoReset(client, { resetId: aReset.resetId }),
-  ).rejects.toThrow(/access/);
-  expect(local).toHaveBeenCalledTimes(2);
 });
 
 it("turn get/list, pagination, Changes ranges and footer expanded diff round-trip only typed identities", async () => {
@@ -429,10 +325,8 @@ it("publishes confirmed cloud lists without waiting for a stalled Local read", a
   const client = new WorkspaceRuntimeClient({
     open: vi.fn(),
     workspaces: () => [{ id: folder, repoSlug: "cloud-fixture" }],
-    readHistory: async () => ({
-      chats: [{ id: chatId, folder }],
-      chatDeletions: [],
-    }),
+    readHistory: nativeHistory,
+    historyRoot: () => nativeRoot,
   });
   clients.push(client);
   await client.warmHistoryWorkspace(scope);

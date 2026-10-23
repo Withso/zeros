@@ -20,20 +20,18 @@ import React, {
   useCallback,
   useSyncExternalStore,
 } from "react";
-import { prepareCloudGithubWrite } from "../cloud-github";
 import {
   RuntimeClient,
   invalidateEnginePort,
   isRejectionRetryableAfterEngineRestart,
   type ConnectionStatus,
 } from "./ws-client";
-import { getActiveBridge, setActiveBridge, wireCloudRuntimeRetirement } from "./active-bridge";
+import { getActiveBridge, setActiveBridge } from "./active-bridge";
 import { wireGithubCredentialWriteback } from "./github-token-sync";
 import { nativeListen, useNativeRuntime } from "../runtime";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
-import { openCloudRuntime } from "./open-cloud-runtime";
-import { readCloudWorkspaceHistory } from "../cloud-history";
-import { onCloudHistoryRestoreHead } from "../cloud-transcript-cache";
+import { openCloudV2Runtime } from "./open-cloud-v2-runtime";
+import { cloudV2CheckoutPath, readCloudV2History } from "../cloud-v2";
 import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, cloudWorkspaceStopVersion, getCloudWorkspaceRows, isCloudWorkspaceLifecyclePending } from "../../state/cloud-workspace-catalog";
 import { wireWorkbenchConnectionRejection } from "../../state/workbench-availability";
 
@@ -57,10 +55,15 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const [client] = useState(
     () =>
       new WorkspaceRuntimeClient({
-        open: openCloudRuntime,
+        open: openCloudV2Runtime,
         workspaces: () => getCloudWorkspaceRows() as unknown as Record<string, unknown>[],
         workspacesConfirmed: cloudWorkspaceCatalogConfirmed,
         canAccess: target => canReadCloudWorkspace(cloudWorkspaceDocument(target)),
+        canReuseForWork: target => {
+          const doc = cloudWorkspaceDocument(target);
+          return canReadCloudWorkspace(doc) && doc?.capabilities.canWrite === true &&
+            (doc.status === "ready" || doc.status === "busy");
+        },
         identity: target => `${cloudCatalogGeneration()}:${cloudWorkspaceDocument(target)?.generation.number ?? "unknown"}`,
         wakeOwner: target => {
           const doc = cloudWorkspaceDocument(target);
@@ -70,10 +73,13 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
             : undefined;
         },
         manage: cloudWorkspaceOperation,
-        readHistory: readCloudWorkspaceHistory,
-        checkpointHistory: true,
-        onHistoryRestoreHead: onCloudHistoryRestoreHead,
-        prepareGithubWrite: prepareCloudGithubWrite,
+        // History comes from the worker when connected and from the control
+        // plane's mirror otherwise; neither read wakes the VM.
+        readHistory: readCloudV2History,
+        historyRoot: target => {
+          const doc = cloudWorkspaceDocument(target);
+          return doc ? cloudV2CheckoutPath(doc) : undefined;
+        },
       }),
   );
   const nativeRuntime = useNativeRuntime();
@@ -114,12 +120,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     // forceReconnect for in-place project swaps; we reuse the same
     // path for watchdog respawns.
     let offRestart: (() => void) | undefined;
-    let offCloudRetired: (() => void) | undefined;
     let restartListenerClosed = false;
-    void wireCloudRuntimeRetirement(client).then((off) => {
-      if (restartListenerClosed) off();
-      else offCloudRetired = off;
-    }).catch(() => undefined);
     void nativeListen("engine-restarted", () => {
       console.log("[Zeros] engine restarted by watchdog — reconnecting");
       // A respawn replaces the engine PROCESS, so a rejection latched against
@@ -151,7 +152,6 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     return () => {
       restartListenerClosed = true;
       if (offRestart) offRestart();
-      if (offCloudRetired) offCloudRetired();
       offCredentialWriteback();
       offConnectionNotice();
       // React StrictMode replays passive setup immediately after cleanup. The

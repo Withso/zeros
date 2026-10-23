@@ -30,18 +30,8 @@ import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge
 import type { TurnInfo } from "../platform/turns";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
-import type { bridgeDesignListDirectories, CloudDesignFolderListing } from "../platform/bridge/design-bridge";
+import type { bridgeDesignListDirectories } from "../platform/bridge/design-bridge";
 import type { DesignReviewEvidence, DesignReviewSnapshot, DesignProposalReview, DesignReviewFileDetail } from "@zeros/protocol/design-review";
-import type { CloudServiceAccessRow, CloudServiceContext } from "../platform/cloud-workspace-access";
-
-export const cloudServiceContextCache = new KeyedAsyncCache<CloudServiceContext>({
-  maxEntries: 1, reconcile: (previous, next) => JSON.stringify(previous) === JSON.stringify(next) ? previous! : next,
-});
-/** Account epoch, main authority, device/key version, organization, workspace.
- * Safe metadata only; service grants and command/config paths stay in main. */
-export const cloudServiceAccessCache = new KeyedAsyncCache<CloudServiceAccessRow[]>({
-  maxEntries: 32, reconcile: (previous, next) => JSON.stringify(previous) === JSON.stringify(next) ? previous! : next,
-});
 
 
 export const designReviewCache = new KeyedAsyncCache<DesignReviewSnapshot>({
@@ -159,7 +149,6 @@ export const designDirectoryListingCache = new KeyedAsyncCache<
   Awaited<ReturnType<typeof bridgeDesignListDirectories>>
 >(32);
 /** JSON([cloud workspace key, relative directory]); includes empty VM folders. */
-export const cloudDesignFolderCache = new KeyedAsyncCache<CloudDesignFolderListing>(32);
 /** Design folders change on Git timescales (a commit, a pull). The exact
  *  signals — a confirmed mode switch, external ref changes — patch or
  *  invalidate the key; this window only catches out-of-band edits. */
@@ -417,7 +406,6 @@ export function invalidateDesignDirectoryTargetReadCache(): void {
   designCheckoutStatusCache.invalidateAll();
   designDirectoryTargetCache.invalidateAll();
   designDirectoryListingCache.invalidateAll();
-  cloudDesignFolderCache.invalidateAll();
 }
 
 /** A NON-initial bridge (re)connection — engine restart, crash recovery, a
@@ -450,7 +438,6 @@ export function invalidateAllEngineReadCaches(): void {
   designDirectoryTargetCache.invalidateAll();
   designDirectoryListingCache.invalidateAll();
 
-  cloudDesignFolderCache.invalidateAll();
 
   // Turn rows are engine state too: a reset (or a turn settling) on ANOTHER
   // device lands while this renderer is deaf to DB_CHANGED.

@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as credentials from "../provider-credentials";
 import * as providerEnv from "../../settings/provider-env";
 import { AgentGateway } from "../gateway";
-import * as cloudExecutions from "../cloud-provider-execution";
 import { normalizeProviderError, providerErrorFailure } from "../adapters/shared/provider-error";
 import { AgentFailureError, type AgentAdapter } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
@@ -288,55 +287,6 @@ describe("Local provider connection changes", () => {
       expect(c.internals.executionToAgent.get("live")).toBe("claude");
     } finally {
       await c.gateway.dispose();
-    }
-  });
-
-  it("never re-derives a cloud execution's admitted credential from Local settings", async () => {
-    const boundary = {} as never;
-    const validate = vi.fn(async () => {});
-    const execution = {
-      mode: "actor-grant-v1",
-      provider: "claude",
-      lease: { validate },
-    } as unknown as cloudExecutions.CloudProviderExecution;
-    const original = cloudExecutions.cloudProviderExecution;
-    vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(
-      (value) => (value === boundary ? execution : original(value)),
-    );
-    const gateway = new AgentGateway({
-      projectRoot: "/tmp/zeros-account-switch",
-      executionBoundary: { ...testExecutionBoundary(), backend: "cloud-worker" },
-      events: {
-        onSessionUpdate: () => {},
-        onPermissionRequest: () => {},
-        onQuestionRequest: () => {},
-        onAgentStderr: () => {},
-        onAgentExit: () => {},
-      },
-    });
-    const prompt = vi.fn(async () => ({ response: { stopReason: "end_turn" } }));
-    const updateCredentials = vi.fn(async () => {});
-    const internals = gateway as unknown as SwitchInternals & {
-      executionBoundaries: Map<string, unknown>;
-    };
-    internals.adapters.set("claude", {
-      agentId: "claude",
-      prompt,
-      dispose: async () => {},
-      capabilityPorts: { runtimeConfiguration: { updateCredentials } },
-    } as unknown as AgentAdapter);
-    internals.executionToAgent.set("cloud", "claude");
-    internals.executionBoundaries.set("cloud", boundary);
-    // The cloud admission's authority id never equals a Local fingerprint.
-    internals.executionAuthFingerprint.set("cloud", "a".repeat(64));
-    try {
-      await gateway.prompt("claude", "cloud", [{ type: "text", text: "hi" }]);
-      expect(validate).toHaveBeenCalledOnce();
-      expect(updateCredentials).not.toHaveBeenCalled();
-      expect(prompt).toHaveBeenCalledOnce();
-    } finally {
-      internals.executionBoundaries.clear();
-      await gateway.dispose();
     }
   });
 

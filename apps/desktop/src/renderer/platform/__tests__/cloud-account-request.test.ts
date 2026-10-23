@@ -10,203 +10,62 @@ vi.mock("../../features/team/control-plane", () => ({
     constructor(public status: number, public code: string, message: string) { super(message); }
   },
 }));
-import { CloudWorkspaceDocumentSchema, changeCloudWorkspaceLifecycle, cloudAccountRequest, cloudAgentGrant, cloudAgentDelegations, createCloudWorkspaceDocument, getCloudWorkspaceDocument,
-  getCloudRuntimeUpgradeAvailability } from "../cloud-workspaces";
+import { CloudWorkspaceDocumentSchema, changeCloudWorkspaceLifecycle, cloudAccountRequest, createCloudWorkspaceDocument,
+  getCloudWorkspaceDocument } from "../cloud-workspaces";
 
+function v2Workspace(id: string, state: string) {
+  return {
+    id, organizationId: id, creatorUserId: id, name: "Workspace", repository: "sample/repo", branch: "zeros/workspace",
+    baseBranch: "main", state, errorCode: null, createdAt: "2026-10-04T00:00:00.000Z", updatedAt: "2026-10-04T00:00:00.000Z",
+    version: 2, capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex"] },
+  };
+}
 const session = { access_token: "synthetic-session", user: { sub: "user_provider_subject_sentinel", accountId: "55555555-5555-4555-8555-555555555555" } };
 beforeEach(() => { state.generation = 0; state.session.mockReset(); state.source.mockReset(); });
 afterEach(() => vi.unstubAllGlobals());
 
 describe("cloud request account boundaries", () => {
-  it("rejects local workspace targets before authentication or HTTP for runtime discovery", async () => {
-    const fetcher = vi.fn();
-    vi.stubGlobal("fetch", fetcher);
-    const target = { organizationId: "personal", workspaceId: "/local/workspace" };
-    await expect(getCloudRuntimeUpgradeAvailability(target)).rejects.toThrow();
-    expect(state.session).not.toHaveBeenCalled();
-    expect(fetcher).not.toHaveBeenCalled();
-  });
-  it("reads staff runtime availability for the exact workspace and rejects a changed identity", async () => {
-    state.session.mockResolvedValue(session);
-    const organizationId = "11111111-1111-4111-8111-111111111111", workspaceId = "22222222-2222-4222-8222-222222222222";
-    const result = { organizationId, workspaceId, generation: 1, currentRuntimeId: `r1-${"a".repeat(64)}`,
-      latestRuntimeId: `r1-${"b".repeat(64)}`, updateAvailable: true, unavailableReason: null, transition: null };
-    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(result), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ...result, workspaceId: organizationId }), { status: 200 }));
-    vi.stubGlobal("fetch", fetcher);
-    expect(await getCloudRuntimeUpgradeAvailability({ organizationId, workspaceId })).toEqual(result);
-    expect(fetcher.mock.calls[0][0]).toBe(`https://api.example.test/v1/organizations/${organizationId}/cloud-workspaces/${workspaceId}/runtime-upgrade`);
-    expect(fetcher.mock.calls[0][1]).toMatchObject({ method: "GET", cache: "no-store" });
-    await expect(getCloudRuntimeUpgradeAvailability({ organizationId, workspaceId })).rejects.toThrow("workspace identity");
-  });
-  it.each([undefined, "interaction"] as const)("uses the existing wake endpoint with optional reason %s, preserving other lifecycle bodies", async reason => {
+  it("starts, stops and deletes through the v2 lifecycle endpoints", async () => {
     state.session.mockResolvedValue(session);
     const id = "11111111-1111-4111-8111-111111111111";
-    const workspace = {
-      id, organizationId: id, teamId: id, name: "Wake fixture", createdBy: id, placement: "cloud", status: "ready",
-      capabilities: { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null },
-      repository: { forge: "github.com", owner: "sample", name: "repo", revision: "main" },
-      generation: { number: 1, architecture: "linux/amd64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
-        observedState: "ready", lastObservedAt: null },
-      version: 1, error: null, createdAt: "2026-10-04T00:00:00.000Z", updatedAt: "2026-10-04T00:00:00.000Z", deletedAt: null,
-    };
-    const fetch = vi.fn(async () => Response.json({ workspace })); vi.stubGlobal("fetch", fetch);
+    const fetch = vi.fn(async () => Response.json({ workspace: v2Workspace(id, "starting") })); vi.stubGlobal("fetch", fetch);
     const target = { organizationId: id, workspaceId: id };
-    await changeCloudWorkspaceLifecycle(target, "wake", "fixture-intent", reason);
-    expect(fetch).toHaveBeenCalledWith(`https://api.example.test/v1/organizations/${id}/cloud-workspaces/${id}/wake`,
-      expect.objectContaining({ method: "POST", body: JSON.stringify(reason ? { reason } : {}) }));
-    fetch.mockClear();
-    await changeCloudWorkspaceLifecycle(target, "stop", "fixture-stop", reason);
-    expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/\/stop$/), expect.objectContaining({ body: "{}" }));
+    expect((await changeCloudWorkspaceLifecycle(target, "wake", "fixture-intent", "interaction")).status).toBe("waking");
+    expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}/start`,
+      expect.objectContaining({ method: "POST", body: "{}" }));
+    // Archive is its own v2 operation: a plain stop would never become archived.
+    await changeCloudWorkspaceLifecycle(target, "archive", "fixture-archive");
+    expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}/archive`, expect.objectContaining({ method: "POST" }));
+    await changeCloudWorkspaceLifecycle(target, "delete", "fixture-delete");
+    expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}`, expect.objectContaining({ method: "DELETE" }));
+  });
+  it("shows a stopped workspace with an archive mark as archived, and only then", async () => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };
+    const archivedAt = "2026-10-05T00:00:00.000Z";
+    for (const [state, mark, status] of [["stopped", archivedAt, "archived"], ["failed", archivedAt, "archived"], ["stopping", archivedAt, "stopping"],
+      ["stopped", null, "stopped"], ["running", null, "ready"]] as const) {
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...v2Workspace(id, state), archivedAt: mark } })));
+      expect((await getCloudWorkspaceDocument(target)).status).toBe(status);
+    }
   });
   it("preserves optional server-derived edit access without inferring it from legacy write access", () => {
     const capabilities = { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null };
     expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse(capabilities).canEdit).toBeUndefined();
     for (const canEdit of [true, false]) expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse({ ...capabilities, canEdit }).canEdit).toBe(canEdit);
   });
-  it("retains server-derived admin metadata in a fetched workspace DTO", async () => {
+  it("maps a v2 workspace into the shared document and rejects a changed identity", async () => {
     state.session.mockResolvedValue(session);
     const id = "11111111-1111-4111-8111-111111111111";
-    const workspace = {
-      id, organizationId: id, teamId: id, name: "Configure Cloud Computer", createdBy: id,
-      ownerUserId: id, adminWorkspace: { creatorUserId: id }, placement: "cloud", status: "provisioning",
-      capabilities: { canWrite: true, canManage: true, canStart: false, startUnavailableReason: "workspace_not_stopped" },
-      repository: { forge: "github.com", owner: "sample", name: "repo", revision: "main" },
-      generation: { number: 1, architecture: "linux/amd64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
-        observedState: "unknown", lastObservedAt: null },
-      version: 1, error: null, createdAt: "2026-10-04T00:00:00.000Z", updatedAt: "2026-10-04T00:00:00.000Z", deletedAt: null,
-    };
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace })));
-    expect((await getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).adminWorkspace).toEqual({ creatorUserId: id });
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...workspace, adminWorkspace: { creatorUserId: "invalid" } } })));
-    await expect(getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).rejects.toThrow();
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: v2Workspace(id, "running") })));
+    const document = await getCloudWorkspaceDocument({ organizationId: id, workspaceId: id });
+    expect(CloudWorkspaceDocumentSchema.parse(document)).toMatchObject({
+      status: "ready", placement: "cloud", repository: { owner: "sample", name: "repo", revision: "main" },
+      capabilities: { canWrite: true, canEdit: true, canStart: false },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...v2Workspace(id, "running"), id: "22222222-2222-4222-8222-222222222222" } })));
+    await expect(getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).rejects.toThrow("identity");
   });
-  it("chooses the proven account grant even when a newer unqualified API-key grant matches the same model", async () => {
-    state.session.mockResolvedValue(session);
-    const qualified = "44444444-4444-4444-8444-444444444444";
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [
-      { id: "22222222-2222-4222-8222-222222222222", ownerUserId: session.user.accountId, kind: "codex-api-key", models: ["gpt-5.6-luna"], expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: false },
-      { id: qualified, ownerUserId: session.user.accountId, kind: "codex-chatgpt", models: ["gpt-5.6-luna"], expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: true },
-    ] })));
-    expect(await cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-luna")).toBe(qualified);
-  });
-  it("explains an unqualified workspace image before queueing an agent command", async () => {
-    state.session.mockResolvedValue(session);
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [{
-      id: "22222222-2222-4222-8222-222222222222", ownerUserId: session.user.accountId, kind: "claude-setup-token",
-      models: ["claude-haiku-4-5"], expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      runtimeQualified: false,
-    }] })));
-    await expect(cloudAgentGrant({
-      organizationId: "11111111-1111-4111-8111-111111111111",
-      workspaceId: "33333333-3333-4333-8333-333333333333",
-    }, "claude", "claude-haiku-4-5")).rejects.toThrow(/workspace.*runtime.*update/i);
-  });
-
-  it("keeps a qualified cloud grant usable", async () => {
-    state.session.mockResolvedValue(session);
-    const id = "22222222-2222-4222-8222-222222222222";
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [{
-      id, ownerUserId: session.user.accountId, kind: "codex-chatgpt", models: ["gpt-5.6-luna"],
-      expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: true,
-    }] })));
-    await expect(cloudAgentGrant({
-      organizationId: "11111111-1111-4111-8111-111111111111",
-      workspaceId: "33333333-3333-4333-8333-333333333333",
-    }, "codex", "gpt-5.6-luna")).resolves.toBe(id);
-  });
-
-  it("retains the runtime upgrade flag and explains it before a command can be queued", async () => {
-    state.session.mockResolvedValue(session);
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [{
-      id: "22222222-2222-4222-8222-222222222222", ownerUserId: session.user.accountId, kind: "codex-chatgpt", models: ["gpt-5.6-sol"],
-      expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: false, runtimeUpgradeRequired: true,
-    }] })));
-    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-sol"))
-      .rejects.toMatchObject({ code: "cloud_runtime_upgrade_required" });
-  });
-
-  it.each([false, true])("separates missing credentials from model consent (connected=%s)", async connected => {
-    state.session.mockResolvedValue(session);
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: connected ? [{
-      id: "22222222-2222-4222-8222-222222222222", ownerUserId: session.user.accountId, kind: "codex-chatgpt", models: ["gpt-5.5"],
-      expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: true,
-    }] : [] })));
-    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-6.1-sol"))
-      .rejects.toMatchObject({ code: connected ? "cloud_agent_model_not_authorized" : "cloud_agent_credential_required" });
-  });
-
-  it("retains ownership and defaults to the sender instead of a newer delegated connection", async () => {
-    state.session.mockResolvedValue(session);
-    const own = "22222222-2222-4222-8222-222222222222", delegated = "44444444-4444-4444-8444-444444444444";
-    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" };
-    const rows = [
-      { id: delegated, ownerUserId: "66666666-6666-4666-8666-666666666666", kind: "codex-chatgpt", models: ["gpt-5.6-sol"], expiresAt: new Date(Date.now()+60_000).toISOString(), runtimeQualified: true },
-      { id: own, ownerUserId: session.user.accountId, kind: "codex-chatgpt", models: ["gpt-5.6-sol"], expiresAt: new Date(Date.now()+60_000).toISOString(), runtimeQualified: true },
-    ];
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: rows })));
-    expect((await cloudAgentDelegations(target))[0]).toMatchObject({ ownerUserId: rows[0].ownerUserId });
-    expect(await cloudAgentGrant(target, "codex", "gpt-5.6-sol")).toBe(own);
-    expect(await cloudAgentGrant(target, "codex", "gpt-5.6-sol", { delegationId: delegated })).toBe(delegated);
-  });
-
-  it.each([false, true])("never silently falls back to another member's qualified connection (own=%s)", async own => {
-    state.session.mockResolvedValue(session);
-    const rows = [{ id: "44444444-4444-4444-8444-444444444444", ownerUserId: "66666666-6666-4666-8666-666666666666",
-      kind: "codex-chatgpt", models: ["gpt-5.6-sol"], expiresAt: new Date(Date.now()+60_000).toISOString(), runtimeQualified: true }];
-    if (own) rows.push({ ...rows[0]!, id: "22222222-2222-4222-8222-222222222222", ownerUserId: session.user.accountId, runtimeQualified: false });
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: rows })));
-    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-sol"))
-      .rejects.toThrow(own ? /runtime.*update/i : /cloud_agent_credential_required/);
-  });
-
-  it("rejects an unavailable explicit delegation instead of substituting an own grant", async () => {
-    state.session.mockResolvedValue(session);
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [{
-      id: "22222222-2222-4222-8222-222222222222", ownerUserId: session.user.accountId, kind: "codex-chatgpt", models: ["gpt-5.6-sol"],
-      expiresAt: new Date(Date.now()+60_000).toISOString(), runtimeQualified: true,
-    }] })));
-    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-sol", { delegationId: "44444444-4444-4444-8444-444444444444" }))
-      .rejects.toMatchObject({ code: "cloud_agent_credential_required" });
-  });
-
-  it("resolves legacy provider subjects through an exact account request instead of treating sub as a CP UUID", async () => {
-    state.session.mockResolvedValue({ ...session, user: { sub: "66666666-6666-4666-8666-666666666666" } });
-    const own="22222222-2222-4222-8222-222222222222",delegated="44444444-4444-4444-8444-444444444444";
-    const fetcher=vi.fn(async (url: string | URL | Request) => String(url).endsWith("/v1/me")
-      ? Response.json({user:{id:session.user.accountId}}) : Response.json({delegations:[
-        {id:delegated,ownerUserId:"66666666-6666-4666-8666-666666666666",kind:"codex-chatgpt",models:["gpt-5.6-sol"],expiresAt:new Date(Date.now()+60_000).toISOString(),runtimeQualified:true},
-        {id:own,ownerUserId:session.user.accountId,kind:"codex-chatgpt",models:["gpt-5.6-sol"],expiresAt:new Date(Date.now()+60_000).toISOString(),runtimeQualified:true},
-      ]}));
-    vi.stubGlobal("fetch",fetcher);
-    expect(await cloudAgentGrant({organizationId:"11111111-1111-4111-8111-111111111111",workspaceId:"33333333-3333-4333-8333-333333333333"},"codex","gpt-5.6-sol")).toBe(own);
-    expect(fetcher.mock.calls[0]?.[0]).toBe("https://api.example.test/v1/me");
-  });
-
-  it("rejects a legacy account lookup retired before it can prepare any grants", async () => {
-    state.session.mockResolvedValue({ ...session, user: { sub: "user_legacy_subject" } });
-    const fetcher=vi.fn(async () => {state.generation++;return Response.json({user:{id:session.user.accountId}});});
-    vi.stubGlobal("fetch",fetcher);
-    await expect(cloudAgentGrant({organizationId:"11111111-1111-4111-8111-111111111111",workspaceId:"33333333-3333-4333-8333-333333333333"},"codex","gpt-5.6-sol")).rejects.toThrow(/account changed/i);
-    expect(fetcher).toHaveBeenCalledOnce();
-  });
-
-  it.each(["account", "organization"])("rejects a grant response after the initiating %s changes", async () => {
-    state.session.mockResolvedValue(session);
-    vi.stubGlobal("fetch", vi.fn(async () => { state.generation++; return Response.json({ delegations: [{
-      id: "22222222-2222-4222-8222-222222222222", ownerUserId: session.user.accountId, kind: "codex-chatgpt", models: ["gpt-5.6-sol"],
-      expiresAt: new Date(Date.now()+60_000).toISOString(), runtimeQualified: true,
-    }] }); }));
-    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-sol"))
-      .rejects.toThrow(/account changed/i);
-  });
-
-  it.each(["personal", "11111111-1111-4111-8111-111111111111"])("keeps local placement %s outside cloud grant preparation", async organizationId => {
-    const fetcher=vi.fn();vi.stubGlobal("fetch",fetcher);
-    await expect(cloudAgentGrant({ organizationId, workspaceId: "/local/repository" }, "codex", "gpt-5.6-sol")).rejects.toThrow();
-    expect(state.session).not.toHaveBeenCalled();expect(fetcher).not.toHaveBeenCalled();
-  });
-
   it("captures the account before its first asynchronous boundary", async () => {
     const fetch = vi.fn(async () => Response.json({ ok: true }));
     vi.stubGlobal("fetch", fetch);
@@ -244,8 +103,7 @@ describe("cloud request account boundaries", () => {
     await expect(createCloudWorkspaceDocument({
       organizationId: "11111111-1111-4111-8111-111111111111",
       idempotencyKey: "workspace-intent",
-      repository: { forge: "github.com", owner: "example", name: "repository", revision: "main",
-        githubInstallationId: "22222222-2222-4222-8222-222222222222" },
+      repository: { owner: "example", name: "repository" },
     })).rejects.toMatchObject({ code: "github_cloud_source_authorization_required" });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(state.source).not.toHaveBeenCalled();

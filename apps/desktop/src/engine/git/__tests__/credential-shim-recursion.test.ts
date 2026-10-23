@@ -126,12 +126,8 @@ describe("credential shim executable resolution", () => {
     })).rejects.toMatchObject({ code: 126, stderr: expect.stringContaining("recursive executable") });
   });
 
-  const modes = process.platform === "linux" ? ["local", "cloud"] : ["local"];
-  it.each(modes)("preserves a normal %s invocation and its credential helper", async (mode) => {
-    const uid = process.getuid?.() || 10_001;
-    const gid = process.getgid?.() || 10_001;
-    const prepared = (await innerBroker.prepareGitCredentialShellEnvironment("inner", `${binaryDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
-      mode === "cloud" ? { uid, gid } : undefined))!.env;
+  it("preserves a normal local invocation and its credential helper", async () => {
+    const prepared = (await innerBroker.prepareGitCredentialShellEnvironment("inner", `${binaryDirectory}${path.delimiter}${process.env.PATH ?? ""}`))!.env;
     const shim = path.join(prepared.PATH!.split(path.delimiter)[0]!, "git");
     const env = invocationEnvironment(prepared);
     const version = await runFile(shim, ["--version"], { env, timeoutMs: 2_000 });
@@ -141,16 +137,13 @@ describe("credential shim executable resolution", () => {
     expect(version.stdout).toContain("git version");
     expect(credential.stdout).toBe("protocol=https\nhost=github.com\nusername=fixture\npassword=fixture-only\n");
     expect(await readFile(path.join(directory, "git-spawns"), "utf8")).toBe("invoked\ninvoked\n");
-    expect(prepared.ZEROS_GIT_AUTH_BROKER_PID).toBe(mode === "local" ? String(process.pid) : undefined);
+    expect(prepared.ZEROS_GIT_AUTH_BROKER_PID).toBe(String(process.pid));
   });
 
-  it.each(modes.flatMap((mode) => [22, 28].map((status) => ({ mode, status }))))(
-    "keeps a live $mode broker fail-closed after curl exit $status",
-    async ({ mode, status }) => {
-      const uid = process.getuid?.() || 10_001;
-      const gid = process.getgid?.() || 10_001;
-      const prepared = (await innerBroker.prepareGitCredentialShellEnvironment("inner", `${binaryDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
-        mode === "cloud" ? { uid, gid } : undefined))!.env;
+  it.each([22, 28])(
+    "keeps a live local broker fail-closed after curl exit %s",
+    async (status) => {
+      const prepared = (await innerBroker.prepareGitCredentialShellEnvironment("inner", `${binaryDirectory}${path.delimiter}${process.env.PATH ?? ""}`))!.env;
       await writeFile(path.join(binaryDirectory, "curl"), `#!/bin/sh\nexit ${status}\n`, { mode: 0o700 });
       const helper = path.join(directory, "ambient-helper");
       const sentinel = path.join(directory, "ambient-invoked");

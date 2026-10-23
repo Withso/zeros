@@ -161,6 +161,7 @@ it.each([
       open: vi.fn(),
       workspaces: () => [{ id: "cloud", path: "cloud", repoSlug: "cloud" }],
       readHistory: async () => ({ chats: [], chatDeletions: [], revision: 1 }),
+      historyRoot: () => "/home/user/Owner/repo",
     });
     const read = () =>
       bridge.request({

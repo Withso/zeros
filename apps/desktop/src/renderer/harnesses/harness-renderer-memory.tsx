@@ -39,7 +39,6 @@ import {
   turnRowCache,
   attachmentTextPreviewsCache,
 } from "../state/read-caches";
-import { CloudTranscriptCache } from "../state/cloud-transcript-cache";
 import { LocalTranscriptCache } from "../state/local-transcript-cache";
 
 const noop = () => {};
@@ -54,16 +53,6 @@ const folder =
   placement === "cloud"
     ? cloudWorkspaceKey(target)
     : `/fixture/${placement}/repo`;
-const cloudHistory = new CloudTranscriptCache({
-  isAllowed: () => true,
-  read: async () => ({
-    cacheEpoch: "33333333-3333-4333-8333-333333333333",
-    window: null,
-  }),
-  write: async () => {},
-  prune: async () => {},
-});
-cloudHistory.setAccount("fixture-account");
 const localHistory = new LocalTranscriptCache();
 const listeners = new Set<object>();
 const calls: Record<string, number> = {};
@@ -265,7 +254,6 @@ let root: Root | null = null;
 function mount() {
   if (root) return;
   prepareSessions();
-  cloudHistory.setAccount("fixture-account");
   root = createRoot(document.getElementById("root")!);
   flushSync(() => root!.render(<Harness />));
 }
@@ -328,22 +316,8 @@ Object.assign(window, {
       for (let i = 0; i < 96; i++) {
         const chatId = `history-${round}-${i}`,
           content = messages(chatId);
-        if (placement === "cloud")
-          await cloudHistory.confirm(
-            { accountId: "fixture-account", ...target, chatId },
-            {
-              recordEpoch: null,
-              revision: 1,
-              cursor: content.at(-1)!.id,
-              messages: content.map((message) => ({
-                msgId: message.id,
-                kind: message.kind,
-                createdAt: message.createdAt,
-                payload: JSON.stringify(message),
-              })),
-            },
-          );
-        else
+        // Cloud chats keep no renderer-side history cache.
+        if (placement !== "cloud")
           localHistory.remember(chatId, folder, {
             messages: content,
             leadingPrompt: null,
@@ -367,33 +341,17 @@ Object.assign(window, {
       flushSync(() => root?.unmount());
       root = null;
       useSessionsStore.getState().clearAll();
-      cloudHistory.setAccount(null);
       localHistory.releaseMemory();
     },
     stats() {
       const slots = Object.values(useSessionsStore.getState().sessions);
-      // Fixture-only introspection of the real cache: no product diagnostics or
-      // test API is added to the renderer's authority/history boundary.
-      const history = cloudHistory as unknown as {
-        windows: Map<string, { bytes: number }>;
-        tokens: Map<string, unknown>;
-      };
       return {
         placement,
         rows,
         ownerIsPersonal: getActiveOrganizationSnapshot()?.isPersonal,
-        historyEntries:
-          placement === "cloud"
-            ? history.windows.size
-            : localHistory.memoryStats().entries,
-        historyBytes:
-          placement === "cloud"
-            ? [...history.windows.values()].reduce(
-                (n, window) => n + window.bytes,
-                0,
-              )
-            : localHistory.memoryStats().bytes,
-        historyTokens: placement === "cloud" ? history.tokens.size : 0,
+        historyEntries: placement === "cloud" ? 0 : localHistory.memoryStats().entries,
+        historyBytes: placement === "cloud" ? 0 : localHistory.memoryStats().bytes,
+        historyTokens: 0,
         chats: slots.length,
         resident: slots.filter((s) => s.messages.length > 0).length,
         messages: slots.reduce((n, s) => n + s.messages.length, 0),

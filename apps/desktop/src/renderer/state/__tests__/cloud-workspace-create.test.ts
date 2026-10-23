@@ -28,14 +28,13 @@ import { filterRowsForOrganization } from "../../features/team/organization-capa
 import type { OrganizationSummary } from "../../features/team/control-plane";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
-const request = { organizationId, repository: { forge: "github.com" as const, owner: "example", name: "fixture",
-  revision: "refs/heads/main", githubInstallationId: "33333333-3333-4333-8333-333333333333" }, idempotencyKey: "create-request-identity" };
+const request = { organizationId, repository: { owner: "example", name: "fixture" }, idempotencyKey: "create-request-identity" };
 function doc(): CloudWorkspaceDocument {
   return { id: "22222222-2222-4222-8222-222222222222", organizationId, teamId: organizationId,
     name: "Cloud fixture", placement: "cloud", createdBy: organizationId, status: "provisioning", version: 1,
     error: null, deletedAt: null, createdAt: "2026-09-26T00:00:00Z", updatedAt: "2026-09-26T00:00:00Z",
     capabilities: { canWrite: true, canManage: true, canStart: false, startUnavailableReason: "workspace_not_stopped" },
-    repository: request.repository, generation: { number: 1, architecture: "x86_64",
+    repository: { forge: "github.com", ...request.repository, revision: "main" }, generation: { number: 1, architecture: "x86_64",
       resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "pending", lastObservedAt: null } };
 }
 function deferred<T>() {

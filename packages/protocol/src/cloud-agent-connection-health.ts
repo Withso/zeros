@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Mirrored by apps/control-plane/src/cloud-workspaces/agent-connection-health-contract.ts (Zod 3).
+// Mirrored by apps/control-plane/src/agent-credentials/agent-connection-health-contract.ts (Zod 3).
 /** Selected vault metadata only; neither model admission nor a refresh grant. */
 export const CloudAgentConnectionHealthSchema = z.object({
   version: z.literal(1),

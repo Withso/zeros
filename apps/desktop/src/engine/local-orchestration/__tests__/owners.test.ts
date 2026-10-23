@@ -17,9 +17,8 @@ const projects: EngineProject[] = [
   { id: "proj_plain", canonicalId: "u2", name: "notes", repoRoot: "/notes", repoSlug: "notes", originUrl: null, addedAt: 1 },
 ];
 
-function index(managed: Workspace[], options: { cloud?: boolean; failing?: boolean } = {}) {
+function index(managed: Workspace[], options: { failing?: boolean } = {}) {
   return new LocalOwnerIndex({
-    isCloudWorker: () => options.cloud === true,
     listManagedWorkspaces: () => {
       if (options.failing) throw new Error("db locked");
       return managed;
@@ -64,7 +63,6 @@ describe("Local owners", () => {
   });
 
   it("fails closed", () => {
-    expect(() => index(managed, { cloud: true })).toThrow(/local engine/);
     expect(() => index(managed, { failing: true })).toThrow(/workspace registry/);
     expect(() => requireLocalOwner(index(managed), "/worktrees/org")).toThrow(/not in a Local workspace/);
     expect(() => requireLocalOwner(index(managed), "/elsewhere")).toThrow(/not a workspace or project added/);

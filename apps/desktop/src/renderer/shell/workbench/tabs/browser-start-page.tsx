@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, type ReactNode } from "react";
 import { Ellipsis, Globe } from "lucide-react";
 
 import {
@@ -7,16 +7,7 @@ import {
   type LocalDevServerRow,
 } from "../../../features/browser/local-dev-servers";
 import { workspacePreviewAvailable } from "../../../platform/cloud-workspace-access";
-import {
-  isCloudWorkspace,
-  parseCloudWorkspaceKey,
-} from "../../../platform/bridge/cloud-workspace-key";
-import type { CloudWorkspaceDocument } from "../../../platform/cloud-workspaces";
-import {
-  cloudWorkspaceDocument,
-  subscribeCloudWorkspaces,
-} from "../../../state/cloud-workspace-catalog";
-import { useCloudWorkspaceDetectedPorts } from "../../../state/use-cloud-workspace-detected-ports";
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,14 +46,10 @@ export function BrowserStartPage({ scope, active, onOpen }: BrowserStartPageProp
             </p>
           </Stack>
           {cloud ? (
-            previewAvailable ? (
-              <CloudPortsSection scope={scope} active={active} onOpen={onOpen} />
-            ) : (
-              <Stack as="section" gap={2} aria-label="Workspace ports">
-                <SectionHeading label="Workspace" />
-                <NeutralLine>Cloud preview URLs are not configured for this build.</NeutralLine>
-              </Stack>
-            )
+            <Stack as="section" gap={2} aria-label="Workspace ports">
+              <SectionHeading label="Workspace" />
+              <NeutralLine>Previews aren't available in cloud workspaces yet.</NeutralLine>
+            </Stack>
           ) : (
             <LocalServersSection scope={scope} active={active} onOpen={onOpen} />
           )}
@@ -223,100 +210,3 @@ function LocalServersSection({ scope, active, onOpen }: BrowserStartPageProps) {
   );
 }
 
-// ── Cloud placement ────────────────────────────────────────
-
-/** Neutral copy for every VM state that has no live ports. Null = running. */
-export function cloudPortsNotice(doc: CloudWorkspaceDocument | undefined): string | null {
-  if (!doc) return "Ports appear when the workspace is ready.";
-  if (doc.deletedAt !== null) return "This workspace is unavailable.";
-  switch (doc.status) {
-    case "ready":
-    case "busy":
-      return doc.capabilities.canEdit === true
-        ? null
-        : "Editing access is required to open workspace ports.";
-    case "creating":
-    case "provisioning":
-    case "setting_up":
-      return "Ports appear after the workspace finishes setting up.";
-    case "starting":
-    case "waking":
-    case "restoring":
-      return "Ports appear once the workspace has started.";
-    case "sleeping":
-    case "stopped":
-      return "Start the workspace to see its ports.";
-    case "stopping":
-      return "The workspace is stopping.";
-    case "archived":
-      return "This workspace is archived.";
-    case "failed":
-    case "error":
-      return "Ports are unavailable until the workspace recovers.";
-    case "deleting":
-    case "deleted":
-      return "This workspace is unavailable.";
-    default:
-      return "Ports appear when the workspace is running.";
-  }
-}
-
-function CloudPortsSection({ scope, active, onOpen }: BrowserStartPageProps) {
-  const target = useMemo(() => parseCloudWorkspaceKey(scope), [scope]);
-  const getDocument = useCallback(
-    () => (target ? cloudWorkspaceDocument(target) : undefined),
-    [target],
-  );
-  const doc = useSyncExternalStore(subscribeCloudWorkspaces, getDocument, getDocument);
-  const notice = cloudPortsNotice(doc);
-  // Passive heartbeat read: polls only ready/busy VMs and never wakes one.
-  const detected = useCloudWorkspaceDetectedPorts(scope, {
-    active,
-    open: true,
-    featureActive: notice === null,
-  });
-  const data =
-    target &&
-    detected.data?.organizationId === target.organizationId &&
-    detected.data.workspaceId === target.workspaceId
-      ? detected.data
-      : undefined;
-  const ports = useMemo(
-    () =>
-      (data?.ports ?? [])
-        .filter((port) => port.health !== "closed")
-        .sort((a, b) => a.port - b.port),
-    [data],
-  );
-  let line: string | null = notice;
-  if (!line && ports.length === 0) {
-    if (data) line = "No ports are open in this workspace.";
-    else if (detected.error) line = "Couldn't load workspace ports.";
-    else line = "Checking workspace ports…";
-  }
-  return (
-    <Stack as="section" gap={2} aria-label="Workspace ports">
-      <SectionHeading label="Workspace" />
-      {line ? (
-        <NeutralLine>{line}</NeutralLine>
-      ) : (
-        <Stack as="ul" gap={1.5} className="m-0 list-none p-0">
-          {ports.map((port) => {
-            const host = `localhost:${port.port}`;
-            const unhealthy = port.health === "unhealthy";
-            return (
-              <ServerRow
-                key={port.port}
-                title={`Port ${port.port}`}
-                detail={port.processLabel ? `${host} · ${port.processLabel}` : host}
-                tone={unhealthy ? "warning" : "online"}
-                statusLabel={unhealthy ? "Not responding" : "Running"}
-                onOpen={() => onOpen(`http://localhost:${port.port}`)}
-              />
-            );
-          })}
-        </Stack>
-      )}
-    </Stack>
-  );
-}

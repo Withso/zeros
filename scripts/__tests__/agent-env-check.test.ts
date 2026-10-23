@@ -264,4 +264,29 @@ describe("agent credential check", () => {
     for(const invalid of [{ZEROS_DEV_ACCOUNT_ID:"bad"},{ZEROS_DEV_REPOSITORY:"../foreign"},{ZEROS_DEV_GITHUB_INSTALLATION_ID:"1234"}])
       expect(checkZerosDevValues({...identity,...invalid})).toMatchObject({status:"fail"});
   });
+
+  it.each([undefined, "", "synthetic-local-password"])("accepts the electron:cloud fixture with an optional password (%#)", async password => {
+    const values = { ZEROS_DEV_REPOSITORY: "test-owner/test-repo", ZEROS_DEV_GITHUB_INSTALLATION_ID: "1234",
+      ...(password === undefined ? {} : { ZEROS_DEV_PASSWORD: password }) };
+    const { deps, seen } = network();
+    const result = byId(await runProviderChecks(values, deps))["zeros-dev"];
+    expect(result).toMatchObject({ status: "ok", detail: expect.stringContaining("electron:cloud") });
+    expect(result.detail).toContain("live login not checked");
+    expect(seen).toEqual([]);
+    if (password) expect(JSON.stringify(result)).not.toContain(password);
+  });
+
+  it("rejects malformed or incomplete local fixtures and never falls back from a partial hosted identity", () => {
+    const local = { ZEROS_DEV_REPOSITORY: "test-owner/test-repo", ZEROS_DEV_GITHUB_INSTALLATION_ID: "1234" };
+    for (const changes of [
+      { ZEROS_DEV_REPOSITORY: "" }, { ZEROS_DEV_REPOSITORY: "../foreign" }, { ZEROS_DEV_REPOSITORY: "owner/repo.git" },
+      { ZEROS_DEV_GITHUB_INSTALLATION_ID: "" }, { ZEROS_DEV_GITHUB_INSTALLATION_ID: "0" },
+      { ZEROS_DEV_GITHUB_INSTALLATION_ID: "-1" }, { ZEROS_DEV_GITHUB_INSTALLATION_ID: "1e3" },
+      { ZEROS_DEV_GITHUB_INSTALLATION_ID: "9007199254740992" },
+      { ZEROS_DEV_GITHUB_INSTALLATION_ID: "33333333-3333-4333-8333-333333333333" },
+      { ZEROS_DEV_REPOSITORY_ID: "invalid" }, { ZEROS_DEV_PASSWORD: "x".repeat(1025) },
+      ...["WORKOS_SUBJECT", "ACCOUNT_ID", "ORGANIZATION_ID", "EMAIL", "ACCESS_TOKEN", "REFRESH_TOKEN", "SESSION_ID", "TOKEN_EXPIRES_AT", "DEVICE_PRIVATE_KEY_B64"]
+        .map(name => ({ [`ZEROS_DEV_${name}`]: "incomplete-hosted-identity" })),
+    ]) expect(checkZerosDevValues({ ...local, ...changes })).toMatchObject({ status: "fail" });
+  });
 });

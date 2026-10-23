@@ -217,121 +217,6 @@ the comma-separated `0009_organization_team_hierarchy.sql`,
 `0061_workos_provider_erasure_fences.sql` migration approvals. It refuses
 Production; Production always receives a fresh database service.
 
-### Provision a channel's cloud backend
-
-Use **Cloud backend provision** (`cloud-provision.yml`) from a reviewed
-`release/X.Y.Z` ref for Beta, then Production. Production takes the single
-`production-approval` review before the channel job reads secrets. Plan and
-apply share `hosted-mutation-<channel>` with cutover and promotion; runs never
-cancel one another. Alpha apply is refused (the CLI permits a read-only Alpha
-plan from `main`). No provisioning run deploys an API or calls Boat, R2 or Resend.
-
-The owner creates only three external credentials per channel, in the `beta`
-or `production` GitHub environment: a non-admin runtime `BOAT_API_KEY`, an R2
-token scoped to `zeros-cloud-workspaces-<channel>` stored as
-`CLOUD_WORKSPACE_S3_ACCESS_KEY_ID` and `CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY`,
-and `RESEND_API_KEY`. Reuse the existing channel `RAILWAY_DEPLOY_TOKEN` and
-Railway target-ID / `PLANETSCALE_DATABASE` variables. Boat is **one shared
-account across Dev and every channel**: the orchestrator supplies the canonical
-`BOAT_ACCOUNT_SCOPE` and `BOAT_BILLING_ORG` as GitHub environment **variables**.
-Apply requires both inputs even if Railway already has them; neither is generated.
-
-The managed-Boat configuration derived from `apps/control-plane/src/config.ts`
-has these sources (all output is names/status only):
-
-| Railway variables | Source / rule |
-| --- | --- |
-| `BOAT_API_KEY`, `CLOUD_WORKSPACE_S3_ACCESS_KEY_ID`, `CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY`, `RESEND_API_KEY` | Owner secrets; set only when different, otherwise unchanged; missing inputs may retain existing values |
-| `BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG` | Required GitHub environment variables; identical to `profile.boat` in the shared admission configuration |
-| `BOAT_COMPUTE_POLICY_ID` | Initially `zeros-<channel>-standard-v1`; thereafter retain the existing channel database price-policy label |
-| `BOAT_TTL_SECONDS`, `BOAT_SECONDS_PER_DOLLAR` | Initial constants `900`, `100000`; retain values belonging to an existing selected price policy, never silently reprice it |
-| `CLOUD_WORKSPACE_CPU_MILLICORES`, `CLOUD_WORKSPACE_MEMORY_MIB` | Constants `4000`, `8192` (4 vCPU / 8 GB) |
-| `CLOUD_WORKSPACE_OBJECT_STORE_KIND`, `CLOUD_WORKSPACE_S3_REGION`, `CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS` | Constants `s3`, `auto`, `336` (14 days); retain recovery keys and objects accordingly |
-| `CLOUD_WORKSPACE_S3_ENDPOINT` | GitHub variable of that name, else `https://<CLOUD_ACCOUNT_ID or CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com`; retain a valid existing endpoint if neither source is supplied |
-| `CLOUD_WORKSPACE_S3_BUCKET`, `CLOUD_WORKSPACE_CONTROL_PLANE_URL` | Derived channel bucket and `CHANNELS[channel].api` from `scripts/release/contracts.ts` |
-| `ZEROS_DEPLOY_ENV` | Derived channel marker required by the worker tuple-selection adapter |
-| `CLOUD_WORKSPACE_SECRET_KEYS_JSON`, `CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION` | Generated once, version `1`; settings, setup and agent-credential encryption share this ring |
-| `CLOUD_WORKSPACE_OBJECT_KEYS_JSON`, `CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION` | Independently generated once, version `1`; durable-object encryption |
-| `CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON`, `CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION` | Independently generated once, version `1`; Codex renewal/security fingerprints, never a native refresh token |
-| `CLOUD_CAPABILITY_ISSUER` | S1 issuer origin (the service's public HTTPS origin, no path); optional until the capabilities rollout; without it no capability is issued and the S2 uplink stays unmounted |
-| `CLOUD_CAPABILITY_KEYS_JSON`, `CLOUD_CAPABILITY_CURRENT_KEY_VERSION` | Independently generated once, version `1`; seals the S1 signing keys at rest, never the settings ring. Signing keys themselves are database rows managed with `cloud-capability-key:manage` (runbook in docs/cloud-workspace/authority-cache.md) |
-| `CLOUD_WORKSPACES_ENABLED`, `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED`, `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` | Initially all `false`; preserve existing enabled/paused states on repeat apply; set all `true` only on an explicit `enable_cloud` apply with a selected tuple, qualified unless `ZEROS_WORKER_PROMOTION` is off |
-| `EMAIL_FROM`, `OPERATIONS_ALERT_EMAIL` | Constants `Zeros <notifications@zeros.build>`, `alert@zeros.build` |
-| `CLOUD_WORKSPACE_PROVIDER`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, `ZEROS_CLOUD_SOURCE_COMMIT`, `ZEROS_CLOUD_IMAGE_ARCHITECTURE`, `CLOUD_WORKSPACE_STORAGE_MIB` | Worker lane's complete six-field tuple. Provisioning writes them only for `adopt_base_worker` while worker promotion is off and the channel has no tuple: it copies the tuple Alpha serves when that image is the channel's `BOAT_BASE_SNAPSHOT`. It never completes a partial tuple or replaces a selected one |
-| `ZEROS_RELEASE_CANARIES_ENABLED`, `RUNTIME_QUALIFICATION_ACTOR_USER_ID`, `WORKER_CANARY_ORGANIZATION_ID`, `WORKER_CANARY_REPOSITORY` | Optional existing GitHub environment variables; missing ones are reported `missing-input`, not invented |
-| `WORKER_CANARY_ADMISSION_TOKEN`, `WORKER_ADMISSION_CONFIG_JSON` | Optional existing GitHub environment secrets, also installed server-side; required and validated when release canaries are enabled |
-| Existing `DATABASE_URL`, authentication/WorkOS configuration, `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_SLUG`, `GITHUB_OAUTH_CALLBACK_URL`, `GITHUB_APP_PRIVATE_KEY` | Kept Railway-only; the enabled API requires a valid RSA private key and complete GitHub registration |
-
-While `ZEROS_WORKER_PROMOTION` is off, apply with `enable_cloud` and
-`adopt_base_worker` to turn on a channel's cloud with the shared base image.
-The next release deploys those variables. Agents in cloud workspaces still run
-only on images with recorded runtime qualifications for that channel.
-
-Engine protocol/port/heartbeat, setup deadlines and operation/archive/reconcile
-limits retain existing validated values or the boot loader's defaults. Managed
-Boat keeps provider credentials in coordinator configuration. Railway
-injects `RAILWAY_GIT_COMMIT_SHA` at deployment; provisioning must not invent it.
-
-Every new keyring is a JSON object such as `{"1":"<canonical base64url for 32
-crypto-random bytes>"}` with an independent key and matching current selector.
-No generated value reaches output, artifacts or GitHub secrets. Existing rings
-and selectors are never overwritten or rotated. Supported legacy
-`CLOUD_WORKSPACE_SECRET_KEY_V1` / `CLOUD_WORKSPACE_OBJECT_KEY_V1` are adopted
-without changing their key material. A single V1 ring may receive its missing
-selector; incomplete or ambiguous rings fail rather than guess or rotate. Use
-the separate [key-rotation procedure](cloud-workspace/security.md#secret-binding-verification-and-key-rotation)
-for rotation.
-
-The Actions token is read-only and cannot install environment secrets. The
-orchestrator securely copies the existing release-only admission bearer (at
-least 32 characters) and shared admission JSON into the channel's GitHub secrets;
-this workflow does **not** generate either. The JSON retains the canonical shared
-Dev/Boat/registry profile, not the channel's deployment targets. Native account
-credentials stay in the channel's encrypted API store, never CI. See
-[release worker qualification](cloud-workspace/release-worker-qualification.md)
-for owner designations, budgets and the remaining worker-lane configuration.
-
-1. Configure the owner credentials, canonical identity variables and endpoint
-   source, then dispatch `mode=plan`, `channel=beta` (or `production`). Review
-   only names and `unchanged`, `set`, `generate`, `missing-input`, `kept-existing`.
-2. Dispatch `mode=apply`, `confirm=zeros-control-plane-beta` (or
-   `zeros-control-plane-production`), leaving `enable_cloud=false`. Configuration
-   is validated in memory with a placeholder database URL and the real boot
-   loader, without its potentially sensitive diagnostics. The enabled schema is
-   also checked using validation-only placeholders for absent worker fields and
-   planned keyrings; **none of those placeholders can be written**. Apply uses
-   one `variableCollectionUpsert` with `replace:false, skipDeploys:true`, then
-   verifies exact readback in memory. Missing optional canary inputs do not block
-   staging unless server-side canaries are requested. Autodeploy/staged changes,
-   concurrent variable changes, previews or invalid existing configuration stop apply.
-3. Deploy the reviewed same-SHA API with current compatible migrations and
-   **customer cloud still disabled**. The boot loader validates account encryption
-   keys independently of the worker profile. Authenticated owners can connect
-   native accounts and explicitly designate exact credentials/models for release
-   checks. Customer allocation, workspace credential delegation, engine execution
-   and customization stay disabled. With `ZEROS_RELEASE_CANARIES_ENABLED=true`,
-   the separate release-only bearer, immutable `RAILWAY_GIT_COMMIT_SHA`, owner/
-   organization/repository and matching shared admission configuration, release
-   native canaries can run **without any preexisting image tuple**. Staff/owner
-   consent, migration/maintenance fences and account admission remain enforced.
-4. Obtain the trusted same-SHA services receipt, qualify all three native kinds
-   through the worker lane, select its complete immutable tuple, then redeploy
-   the same API SHA **still cloud-off**. `/v1/release-identity` now exposes that
-   selected tuple and the database-backed three-kind, same-contract, enabled,
-   MCP-qualified approval result independently of customer rollout.
-5. Plan and apply with `enable_cloud=true` only after that readback. The enable
-   gate requires an exact selected tuple match, same channel, worker and API
-   source SHAs both equal to the approved release SHA, current compatible schema,
-   valid whole configuration and `workerQualified=true`; tuple presence or a
-   qualified older worker is insufficient. Qualification is rechecked before the
-   single variable write. A default repeat apply preserves existing flags and
-   keyrings, including deliberately paused workers; invalid existing state fails
-   rather than being reset. The next explicit deploy or hosted promotion picks
-   up the enabled values and verifies live readiness. A staged enable is not
-   live readiness: qualification can be revoked after the check, and per-account
-   runtime admission still validates current authority. Desktop cloud capability
-   remains a separate approved release flag. Previews stay off.
-
 ### WorkOS application callbacks
 
 Create separate Web and Desktop Applications inside each channel's WorkOS
@@ -533,9 +418,6 @@ variables:
 | `AUTH_JWKS_URL`                              | unused                    | exact qualified JWKS URL                                                        |
 | `AUTH_AUDIENCE`                              | unused                    | matching channel API origin                                                     |
 | `ZEROS_CLOUD_WORKSPACES_ENABLED`             | `false`                   | `false` until that channel's desktop cloud client is release-approved           |
-| `VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES` | unset: Cloud previews hidden | optional; when supplied, 1-8 unique exact lowercase DNS suffixes |
-| `CLOUD_WORKSPACE_PROVIDER`                  | unused while cloud is off | `boat`; omission selects Boat and other values are rejected |
-| `VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64`   | unused while cloud is off | optional canonical base64url OpenSSH pins for explicitly configured gateways; Boat uses the runtime tunnel |
 
 The authentication entries are public verification values baked only into
 Electron main. Never add a WorkOS API key—generic, web, desktop, or channel-
@@ -543,9 +425,9 @@ prefixed—to a desktop release environment. The release gate rejects any
 `WORKOS_*_API_KEY` shape.
 
 `ZEROS_CLOUD_WORKSPACES_ENABLED` is a separate exact-`true` desktop build
-capability, not the Railway `CLOUD_WORKSPACES_ENABLED` rollout flag and not an
+capability, not the Railway `CLOUD_V2_ENABLED` rollout flag and not an
 installed-app preference. The checked-in
-[`cloud-workspace-channels.json`](../apps/control-plane/src/cloud-workspace-channels.json)
+[`cloud/channels.json`](../apps/control-plane/src/cloud/channels.json)
 policy is an additional required gate shared by desktop builds, control-plane
 configuration and release jobs. Development/Alpha allow cloud; Beta/Production
 pause it. Desktop `dev` maps to `development`, and `stable` to `production`.
@@ -555,14 +437,10 @@ engine and Electron compile steps; each artifact bakes it, and Electron pins
 the child environment to the same decision. Leave it unset or set it to `false`
 until the channel is approved. Enabling only the backend does not activate a
 desktop client, and enabling only the desktop does not bypass backend admission.
-The first cloud release leaves public cloud-preview suffixes
-unset: Cloud Preview URL controls are hidden, while preview-independent
-forward-to-localhost tunnels remain available. The release-environment check
-allows cloud-enabled builds without preview suffixes and validates their format
-whenever supplied. Managed Boat uses the backend terminal tunnel, so it
-requires no provider gateway pin; a
-supplied pin document is still validated. Flags-off builds remain valid without
-either value.
+Cloud v2 relays agents, files, Git and terminals through the control plane's
+connection into each worker. Design,
+browser, simulators, old preview grants and SSH gateway configuration are not
+part of this release path.
 
 On channels that allow cloud, Organization Settings → Agents credential
 enrollment is independent of desktop cloud execution. Signed-in members can
@@ -575,61 +453,19 @@ workspace admission gate, and does not authorize release checks: **Use for relea
 checks** retains its separate configured platform-owner and current-revision
 consent requirements.
 
-### Reversible cloud pause
+### Cloud channel policy
 
-The Beta/Production pause preserves cloud rows, objects, provider resources,
-runtime pins and desktop caches. It performs no resource cleanup. The desktop
-hides cloud workspaces and controls, shows “Cloud workspaces are paused” where
-organization cloud creation/settings would appear, and sends no cloud API
-requests. Local Personal and organization-local workspaces and device agents
-keep their existing behavior.
+`apps/control-plane/src/cloud/channels.json` enables cloud for Development and
+Alpha and keeps Beta and Production paused. The desktop and release tools read
+the same policy. A pause disables cloud entry points and preserves existing
+resources; Local Personal and organization-local workspaces stay available.
 
-The control plane ignores stale cloud opt-ins before constructing cloud
-configuration: no cloud provider client, worker, listener, runtime publication
-or qualification starts. Shared authentication, security and directory services
-remain enabled. Release identity reports disabled cloud without reading cloud
-health, the runtime registry or worker qualifications. The hosted release can
-repair an older deployment without first requiring that older deployment's
-cloud readiness, and verifies the pause on the newly deployed API before
-publication.
-
-Beta/Production releases still apply **all pending expand migrations**, including
-cloud migrations, using the normal backup, checksum and schema verification.
-Any genuinely pending controlled migration retains its existing approval gate.
-Exact-source CI, CodeQL, WorkOS/auth checks, release receipts, signing and
-Production approval/notarization remain mandatory. Cloud runtime publication,
-worker selection and cloud readiness do not block a paused desktop release.
-
-The pause is evaluated only at desktop, control-plane and release boundaries.
-A VM engine has no required release-channel field and does not consult the
-desktop gate; a missing channel cannot disable an Alpha VM's agents or transport.
-
-Unpause checklist (one channel at a time):
-
-1. Change that channel's boolean in `cloud-workspace-channels.json` to `true` in
-   a reviewed release. This restores its existing cloud UI, configuration and
-   release checks without reverting code. Retain the environment opt-outs until
-   the channel's supported runtime is qualified.
-2. Apply pending migrations and deploy the compatible control plane normally.
-   Configure the channel's v4 runtime publication, artifact store and OIDC
-   environment/audience, then publish with `cloud-runtime-bundle.yml`.
-3. Approve the base, build/promote the supported runtime image and complete the
-   channel's runtime and native-agent qualification before admitting customer
-   workspaces. Preserve each workspace's pinned runtime and existing resources.
-   Keep the retired v3 `ZEROS_WORKER_PROMOTION` lane **disabled**; it is not the
-   supported v4 promotion path.
-4. Enable the channel's existing backend/desktop rollout settings. Cloud
-   readiness and the configured qualification checks now apply again; verify
-   the deployed release identity and the normal publication receipt. Rebuild
-   the desktop so its baked channel policy and capability match the backend.
-5. The owner smoke-tests Beta, including Local, organization-local and existing
-   cloud workspaces and owner switching. Dispatch Production only after the
-   owner's go-ahead. To pause again, set the boolean to `false` and release;
-   no cloud data or provider resources need deletion or reconstruction.
+Cloud runtime publication and VM lifecycle are described in
+[Cloud workspaces](cloud-workspaces.md). Runtime delivery is independent of
+signed desktop artifact publication.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
-`main`; `beta` and `production` permit `release/*`, with `main` also allowed
-when standalone runtime publication from main is needed (see below).
+`main`; `beta` and `production` permit `release/*`.
 The stable desktop workflow itself rejects `main` and requires an exact
 `release/X.Y.Z` ref, so a manual dispatch cannot bypass the promotion ladder.
 
@@ -638,9 +474,8 @@ environment holds the required reviewer, permits only `release/*`, and has no
 secrets or variables. `release.yml` starts with an `approve` job in that
 environment, and every job that can read `production` secrets needs it: build,
 submit, notarize, publish and the hosted lane it calls. A direct Production
-dispatch of `controlled-cutover.yml` or `cloud-worker-promotion.yml` needs the
-same approval; Alpha and Beta skip it. The hosted lane passes `caller_gated` to
-the worker workflow, which a dispatch cannot set. The `production` environment
+dispatch of `controlled-cutover.yml` needs the same approval; Alpha and Beta
+skip it. The `production` environment
 therefore keeps its secrets and branch policy but no reviewer of its own.
 
 That moves secret protection to the release branches: the `release` ruleset
@@ -659,51 +494,6 @@ Apply the settings in this order, so no window runs without a gate:
    `production`. Older release branches still run their earlier workflows,
    which lack the approval job; their Production jobs refuse a SHA that the
    latest Beta did not publish.
-
-### Standalone runtime-bundle publication
-
-[cloud-runtime-bundle.yml](../.github/workflows/cloud-runtime-bundle.yml)
-builds and publishes the supported runtime independently of a desktop release.
-Choose `alpha`, `beta`, or `production`; its `publish` job uses that GitHub
-environment and a separate lock for each channel. Configure these Actions
-**variables** in each environment:
-
-| Environment | `CLOUD_WORKSPACE_CONTROL_PLANE_URL` | `CLOUD_RUNTIME_OIDC_AUDIENCE` |
-| --- | --- | --- |
-| `alpha` | `https://api-alpha.zeros.build` | `zeros-control-plane-alpha` |
-| `beta` | `https://api-beta.zeros.build` | `zeros-control-plane-beta` |
-| `production` | `https://api.zeros.build` | `zeros-control-plane-production` |
-
-These publication variables are required; there is no Production fallback.
-The existing Alpha desktop publication retains `VITE_CONTROL_PLANE_URL` and
-its existing Alpha audience default. A custom audience must match
-`CLOUD_RUNTIME_OIDC_AUDIENCE` on that channel's control plane.
-
-On Railway, enable `CLOUD_RUNTIME_PUBLICATION_ENABLED=true` only for the
-intended channel and retain its own CP-held `CLOUD_WORKSPACE_S3_*` artifact
-configuration. The checked-in channel policy must also allow cloud; publication
-remains disabled during the Beta/Production pause.
-`CLOUD_RUNTIME_OIDC_ENVIRONMENT` defaults to that CP's channel;
-if explicitly set it must match. Leave it nonempty for standalone publication.
-The explicit empty compatibility value is confined to the legacy Alpha push
-and cannot authorize this dispatch. Artifact credentials stay on the control
-plane; the publisher uses GitHub OIDC and bounded upload capabilities.
-
-Alpha dispatch is allowed only on `main`. Beta and Production allow `main` or
-`release/*`; their GitHub environment branch policies must also allow `main`
-if publication from that ref is desired. The desktop Beta/Production workflows
-retain their own frozen `release/X.Y.Z` guards. The standalone publisher honors
-protections on `alpha`, `beta`, or `production` itself; the desktop release's
-separate `production-approval` job does not govern this workflow. Configured
-reviewer requirements on the selected environment still apply. Environment
-settings are owner-operated; this source change does not alter them.
-
-The same latest exact-SHA Preflight/CodeQL and current-branch evidence is
-verified before upload, including for Alpha dispatch. Publication changes the
-registry only. Qualification, staging, runtime selection and qualified
-upgrade/wake admission remain the existing paths; publication alone neither
-installs a runtime nor changes a running workspace's saved pin. See
-[Standalone publication](cloud-workspace/runtime-bundles.md#standalone-publication).
 
 ### macOS signing keychain
 
@@ -763,12 +553,12 @@ Exercise this procedure in Alpha and Beta before Production. For each channel:
 3. In a database-owner shell inside that exact reviewed image, run only the
    compiled strict migrator. Scope the approval to this one process; never save
    it on the Railway web service. A database beginning before `0009` and
-   advancing through this migration artifact requires all ten controlled
+   advancing through this migration artifact requires all 21 controlled
    boundaries:
 
    ```bash
    NODE_ENV=production \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql,0101_cloud_workspace_pro_entitlements.sql,0103_cloud_workspace_pro_sharing.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql,0101_cloud_workspace_pro_entitlements.sql,0103_cloud_workspace_pro_sharing.sql,0182_retire_legacy_cloud.sql,0191_retire_legacy_cloud_02.sql,0192_retire_legacy_cloud_03.sql,0193_retire_legacy_cloud_04.sql,0194_retire_legacy_cloud_05.sql,0195_retire_legacy_cloud_06.sql,0196_retire_legacy_cloud_07.sql,0197_retire_legacy_cloud_08.sql,0198_retire_legacy_cloud_09.sql,0199_retire_legacy_cloud_10.sql,0200_retire_legacy_cloud_11.sql \
    node dist/migrate.js
    ```
 
@@ -790,30 +580,6 @@ Exercise this procedure in Alpha and Beta before Production. For each channel:
 
 Do not use Railway image rollback after `0009`: the old image expects the old
 schema. Restore the database backup or roll forward with corrected new code.
-
-## One-time cloud authority migration `0025`
-
-Alpha tracks `main`, so an unapproved controlled migration must not turn its
-automatic deploy into a restart loop. The service-boot runner may stop before
-`0025_cloud_workspace_engine_authority.sql` only while both cloud runtime flags
-are false, every pre-boundary cloud state table is empty, and no later migration
-is recorded. Railway then receives a healthy HTTP response whose `/healthz`
-body contains `migrations.state=controlled_migration_pending`; every cloud API
-returns `503 controlled_migration_pending`, unrelated APIs remain available,
-and no migration after `0024` is recorded or applied. Existing cloud state or
-an enabled cloud flag makes startup fail closed instead.
-
-That state is a maintenance signal, not approval and not cloud readiness.
-Production service boot never honors `CONTROL_PLANE_MIGRATION_APPROVALS` and
-never executes a controlled boundary; in particular, unapproved `0009` remains
-a startup failure because it changes core schema. Drain old processes, take a
-verified backup, record the commit and checksummed ledger, and run
-`node dist/migrate.js` inside that exact production image with
-`NODE_ENV=production` and the exact one-process approval for `0025`. Never put
-the approval on the web service. Remove it, restart the same commit, and require
-the pending state to disappear before enabling either cloud flag. The complete
-empty-state and existing-state sequences are in
-[`cloud-workspace/infrastructure-and-operations.md`](cloud-workspace/infrastructure-and-operations.md#controlled-migration-rollout).
 
 ## Normal promotion after the one-time migration
 
@@ -865,7 +631,7 @@ credentials appear only in the build job. Only the final publisher has
 `contents: write`; it has no signing or provider credentials.
 
 ```text
-CI (exact SHA) ──► hosted services ──► worker / final API readiness ──┐
+CI (exact SHA) ──► hosted services ──► final API readiness ──┐
 Mac build + sign (parallel with CI) ──► signed artifact ─────────────┼─► feed + ledger
                                                                   │
 Production only: CI + build ──► Apple submit ──► notarize + verify ──┘
@@ -885,21 +651,20 @@ The ordinary Alpha critical path is `max(Mac build, required CI + hosted flow)`
 plus artifact/feed publication, not their sum and not another seven-minute
 quality job. With the September 30, 2026 measurements (about 15 minutes CI and
 13 minutes Mac packaging), **approximately 25 minutes merge-to-feed is a
-target, not a measured guarantee**: provider deployment, cold worker/native
-canaries, CI failures/reruns, runner queues and Production's Apple queue can
+target, not a measured guarantee**: provider deployment,  CI failures/reruns, runner queues and Production's Apple queue can
 extend it. The `ui-smoke` job is unchanged by this restructuring.
 
 ### Concurrent Alpha preparation
 
 Each `release-alpha.yml` push/main run starts its exact-source CI barrier,
-read-only version preparation and Linux runtime build independently. Protected
+read-only version preparation independently. Protected
 macOS signing waits only for that small version job, independently of CI.
 There is no workflow-wide Alpha lock. Its `publication` job calls
 `alpha-publication.yml` after the CI barrier reports `ready=true` and version
 preparation succeeds, and holds `release-alpha` with cancellation disabled for
 that entire reusable call:
-entry revalidation, hosted services, optional worker qualification, final hosted
-receipt, desktop feed/ledger/tag/readback/retention and runtime publication.
+entry revalidation, hosted services, final hosted receipt and desktop
+feed/ledger/tag/readback/retention.
 Individual hosted locks remain `hosted-mutation-<channel>`; their different
 group avoids nesting the outer lock into itself. Beta and Production retain
 their separate workflow-wide channel locks, full CI, branch gates and
@@ -908,7 +673,7 @@ Production approval/notarization. Their builds already run alongside Alpha.
 The read-only `metadata` job computes `<next stable>-alpha.<parent run_number>`
 with the original `compute-version.mjs` and a full tagged exact-SHA checkout.
 Signing and publication consume that one output. The transaction passes it to
-every hosted/worker/publisher checkpoint; it never recomputes from later stable
+every hosted/publisher checkpoint; it never recomputes from later stable
 tags. Failed-job retries can carry the successful metadata job and its original
 version. A higher run counter with a lower prepared stable base must fail before
 hosted writes: `1.0.0-alpha.402` cannot follow `1.0.1-alpha.401`. Both counter/source
@@ -939,9 +704,7 @@ desktop publisher verifies that metadata against the producing attempt, the
 exact prepared version and updater feed before using the version/capability.
 Current environment variables
 cannot substitute for the capability already baked into the signed desktop.
-The runtime publisher revalidates its producer before the existing exact-source
-CI and OIDC publication, which still checks descriptor, manifest and archive
-identity and the original parent's `workflow_ref`.
+
 
 The existing Alpha release's metadata edit retries at most three identical
 `gh release edit` attempts, with 1 s and 2 s backoffs, only when gh reports a
@@ -1184,7 +947,7 @@ call, while candidate CI and builds prepare concurrently.
 
 To enable, pause automatic Alpha delivery operationally, let running and
 pending Alpha work finish, and verify a healthy current Alpha API/schema,
-Pages, worker and feed/tag/ledger baseline. Hold independent provider Git
+Pages and feed/tag/ledger baseline. Hold independent provider Git
 autodeploy. Start with `ZEROS_ALPHA_FORWARD_ONLY=admitted`; after observing
 successful admitted candidates finish while main advances, set it to `enabled`
 to admit candidates already behind main. `ZEROS_ALPHA_CI_FAST_PATH` remains an
@@ -1192,9 +955,9 @@ independent choice of exact-source evidence. No repository variable or provider
 setting is changed by this implementation.
 
 The pilot requires exclusive automatic Alpha writers across its stages.
-Individual hosted locks are released between services, worker and finalization;
+Individual hosted locks are released between services and finalization;
 they do not provide cross-destination atomicity or exclude a direct operation
-between stages. Before a manual Alpha cutover, direct worker/runtime/feed
+between stages. Before a manual Alpha cutover, direct runtime/feed
 operation or recovery, pause and drain automatic releases, perform the existing
 strict full/current operation, verify every destination and cleanup receipt,
 then resume. Unknown partial mutations require owner reconciliation; this
@@ -1216,22 +979,11 @@ Railway deploy, deployment `SUCCESS`, public release readiness, app/Ops Pages
 build and direct upload, custom-domain manifest verification, then anonymous
 WorkOS handshake verification. That job saves
 `hosted-services-<channel>-<sha>` with status `services-ready`, **not** desktop
-publication authority. The worker lane runs only after these services succeed,
-so its native canaries target the newly deployed API. It must complete audited
-qualification, temporary-role/resource cleanup and the atomic complete tuple
-update with deployment suppressed before saving its authenticated
-`worker-promotion-<channel>-<sha>` success receipt.
-
-Finalization authenticates both artifacts against this parent release's exact
-repository/branch/SHA and successful producing jobs in their recorded attempts,
-rechecks current provider/Pages state and the selected worker tuple, then
-explicitly redeploys the same API SHA with the new tuple. It requires final
-source, schema-manifest, health and current qualification proof before saving
-`hosted-promotion-<channel>-<sha>`. An unchanged qualified worker with identical
-committed inputs is reused without a second API deploy. A failed/rate-limited
-canary, missing receipt, incomplete cleanup, changed tuple or failed API redeploy
-withholds final publication authority. Only the final hosted receipt can
-authorize the signed desktop publisher and cumulative release ledger.
+publication authority. Finalization authenticates that artifact against this
+parent release's exact repository, branch and SHA and the successful producing
+job. It verifies current provider, Pages, API source and schema before saving
+`hosted-promotion-<channel>-<sha>`. Only that final receipt authorizes the desktop
+publisher and cumulative release ledger.
 There is no Ops deployment in Beta. Every Pages artifact includes Functions
 and the applicable marketing output. Build/install output from provider-facing
 subprocesses is withheld, and receipts contain allowlisted public fields only.
@@ -1249,8 +1001,7 @@ Immediately before each desktop publisher writes its release, it runs
 `scripts/release/publication-cli.ts`. With hosted promotion enabled, the gate
 downloads this run's receipt, verifies the successful hosted job in its recorded
 attempt, then rereads the current backend and every channel Pages manifest.
-Source SHA, migration manifest and complete worker tuple must still match the
-receipt; cloud-enabled desktops also require current `workerQualified=true`.
+Source SHA and migration manifest must still match the receipt.
 Run A cannot publish after run B promoted a newer hosted state. A retry with
 unchanged hosted state is allowed. Production rechecks CI and branch freshness
 before Apple submission/polling, then the complete hosted proof immediately
@@ -1295,121 +1046,10 @@ clients may have observed a release, rather than silently rewriting timestamps.
 `GET /v1/release-identity` is public and secret-free, including during
 maintenance. It returns version 1, deployed Railway Git SHA, channel,
 maintenance, packaged/recorded migration head and checksum-manifest digest,
-`current`/`pending`/`controlled`/`unknown` state, aggregate cloud readiness and
-the complete selected worker identity. It returns 503 unless ready; `/healthz`
+`current`/`pending`/`controlled`/`unknown` state and cloud service readiness. It returns 503 unless ready; `/healthz`
 retains its existing liveness semantics. Provider errors, tenant information,
 credentials and cloud-health diagnostic strings never enter the identity body.
 The controller verifies the response against its exact checkout manifest.
-The additive `workerQualified` flag requires enabled, audited native approvals
-for **Claude Account (`claude-setup-token`), Codex Account (`codex-chatgpt`) and
-Cursor (`cursor-api-key`)** on the selected provider/image, one common native
-contract, and the `zeros-cloud-worker-v3` profile, each with MCP qualification.
-It exposes no credential kind, account, evidence or owner identity; a failed
-approval read returns false. Each agent's runtime admission still enforces its
-own credential kind and exact runtime contract. This flag is separate from
-aggregate service readiness and does not alter `/healthz`.
-Enabled worker reuse and final hosted readiness require affirmative current
-qualification whenever the desktop publishes cloud capability. Reuse pins the
-entire live tuple after checking the committed input tree; final readiness
-requires that exact tuple. Missing, false or revoked approval blocks publication.
-The public boolean does not replace per-credential native launch qualification.
-
-### Retired Boat deletions do not block release readiness
-
-Control-plane release eligibility is scoped to the CP artifact. Cleanup-only
-reasons (`deletion_jobs_failed`, `deletion_provider_stalled`,
-`deletion_intent_stalled`, `object_deletion_stalled`, `provider_orphans_stalled`)
-remain operational alerts and do not prevent a CP repair release. The two
-combined reasons require a finer read: `lifecycle_stalled` is cleanup only
-when every stalled intent is a delete; `object_rotation_failed` is cleanup only
-when there is no failed rotation and only source/target cleanup is pending.
-These classifications and the full health reasons come from one query in the
-same read-only, repeatable-read transaction.
-
-Stalled non-delete lifecycle work, failed rotations, setup/engine leases,
-access revocation, outbox delivery, blocked idle stops, durability and all
-compute/billing signals still close readiness. Unknown reasons and unreadable
-health fail closed. Workers, setup execution and durability must remain enabled;
-source/schema, migration, signing and selected worker/runtime/template proofs
-retain their own release and admission gates. Local and organization-local
-workspaces and disabled cloud channels do not use this projection.
-
-The v1 `cloud.state="healthy"` field describes CP **release eligibility**.
-For cleanup outside the legacy Boat label below, the identity does not add a
-new deferral kind or operational-state field: `/healthz` and in-service alerts
-continue to expose the full degraded health and reason codes. No health reason
-or resource identity is copied into the release receipt. Missing qualification
-remains false; cleanup eligibility cannot manufacture artifact approval.
-
-Once Boat accepts a deletion (a `bdop_*` receipt), erasing its stored data is
-Boat's background work. This release deferral covers both retired, non-current
-generations and generations of a workspace whose status is `deleting` or
-`deleted`. A qualifying receipt that Boat keeps `blocked`, `retrying` or
-otherwise unfinished does not close release readiness on any channel; no
-operator exception, allowlist or expiry is involved.
-
-For the existing `deferredReadiness` label, the API requires
-`deletion_intent_stalled` to be the sole health reason and checks **every**
-stalled intent and provider journal. Each must have a Boat deletion receipt, an
-observing delete intent with `provider_deletion_pending` or
-`provider_deletion_blocked`, one of the generation/workspace conditions above,
-and a matching archived Boat binding without deletion proof. The original
-no-error intent allowance remains valid only for retired non-current
-generations. A missing or mismatched record, failed/queued intent, a current
-generation on a live workspace, unbound journal, other provider, or another
-health reason (including `deletion_jobs_failed` or `deletion_provider_stalled`)
-refuses that legacy label. CP eligibility still follows the scoped projection
-above; this does not weaken the label's provider-receipt proof.
-
-While deferred, `/v1/release-identity` retains `cloud.ready=true` and the v1
-`cloud.state="healthy"` **release-readiness** posture, and explicitly adds
-`cloud.operationalState="degraded"` plus
-`deferredReadiness={"kind":"retired-boat-deletions"}`. This existing v1 label
-also covers qualifying deleting/deleted workspaces. No resource IDs or
-counts are public. `/healthz`, health alerts, deletion workers, pending storage
-accounting and physical-deletion verification are unchanged, so the receipt
-stays visible until Boat completes it; track it with the provider. The API still
-measures real worker qualification; signing, source/schema checks, migration
-approvals and other release gates are unchanged. Local workspaces, organization
-local workspaces and owner/placement switching do not use this server-only
-policy.
-
-This replaces the earlier expiring `ALPHA_DELETION_READINESS_EXCEPTION_JSON`
-allowlist. The API ignores that variable; remove it from service configuration.
-Release tooling still accepts a current `alphaReadinessException` from an API
-deployed before this change, so admission can read the outgoing deployment.
-Provider completion and normal deletion verification remain the permanent
-resolution; deferral neither certifies erasure nor settles provider capacity.
-
-Hosted control planes keep `DATABASE_MIGRATIONS_ON_BOOT=false`. The migration
-subprocess requires `NODE_ENV=production`, rejects pending controlled
-boundaries (use the reviewed drain ceremony separately), verifies checksums,
-and requires `ledger=verified`, a successful backup and `role.deleted=true`.
-The standalone command remains:
-
-```sh
-NODE_ENV=production pnpm --dir apps/control-plane release-migration:manage \
-  --database zeros-control-plane-alpha --branch main \
-  --execute --confirm zeros-control-plane-alpha
-```
-
-Its default plan creates/deletes a one-hour provider owner login even though
-its SQL is read-only. `scripts/release/cli.ts --plan` performs only read-only
-provider inspection and never creates a role. Neither plan authorizes a
-controlled migration. A failed or ambiguous deploy stops publication; no
-old-binary rollback or database restore runs automatically. Inspect provider
-state and retained receipts before a retry. Temporary-role cleanup failure is
-a failure, with the one-hour TTL only a backstop.
-
-`pnpm check:web-deploy` defaults to the two Alpha Pages projects and fails
-closed unless both `app-alpha.zeros.build` and `ops-alpha.zeros.build` publish
-the exact `origin/main` SHA in `/zeros-deployment.json`. Cloudflare Pages
-injects that SHA at build time; the manifest contains only its schema version,
-Git commit, and `app`/`ops` surface, and is served with `Cache-Control: no-store`.
-Use `CF_PAGES_PROJECT` plus `WEB_DEPLOY_REF` for an individual Beta or
-Production qualification. A Cloudflare API token is optional corroboration,
-not a prerequisite for checking the custom domains users actually reach.
-
 ### Expand/contract migration rules
 
 The **Step A bridge** merges the phase-aware runner/verifier/lint without adding
@@ -1469,6 +1109,32 @@ contracts like controlled boundaries and refuses them even after their date;
 the strict operator migrator is the separate authority. Legacy controlled
 downtime approvals remain unchanged and are not a zero-downtime escape hatch.
 
+Cloud v1 retirement is one controlled cutover across eleven contract files:
+`0182_retire_legacy_cloud.sql` and `0191_retire_legacy_cloud_02.sql` through
+`0200_retire_legacy_cloud_11.sql`. The owner approved that retirement; every
+batch retains the `2026-10-21` not-before date. 0182 preserves vault metadata
+and removes retained-table hooks before the first drops. Follow-up batches
+come after 0190 so existing migration numbers do not move. Their small
+transactions target fewer than 1,000 backend locks; the ladder test measures
+`pg_locks` before each contract commit and fails above 1,500. Never combine
+the batches into one transaction: PostgreSQL holds dependency locks until
+commit, even when the dropped objects no longer exist.
+
+For a database already at 0181, the one-shot approval is:
+
+```bash
+CONTROL_PLANE_MIGRATION_APPROVALS=0182_retire_legacy_cloud.sql,0191_retire_legacy_cloud_02.sql,0192_retire_legacy_cloud_03.sql,0193_retire_legacy_cloud_04.sql,0194_retire_legacy_cloud_05.sql,0195_retire_legacy_cloud_06.sql,0196_retire_legacy_cloud_07.sql,0197_retire_legacy_cloud_08.sql,0198_retire_legacy_cloud_09.sql,0199_retire_legacy_cloud_10.sql,0200_retire_legacy_cloud_11.sql \
+NODE_ENV=production node dist/migrate.js
+```
+
+For `controlled-cutover.yml`, pass that comma-separated filename list as
+`approvals`. Reconcile the ledger after an interruption and approve only the
+remaining controlled filenames. Keep old writers stopped and maintenance
+enabled until the final batch and schema verification succeed; automatic
+service boot cannot approve or defer these contracts. Restore the paired
+backup for a v1 rollback, rather than attempting to run the old binary on a
+partially or fully retired schema.
+
 The first rollout needs a compatible bridge: binaries released before this
 phase-aware verifier still reject every unknown row. Deploy/rehearse the
 tolerant verifier against the unchanged 0121 ledger before applying 0122, retain
@@ -1480,14 +1146,12 @@ compatible API rollback or a reviewed forward fix/paired data recovery.
 
 ## Ordered-controller rollout switches and owner setup
 
-This repository implements the hosted controller and the guarded worker build,
-native-canary, approval and receipt transport. They are shipped disabled and
-have not undergone a live protected-channel rehearsal. Do not interpret a green disabled guard or
-`worker-plan` artifact as a deployment receipt. Set `ZEROS_HOSTED_PROMOTION`
+The hosted controller uses source, schema, provider and publication receipts.
+A green disabled guard is not a deployment receipt. Set `ZEROS_HOSTED_PROMOTION`
 to exactly `enabled` only after the channel setup below and an isolated live
 rehearsal. Missing required secrets with the switch enabled fails the guard.
 With it disabled, both the initial guard and the desktop publication step
-compare the candidate's complete committed schema and worker-input contract
+compare the candidate's complete committed schema
 against the **published channel baseline**, never an event-local push diff.
 The guard derives the published SHA from a successful same-channel release
 workflow with a successful desktop publish step, checking the exact repository,
@@ -1510,7 +1174,7 @@ or history exceeding the bounded scan require live manual-cutover proof.
 Migration identity hashes every ordered migration name and checksum from Git
 objects, so packaging edits cannot change the comparison. A dispatch or first
 branch push can publish without an identity endpoint **only when its schema
-matches this verified publication baseline** and the worker guard permits it.
+matches this verified publication baseline**.
 An unresolved change remains visible on every descendant push, even when its
 own diff contains only documentation. New migrations on this branch still
 require manual cutover regardless of legacy-tag bootstrap.
@@ -1524,25 +1188,13 @@ successful-publication cross-check applies. Do not manufacture or move a
 baseline tag to bypass a cutover.
 
 Every guard performs one anonymous, five-second public identity read. If the
-endpoint answers, its readiness/schema/worker state takes precedence over the
+endpoint answers, its readiness/schema state takes precedence over the
 publication baseline. An answering but unready or malformed identity cannot be replaced
 with an older tag's proof. If neither a usable baseline nor an identity answers,
 publication blocks with operator steps. An unavailable endpoint alone does not
 block an unchanged published schema. Every disabled decision emits an annotation
 and step summary and creates no hosted receipt.
 
-- Worker input changes are warning-only when
-  `ZEROS_CLOUD_WORKSPACES_ENABLED` is not exactly `true`. Ordinary engine edits
-  therefore preserve legacy desktop publication for cloud-disabled channels
-  when the schema is unchanged or manual cutover is verified.
-- For a cloud-enabled desktop, changed worker inputs block unless the channel's
-  public release identity is ready, its cloud subsystem is enabled, and
-  `workerQualified=true`. The complete immutable worker tuple must use the
-  selected provider and either the candidate SHA or a source with identical
-  committed worker inputs. Missing qualification, stale inputs, unreadable
-  Git history or a missing endpoint cannot authorize this exception. An
-  answering identity with revoked qualification blocks a cloud-enabled desktop
-  even if its worker-input tree matches the tag baseline.
 - Migration changes relative to published channel state block until the fixed
   channel API's `/v1/release-identity` verifies a completed manual cutover.
   The response must be ready, belong to that channel, have maintenance off and
@@ -1554,8 +1206,7 @@ and step summary and creates no hosted receipt.
 
 Missing, older, mismatched, malformed or timed-out identity responses keep an
 unverified migration candidate blocked, with the exact backup/migration/deploy/rerun procedure
-in its error annotation and summary. The worker condition remains independent:
-manual schema verification cannot authorize an unqualified cloud worker.
+in its error annotation and summary.
 
 The explicit required-CI barrier replaces reliance on Railway's **Wait for CI**
 for workflow-owned mutations and feed publication. An initially failed Preflight
@@ -1599,8 +1250,7 @@ Configure these GitHub **environment** variables independently in `alpha`,
 | `AUTH_ISSUER`, `AUTH_JWKS_URL`                                       | channel's qualified public WorkOS issuer and signing-key URL; HTTPS only                             |
 | `AUTH_WEB_CLIENT_ID`, `AUTH_DESKTOP_CLIENT_ID`                       | distinct channel client IDs; public verification metadata, never client secrets                      |
 | `ZEROS_CLOUD_WORKSPACES_ENABLED`                                     | exact desktop capability decision; `true` only after qualification                                   |
-| `CLOUD_WORKSPACE_PROVIDER`                                           | `boat` for managed Boat; other values are rejected                                |
-| Existing desktop auth/origin/preview values                          | the exact channel values in the earlier tables                                                       |
+| Existing desktop auth/origin values                          | the exact channel values in the earlier tables                                                       |
 
 The event supplies `RELEASE_SHA`, `RELEASE_BRANCH` and channel;
 they are not owner-overridable deployment variables. `GITHUB_SHA` must equal
@@ -1648,10 +1298,8 @@ Owner setup, once per channel before **enabling** the controller:
    Confirm fork workflows cannot access release environments.
 2. Keep server WorkOS/GitHub App/database/object-store/keyring settings in
    Railway. Provision separate channel databases, unprivileged runtime roles,
-   cloud buckets, encryption keys and validated callback allowlists. Supply
-   real preview DNS/TLS and a matching preview suffix only for a later
-   preview-enabled release; the first desktop cloud release leaves preview
-   settings unset. Bootstrap the stable database object owner through the documented
+   encryption keys and validated callback allowlists. Bootstrap the stable
+   database object owner through the documented
    migration procedure; the workflow cannot grant its own authority.
 3. Disable Railway independent autodeploy through its actual toggle and turn
    Wait for CI off. A watch-pattern hold alone is not sufficient: the
@@ -1676,171 +1324,6 @@ Owner setup, once per channel before **enabling** the controller:
    mismatch on isolated targets. Every failure must withhold later publication.
    Do not rerun a mutation after an ambiguous response until its provider state
    is reconciled. Workflow cancellation/runner loss also requires reconciliation.
-
-## Worker lane and first rollout of this branch
-
-The opt-in v3 worker-promotion lane is retired. Setting
-`ZEROS_WORKER_PROMOTION=enabled` on an unpaused channel refuses before build/allocation, provider reads,
-credential preparation or release handoff. Default-disabled hosted promotion
-and publication keep their existing source, schema, receipt and exact worker
-checks. Explicit guarded storage reconciliation and historical receipts remain
-available; the supported artifact is the v4 runtime bundle.
-Paused channels normalize this stale opt-in to disabled before worker decisions;
-it cannot block their Local desktop release or re-enable the retired lane.
-
-The separate shared Dev native agent canary is also retired: `pnpm dev:agents`,
-the native/hosted canary producer and SSH/backend start entry points return
-`release_worker_images_retired` (409), with
-`v3 release worker images are retired; v4 runtime bundles are the supported artifact`.
-Refusal happens before budget/admission/lease/dispatch writes, builder allocation,
-credential or connection renewal, SSH registration, commands or private uploads.
-Already-started polling and exact original-intent cleanup/reconcile remain;
-normal app/backend launch reports the optional native refusal while continuing,
-and no-fixture connection authority maintenance is unchanged. Follow-up:
-**re-qualify Dev native agent canary on v4**. See the
-[Dev runtime qualification note](development-environments.md#runtime-qualification).
-
-The following describes historical worker producer/receipt contracts. It does
-not authorize new v3 release or Dev native qualification.
-
-Historical worker primitives in `scripts/release/` included:
-
-- Exact committed input-tree hashing using the existing worker input policy.
-- Existing Boat image kit export/build/attestation, fresh sanitation at snapshot
-  save, ready-state polling and confirmed owned-builder cleanup.
-- Shared disposable-VM transport and native report verification used by Dev,
-  rebound to the release channel with a newly hashed version-3 evidence document
-  (including native MCP). All three offered credential kinds must pass;
-  Codex subscription requires the real
-  renewal/cache/account-binding evidence as well as image refresh adoption.
-- The audited `manageCloudAgentRuntime` operator with one short-lived
-  PlanetScale owner login for plan and execute, target/hash match and confirmed
-  role deletion before selection. No direct qualification-table INSERT.
-- A complete worker tuple passed to a single update callback:
-  `CLOUD_WORKSPACE_PROVIDER`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`,
-  `ZEROS_CLOUD_SOURCE_COMMIT`, `ZEROS_CLOUD_IMAGE_ARCHITECTURE`, and
-  `CLOUD_WORKSPACE_STORAGE_MIB`. The Railway adapter uses one
-  `variableCollectionUpsert` with `replace:false, skipDeploys:true`, then reads
-  back the tuple. Worker owns this sole tuple write; hosted finalization then
-  redeploys the same API SHA and verifies qualification and the selected tuple.
-
-The success handoff is artifact `worker-promotion-<channel>-<source_sha>`, file
-`worker-receipt.json`, produced by job `worker`, execution step
-`Worker plan or guarded execution`, upload step `Save success receipt`. It binds
-repository, channel, branch, event SHA, committed inputs, parent run ID and
-recorded attempt, the complete tuple, profile, three kinds, approval/evidence
-hashes and confirmed temporary-VM/owner-role deletion. Callable executions
-require a genuine receipt even if post-services identity would otherwise permit
-reuse. Standalone unchanged-worker reuse is receipt-free. No plan or another
-run's receipt can authorize hosted finalization.
-
-Default **SMOKE** uses two messages per agent; **FULL** is selected for native
-adapter/containment/contract inputs or explicit request. Anthropic/OpenAI
-API-key modes stayed unoffered on an image until separately qualified. Historical Dev rate
-limits deferred retry with bounded backoff without consuming the three attempts;
-release returns **“canary account rate-limited”** without automatic retry or
-approval. Alpha, Beta, Production, Dev and custom images share Boat's current
-subscription quota. Zeros imposes no numerical snapshot limit, per-channel
-allocation or spare slot. Complete inventory and unreleased named reservations
-remain tracked, including the retained base. Boat capture responses enforce
-the plan's allowance; quota and rate-limit errors keep their safe classification
-without releasing uncertain reservations. Builder compute limits remain separate.
-
-See [release worker qualification](cloud-workspace/release-worker-qualification.md)
-for exact protected secret names/configuration, the encrypted rotation-safe
-store, the owner-only **Use for release checks** Settings switches and automatic
-server-side connection discovery, profile inputs, account
-budgets, snapshot retirement and lost-response recovery. No owner, native
-credential or approval may be copied from a Dev fixture into a release channel.
-
-Required live rehearsal still includes account/billing and snapshot ownership,
-quota and budget failure, runner interruption and cleanup recovery, native
-permission/tool execution, Codex real renewal, Files/Changes/Review, terminal,
-Git author/PR writes, reconnect, idle cancellation, checkpoint/stop/wake/archive
-and existing-generation compatibility. Machine attestation alone does not
-prove these user flows. Retain selected snapshots and encryption keys for old
-workspaces; selecting a new default does not upgrade running generations.
-
-For this branch's first rollout:
-
-1. Keep `ZEROS_HOSTED_PROMOTION` and `ZEROS_WORKER_PROMOTION` disabled and
-   `ZEROS_CLOUD_WORKSPACES_ENABLED=false` for the initial desktop release.
-   Hold independent Railway and Pages autodeploy before merging this schema
-   cutover; do not rely on Wait for CI if a pending workflow could be cancelled.
-   Freeze the candidate SHA until the release finishes. Merge the reviewed
-   candidate to `main`. Its schema differs from the published `alpha` baseline,
-   so the guard should fail until cutover is verified. An actual failed workflow
-   makes Railway skip that SHA when Wait for CI is on; a cancelled pending run
-   is not equivalent. Worker changes alone do not fail a cloud-disabled release.
-2. The operator records the exact event SHA, re-reads the live ledger/checksums,
-   builds the committed candidate and prepares the reviewed drain/maintenance
-   ceremony for any controlled migrations. Inspect the complete pending set;
-   do not assume migrations 0105–0112 are the entire change and never rewrite
-   applied SQL. Hold Railway autodeploy and turn Wait for CI off for the
-   explicit cutover, with no unrelated staged dashboard changes. The old
-   backend may refuse an advanced ledger on restart.
-3. From that exact checkout, run the strict release command:
-
-   ```sh
-   NODE_ENV=production pnpm --dir apps/control-plane release-migration:manage \
-     --database zeros-control-plane-alpha --branch main \
-     --execute --confirm zeros-control-plane-alpha
-   ```
-
-   It creates and awaits a fresh PlanetScale backup before migration. Complete
-   any separately reviewed controlled-migration approvals and require
-   `ledger=verified` and `role.deleted=true`; retain the backup/cleanup evidence.
-4. Immediately deploy the same SHA explicitly through Railway's
-   `serviceInstanceDeployV2(commitSha, environmentId, serviceId)` for Alpha,
-   wait for deployment `SUCCESS`, then verify
-   `https://api-alpha.zeros.build/v1/release-identity`: exact SHA, current
-   candidate migration manifest, maintenance false and readiness true.
-   This manual first cutover installs the endpoint even if the previous
-   backend had none; a separate identity bridge is optional for this disabled
-   path. Never use a moving “latest commit” deployment or bypass failed
-   readiness. Roll forward or use the separately authorized recovery plan.
-5. Upload matching Pages app/Ops, verify custom-domain manifests and auth
-   handoffs, then **re-run the failed Release (alpha) workflow for the same
-   SHA**. Its disabled guard now reports **manual cutover verified**, and the
-   desktop publisher reruns that decision against freshly fetched tags and live
-   identity before writing assets. The cloud-disabled desktop can publish and
-   advance the rolling `alpha` tag. A later docs-only push containing the same
-   unverified migrations cannot bypass cutover. All quality, signing, updater,
-   PTY and engine gates remain. Restore the chosen legacy Git autodeploy/Wait
-   for CI settings after reconciling the completed cutover; later ordinary
-   pushes with unchanged published schema keep their existing behavior while
-   promotion remains disabled. Beta's first branch push and Production dispatch
-   require either matching live identity or unchanged schema relative to a
-   successful channel publication verified against its tag. Stale rolling refs
-   alone cannot prove the previous published schema; successful publish-step
-   evidence can bootstrap them without ref mutation. If that evidence or the
-   channel tag is unavailable, perform the identity-verified manual cutover first.
-6. Cloud enablement is a separate step: qualify the exact candidate worker,
-   apply its audited runtime approval with the same owner login for plan/apply,
-   confirm cleanup, select the full worker tuple and verify it live. Rehearse
-   the guarded transport/receipt handoff after API, Pages and WorkOS using only
-   the owner's explicitly designated three-mode matrix and protected secrets.
-   Code and fake tests are not live qualification. Only then set the desktop cloud flag
-   true and build/smoke the cloud-enabled macOS app. A successful cloud-disabled
-   desktop release does not qualify the full-cloud launch.
-7. Enable the ordered controller only after the owner setup above and
-   isolated rehearsal pass. An unchanged worker can be reused only when the
-   selected public identity has `workerQualified=true` and its committed
-   worker-input tree matches the candidate; final readiness pins the same tuple;
-   a changed or unmeasurable worker blocks hosted promotion. Then repeat the
-   isolated setup for Beta and promote Production only from its successful
-   exact-SHA Beta receipt.
-   A cloud-disabled desktop (`ZEROS_CLOUD_WORKSPACES_ENABLED` not `true`) is
-   the deliberate exception: it does not depend on the worker, so promotion
-   neither compares worker inputs nor requires qualification, even when the
-   API itself runs staff cloud with an unqualified worker. The API must still
-   keep the tuple it served at the services handoff; finalization refuses a
-   change, and a worker change belongs to the worker lane. This is not a
-   cloud qualification: an API change that a running worker depends on still
-   needs the worker ceremony. The services receipt records the desktop cloud
-   capability, and finalization and publication refuse a different one. The
-   build job records the capability it baked into the app, and publication
-   refuses to reinterpret it: changing the variable means rebuilding.
 
 ### Controlled cutover workflow
 

@@ -73,7 +73,7 @@ export function sanitizeAiTitle(raw: string): string | null {
   return words.length >= 3 &&
     Array.from(result).length <= 80 &&
     words.every((word) => /[\p{L}\p{N}]/u.test(word)) &&
-    !/[\p{Cc}\p{Cf}<>\[\]{}*`]/u.test(result)
+    !/[\p{Cc}\p{Cf}<>[\]{}*`]/u.test(result)
     ? result
     : null;
 }

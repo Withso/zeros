@@ -27,17 +27,12 @@ import { assertDesignWriteAuthorized } from "./write-authority";
 export async function removeDesignDirectory(opts: {
   repoRoot: string;
   directory: string;
-  /** Server-admitted primary checkout. Its allocation cannot be archived by
-   * the local workspace lifecycle; the engine retires Design actors first. */
-  livePrimaryWorkspaceId?: string;
 }): Promise<void> {
   return withWorkspaceGitMutation(opts.repoRoot, async () => {
     const { repoRoot, directory } = opts;
     if (
       listWorkspaces({ archived: false }).some(
-        (ws) =>
-          path.resolve(ws.repoRoot) === path.resolve(repoRoot) &&
-          !(ws.id === opts.livePrimaryWorkspaceId && ws.placement === "cloud" && path.resolve(ws.path) === path.resolve(repoRoot)),
+        (ws) => path.resolve(ws.repoRoot) === path.resolve(repoRoot),
       )
     )
       throw new Error(

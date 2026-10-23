@@ -48,8 +48,7 @@ import {
   type PermissionFeedbackPlacement,
 } from "./permission-feedback-placement";
 import "./composer-pills.css";
-import { useCloudRuntimeUpgradeLink } from "./cloud-runtime-upgrade-link";
-import { cloudModelRuntimeUpgradeRequired, type WorkspaceRegistryAgent } from "./workspace-agent-registry";
+import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 
 // Wave 3 close-out (2026-05-16): the in-file useClickAway helper that
 // every pill once shared was deleted. All pills now use shadcn Popover,
@@ -119,14 +118,13 @@ export function ModelPill({
   fast,
   onChange,
   onConfigure,
+  onRefreshModels,
   onSelectAgentModel,
   redirectCrossAgent,
   selectionTiming,
-  workspaceFolder,
   active = true,
-  runtimeUpgradeRequiredForAgents = false,
 }: {
-  agents?: WorkspaceRegistryAgent[] | null;
+  agents?: BridgeRegistryAgent[] | null;
   agentId: string | null;
   /** Optional brand-logo URL fallback. Usually unset — AgentIcon prefers
    *  the bundled SVG keyed by agentId (claude/codex/cursor/…). */
@@ -140,6 +138,9 @@ export function ModelPill({
   fast: boolean;
   onChange: (next: string | null) => void;
   onConfigure: (configuration: ModelConfiguration) => void;
+  /** Optional cloud metadata revalidation. Opens immediately with the retained
+   * snapshot; the worker and control plane bound provider discovery. */
+  onRefreshModels?: () => void;
   /** A pick under a DIFFERENT agent (the unified dropdown lists them all).
    *  Omitted ⇒ cross-agent rows still render but picking one is a no-op. */
   onSelectAgentModel?: (sel: AgentModelSelection) => void;
@@ -147,10 +148,7 @@ export function ModelPill({
    *  agents' models then show a ↗ in the dropdown ("opens a new chat"). */
   redirectCrossAgent?: boolean;
   selectionTiming?: "next-message";
-  workspaceFolder?: string;
   active?: boolean;
-  /** Optional stable reason supplied by cloud agent discovery. */
-  runtimeUpgradeRequiredForAgents?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // Close while the host composer is concealed (see ComposerConcealedContext).
@@ -175,8 +173,6 @@ export function ModelPill({
   const current =
     models.find((m) => m.value === value) ??
     resolveModelOption(agentId, value ?? null, initialize);
-  const runtimeUpgradeLink = useCloudRuntimeUpgradeLink(workspaceFolder, active && !concealed,
-    runtimeUpgradeRequiredForAgents || cloudModelRuntimeUpgradeRequired(workspaceFolder, agents?.find(agent => agent.id === agentId), current));
   const activeValue = current?.value ?? value ?? null;
   const displayLabel = configuredModelLabelParts(
     agentId,
@@ -198,10 +194,9 @@ export function ModelPill({
       initialize={initialize}
       value={{ agentId, model: activeValue, effort, fast }}
       open={open && !concealed && active}
-      onOpenChange={setOpen}
+      onOpenChange={(nextOpen) => { if (nextOpen && active && !concealed) onRefreshModels?.(); setOpen(nextOpen); }}
       redirectCrossAgent={redirectCrossAgent}
       selectionTiming={selectionTiming}
-      footer={runtimeUpgradeLink}
       onConfigure={onConfigure}
       onSelect={(sel) => {
         if (agentFamily(sel.agentId) === agentFamily(agentId)) {

@@ -28,10 +28,6 @@ import {
   readAgentAttachmentFile,
 } from "./attachment-file-reader";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
-import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
-import { parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
-import { readCloudTranscriptWithCachedPaint } from "../../platform/cloud-transcript-cache";
-import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import {
@@ -43,7 +39,6 @@ import {
   bridgeChatBulkUpsert,
   bridgeMessageWindow,
   bridgeMessageWindowSnapshot,
-  bridgeCloudCopyWindow,
   bridgeMessageWindowOlder,
   bridgeMessageClear,
   bridgeMessageTruncateFrom,
@@ -57,6 +52,7 @@ import {
   type ChatSnapshotWire,
   type MessageWindowSnapshot,
 } from "../../platform/bridge/workspace-bridge";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 export type { MessageSearchHit, DbPullResult, ChatMessageDelta };
 
@@ -122,15 +118,12 @@ export async function windowMessages(
   chatId: string,
   limit: number,
   before?: number,
-  onCached?: (messages: AgentMessage[]) => void,
 ): Promise<AgentMessage[]> {
-  return (await windowMessagesSnapshot(chatId, limit, before, onCached ? page => onCached(page.messages) : undefined)).messages;
+  return (await windowMessagesSnapshot(chatId, limit, before)).messages;
 }
 
-export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "source" | "turnOpening"> & {
+export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "turnOpening"> & {
   messages: AgentMessage[];
-  source: MessageWindowSnapshot["source"] | "cache";
-  nativeObservation?: true;
   /** Local only: the opening prompt of the turn the window starts inside. */
   leadingPrompt?: AgentTextMessage;
 };
@@ -151,18 +144,9 @@ export async function windowMessagesSnapshot(
   chatId: string,
   limit: number,
   before?: number,
-  onCached?: (page: AgentMessageWindow) => void,
 ): Promise<AgentMessageWindow> {
   const bridge = requireBridge("load the chat transcript");
-  const target = parseCloudScopedId(chatId);
-  const canPaintCached = !!target && before === undefined && !!onCached;
-  const page = await readCloudTranscriptWithCachedPaint(chatId,
-    () => bridgeMessageWindowSnapshot(bridge, chatId, limit, before),
-    canPaintCached ? window => onCached!({ source: "cache", restoreHead: window.restoreHead, nativeObservation: window.nativeObservation,
-      messages: window.messages.map(fromPersistedMessage).filter((message): message is AgentMessage => message !== null) }) : undefined,
-    page => page.messages.length === 0 && (page.source === "control-plane" && !page.restoreHead ||
-      !!page.restoreHead && !page.restoreHead.head?.deleted && !cloudHistoryFenceHasTranscript(page.restoreHead)),
-  );
+  const page = await bridgeMessageWindowSnapshot(bridge, chatId, limit, before);
   const { turnOpening, ...rest } = page;
   const messages = page.messages
     .map(fromPersistedMessage)
@@ -249,9 +233,6 @@ export interface LoadedTranscript {
   /** False when a bound stopped the walk before the start of history, so the
    *  caller can say the copy is partial instead of reporting it complete. */
   complete: boolean;
-  /** Explicit copy fallback; never used as hydration/attachment authority. */
-  partialCloudHistory?: boolean;
-  isCurrent?: () => boolean;
 }
 
 /** A chat's persisted transcript, oldest-first — for "copy transcript", which
@@ -271,17 +252,10 @@ export interface LoadedTranscript {
  *     would silently cap every copy in the app. Costs one extra round trip. */
 export async function loadFullTranscript(
   chatId: string,
-  options: { allowPartialCloudCopy?: boolean } = {},
 ): Promise<LoadedTranscript> {
   const bridge = requireBridge("copy the chat transcript");
   const pages: PersistedMessageWire[][] = [];
-  const copyPage = options.allowPartialCloudCopy && parseCloudScopedId(chatId) && bridge instanceof WorkspaceRuntimeClient
-    ? await bridgeCloudCopyWindow(bridge, chatId, TRANSCRIPT_PAGE) : undefined;
-  // A partial projection is a bounded copy of the rows actually available,
-  // never proof that an empty result means this conversation has no history.
-  if (copyPage?.partial) return { complete: false, partialCloudHistory: true, isCurrent: copyPage.isCurrent,
-    messages: copyPage.messages.map(fromPersistedMessage).filter((m): m is AgentMessage => m !== null) };
-  let page = copyPage?.messages ?? await bridgeMessageWindow(
+  let page = await bridgeMessageWindow(
     bridge,
     chatId,
     TRANSCRIPT_PAGE,
@@ -328,7 +302,6 @@ export async function loadFullTranscript(
       .map(fromPersistedMessage)
       .filter((m): m is AgentMessage => m !== null),
     complete,
-    ...(copyPage ? { isCurrent: copyPage.isCurrent } : {}),
   };
 }
 
@@ -392,11 +365,13 @@ export async function listChatSummariesForFolder(args: {
   excludeChatId?: string;
 }): Promise<ChatSummaryWire[]> {
   if (!args.folder) return [];
-  return bridgeChatSummaries(
+  const read = bridgeChatSummaries(
     requireBridge("list chat summaries"),
     args.folder,
     args.excludeChatId,
   );
+  // A stopped cloud workspace is not woken for this optional row.
+  return isCloudWorkspace(args.folder) ? read.catch(() => []) : read;
 }
 
 export type { AttachmentWriteResult } from "@zeros/protocol/attachment-policy";

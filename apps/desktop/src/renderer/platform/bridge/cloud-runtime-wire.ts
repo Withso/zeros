@@ -9,7 +9,6 @@ import {
 } from "./cloud-workspace-key";
 import { runSessionId } from "@zeros/protocol/run-actions";
 import { turnIdentitySchema } from "@zeros/protocol/changes-history";
-import { DESIGN_CATALOG_READ_OPERATION, designCatalogReadSchema, designCatalogReplySchema } from "@zeros/protocol/design-catalog";
 
 export type WireRecord = Record<string, unknown>;
 export interface CloudRuntimeScope extends CloudWorkspaceTarget {
@@ -35,12 +34,6 @@ export function cloudReplyOwnership(cwd: string | null | undefined, chatId: stri
 export function cloudRequestTarget(
   message: WireRecord,
 ): CloudWorkspaceTarget | null {
-  // Replica parameters describe the cloud source of a Mac-owned download.
-  // Its filesystem and enrolled device belong to the Local engine even while
-  // that cloud workspace has an open remote connection.
-  if (message.type === "WORKSPACE_REQUEST" &&
-    typeof message.op === "string" && message.op.startsWith("cloudReplica."))
-    return null;
   const candidates: unknown[] = [];
   const collect = (value: WireRecord) => {
     for (const key of [
@@ -175,25 +168,6 @@ function mapTurnIdentity(
   };
 }
 
-/** Design uses the lint report's checkout identity to fence cached snapshots.
- * Map only that typed envelope; authored paths, HTML and diagnostics are data. */
-function cloudDesignReport(scope: CloudRuntimeScope, value: unknown): WireRecord {
-  const report = record(value);
-  if (report.workspacePath !== scope.root)
-    throw new Error("Design snapshot does not match the admitted cloud checkout");
-  return { ...report, workspacePath: cloudWorkspaceKey(scope) };
-}
-
-/** Only typed context ownership crosses this boundary. Preview URLs and
- * authored text remain opaque, and foreign native owners fail closed. */
-function cloudDesignReference(scope: CloudRuntimeScope, value: unknown, direction: "in" | "out"): WireRecord {
-  const reference = record(value);
-  const key = cloudWorkspaceKey(scope);
-  if (reference.workspaceId !== (direction === "in" ? scope.engineWorkspaceId : key))
-    throw new Error("The Design reference belongs to another workspace.");
-  return { ...reference, workspaceId: direction === "in" ? key : scope.engineWorkspaceId };
-}
-
 export function cloudOutgoing(
   scope: CloudRuntimeScope,
   message: WireRecord,
@@ -201,17 +175,7 @@ export function cloudOutgoing(
   const out = mapFields(scope, message, "out");
   if (message.params) {
     const original = record(message.params);
-    if (message.op === DESIGN_CATALOG_READ_OPERATION &&
-        designCatalogReadSchema.parse(original).workspaceId !== cloudWorkspaceKey(scope))
-      throw new Error("Design catalog belongs to another cloud workspace.");
     const params = mapFields(scope, original, "out");
-    if (["design.context.inspect", "design.context.capture"].includes(String(message.op)) && original.reference)
-      params.reference = cloudDesignReference(scope, original.reference, "out");
-    // Desktop directory lifecycle calls identify their repository by root.
-    // The cloud worker additionally fences them to its admitted primary row.
-    if (params.workspaceId === undefined && parseCloudWorkspaceKey(original.repoRoot) &&
-        ["design.previewExistingDirectory", "design.adoptDirectory", "design.renameDirectory", "design.removeDirectory"].includes(String(message.op)))
-      params.workspaceId = scope.engineWorkspaceId;
     if (message.op === "turns.undoReset")
       params.resetId = nativeValue(scope, original.resetId);
     if (message.op === "turns.list" && original.after)
@@ -237,6 +201,8 @@ export function cloudOutgoing(
       params.sessionIds = original.sessionIds.map((id) =>
         nativeValue(scope, id),
       );
+    if (Array.isArray(original.chatIds))
+      params.chatIds = original.chatIds.map((id) => nativeValue(scope, id));
     out.params = params;
   }
   // Host executable paths and directory grants cannot describe a cloud
@@ -258,14 +224,6 @@ export function cloudIncoming(
     out.notification = mapFields(scope, record(message.notification), "in");
   if (message.request)
     out.request = mapFields(scope, record(message.request), "in");
-  if (message.cloudSnapshot) {
-    const snapshot = record(message.cloudSnapshot);
-    out.cloudSnapshot = { ...mapFields(scope, snapshot, "in"),
-      ...(snapshot.latestTurn ? { latestTurn: mapFields(scope, record(snapshot.latestTurn), "in") } : {}),
-      permissions: (Array.isArray(snapshot.permissions) ? snapshot.permissions : []).map(item => ({ ...record(item), request: mapFields(scope, record(record(item).request), "in") })),
-      questions: (Array.isArray(snapshot.questions) ? snapshot.questions : []).map(item => ({ ...record(item), request: mapFields(scope, record(record(item).request), "in") })),
-    };
-  }
   if (Array.isArray(message.chatIds))
     out.chatIds = message.chatIds.map((id) => cloudScopedId(scope, String(id)));
   if (Array.isArray(message.terminals))
@@ -277,40 +235,10 @@ export function cloudIncoming(
     out.workspaceIds = [cloudWorkspaceKey(scope)];
     out.cloudWorkspace = cloudWorkspaceKey(scope);
   }
-  if (message.op === "workspace.resourceUsage" && message.type === "WORKSPACE_RESPONSE" && message.result) {
-    const sample = record(message.result);
-    if (sample.organizationId !== scope.organizationId || sample.workspaceId !== scope.workspaceId)
-      throw new Error("Resource usage does not match the admitted cloud workspace");
-    // This operation already carries the CP UUID, not a VM-native workspace
-    // row/path. Preserve its exact typed identity instead of generic remapping.
-    return { ...out, result: sample };
-  }
   if (message.result && typeof message.result === "object") {
-    if (message.op === DESIGN_CATALOG_READ_OPERATION) {
-      const catalog = designCatalogReplySchema.parse(message.result);
-      if (catalog.status === "unavailable") return { ...out, result: catalog };
-      if (catalog.owner.workspaceId !== scope.engineWorkspaceId || catalog.owner.placement !== "cloud" ||
-          catalog.owner.organizationId !== scope.organizationId)
-        throw new Error("Design catalog belongs to another cloud workspace.");
-      return { ...out, result: { ...catalog, owner: { ...catalog.owner, workspaceId: cloudWorkspaceKey(scope) } } };
-    }
     const result = mapFields(scope, record(message.result), "in");
-    if (typeof message.op === "string" &&
-        (message.op.startsWith("design.") || message.op === "workspace.setMode")) {
-      if (["design.context.create", "design.context.inspect", "design.context.capture", "design.verification.open"].includes(message.op) && result.reference)
-        result.reference = cloudDesignReference(scope, result.reference, "in");
-      if (result.snapshot) {
-        const snapshot = record(result.snapshot);
-        result.snapshot = { ...snapshot, protocolCapability: null,
-          lint: cloudDesignReport(scope, snapshot.lint) };
-      }
-      if (record(result.mutation).lint) {
-        const mutation = record(result.mutation);
-        result.mutation = { ...mutation, lint: cloudDesignReport(scope, mutation.lint) };
-      }
-      if (message.op === "design.lint" && result.report)
-        result.report = cloudDesignReport(scope, result.report);
-    }
+    if (message.op === "chats.titleSeeds" && Array.isArray(result.seeds))
+      result.seeds = result.seeds.map((seed) => mapFields(scope, record(seed), "in"));
     if (message.op === "turns.reset" && typeof result.resetId === "string")
       result.resetId = cloudScopedId(scope, result.resetId);
     if (message.op === "turns.get" && result.turn)

@@ -56,13 +56,14 @@ CI policy and lists adjacent tests and required local gates. `run --execute
 processes and a receipt. Full CI suites and native checks unavailable on the
 host remain explicitly unverified. See [the tool guide](tools.md).
 
-`local-ui` uses the existing Playwright app driver. `cloud-health`,
-`cloud-dispatch` and `cloud-status` use zeros-dev and its main-only Actions
-canary. Plans make no live call; dispatch never claims an E2E pass. The cloud
-adapter requires the hourly workflow and helpers from PR #493.
+`local-ui` uses the existing Playwright app driver. There is no cloud driver:
+the live cloud proof is the deployed Dev gate0 probe, which the integrator runs
+with Alpha authorization (see `zstack-verify`).
 
 `node scripts/zstack/eval-replay.mjs --case <id>` plans an isolated replay.
-Execution compares the fixed tests with the fix's first-parent source. Seeded
+Execution compares the fixed tests with the fix's first-parent source. Cases
+replay at their fix commit, so a `check` may name tests that later work
+retired, such as the v1 cloud suites. Seeded
 cases have one exact mutation in `evals/seeds/<id>.json`. Replays write counts
 and hashes, never raw test output. Missing prerequisites and unsupported
 commands stay unverified; a green parent is a miss, not a catch.

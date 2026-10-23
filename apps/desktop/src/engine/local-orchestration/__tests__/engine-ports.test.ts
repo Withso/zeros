@@ -63,7 +63,6 @@ class FakeEngine {
   host(): LocalEngineHost {
     return {
       linkScheme: () => "zeros-dev",
-      isCloudWorker: () => false,
       featureOpen: () => true,
       executionForChat: (chatId) => this.executions.get(chatId) ?? null,
       activePrompt: (executionId) => this.prompts.get(executionId) ?? null,

@@ -2,8 +2,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
-import { seedReadyCloudWorkspace } from "../cloud-workspaces/test-fixtures.js";
-import { DatabaseCloudAgentCredentialService } from "../cloud-workspaces/agent-credentials.js";
+import { seedCredentialOwner } from "../agent-credentials/test-fixtures.js";
+import { DatabaseCloudAgentCredentialService } from "../agent-credentials/agent-credentials.js";
 import { DevConnectionClient } from "./client.js";
 import { DevConnectionRuntime } from "./runtime.js";
 import { withSystemTx } from "../db.js";
@@ -11,7 +11,7 @@ import { DatabaseDevConnectionRestore } from "./restore.js";
 import type { ConnectionReference } from "./types.js";
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("Dev reference persistence",()=>{
-  let pool:pg.Pool, fixture:Awaited<ReturnType<typeof seedReadyCloudWorkspace>>, restore:DatabaseDevConnectionRestore;
+  let pool:pg.Pool, fixture:Awaited<ReturnType<typeof seedCredentialOwner>>, restore:DatabaseDevConnectionRestore;
   const generation=randomUUID(), keys={keys:{1:randomBytes(32).toString("base64url")},currentKeyVersion:1};
   const reference=():ConnectionReference=>({mode:"dev-reference",bindingId:randomUUID(),connectionId:randomUUID(),generationId:generation,
     organization:"org_dev",kind:"claude-api-key",accountId:"member",appScope:"api",revision:1,consentRevision:1,
@@ -21,7 +21,7 @@ suite("Dev reference persistence",()=>{
   afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();});
   beforeEach(async()=>{
     await resetMigratedTestDatabase(pool);
-    fixture=await seedReadyCloudWorkspace(pool);
+    fixture=await seedCredentialOwner(pool);
     await pool.query("UPDATE user_identities SET provider_sub='user_dev' WHERE user_id=$1",[fixture.userId]);
     await pool.query("INSERT INTO workos_organization_links(organization_id,workos_organization_id,external_id,state) VALUES($1::uuid,'org_dev',($1::uuid)::text,'active')",[fixture.organizationId]);
     restore=new DatabaseDevConnectionRestore(pool);
@@ -33,7 +33,6 @@ suite("Dev reference persistence",()=>{
     expect(await service.organizationConnections(fixture.userId,fixture.organizationId)).toMatchObject({connections:[{connected:true,credentialId:ref.bindingId}]});
     const versions=(await pool.query("SELECT * FROM cloud_agent_credential_versions")).rows;
     expect(versions).toHaveLength(1); expect(versions[0]).toMatchObject({material_mode:"dev-reference",ciphertext:null,nonce:null,key_version:null});
-    expect((await pool.query("SELECT * FROM cloud_agent_runtime_qualifications")).rowCount).toBe(0);
     await restore.replace(mapping(),generation,[]);
     expect(await service.organizationConnections(fixture.userId,fixture.organizationId)).toMatchObject({credentials:[]});
   });

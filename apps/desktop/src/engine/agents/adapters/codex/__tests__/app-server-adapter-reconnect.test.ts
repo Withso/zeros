@@ -236,7 +236,7 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
         if (kind === "rpc") throw rejection;
         return { turnId: "rejected", status: "failed", raw: { turn: { error: rejection } } };
       };
-      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") })).rejects.toMatchObject({ failure: { kind: "protocol-error", advice: expect.stringMatching(/model menu/) } });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") })).rejects.toMatchObject({ failure: { kind: "protocol-error", advice: expect.stringContaining("Pick another model.") } });
       await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.map(model => model.value)).toEqual(["gpt-6-astra"]));
       expect(turns).toHaveLength(1);
       expect(turns[0]).toMatchObject({ model: "gpt-5.6-sol" });
@@ -733,8 +733,12 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     try {
       const error = await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") }).catch((failure: unknown) => failure);
       expect(error).toMatchObject({ failure: { kind } });
-      expect((error as Error).message).toContain(message);
-      expect((error as Error).message).toContain("Additional provider explanation.");
+      if (message === "The model `private-model` is not available.") {
+        expect((error as Error).message).toBe("Your Codex connection can't use the selected model. Pick another model.");
+      } else {
+        expect((error as Error).message).toContain(message);
+        expect((error as Error).message).toContain("Additional provider explanation.");
+      }
     } finally { await adapter.dispose(); }
   });
 

@@ -62,24 +62,15 @@ because it is dated or unqualified.
 | Reference                                                                               | Retention and purpose                                                                                                                                                   |
 | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Development restarts](development-restarts.md)                                         | Durable runbook for dev reloaders, production crash recovery, active-turn protection and synced checkouts                                                               |
-| [Linux zeros-dev](zeros-dev.md)                                                        | Alpha test identity, shared desktop protocol harness, scoped diagnostics, evidence and cleanup; legacy Dev retirement is separate                                       |
-| [Detached agent observations](detached-agent-offline-proof.md)                          | Bounded offline consistency checks; separate from live authority, signed receipts and qualification                                                                    |
 | [Deployment environments](deployment-environments.md)                                   | Durable topology, isolation, promotion and release operations; retire one-time rollout sections once completed                                                          |
 | [Required-check migration](ci-rulesets.md)                                              | Owner runbook for moving main's required checks to `zeros/ci-gate`; keep rollback guidance and retire the staged rollout once the final set is observed                 |
 | [CI recovery operations](ci-operations.md)                                              | Main-only recovery modes, protected incident App setup, repair contracts, budgets and resolution                                                                        |
 | [CI selection](ci.md)                                                                   | Lane ownership, additive labels, local previews, fail-closed evidence and owner merges for CI definitions                                                               |
 | [CI concurrency](ci-concurrency.md)                                                     | Main Preflight coalescing, its Alpha and recovery consequences, and the queue validator                                                                                 |
 | [WorkOS architecture and rollout](workos-authentication-migration.md)                   | Active migration/qualification plus lasting identity, session and authentication contracts; retain those contracts when retiring the rollout checklist                  |
-| [Cloud workspaces index](cloud-workspace/README.md)                                     | Boat-only v2 source/v4 runtime/actor2 contracts, source map, release qualification and explicitly proposed performance/reliability work |
+| [Cloud workspaces](cloud-workspaces.md) | Standalone VM worker, relay, runtime delivery and lifecycle |
 | [Agent capability roadmap](agent-capabilities-parity-and-ui-consolidated-2026-07-01.md) | Active provider/product backlog; keep until remaining items are implemented, rejected or moved to an owned plan                                                         |
 | [Design future phases](design-mode-roadmap.md#4-phases-and-dependency-gates)            | Phase 2–8 work remains in the canonical Design guide; completing a phase updates its implemented contract in the same document                                          |
-
-The cloud index lists every document in that program and its retention policy.
-Its architecture, product, data, security, operations, enterprise and engineering
-references remain useful after launch. [Qualification status](cloud-workspace/qualification-status.md)
-separates repository behavior from live/platform release gates;
-[warm pool and reliability follow-ups](cloud-workspace/warm-pool.md) owns proposed work.
-Completed cloud roadmaps and dated audits are consolidated into those guides.
 
 ## Documentation maintenance
 

@@ -1,0 +1,3 @@
+# First cloud chat admission before metadata persistence
+
+A binding-free adoption probe can race the renderer's asynchronous chat metadata save. Test both orders through the real worker, then consume its typed failure through the actual renderer session callback. A missing execution is a normal probe miss, not proof that a chat is unavailable. Keep tombstones, explicit provider locators and workspace authorization refusals distinct; adopt an already preparing creation instead of minting a second execution. Test the initial ChatView creation and reconnect fallback separately, retaining the same chat and tab. Local Personal and organization-local keep their existing admission paths.

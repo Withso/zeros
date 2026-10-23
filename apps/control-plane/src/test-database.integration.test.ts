@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
-import { seedReadyCloudWorkspace } from "./cloud-workspaces/test-fixtures.js";
+import { seedCredentialOwner } from "./agent-credentials/test-fixtures.js";
 import {
   rebuildMigratedTestDatabase,
   resetMigratedTestDatabase,
@@ -70,10 +70,7 @@ d("reusable migrated test database", () => {
     const migrated = await snapshot();
     expect(migrated["public.schema_migrations"]).not.toEqual([]);
 
-    const fixture = await seedReadyCloudWorkspace(pool);
-    await pool.query(
-      "UPDATE managed_compute_provider_requirements SET require_credit = NOT require_credit",
-    );
+    const fixture = await seedCredentialOwner(pool);
     // Append-only, owner-only evidence with a RESTRICT reference to users:
     // neither its guard trigger nor the foreign key may block the restore.
     await pool.query(
@@ -87,22 +84,7 @@ d("reusable migrated test database", () => {
     await expect(
       pool.query("DELETE FROM staff_role_changes"),
     ).rejects.toThrow(/append-only/);
-    // A device session (forced RLS, cascading from devices and users) and a
-    // catalog sequence draw from the workspace trigger are both undone.
-    await pool.query(
-      `INSERT INTO devices (id, user_id, label, platform, public_key, key_fingerprint)
-       VALUES ($1, $2, 'Restore', 'linux', $3, $4)`,
-      [DEVICE_ID, fixture.userId, Buffer.alloc(32, 7), Buffer.alloc(32, 8)],
-    );
-    await pool.query(
-      `INSERT INTO cloud_device_sessions (id, user_id, device_id, expires_at)
-       VALUES ($1, $2, $3, now() + interval '1 day')`,
-      [DEVICE_SESSION_ID, fixture.userId, DEVICE_ID],
-    );
-    await pool.query(
-      "UPDATE cloud_workspaces SET version = version + 1 WHERE id = $1",
-      [fixture.workspaceId],
-    );
+    await pool.query("INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state) VALUES($1,$2,$3,'Restore','o/r','topic','main','stopped')",[randomUUID(),fixture.organizationId,fixture.userId]);
     expect(await snapshot()).not.toEqual(migrated);
 
     await expect(resetMigratedTestDatabase(pool)).resolves.toBe("restored");

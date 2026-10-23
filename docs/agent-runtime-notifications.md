@@ -64,7 +64,7 @@ on the acknowledgment commit.
 | Security               | Public GitHub advisories for the three bundled pins and the separately pinned control-plane Codex auth keeper. Runtime advisories use the working PR; unrelated direct/transitive fixes remain with Renovate.                                    |
 | Models                 | The exact installed bundled runtime lists advertised models for a dedicated test-account configuration. Pagination must complete. No model turn, prompt, agent creation or inference is requested.                                               |
 | Desktop delivery       | Public Alpha, Beta and Production release ledgers identify published source SHAs; manifests at those SHAs identify the pins. Source ancestry recognizes inclusion by a later release. Beta/Production lag is a maintainer promotion decision.    |
-| Cloud delivery         | A small validated Alpha publication receipt distinguishes published, disabled, failed and unknown. Publication does not prove live cloud qualification or customer adoption. The current receipt deliberately leaves live qualification unknown. |
+| Cloud delivery         | Standalone worker delivery is currently unobserved. Receipts from the retired runtime-bundle publisher are ignored; desktop release evidence cannot establish v2 worker delivery. |
 
 Catalog entries, names, favorites, aliases and defaults remain curated. A model
 disappearance requires complete observations on two distinct UTC dates for the
@@ -98,7 +98,7 @@ Each gate records its own exit code; one failure does not skip later gates:
 - Strict offline catalog verification and semantic surface review.
 - Cursor packaging closure and source/Electron host smoke checks.
 - Claude and Codex native startup checks without working inference credentials.
-- License inventory, packaging paths, adapter fixtures and runtime-skew contracts.
+- License inventory, packaging paths and adapter fixtures.
 
 Failed setup produces incomplete gates where the reporter can run. Missing,
 cancelled, invalid or skipped evidence never becomes a pass. Reports name both

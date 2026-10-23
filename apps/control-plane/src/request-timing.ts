@@ -4,35 +4,10 @@ import { isPromise } from "node:util/types";
 import type { MiddlewareHandler } from "hono";
 import { routePath } from "hono/route";
 import type { Pool, PoolClient } from "pg";
-import { z } from "zod";
 import { advisoryLockPurpose, type DatabaseTimingSpan, type RequestDatabaseTiming } from "./database-timing.js";
 
 export const DEFAULT_SLOW_REQUEST_LOG_MS = 1000;
 
-// Standalone mirror of protocol/cloud-events. The control plane deploys
-// independently; only tests import the shared wire module for parity checks.
-const originUuid = z.string().regex(/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/);
-const originIdentity = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
-const requestOriginSchema = z.object({
-  version: z.literal(1), organizationId: originUuid, workspaceId: originUuid,
-  generation: z.number().int().positive().safe(), engineInstanceId: originUuid,
-  mode: z.enum(["legacy", "boot-owner-v1"]), bootId: originUuid.nullable(), writerEpoch: originUuid.nullable(),
-  clockId: originUuid, spanId: originUuid, flightId: originUuid.nullable(), producer: z.enum(["foreground", "background", "unknown"]),
-  operation: z.enum(["commands.mutate", "commands.snapshot", "commands.read", "commands.conversation", "commands.claim", "commands.stop",
-    "commands.settle", "commands.confirm-goal", "commands.mirror", "credentials.admit", "credentials.validate",
-    "credentials.refresh-codex", "actors.confirm", "actors.renew", "boot.credentials", "boot.refresh", "boot.activate",
-    "events.append", "events.replay", "records.sync", "controls.exchange"]),
-  intent: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("command"), commandId: originUuid, conversationId: originIdentity,
-      turnId: originIdentity, executionId: originIdentity.nullable() }).strict(),
-    z.object({ kind: z.literal("claim"), claimId: originUuid.nullable(), conversationId: originIdentity,
-      executionId: originIdentity }).strict(),
-    z.object({ kind: z.literal("none") }).strict(),
-  ]),
-}).strict().refine(value => value.mode === "legacy" ? value.bootId === null && value.writerEpoch === null :
-  value.bootId !== null && value.writerEpoch !== null);
-export type VerifiedEngineRequestOrigin = Omit<z.infer<typeof requestOriginSchema>, "version" | "clockId" | "spanId" | "flightId" | "producer">;
-type RequestOrigin = Readonly<z.infer<typeof requestOriginSchema>>;
 let requestCostClockDomainId: string | undefined;
 function clockUs(): number | null {
   try {
@@ -51,8 +26,7 @@ type RequestTimingState = { transactions: number; heldMs: number; waitMs: number
 export type RequestDatabaseCost = Readonly<{
   version: 1; scope: "application-query-port"; method: string; route: string; status: number | "error";
   clockDomainId: string; clockSource: "node-process-hrtime"; startedAtUs: number | null; completedAtUs: number | null;
-  clockCoverage: "complete" | "unavailable"; origin: RequestOrigin | null; originCoverage: "verified" | "unverified" | "conflict";
-  causalCoverage: "unavailable";
+  clockCoverage: "complete" | "unavailable";
   queriesStarted: number; queriesCompleted: number; queriesFailed: number; queriesInFlight: number;
   uncheckedClientCheckouts: number; checkoutsInFlight: number;
   transactions: number; commits: number; rollbacks: number;
@@ -65,8 +39,7 @@ type TransactionCost = { phase: "open" | "committed" | "rolled-back" | "unknown"
 type ResultCost = { state: DatabaseCostState; tx: TransactionCost; writes: number | null; rows: number | null; bytes: number | null; minimumRows: number;
   annotation?: DatabasePersistenceCost };
 type DatabaseCostState = {
-  startedAtUs: number | null; origin: RequestOrigin | null; originRaw: string | null;
-  originCoverage: "verified" | "unverified" | "conflict"; originRejected: boolean;
+  startedAtUs: number | null;
   queriesStarted: number; queriesCompleted: number; queriesFailed: number; queriesInFlight: number;
   uncheckedClientCheckouts: number; checkoutsInFlight: number;
   transactions: number; commits: number; rollbacks: number; statements: number; writes: number; observedRows: number;
@@ -80,7 +53,7 @@ export type RequestTimingMiddleware = MiddlewareHandler & {
 };
 
 function newDatabaseCost(): DatabaseCostState {
-  return { startedAtUs: clockUs(), origin: null, originRaw: null, originCoverage: "unverified", originRejected: false,
+  return { startedAtUs: clockUs(),
     queriesStarted: 0, queriesCompleted: 0, queriesFailed: 0, queriesInFlight: 0, uncheckedClientCheckouts: 0, checkoutsInFlight: 0, transactions: 0,
     commits: 0, rollbacks: 0, statements: 0, writes: 0, observedRows: 0, rows: 0, bytes: 0, committedBytes: 0,
     unknownWrites: 0, unknownRows: 0, unknownBytes: 0, unknownCommittedBytes: 0, unavailable: false,
@@ -475,10 +448,7 @@ function costSummary(state: DatabaseCostState, method: string, route: string, st
   return Object.freeze({ version: 1, scope: "application-query-port", method, route, status,
     clockDomainId: requestCostClockDomainId ??= randomUUID(), clockSource: "node-process-hrtime",
     startedAtUs: clockComplete ? state.startedAtUs : null, completedAtUs: clockComplete ? sampled : null,
-    clockCoverage: clockComplete ? "complete" : "unavailable", origin: state.origin, originCoverage: state.originCoverage,
-    // Authenticated producer provenance still does not establish a per-turn
-    // wait edge, especially for shared/pre-window background requests.
-    causalCoverage: "unavailable",
+    clockCoverage: clockComplete ? "complete" : "unavailable",
     queriesStarted: state.queriesStarted, queriesCompleted: state.queriesCompleted, queriesFailed: state.queriesFailed,
     queriesInFlight: state.queriesInFlight, transactions: state.transactions, commits: state.commits, rollbacks: state.rollbacks,
     uncheckedClientCheckouts: state.uncheckedClientCheckouts, checkoutsInFlight: state.checkoutsInFlight,
@@ -501,41 +471,6 @@ function appendSpan(timing: RequestTimingState, span: DatabaseTimingSpan): void 
 const callbackCosts = new AsyncLocalStorage<DatabaseCostState | undefined>();
 function currentDatabaseCost() { return callbackCosts.getStore() ?? active.getStore()?.cost; }
 const observedResults = new WeakMap<object, ResultCost>();
-
-/** Call only after the service independently authenticates the current engine
- * and validates its actual operation/body intent. The header is observation
- * input; it never authorizes a request or changes its result. */
-export function recordVerifiedEngineRequestOrigin(rawHeader: string | undefined, expected: VerifiedEngineRequestOrigin): boolean {
-  const state = currentDatabaseCost();
-  if (!state || state.closed) return false;
-  const reject = () => {
-    if (state.originCoverage === "verified") state.originCoverage = "conflict";
-    state.origin = null; state.originRaw = null; state.originRejected = true;
-    return false;
-  };
-  try {
-    if (!rawHeader || Buffer.byteLength(rawHeader) > 2048) return reject();
-    const parsed = requestOriginSchema.safeParse(JSON.parse(rawHeader));
-    if (!parsed.success || JSON.stringify(parsed.data) !== rawHeader) return reject();
-    const value = parsed.data;
-    if (value.organizationId !== expected.organizationId || value.workspaceId !== expected.workspaceId ||
-        value.generation !== expected.generation || value.engineInstanceId !== expected.engineInstanceId ||
-        value.mode !== expected.mode || value.bootId !== expected.bootId || value.writerEpoch !== expected.writerEpoch ||
-        value.operation !== expected.operation || value.intent.kind !== expected.intent.kind) return reject();
-    const intent = value.intent, actual = expected.intent;
-    if (intent.kind === "command" && (actual.kind !== "command" || intent.commandId !== actual.commandId ||
-        intent.conversationId !== actual.conversationId || intent.turnId !== actual.turnId || intent.executionId !== actual.executionId) ||
-        intent.kind === "claim" && (intent.claimId === null || actual.kind !== "claim" || intent.claimId !== actual.claimId ||
-          intent.conversationId !== actual.conversationId || intent.executionId !== actual.executionId)) return reject();
-    if (state.originRejected || state.originRaw !== null && state.originRaw !== rawHeader) {
-      state.originCoverage = "conflict";
-      return reject();
-    }
-    state.origin = Object.freeze({ ...value, intent: Object.freeze(value.intent) });
-    state.originRaw = rawHeader; state.originCoverage = "verified";
-    return true;
-  } catch { return reject(); }
-}
 
 export type TransactionTimingSummary = Readonly<{ transactions: number; waitMs: number; heldMs: number }>;
 type TransactionTimingScope = { summary: { transactions: number; waitMs: number; heldMs: number }; closed: boolean; parent: TransactionTimingScope | undefined };

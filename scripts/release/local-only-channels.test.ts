@@ -1,9 +1,7 @@
 import { readFileSync } from "node:fs";
 import { load } from "js-yaml";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { promotionConfig } from "./contracts";
-import { hostedWorkerPromotionRequired } from "./guard";
-import { reusableWorker } from "./worker-reuse";
 import { releaseChannelEnvironment } from "./channel-policy.mjs";
 
 const sourceSha = "a".repeat(40);
@@ -11,7 +9,7 @@ function environment(channel: "beta" | "production") {
   return {
     RELEASE_CHANNEL: channel, RELEASE_SHA: sourceSha, RELEASE_BRANCH: "release/1.2.3", GITHUB_SHA: sourceSha,
     GITHUB_REPOSITORY: "example/zeros", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1",
-    ZEROS_HOSTED_PROMOTION: "enabled", ZEROS_CLOUD_WORKSPACES_ENABLED: "true", ZEROS_WORKER_PROMOTION: "enabled",
+    ZEROS_HOSTED_PROMOTION: "enabled", ZEROS_CLOUD_WORKSPACES_ENABLED: "true",
     RAILWAY_PROJECT_ID: "11111111-1111-4111-8111-111111111111", RAILWAY_ENVIRONMENT_ID: "22222222-2222-4222-8222-222222222222",
     RAILWAY_SERVICE_ID: "33333333-3333-4333-8333-333333333333", PLANETSCALE_ORG: "example",
     PLANETSCALE_DATABASE: `zeros-control-plane-${channel}`, PLANETSCALE_BRANCH: "main",
@@ -25,38 +23,29 @@ function environment(channel: "beta" | "production") {
 describe("release channel environment", () => {
   it("preserves the existing exact-true validation on an unpaused channel", () => {
     expect(releaseChannelEnvironment("alpha", {})).toEqual({
-      ZEROS_CLOUD_WORKSPACES_ENABLED: "false", ZEROS_WORKER_PROMOTION: "disabled",
+      ZEROS_CLOUD_WORKSPACES_ENABLED: "false",
     });
-    expect(releaseChannelEnvironment("alpha", { ZEROS_CLOUD_WORKSPACES_ENABLED: "true", ZEROS_WORKER_PROMOTION: "enabled" }))
-      .toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "true", ZEROS_WORKER_PROMOTION: "enabled" });
+    expect(releaseChannelEnvironment("alpha", { ZEROS_CLOUD_WORKSPACES_ENABLED: "true" }))
+      .toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "true" });
     expect(() => releaseChannelEnvironment("alpha", { ZEROS_CLOUD_WORKSPACES_ENABLED: "TRUE" }))
       .toThrow("Invalid desktop cloud capability");
   });
 
   it("makes stale cloud-only settings inert while the channel is paused", () => {
-    expect(releaseChannelEnvironment("beta", { ZEROS_CLOUD_WORKSPACES_ENABLED: "obsolete", ZEROS_WORKER_PROMOTION: "enabled" }))
-      .toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "false", ZEROS_WORKER_PROMOTION: "disabled" });
+    expect(releaseChannelEnvironment("beta", { ZEROS_CLOUD_WORKSPACES_ENABLED: "obsolete" }))
+      .toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "false" });
     expect(() => releaseChannelEnvironment("unknown", {})).toThrow("Unknown cloud release channel");
   });
 });
 
 describe.each(["beta", "production"] as const)("%s Local release", channel => {
-  it("disables cloud and qualification despite stale protected cloud settings", () => {
-    expect(promotionConfig(environment(channel))).toMatchObject({ cloudRequired: false, requireQualifiedWorker: false });
+  it("disables cloud despite stale protected cloud settings", () => {
+    expect(promotionConfig(environment(channel))).toMatchObject({ cloudRequired: false });
   });
 
-  it("does not enter retired worker promotion or discover a runner", async () => {
-    const fetch = vi.fn();
-    await expect(hostedWorkerPromotionRequired(true, { channel, sourceSha }, { fetch })).resolves.toBe(false);
-    expect(fetch).not.toHaveBeenCalled();
-  });
 
-  it("does not require the old cloud readiness or worker tree before a Local-only deployment", async () => {
-    const hash = vi.fn();
-    await expect(reusableWorker({ channel, sourceSha, cloudRequired: false, requireQualifiedWorker: false },
-      { ready: false, cloud: { enabled: true, ready: false, state: "unready" } }, hash)).resolves.toBeUndefined();
-    expect(hash).not.toHaveBeenCalled();
-  });
+
+
 
   it("keeps migration target and provider authority validation mandatory", () => {
     for (const patch of [{ PLANETSCALE_DATABASE: "foreign-database" }, { PLANETSCALE_SERVICE_TOKEN: "" },
@@ -70,7 +59,7 @@ describe.each(["beta", "production"] as const)("%s Local release", channel => {
       jobs: Record<string, { env?: Record<string, string>; needs?: string[]; steps?: { run?: string }[] }>;
     };
     expect(releaseChannelEnvironment(channel, environment(channel))).toEqual({
-      ZEROS_CLOUD_WORKSPACES_ENABLED: "false", ZEROS_WORKER_PROMOTION: "disabled",
+      ZEROS_CLOUD_WORKSPACES_ENABLED: "false",
     });
     for (const job of [workflow.jobs.build, workflow.jobs.publish]) {
       expect(job.steps?.some(step => step.run === "node scripts/release/channel-policy.mjs --github-env")).toBe(true);

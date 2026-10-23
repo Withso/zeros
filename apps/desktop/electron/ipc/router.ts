@@ -49,7 +49,6 @@ const commandTable: Record<string, CommandHandler> = {
   // ── App info (runtime mode / version) — for analytics routing ──
   app_info: notImpl("app_info", 1),
   local_navigation_ready: notImpl("local_navigation_ready", 1),
-  app_user_presence: notImpl("app_user_presence", 1),
   cursor_subscription: notImpl("cursor_subscription", 1),
   provider_subscription: notImpl("provider_subscription", 1),
   cloud_provider_auth: notImpl("cloud_provider_auth", 1),
@@ -79,37 +78,7 @@ const commandTable: Record<string, CommandHandler> = {
   native_app_names: notImpl("native_app_names", 3),
   tool_artwork_images: notImpl("tool_artwork_images", 3),
   open_in_app: notImpl("open_in_app", 3),
-  cloud_workspace_ssh_copy: notImpl("cloud_workspace_ssh_copy", 3),
-  cloud_workspace_ssh_terminal: notImpl("cloud_workspace_ssh_terminal", 3),
-  cloud_workspace_ssh_ide: notImpl("cloud_workspace_ssh_ide", 3),
-  cloud_workspace_tunnel_start: notImpl("cloud_workspace_tunnel_start", 3),
-  cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
-  cloud_workspace_access_context: notImpl("cloud_workspace_access_context", 3),
-  cloud_workspace_access_list: notImpl("cloud_workspace_access_list", 3),
-  cloud_workspace_port_forwarding_get: notImpl("cloud_workspace_port_forwarding_get", 3),
-  cloud_workspace_port_forwarding_set: notImpl("cloud_workspace_port_forwarding_set", 3),
-  cloud_workspace_port_forwarding_runtime: notImpl("cloud_workspace_port_forwarding_runtime", 3),
-  cloud_workspace_port_forwarding_forget: notImpl("cloud_workspace_port_forwarding_forget", 3),
-  cloud_transcript_cache_read: notImpl("cloud_transcript_cache_read", 3),
-  cloud_transcript_cache_write: notImpl("cloud_transcript_cache_write", 3),
-  cloud_transcript_cache_prune: notImpl("cloud_transcript_cache_prune", 3),
-  cloud_workspace_runtime_open: notImpl("cloud_workspace_runtime_open", 3),
   cloud_workspace_capability: notImpl("cloud_workspace_capability", 3),
-  cloud_workspace_runtime_refresh: notImpl(
-    "cloud_workspace_runtime_refresh",
-    3,
-  ),
-  cloud_workspace_runtime_close: notImpl("cloud_workspace_runtime_close", 3),
-  cloud_workspace_sdk_runtime_open: notImpl("cloud_workspace_sdk_runtime_open", 3),
-  cloud_workspace_sdk_runtime_refresh: notImpl("cloud_workspace_sdk_runtime_refresh", 3),
-  cloud_workspace_sdk_runtime_legacy: notImpl("cloud_workspace_sdk_runtime_legacy", 3),
-  cloud_workspace_sdk_runtime_proof: notImpl("cloud_workspace_sdk_runtime_proof", 3),
-  cloud_workspace_sdk_runtime_capabilities: notImpl("cloud_workspace_sdk_runtime_capabilities", 3),
-  cloud_workspace_sdk_runtime_connection: notImpl("cloud_workspace_sdk_runtime_connection", 3),
-  cloud_workspace_sdk_runtime_command: notImpl("cloud_workspace_sdk_runtime_command", 3),
-  cloud_workspace_sdk_stream: notImpl("cloud_workspace_sdk_stream", 3),
-  cloud_workspace_outbox_enqueue: notImpl("cloud_workspace_outbox_enqueue", 3),
-  cloud_workspace_outbox_list: notImpl("cloud_workspace_outbox_list", 3),
 
   // ── WorkOS session at rest — main owns the full token pair; the renderer only
   // ever gets a live access token or decoded identity claims. The pair is written
@@ -189,7 +158,6 @@ const commandTable: Record<string, CommandHandler> = {
   ),
   "browser:revoke-preview-origin": notImpl("browser:revoke-preview-origin", 0),
   "browser:control-iframe": notImpl("browser:control-iframe", 0),
-  "browser:open-cloud-preview": notImpl("browser:open-cloud-preview", 0),
   "browser:list-local-servers": notImpl("browser:list-local-servers", 0),
   "browser:open-window": notImpl("browser:open-window", 0),
   "browser:inspect-frame": notImpl("browser:inspect-frame", 0),
@@ -331,7 +299,7 @@ export function registerIpcHandlers(): void {
       IS_LOCAL_DEVELOPMENT &&
       (cmd.startsWith("auth_") ||
         cmd.startsWith("cloud_") ||
-        ["gh_app_connect", "gh_cloud", "browser:open-cloud-preview"].includes(cmd))
+        ["gh_app_connect", "gh_cloud"].includes(cmd))
     ) {
       throw new Error("Account and cloud services are unavailable in Zeros Local.");
     }

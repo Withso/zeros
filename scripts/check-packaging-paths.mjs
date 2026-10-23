@@ -170,7 +170,7 @@ for (const { label, text, file, parent, publication } of channelReleaseWorkflows
   requireWorkflowToken(text, label, `ZEROS_CHANNEL: ${ch}`);
   if (ch === "alpha") {
     // These job/step identities are read by the publication baseline client.
-    // A green supersession skips the one callable transaction, including runtime.
+    // A green supersession skips the one callable transaction, including hosted services.
     requireWorkflowToken(text, label, "name: Publish Alpha feed");
     requireWorkflowToken(text, label, 'name: Publish rolling "alpha" prerelease');
     requireWorkflowToken(parent, label, "ready: ${{ steps.barrier.outputs.ready }}");
@@ -181,38 +181,33 @@ for (const { label, text, file, parent, publication } of channelReleaseWorkflows
     requireWorkflowToken(parent, label, "cancel-in-progress: false");
     requireWorkflowToken(publication, label, "workflow_call:");
     requireWorkflowToken(publication, label, "needs: entry");
-    requireWorkflowToken(publication, label, "needs: [entry, hosted]", 2);
+    requireWorkflowToken(publication, label, "needs: [entry, hosted]");
     requireWorkflowToken(parent, label, "ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
     requireWorkflowToken(parent, label, "ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
     for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"]]) {
       requireWorkflowToken(parent, label, `${input}: \${{ vars.${variable} }}`);
       requireWorkflowToken(publication, label, `${input}: \${{ inputs.${input} }}`);
-      requireWorkflowToken(publication, label, `${variable}: \${{ inputs.${input} }}`, 3);
+      requireWorkflowToken(publication, label, `${variable}: \${{ inputs.${input} }}`, 2);
     }
     requireWorkflowToken(parent, label, "alpha_prepared_version: ${{ needs.metadata.outputs.version }}");
-    requireWorkflowToken(publication, label, "ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}", 3);
+    requireWorkflowToken(publication, label, "ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}", 2);
     requireWorkflowToken(publication, label, "alpha-build-cli.ts --wait desktop");
-    requireWorkflowToken(publication, label, "alpha-build-cli.ts --wait runtime");
     requireWorkflowToken(publication, label, "alpha-build-cli.ts --verify-metadata");
-    requireWorkflowToken(publication, label, "alpha-build-cli.ts --verify-producer runtime");
     requireWorkflowToken(text, label, "name: Save Alpha admission receipt");
     requireWorkflowToken(text, label, "if: success() && steps.barrier.outputs.admission_issued == 'true'");
     requireWorkflowToken(text, label, "name: alpha-admission-${{ github.sha }}");
-    requireWorkflowToken(text, label, "pnpm exec tsx scripts/release/ci-cli.ts --verify");
+    requireWorkflowToken(publication, label, "pnpm exec tsx scripts/release/alpha-transaction-cli.ts");
     requireWorkflowToken(text, label, "pnpm exec tsx scripts/release/publication-cli.ts");
   }
 }
 
 // Reusable defaults retain full CI and strict freshness. Only the automatic
-// Alpha parent supplies these inputs, including through the nested worker.
+// Alpha parent supplies these inputs to the hosted publication.
 const hostedPromotionWorkflow = readFileSync(".github/workflows/hosted-promotion.yml", "utf8");
-const workerPromotionWorkflow = readFileSync(".github/workflows/cloud-worker-promotion.yml", "utf8");
+requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", "pnpm exec tsx scripts/release/ci-cli.ts --verify");
 for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"], ["alpha_prepared_version", "ALPHA_PREPARED_VERSION"]]) {
   requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${input}:`);
-  requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${input}: \${{ inputs.${input} }}`);
   requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${variable}: \${{ inputs.${input} }}`, 3);
-  requireWorkflowToken(workerPromotionWorkflow, "worker promotion workflow", `      ${input}:`);
-  requireWorkflowToken(workerPromotionWorkflow, "worker promotion workflow", `      ${variable}: \${{ inputs.${input} }}`);
 }
 
 for (const from of froms) {

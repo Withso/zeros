@@ -150,6 +150,8 @@ interface DispatcherComposerProps {
   mode?: WorkspaceMode;
   /** Design-mode presentation + create. Required when `mode` is "design". */
   design?: DispatcherDesignCreate;
+  /** Native permission modes (Plan, Ask, …). Off for cloud workspaces for now. */
+  permissionModes?: boolean;
 }
 
 export function DispatcherComposer({
@@ -161,6 +163,7 @@ export function DispatcherComposer({
   disabled = false,
   mode = "code",
   design,
+  permissionModes = true,
 }: DispatcherComposerProps) {
   const designMode = mode === "design" && design !== undefined;
   const [selection, setSelection] = useState<AgentModelSelection | null>(null);
@@ -325,7 +328,7 @@ export function DispatcherComposer({
   // Manual/Accept Edits/Plan/Auto/Bypass — Haiku drops Auto; Codex: Ask for
   // approval/Approve for me/Full access; Cursor: Ask/Edit). Shown whenever the
   // agent has a native-mode vocabulary (now includes Cursor).
-  const showPermissionToggle = agentHasPermissionMenu(agentId, model);
+  const showPermissionToggle = permissionModes && agentHasPermissionMenu(agentId, model);
 
   return (
     <div

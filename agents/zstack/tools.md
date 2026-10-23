@@ -3,7 +3,7 @@
 These tools help an agent run the existing engineering checks and record what
 they proved. They do not change required CI statuses, deploy anything, or merge
 PRs. Local Personal and organization-local checks use the same app driver;
-cloud verification uses the existing Alpha fixture and hourly workflow.
+cloud verification is the deployed Dev gate0 probe.
 
 ## Plan and verify a change
 
@@ -46,36 +46,38 @@ Local receipts are unsigned. Source fingerprints bind an observation, not a
 trusted CI attestation. Tokens/cost are `null` when the host does not provide
 them; no estimate is invented. Keep receipts outside the checkout.
 
-## Local and cloud scenarios
+## Local UI and live cloud proof
 
 ```sh
 node scripts/zstack/verify.mjs local-ui --shard 1/3
-node scripts/zstack/verify.mjs cloud-health --source <intended-main-sha>
-node scripts/zstack/verify.mjs cloud-dispatch --source <intended-main-sha>
-node scripts/zstack/verify.mjs cloud-status --source <intended-main-sha>
 ```
 
-Each command plans by default. Add `--execute --receipt <file>` only for the
+The command plans by default. Add `--execute --receipt <file>` only for the
 verification authorized by the task. `local-ui` invokes `pnpm test:ui-smoke`,
 the existing Playwright app driver, with a twenty-minute deadline. A shard
 does not claim the remaining shards, and Linux never claims macOS engine
 smoke. The driver retains the app's Local and cloud fixture scenarios.
 
-Cloud helpers require the hourly workflow/helpers from PR #493. Health uses
-the Alpha-only zeros-dev contract and its canonical credential store. Dispatch
-uses `pnpm agent:gh workflow run zeros-dev-e2e.yml --ref main`; model keys stay
-in Actions. It reports `dispatch_requested`, with no invented workflow run ID
-and no E2E pass. Concurrent dispatches cannot be correlated from that response.
-Status makes bounded public Actions reads and reuses the canary's trusted-run,
-executed-lifecycle and completion-freshness checks. Only the expected main SHA
-can pass, and a newer active run leaves completed evidence in force. This
-qualifies that main source, not uncommitted local changes.
+This tool has no cloud driver. The live cloud proof is the deployed Dev gate0
+probe, run by the integrator with the task's Alpha authorization:
 
-The hourly job preserves signed cleanup receipts and names its failing stage.
-Use the existing receipt download and recovery procedure in `docs/zeros-dev.md`
-for product-stage diagnostics; this wrapper neither imports an untrusted
-artifact into the fixture nor treats an unsigned local receipt as its signed
-cleanup authority. No fixture mutation occurs during a plan or status read.
+```sh
+pnpm --dir apps/control-plane cloud-v2:gate0 --api "$ZEROS_GATE0_API_URL" --runtime <runtime-sha256>
+```
+
+It creates one disposable workspace from the organization's existing Cloud
+Computer and checks:
+
+- a native turn for each of Claude, Codex and Cursor;
+- terminal, file and Git round trips;
+- the mirrored history, including offline reads without a wake;
+- one stop and one wake;
+- deletion.
+
+It starts a real Boat VM, so run it once per deployed change, not per edit.
+Its output names only the failing stage. It never prints response bodies,
+URLs or credentials. A green gate0 qualifies that deployed backend and
+runtime, not uncommitted local changes.
 
 ## Replay and seeded checks
 

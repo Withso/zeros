@@ -271,17 +271,13 @@ export interface McpRemoteServerRegistration<T extends "http" | "sse"> {
 export interface AgentGatewayOptions {
   projectRoot: string;
   events: AgentGatewayEvents;
-  /** Production injects the engine-wide actor router: local Code runs on the
-   * native host and cloud may force its qualified worker boundary. Composer
-   * mode does not select an execution backend. */
+  /** Production injects the engine-wide actor router: Code runs on the native
+   * host. Composer mode does not select an execution backend. */
   executionBoundary?: ExecutionBoundary;
-  /** Browser-preview ingress. Local sessions use loopback; a qualified cloud
-   * coordinator injects a root-owned signed-port factory. */
+  /** Browser-preview ingress. Local sessions use loopback. */
   previewGatewayFactory?: BoundaryPreviewGatewayFactory;
   /** Engine-owned product tools, scoped to one native Code execution. */
   sessionToolFactory?: import("./session-tools").AgentSessionToolFactory;
-  /** Trusted control-plane admission for private cloud provider processes. */
-  cloudAgentExecutionFactory?: import("./cloud-provider-execution").CloudAgentExecutionFactory;
 }
 
 // ── AgentAdapter — the per-CLI contract ──────────────────
@@ -697,12 +693,6 @@ export interface AgentAdapter {
 
   /** Abort the current turn. */
   cancel(opts: { sessionId: string }): Promise<void>;
-  /** Exact process ownership, including provider-native ambient work. Cloud
-   * retention uses this in addition to the public active-task snapshot. */
-  backgroundWorkActive?(sessionId:string):boolean|Promise<boolean>;
-  /** Reject configuration requiring native process replacement before a
-   * retained cloud history owner is assigned to the next command. */
-  assertBackgroundReuse?(opts:{sessionId:string;env:Record<string,string>;modeId?:string}):void;
 
   /** Stop one provider-owned background task without interrupting the parent
    * turn or sibling work. Optional for providers with no background-task API. */

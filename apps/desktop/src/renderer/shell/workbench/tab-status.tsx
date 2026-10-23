@@ -18,8 +18,6 @@ import {
   registerWorkbenchFrameVisibility,
   useWorkbenchAvailability,
 } from "../../state/workbench-availability";
-import { openWorkbenchTerminal } from "./open-terminal";
-import { SETUP_SUBTAB } from "../terminal/use-setup-control";
 import {
   describeWorkbenchFailure,
   describeWorkbenchEmptyState,
@@ -211,28 +209,18 @@ export function WorkbenchTabFrame({
     key,
     status: null,
   });
-  let status =
+  const status =
     nextStatus ??
     ((snapshot.busy ||
       (snapshot.pending && lastStatus.current.status?.tone === "error")) &&
     lastStatus.current.key === key
       ? lastStatus.current.status
       : null);
-  if (status?.action === "Open Setup" && tab.terminalId === SETUP_SUBTAB)
-    status = { ...status, action: undefined };
   lastStatus.current = { key, status };
   const notice = !status && availability.connection === "connected" ? snapshot.notice : null;
   const blocked = status !== null && !snapshot.hasContent;
   const retry = useCallback(() => {
     if (!visible) return;
-    if (status?.action === "Open Setup") {
-      openWorkbenchTerminal(folder, {
-        terminalId: SETUP_SUBTAB,
-        title: "Setup",
-        placement: "tab",
-      });
-      return;
-    }
     void sources.retry(
       availability.connection !== "connected" ||
         availabilityStatus?.action === "Retry"
@@ -245,7 +233,6 @@ export function WorkbenchTabFrame({
     availabilityStatus?.action,
     folder,
     sources,
-    status?.action,
   ]);
   return (
     <StatusContext.Provider value={context}>

@@ -19,10 +19,8 @@
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { publishCloudWorkspacePath } from "./cloud-workspace-ownership";
 import path from "node:path";
 import { isSensitiveRepoPath } from "./read-file";
-import type { QualifiedCloudFilePolicy } from "./cloud-file-policy";
 import { inspectExpectedWorkspaceContent, WorkspaceFileGuardError } from "./file-content-guard";
 
 // Keep in sync with read-file.ts MAX_TEXT_BYTES (the editor is a text surface).
@@ -68,8 +66,6 @@ export function writeWorkspaceFile(
   content: string,
   opts?: {
     remote?: boolean;
-    cloudPolicy?: QualifiedCloudFilePolicy;
-    expectedCloudTarget?: string;
     expectedContent?: string | null;
     /** Engine-only regular-file mode from validated Git metadata. Applied only
      * when expectedContent is null and the destination remains absent. */
@@ -99,8 +95,7 @@ export function writeWorkspaceFile(
   let expectedGeneration: string | undefined;
   if (guarded) {
     try {
-      opts?.cloudPolicy?.assertPath(rel, true);
-      if (remote && !opts?.cloudPolicy && isSensitiveRepoPath(path.relative(root, target))) {
+      if (remote && isSensitiveRepoPath(path.relative(root, target))) {
         return fail(rel, "refusing to write a secret/credential file over a remote connection");
       }
       expectedGeneration = inspect();
@@ -112,40 +107,6 @@ export function writeWorkspaceFile(
       throw new WorkspaceFileGuardError("The file changed. Refresh it before saving; your draft is still available.");
     }
   };
-  if (opts?.cloudPolicy) {
-    let parent: ReturnType<QualifiedCloudFilePolicy["openWriteParent"]> | undefined;
-    let temporary: string | undefined;
-    try {
-      parent = opts.cloudPolicy.openWriteParent(rel, opts.expectedCloudTarget);
-      const basename = path.basename(parent.target);
-      temporary = `/proc/self/fd/${parent.fd}/${basename}.tmp-${randomUUID()}`;
-      const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-      try {
-        fs.writeFileSync(fd, content, "utf8");
-        try {
-          fs.fchmodSync(fd, fs.statSync(parent.target).mode);
-        } catch (error) {
-          if (
-            (error as NodeJS.ErrnoException).code === "ENOENT" &&
-            creationMode !== undefined
-          )
-            fs.fchmodSync(fd, creationMode);
-        }
-        opts.cloudPolicy.assertDescriptor(parent.fd, parent.directory, true);
-        publishCloudWorkspacePath(path.join(parent.directory, path.basename(temporary)), fd);
-      } finally { fs.closeSync(fd); }
-      opts.cloudPolicy.assertPath(rel, true);
-      opts.cloudPolicy.assertDescriptor(parent.fd, parent.directory, true);
-      assertStillExpected();
-      fs.renameSync(temporary, `/proc/self/fd/${parent.fd}/${basename}`);
-      return { kind: "success", path: rel, bytes };
-    } catch (error) { return fail(rel, error instanceof WorkspaceFileGuardError ? error.message : "Cloud file access is outside the admitted repository policy"); }
-    finally {
-      if (temporary) { try { fs.rmSync(temporary, { force: true }); } catch { /* failed write */ } }
-      if (parent) fs.closeSync(parent.fd);
-    }
-  }
-
   // Secret gate for a REMOTE client, on the RESOLVED relative path (so '.env/.'
   // can't slip past) and BEFORE touching disk.
   const SECRET_REFUSAL =
@@ -212,7 +173,6 @@ export function writeWorkspaceFile(
         )
           fs.chmodSync(tmp, creationMode);
       }
-      publishCloudWorkspacePath(tmp);
       assertStillExpected();
       fs.renameSync(tmp, target);
     } catch (err) {

@@ -4,8 +4,6 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { currentCloudFilePolicy } from "./cloud-file-policy";
-import { publishCloudWorkspacePath } from "./cloud-workspace-ownership";
 import { runFile } from "../git/git-exec";
 import {
   assertContextDirectory,
@@ -96,7 +94,6 @@ async function appendIgnore(target: string, body: string): Promise<boolean> {
   try {
     if (!(await handle.stat()).isFile())
       throw new Error("gitignore is not a regular file");
-    publishCloudWorkspacePath(target, handle.fd);
     const existing = await handle.readFile("utf8");
     if (existing.includes(body)) return false;
     await handle.writeFile(
@@ -134,8 +131,6 @@ export async function migrateLegacyContextDirectory(
       );
     const source = path.join(sourceRoot, relative);
     const target = path.join(targetRoot, relative);
-    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, source), true);
-    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, target), true);
     const stat = await fs.lstat(source);
     const existing = await statIfPresent(target);
     if (stat.isDirectory()) {
@@ -189,7 +184,6 @@ export async function migrateLegacyContextDirectory(
     const target = path.join(targetRoot, relative);
     await assertContextDirectory(target, workspaceRoot);
     await fs.mkdir(target, { recursive: true });
-    publishCloudWorkspacePath(target);
   }
   // Preserve the visibility of previously shared files. Already-ignored
   // scratch within shared stays ignored; tracked files count as shared even
@@ -247,7 +241,6 @@ export async function migrateLegacyContextDirectory(
       const code = (error as NodeJS.ErrnoException).code;
       // Another process may already have completed this exact move.
       if (code === "ENOENT" && (await statIfPresent(target))) {
-        publishCloudWorkspacePath(target);
         continue;
       }
       if (code !== "EEXIST") throw error;
@@ -262,7 +255,6 @@ export async function migrateLegacyContextDirectory(
     await retireLegacyContextFile(workspaceRoot, relative, copiedFileMatches);
     // Until retirement the destination can still alias the legacy inode.
     // Publication refuses that hardlink, so grant ownership only afterward.
-    publishCloudWorkspacePath(target);
   }
   for (const relative of directories.reverse()) {
     await fs

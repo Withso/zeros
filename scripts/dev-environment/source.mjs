@@ -13,24 +13,17 @@ export function deployableSourcePath(file) {
   return file.includes("/") ? ROOTS.has(file.split("/")[0]) : ROOT_FILE.test(file);
 }
 
-/** Native engine, runtime/qualification scripts, shared packages, assets and
- * dependency/build contracts. Renderer and control-plane edits do not rebuild
- * a VM. New worker build inputs must be added here alongside their build step. */
+/** The worker digest is a persisted Dev receipt field. V2 hashes only the
+ * standalone worker, its shared protocol and dependency/build contracts. */
 export function workerSourcePath(file) {
   if (!deployableSourcePath(file)) return false;
   if (!file.includes("/")) return true;
-  if (/^(?:packages|catalogs|styles|third_party|patches|types)\//.test(file)) return true;
-  if (file === "apps/desktop/src/cli.ts" || file.startsWith("apps/desktop/src/engine/") || file.startsWith("apps/desktop/src/assets/")) return true;
-  // The release image kit shares its sanitation/attestation scripts with the
-  // organization image builder; the standalone control plane owns that module.
-  if (file === "apps/control-plane/src/cloud-workspaces/computer-image-scripts.ts") return true;
-  if (file === "scripts/dev-environment/provider-http.mjs") return true;
-  return file.startsWith("scripts/cloud-workspace-validation/") ||
-    /^scripts\/(?:stage-ripgrep|codegen-codex(?:-lib)?|fix-node-pty-helper)\.(?:mjs|cjs)$/.test(file);
+  return file.startsWith("apps/cloud-worker/") || file.startsWith("packages/protocol/") ||
+    file.startsWith("patches/") || file.startsWith("types/");
 }
 
 /** Desktop renderer/main files are served or rebuilt on the Mac. They are not
- * inputs to the hosted API, authentication facade, or cloud worker image. All
+ * inputs to the hosted API, authentication facade, or cloud worker. All
  * other deployable inputs stay conservative, including shared build scripts. */
 export function hostedSourcePath(file) {
   return deployableSourcePath(file) && !file.startsWith("apps/desktop/src/renderer/") &&
@@ -68,8 +61,8 @@ function assertRegularSource(root, relative) {
 }
 
 /** Include intended tracked and untracked source without touching the user's
- * index/branch. A private clean commit lets the existing worker image kit use
- * its exact-source attestation for an uncommitted development candidate. */
+ * index/branch. A private clean commit identifies an uncommitted development
+ * candidate for deployment and runtime packaging. */
 export function captureDevelopmentSource(repositoryRoot, stateDirectory) {
   const root = fs.realpathSync(repositoryRoot), parent = fs.realpathSync(stateDirectory);
   if (parent === root || parent.startsWith(root + path.sep)) throw new Error("Dev source snapshots must live outside the checkout");

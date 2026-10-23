@@ -123,8 +123,9 @@ reinterprets product ownership.
   [Identity linking](https://workos.com/docs/authkit/identity-linking).
 - `user.updated` refreshes bounded profile data. `user.deleted` disables the
   identity and Zeros account, revokes all known browser/desktop sessions and
-  cloud endpoint grants, and removes collaborative access. Personal and all
-  product data remain preserved for reviewed recovery or retention policy.
+  schedules the account's v2 workspaces for deletion, and removes collaborative
+  access. Personal data stays on the device; remaining hosted data follows the
+  reviewed retention policy.
 - The independent Zeros GitHub App remains the sole owner of repository
   authorization. WorkOS login must not request extra GitHub scopes or return
   provider access/refresh tokens.

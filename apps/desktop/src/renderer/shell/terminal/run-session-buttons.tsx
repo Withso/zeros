@@ -2,7 +2,7 @@ import { Globe, Square } from "lucide-react";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { WORKBENCH_TITLE_ACTION_CLS } from "../workbench/tab-chrome";
-import { workspacePreviewAvailable, warmCloudPreviewContext } from "../../platform/cloud-workspace-access";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
@@ -29,7 +29,6 @@ export function RunSessionButtons({
   const canEdit = useCloudWorkspaceCanEdit(folderKey);
   const previewAvailable = workspacePreviewAvailable(folderKey ?? "") && (!isCloudWorkspace(folderKey) || (cloudPreviews && canEdit));
   const warmPreview = () => {
-    if (cloudPreviews && canEdit && isCloudWorkspace(folderKey)) void warmCloudPreviewContext().catch(() => undefined);
   };
   // The cache supplies normalized HTTP(S) URLs; display their effective port.
   const preview = previewUrl ? new URL(previewUrl) : null;

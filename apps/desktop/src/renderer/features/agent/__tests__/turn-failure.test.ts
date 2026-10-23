@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
 import { turnFailureForCard } from "../turn-failure";
 import { TurnFailureCard } from "../turn-failure-card";
+import { AgentNoticeText } from "../agent-notice";
+import { metaForEvent } from "../renderers/event-meta";
+import { renderDetail } from "../renderers/event-row-renderer";
+import type { RendererContext } from "../renderers/types";
 
 const notice: AgentMessage = {
   id: "n1",
@@ -16,6 +20,24 @@ const notice: AgentMessage = {
 };
 
 describe("persistent turn failure card", () => {
+  it("keeps a persisted OpenAI model refusal's private diagnostics out of every chat presentation", () => {
+    const message = "Codex: unexpected status 403 Forbidden: Project `proj_fixture` does not have access to model `gpt-6.1-sol`, url: https://proxy.example.test/v2/cloud/proxy/openai/responses, cf-ray: fixture-ray, request id: fixture-request";
+    const event = JSON.parse(JSON.stringify({ ...notice, message }));
+    const failure = turnFailureForCard({ events: [event], turnId: "u1", status: "failed" })!;
+    const presentations = [
+      renderToStaticMarkup(createElement(TurnFailureCard, { failure })),
+      renderToStaticMarkup(createElement(AgentNoticeText, { message })),
+      renderToStaticMarkup(renderDetail(event, {} as RendererContext)),
+      metaForEvent(event).target,
+    ];
+    for (const text of presentations) {
+      expect(text).toContain("Pick another model.");
+      expect(text).toContain("GPT-6.1 Sol");
+      expect(text).not.toMatch(/proj_fixture|https:|fixture-ray|fixture-request/);
+    }
+    expect(event.message).toBe(message); // Presentation never rewrites diagnostics/history.
+  });
+
   it("uses the persisted organization-settings reason with a single Retry action", () => {
     const failure = turnFailureForCard({ events: JSON.parse(JSON.stringify([{ ...notice, code: "org_config_required_unavailable", message: "Native settings service is unavailable. Try to sign in." }])), turnId: "u1", status: "failed" })!;
     expect(failure).toEqual({ kind: "protocol-error", message: "Claude couldn't load your organization's required settings. Check your connection, then retry.", newChatAllowed: false });

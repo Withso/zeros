@@ -1,5 +1,3 @@
-import type { CloudAdmissionState } from "./cloud-admission-failure";
-import type { CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 // ──────────────────────────────────────────────────────────
 // Agent session — type definitions + pure utilities
 // ──────────────────────────────────────────────────────────
@@ -106,8 +104,6 @@ export interface AgentUsage {
 }
 
 export interface AgentSessionState {
-  /** Cloud-only refusal before provider execution; independent of local auth. */
-  cloudAdmissionFailure?: CloudAdmissionState | null;
   /** Renderer-owned cloud FIFO readiness; Local sessions never set it. */
   cloudSendWait?: { state: "waiting" | "failed"; phase?: "sending" | "starting-workspace"; message?: string; turnId?: string; startedAt?: number };
   /** Native dispatch is pending; only an exact accepted turn starts its clock. */
@@ -157,11 +153,10 @@ export interface AgentSessionState {
    *  `loading` is an explicit cold-read state so an empty array can never be
    *  mistaken for a genuinely new chat while SQLite is being rehydrated. */
   transcriptState: "resident" | "cold" | "loading";
-  /** Verified cloud presentation may paint while authoritative hydration is
+  /** A Local cached window may paint while authoritative hydration is
    * pending. It never grants admission, completes a turn or drains a queue.
-   * Only a CP/cache window carries this proof; native live rows are separate. */
-  /** `empty`: a Local chat known to be empty paints its empty state. */
-  transcriptPresentation: { source: "cache" | "control-plane"; restoreHead?: CloudHistoryRestoreFence; nativeObservation?: true; empty?: true } | null;
+   * `empty`: a Local chat known to be empty paints its empty state. */
+  transcriptPresentation: { source: "cache"; empty?: true } | null;
   /** A durable transcript update arrived while the payload was cold/loading.
    *  Raw streaming deltas are deliberately not folded into an empty array;
    *  reopening performs an exact SQLite window read instead. */
@@ -272,6 +267,7 @@ export interface AgentSessionControls {
    *  auth screen can render the advertised auth methods. Lets the UI honour
    *  whatever the agent tells us without hardcoding per-vendor methods. */
   initAgent(agentId: string): Promise<InitializeResponse>;
+  refreshModelCatalog?(): void;
   /** Create a new session with the given agent id. */
   startSession(agentId: string, options?: StartSessionOptions): Promise<void>;
   /** Send a user prompt. Enqueues a user message immediately.

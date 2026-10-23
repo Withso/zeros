@@ -36,7 +36,6 @@ jobs:
     environment: ${{ inputs.channel }}
     outputs:
       enabled: ${{ steps.guard.outputs.enabled }}
-      worker_enabled: ${{ steps.guard.outputs.worker_enabled }}
     env:
       RELEASE_CHANNEL: ${{ inputs.channel }}
       RELEASE_SHA: ${{ inputs.source_sha }}
@@ -46,7 +45,6 @@ jobs:
       ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
       ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
-      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
       RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
@@ -57,7 +55,6 @@ jobs:
       CF_PAGES_APP_PROJECT: ${{ vars.CF_PAGES_APP_PROJECT }}
       CF_PAGES_OPS_PROJECT: ${{ vars.CF_PAGES_OPS_PROJECT }}
       AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,11 +70,6 @@ jobs:
           cache: pnpm
       - name: Apply the cloud channel pause
         run: node scripts/release/channel-policy.mjs --github-env
-      - name: Refuse retired v3 worker promotion
-        if: env.ZEROS_WORKER_PROMOTION == 'enabled'
-        run: |
-          echo '::error::v3 release worker images are retired; v4 runtime bundles are the supported artifact'
-          exit 1
       - run: pnpm install --frozen-lockfile
       - name: Verify exact-source required CI
         env:
@@ -92,22 +84,6 @@ jobs:
           PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm exec tsx scripts/release/guard.ts
-  worker:
-    needs: [guard, services]
-    if: needs.guard.outputs.enabled == 'true' && needs.guard.outputs.worker_enabled == 'true'
-    uses: ./.github/workflows/cloud-worker-promotion.yml
-    with:
-      channel: ${{ inputs.channel }}
-      source_sha: ${{ inputs.source_sha }}
-      branch: ${{ inputs.branch }}
-      before_sha: ${{ inputs.before_sha }}
-      alpha_ci_fast_path: ${{ inputs.alpha_ci_fast_path }}
-      alpha_forward_only: ${{ inputs.alpha_forward_only }}
-      alpha_prepared_version: ${{ inputs.alpha_prepared_version }}
-      execute: true
-      # Production reaches this only through release.yml's approval job.
-      caller_gated: true
-    secrets: inherit
   services:
     name: Hosted services
     needs: guard
@@ -140,9 +116,6 @@ jobs:
       AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
       AUTH_WEB_CLIENT_ID: ${{ vars.AUTH_WEB_CLIENT_ID }}
       AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
-      WORKER_PROMOTION_REQUIRED: ${{ needs.guard.outputs.worker_enabled }}
-      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -183,8 +156,8 @@ jobs:
           retention-days: 90
   promote:
     name: Hosted mutation
-    needs: [guard, services, worker]
-    if: always() && needs.guard.result == 'success' && needs.guard.outputs.enabled == 'true' && needs.services.result == 'success' && (needs.worker.result == 'success' || needs.worker.result == 'skipped')
+    needs: [guard, services]
+    if: always() && needs.guard.result == 'success' && needs.guard.outputs.enabled == 'true' && needs.services.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: ${{ inputs.channel }}
@@ -213,9 +186,6 @@ jobs:
       AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
       AUTH_WEB_CLIENT_ID: ${{ vars.AUTH_WEB_CLIENT_ID }}
       AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
-      WORKER_PROMOTION_REQUIRED: ${{ needs.guard.outputs.worker_enabled }}
-      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

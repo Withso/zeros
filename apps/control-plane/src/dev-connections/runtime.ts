@@ -2,12 +2,12 @@ import { hkdfSync, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
-import { openCredentialBytes, sealCredentialBytes, type CloudAgentCredentialKeys } from "../cloud-workspaces/agent-credential-envelope.js";
+import { openCredentialBytes, sealCredentialBytes, type CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { DevConnectionClient, devConnectionClientFromEnvironment, ReferenceSchema, type RestoreMapping } from "./client.js";
 import { devConnectionsEnabled } from "./config.js";
 import { DatabaseDevConnectionRestore, currentMapping, invalidateReferences } from "./restore.js";
 import { denied, parseMaterial, uuid, type ConnectionReference, type GithubMaterial, type GrantScope } from "./types.js";
-import {serializeCloudAgentCredentialSourceMutation,assertLegacyCloudAgentCredentialMutationAllowed} from "../cloud-workspaces/agent-credential-mutations.js";
+import {serializeCloudAgentCredentialSourceMutation,assertCloudAgentCredentialMutationAllowed} from "../agent-credentials/agent-credential-mutations.js";
 
 type Stored = {owner_user_id:string;org_id:string;issuer:string;subject:string;workos_org_id:string;generation_id:string;reference:ConnectionReference;fingerprint:string};
 const mapping=(r:Stored):RestoreMapping=>({issuer:r.issuer,subject:r.subject,workosOrganizationId:r.workos_org_id,
@@ -185,7 +185,7 @@ export class DevConnectionRuntime {
       const aliases=scope==="local"?[{binding_id:id}]:(await tx.query<{binding_id:string}>(`SELECT binding_id FROM dev_connection_references
         WHERE owner_user_id=$1 AND generation_id=$2 AND reference->>'connectionId'=$3 AND ($4::uuid IS NULL OR org_id=$4)`,
         [user,this.client.generationId,row.reference.connectionId,scope==="global"?null:org])).rows;
-      for(const alias of aliases)await assertLegacyCloudAgentCredentialMutationAllowed(tx,user,{credentialId:alias.binding_id,...(scope==="global"?{}:{organizationId:org})});
+      for(const alias of aliases)await assertCloudAgentCredentialMutationAllowed(tx,user,{credentialId:alias.binding_id,...(scope==="global"?{}:{organizationId:org})});
       // Keep the first-holder lock through this legacy remote write. New mode
       // holders require the separate durable conditional removal API below.
       if(scope!=="local")await this.client.revoke(await this.token(tx,row),row.reference.connectionId,scope);

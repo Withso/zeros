@@ -216,26 +216,21 @@ function legacyMigrationAgentId(): string | null {
 }
 
 /** Pure model resolution shared by births, the catalog star and Settings. */
-export function modelForNewChat(agentId: string | null, cloudModels?: readonly string[]): string | null {
-  const favorite = effectiveFavoriteModel(agentId);
-  // Workspace consent is exact, including context suffixes. Choosing a cloud
-  // fallback must not change the user's global favorite or local defaults.
-  return cloudModels === undefined || (favorite !== null && cloudModels.includes(favorite))
-    ? favorite
-    : modelsForAgent(agentId, null).find(option => cloudModels.includes(option.value))?.value ?? null;
+export function modelForNewChat(agentId: string | null): string | null {
+  return effectiveFavoriteModel(agentId);
 }
 
 /** The fields a brand-new chat for `agentId` is born with — the single
  *  source of truth shared by every spawn path (new workspace, "+" → Chat,
  *  ⌘T). Effort/Fast restore this exact model's last user choice. */
-export function newChatBornDefaults(agentId: string | null, cloudModels?: readonly string[]): {
+export function newChatBornDefaults(agentId: string | null): {
   model: string | null;
   effort: ChatEffort;
   permissionMode: ChatPermissionMode;
   lastModeId?: string;
   fast: boolean;
 } {
-  const model = modelForNewChat(agentId, cloudModels);
+  const model = modelForNewChat(agentId);
   migrateLegacyConfigurationFor(agentId, model);
   const { effort, fast } = resolveModelConfiguration(agentId, model, null);
   // Default exact native modes: Claude Auto, Codex Approve for me, Cursor Auto.

@@ -1,35 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceRuntimeClient } from "../workspace-runtime-client";
 import { cloudScopedId, cloudWorkspaceKey } from "../cloud-workspace-key";
+import { RuntimeClient } from "../ws-client";
+import { createMessage } from "@zeros/protocol";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
-describe("stopped workspace search routing", () => {
-  it("shares exact-key searches without opening or waking a VM", async () => {
+describe("cloud workspace search", () => {
+  it.each([
+    ["folder", { folder: cloudWorkspaceKey(target), query: "saved" }],
+    ["chat", { chatId: cloudScopedId(target, "chat"), query: "saved" }],
+  ])("is unavailable for a %s-scoped cloud search without opening, waking or reading the mirror", async (_scope, params) => {
     const open = vi.fn(async () => { throw new Error("VM must stay stopped"); });
-    const readHistory = vi.fn(async () => ({ hits: [{ chatId: cloudScopedId(target, "chat"), msgId: "saved" }] }));
-    const client = new WorkspaceRuntimeClient({ open, readHistory, workspaces: () => [] });
+    const readHistory = vi.fn(async () => ({ hits: [] }));
+    const client = new WorkspaceRuntimeClient({ open, readHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
     try {
-      const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.search", params: { folder: cloudWorkspaceKey(target), query: "saved" } };
-      const [a, b] = await Promise.all([client.request(request), client.request(request)]);
-      expect(a).toMatchObject({ result: { hits: [{ msgId: "saved" }] } });
-      expect(a).toEqual(b);
-      expect(readHistory).toHaveBeenCalledOnce();
+      await expect(client.request({ type: "WORKSPACE_REQUEST", op: "messages.search", params })).rejects
+        .toMatchObject({ code: "CLOUD_V2_UNSUPPORTED", message: expect.stringMatching(/isn't available in cloud/) });
+      expect(readHistory).not.toHaveBeenCalled();
       expect(open).not.toHaveBeenCalled();
     } finally { client.dispose(); }
   });
-  it("discards an in-flight search after account replacement", async () => {
-    let release!: (value: Record<string, unknown>) => void;
-    const readHistory = vi.fn(() => new Promise<Record<string, unknown>>(resolve => { release = resolve; }));
-    const open = vi.fn(async () => { throw new Error("VM must stay stopped"); });
+});
+
+describe("Local search forwarding", () => {
+  it.each(["/personal/local", "/organization/local"])("leaves %s search ownership and payload on the Local transport", async folder => {
+    const hit = { chatId: "chat", msgId: "reply", payload: "{\"text\":\"old transcript\"}", createdAt: 1 };
+    const request = createMessage({ type: "WORKSPACE_REQUEST", source: "browser", op: "messages.search",
+      params: { folder, chatId: "chat", query: "old", limit: 20 } });
+    const reply = createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: request.id, op: "messages.search", result: { hits: [hit] } });
+    const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue(reply), open = vi.fn(), readHistory = vi.fn();
     const client = new WorkspaceRuntimeClient({ open, readHistory, workspaces: () => [] });
     try {
-      const result = client.request({ type: "WORKSPACE_REQUEST", op: "messages.search", params: { chatId: cloudScopedId(target, "chat"), query: "saved" } });
-      const rejected = expect(result).rejects.toThrow(/changed|retired|closed/i);
-      await vi.waitFor(() => expect(readHistory).toHaveBeenCalledOnce());
-      client.dispose();
-      release({ hits: [] });
-      await rejected;
+      expect(await client.request(request, 3210)).toBe(reply);
+      expect(local).toHaveBeenCalledWith(request, 3210);
       expect(open).not.toHaveBeenCalled();
-    } finally { client.dispose(); }
+      expect(readHistory).not.toHaveBeenCalled();
+      expect(hit.chatId).toBe("chat");
+    } finally { client.dispose(); local.mockRestore(); }
   });
 });

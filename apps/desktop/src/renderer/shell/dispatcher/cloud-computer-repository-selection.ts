@@ -1,10 +1,13 @@
 import { useEffect, useSyncExternalStore } from "react";
-import type { CloudComputerV2ActiveRepository } from "@zeros/protocol/cloud-computer-v2";
+import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 
 export const computerRepositoryStorageKey =
   "zeros:cloud-computer-repository:v1";
 const MAX_OWNERS = 128;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A lowercase owner/name. Numeric ids written by the retired v1 Computer are
+ * dropped on read. */
+const repositoryId = /^[a-z0-9_.-]{1,100}\/[a-z0-9_.-]{1,100}$/;
 function validOwner(key: unknown): key is string {
   if (typeof key !== "string" || key.length > 100) return false;
   try {
@@ -30,7 +33,7 @@ export function parseComputerRepositorySelections(
           row.length === 2 &&
           validOwner(row[0]) &&
           typeof row[1] === "string" &&
-          /^[1-9][0-9]{0,39}$/.test(row[1]),
+          repositoryId.test(row[1]),
       )
       .slice(-MAX_OWNERS),
   );
@@ -58,7 +61,7 @@ export function rememberComputerRepository(
   owner: string,
   id: string | null,
 ): void {
-  if (!validOwner(owner) || (id !== null && !/^[1-9][0-9]{0,39}$/.test(id)))
+  if (!validOwner(owner) || (id !== null && !repositoryId.test(id)))
     return;
   if ((selections.get(owner) ?? null) === id) return;
   selections.delete(owner);
@@ -78,7 +81,7 @@ export function rememberComputerRepository(
 
 export function useComputerRepositorySelection(
   owner: string | null,
-  repositories: CloudComputerV2ActiveRepository[] | undefined,
+  repositories: readonly CloudComputerRepository[] | null | undefined,
   active: boolean,
 ) {
   const remembered = useSyncExternalStore(
@@ -93,7 +96,7 @@ export function useComputerRepositorySelection(
     repositories?.[0] ??
     null;
   useEffect(() => {
-    if (active && owner && repositories !== undefined)
+    if (active && owner && repositories != null)
       rememberComputerRepository(owner, repository?.id ?? null);
   }, [active, owner, repositories, repository?.id]);
   return {

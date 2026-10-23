@@ -120,9 +120,6 @@ critical browser entry; it does not authorize substituting full composer smoke.
 
 | Lane                     | Ownership or selection                                                                    |
 | ------------------------ | ----------------------------------------------------------------------------------------- |
-| `cloud-chaos`            | Control-plane chaos scenarios (advisory; `ci:cloud-chaos` or its path rule)               |
-| `cloud-client`           | `packages/cloud-client/**` SDK and conformance suites (advisory)                          |
-| `cloud-scale`            | Load-simulator 10×/100× budget scenarios (advisory; `ci:cloud-scale` or load-sim paths)   |
 | `docs-only`              | Modified documentation in the audited allowlist                                           |
 | `ci-config`              | CI definitions; shared invalidators select the full PR set                                |
 | `web`                    | Web hub, handoff, Functions, and shared web inputs                                        |
@@ -136,12 +133,11 @@ critical browser entry; it does not authorize substituting full composer smoke.
 | `model-catalogs`         | Catalogs and provider/generated protocol tooling                                          |
 | `protocol`               | Protocol source and shared catalog contracts                                              |
 | `design-containment`     | Design packages, containment, and authored-source tools                                   |
-| `cloud-runtime`          | Cloud worker, engine bundle, qualification, and development tooling                       |
+| `cloud-runtime`          | Standalone cloud worker, relay and development tooling                       |
 | `dependencies-toolchain` | Dependency graphs and toolchain inputs                                                    |
 | `repository-contracts`   | Repository layout tests, checked documents, and root script tests                         |
 | `smoke-harness`          | Browser smoke scripts, fixtures, and renderer harnesses                                   |
 | `macos`                  | Derived from source-sync and unsigned-packaging check predicates, or requested explicitly |
-| `runtime-bundle`         | Linux bundle verification, including all browser-harness paths                            |
 | `ui-smoke`               | Full composer smoke; explicit PR label or full mode only                                  |
 
 `docs-only` is an additive lane bit, never permission to suppress other lanes.
@@ -157,8 +153,8 @@ instead of copying that list. Protocol files outside that closure do not select
 the database suites merely because they are protocol files.
 
 Browser-harness inputs are `scripts/ui-smoke-*`, `scripts/ui-smoke/**`, and
-`apps/desktop/src/renderer/harnesses/**`. They select `runtime-bundle` while leaving
-`ui-smoke` off in PR mode. Web verification uses offline typechecks, tests,
+`apps/desktop/src/renderer/harnesses/**`. They select their smoke-harness
+contracts while leaving `ui-smoke` off in PR mode. Web verification uses offline typechecks, tests,
 `build:standalone`, and `check:deep-link-schemes`. The deployed Pages probe is
 excluded from this registry.
 
@@ -183,32 +179,14 @@ the existing workload boundaries.
 `tracked-secrets` runs in full Preflight and is also bundled into selected CI
 Vitest shards; its independent selection does not force a Vitest workload on
 every documentation change. Commit-range scanning stays mandatory on every PR.
-Actionlint, CodeQL, cloud qualification, and Alpha runtime-bundle checks record
-their separate workflow owners. The unsigned packaging proof runs in Scheduled
+Actionlint and CodeQL record their separate workflow owners. The unsigned packaging proof runs in Scheduled
 and contributes to the macOS workload floor. The reserved critical-composer
 entry has no executable suite yet and is advisory; it never substitutes for
 `composer-full`. These execution-owner annotations do not add workflow steps.
 
-Four advisory cloud-program jobs (`local-untouched`, `cloud-chaos`,
-`cloud-scale`, `cloud-client`) run in `ci.yml` outside the trusted job
-inventory. Each lane-gated job reads its lane bit from the scope ledger and
-skips green while the trusted base policy lacks the lane, so the introducing
-change cannot wedge itself; each workload passes empty until its track lands
-the test files. They sit under `zeros/ci-gate` with tolerated results, so a
-failure shows on the PR without blocking it, until the owner promotes a lane
-into the required selection. `local-untouched` runs on every PR: it fails a
-cloud-program change that touches Local-only files (per
-`docs/cloud-workspace/local-seams.json`, judged by the base commit's copy so a
-PR cannot weaken its own gate; the manifest is itself a CI-definition path, so
-editing it needs an owner merge, and a PR whose head copy does not parse or
-validate fails) without the `local-seams-sign-off`
-label, or that crosses a shared seam (engine core, renderer bridge, protocol,
-account auth) while the Local test lanes are unselected. Only the owner
-applies `local-seams-sign-off`; agents never add it — the label is the owner's
-explicit sign-off, and agents act with the owner's GitHub identity. The load-simulator
-budget check itself runs in the control-plane database lane on every CP
-change; `cloud-scale` adds the 10×/100× scenario suite by label or load-sim
-path, with a nightly promotion deferred to the track G rollout.
+The `cloud-v2-worker` job runs the standalone worker's typecheck, lint and tests
+on Node 24 when the `cloud-runtime` lane is selected. `zeros/ci-gate` requires
+its success for a selected lane and permits a skip only when that lane is off.
 
 ## Local preview and additive labels
 
@@ -387,9 +365,7 @@ paths recognized by `scripts/ci/ci-definition.mjs`: workflows/actions,
 `.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/agent-runtime/**`, `scripts/check-*`,
 the explicit Vitest runner, composer entry and `scripts/ui-smoke/**`, release
 scripts, root Vitest/ESLint configs, root package/lock/workspace files, the
-control-plane/web package and lockfiles, and the Local seams manifest
-`docs/cloud-workspace/local-seams.json` (the `local-untouched` gate trusts the
-base copy, so an unreviewed edit would let the next PR cross a weakened seam).
+control-plane/web package and lockfiles.
 
 List definition paths in a committed diff with:
 
@@ -465,8 +441,7 @@ policy requires none. Independent engineering review and merge authorization
 remain separate operator responsibilities.
 
 Two complete preflights refresh the head, base, diff, checks, identity and
-open-PR guard, including a final PR read after each batch and after the live
-hourly gate. Changed heads, bases,
+open-PR guard, including a final PR read after each batch. Changed heads, bases,
 titles, bodies or labels refuse rather than silently qualifying a different
 request. GitHub enforces the expected head and current branch protections at
 the write boundary. There is no expected-base CAS in this API: a base update
@@ -503,50 +478,3 @@ The default merge request uses `gh pr merge --auto --squash --match-head-commit`
 checked head SHA and explicit checked PR title and body. This keeps GitHub's
 squash-message defaults or later PR text changes from introducing a skip marker.
 Do not call `gh pr merge` or the bot merge command directly.
-
-## Hourly zeros dev merge requirement
-
-The owner enables [the Alpha canary](zeros-dev.md#hourly-e2e-in-actions) and adds
-`zeros/dev-e2e` to main's required statuses. First dispatch
-`zeros-dev-e2e-gate.yml` on main to publish that context for open PRs, require
-it in branch protection, then enable the lifecycle workflow. The gate allows
-the initial rollout until a main attempt actually completes both the product
-lifecycle and receipt upload successfully. Skipped jobs cannot count as green,
-and a failed rerun cannot erase a previous successful attempt's activation.
-
-After activation, cloud-selected PRs require the newest completed main canary
-to be green and less than two hours old, measured from its lifecycle job's
-`completed_at`. Newer queued or running attempts leave that completed result
-authoritative. An active rerun uses its previous completed attempt until the
-rerun completes; it cannot renew freshness or hide a completed failure. The
-trusted base's policy also runs at the end of `zeros/ci-gate`, and
-`pnpm agent:merge` reads the current canary again before arming auto-merge.
-PRs selecting no cloud lane receive an alert and pass this gate. Security,
-signing, migration and all other required checks keep their own authority.
-
-`zeros-dev-e2e-gate.yml` refreshes all open PR heads on PR changes, canary start
-and completion, and every fifteen minutes for freshness expiry. It runs only
-trusted main source, has no product/provider secrets, and can write only the
-fixed `zeros/dev-e2e` status. It never checks out or executes PR source. Pending
-status fences the old success during evaluation; the final head is rechecked
-before publication. GitHub can delay event delivery and scheduled jobs, so
-these statuses are observations, not expiring leases. The CI and merge-wrapper
-reads still check the two-hour boundary directly. Monitor the refresher's own
-failed runs; do not treat a stale check display as current evidence.
-
-When the canary is red, only its exact owner-reviewed repair may bypass this
-one gate. Generate a read-only marker plan with
-`node scripts/ci/zeros-dev-gate.mjs --repair-marker`, using the normal scoped
-GitHub token. The master creates the proposed `.github/ci-incidents/<digest>.json`
-marker in the repair's first commit, then removes it with the fix and retained
-regression. The marker binds the canary source SHA, run and attempt; it uses the
-closed `hourly_marker` contract. An admin's approval must apply to the exact
-current repair head. A label, PR prose, retained marker, different failing
-attempt, stale review or missing regression cannot authorize an exception.
-The Preflight incident bot's writer contract stays unchanged. Refresh the
-status after approval by dispatching `zeros-dev-e2e-gate.yml` on main.
-
-These workflows and gate definitions need the owner's merge. Rollback is an
-owner removal of the required status and a normal revert of the CI/wrapper
-enforcement; disabling `ZEROS_DEV_E2E_ENABLED` alone keeps an activated gate
-closed. Retain lifecycle artifacts for cleanup recovery.

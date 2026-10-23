@@ -15,7 +15,6 @@ import {
   insertWorkspace,
 } from "../../git/state";
 import type { Workspace } from "../../git/types";
-import { CloudCustomizationRedactor } from "../../agents/cloud-customization-redaction";
 import {
   PTY_AGENT_AUTH_CWD,
   type PtyExitReason,
@@ -112,18 +111,6 @@ describe("PtyService", () => {
     fake.emitData("background output"); now++; expect(svc.hasRecentInput()).toBe(false);
     svc.write("missing", "hello"); expect(svc.hasRecentInput()).toBe(false);
     svc.killAll();
-  });
-  it("filters execution literals before both live output and terminal replay, including split writes", () => {
-    const fake=makeFake(), mirrored:string[]=[], published:string[]=[];
-    const svc=new PtyService(process.cwd(),()=>fake.handle,()=>({write:(data:string)=>{mirrored.push(data);},resize:()=>{},dispose:()=>{},snapshot:async()=>({data:mirrored.join(""),truncated:false,bytes:0})}));
-    svc.onData((_id,data)=>published.push(data));
-    const redactor=new CloudCustomizationRedactor(["synthetic-org-secret"]);
-    svc.create({sessionId:"private",outputFilter:{write:data=>redactor.stream("pty",data),finish:()=>redactor.finish("pty")}});
-    fake.emitData("synthetic-org-"); fake.emitData("secret");
-    expect(published.join("")).not.toContain("synthetic-org-secret");
-    expect(mirrored).toEqual(published);
-    fake.emitExit(0,null);
-    expect(published.join("")).toContain("[redacted]");
   });
   it("creates a session and routes output to onData", () => {
     const fake = makeFake();

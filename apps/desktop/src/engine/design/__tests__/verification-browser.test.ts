@@ -1,7 +1,6 @@
 import { chromium, type Browser } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
@@ -9,7 +8,6 @@ import { createDesignFrame, initializeDesignDocument } from "../document";
 import { createDesignContextReference } from "../context";
 import { designDirectoryNameFor, forgetDesignDirectoryName } from "../directory-registry";
 import { startDesignVerificationService } from "../verification-service";
-import { CloudRuntimePreviewGateway } from "../../transport/cloud-preview-gateway";
 
 let browser: Browser;
 beforeAll(async () => { browser = await chromium.launch({ headless: true }); });
@@ -49,12 +47,10 @@ it("blocks authored links and clears readiness if the loaded preview document is
   }
 });
 
-it.each(["local", "cloud"])("opens a %s static sandboxed frame offscreen, then refreshes saved source while visible", async placement => {
+it("opens a static sandboxed frame offscreen, then refreshes saved source while visible", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "zeros-frame-preview-browser-"));
   const service = await startDesignVerificationService({ renderer: () => undefined });
   const page = await browser.newPage();
-  let gateway: CloudRuntimePreviewGateway | undefined;
-  let server: Server | undefined;
   try {
     execFileSync("git", ["init", "-q"], { cwd: root });
     await initializeDesignDocument(root);
@@ -75,28 +71,6 @@ it.each(["local", "cloud"])("opens a %s static sandboxed frame offscreen, then r
     const reference = await createDesignContextReference(root, "workspace", frame);
     const access = service.register({ workspaceId: "workspace", workspacePath: root, directory, directoryId: reference.directoryId });
     const destination = new URL(`${access.url}/${frame}/?frameId=${reference.frameId}`);
-    if (placement === "cloud") {
-      const remotePort = Number(destination.port);
-      const credential = `zwp_${"A".repeat(43)}`;
-      gateway = new CloudRuntimePreviewGateway({
-        forbiddenPorts: () => [],
-        verify: async token => token === credential ? {
-          version: 1, audience: "zeros-cloud-runtime-access-admission-v1", admitted: true,
-          grantId: "11111111-1111-4111-8111-111111111111", accountUserId: "22222222-2222-4222-8222-222222222222",
-          authorityEpoch: 1, kind: "preview", remotePort, expiresAtMs: Date.now() + 10_000,
-        } : null,
-      });
-      server = createServer((req, res) => {
-        if (!gateway!.handle(req, res)) { res.statusCode = 404; res.end(); }
-      });
-      await new Promise<void>(resolve => server!.listen(0, "127.0.0.1", resolve));
-      destination.port = String((server.address() as { port: number }).port);
-      // The public ingress cannot expose the listener without admission. The
-      // native Browser service supplies the grant for its exact frame target.
-      expect((await fetch(destination)).status).toBe(404);
-      expect((await fetch(destination, { headers: { "x-zeros-runtime-access": `zwp_${"B".repeat(43)}` } })).status).toBe(401);
-      await page.setExtraHTTPHeaders({ "x-zeros-runtime-access": credential });
-    }
     // The native browser parks its view offscreen until the user opens its tab.
     await page.addInitScript(() => Object.defineProperty(document, "hidden", { get: () => true, configurable: true }));
     await page.goto(destination.toString());
@@ -130,11 +104,6 @@ it.each(["local", "cloud"])("opens a %s static sandboxed frame offscreen, then r
     expect(await page.locator("output").textContent()).toMatch(/expired/i);
   } finally {
     await page.close();
-    gateway?.close();
-    if (server) {
-      server.closeAllConnections();
-      await new Promise<void>(resolve => server!.close(() => resolve()));
-    }
     await service.stop(); forgetDesignDirectoryName(root); await rm(root, { recursive: true, force: true });
   }
 });

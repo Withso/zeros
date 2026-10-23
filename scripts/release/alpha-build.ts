@@ -10,15 +10,13 @@ const source = { repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), branch: z.l
   runId: counter, runAttempt: counter, runNumber: counter };
 export const AlphaBuildMetadata = z.object({ version: z.literal(1), channel: z.literal("alpha"), ...source,
   releaseVersion: z.string().regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha\.[1-9]\d*$/), cloudEnabled: z.boolean() }).strict();
-export const AlphaProducerProof = z.object({ version: z.literal(1), ...source, kind: z.enum(["desktop", "runtime"]),
+export const AlphaProducerProof = z.object({ version: z.literal(1), ...source, kind: z.literal("desktop"),
   producerId: integer, producerAttempt: integer.nullable(), artifactId: integer }).strict();
 export type ProducerProof = z.infer<typeof AlphaProducerProof>;
 type Kind = ProducerProof["kind"];
 const producers = {
   desktop: { name: "Build + sign Alpha (macOS arm64 · NOT notarized)", artifact: "zeros-alpha-arm64-build",
     steps: ["Compute alpha version", "Record the baked cloud capability", "Verify installer + updater signatures", "Write signed Alpha build metadata", "Save signed Alpha artifacts"] },
-  runtime: { name: "Build Linux runtime bundle", artifact: "zeros-alpha-runtime-build",
-    steps: ["Build and verify the exact-source runtime", "Save runtime bundle outputs"] },
 } as const;
 export const ALPHA_BUILD_WAIT_MS = 45 * 60_000;
 export const ALPHA_PROOF_RECHECK_MS = 10 * 60_000;
@@ -36,8 +34,7 @@ export async function authenticatedAlphaParent(env: NodeJS.ProcessEnv, read: Rea
 }
 
 function producerJob(kind: Kind, jobs: any[], env: NodeJS.ProcessEnv) {
-  const matches = jobs.filter(job => job?.name === producers[kind].name ||
-    kind === "runtime" && job?.name === "Build Linux runtime bundle / Build Linux runtime bundle");
+  const matches = jobs.filter(job => job?.name === producers[kind].name);
   requireCheck(matches.length === 1, "Alpha build producer evidence is missing or ambiguous");
   const job = matches[0], attempt = Number(env.GITHUB_RUN_ATTEMPT);
   requireCheck(integer.safeParse(job.id).success && job.run_id === Number(env.GITHUB_RUN_ID) && job.head_sha === env.GITHUB_SHA &&
@@ -109,8 +106,8 @@ function requireSameProducer(recorded: ProducerProof, current: ProducerProof) {
     current.artifactId === recorded.artifactId, "Alpha build producer or artifact changed after download");
 }
 
-/** Recheck the immutable artifact and producer after download. This also owns
- * runtime handoff, whose descriptor independently verifies exact-source bytes. */
+/** Recheck the immutable artifact and producer after download, before its
+ * signed metadata is accepted. */
 export async function validateAlphaProducerProof(proof: unknown, env: NodeJS.ProcessEnv, read: Read, options: Parameters<typeof poll>[1] = {}) {
   const parsed = AlphaProducerProof.safeParse(proof);
   requireCheck(parsed.success, "Alpha build producer proof is invalid");

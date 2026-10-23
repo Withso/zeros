@@ -3,6 +3,45 @@ import { normalizeProviderError, providerErrorFailure } from "../provider-error"
 
 describe("normalizeProviderError", () => {
   it.each([
+    ["The model `gpt-6-luna` is unavailable.", "Your Codex connection can't use GPT-6 Luna. Pick another model."],
+    ["The model `gpt-4.9` is unavailable.", "Your Codex connection can't use gpt-4.9. Pick another model."],
+    ["Project access denied for model: gpt-6.1-sol.", "Your OpenAI key can't use GPT-6.1 Sol. Pick another model."],
+    ["Codex model unavailable: Project `project-fixture` does not have access to model `gpt-6.1-sol`.", "Your OpenAI key can't use GPT-6.1 Sol. Pick another model."],
+    ["Model `https://proxy.example.test/?request_id=private` is unavailable.", "Your Codex connection can't use the selected model. Pick another model."],
+    ["Model `request-fixture-secret` is unavailable.", "Your Codex connection can't use the selected model. Pick another model."],
+    ["Model unavailable, request id: fixture-request", "Your Codex connection can't use the selected model. Pick another model."],
+  ])("uses safe model names in refusal copy (%s)", (message, expected) => {
+    const { failure } = providerErrorFailure("codex", { category: "model-unavailable", message }, "prompt");
+    expect(failure.message).toBe(expected);
+    expect(failure.advice).toBe(expected);
+  });
+
+  it("keeps OpenAI model refusal diagnostics out of the user-facing failure", () => {
+    const message = "unexpected status 403 Forbidden: Project `proj_fixture` does not have access to model `gpt-6.1-sol`, url: https://proxy.example.test/v2/cloud/proxy/openai/responses, cf-ray: fixture-ray, request id: fixture-request";
+    const native = normalizeProviderError("codex", { status: 403, message });
+    const error = providerErrorFailure("codex", native, "prompt");
+    const { failure } = error;
+    expect(native.message).toBe(message);
+    expect(failure).toMatchObject({ kind: "protocol-error", message: "Your OpenAI key can't use GPT-6.1 Sol. Pick another model.",
+      advice: "Your OpenAI key can't use GPT-6.1 Sol. Pick another model." });
+    expect(JSON.stringify(failure)).not.toMatch(/proj_fixture|https:|fixture-ray|fixture-request/);
+    expect(JSON.stringify(error)).not.toMatch(/proj_fixture|https:|fixture-ray|fixture-request/);
+    expect(error.cause).toBe(native);
+    expect(normalizeProviderError("codex", error).category).toBe("model-unavailable");
+  });
+
+  it("recognizes OpenAI project model access refusals without changing auth or transport precedence", () => {
+    const message = "unexpected status 403 Forbidden: Project `proj_fixture` does not have access to model `gpt-6.1-sol`, url: https://proxy.example.test/v2/cloud/proxy/openai/responses, cf-ray: fixture-ray, request id: fixture-request";
+    for (const value of [new Error(message), { status: 403, message }, {
+      codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 403 } }, message,
+    }]) expect(normalizeProviderError("codex", value)).toMatchObject({ category: "model-unavailable", message });
+    for (const [status, category] of [[401, "auth-required"], [429, "rate-limited"], [503, "transport-closed"]] as const)
+      expect(normalizeProviderError("codex", { status, message }).category).toBe(category);
+    expect(normalizeProviderError("codex", { status: 403, message: "Project access denied while requesting model gpt-6.1-sol." }).category).toBe("protocol-error");
+    expect(normalizeProviderError("codex", { message: "Request refused.", advice: message }).category).toBe("protocol-error");
+  });
+
+  it.each([
     ["verification_required", "verification-required"],
     ["cloud_credential_error", "cloud-credentials-unavailable"],
   ] as const)("keeps Claude's %s separate from login, model and transport recovery", (code, category) => {

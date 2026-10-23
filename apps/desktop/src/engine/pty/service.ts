@@ -117,9 +117,6 @@ export interface PtyCreateOptions {
   command?: string;
   /** Verbatim child env (see PtySpawnRequest.env). */
   env?: Record<string, string>;
-  /** Execution-owned literal filter, applied before live output or replay.
-   * It stays in the engine and never enters the PTY host request. */
-  outputFilter?: { write(data: string): string; finish(): string };
   /** Interactive one-shot shell (see PtySpawnRequest.interactive). */
   interactive?: boolean;
   /** Prepared owned-process wrapper for repository-controlled commands. */
@@ -426,21 +423,18 @@ export class PtyService {
       proc.onSpawned((pid) => opts.onSpawned?.(pid, () => leaderExited));
     }
 
-    const publish = (data: string) => {
-      if (!data) return;
+    proc.onData((data) => {
       // Feed the mirror the EXACT bytes clients get so its resolved grid stays
       // in lockstep — that grid is what we serialize on reattach.
       session.mirror?.write(data);
       this.onDataCb?.(opts.sessionId, data);
-    };
-    proc.onData((data) => publish(opts.outputFilter ? opts.outputFilter.write(data) : data));
+    });
     proc.onExit((exitCode, signal, reason) => {
       leaderExited = true;
       // Lifecycle owners retain their failed proof separately. A callback
       // failure must not swallow the native exit witness or strand UI waiters.
       try { if (!proc.pid && (reason === "spawn-failed" || reason === "host-unavailable")) opts.onSpawnFailed?.(reason); } catch { /* Owner retains the original pending launch. */ }
       try { opts.onExit?.(); } catch { /* Owner retains the original retirement. */ }
-      if (opts.outputFilter) publish(opts.outputFilter.finish());
       session.mirror?.dispose();
       this.sessions.delete(opts.sessionId);
       const waiters = this.exitWaiters.get(opts.sessionId);

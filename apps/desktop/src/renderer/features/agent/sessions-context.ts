@@ -106,6 +106,8 @@ export interface SessionsActions {
   };
   listAgents(force?: boolean): Promise<BridgeRegistryAgent[]>;
   initAgent(agentId: string): Promise<InitializeResponse>;
+  /** Metadata only; the owning runtime caches discovery for the selected key. */
+  refreshModelCatalog(chatId: string): void;
   ensureSession(
     chatId: string,
     agentId: string,
@@ -149,7 +151,7 @@ export interface SessionsActions {
   openBoundaryPort(
     chatId: string,
     portId: string,
-  ): Promise<{ url: string; admissionUrl: string; expiresAt: number; nativeTarget?: import("@zeros/protocol/containment").CloudAgentPreviewTarget }>;
+  ): Promise<{ url: string; admissionUrl: string; expiresAt: number }>;
   respondToPermission(
     chatId: string,
     response: RequestPermissionResponse,
@@ -260,7 +262,9 @@ export interface SessionsActions {
    * Conversation history and the provider binding remain durable, so restoring
    * an archived chat can resume into a fresh execution. Safe before a route has
    * been published: the conversation id invalidates an in-flight bind. */
-  closeSession(chatId: string): void | Promise<boolean>;
+  // agent-switch retires only an untouched cloud view. It must never Stop a
+  // turn, and preserves the confirmed empty transcript during rebinding.
+  closeSession(chatId: string, options?: { reason: "agent-switch" }): void | Promise<boolean>;
   disposeAll(): void;
 }
 

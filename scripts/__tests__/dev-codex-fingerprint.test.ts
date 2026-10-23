@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { newHostedGeneration } from "../dev-environment/hosted-state.mjs";
 import { hostedBackendEnvironment, hostedPublicProfile, hostedWebEnvironment } from "../dev-environment/hosted-profile.mjs";
-import { loadCodexFingerprintKeys } from "../../apps/control-plane/src/cloud-workspaces/codex-fingerprint-keys";
+import { loadCodexFingerprintKeys } from "../../apps/control-plane/src/agent-credentials/codex-fingerprint-keys";
 
 describe("hosted Dev Codex account import", () => {
   it("supplies a stable, separate refresh fingerprint keyring only to the backend", () => {
@@ -12,13 +12,12 @@ describe("hosted Dev Codex account import", () => {
     const profile: any = { cloudflare: { domain: "example.test", accountId: "account", zoneId: "zone", apiToken: "fixture" }, workos: { environment: "dev", webClientId: "client_web", desktopClientId: "client_desktop", apiKey: "workos-private-fixture" },
       railway: { projectId: "test" }, github: { appId: 1, privateKeyBase64: Buffer.from("fixture").toString("base64") }, boat: { secondsPerDollar: 10 }, storage: {} };
     const source = { workerInputsSha256: "b".repeat(64), sourceSha256: "c".repeat(64) };
-    const worker = { inputsSha256: source.workerInputsSha256, buildSha256: "d".repeat(64), storageMiB: 10000 };
-    const first = hostedBackendEnvironment(state, profile, source, worker);
+    const env = { ZEROS_CLOUD_V2_RUNTIME_SHA256: "d".repeat(64) };
+    const first = hostedBackendEnvironment(state, profile, source, undefined, env);
     const keys = loadCodexFingerprintKeys(first);
     expect(keys).toEqual({ currentKeyVersion: 1, keys: { 1: Buffer.from(state.keys.agent, "hex").toString("base64url") } });
     expect(keys!.keys[1]).not.toBe(first.CLOUD_WORKSPACE_SECRET_KEY_V1);
-    expect(keys!.keys[1]).not.toBe(first.CLOUD_WORKSPACE_OBJECT_KEY_V1);
-    const restarted = hostedBackendEnvironment(structuredClone(state), profile, source, worker);
+    const restarted = hostedBackendEnvironment(structuredClone(state), profile, source, undefined, env);
     expect(loadCodexFingerprintKeys(restarted)).toEqual(keys);
     const publicValues = JSON.stringify([hostedPublicProfile(state, profile), hostedWebEnvironment(state, profile)]);
     expect(publicValues).not.toContain(keys!.keys[1]);

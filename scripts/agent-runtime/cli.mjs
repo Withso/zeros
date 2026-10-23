@@ -477,26 +477,6 @@ async function main() {
       process.exitCode = 1;
     return;
   }
-  if (command === "publication-receipt") {
-    const { publicationReceipt } = await import("./delivery.mjs");
-    let diagnostic = null;
-    try {
-      diagnostic = parseJson(
-        readFileSync(env.RUNTIME_PUBLICATION_DIAGNOSTIC, "utf8"),
-      );
-    } catch {
-      /* A failed setup still emits unknown evidence. */
-    }
-    const receipt = publicationReceipt({
-      directory: env.RUNTIME_BUNDLE_DIRECTORY,
-      diagnostic,
-      runId: Number(env.GITHUB_RUN_ID),
-      attempt: Number(env.GITHUB_RUN_ATTEMPT),
-      source: env.GITHUB_SHA,
-    });
-    save("publication.json", receipt);
-    return;
-  }
   throw new Error("Unknown runtime notification command.");
 }
 

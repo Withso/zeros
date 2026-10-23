@@ -42,9 +42,6 @@ import {
 } from "./adopt-directory";
 import { stageDesignRegistry } from "./metadata-git";
 import { createHash, randomUUID } from "node:crypto";
-import path from "node:path";
-import { designAssetUploadSchema, prepareDesignAssetUpload, withDesignAssetUpload } from "./asset-upload";
-import { escapeAttribute } from "./source";
 import { readCanvas } from "./document-storage";
 import { refreshDesignStyleBuilds, setDesignStyleBuildPresence } from "./style-builds";
 import { retryDesignFonts } from "./style-fonts";
@@ -77,7 +74,6 @@ import {
   opSettingsResolveWithOverride,
 } from "../settings/ops";
 import { personalRepoRoot } from "../settings/personal-repo";
-import type { QualifiedCloudFilePolicy } from "../files/cloud-file-policy";
 import {
   designDocumentIdForFrame,
   forgetWorkspaceDesignApiFrames,
@@ -144,7 +140,6 @@ import {
   designSelectionStyles,
   designMatchedDeclarations,
   designMutationStyles,
-  designHistorySourceVersions,
 } from "./route-params";
 import {
   transferDesignHistoryBytes,
@@ -188,7 +183,7 @@ export interface DesignReadWorkspace {
   designDirectory: string;
 }
 export interface DesignWorkspaceRouteHost {
-  readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission, cloud: boolean): Promise<DesignCatalogReply>;
+  readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission): Promise<DesignCatalogReply>;
   resolveDesignWorkspace(workspaceId: string, remote: boolean): Workspace;
   resolveReadCwd(workspaceId: string, remote: boolean): string;
   withDesignReadWorkspace<T>(
@@ -274,7 +269,6 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
-  "design.asset.upload",
   "design.stage",
   "design.unstage",
   "design.save",
@@ -294,14 +288,14 @@ export async function handleDesignWorkspaceRoute(
   host: DesignWorkspaceRouteHost,
   op: string,
   params: Params,
-  options: { remote: boolean; hostLocalResources: boolean; actor?: DesignActor; primaryRepositoryRoot?: string; cloudFiles?: QualifiedCloudFilePolicy; catalogAdmission?: DesignCatalogAdmission; cloudCatalog?: boolean },
+  options: { remote: boolean; hostLocalResources: boolean; catalogAdmission?: DesignCatalogAdmission },
 ): Promise<unknown> {
   const { remote, hostLocalResources } = options;
-  const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, options.actor ?? { kind: "human", id: "desktop" });
+  const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, { kind: "human", id: "desktop" });
   switch (op) {
     case "design.catalog.read": {
       if (!options.catalogAdmission) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Design catalog requires a live connection." });
-      return host.readDesignCatalog(designCatalogReadSchema.parse(params), remote, options.catalogAdmission, options.cloudCatalog === true);
+      return host.readDesignCatalog(designCatalogReadSchema.parse(params), remote, options.catalogAdmission);
     }
     case "design.capture": {
       const input = designWorkspaceCaptureSchema.parse(params);
@@ -472,7 +466,6 @@ export async function handleDesignWorkspaceRoute(
       let transaction;
       try {
         transaction = designTransactionSchema.parse(params.transaction);
-        if (options.actor) transaction = { ...transaction, actor: options.actor };
       } catch (error) {
         throw new GitError({
           code: "VALIDATION_FAILED",
@@ -553,8 +546,6 @@ export async function handleDesignWorkspaceRoute(
         remote,
       );
       const direction = op === "design.history.undo" ? "undo" : "redo";
-      const expectedSources = options.actor && params.expectedSourceVersions !== undefined
-        ? designHistorySourceVersions(params.expectedSourceVersions) : undefined;
       const history = host.designHistoryState(workspace.path);
       const source = history?.[direction];
       const entry = source?.pop();
@@ -681,21 +672,10 @@ export async function handleDesignWorkspaceRoute(
         const documentId = designDocumentIdForFrame(entry.frame);
         let result;
         try {
-          let expectedRevision = options.actor && !expectedSources
-            ? reqStr(params, "expectedRevision") : undefined;
-          if (expectedSources) {
-            // Read the semantic revision BEFORE checking the rendered source.
-            // A write racing either read still fails the API's revision CAS.
-            expectedRevision = (await api.open(documentId)).revision;
-            const current = await readDesignFrameRenderIdentity(workspace.path, entry.frame);
-            if (expectedSources[entry.frame] !== current.sourceVersion)
-              throw new GitError({ code: "VALIDATION_FAILED", message: "Design source changed. Refresh before undoing or redoing." });
-          }
           result =
             direction === "undo"
-              ? await api.undo(documentId, options.actor, { expectedRevision })
-              : await api.redo(documentId, options.actor, { expectedRevision });
-          if (!result && options.actor) throw new GitError({ code: "VALIDATION_FAILED", message: "Another collaborator changed Design history. Refresh before undoing." });
+              ? await api.undo(documentId)
+              : await api.redo(documentId);
         } catch (error) {
           if (error instanceof DesignPageTargetError)
             history.bytes = Math.max(0, history.bytes - entry.bytes);
@@ -717,7 +697,7 @@ export async function handleDesignWorkspaceRoute(
       // Compatibility fallback for a history session created before this
       // service began tracking workspace-wide ordering. An empty canvas has
       // no fallback document, but a structural deletion above still works.
-      const frame = options.actor ? undefined : optStr(params, "frame");
+      const frame = optStr(params, "frame");
       if (!frame) {
         return {
           result: null,
@@ -753,7 +733,7 @@ export async function handleDesignWorkspaceRoute(
       if (reqStr(params, "workspaceId") !== reference.workspaceId) throw new GitError({ code: "VALIDATION_FAILED", message: "The Design reference belongs to another workspace." });
       return host.withDesignReadWorkspace(reference.workspaceId, remote, async ({ root, designDirectory }) => {
         const inspection = await inspectDesignContext(root, reference);
-        if (inspection.status !== "ready" || remote || (!hostLocalResources && !options.primaryRepositoryRoot)) return inspection;
+        if (inspection.status !== "ready" || remote || !hostLocalResources) return inspection;
         const verification = await openDesignVerification({ workspaceId: reference.workspaceId, workspacePath: root, directory: designDirectory, directoryId: reference.directoryId });
         return { ...inspection, verification, previewUrl: designFramePreviewUrl(verification, reference) };
       });
@@ -761,7 +741,7 @@ export async function handleDesignWorkspaceRoute(
     case "design.verification.open": {
       // The qualified cloud primary owns its loopback preview. Desktop clients
       // reach it only through the existing authenticated Browser preview host.
-      if (remote || (!hostLocalResources && !options.primaryRepositoryRoot)) throw new Error("Frame preview is currently available in local workspaces.");
+      if (remote || !hostLocalResources) throw new Error("Frame preview is currently available in local workspaces.");
       const workspaceId = reqStr(params, "workspaceId");
       return host.withDesignReadWorkspace(workspaceId, false, async ({ root, designDirectory }) => {
         const reference = await createDesignContextReference(root, workspaceId, reqStr(params, "frame"), undefined, reqStr(params, "directoryId"));
@@ -770,7 +750,7 @@ export async function handleDesignWorkspaceRoute(
       });
     }
     case "design.context.capture": {
-      if (remote || (!hostLocalResources && !options.primaryRepositoryRoot)) throw new Error("Frame image attachments require an admitted workspace host.");
+      if (remote || !hostLocalResources) throw new Error("Frame image attachments require an admitted workspace host.");
       const reference = designContextReferenceSchema.parse(params.reference);
       if (reqStr(params, "workspaceId") !== reference.workspaceId)
         throw new Error("The frame belongs to another workspace.");
@@ -1750,12 +1730,7 @@ export async function handleDesignWorkspaceRoute(
         },
       };
     }
-    case "design.asset.insert":
-    case "design.asset.upload": {
-      if (op === "design.asset.upload" && !options.primaryRepositoryRoot)
-        throw new Error("Image upload requires a cloud workspace.");
-      const uploadInput = op === "design.asset.upload" ? designAssetUploadSchema.parse(params) : undefined;
-      const asset = uploadInput ? prepareDesignAssetUpload(uploadInput) : undefined;
+    case "design.asset.insert": {
       const workspace = host.resolveDesignWorkspace(
         reqStr(params, "workspaceId"),
         remote,
@@ -1772,14 +1747,7 @@ export async function handleDesignWorkspaceRoute(
           message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
         });
       }
-      const prepared = asset && uploadInput ? await (async () => {
-        const offsets = await readDesignElementOffsetMap(workspace.path, frame);
-        const root = offsets.find(element => element.tag === "main") ?? offsets[0];
-        if (!root) throw new Error("The frame has no editable root.");
-        const reference = path.posix.relative(path.posix.dirname(frame), asset.file);
-        return { nodeId: root.oid,
-          html: `<img data-oid="asset-${randomUUID()}" src="${escapeAttribute(reference)}" alt="${escapeAttribute(path.basename(uploadInput.name, path.extname(uploadInput.name)))}" style="position:absolute; left:${Math.round(uploadInput.x)}px; top:${Math.round(uploadInput.y)}px; max-width:320px; height:auto;">` };
-      })() : await prepareDesignAssetInsertion(workspace.path, {
+      const prepared = await prepareDesignAssetInsertion(workspace.path, {
         frame,
         sourceVersion,
         assetPath: reqStr(params, "assetPath"),
@@ -1790,7 +1758,7 @@ export async function handleDesignWorkspaceRoute(
       const apply = () => applyDesktopDesignOperation(
         workspace.path,
         frame,
-        `Insert ${asset?.file ?? reqStr(params, "assetPath")}`,
+        `Insert ${reqStr(params, "assetPath")}`,
         {
           operationId,
           type: "node.set-html",
@@ -1801,7 +1769,7 @@ export async function handleDesignWorkspaceRoute(
         undefined,
         summary.revision,
       );
-      const applied = asset ? await withDesignAssetUpload(asset, apply) : await apply();
+      const applied = await apply();
       const mutation = await readDesignMutationResult(
         workspace.path,
         frame,
@@ -1814,7 +1782,6 @@ export async function handleDesignWorkspaceRoute(
         );
       }
       return {
-        ...(asset ? { assetPath: asset.file, receipt: applied.receipt } : {}),
         mutation,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
@@ -1977,7 +1944,7 @@ export async function handleDesignWorkspaceRoute(
           ).map(([id, entry]) => [entry.path, id]),
         ),
         pointer,
-        active: (options.primaryRepositoryRoot && entryTarget?.directory) || designDirectoryNameFor(cwd),
+        active: designDirectoryNameFor(cwd),
         target: entryTarget,
       };
     }
@@ -1990,13 +1957,12 @@ export async function handleDesignWorkspaceRoute(
           message: "Design folders are managed in the desktop app.",
         });
       const repoRoot = reqStr(params, "repoRoot");
-      if (options.primaryRepositoryRoot !== repoRoot && !isKnownRepoRoot(repoRoot))
+      if (!isKnownRepoRoot(repoRoot))
         throw new GitError({
           code: "WORKSPACE_NOT_FOUND",
           message: "Open this repository in Zeros first.",
         });
       const folder = reqStr(params, "folder");
-      options.cloudFiles?.assertPath(folder, op === "design.adoptDirectory");
       return op === "design.previewExistingDirectory"
         ? previewExistingDesignDirectory(repoRoot, folder)
         : adoptExistingDesignDirectory(
@@ -2047,17 +2013,15 @@ export async function handleDesignWorkspaceRoute(
         });
       }
       const repoRoot = reqStr(params, "repoRoot");
-      if (options.primaryRepositoryRoot !== repoRoot && !isKnownRepoRoot(repoRoot)) {
+      if (!isKnownRepoRoot(repoRoot)) {
         throw new GitError({
           code: "WORKSPACE_NOT_FOUND",
           message: "Open this repository in Zeros first.",
         });
       }
-      options.cloudFiles?.assertPath(reqStr(params, "directory"), true);
       await removeDesignDirectory({
         repoRoot,
         directory: reqStr(params, "directory"),
-        ...(options.cloudFiles ? { livePrimaryWorkspaceId: reqStr(params, "workspaceId") } : {}),
       });
       return { removed: true };
     }
@@ -2074,15 +2038,13 @@ export async function handleDesignWorkspaceRoute(
         });
       }
       const repoRoot = reqStr(params, "repoRoot");
-      if (options.primaryRepositoryRoot !== repoRoot && !isKnownRepoRoot(repoRoot)) {
+      if (!isKnownRepoRoot(repoRoot)) {
         throw new GitError({
           code: "WORKSPACE_NOT_FOUND",
           message:
             "That repository isn't open in Zeros — open the folder first.",
         });
       }
-      options.cloudFiles?.assertPath(reqStr(params, "from"), true);
-      options.cloudFiles?.assertPath(reqStr(params, "to"), true);
       return renameDesignDirectory({
         repoRoot,
         from: reqStr(params, "from"),

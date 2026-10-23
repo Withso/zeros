@@ -4,7 +4,8 @@ Use `pnpm electron:local` on a Mac for UI and local feature testing without a
 Zeros account. It opens the real desktop shell in the device-local organization
 using the existing engine, SQLite database, Git, worktree, terminal, browser and
 provider integrations. Renderer edits retain Vite HMR; engine and native edits
-use the existing development watchers and main supervisor.
+use the existing development watchers and main supervisor. To test a branch's
+cloud workspaces before merge, use [`pnpm electron:cloud`](electron-cloud.md).
 
 `pnpm electron:dev` remains the complete hosted application for sign-in,
 organizations, billing, cloud workspaces and integration testing. Its launcher,
@@ -75,7 +76,7 @@ Preload obtains that decision directly from main before the renderer starts.
 Packaged Alpha/Beta/Production and full Dev retain their login boundary; Vite
 variables and renderer/process arguments cannot enable Local admission.
 
-Account/organization/cloud requests, account security monitoring, cloud replica
+Account/organization/cloud requests, account security monitoring, cloud catalog
 refresh, hosted GitHub App refresh, OAuth deep links and product analytics are
 disabled. Local does not claim any hosted Dev or packaged callback scheme. The
 normal loopback host, origin and per-boot token checks remain in force, as does

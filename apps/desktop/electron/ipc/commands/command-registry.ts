@@ -11,7 +11,6 @@ import { ghCloud } from "./cloud-github";
 // ──────────────────────────────────────────────────────────
 
 import { setCommand } from "../router";
-import { cloudTranscriptCacheRead, cloudTranscriptCacheWrite, cloudTranscriptCachePrune, installCloudTranscriptCacheLifecycle } from "./cloud-transcript-cache";
 import { cursorSubscription } from "./cursor-subscription";
 import { providerSubscription } from "./provider-subscription";
 import { cloudProviderAuth } from "./cloud-provider-auth";
@@ -114,37 +113,9 @@ import {
 } from "./window";
 import { appInfo, appSettingGet, appSettingSet, engineRestart, localNavigationReady } from "./app";
 import { logSubmit, logsExportOpen, logsRecent } from "./logs";
-import {
-  cloudWorkspaceAccessContext,
-  cloudWorkspaceAccessList,
-  cloudWorkspaceAccessRevoke,
-  cloudWorkspacePortForwardingGet,
-  cloudWorkspacePortForwardingSet,
-  cloudWorkspacePortForwardingRuntime,
-  cloudWorkspacePortForwardingForget,
-  cloudWorkspaceRuntimeClose,
-  cloudWorkspaceRuntimeOpen,
-  cloudWorkspaceCapability,
-  cloudWorkspaceRuntimeRefresh,
-  cloudWorkspaceSshCopy,
-  cloudWorkspaceSshIde,
-  cloudWorkspaceSshTerminal,
-  cloudWorkspaceTunnelStart,
-} from "./cloud-workspace-access";
-import { cloudWorkspaceSdkRuntimeOpen, cloudWorkspaceSdkRuntimeRefresh, cloudWorkspaceSdkRuntimeLegacy,
-  cloudWorkspaceSdkRuntimeProof, cloudWorkspaceSdkRuntimeCapabilities, cloudWorkspaceSdkStream,
-  cloudWorkspaceSdkRuntimeConnection, cloudWorkspaceSdkRuntimeCommand } from "./cloud-sdk-runtime";
-import {
-  cloudWorkspaceOutboxEnqueue,
-  cloudWorkspaceOutboxList,
-  installCloudOutboxLifecycle,
-} from "./cloud-outbox";
+import { cloudWorkspaceCapability } from "./cloud-capability";
 export function registerAllCommands(): void {
   registerAttachmentSourceIpc();
-  installCloudTranscriptCacheLifecycle();
-  setCommand("cloud_transcript_cache_read", cloudTranscriptCacheRead);
-  setCommand("cloud_transcript_cache_write", cloudTranscriptCacheWrite);
-  setCommand("cloud_transcript_cache_prune", cloudTranscriptCachePrune);
   // App info (runtime mode / version / platform) — consumed by the
   // renderer analytics layer to route events to the right PostHog
   // project (Zeros Dev vs Zeros). Metadata only.
@@ -192,36 +163,7 @@ export function registerAllCommands(): void {
   setCommand("tool_artwork_images", toolArtworkImages);
   setCommand("open_in_app", openInApp);
 
-  // Cloud access is brokered entirely in Electron main. Provider SSH and
-  // preview bearers never cross this command boundary into renderer code.
-  setCommand("cloud_workspace_ssh_copy", cloudWorkspaceSshCopy);
-  setCommand("cloud_workspace_ssh_terminal", cloudWorkspaceSshTerminal);
-  setCommand("cloud_workspace_ssh_ide", cloudWorkspaceSshIde);
-  setCommand("cloud_workspace_tunnel_start", cloudWorkspaceTunnelStart);
-  setCommand("cloud_workspace_access_revoke", cloudWorkspaceAccessRevoke);
-  setCommand("cloud_workspace_access_context", cloudWorkspaceAccessContext);
-  setCommand("cloud_workspace_access_list", cloudWorkspaceAccessList);
-  setCommand("cloud_workspace_port_forwarding_get", cloudWorkspacePortForwardingGet);
-  setCommand("cloud_workspace_port_forwarding_set", cloudWorkspacePortForwardingSet);
-  setCommand("cloud_workspace_port_forwarding_runtime", cloudWorkspacePortForwardingRuntime);
-  setCommand("cloud_workspace_port_forwarding_forget", cloudWorkspacePortForwardingForget);
-  setCommand("cloud_workspace_runtime_open", cloudWorkspaceRuntimeOpen);
   setCommand("cloud_workspace_capability", cloudWorkspaceCapability);
-  setCommand("cloud_workspace_runtime_refresh", cloudWorkspaceRuntimeRefresh);
-  setCommand("cloud_workspace_runtime_close", cloudWorkspaceRuntimeClose);
-  setCommand("cloud_workspace_sdk_runtime_open", cloudWorkspaceSdkRuntimeOpen);
-  setCommand("cloud_workspace_sdk_runtime_refresh", cloudWorkspaceSdkRuntimeRefresh);
-  setCommand("cloud_workspace_sdk_runtime_legacy", cloudWorkspaceSdkRuntimeLegacy);
-  setCommand("cloud_workspace_sdk_runtime_proof", cloudWorkspaceSdkRuntimeProof);
-  setCommand("cloud_workspace_sdk_runtime_capabilities", cloudWorkspaceSdkRuntimeCapabilities);
-  setCommand("cloud_workspace_sdk_runtime_connection", cloudWorkspaceSdkRuntimeConnection);
-  setCommand("cloud_workspace_sdk_runtime_command", cloudWorkspaceSdkRuntimeCommand);
-  setCommand("cloud_workspace_sdk_stream", cloudWorkspaceSdkStream);
-  // Durable per-account lifecycle outbox (S3-Q5): every cloud workspace
-  // command enters here before the network; sign-out clears it.
-  setCommand("cloud_workspace_outbox_enqueue", cloudWorkspaceOutboxEnqueue);
-  setCommand("cloud_workspace_outbox_list", cloudWorkspaceOutboxList);
-  installCloudOutboxLifecycle();
 
   // Auth (browser sign-in flow via app.zeros.build/auth.zeros.build)
   // Auth0 session @ rest — main owns the full token pair (auth-session.ts); the

@@ -39,7 +39,7 @@ export async function inspectHostedLive(state, profile, dependencies = {}) {
   const { inspectRailwayEnvironment, railwayDevClient } = await import("./railway.mjs");
   const { verifyPlanetScaleRuntimeRole, planetScaleDevClient } = await import("./planetscale.mjs");
   const { hostedCloudflareClient } = await import("./hosted-cloudflare.mjs");
-  const { devBoatClient } = await import("./hosted-image.mjs");
+  const { devBoatClient } = await import("./boat.mjs");
   const { providerJson } = await import("./provider-http.mjs");
   const { hostedPublicProfile } = await import("./hosted-profile.mjs");
   const lease = { state }, checks = [];

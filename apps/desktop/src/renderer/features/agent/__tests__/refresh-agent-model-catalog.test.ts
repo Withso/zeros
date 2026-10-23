@@ -13,6 +13,21 @@ function deferred<T>() {
 }
 
 describe("exact-owner model catalog refresh", () => {
+  it("clears the old cloud credential list when the replacement key has unknown availability", async () => {
+    const prior = catalog(["gpt-6-luna"]);
+    prior._meta!.cloudModelScope = "cloud/workspace/1";
+    const owner = { bridge: {}, key: "cloud/chat/execution", initialize: prior };
+    const replacement: InitializeResponse = { protocolVersion: 1, agentCapabilities: { steering: true },
+      _meta: { modelsDynamic: true, cloudModelScope: "cloud/workspace/2" } };
+    const publish = vi.fn();
+    await refreshAgentModelCatalog({ current: () => owner, request: async () => replacement, publish });
+    expect(publish).toHaveBeenCalledExactlyOnceWith(replacement);
+    publish.mockClear();
+    replacement._meta!.cloudModelScope = prior._meta!.cloudModelScope;
+    await refreshAgentModelCatalog({ current: () => owner, request: async () => replacement, publish });
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it.each(["local", "organization-local", "cloud"])("restores steering metadata after a %s conversation is reopened", async placement => {
     const owner: AgentModelCatalogOwner = { bridge: {}, key: `${placement}/chat/execution`, initialize: null };
     const initialize: InitializeResponse = { protocolVersion: 1, agentCapabilities: { steering: true } };

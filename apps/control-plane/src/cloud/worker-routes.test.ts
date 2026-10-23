@@ -1,0 +1,74 @@
+import { randomUUID } from "node:crypto";
+import { Hono } from "hono";
+import { expect, it, vi } from "vitest";
+import { HttpError } from "../authz.js";
+import { createCloudV2WorkerRoutes, type CloudV2WorkerRouteDeps } from "./worker-routes.js";
+import { newCloudV2Token } from "./tokens.js";
+import type { CloudV2Workspace } from "./store.js";
+
+function fixture() {
+  const bootId = randomUUID(), token = newCloudV2Token("worker").token;
+  const w = { id: randomUUID(), organizationId: randomUUID(), creatorUserId: randomUUID(), repository: "o/r", branch: "w", baseBranch: "main", state: "running", accessEpoch: "0", loginRevision: "0" } as CloudV2Workspace & { accessEpoch: string; loginRevision: string };
+  let allowed = true, revision = "0";
+  const deps: CloudV2WorkerRouteDeps = {
+    runtimeSha256: "a".repeat(64),
+    store: {
+      acceptWorkerHello: vi.fn(async value => allowed && value === token ? w : null),
+      workerSession: vi.fn(async (value, boot) => allowed && value === token && boot === bootId ? { ...w, loginRevision: revision } : null),
+      accessEpoch: vi.fn(async () => allowed ? "0" : null),
+      loginRevision: vi.fn(async () => revision),
+      markActive: vi.fn(async () => {}),
+      writeWorkerHistory: vi.fn(async () => {}),
+    },
+    config: vi.fn(async () => ({ t: "config", loginRevision: revision,
+      workspace: { id: w.id, organizationId: w.organizationId, repository: w.repository, branch: w.branch, baseBranch: w.baseBranch, checkoutPath: "/home/user/o/r" }, agents: {} })),
+    githubToken: vi.fn(async () => ({ token: "synthetic-github-token", expiresAt: 5000 })),
+  };
+  const app = new Hono();
+  app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+  app.route("/", createCloudV2WorkerRoutes(deps));
+  const request = (path: string, body?: unknown, headers: Record<string, string> = {}) => app.request(`/v2/cloud/worker/${path}`, {
+    method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "x-zeros-worker-boot": bootId, "content-type": "application/json", ...headers },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return { bootId, token, deps, request, revoke: () => { allowed = false; }, revise: (value: string) => { revision = value; } };
+}
+it("accepts outbound hello and returns configuration, refusing stale runtimes", async () => {
+  const f = fixture();
+  const body = { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) };
+  const response = await f.request("hello", body);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
+  expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
+});
+it("authenticates each HTTP carrier and fences obsolete boots before credentials or rows", async () => {
+  const f = fixture();
+  for (const [path, body] of [["activity", { idle: false }], ["history", { t: "history", bootId: f.bootId, sequence: 1, chats: [] }], ["github-token", {}], ["config", undefined]] as const) {
+    expect((await f.request(path, body, { authorization: "Bearer invalid" })).status).toBe(401);
+    expect((await f.request(path, body, { authorization: f.token })).status).toBe(401);
+    expect((await f.request(path, body, { "x-zeros-worker-boot": randomUUID() })).status).toBe(401);
+  }
+  expect(f.deps.githubToken).not.toHaveBeenCalled(); expect(f.deps.store.writeWorkerHistory).not.toHaveBeenCalled();
+});
+it("reports the committed login revision for poll repair and retains native history shape", async () => {
+  const f = fixture(); f.revise("3");
+  expect(await (await f.request("activity", { idle: false })).json()).toEqual({ state: "running", loginRevision: "3" });
+  expect(f.deps.store.markActive).toHaveBeenCalledTimes(1);
+  const history = { t: "history", bootId: f.bootId, sequence: 1, chats: [{ id: "native-chat" }] };
+  expect((await f.request("history", history)).status).toBe(200);
+  expect(f.deps.store.writeWorkerHistory).toHaveBeenCalledWith(f.token, f.bootId, 1, { chats: [{ id: "native-chat" }] });
+  expect((await f.request("history", { ...history, chats: Array.from({ length: 501 }, () => ({ id: "x" })) })).status).toBe(400);
+});
+it("discards credential reads made obsolete by a concurrent committed Settings change", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockImplementationOnce(async () => { f.revise("1"); return { ...original, agents: { cursor: { apiKey: "synthetic-old-token" } } }; });
+  const response = await f.request("config");
+  expect(await response.json()).toMatchObject({ config: { loginRevision: "1", agents: {} } });
+});
+it("rechecks authority after a slow token provider and returns a typed refusal", async () => {
+  const f = fixture();
+  vi.mocked(f.deps.githubToken).mockImplementationOnce(async () => { f.revoke(); return { token: "never-disclose", expiresAt: 50 }; });
+  const response = await f.request("github-token", {});
+  expect(response.status).toBe(401);
+  expect(await response.text()).not.toContain("never-disclose");
+});

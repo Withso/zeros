@@ -46,16 +46,10 @@
   `scripts/__tests__/repository-layout.test.ts` explicitly, update the owning
   index and preserve existing entries. Docs lint and an interrupted full-root
   run do not verify that inventory boundary.
-- **Guest launcher inventories:** after adding a Python invocation or rebasing
-  runtime launchers, run `scripts/__tests__/cloud-runtime-bootstrap.test.ts`.
-  Reconcile the exact discovered entry count and retain the actual isolation,
-  bytecode and fresh-cache assertions; an inventory mismatch alone does not
-  establish a production bytecode defect.
-- **Trusted-base gate drift:** when workloads pass but the hourly gate reports
-  `hourly_unavailable`, compare the policy checkout SHA with the current main
-  workflow's job profiles. If main already contains the compatible reader,
-  update the PR branch to include it and run fresh CI; a failed-job rerun keeps
-  the old trusted base and cannot pick up that fix.
+- **Permission-sensitive suites on a shared host:** the Dev environment and
+  auth-profile suites refuse group-writable state. Under a `0002` umask they
+  fail with "private, user-owned files". Rerun them with `umask 022`, which
+  matches CI, before suspecting the diff.
 - **Release workflows:** never rerun only the failed jobs. Carried producer
   jobs get new IDs and break signed-build provenance. Use a full rerun or a new
   push. A release that started while another deploy was in flight can fail its

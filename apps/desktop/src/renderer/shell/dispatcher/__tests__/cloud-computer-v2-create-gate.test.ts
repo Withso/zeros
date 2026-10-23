@@ -1,25 +1,17 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Project } from "../../../state/projects-store";
-import type { CloudComputerV2State } from "@zeros/protocol/cloud-computer-v2";
-import {
-  computerBuild,
-  computerOrg,
-  computerState,
-  computerUser,
-} from "../../../features/settings/__tests__/cloud-computer-v2-fixtures";
+import type { CloudComputerRepository } from "../../../features/settings/cloud-computer-v2-create-gate";
+import { computerOrg, computerRepository, computerUser } from "./cloud-computer-fixtures";
 
 const state = vi.hoisted(() => ({
   cloudChannel: true,
-  feature: true,
-  role: "developer" as string | null,
   organizationRole: "admin",
   personal: false,
-  snapshot: undefined as CloudComputerV2State | undefined,
+  repositories: undefined as readonly CloudComputerRepository[] | null | undefined,
   error: null as Error | null,
-  reads: [] as { key: string | null; enabled: boolean }[],
-  warm: vi.fn(),
+  reads: [] as { key: string | null; enabled: boolean; fetch: (key: string) => unknown }[],
+  installed: vi.fn(),
   dispatch: vi.fn(),
 }));
 vi.mock("../../../config/release-channel", async original => ({
@@ -27,75 +19,29 @@ vi.mock("../../../config/release-channel", async original => ({
   isFeatureEnabled: () => state.cloudChannel,
 }));
 vi.mock("../../../features/team/team-store", () => ({
-  useTeams: () => ({
-    me: { user: { id: computerUser, staffRole: state.role } },
-  }),
+  useTeams: () => ({ me: { user: { id: computerUser } } }),
   useActiveOrganization: () => ({
     id: computerOrg,
     isPersonal: state.personal,
     role: state.organizationRole,
     workspaceCapabilities: { local: state.personal, cloud: !state.personal },
   }),
-  getTeamStoreState: () => ({ me: { user: { id: computerUser } } }),
-  getOrganizationStoreGeneration: () => 0,
 }));
-vi.mock("../../../features/settings/internal-features", () => ({
-  useInternalFeatureActive: () =>
-    state.feature &&
-    (state.role === "developer" || state.role === "platform_owner"),
-}));
-vi.mock(
-  "../../../features/settings/cloud-computer-v2-client",
-  async (original) => ({
-    ...(await original<
-      typeof import("../../../features/settings/cloud-computer-v2-client")
-    >()),
-    prefetchCloudComputerV2: state.warm,
-  }),
-);
-vi.mock("../../../platform/cloud-workspaces", () => ({
-  cloudAccountRequest: vi.fn(),
-  getCloudWorkspaceCreateOptions: vi.fn(),
-}));
-vi.mock("../../../state/store", () => ({
-  useWorkspaceDispatch: () => state.dispatch,
-}));
+vi.mock("../../../platform/cloud-v2", () => ({ getCloudV2InstalledRepositories: state.installed }));
+vi.mock("../../../state/store", () => ({ useWorkspaceDispatch: () => state.dispatch }));
 vi.mock("../../../state/use-cached-read", () => ({
-  useCachedRead: (
-    _cache: unknown,
-    key: string | null,
-    _fetch: unknown,
-    options: { enabled?: boolean },
-  ) => {
-    state.reads.push({ key, enabled: options.enabled ?? key !== null });
-    if (key === "desktop") return { data: { enabled: true } };
-    if (key && [4, 6].includes(JSON.parse(key).length))
-      return {
-        data: {
-          configured: true,
-          installations: [{ id: computerOrg }],
-          repository: {
-            owner: "example",
-            name: "project",
-            defaultBranch: "main",
-          },
-        },
-      };
-    if (!key) return { data: undefined, error: null };
-    return { data: state.snapshot, error: state.error };
+  useCachedRead: (_cache: unknown, key: string | null, fetch: (key: string) => unknown, options: { enabled?: boolean }) => {
+    state.reads.push({ key, enabled: options.enabled ?? key !== null, fetch });
+    if (!key) return { data: undefined, error: null, refresh: vi.fn() };
+    return { data: state.repositories, error: state.error, refresh: vi.fn() };
   },
 }));
-import { useCloudCreate } from "../cloud-create";
 import {
   CloudComputerV2CreateNotice,
+  cloudComputerRepositoriesCache,
   useCloudComputerV2CreateGate,
 } from "../../../features/settings/cloud-computer-v2-create-gate";
 
-const project = {
-  id: "project",
-  repoRoot: `cloud://${computerOrg}/22222222-2222-4222-8222-222222222222`,
-  originUrl: "https://github.com/example/project.git",
-} as Project;
 function readGate(active = true) {
   let result!: ReturnType<typeof useCloudComputerV2CreateGate>;
   function Probe() {
@@ -105,135 +51,80 @@ function readGate(active = true) {
   renderToStaticMarkup(createElement(Probe));
   return result;
 }
-it("keeps Computer status and repository prefetch dormant when the release channel disables cloud", () => {
-  state.cloudChannel = false;
-  const gate = readGate();
-  expect(gate.enabled).toBe(false);
-  expect(gate.key).toBeNull();
-  gate.warm();
-  expect(state.reads.every(read => read.key === null && !read.enabled)).toBe(true);
-  expect(state.warm).not.toHaveBeenCalled();
-});
-function create(active = true) {
-  let result!: ReturnType<typeof useCloudCreate>;
-  function Probe() {
-    result = useCloudCreate(project, null, active);
-    return null;
-  }
-  renderToStaticMarkup(createElement(Probe));
-  return result;
-}
 beforeEach(() => {
   state.cloudChannel = true;
-  state.feature = true;
-  state.role = "developer";
   state.organizationRole = "admin";
   state.personal = false;
-  state.snapshot = computerState();
+  state.repositories = null;
   state.error = null;
   state.reads = [];
-  state.warm.mockReset();
+  state.installed.mockReset().mockResolvedValue(null);
+  for (const key of cloudComputerRepositoriesCache.keys()) cloudComputerRepositoriesCache.forget(key);
 });
 
-describe("first-build cloud create admission", () => {
-  it("removes the admin Settings action on current organization demotion despite a warm canManage", () => {
+describe("cloud create admission", () => {
+  // Regression: the gate read the retired v1 Cloud Computer route, so every
+  // create stayed blocked against the v2 control plane.
+  it("reads the member-visible v2 repository list for the exact organization", async () => {
+    const gate = readGate();
+    expect(gate.key).toBe(JSON.stringify([computerUser, computerOrg]));
+    const read = state.reads.find(row => row.key === gate.key)!;
+    await read.fetch(gate.key!);
+    expect(state.installed).toHaveBeenCalledWith(computerOrg);
+  });
+  it("keeps reads and warming dormant when the release channel disables cloud", () => {
+    state.cloudChannel = false;
+    const gate = readGate();
+    expect(gate.enabled).toBe(false);
+    expect(gate.key).toBeNull();
+    gate.warm();
+    expect(state.reads.every(read => read.key === null && !read.enabled)).toBe(true);
+    expect(state.installed).not.toHaveBeenCalled();
+  });
+  it("requires a first build and offers admins the Settings destination", () => {
+    const gate = readGate();
+    expect(gate.reason).toBe("Build your Cloud Computer first");
+    expect(gate.required).toBe(true);
+    const html = renderToStaticMarkup(createElement(CloudComputerV2CreateNotice, { required: true, canManage: gate.canManage, warm: gate.warm }));
+    expect(html).toContain("Open Cloud Computer settings");
+  });
+  it("directs members to an admin and follows a current demotion", () => {
     expect(readGate().canManage).toBe(true);
     state.organizationRole = "member";
-    expect(readGate().canManage).toBe(false);
-    expect(readGate().required).toBe(true);
-  });
-  it("disables both create modes before a first successful active template and offers admins the Settings destination", () => {
-    const result = create();
-    expect(result.reason).toBe("Build your Cloud Computer first");
-    expect(result.computerRequired).toBe(true);
-    const html = renderToStaticMarkup(
-      createElement(CloudComputerV2CreateNotice, {
-        required: true,
-        canManage: true,
-        warm: result.warmComputer,
-      }),
-    );
-    expect(html).toContain("Open Cloud Computer settings");
-    state.snapshot = computerState({
-      state: "failed",
-      latestBuild: computerBuild({ state: "failed" }),
-    });
-    expect(create().reason).toBe("Build your Cloud Computer first");
-  });
-
-  it("keeps active vN creation available during unbuilt changes and another build", () => {
-    state.snapshot = computerState({
-      state: "building",
-      active: computerBuild(),
-      activeRepositories: [{ id: "123", owner: "example", name: "project", installationId: computerOrg }],
-      unbuiltChanges: true,
-      latestBuild: computerBuild({ state: "running" }),
-    });
-    expect(create().reason).toBeNull();
-  });
-
-  it("fails closed while the exact org is cold or its first read fails", () => {
-    state.snapshot = undefined;
-    expect(create().reason).toBe("Checking Cloud Computer…");
-    state.error = new Error("offline");
-    expect(create().reason).toContain("could not be checked");
-  });
-
-  it("retains a confirmed active snapshot when revalidation fails", () => {
-    state.snapshot = computerState({
-      state: "active",
-      active: computerBuild(),
-      activeRepositories: [{ id: "123", owner: "example", name: "project", installationId: computerOrg }],
-    });
-    state.error = new Error("offline");
-    expect(create().reason).toBeNull();
-  });
-
-  it("warms and checks v2 for every organization member", () => {
-    readGate().warm();
-    expect(state.warm).toHaveBeenCalledWith(computerUser, computerOrg);
-    for (const role of [null, "support_admin", "developer"]) {
-      state.feature = false;
-      state.role = role;
-      state.warm.mockReset();
-      const gate = readGate();
-      gate.warm();
-      expect(gate.enabled).toBe(true);
-      expect(gate.reason).toBe("Build your Cloud Computer first");
-      expect(state.warm).toHaveBeenCalledWith(computerUser, computerOrg);
-    }
-  });
-
-  it("gates reads and intent warming on owner and activity", () => {
-    for (const [feature, role, personal, active] of [
-      [true, "developer", true, true],
-      [true, "developer", false, false],
-    ] as const) {
-      state.feature = feature;
-      state.role = role;
-      state.personal = personal;
-      state.reads = [];
-      state.warm.mockReset();
-      const gate = readGate(active);
-      gate.warm();
-      expect(state.reads.every((row) => !row.enabled)).toBe(true);
-      expect(state.warm).not.toHaveBeenCalled();
-      if (personal)
-        expect(gate.reason).toBeNull();
-    }
-  });
-
-  it("requires the computer with the retired flag off and directs members to an admin", () => {
-    state.feature = false;
-    expect(create().reason).toBe("Build your Cloud Computer first");
-    const html = renderToStaticMarkup(
-      createElement(CloudComputerV2CreateNotice, {
-        required: true,
-        canManage: false,
-        warm: vi.fn(),
-      }),
-    );
+    const gate = readGate();
+    expect(gate.canManage).toBe(false);
+    expect(gate.required).toBe(true);
+    const html = renderToStaticMarkup(createElement(CloudComputerV2CreateNotice, { required: true, canManage: false, warm: vi.fn() }));
     expect(html).toContain("Ask an organization admin");
     expect(html).not.toContain("Open Cloud Computer settings");
+  });
+  it("admits creation from the live build's repositories", () => {
+    state.repositories = [computerRepository("example", "project")];
+    const gate = readGate();
+    expect(gate.reason).toBeNull();
+    expect(gate.repositories).toEqual([computerRepository("example", "project")]);
+  });
+  it("fails closed while the exact organization is cold or its first read fails", () => {
+    state.repositories = undefined;
+    expect(readGate().reason).toBe("Checking Cloud Computer…");
+    state.error = new Error("offline");
+    expect(readGate().reason).toContain("could not be checked");
+  });
+  it("keeps a confirmed list when revalidation fails", () => {
+    state.repositories = [computerRepository("example", "project")];
+    state.error = new Error("offline");
+    expect(readGate().reason).toBeNull();
+  });
+  it("gates reads and intent warming on owner and activity", () => {
+    for (const [personal, active] of [[true, true], [false, false]] as const) {
+      state.personal = personal;
+      state.reads = [];
+      state.installed.mockClear();
+      const gate = readGate(active);
+      gate.warm();
+      expect(state.reads.every(row => !row.enabled)).toBe(true);
+      expect(state.installed).not.toHaveBeenCalled();
+      if (personal) expect(gate.reason).toBeNull();
+    }
   });
 });

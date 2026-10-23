@@ -5,15 +5,10 @@ import path from "node:path";
 import type { ExecFileOptions } from "node:child_process";
 
 const state = vi.hoisted(() => ({
-  cloud: false,
   command: "",
   stderr: "",
   status: 128,
   calls: [] as Array<{ args: string[]; options: ExecFileOptions }>,
-}));
-vi.mock("../../agents/containment/cloud-worker-config", () => ({
-  loadCloudWorkerConfiguration: () =>
-    state.cloud ? { version: 4, uid: 10001, gid: 10001 } : null,
 }));
 vi.mock("node:child_process", async (original) => ({
   ...(await original<typeof import("node:child_process")>()),
@@ -42,9 +37,9 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe.each([false, true])(
-  "Design settings Git probes (cloud=%s)",
-  (cloud) => {
+describe(
+  "Design settings Git probes",
+  () => {
     it.each([
       [
         "rev-parse",
@@ -69,7 +64,6 @@ describe.each([false, true])(
       async (command, operation, stderr, reason) => {
         vi.resetModules();
         Object.assign(state, {
-          cloud,
           command,
           stderr,
           status: 128,
@@ -95,15 +89,14 @@ describe.each([false, true])(
         expect(JSON.stringify(cause)).not.toContain("/private/");
         expect(JSON.stringify(cause)).not.toContain(root);
         const options = state.calls.at(-1)!.options;
-        expect(options.uid).toBe(cloud ? process.geteuid?.() : undefined);
-        expect(options.gid).toBe(cloud ? process.geteuid?.() : undefined);
+        expect(options.uid).toBeUndefined();
+        expect(options.gid).toBeUndefined();
       },
     );
 
     it("handles check-ignore exit 1 as a missing exclusion", async () => {
       vi.resetModules();
       Object.assign(state, {
-        cloud,
         command: "check-ignore",
         stderr: "",
         status: 1,

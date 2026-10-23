@@ -1065,22 +1065,22 @@ dbDescribe("organization GitHub source authorization", () => {
     return {user,org,request,entry,calls};
   }
 
-  it("connects only the acting member, lists their repositories and produces a short-lived source proof", async () => {
+  it("connects only the acting member and returns repositories after checking current authority", async () => {
     const f = await fixture();
     expect((await f.request({action:"connect",installationId:f.entry.id})).status).toBe(200);
     const repos = await f.request({action:"repositories",installationId:f.entry.id,page:1});
     expect(await repos.json()).toEqual({repositories:[{id:"123",owner:"acme",name:"example",defaultBranch:"main",private:true}],nextPage:null});
     const source = await f.request({action:"source",owner:"acme",repository:"example"});
     expect(await source.json()).toMatchObject({installationId:f.entry.id,repository:{id:"123"}});
-    const proof = await withSystemTx(pool,tx=>tx.query("SELECT actor_fingerprint=cloud_github_actor_fingerprint(org_id,owner_user_id) AS current,expires_at>now() AND expires_at<=now()+interval '2 minutes' AS short_lived FROM cloud_github_source_access WHERE org_id=$1 AND owner_user_id=$2",[f.org,f.user.id]));
-    expect(proof.rows).toEqual([{current:true,short_lived:true}]);
+    const connection = await withSystemTx(pool, tx => tx.query("SELECT installation_id FROM cloud_github_connections WHERE org_id=$1 AND owner_user_id=$2", [f.org, f.user.id]));
+    expect(connection.rows).toEqual([{ installation_id: f.entry.id }]);
     expect(f.calls.some(call=>call.url.includes("/access_tokens"))).toBe(false);
     const before = f.calls.length;
     const denied = await f.request({action:"source",organizationId:randomUUID(),owner:"acme",repository:"example"});
     expect(denied.status).toBe(404);
     expect(f.calls).toHaveLength(before);
     expect((await f.request({action:"disconnect",installationId:f.entry.id,accessToken:undefined})).status).toBe(200);
-    expect((await pool.query("SELECT 1 FROM cloud_github_source_access WHERE org_id=$1",[f.org])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_github_connections WHERE org_id=$1",[f.org])).rowCount).toBe(0);
   });
 
   it("rejects an accessible GitHub installation when the person is not an active organization member", async () => {
@@ -1098,6 +1098,6 @@ dbDescribe("organization GitHub source authorization", () => {
     const response = await f.request({action:"source",owner:"acme",repository:"example"});
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({error:{code:"github_authorization_changed"}});
-    expect((await pool.query("SELECT 1 FROM cloud_github_source_access WHERE org_id=$1",[f.org])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_github_connections WHERE org_id=$1",[f.org])).rowCount).toBe(0);
   });
 });

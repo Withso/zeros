@@ -440,6 +440,57 @@ export async function checkSidebarResourceDiagnostics({
   );
 }
 
+/** Retained from the retired cloud restart smoke: a Local workspace menu takes
+ * Escape at its first focus and releases the native overlay without writes.
+ * The menu is shared by every Local owner; owner-specific Local-link gating
+ * has its own unit coverage. */
+export async function checkSidebarLocalMenuFirstFocusEscape({ page, check, harnessBase }) {
+  await resetHarness(page, harnessBase);
+  await page.evaluate(() => {
+    window.appSidebarMenuProbe = { overlayActive: false };
+    document.addEventListener("zeros-native-surface-overlay-intent", (event) => {
+      window.appSidebarMenuProbe.overlayActive = event.detail.active;
+    });
+  });
+  const writes = () =>
+    page.evaluate(() =>
+      window.appSidebarRequests.filter(({ op }) => ["workspace.setStatus", "workspace.archive"].includes(op)).length,
+    );
+  const row = page.locator('[data-workspace-id="ws-atlanta"]');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const before = await writes();
+    await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+    await page.evaluate(() => {
+      const probe = window.appSidebarMenuProbe;
+      probe.escapeSent = false;
+      const onFocus = (event) => {
+        const menu = event.target.closest?.('[role="menu"]');
+        if (!menu) return;
+        document.removeEventListener("focusin", onFocus, true);
+        probe.focusInsideMenu = menu.contains(document.activeElement);
+        probe.overlayAtFirstFocus = probe.overlayActive;
+        menu.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        probe.escapeSent = true;
+      };
+      document.addEventListener("focusin", onFocus, true);
+    });
+    await row.click({ button: "right" });
+    await expect.poll(() => page.evaluate(() => window.appSidebarMenuProbe.escapeSent)).toBe(true);
+    expect(await page.evaluate(() => window.appSidebarMenuProbe.focusInsideMenu)).toBe(true);
+    expect(await page.evaluate(() => window.appSidebarMenuProbe.overlayAtFirstFocus)).toBe(true);
+    await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+    await expect(row).toHaveAttribute("data-state", "closed");
+    // Leave the row so a hover tooltip cannot hold the shared overlay intent.
+    await page.mouse.move(1, 1);
+    await expect.poll(() => page.evaluate(() => window.appSidebarMenuProbe.overlayActive)).toBe(false);
+    expect(await writes()).toBe(before);
+  }
+  check(
+    "A Local workspace menu handles first-focus Escape twice and releases native overlays without writes",
+    true,
+  );
+}
+
 export const appSidebarRegressionChecks = [
   checkSidebarNarrowHeader,
   checkSidebarHistory,
@@ -448,4 +499,5 @@ export const appSidebarRegressionChecks = [
   checkSidebarHiddenReads,
   checkSidebarReselection,
   checkSidebarResourceDiagnostics,
+  checkSidebarLocalMenuFirstFocusEscape,
 ];

@@ -1,4 +1,5 @@
 import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
+import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { designToolLabel } from "./design-tool-presentation";
 import { ChromeIcon } from "@/renderer/shared/ui/chrome-icon";
 // ──────────────────────────────────────────────────────────
@@ -157,7 +158,7 @@ export function metaForEvent(message: AgentMessage): EventMeta {
     // so a retry burst reads as a quiet stack of rows instead of prose glued
     // into the agent's answer.
     const m = message as any;
-    const text = (m.message as string) ?? "";
+    const text = modelRejectionDisplayText((m.message as string) ?? "");
     // An api_retry burst reads as "Reconnecting agent", not a warning. While
     // live it renders as a shimmer row (see
     // EventRowRenderer); once settled this is its static record. The

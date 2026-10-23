@@ -33,7 +33,7 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 
-import { gitExecutionIdentity, runGit } from "./git-exec";
+import { runGit } from "./git-exec";
 import { isInside } from "../files/read-file";
 import { listMentionPaths } from "../files/mention-paths";
 
@@ -238,7 +238,6 @@ export async function listIgnoredEntries(
 ): Promise<string[]> {
   if (!cwd) return [];
   const read = () => dir ? readIgnoredDir(cwd, dir, limit) : listIgnoredRoots(cwd, limit);
-  if (gitExecutionIdentity()) return read();
   const key = JSON.stringify([path.resolve(cwd), dir ?? null, limit]);
   const current = ignoredEntryFlights.get(key);
   if (current) return [...await current];

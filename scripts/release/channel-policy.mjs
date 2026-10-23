@@ -1,9 +1,9 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const channels = JSON.parse(readFileSync(new URL("../../apps/control-plane/src/cloud-workspace-channels.json", import.meta.url), "utf8"));
+const channels = JSON.parse(readFileSync(new URL("../../apps/control-plane/src/cloud/channels.json", import.meta.url), "utf8"));
 
-/** Apply the checked-in pause before any cloud build/qualification decisions.
+/** Apply the checked-in pause before any cloud release decisions.
  * Existing environment opt-outs remain valid on channels that allow cloud. */
 export function releaseChannelEnvironment(channel, environment) {
   if (!Object.hasOwn(channels, channel) || typeof channels[channel] !== "boolean")
@@ -13,7 +13,6 @@ export function releaseChannelEnvironment(channel, environment) {
     throw new Error("Invalid desktop cloud capability");
   return {
     ZEROS_CLOUD_WORKSPACES_ENABLED: allowed && environment.ZEROS_CLOUD_WORKSPACES_ENABLED === "true" ? "true" : "false",
-    ZEROS_WORKER_PROMOTION: allowed && environment.ZEROS_WORKER_PROMOTION === "enabled" ? "enabled" : "disabled",
   };
 }
 

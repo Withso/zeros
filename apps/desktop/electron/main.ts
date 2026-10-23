@@ -14,9 +14,7 @@ if (LOCAL_DEVELOPMENT_BUILD_ERROR) {
 }
 
 import { hydrateShellPath } from "./shell-path";
-import { desktopUserPresence } from "./desktop-user-presence";
 import { rendererProcessOwners } from "./renderer-process-owners";
-import { handleSharedCloudAccessSessionChange } from "./cloud-workspace-access-runtime";
 import { startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
 import type { DesignCaptureService } from "../src/engine/design/capture-service";
@@ -171,9 +169,7 @@ import {
   startEngineCodeWatcher,
   startWatchdog,
   pushGithubCredentialToEngine,
-  pushCloudReplicaSessionToEngine,
 } from "./sidecar";
-import { startCloudReplicaSessionRefresh } from "./cloud-replica-session-lifecycle";
 import { seedCloudWorkspaceDesktopCapabilityEnvironment } from "../src/engine/cloud-workspace-capability";
 import { installAppMenu } from "./menu";
 import { appendLogRecord, flushLogStore, initLogStore } from "./log-store";
@@ -1255,6 +1251,14 @@ function setupDockBrand(): void {
 
 app.whenReady().then(async () => {
   app.once("will-quit", startProcessMetricsLogging());
+  if (!IS_PACKAGED && !IS_LOCAL_DEVELOPMENT && process.env.ZEROS_CLOUD_DESKTOP_HANDOFF) {
+    try {
+      const { signInCloudDesktop } = await import("./cloud-desktop-sign-in");
+      await signInCloudDesktop();
+    } catch {
+      console.warn("[auth] Automatic cloud development sign-in unavailable; the saved session was preserved. Sign in manually or check the private fixture settings.");
+    }
+  }
   if (IS_LOCAL_DEVELOPMENT && process.env.ZEROS_SHARED_SECRETS_DIR) {
     try {
       migrateLocalProviderSecrets(app.getPath("userData"));
@@ -1882,12 +1886,6 @@ app.whenReady().then(async () => {
     setCommand(name, handler);
   }
   let startAuthSecurityMonitor = () => {};
-  const userPresence = desktopUserPresence(powerMonitor, emitEvent);
-  setCommand("app_user_presence", (_args, event) => {
-    trustedBrowserWindow(event);
-    return { available: userPresence.available() };
-  });
-  app.once("will-quit", userPresence.close);
   if (!IS_LOCAL_DEVELOPMENT) {
     const authSecurityMonitor = new WorkOSDesktopSecurityMonitor({
       baseUrl: controlPlaneBaseUrl(),
@@ -1914,29 +1912,12 @@ app.whenReady().then(async () => {
     const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
       emitEvent("auth-store-changed", {});
       void authSecurityMonitor.revalidate("session_changed", true);
-      // Start the cloud-session update first: its writer advances the generation
-      // synchronously, so an older bearer can no longer publish while unrelated
-      // GitHub credential work is awaited.
-      const cloudReplicaSessionUpdate = pushCloudReplicaSessionToEngine();
       await pushGithubCredentialToEngine();
-      await cloudReplicaSessionUpdate;
       await scheduleGithubAppRefresh();
       emitEvent("github-credential-store-changed", {});
     });
-    // Token refresh is intentionally not a semantic sign-in event. Periodically
-    // renew the engine's in-memory bearer so background replica convergence does
-    // not stall after the original WorkOS access token expires.
-    const disposeCloudReplicaSessionRefresh = startCloudReplicaSessionRefresh({
-      refresh: pushCloudReplicaSessionToEngine,
-      onError: (error: unknown) => {
-        console.warn(
-          `[cloud-replica] periodic session refresh failed (${error instanceof Error ? error.name : "unknown"})`,
-        );
-      },
-    });
     startAuthSecurityMonitor = () => authSecurityMonitor.start();
     app.on("will-quit", () => {
-      disposeCloudReplicaSessionRefresh();
       disposeGithubSessionSync();
       app.off("browser-window-focus", onAuthWindowFocus);
       powerMonitor.off("resume", onAuthResume);
@@ -2019,8 +2000,7 @@ app.whenReady().then(async () => {
         void pushProviderCredentialsToEngine().catch(() => {});
       }
       if (changedAccounts.includes("auth-session:tokens")) {
-        handleSharedCloudAccessSessionChange(() => emitEvent("auth-store-changed", {}));
-        void pushCloudReplicaSessionToEngine();
+        emitEvent("auth-store-changed", {});
         void pushGithubCredentialToEngine();
         void scheduleGithubAppRefresh();
       }

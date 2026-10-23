@@ -38,7 +38,6 @@ import type { LocalMessagePresentation, LocalOrchestrationPorts, LocalPendingCar
  * state or a call into an existing handler — no new lifecycle. */
 export interface LocalEngineHost {
   linkScheme(): LocalLinkScheme;
-  isCloudWorker(): boolean;
   featureOpen(): boolean;
   /** The live execution bound to a chat, if any. */
   executionForChat(chatId: string): { executionId: string; agentId: string } | null;
@@ -232,7 +231,6 @@ export function createLocalEnginePorts(host: LocalEngineHost): LocalEnginePorts 
     awaitingSetup: setupExpected,
     engineId: () => engineId,
     linkScheme: () => host.linkScheme(),
-    isCloudWorker: () => host.isCloudWorker(),
     featureOpen: () => host.featureOpen(),
 
     listManagedWorkspaces: () => listWorkspaces({}),

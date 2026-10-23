@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
-import { isCloudLifecycleDeferred } from "../../../platform/cloud-lifecycle-result";
 
 // Execute the real handler with its product dependencies replaced. Rendering
 // the surrounding settings forms is unrelated to the destructive continuation.
@@ -28,24 +27,13 @@ function fixture(result:unknown){
   const workspaceDelete=vi.fn().mockResolvedValue(result);
   const scope={...effects,busy:false,project,chats:[],activeChatId:null,newAgentFolder:null,
     projects:[project,{id:"other",repoRoot:"/other"}],peekWorkspacesFor:()=>[workspace],workspaceList:async()=>[workspace],
-    folderIsOwnedByProject:()=>true,isLocalMainWorkspace:()=>false,workspaceDelete,isCloudLifecycleDeferred,
+    folderIsOwnedByProject:()=>true,isLocalMainWorkspace:()=>false,workspaceDelete,
     toast,isGitErrorShape:()=>false,console:{warn:vi.fn(),error:vi.fn()}};
   const run=new Function(...Object.keys(scope),`return ${code}`)(...Object.values(scope)) as ()=>Promise<void>;
   return {run,effects,toast,workspaceDelete};
 }
 
 describe("repository removal final-save continuation",()=>{
-  it.each([{kind:"background_pending",operationId:"test-operation"},{kind:"retired"}])(
-    "keeps repository and chats after $kind",async result=>{
-      const f=fixture(result);await f.run();
-      expect(f.workspaceDelete).toHaveBeenCalledOnce();
-      expect(f.effects.removeProject).not.toHaveBeenCalled();
-      expect(f.effects.dispatch).not.toHaveBeenCalled();
-      expect(f.effects.onOpenChange).not.toHaveBeenCalled();
-      expect(f.effects.forgetWorkspacesFor).not.toHaveBeenCalled();
-      for(const notify of Object.values(f.toast))expect(notify).not.toHaveBeenCalled();
-      expect(f.effects.setBusy).toHaveBeenLastCalledWith(false);
-    });
   it("retains the completed Local/organization-local deletion continuation",async()=>{
     const f=fixture(undefined);await f.run();
     expect(f.workspaceDelete).toHaveBeenCalledOnce();

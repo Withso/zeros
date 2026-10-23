@@ -1,5 +1,5 @@
 import { ChevronDown, Plus } from "lucide-react";
-import type { CloudComputerV2ActiveRepository } from "@zeros/protocol/cloud-computer-v2";
+import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 import { Button, GithubIcon } from "../../shared/ui";
 import { Tooltip } from "../../shared/ui/primitives";
 import {
@@ -22,14 +22,14 @@ export function CloudComputerRepositoryPicker({
   onSelect,
   warm,
 }: {
-  repositories: CloudComputerV2ActiveRepository[];
-  selected: CloudComputerV2ActiveRepository | null;
+  repositories: readonly CloudComputerRepository[];
+  selected: CloudComputerRepository | null;
   active: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   disabled: boolean;
   onSelect: (id: string) => void;
-  warm: (repository: CloudComputerV2ActiveRepository) => void;
+  warm: (repository: CloudComputerRepository) => void;
 }) {
   const dispatch = useWorkspaceDispatch();
   return (

@@ -40,6 +40,7 @@ function fixture() {
     const source = path.join(repository, "scripts/dev-environment", name);
     if (fs.existsSync(source)) fs.copyFileSync(source, path.join(dev, name));
   }
+  fs.copyFileSync(path.join(repository, "scripts/electron-local-process-group.mjs"), path.join(root, "scripts/electron-local-process-group.mjs"));
   write("scripts/dev-environment/hosted-launcher.mjs", `
     import 'esbuild';
     import { createRequire } from 'node:module';

@@ -1,4 +1,4 @@
-// Production chat/composer and admission recovery; synthetic native transport.
+// Production chat/composer; synthetic native transport.
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
@@ -9,15 +9,13 @@ import { ActionsCtx, type SessionsActions } from "../features/agent/sessions-con
 import { useChatSession } from "../features/agent/sessions-hooks";
 import { BLANK, useSessionsStore } from "../features/agent/sessions-store";
 import { getLiveChatDraft } from "../features/agent/composer-live-drafts";
-import { recoverCloudAdmissionFailure } from "../features/agent/cloud-runtime-upgrade";
-import { invalidateCloudAgentRegistry, warmCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
+import { warmCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
 import { loadAgents } from "../features/agent/agents-cache";
 import { acceptOrganizationSnapshot } from "../features/team/team-store";
 import { Button, TooltipProvider } from "../shared/ui/primitives";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
-import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import { useWorkspaceStore } from "../state/workspace-store";
@@ -29,8 +27,6 @@ const workspaceId = "22222222-2222-4222-8222-222222222222";
 const folder = `cloud://${organizationId}/${workspaceId}`;
 const placements = [folder, "/fixture/personal/local", "/fixture/organization/local"];
 const agents = [{ id: "codex", name: "Codex", installed: true, authenticated: true, version: "1.0.0", description: "", distribution: {} }];
-let runtimeRequired = new URLSearchParams(location.search).has("blocked");
-let error = "cloud_agent_model_not_authorized";
 let sends = 0;
 let reconnects = 0;
 const followUpFixture = new URLSearchParams(location.search).has("follow-up");
@@ -80,48 +76,28 @@ const actions = {
   ensureSession: async () => {},
   updateConfig: () => {},
   holdQueue: () => {}, releaseQueue: () => {},
-  sendPrompt: async (chatId, text, displayText, _attachments, bubbleAttachments, segments, _autoAction, onAccepted, cloudQueue, _wakeIntent, followUpBehavior) => {
+  sendPrompt: async (chatId, text, displayText, _attachments, bubbleAttachments, segments, _autoAction, onAccepted, _cloudQueue, _wakeIntent, followUpBehavior) => {
     sends++;
     followUps.push({ chatId, behavior: followUpBehavior });
-    const draft = getLiveChatDraft(chatId);
     const message = { id: crypto.randomUUID(), kind: "text" as const, role: "user" as const, text: displayText ?? text,
       createdAt: Date.now(), attachments: bubbleAttachments, segments };
     const store = useSessionsStore.getState(), slot = store.sessions[chatId];
     store.patchSession(chatId, { messages: [...slot.messages, message], status: "streaming" });
     onAccepted?.();
     if (followUpFixture) return;
-    if (isCloudWorkspace(slot.cwd)) {
-      const refuse = () => recoverCloudAdmissionFailure({ folder: slot.cwd, chatId, error, message, draft,
-        model: "gpt-6.1-sol", store: useSessionsStore.getState(), pauseQueue: () => {} });
-      // Queue acceptance returns before readiness/admission completes. Let the
-      // composer clear its accepted draft before delivering the refusal.
-      if (cloudQueue) setTimeout(refuse, 0);
-      else refuse();
-    } else store.patchSession(chatId, { status: "ready" });
+    store.patchSession(chatId, { status: "ready" });
   },
 } satisfies Partial<SessionsActions>;
 Object.assign(window, { composerSendFailureFixture: {
-  get runtimeRequired() { return runtimeRequired; },
   get sends() { return sends; },
   get followUps() { return followUps; },
   get reconnects() { return reconnects; },
   get document() { return document; },
-  get runtimeAvailability() {
-    return { organizationId, workspaceId, generation: document.generation.number,
-      currentRuntimeId: `r1-${"a".repeat(64)}`, latestRuntimeId: `r1-${(runtimeRequired ? "b" : "a").repeat(64)}`,
-      updateAvailable: runtimeRequired, unavailableReason: null, transition: null };
-  },
-  setFailure(code: string) { error = code; },
   publish(patch: Partial<CloudWorkspaceDocument>) {
     document = { ...document, ...patch, version: document.version + 1,
       updatedAt: new Date(Date.UTC(2026, 9, 1, 10) + (document.version + 1) * 1000).toISOString() };
     acceptCloudWorkspaceDocument(document);
     return document;
-  },
-  async refresh(required = runtimeRequired) {
-    runtimeRequired = required;
-    invalidateCloudAgentRegistry(folder);
-    await warmCloudAgentRegistry(folder);
   },
 } });
 await loadAgents(actions.listAgents);

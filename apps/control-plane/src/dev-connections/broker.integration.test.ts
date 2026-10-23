@@ -10,7 +10,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { syntheticCodexCache } from "../cloud-workspaces/codex-auth-test-fixture.js";
+import { syntheticCodexCache } from "../agent-credentials/codex-auth-test-fixture.js";
 import { checkDevConnectionsSchema, migrateDevConnections } from "./migrate.js";
 import { DevConnectionStore } from "./store.js";
 import { DevConnectionBroker } from "./broker.js";

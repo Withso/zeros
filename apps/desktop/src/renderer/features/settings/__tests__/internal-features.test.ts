@@ -82,8 +82,6 @@ describe("isInternalUser — the staff gate", () => {
       store.setInternalFeatureEnabled(feature, false);
       expect(store.isInternalFeatureActive(feature)).toBe(false);
     }
-    // Local development never grants hosted platform-owner powers.
-    expect(store.isInternalFeatureActive("releaseCanaries")).toBe(false);
     vi.stubGlobal("window", { __ZEROS_NATIVE__: {}, addEventListener: vi.fn() });
     expect(store.isInternalUser()).toBe(false);
   });
@@ -145,19 +143,6 @@ describe("internal feature flags", () => {
     expect(store.isInternalFeatureEnabled("copyLogs")).toBe(true);
     store.setInternalFeatureEnabled("copyLogs", false);
     expect(JSON.parse(backing.get("zeros.internalFeatures")!)).toEqual({ cloudComputerV2: true, copyLogs: false });
-  });
-  it("makes release-check controls discoverable only to platform owners without enabling credential consent", async () => {
-    const store = await freshStore();
-    for (const role of [null, "developer", "support_admin"] as const) {
-      signedInAs(role);
-      expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(false);
-    }
-    signedInAs("platform_owner");
-    expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(true);
-    store.setInternalFeatureEnabled("releaseCanaries" as any, false);
-    expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(false);
-    signedOut();
-    expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(false);
   });
   it("starts staged agent control features on for staff only", async () => {
     const backing = installLocalStorageStub();

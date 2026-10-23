@@ -27,9 +27,6 @@
 import type { Octokit as OctokitClass } from "@octokit/rest";
 import { createGithubInlineReviewService } from "./github-inline-review";
 import { createHash } from "node:crypto";
-import { githubWriteCredential } from "./github-write-context";
-import { githubReadTransport } from "./github-read-context";
-import { githubWritePublication } from "./github-write-publication";
 import { ensureLocalSettingsIgnored } from "../settings/personal-repo";
 import { GitError, isGitError, type GitErrorCode } from "./errors";
 import { getWorkspace } from "./worktree";
@@ -38,7 +35,6 @@ import { isRepo } from "./repo";
 import {
   assertSafeGitRef,
   classifyGitTransportError,
-  gitExecutionIdentity,
   runFile,
   runGit,
 } from "./git-exec";
@@ -138,10 +134,6 @@ let pendingOctokit: { token: string; promise: Promise<OctokitClass> } | null = n
 const localReadFlights = new WeakMap<OctokitClass, Map<string, Promise<unknown>>>();
 const remoteReadFlights = new Map<string, Promise<RunFileResult>>();
 
-function isLocalGithubRead(): boolean {
-  return !gitExecutionIdentity() && !githubWriteCredential() && !githubReadTransport();
-}
-
 /** Only concurrent, exact observations share work. No settled result can hide
  * a remote/configuration change from an explicit refresh. Each API map belongs
  * to the already-admitted credential's client, never to a global account key. */
@@ -157,7 +149,7 @@ function shareRead<T>(flights: Map<string, Promise<T>>, key: string, read: () =>
 }
 
 function readWithClient<T>(oct: OctokitClass, key: readonly unknown[] | undefined, read: () => Promise<T>): Promise<T> {
-  if (!key || !isLocalGithubRead()) return read();
+  if (!key) return read();
   let flights = localReadFlights.get(oct);
   if (!flights) { flights = new Map(); localReadFlights.set(oct, flights); }
   return shareRead(flights, JSON.stringify(key), read) as Promise<T>;
@@ -195,11 +187,6 @@ function clearOctokitCache(): void {
 
 async function currentCredentialClient(token: string): Promise<OctokitClass> {
   if (cachedOctokit && cachedOctokitToken === token) return cachedOctokit;
-  if (!isLocalGithubRead()) {
-    const oct = await octokitFactory(token);
-    cacheOctokit(oct, token);
-    return oct;
-  }
   if (pendingOctokit?.token === token) return pendingOctokit.promise;
   const entry = { token, promise: octokitFactory(token) };
   pendingOctokit = entry;
@@ -578,13 +565,6 @@ export async function verifyGithubToken(
 /** Get the cached Octokit instance, or lazy-init from the persisted
  *  token. Throws NOT_AUTHENTICATED if no token is present. */
 async function getOctokit(): Promise<OctokitClass> {
-  const scoped = githubWriteCredential();
-  if (scoped) return octokitFactory(scoped.token, scoped.apiBaseUrl);
-  const readTransport = githubReadTransport();
-  if (readTransport) {
-    const { Octokit } = await loadOctokit();
-    return new Octokit({ request: { fetch: readTransport } });
-  }
   // Consult the token store on EVERY call so a sign-out / token swap can never
   // be served by a stale cached client. The cache is reused only when the
   // current token still matches the one the client was built with.
@@ -607,9 +587,6 @@ async function getOctokit(): Promise<OctokitClass> {
  *  Unauthenticated clients are deliberately not put in the auth cache, whose
  *  token-identity invariant must remain exact. */
 async function getOptionalAuthOctokit(): Promise<OctokitClass> {
-  const scoped = githubWriteCredential();
-  if (scoped) return octokitFactory(scoped.token, scoped.apiBaseUrl);
-  if (githubReadTransport()) return getOctokit();
   const token = await tokenStore.get();
   if (!token) {
     clearOctokitCache();
@@ -932,10 +909,6 @@ async function withAuthRetry<T>(
   fn: (octokit: OctokitClass) => Promise<T>,
   readKey?: readonly unknown[],
 ): Promise<T> {
-  if (githubWriteCredential() || githubReadTransport()) {
-    try { return await fn(await getOctokit()); }
-    catch (error) { throw wrapApiError(error, "GitHub API call failed"); }
-  }
   const oct = await getOctokit();
   const rejectedToken = cachedOctokitToken;
   try {
@@ -1090,7 +1063,6 @@ export function parseGitHubRemote(originUrl: string): {
         "Could not parse an owner and repository from the GitHub remote.",
     });
   }
-  githubWriteCredential({ owner, repository: repo });
   return { owner, repo };
 }
 
@@ -1108,14 +1080,10 @@ export interface GithubRepositoryOwnerAvatar {
 export async function getRepositoryOwnerAvatar(
   originUrl: string,
 ): Promise<GithubRepositoryOwnerAvatar | null> {
-  const { owner, repo } = parseGitHubRemote(originUrl);
+  const { owner } = parseGitHubRemote(originUrl);
   const oct = await getOptionalAuthOctokit();
   try {
-    // Cloud authority covers this exact repository, including its owner
-    // metadata. A global /users lookup is outside that read contract.
-    const account = githubReadTransport()
-      ? (await oct.repos.get({ owner, repo })).data.owner
-      : (await oct.users.getByUsername({ username: owner })).data;
+    const account = (await oct.users.getByUsername({ username: owner })).data;
     const avatarUrl = account?.avatar_url?.trim();
     if (!avatarUrl) return null;
 
@@ -1152,7 +1120,7 @@ function octoPrToPr(p: {
   body: string | null;
   user: { login: string } | null;
   base: { ref: string };
-  head: { ref: string; sha: string };
+  head: { ref: string; sha: string; repo?: { full_name?: string | null } | null };
   mergeable?: boolean | null;
   mergeable_state?: string;
   created_at: string;
@@ -1175,6 +1143,7 @@ function octoPrToPr(p: {
     baseBranch: p.base.ref,
     headBranch: p.head.ref,
     headSha: p.head.sha,
+    headRepository: p.head.repo?.full_name ?? null,
     mergeableState: p.mergeable_state ?? "unknown",
     isMergeable: p.mergeable ?? null,
     createdAt: new Date(p.created_at).getTime(),
@@ -1205,9 +1174,7 @@ async function workspaceRemote(workspaceId: string): Promise<{
       ["-C", ws.repoRoot, "remote", "get-url", remote],
       { maxBufferBytes: 1024 * 1024 },
     );
-    ({ stdout } = await (isLocalGithubRead()
-      ? shareRead(remoteReadFlights, JSON.stringify([ws.repoRoot, remote]), read)
-      : read()));
+    ({ stdout } = await shareRead(remoteReadFlights, JSON.stringify([ws.repoRoot, remote]), read));
   } catch (err) {
     // No such remote (or git failed) — `git remote get-url` exits 128 with a
     // raw child-process error. Without this it escapes BEFORE withAuthRetry's
@@ -1238,7 +1205,6 @@ function githubRepositoryFor(
   workspaceId: string,
   repository?: { owner: string; repo: string },
 ): Promise<{ owner: string; repo: string }> {
-  if (repository) githubWriteCredential({ owner: repository.owner, repository: repository.repo });
   return repository
     ? Promise.resolve(repository)
     : workspaceRemote(workspaceId);
@@ -1413,7 +1379,6 @@ export async function createPr(
   }
 
   const wantDraft = opts.draft ?? true;
-  const publication = githubWriteCredential() ? await githubWritePublication(ws, "gh.prCreate") : ws;
   const createWith = (draft: boolean) =>
     withAuthRetry((oct) =>
       oct.pulls.create({
@@ -1421,7 +1386,7 @@ export async function createPr(
         repo,
         title: opts.title,
         body: opts.body,
-        head: publication.branch,
+        head: ws.branch,
         base: ws.baseBranch,
         draft,
       }),

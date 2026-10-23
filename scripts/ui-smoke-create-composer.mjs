@@ -1,16 +1,17 @@
 import { expect } from "@playwright/test";
 
-const unbuiltComputer = () => ({
-  state: "not_built",
-  revision: 0,
-  draft: { configId: null, repositories: [], installScript: "", timeoutSeconds: 900, environment: [] },
-  active: null,
-  activeRepositories: [],
-  previous: null,
-  latestBuild: null,
-  unbuiltChanges: false,
-  history: { builds: [], nextCursor: null },
-  canManage: true,
+const unbuiltComputer = () => ({ repositories: null });
+const workspaceFixture = (overrides = {}) => ({
+  id: "88888888-8888-4888-8888-888888888888",
+  organizationId: "11111111-1111-4111-8111-111111111111",
+  creatorUserId: "11111111-1111-4111-8111-111111111111",
+  name: "Existing cloud workspace",
+  repository: "example/project", branch: "workspace/topic", baseBranch: "main",
+  state: "stopped", errorCode: null, version: 2,
+  createdAt: "2026-10-21T10:00:00Z", updatedAt: "2026-10-21T10:00:00Z",
+  capabilities: { design: false, browser: false, simulators: false,
+    terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"] },
+  ...overrides,
 });
 
 async function expectContextControlsInOneRow(page) {
@@ -43,9 +44,9 @@ async function expectContextControlsInOneRow(page) {
 
 /** Real Create page, menus, editor and create requests; only transport is fake. */
 export async function runCreateComposerSmoke({ page, check, harnessBase }) {
-  // Organization Create depends on its v2 template, not a Local checkout.
+  // Organization Create depends on its Cloud Computer, not a Local checkout.
   // Mock the read at the transport boundary; production validates its schema.
-  await page.route(/^https:\/\/api\.example\.test\/v1\/organizations\/[^/]+\/cloud-computer\/v2(?:\?|$)/, route => {
+  await page.route(/^https:\/\/api\.example\.test\/v1\/cloud-v2\/organizations\/[^/]+\/computer\/repositories(?:\?|$)/, route => {
     expect(route.request().method()).toBe("GET");
     return route.fulfill({ json: unbuiltComputer() });
   });
@@ -59,15 +60,15 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
   await page.getByRole("button", { name: "Show Create", exact: true }).click();
   // A cloud-only repository in another organization must never become a
   // Local branch-picker input, even though the global runtime catalog knows it.
-  await page.evaluate(async () => {
+  await page.evaluate(async workspace => {
     const { acceptCloudWorkspaceDocument } = await import("/apps/desktop/src/renderer/state/cloud-workspace-catalog.ts");
+    const { cloudV2Document } = await import("/apps/desktop/src/renderer/platform/cloud-v2.ts");
     const { notifyProjectsChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
-    const organizationId="33333333-3333-4333-8333-333333333333",now="2026-09-27T00:00:00Z";
-    acceptCloudWorkspaceDocument({id:"77777777-7777-4777-8777-777777777777",organizationId,teamId:organizationId,createdBy:organizationId,name:"Cloud only",placement:"cloud",status:"stopped",version:1,error:null,createdAt:now,updatedAt:now,deletedAt:null,
-      capabilities:{canWrite:true,canManage:true,canStart:true,startUnavailableReason:null},repository:{forge:"github.com",owner:"example",name:"organization-only",revision:"refs/heads/main"},
-      generation:{number:1,architecture:"linux/amd64",resources:{cpuMillicores:2000,memoryMiB:4096,storageMiB:20480},observedState:"stopped",lastObservedAt:null}});
+    acceptCloudWorkspaceDocument(cloudV2Document(workspace));
     notifyProjectsChanged();
-  });
+  }, workspaceFixture({ id: "77777777-7777-4777-8777-777777777777",
+    organizationId: "33333333-3333-4333-8333-333333333333", name: "Cloud only",
+    repository: "example/organization-only" }));
   const card = page.locator("[data-dispatcher-composer]");
   const source = page.locator("[data-create-source-trigger]");
   const editor = card.locator(".composer-pm");
@@ -85,7 +86,6 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
   await expectContextControlsInOneRow(page);
   const location = page.getByRole("button", { name: "Workspace location", exact: true });
   await expect(location).toHaveCount(0);
-  expect(await page.evaluate(() => window.folderWorkspaceRequests.filter(row => row.op === "cloud_workspace_capability").length)).toBe(0);
   await editor.fill("Keep my draft when switching organizations");
   await page.evaluate(() => window.setCreateOrganization("organization"));
   await expect(location).toHaveCount(0);
@@ -317,42 +317,28 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
 /** A delayed real create response must not retarget the newly selected owner. */
 export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
   const organizationId = "11111111-1111-4111-8111-111111111111";
-  const active = {
-    id: "77777777-7777-4777-8777-777777777777", version: 1,
-    configId: "88888888-8888-4888-8888-888888888888", acceptedRevision: 1,
-    state: "succeeded", stage: "done", errorCode: null, rebuiltFromBuildId: null,
-    templateState: "ready", createdAt: "2026-10-04T10:00:00.000Z",
-    startedAt: "2026-10-04T10:00:00.000Z", completedAt: "2026-10-04T10:00:00.000Z", cancelRequestedAt: null,
-  };
+  const existing = workspaceFixture();
+  const created = workspaceFixture({ id: "44444444-4444-4444-8444-444444444444",
+    name: "Created in Organization 1", state: "running" });
   let releaseCreate;
   const createGate = new Promise(resolve => { releaseCreate = resolve; });
   const creates = [];
   await page.route("https://api.example.test/**", async route => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (pathname.endsWith("/cloud-computer/v2") && request.method() === "GET") {
-      await route.fulfill({ json: { ...unbuiltComputer(), state: "active", revision: 1, active,
-        activeRepositories: [{ id: "123", owner: "example", name: "project", installationId: "33333333-3333-4333-8333-333333333333" }],
-        latestBuild: active, history: { builds: [active], nextCursor: null },
-      } });
-    } else if (pathname.endsWith("/create-options")) {
-      await route.fulfill({ json: { configured: true, repository:{owner:"example",name:"project",defaultBranch:"main"}, installations: [{
-        id: "33333333-3333-4333-8333-333333333333", accountLogin: "example",
-      }] } });
-    } else if (pathname.endsWith("/cloud-workspaces") && request.method() === "POST") {
-      creates.push({ pathname, body: request.postDataJSON() });
+    if (pathname === `/v1/cloud-v2/organizations/${organizationId}/computer/repositories` && request.method() === "GET") {
+      await route.fulfill({ json: { repositories: [{ repository: "example/project", defaultBranch: "master" }] } });
+    } else if (pathname === "/v1/cloud-v2/workspaces" && request.method() === "GET") {
+      const owner = new URL(request.url()).searchParams.get("organizationId");
+      await route.fulfill({ json: { workspaces: owner === organizationId ? [existing] : [] } });
+    } else if (pathname === `/v1/cloud-v2/workspaces/${existing.id}` && request.method() === "GET") {
+      await route.fulfill({ json: { workspace: existing } });
+    } else if (pathname === `/v1/cloud-v2/workspaces/${created.id}` && request.method() === "GET") {
+      await route.fulfill({ json: { workspace: created } });
+    } else if (pathname === "/v1/cloud-v2/workspaces" && request.method() === "POST") {
+      creates.push({ pathname, body: request.postDataJSON(), idempotencyKey: request.headers()["idempotency-key"] });
       await createGate;
-      await route.fulfill({ status: 201, json: { workspace: {
-        id: "44444444-4444-4444-8444-444444444444",
-        organizationId, teamId: organizationId, createdBy: organizationId,
-        name: "Created in Organization 1", placement: "cloud", status: "ready",
-        version: 1, error: null, deletedAt: null,
-        createdAt: "2026-09-26T10:00:00Z", updatedAt: "2026-09-26T10:00:00Z",
-        capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
-        repository: { forge: "github.com", owner: "example", name: "project", revision: "refs/heads/main" },
-        generation: { number: 1, architecture: "x86_64", observedState: "running", lastObservedAt: null,
-          resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } },
-      } } });
+      await route.fulfill({ status: 201, json: { workspace: created } });
     } else {
       await route.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "Fixture unavailable" } } });
     }
@@ -363,25 +349,28 @@ export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
     await page.getByRole("button", { name: "Open folder fixture", exact: true }).click();
     await page.getByRole("button", { name: "Initialize git and create", exact: true }).click();
     await page.getByRole("button", { name: "Show Create", exact: true }).click();
-    await page.evaluate(async () => {
-      const {acceptCloudWorkspaceDocument}=await import("/apps/desktop/src/renderer/state/cloud-workspace-catalog.ts");
-      const {notifyProjectsChanged}=await import("/apps/desktop/src/renderer/state/use-projects.ts");
-      const organizationId="11111111-1111-4111-8111-111111111111",now="2026-09-27T00:00:00Z";
-      acceptCloudWorkspaceDocument({id:"88888888-8888-4888-8888-888888888888",organizationId,teamId:organizationId,createdBy:organizationId,name:"Existing cloud workspace",placement:"cloud",status:"stopped",version:1,error:null,createdAt:now,updatedAt:now,deletedAt:null,
-        capabilities:{canWrite:true,canManage:true,canStart:true,startUnavailableReason:null},repository:{forge:"github.com",owner:"example",name:"project",revision:"refs/heads/main"},generation:{number:1,architecture:"linux/amd64",resources:{cpuMillicores:2000,memoryMiB:4096,storageMiB:20480},observedState:"stopped",lastObservedAt:null}});
+    await page.evaluate(async workspace => {
+      const { acceptCloudWorkspaceDocument } = await import("/apps/desktop/src/renderer/state/cloud-workspace-catalog.ts");
+      const { cloudV2Document } = await import("/apps/desktop/src/renderer/platform/cloud-v2.ts");
+      const { notifyProjectsChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+      acceptCloudWorkspaceDocument(cloudV2Document(workspace));
       notifyProjectsChanged();
       window.setFolderGitState(true, "https://github.com/example/project.git");
       window.setCreateOrganization("organization");
-    });
+    }, existing);
     const card = page.locator("[data-dispatcher-composer]");
     const editor = card.locator(".composer-pm");
     const location = page.getByRole("button", { name: "Workspace location", exact: true });
     await expect(location).toHaveCount(0);
     await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
+    await expect(page.locator("[data-create-source-trigger]")).toHaveText("master");
     await editor.fill("Preserve this prompt while creation finishes");
     await card.getByRole("button", { name: "Create", exact: true }).click();
     await expect.poll(() => creates.length).toBe(1);
-    expect(creates[0].pathname).toBe(`/v1/organizations/${organizationId}/cloud-workspaces`);
+    expect(creates[0].pathname).toBe("/v1/cloud-v2/workspaces");
+    expect(creates[0].body).toMatchObject({ organizationId, repository: "example/project" });
+    expect(creates[0].body).not.toHaveProperty("baseBranch");
+    expect(creates[0].idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
     await page.evaluate(() => window.setCreateOrganization("personal"));
     releaseCreate();
     await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();

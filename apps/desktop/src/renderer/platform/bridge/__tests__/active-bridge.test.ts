@@ -159,7 +159,7 @@ describe("active bridge connection subscriptions", () => {
     setActiveBridge(runtimeClient(bridge));
     const target: RuntimeConnectionTarget = {
       kind: "cloud",
-      channel: "electron-ssh-tunnel",
+      channel: "v2-websocket",
       runtimeId: "11111111-1111-4111-8111-111111111111",
       organizationId: "22222222-2222-4222-8222-222222222222",
       workspaceId: "33333333-3333-4333-8333-333333333333",
@@ -167,8 +167,8 @@ describe("active bridge connection subscriptions", () => {
       authorityEpoch: 11,
       engineInstanceId: "44444444-4444-4444-8444-444444444444",
       connectionSequence: 1,
-      url: "ws://127.0.0.1:54173/ws",
-      cloudToken: `zws_${"a".repeat(43)}`,
+      url: "wss://api.example.test/v2/cloud/workspaces/33333333-3333-4333-8333-333333333333/bridge",
+      protocols: ["zeros.cloud.v2", `ticket.zw2c_${"a".repeat(43)}`],
       expiresAt: Date.now() + 60_000,
     };
 

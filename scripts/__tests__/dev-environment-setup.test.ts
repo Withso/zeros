@@ -39,8 +39,11 @@ describe("secure portable Dev setup", () => {
     const f = fixture(), destination = path.join(f.root, "zeros-dev-env.json");
     const env = { ZEROS_DEV_PROFILE_B64: Buffer.from(JSON.stringify(f.profile)).toString("base64") };
     expect(loadHostedProfile(f.root, { env, homeDir: f.home })).toEqual(f.profile);
-    expect(fs.statSync(destination).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toEqual(f.profile);
+    const imported = fs.openSync(destination, "r");
+    try {
+      expect(fs.fstatSync(imported).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(fs.readFileSync(imported, "utf8"))).toEqual(f.profile);
+    } finally { fs.closeSync(imported); }
     expect(fs.existsSync(path.join(f.home, ".zeros-dev"))).toBe(false);
     expect(f.git("status", "--porcelain")).toBe("");
     env.ZEROS_DEV_PROFILE_B64 = "invalid-new-value";
@@ -50,7 +53,7 @@ describe("secure portable Dev setup", () => {
   it("imports the cloud setting through actual setup without printing credentials", () => {
     const f = fixture(), repository = path.resolve(import.meta.dirname, "../..");
     fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(f.root, "scripts/dev-environment"), { recursive: true });
-    for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(f.root, "scripts", file));
+    for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(f.root, "scripts", file));
     fs.writeFileSync(path.join(f.root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
     fs.writeFileSync(path.join(f.root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
     const value = Buffer.from(JSON.stringify(f.profile)).toString("base64");

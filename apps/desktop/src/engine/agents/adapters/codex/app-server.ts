@@ -1,9 +1,3 @@
-import {resolveCloudRuntime} from "../../containment/cloud-runtime-root.mjs";
-import {CloudCodexAuth} from "./cloud-auth";
-import { cloudCodexFailure } from "./cloud-failure";
-import { captureCloudCodexProjectConfig } from "./cloud-project-config";
-import { CloudCommandFailureError, decodeCloudCommandFailure, type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
-import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 // ──────────────────────────────────────────────────────────
 // Codex app-server runtime — long-lived JSON-RPC over stdio.
@@ -53,7 +47,6 @@ import { mcpWorkingDirectory } from "../../mcp-working-directory";
 
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { pathToFileURL } from "node:url";
 
 import {
   spawnStdioAgent,
@@ -62,9 +55,6 @@ import {
 import type { McpServerRegistration, NativePromptStage, NativePromptOutputKind } from "../../types";
 import { CodexNativeTurnOutput, CODEX_NATIVE_OUTPUT_METHODS } from "./native-output";
 import type { PreparedBoundary } from "../../containment/types";
-import {cloudExecutionLifetime,cloudProviderExecution,executionMcpServers} from "../../cloud-provider-execution";
-import {CloudCodexExecServer} from "./cloud-exec-server";
-import {cloudCodexRequest,cloudCodexToolCall,cloudCodexConfig,bindCloudCodexThread} from "./cloud-policy";
 import { hasKernelExecutionBoundary } from "../../containment/status";
 import {
   JSON_RPC_NO_RESPONSE,
@@ -72,7 +62,7 @@ import {
   JsonRpcRequestError,
 } from "../shared/jsonrpc";
 import { buildSpawnEnvWithLoginPath } from "../shared/login-shell-path";
-import { resolveCodexBinary, resolveCloudCodexBinaryFromImage, type CodexBinarySource } from "./binary-resolver";
+import { resolveCodexBinary, type CodexBinarySource } from "./binary-resolver";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import { MAX_PENDING_MCP_ELICITATIONS } from "../shared/mcp-elicitation";
 
@@ -409,10 +399,6 @@ export interface CodexAppServerHandle {
   /** Underlying child process — exposed for diagnostics (pid, exit). */
   readonly child: ChildProcess;
 
-  /** First fatal cloud RPC or credential callback cause, latched before
-   * retirement can replace it with a generic process-exit failure. */
-  readonly cloudFailure?: Error | null;
-
   /** Start a new conversation thread. Returns the threadId the server
    *  assigned, plus the resolved policy/model so the caller can render
    *  the initial state. */
@@ -568,8 +554,9 @@ const TURN_INACTIVITY_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 // adapters share one cap.
 const APPROVAL_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 
-/** Per-process file auth storage for the selected cloud HOME. Plain same-user
- * directories separate state; they do not hide it from other VM processes. */
+/** Per-process Codex configuration. A ZSR child cannot access the host
+ * keychain by design, so both Codex and MCP OAuth refreshes must remain in the
+ * generation-private CODEX_HOME owned for that contained session. */
 export function codexAppServerFeatureArgs(fileAuthStorage: boolean): string[] {
   return [
     "-c",
@@ -599,41 +586,10 @@ export async function bootCodexAppServerRuntime(
   opts: CodexAppServerBootOptions,
 ): Promise<CodexAppServerHandle> {
   const logTag = opts.logTag ?? "codex-app-server";
-  const cloud=cloudProviderExecution(opts.executionBoundary);
-  const cloudAttempt = cloud ? randomUUID() : null;
-  const cloudStage = async <T>(
-    step: "initialize" | "executor_start" | "provider_login" | "environment_add" | "environment_info" | "environment_ready",
-    run: () => Promise<T>,
-  ): Promise<T> => {
-    if (!cloud) return run();
-    const started = performance.now();
-    const observe = (status: "started" | "succeeded" | "failed") => {
-      // Closed stage names and an ephemeral attempt ID only: no RPC bytes,
-      // URLs, paths, credentials, account IDs or provider error messages.
-      try {
-        opts.onStderr?.(`[codex-app-server] cloud_stage ${JSON.stringify({
-          attempt: cloudAttempt, step, status,
-          elapsedMs: Math.min(3_600_000, Math.max(0, Math.round(performance.now() - started))),
-        })}`);
-      } catch { /* diagnostic observers cannot alter provider admission */ }
-    };
-    observe("started");
-    try { const result = await run(); observe("succeeded"); return result; }
-    catch (error) { observe("failed"); throw error; }
-  };
-  const cwd=cloud?.cwd??opts.cwd;
-  const cloudLifetime=cloud?cloudExecutionLifetime(cloud):null;
-  const cloudAuth=cloud&&cloudLifetime?new CloudCodexAuth({
-    codexAuth:()=>cloud.auth.codexAuth(),refreshCodex:(version,accountId)=>cloud.auth.refreshCodex(version,accountId),
-    assertLive:()=>cloudLifetime.assertLive(),close:()=>cloudLifetime.close(),
-  }):null;
-  cloudLifetime?.assertLive();
-  let cloudEnvironment:CloudCodexExecServer|undefined;
+  const cwd = opts.cwd;
 
-  const binarySource = cloud ? await resolveCloudCodexBinaryFromImage() : await resolveCodexBinary({ override: opts.cliBinary });
-  if(cloud&&(binarySource.source!=="bundled"||!binarySource.path.startsWith(`${resolveCloudRuntime().workerRoot}/`)||binarySource.path.endsWith(".js")))
-    throw new Error("Cloud Codex requires the pinned native executable");
-  const env = cloud?cloud.coordinator.environment():await buildSpawnEnvWithLoginPath(opts.env);
+  const binarySource = await resolveCodexBinary({ override: opts.cliBinary });
+  const env = await buildSpawnEnvWithLoginPath(opts.env);
 
   // The binary-resolver returns either an executable path or the
   // wrapper script `bin/codex.js`. For the latter, we need to spawn
@@ -642,7 +598,7 @@ export async function bootCodexAppServerRuntime(
     ? [process.execPath, [binarySource.path]]
     : [binarySource.path, []];
 
-  const mcpArgs = buildMcpServerOverrides((executionMcpServers(cloud, opts.mcpServers) ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, cwd) } : s), cloud ? { cloudCwd: cwd } : undefined);
+  const mcpArgs = buildMcpServerOverrides((opts.mcpServers ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, cwd) } : s));
 
   // Feature overrides (per-process `-c`, no ~/.codex/config.toml mutation):
   //   • default_mode_request_user_input — codex only puts the
@@ -657,13 +613,8 @@ export async function bootCodexAppServerRuntime(
   //     turn's output. We enabled the feature deliberately; the per-turn
   //     banner is pure noise for the user.
   const featureArgs = codexAppServerFeatureArgs(
-    !!cloud || hasKernelExecutionBoundary(opts.executionBoundary),
+    hasKernelExecutionBoundary(opts.executionBoundary),
   );
-  if(cloud){
-    const project=await captureCloudCodexProjectConfig(cloud,cwd);
-    if(project.excluded)opts.onStderr?.("[codex-app-server] Some repository Codex settings are unavailable in cloud. Provider authority, permissions and MCP remain governed by the admitted execution.");
-    for(const [name,value] of Object.entries(cloudCodexConfig(cloud)))featureArgs.push("-c",`${name}=${JSON.stringify(value)}`);
-  }
 
   const proc = spawnStdioAgent({
     command,
@@ -705,7 +656,7 @@ export async function bootCodexAppServerRuntime(
   // (and image metadata), so unconditional console.log would violate
   // the prompts-stay-out-of-production-logs rule. Set DEBUG_CODEX_RPC=1
   // to enable; even then we redact `params.input` before printing.
-  const rpcTraceEnabled = !cloud&&process.env.DEBUG_CODEX_RPC === "1";
+  const rpcTraceEnabled = process.env.DEBUG_CODEX_RPC === "1";
   // Turn inactivity listeners are registered by runTurn() after the
   // `turn/start` ack. Any inbound JSON-RPC frame from this per-session
   // app-server counts as activity: streamed output, progress, warnings,
@@ -742,15 +693,15 @@ export async function bootCodexAppServerRuntime(
     },
   });
   registerCodexHostRequestHandlers(client, {
-    onDynamicToolCall: cloud?params=>cloudCodexToolCall(cloud,params):opts.onDynamicToolCall,
-    refreshChatgptAuthTokens: cloudAuth?params=>cloudAuth.refresh(params):opts.refreshChatgptAuthTokens,
+    onDynamicToolCall: opts.onDynamicToolCall,
+    refreshChatgptAuthTokens: opts.refreshChatgptAuthTokens,
     generateAttestation: opts.generateAttestation,
   });
 
   // ── Handshake: initialize ─────────────────────────────────
   let initResp: CodexInitializeResponse;
   try {
-    initResp = await cloudStage("initialize", () => client.request<CodexInitializeResponse>(
+    initResp = await client.request<CodexInitializeResponse>(
       "initialize",
       {
         clientInfo: {
@@ -765,7 +716,7 @@ export async function bootCodexAppServerRuntime(
         }),
       },
       { timeoutMs: INITIALIZE_TIMEOUT_MS },
-    ));
+    );
   } catch (err) {
     await teardown(proc, client);
     throw wrapBootError(
@@ -1034,25 +985,6 @@ export async function bootCodexAppServerRuntime(
   // acknowledgement. Register every blocking handler first so the first frame
   // cannot race a partially initialized host.
   client.notify("initialized", {});
-  if(cloud){
-    let category: CloudCommandFailureCause["category"] = "executor_start_failed";
-    try{
-      cloudEnvironment=await cloudStage("executor_start", () => CloudCodexExecServer.start(cloud,binarySource.path));
-      category="provider_login_failed";
-      await cloudStage("provider_login", async () => {
-        const login=cloudAuth!.login();
-        if(login)await client.request("account/login/start",login,{timeoutMs:5000});
-      });
-      category="environment_setup_failed";
-      const environment = cloudEnvironment;
-      await cloudStage("environment_add", () => client.request("environment/add",{environmentId:environment.environmentId,execServerUrl:environment.url,connectTimeoutMs:5000},{timeoutMs:6000}));
-      await cloudStage("environment_info", async () => {
-        const info=await client.request<{cwd:string|null}>("environment/info",{environmentId:environment.environmentId},{timeoutMs:5000});
-        if(info.cwd!==pathToFileURL(cwd).href)throw new CloudCommandFailureError({stage:"provider_start",category:"environment_identity_mismatch"});
-        cloudLifetime!.assertLive();
-      });
-    }catch(error){void cloudLifetime!.close().catch(()=>{});throw cloudCodexFailure(error,{stage:"provider_start",category});}
-  }
 
   // ── Track turn lifecycle for runTurn correlation ─────────
   //
@@ -1169,27 +1101,8 @@ export async function bootCodexAppServerRuntime(
   };
 
   let disposePromise: Promise<void> | null = null;
-  let fatalRequestFailure: Error | null = null;
-  let observedNativeExit = false;
-  // Capture the ORIGINAL authority cause synchronously, before its native
-  // retirement closes stdout or rejects a required RPC. Exit/dispose cleanup
-  // must never diagnose the generic lifetime.close() it invokes itself.
-  const captureOriginalAbort = (): void => {
-    if (!cloudLifetime?.signal?.aborted || observedNativeExit || disposePromise || fatalRequestFailure || cloudAuth?.failure) return;
-    const reason: unknown = cloudLifetime.signal.reason;
-    const code = reason && typeof reason === "object" ? (reason as { code?: unknown }).code : undefined;
-    const diagnosis = decodeCloudCommandFailure(code);
-    if (diagnosis) fatalRequestFailure = new CloudCommandFailureError(diagnosis);
-    else if (isCloudAgentAdmissionCode(code)) fatalRequestFailure = Object.assign(new Error("Cloud execution authority ended"), { code });
-  };
-  cloudLifetime?.signal?.addEventListener("abort", captureOriginalAbort, { once: true });
-  captureOriginalAbort();
-
   // ── Exit cleanup ──────────────────────────────────────────
   void proc.exited.then(({ code, signal }) => {
-    observedNativeExit = true;
-    cloudLifetime?.signal?.removeEventListener("abort", captureOriginalAbort);
-    if(cloudLifetime)void cloudLifetime.close().catch(()=>{});
     client.close(`codex exited code=${code} signal=${signal ?? ""}`);
     abandonPendingServerRequests();
     for (const w of turnWaiters.values()) w.resolve("failed");
@@ -1202,25 +1115,7 @@ export async function bootCodexAppServerRuntime(
     method: string,
     params: unknown,
     rpcOpts?: { timeoutMs?: number; onWritten?: () => void },
-    fatalForSession = false,
   ): Promise<T> => {
-    if(cloud){
-      if(cloudAuth?.failure)throw cloudAuth.failure;
-      const stage = method === "turn/start" ? "provider_prompt" : "provider_start";
-      if(!cloudEnvironment)throw new CloudCommandFailureError({stage,category:"environment_not_ready"});
-      params=cloudCodexRequest(cloud,cloudEnvironment.environmentId,method,params);
-      if(cloud.mode==="actor-grant-v1")await cloud.lease.validate();
-      cloudLifetime!.assertLive();
-      if(["thread/start","thread/resume","turn/start"].includes(method)){
-        try{
-          const environment = cloudEnvironment;
-          await cloudStage("environment_ready", async () => {
-            const status=await client.request<{status:string}>("environment/status",{environmentId:environment.environmentId},{timeoutMs:5000});
-            if(status.status!=="ready")throw new CloudCommandFailureError({stage,category:"environment_not_ready"});
-          });
-        }catch(error){void cloudLifetime!.close().catch(()=>{});throw cloudCodexFailure(error,{stage,category:"environment_not_ready"});}
-      }
-    }
     let attempt = 0;
     let lastErr: unknown = null;
     while (attempt <= OVERLOAD_MAX_RETRIES) {
@@ -1240,26 +1135,14 @@ export async function bootCodexAppServerRuntime(
           attempt++;
           continue;
         }
-        // Metadata discovery may swallow an unsupported/refused RPC. Only
-        // required session lifecycle callers retire the admitted workload.
-        if(cloud && fatalForSession){
-          fatalRequestFailure ??= cloudAuth?.failure ?? (err instanceof Error ? err
-            : new CloudCommandFailureError({stage:method === "turn/start" || method === "review/start" ? "provider_prompt" : "provider_start",category:"protocol_error"}));
-          void cloudLifetime!.close().catch(()=>{});
-        }
         throw err;
       }
     }
-    const failure = lastErr instanceof Error
+    throw lastErr instanceof Error
       ? lastErr
       : new Error(
           `codex ${method} failed after ${OVERLOAD_MAX_RETRIES + 1} attempts`,
         );
-    if(cloud && fatalForSession){
-      fatalRequestFailure ??= cloudAuth?.failure ?? failure;
-      void cloudLifetime!.close().catch(()=>{});
-    }
-    throw failure;
   };
 
   /** `turn/start` and inline `review/start` acknowledge with the same Turn
@@ -1295,9 +1178,8 @@ export async function bootCodexAppServerRuntime(
       const ack = await requestWithRetry<{
         turn: { id: string; status: string };
       }>(method, params, runOpts?.onNativePromptStage || output
-        ? { onWritten: () => { output?.written(); observe("native_write"); } } : undefined, true);
+        ? { onWritten: () => { output?.written(); observe("native_write"); } } : undefined);
       const turnId = ack.turn.id;
-      if(cloudAuth?.failure)throw cloudAuth.failure;
       // The RPC client matched this response to this native request. An
       // unusable turn identity/status cannot establish native acceptance.
       if (typeof turnId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(turnId) &&
@@ -1363,7 +1245,6 @@ export async function bootCodexAppServerRuntime(
           });
         },
       );
-      if(cloudAuth?.failure)throw cloudAuth.failure;
       return { turnId, status: finalStatus, raw: ack };
     } finally {
       output?.dispose();
@@ -1376,16 +1257,12 @@ export async function bootCodexAppServerRuntime(
     cliVersion,
     binarySource,
     child: proc.child,
-    get cloudFailure() { return fatalRequestFailure ?? cloudAuth?.failure ?? null; },
 
     async startThread(params) {
       const result = await requestWithRetry<GenThreadStartResponse>(
         "thread/start",
         params,
-        undefined,
-        true,
       );
-      if(cloud)bindCloudCodexThread(cloud,result.thread.id);
       return {
         threadId: result.thread.id,
         providerSessionId: result.thread.sessionId,
@@ -1401,10 +1278,7 @@ export async function bootCodexAppServerRuntime(
       const result = await requestWithRetry<GenThreadResumeResponse>(
         "thread/resume",
         params,
-        undefined,
-        true,
       );
-      if(cloud)bindCloudCodexThread(cloud,result.thread.id);
       return {
         threadId: result.thread.id,
         providerSessionId: result.thread.sessionId,
@@ -1485,7 +1359,6 @@ export async function bootCodexAppServerRuntime(
       // prior attempt and falsely report success while its stop still hangs.
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
-        cloudLifetime?.signal?.removeEventListener("abort", captureOriginalAbort);
         // Settle any in-flight approval requests before the JSON-RPC
         // client closes so the server doesn't see an abrupt stream
         // disconnect mid-request (avoids stuck threads server-side).
@@ -1512,7 +1385,6 @@ export async function bootCodexAppServerRuntime(
         turnWaiters.clear();
         client.close("dispose");
         await proc.stop();
-        if(cloudLifetime)await cloudLifetime.close();
       })();
       return disposePromise;
     },
@@ -1658,14 +1530,8 @@ function compareSemver(a: string, b: string): number {
  *  config schema. */
 export function buildMcpServerOverrides(
   servers: readonly McpServerRegistration[],
-  cloud?: { cloudCwd: string },
 ): string[] {
   const args: string[] = [];
-  // Native tables merge recursively. Disable repository config loading, even
-  // when a config file is created after discovery. The cloud HOME/system config
-  // directories are immutable empty mounts; only these admitted overrides load.
-  // Use an inline table: Codex's dotted-key parser does not unquote path keys.
-  if (cloud) args.push("-c", `projects={ "${escapeTomlString(cloud.cloudCwd)}" = { trust_level = "untrusted" } }`);
   for (const s of servers) {
     // Names go into TOML keys; only allow alnum + underscore + dash to
     // avoid syntax injection. Skip silently rather than throw — a

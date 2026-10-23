@@ -5,14 +5,31 @@ import { run } from "./processes.mjs";
 import { privateDirectory, saveWorkspace, systemEnvironment, writePrivateFile } from "./state.mjs";
 import { portFree } from "../dev-ports.mjs";
 
-export async function databaseCommand(workspace, ports, repositoryRoot, action) {
-  const input = { action, owner: workspace.state.owner, port: ports.database,
+export async function databaseCommand(workspace, ports, repositoryRoot, action, details = {}) {
+  const input = { ...details, action, owner: workspace.state.owner, instanceId: workspace.state.instanceId, port: ports.database,
     migrationUrl: databaseUrl(workspace, ports.database, "migration"), runtimeUrl: databaseUrl(workspace, ports.database) };
   const output = await run(process.execPath, [path.join(repositoryRoot, "scripts/dev-environment/database.mjs")], {
     cwd: repositoryRoot, env: systemEnvironment(), input: JSON.stringify(input), timeout: 180_000, label: `Development database ${action}`,
   });
   try { return JSON.parse(output.split("\n").at(-1)); }
   catch { throw new Error("Invalid development database result"); }
+}
+
+/** libpq reads PGDATABASE as a database name, not a connection URI, so a URI
+ * there silently falls back to the default socket. Pass each part through the
+ * child's environment; credentials still never enter argv. */
+export function libpqEnvironment(value) {
+  const url = new URL(value);
+  if (url.protocol !== "postgresql:" || url.hostname !== "127.0.0.1" || !url.port || url.search || url.hash ||
+      !url.username || !url.password || url.pathname.length < 2) throw new Error("Invalid local database connection");
+  return { PGHOST: url.hostname, PGPORT: url.port, PGUSER: decodeURIComponent(url.username),
+    PGPASSWORD: decodeURIComponent(url.password), PGDATABASE: decodeURIComponent(url.pathname.slice(1)) };
+}
+
+/** The backup must be complete. Tables with forced row-level security hide
+ * their rows from the migration role, so dump as this local cluster's admin. */
+export function backupEnvironment(workspace, port) {
+  return libpqEnvironment(databaseUrl(workspace, port, "admin"));
 }
 
 export async function migratePostgres(workspace, profile, ports, repositoryRoot) {
@@ -22,7 +39,7 @@ export async function migratePostgres(workspace, profile, ports, repositoryRoot)
     const file = path.join(directory, `before-migrate-${Date.now()}.dump`);
     // Libpq reads the connection from this child's environment, never argv.
     await run(path.join(postgresBinaries(profile), "pg_dump"), ["--format=custom", "--file", file], {
-      env: { ...systemEnvironment(), PGDATABASE: databaseUrl(workspace, ports.database, "migration") }, label: "Pre-migration backup",
+      env: { ...systemEnvironment(), ...backupEnvironment(workspace, ports.database) }, label: "Pre-migration backup",
     });
     fs.chmodSync(file, 0o600);
     await databaseCommand(workspace, ports, repositoryRoot, "migrate");
@@ -33,7 +50,9 @@ export async function migratePostgres(workspace, profile, ports, repositoryRoot)
 const ROLES = { admin: "zeros_dev_admin", migration: "zeros_dev_migrator", runtime: "zeros_dev_runtime" };
 
 export function postgresBinaries(profile = {}) {
-  const candidates = [profile.postgresBin, "/opt/homebrew/opt/postgresql@18/bin", "/usr/local/opt/postgresql@18/bin", "/usr/lib/postgresql/18/bin", "/usr/pgsql-18/bin"].filter(Boolean);
+  // /usr/bin last: distribution packages that install one major there are
+  // still checked against PostgreSQL 18 before any cluster is touched.
+  const candidates = [profile.postgresBin, "/opt/homebrew/opt/postgresql@18/bin", "/usr/local/opt/postgresql@18/bin", "/usr/lib/postgresql/18/bin", "/usr/pgsql-18/bin", "/usr/bin"].filter(Boolean);
   for (const directory of candidates) if (fs.existsSync(path.join(directory, "initdb")) && fs.existsSync(path.join(directory, "pg_ctl"))) return directory;
   throw new Error("PostgreSQL 18 is required. On macOS run brew install postgresql@18; otherwise set postgresBin in the private Dev profile.");
 }
@@ -63,6 +82,31 @@ export function databaseUrl(workspace, port, role = "runtime") {
 export function validateDatabaseUrl(value, workspace, port, role = "runtime") {
   if (value !== databaseUrl(workspace, port, role)) throw new Error("Refusing a connection outside this workspace's local development database");
   return value;
+}
+
+// The schema owner bypasses RLS like hosted's (`postgres` on Alpha): SECURITY
+// DEFINER helpers such as app_user_org_ids() read FORCE-RLS tables, and a
+// non-bypassing owner re-enters their policies until the stack overflows.
+// Request roles never bypass RLS.
+const ROLE_ATTRIBUTES = { migration: "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS", runtime: "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS" };
+
+/** Creates or verifies this checkout's database roles through its admin connection. */
+export async function ensureDevelopmentRoles(admin, workspace) {
+  const roles = await admin.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1)", [["zeros_app", ROLES.migration, ROLES.runtime]]);
+  const names = new Set(roles.rows.map(row => row.rolname));
+  if (!names.has("zeros_app")) await admin.query("CREATE ROLE zeros_app NOLOGIN NOSUPERUSER NOBYPASSRLS");
+  for (const kind of ["migration", "runtime"]) {
+    if (!names.has(ROLES[kind])) {
+      const statement = await admin.query("SELECT format('CREATE ROLE %I ' || $3::text || ' PASSWORD %L', $1::text, $2::text) AS sql", [ROLES[kind], workspace.state.database[`${kind}Password`], ROLE_ATTRIBUTES[kind]]);
+      await admin.query(statement.rows[0].sql);
+    }
+  }
+  // Checkouts created before the owner needed RLS bypass upgrade in place.
+  if (names.has(ROLES.migration)) await admin.query("ALTER ROLE zeros_dev_migrator BYPASSRLS");
+  await admin.query("GRANT zeros_app TO zeros_dev_migrator WITH ADMIN OPTION");
+  await admin.query("GRANT zeros_app TO zeros_dev_runtime");
+  const unsafe = await admin.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND (rolsuper OR rolcreatedb OR rolcreaterole OR (rolbypassrls AND rolname <> $2))", [["zeros_app", ROLES.migration, ROLES.runtime], ROLES.migration]);
+  if (unsafe.rowCount) throw new Error("Dev database role authority has changed");
 }
 
 export async function startPostgres(workspace, profile, ports, repositoryRoot) {
@@ -110,19 +154,7 @@ export async function startPostgres(workspace, profile, ports, repositoryRoot) {
     try {
       const actual = await admin.query("SHOW data_directory");
       if (fs.realpathSync(actual.rows[0].data_directory) !== fs.realpathSync(data)) throw new Error("PostgreSQL ownership mismatch");
-      const roles = await admin.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1)", [["zeros_app", ROLES.migration, ROLES.runtime]]);
-      const names = new Set(roles.rows.map(row => row.rolname));
-      if (!names.has("zeros_app")) await admin.query("CREATE ROLE zeros_app NOLOGIN NOSUPERUSER NOBYPASSRLS");
-      for (const kind of ["migration", "runtime"]) {
-        if (!names.has(ROLES[kind])) {
-          const statement = await admin.query("SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD %L', $1::text, $2::text) AS sql", [ROLES[kind], workspace.state.database[`${kind}Password`]]);
-          await admin.query(statement.rows[0].sql);
-        }
-      }
-      await admin.query("GRANT zeros_app TO zeros_dev_migrator WITH ADMIN OPTION");
-      await admin.query("GRANT zeros_app TO zeros_dev_runtime");
-      const unsafe = await admin.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND (rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole)", [["zeros_app", ROLES.migration, ROLES.runtime]]);
-      if (unsafe.rowCount) throw new Error("Dev database role authority has changed");
+      await ensureDevelopmentRoles(admin, workspace);
       const db = await admin.query("SELECT datname FROM pg_database WHERE datname = $1", [workspace.state.database.name]);
       if (!db.rowCount) {
         const statement = await admin.query("SELECT format('CREATE DATABASE %I OWNER zeros_dev_migrator', $1::text) AS sql", [workspace.state.database.name]);

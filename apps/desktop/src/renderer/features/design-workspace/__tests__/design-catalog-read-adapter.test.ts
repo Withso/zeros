@@ -150,7 +150,7 @@ function longSourcePacket(
 }
 
 async function fixture(
-  placement: "personal" | "organization-local" | "cloud" = "cloud",
+  placement: "personal" | "organization-local" | "cloud" = "organization-local",
   admitted = true,
   connected = true,
 ) {
@@ -281,7 +281,7 @@ async function fixture(
 }
 
 describe("coherent Design catalog read adapter", () => {
-  it.each(["personal", "organization-local", "cloud"] as const)(
+  it.each(["personal", "organization-local"] as const)(
     "assembles through the real passive %s facade and keeps descriptors unprepared",
     async (placement) => {
       const f = await fixture(placement);
@@ -312,7 +312,7 @@ describe("coherent Design catalog read adapter", () => {
       expect(f.open).not.toHaveBeenCalled();
       expect(f.peer.request).not.toHaveBeenCalled();
       expect(f.localConnect).not.toHaveBeenCalled();
-      expect(f.localSend).toHaveBeenCalledTimes(placement === "cloud" ? 0 : 2);
+      expect(f.localSend).toHaveBeenCalledTimes(2);
       expect(adapter.isAuthoritative(a.authority, result.catalog)).toBe(true);
     },
   );
@@ -864,7 +864,7 @@ describe("coherent Design catalog read adapter", () => {
   );
 
   it("uses the facade's actual cloud peer-retirement fence", async () => {
-    const f = await fixture();
+    const f = await fixture("cloud");
     const a = lifetime(f.owner);
     const pending = held<unknown>();
     f.setHandler(() => pending.promise);

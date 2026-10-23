@@ -1,0 +1,56 @@
+#!/usr/bin/env node
+// pnpm electron:cloud — this branch's cloud workspaces on one machine, the cloud
+// counterpart of electron:local. It runs the local Dev launcher: an isolated
+// PostgreSQL with this branch's migrations, this branch's control plane, a
+// named Cloudflare tunnel that Boat VMs reach, and the desktop app pointed at
+// it. Nothing is created in Railway or PlanetScale.
+//
+//   pnpm electron:cloud                      start everything and open the app
+//   pnpm electron:cloud --headless           backend only, for agents and gate0
+//   pnpm electron:cloud --seed               seed a running stack's test organization
+//   pnpm electron:cloud --stop | --doctor
+//   pnpm electron:cloud --reset [--yes]      delete this checkout's VMs and data
+//
+// Startup resolves/builds the runtime by this checkout's worker source hash.
+// --runtime and ZEROS_CLOUD_V2_RUNTIME_SHA256 remain explicit overrides.
+import { spawn } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const MODES = { "--headless": "backend", "--stop": "stop", "--doctor": "doctor", "--seed": "seed", "--reset": "archive" };
+const SHA256 = /^[0-9a-f]{64}$/;
+
+/** Pure flag parsing; `defaultRuntime` is for tests and callers that pin one. */
+export function electronCloudCommand(argv, env = process.env, defaultRuntime = undefined) {
+  const modes = argv.filter(arg => Object.hasOwn(MODES, arg));
+  if (modes.length > 1) throw new Error(`Use one of ${Object.keys(MODES).join(", ")}`);
+  const action = modes.length ? MODES[modes[0]] : "start";
+  const args = [];
+  let runtime = env.ZEROS_CLOUD_V2_RUNTIME_SHA256 || defaultRuntime;
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (Object.hasOwn(MODES, arg)) continue;
+    if (arg === "--runtime") {
+      runtime = argv[++index];
+      if (!SHA256.test(runtime ?? "")) throw new Error("--runtime needs the published worker runtime's sha256");
+      continue;
+    }
+    if (arg === "--run-only") { args.push(arg); continue; }
+    if (arg === "--yes" && action === "archive") { args.push(arg); continue; }
+    throw new Error(`Unknown electron:cloud option ${arg}`);
+  }
+  if (!["start", "backend"].includes(action)) return { action, args, runtime: undefined };
+  if (runtime !== undefined && !SHA256.test(runtime)) throw new Error("Invalid worker runtime override");
+  return { action, args, runtime };
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  let command;
+  try { command = electronCloudCommand(process.argv.slice(2)); }
+  catch (error) { console.error(`[electron:cloud] ${error.message}`); process.exit(2); }
+  const launcher = path.join(path.dirname(fileURLToPath(import.meta.url)), "dev-environment/launcher.mjs");
+  const env = { ...process.env, ...(command.runtime ? { ZEROS_CLOUD_V2_RUNTIME_SHA256: command.runtime } : {}) };
+  const child = spawn(process.execPath, [launcher, command.action, ...command.args], { stdio: "inherit", env });
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
+  child.once("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
+}

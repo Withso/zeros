@@ -18,7 +18,6 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { portableDesignName } from "@zeros/protocol/design-path";
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { zerosDataDir } from "../db/paths";
 
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
@@ -191,7 +190,6 @@ function atomicWrite(
   try {
     writeFileSync(fd, source, "utf8");
     fchmodSync(fd, mode);
-    publishCloudWorkspacePath(temporary, fd);
     fsyncSync(fd);
   } finally {
     closeSync(fd);

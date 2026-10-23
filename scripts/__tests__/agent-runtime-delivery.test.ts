@@ -1,17 +1,38 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { hash } from "../agent-runtime/contracts.mjs";
+import { describe, expect, it, vi } from "vitest";
 import {
   includesCommit,
-  publicationReceipt,
+  collectDelivery,
   validateLedger,
-  validatePublication,
 } from "../agent-runtime/delivery.mjs";
+import { renderDashboard } from "../agent-runtime/report.mjs";
+import { initialState } from "../agent-runtime/state.mjs";
 const source = "a".repeat(40);
 
 describe("desktop and cloud delivery evidence", () => {
+  it("does not treat a saved legacy runtime receipt as v2 delivery or query its retired publisher", async () => {
+    const now = "2026-10-21T00:00:00.000Z";
+    const state = initialState(now);
+    state.sources["codex-delivery"] = {
+      status: "complete",
+      lastGood: { data: { cloud: { status: "published", pin: "9.9.9" } } },
+    };
+    const get = vi.fn(async () => { throw Object.assign(new Error("No release"), { status: 404 }); });
+    const observations = await collectDelivery({ get }, state, now);
+    expect(get.mock.calls.map(([path]) => path)).toEqual([
+      "/releases/tags/alpha", "/releases/tags/beta", "/releases/latest",
+    ]);
+    expect(observations).toHaveLength(3);
+    for (const observation of observations) {
+      expect(observation.data.cloud).toEqual({
+        status: "unknown", qualification: "unknown", reason: "v2-delivery-not-observed",
+      });
+    }
+    // Even when a current desktop read fails and state retains lastGood, the
+    // dashboard must never present the old publisher's receipt as v2 evidence.
+    const dashboard = renderDashboard(state, 1);
+    expect(dashboard).not.toContain("9.9.9");
+    expect(dashboard).toContain("v2 delivery is not observed");
+  });
   it("validates channel identity and immutable release sources", () => {
     const ledger = {
       version: 1,
@@ -54,83 +75,5 @@ describe("desktop and cloud delivery evidence", () => {
         "b".repeat(40),
       ),
     ).toBe("unknown");
-  });
-  it("never treats a disabled publisher, failed run or missing receipt as cloud publication", () => {
-    const input = { directory: "/not-read", runId: 1, attempt: 1, source };
-    const diagnostic = {
-      schema: "zeros.diagnostic/v1",
-      component: "publication",
-      stage: "disabled",
-      ok: true,
-      exitCode: 0,
-    };
-    expect(publicationReceipt({ ...input, diagnostic }).status).toBe(
-      "disabled",
-    );
-    expect(
-      publicationReceipt({
-        ...input,
-        diagnostic: { ...diagnostic, stage: "upload", ok: false, exitCode: 1 },
-      }).status,
-    ).toBe("failed");
-    expect(publicationReceipt({ ...input, diagnostic: null }).status).toBe(
-      "unknown",
-    );
-  });
-  it("records only verified public pins/digests and keeps live qualification unknown", () => {
-    const directory = mkdtempSync(join(tmpdir(), "runtime-receipt-"));
-    try {
-      const text = JSON.stringify({
-        source: { commit: source },
-        agents: {
-          claude: { sdk: "1.0.0" },
-          codex: { package: "1.0.0" },
-          cursor: { sdk: "1.0.0" },
-        },
-      });
-      writeFileSync(join(directory, "manifest.json"), text);
-      writeFileSync(
-        join(directory, "descriptor.json"),
-        JSON.stringify({
-          sourceCommit: source,
-          manifestSha256: hash(text),
-          runtimeId: `r1-${hash(text)}`,
-        }),
-      );
-      const receipt = publicationReceipt({
-        directory,
-        runId: 1,
-        attempt: 2,
-        source,
-        diagnostic: {
-          schema: "zeros.diagnostic/v1",
-          component: "publication",
-          stage: "done",
-          ok: true,
-          exitCode: 0,
-        },
-      });
-      expect(receipt).toMatchObject({
-        status: "published",
-        qualification: "unknown",
-        pins: { claude: "1.0.0", codex: "1.0.0", cursor: "1.0.0" },
-      });
-      expect(
-        validatePublication(receipt, {
-          id: 1,
-          run_attempt: 2,
-          head_sha: source,
-        }),
-      ).toBe(receipt);
-      expect(() =>
-        validatePublication(receipt, {
-          id: 1,
-          run_attempt: 3,
-          head_sha: source,
-        }),
-      ).toThrow("provenance");
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
   });
 });

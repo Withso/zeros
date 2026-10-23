@@ -14,7 +14,9 @@ function fixture() {
   const workspace = ensureWorkspace({ repositoryRoot: root, homeDir: root, env: {} });
   const profile = { version: 1, cloudflare: { accountId: "a".repeat(32), zoneId: "b".repeat(32), domain: "example.test", apiToken: "cf-credential-sentinel" },
     workos: { environment: "alpha", webClientId: "client_web", desktopClientId: "client_desktop", apiKey: "workos-credential-sentinel" },
-    github: { appId: 1, appSlug: "test-app", clientId: "public-client", clientSecret: "github-credential-sentinel", privateKeyBase64: Buffer.from("private-key-sentinel").toString("base64") } };
+    github: { appId: 1, appSlug: "test-app", clientId: "public-client", clientSecret: "github-credential-sentinel", privateKeyBase64: Buffer.from("private-key-sentinel").toString("base64") },
+    boat: { apiKey: "boat-credential-sentinel" },
+    storage: { endpoint: "https://storage.example.test", bucket: "runtimes", accessKeyId: "storage-id", secretAccessKey: "storage-credential-sentinel" } };
   return { workspace, profile };
 }
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -24,10 +26,11 @@ describe("local Dev integration boundaries", () => {
     const { workspace: w, profile: p } = fixture();
     w.state.workosWebhook = { secret: "webhook-credential-sentinel" };
     const desktop = desktopEnvironment(w, p), web = webEnvironment(w, p, 21001);
-    for (const value of [p.cloudflare.apiToken, p.workos.apiKey, p.github.clientSecret, p.github.privateKeyBase64, w.state.database.runtimePassword, w.state.workosWebhook.secret]) {
+    for (const value of [p.cloudflare.apiToken, p.workos.apiKey, p.github.clientSecret, p.github.privateKeyBase64, w.state.database.runtimePassword, w.state.workosWebhook.secret,
+      p.boat.apiKey, p.storage.secretAccessKey]) {
       expect(JSON.stringify({ desktop, web })).not.toContain(value);
     }
-    const api = backendEnvironment(w, p, { database: 21000, api: 21001 }, "fb87f8dd-6161-463b-981c-d039c675e0ca");
+    const api = backendEnvironment(w, p, { database: 21000, api: 21001 }, "fb87f8dd-6161-463b-981c-d039c675e0ca", { ZEROS_CLOUD_V2_RUNTIME_SHA256: "d".repeat(64) });
     expect(api.AUTH_AUDIENCE).toBe("https://api-alpha.zeros.build");
     expect(api.APP_ORIGIN).toBe(publicDevProfile(w, p).appOrigin);
     expect(api.DATABASE_URL).toContain("@127.0.0.1:21000/");

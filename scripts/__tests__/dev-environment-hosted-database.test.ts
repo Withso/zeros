@@ -1,14 +1,19 @@
 import { describe, it, expect, vi } from "vitest";
-import { drainHostedWorkers, validateHostedDatabaseRequest, retireHostedWorkerStorage } from "../dev-environment/hosted-database.mjs";
+import { drainHostedWorkers, validateHostedDatabaseRequest } from "../dev-environment/hosted-database.mjs";
 import * as database from "../dev-environment/hosted-database.mjs";
 import * as services from "../dev-environment/hosted-services.mjs";
 const owner = "a".repeat(24), generation = "11111111-1111-4111-8111-111111111111";
 const request = { owner, generation, backendStopped: true };
-function fixture(records: any[] = []) {
+function fixture(workspaces: any[] = [], builds: any[] = [], computers: any[] = []) {
   const pool = { query: vi.fn(async () => ({ rows: [{ owner, generation }] })) };
-  const withSystemTx = vi.fn(async (_pool, fn) => fn({ query: async () => ({ rows: records }) }));
-  const provider = { delete: vi.fn(), verifyAbsence: vi.fn(async () => true) };
-  return { pool, withSystemTx, provider, request, accountScope: "dev-account" };
+  const queries: string[] = [];
+  const withSystemTx = vi.fn(async (_pool, fn) => fn({ query: async (sql: string) => {
+    queries.push(sql);
+    return { rows: sql.includes("SELECT") ? sql.includes("FROM cloud_v2_workspaces") ? workspaces :
+      sql.includes("FROM cloud_v2_computer_builds") ? builds : sql.includes("FROM cloud_v2_computers") ? computers : [] : [] };
+  } }));
+  const provider = { delete: vi.fn(async () => {}), deleteSnapshot: vi.fn(async () => {}) };
+  return { pool, withSystemTx, provider, request, queries };
 }
 describe("Dev database archive", () => {
   it("repairs expired runtime authority for archive and retries interrupted grants before draining", async () => {
@@ -38,51 +43,33 @@ describe("Dev database archive", () => {
     expect(pool.query.mock.calls.map(args => args[0])).toContain('GRANT zeros_app TO "pscale_api_runtime"');
     expect(pool.query.mock.calls.map(args => args[0]).join("\n")).not.toMatch(/CREATE TABLE|INSERT/);
   });
-  it("can transfer a bound, irreversibly retired worker receipt out of the disposable DB", async () => {
-    const id = "bx_test123", operation = "bdop_" + "a".repeat(32);
-    const record = { resourceId: id, deletionRequestedAt: new Date(), deletionOperationId: operation };
-    const boat = vi.fn(async (_method: string, route: string) => route.startsWith("/deletion-operations/")
-      ? { status: 200, body: { operation: { id: operation, kind: "sandbox", targetId: id, status: "blocked", stage: "waiting_for_uploads", expectedBy: new Date(Date.now() + 3600_000).toISOString() } } }
-      : { status: 404 });
-    expect(await retireHostedWorkerStorage(record, boat)).toMatchObject({ id, deletionOperationId: operation, deletionStage: "waiting_for_uploads" });
-    boat.mockResolvedValue({ status: 404 } as any);
-    await expect(retireHostedWorkerStorage(record, boat)).rejects.toThrow(/receipt/);
-    await expect(retireHostedWorkerStorage({ ...record, deletionOperationId: null }, boat)).rejects.toThrow(/receipt/);
-  });
-  it("never transfers an accessible sandbox, unknown retention stage or another target", async () => {
-    const id = "bx_test123", operation = "bdop_" + "a".repeat(32);
-    const record = { resourceId: id, deletionRequestedAt: new Date(), deletionOperationId: operation };
-    for (const altered of [{ stage: "unknown" }, { targetId: "bx_other" }, { expectedBy: null }, {}]) {
-      const boat = vi.fn(async (_method: string, route: string) => route.startsWith("/deletion-operations/")
-        ? { status: 200, body: { operation: { id: operation, kind: "sandbox", targetId: id, status: "blocked", stage: "waiting_for_uploads", expectedBy: new Date().toISOString(), ...altered } } }
-        : { status: 200, body: { sandbox: { id } } });
-      await expect(retireHostedWorkerStorage(record, boat)).rejects.toThrow();
-    }
-  });
-  it("retains transferred cleanup receipts even while an independent uncertain create blocks archive", async () => {
-    const f = fixture([{ provider: "boat", account_scope: "dev-account", workspace_id: "workspace", generation: 1, resource_id: null },
-      { provider: "boat", account_scope: "dev-account", workspace_id: "workspace", generation: 2, resource_id: "resource" }]);
-    f.provider.verifyAbsence.mockResolvedValue(false); f.provider.delete.mockRejectedValue({ code: "provider_deletion_blocked" });
-    const retired = { id: "resource", deletionOperationId: "provider-receipt" };
-    expect(await drainHostedWorkers({ ...f, retirePending: async () => retired })).toEqual({ complete: false, pending: 1, retired: [retired] });
-  });
+
   it("refuses another generation before any query can supersede work", async () => {
     const f = fixture(); f.pool.query.mockResolvedValue({ rows: [{ owner, generation: "different" }] });
     await expect(drainHostedWorkers(f)).rejects.toThrow(/generation/);
     expect(f.withSystemTx).not.toHaveBeenCalled(); expect(f.provider.delete).not.toHaveBeenCalled();
   });
-  it("retains unallocated uncertain creates and pending physical deletions", async () => {
-    const f = fixture([{ provider: "boat", account_scope: "dev-account", workspace_id: "workspace", generation: 1, resource_id: null },
-      { provider: "boat", account_scope: "dev-account", workspace_id: "workspace", generation: 2, resource_id: "resource" }]);
-    f.provider.verifyAbsence.mockResolvedValue(false);
-    f.provider.delete.mockRejectedValue({ code: "provider_deletion_pending" });
-    expect(await drainHostedWorkers(f)).toEqual({ complete: false, pending: 2 });
-    f.provider.verifyAbsence.mockResolvedValue(true); f.provider.delete.mockResolvedValue(undefined);
+
+  it("deletes v2 workspace VMs, builders and each snapshot once before completing archive", async () => {
+    const f = fixture([{ id: "workspace", state: "running", boat_sandbox_id: "bx_workspace" }],
+      [{ id: "build", state: "succeeded", builder_sandbox_id: "bx_builder", snapshot_id: "org-computer" }],
+      [{ snapshot_name: "org-computer" }]);
     expect(await drainHostedWorkers(f)).toEqual({ complete: true, pending: 0 });
+    expect(f.provider.delete.mock.calls).toEqual([["bx_workspace"], ["bx_builder"]]);
+    expect(f.provider.deleteSnapshot.mock.calls).toEqual([["org-computer"]]);
+    expect(f.queries.some(sql => sql.includes("state='deleted'"))).toBe(true);
+    expect(f.queries.some(sql => sql.includes("DELETE FROM cloud_v2_tokens"))).toBe(true);
   });
-  it("does not delete foreign provider resources", async () => {
-    const f = fixture([{ provider: "boat", account_scope: "other", resource_id: "resource" }]);
-    await expect(drainHostedWorkers(f)).rejects.toThrow(/unexpected provider/); expect(f.provider.delete).not.toHaveBeenCalled();
+  it("retains workspace and snapshot rows when provider cleanup fails", async () => {
+    const f = fixture([{ id: "workspace", state: "running", boat_sandbox_id: "bx_workspace" }]);
+    f.provider.delete.mockRejectedValue(new Error("provider unavailable"));
+    await expect(drainHostedWorkers(f)).rejects.toThrow("provider unavailable");
+    expect(f.queries.some(sql => sql.includes("state='deleted'"))).toBe(false);
+  });
+  it("refuses archive when a stopped backend left an unconfirmed create", async () => {
+    const f = fixture([{ id: "workspace", state: "creating", boat_sandbox_id: null }]);
+    await expect(drainHostedWorkers(f)).rejects.toThrow(/unconfirmed/);
+    expect(f.provider.delete).not.toHaveBeenCalled();
   });
   it("pins direct branch connections and requires backend shutdown", () => {
     const url = new URL("postgresql://aws-us-west-2-1.pg.psdb.cloud:5432/postgres?sslmode=verify-full");

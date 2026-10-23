@@ -3,8 +3,8 @@ import { ensurePlanetScaleBranch, reconcilePlanetScaleRoles } from "./planetscal
 import { ensureRailwayEnvironment, ensureRailwayDevDomain, reconcileRailwayUpload } from "./railway.mjs";
 import { ensureDevPages, ensureDevDns, ensureDevPagesDomain } from "./hosted-cloudflare.mjs";
 import { ensureHostedWebhook } from "./hosted-workos.mjs";
-import { reconcileDevImageCreates } from "./hosted-image.mjs";
-import { retireHostedAgentSsh } from "./hosted-agent-ssh.mjs";
+import { reconcileDevImageCreates } from "./retired-resources.mjs";
+import { retireHostedAgentSsh } from "./railway-tools.mjs";
 import { assertHostedCleanupTargets } from "./hosted-protection.mjs";
 
 /** Recovery identifies original resources. Absence, elapsed time, HTTP 409/422

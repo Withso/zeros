@@ -54,14 +54,10 @@ describe("workspace code review routes and trusted attribution", () => {
     expect(fs.existsSync(path.join(root, "design", "canvas.json"))).toBe(false);
   });
 
-  it("uses trusted transport identity, rejecting spoofed authors and unauthenticated remote writes", async () => {
-    const options = { remote: true, cloudActorIdentity: humanIdentity };
+  it("rejects spoofed authors and unauthenticated remote writes", async () => {
+    const options = { remote: true, reviewUserId: humanIdentity.userId };
     const target = path.join(root, "managed"); fs.mkdirSync(target);
     insertWorkspace({ ...template, id: "managed", path: target, repoRoot: root });
-    const thread = await service.handle("codeReview.create", create("managed"), options) as CodeReviewThread;
-    expect(thread.comments[0]!.author).toEqual(codeReviewHumanActor(humanIdentity.userId, true));
-    const differentDevice = await service.handle("codeReview.reply", { workspaceId: "managed", threadId: thread.id, body: "Follow-up" }, { ...options, cloudActorIdentity: { ...humanIdentity, deviceId: "33333333-3333-4333-8333-333333333333" } }) as CodeReviewThread;
-    expect(differentDevice.comments[1]!.author.id).toBe(thread.comments[0]!.author.id);
     for (const field of ["actor", "author", "userId", "reviewUserId"]) {
       await expect(service.handle("codeReview.create", { ...create("managed"), [field]: "forged" }, options)).rejects.toMatchObject({ code: "CODE_REVIEW_INVALID" });
     }
@@ -133,18 +129,6 @@ describe("workspace code review routes and trusted attribution", () => {
     const retained = codeReviewStore.get("managed", thread.id);
     expect(retained.comments).toHaveLength(1);
     expect(retained.anchor).toEqual(input.anchor);
-  });
-
-  it("admits cloud primary comments with current actor policy and hides restricted file contexts from viewers", async () => {
-    const cloud = new WorkspaceService(root, { primaryDesignWorkspace: true });
-    const options = { remote: true, cloudWorker: true, cloudActorIdentity: humanIdentity, cloudFileActor: { role: "developer" as const, authorized: () => true } };
-    fs.writeFileSync(path.join(root, ".env"), "EXAMPLE=placeholder\n");
-    await cloud.handle("codeReview.create", { ...create(), anchor: { ...anchor, path: ".env" } }, options);
-    const viewer = { ...options, cloudFileActor: { role: "viewer" as const, authorized: () => true } };
-    expect(await cloud.handle("codeReview.list", { workspaceId: LOCAL_MAIN_WORKSPACE_ID }, viewer)).toMatchObject({ threads: [] });
-    await expect(cloud.handle("codeReview.create", create(), viewer)).rejects.toThrow();
-    await expect(cloud.handle("codeReview.list", { workspaceId: LOCAL_MAIN_WORKSPACE_ID }, { ...options, cloudFileActor: { ...options.cloudFileActor, authorized: () => false } })).rejects.toThrow();
-    await expect(cloud.handle("codeReview.list", { workspaceId: "other" }, options)).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
   });
 
   it("binds agent tools to registered rowless roots and revokes on nested-owner or path changes", () => {

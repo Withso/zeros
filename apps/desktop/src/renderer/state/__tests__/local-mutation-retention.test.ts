@@ -61,7 +61,10 @@ it.each([false, true])("a failed Local successor retries without replaying stale
   const old = { type: "WORKSPACE_RESPONSE", result: { chats: [local], chatDeletions: [] } };
   const request = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue(old as never);
   let revision = 1;
-  const bridge = new WorkspaceRuntimeClient({ open: vi.fn(), workspaces: () => [], readHistory: async () => ({ chats: [cloud], chatDeletions: [], revision }) });
+  // The control-plane mirror answers with the worker's native row and checkout path.
+  const root = "/home/user/Owner/repo";
+  const bridge = new WorkspaceRuntimeClient({ open: vi.fn(), workspaces: () => [], historyRoot: () => root,
+    readHistory: async () => ({ chats: [{ ...cloud, id: "saved", folder: root }], chatDeletions: [], revision }) });
   (bridge as unknown as { setStatus: (status: string) => void }).setStatus("connected");
   if (mixed) await bridge.warmHistoryWorkspace(target);
   let current: ChatThread[] = [local];

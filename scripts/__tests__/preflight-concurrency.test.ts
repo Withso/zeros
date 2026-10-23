@@ -34,7 +34,6 @@ const readWorkflow = (file: string) =>
   ) as Workflow;
 const preflight = readWorkflow("preflight.yml");
 const ci = readWorkflow("ci.yml");
-const cloudRunner = readWorkflow("cloud-runner-qualification.yml");
 const workflowChecks = readWorkflow("lint-ci.yml");
 const main = (run: number): GitHub => ({
   event_name: "push",
@@ -172,80 +171,6 @@ describe("independent main Preflight runs", () => {
       "fail-fast": false,
       matrix: { shard: [1, 2, 3] },
     });
-  });
-});
-
-describe("independent main Cloud Runner Qualification runs", () => {
-  it("retains every main push in a distinct non-cancelling group", () => {
-    const groups = new Set<string>();
-    for (let run = 1; run <= 50; run++) {
-      groups.add(workflowGroup(main(run), cloudRunner));
-      expect(cancels(main(run), cloudRunner)).toBe(false);
-    }
-    expect(groups.size).toBe(50);
-    expect(cloudRunner.concurrency.queue).toBeUndefined();
-  });
-
-  it("keys main groups by run ID and retains that group for reruns", () => {
-    const github = main(1);
-    expect(workflowGroup(github, cloudRunner)).toBe(
-      `cloud-runner-main-${github.run_id}`,
-    );
-    expect(
-      workflowGroup({ ...github, run_id: github.run_id + 1 }, cloudRunner),
-    ).not.toBe(workflowGroup(github, cloudRunner));
-    expect(workflowGroup({ ...github, run_attempt: 2 }, cloudRunner)).toBe(
-      workflowGroup(github, cloudRunner),
-    );
-    expect(cancels({ ...github, run_attempt: 2 }, cloudRunner)).toBe(false);
-  });
-
-  it.each([
-    { event_name: "pull_request", ref: "refs/pull/42/merge" },
-    { event_name: "pull_request", ref: "refs/heads/main" },
-    {
-      event_name: "merge_group",
-      ref: "refs/heads/gh-readonly-queue/main/pr-42",
-    },
-    { event_name: "merge_group", ref: "refs/heads/main" },
-  ])("preserves per-ref cancellation for $event_name on $ref", (context) => {
-    const github = { ...main(1), ...context };
-    const newer = { ...main(2), ...context };
-    expect(workflowGroup(github, cloudRunner)).toBe(
-      `cloud-runner-${context.ref}`,
-    );
-    expect(workflowGroup(newer, cloudRunner)).toBe(
-      workflowGroup(github, cloudRunner),
-    );
-    expect(workflowGroup(github, cloudRunner)).not.toBe(
-      workflowGroup(main(1), cloudRunner),
-    );
-    expect(cancels(github, cloudRunner)).toBe(true);
-    expect(cancels(newer, cloudRunner)).toBe(true);
-  });
-
-  it("retains full qualification triggers and the isolated BuildKit resource limits", () => {
-    expect(cloudRunner.on).toEqual({
-      pull_request: null,
-      merge_group: null,
-      push: { branches: ["main"] },
-    });
-    const buildkit = cloudRunner.jobs.qualify.steps?.find(
-      (step) =>
-        step.name ===
-        "Exercise the publication BuildKit toolchain without publishing",
-    )?.run;
-    expect(buildkit).toBeDefined();
-    for (const limit of [
-      "max-parallelism = 2",
-      "--driver-opt memory=4g",
-      "--driver-opt memory-swap=4g",
-      "--driver-opt cpu-quota=200000",
-      "--driver-opt cpu-period=100000",
-      "--driver-opt restart-policy=no",
-    ]) {
-      expect(buildkit).toContain(limit);
-    }
   });
 });
 

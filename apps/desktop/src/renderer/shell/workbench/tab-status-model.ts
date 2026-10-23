@@ -8,7 +8,6 @@ import {
   Terminal,
 } from "lucide-react";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
-import { CLOUD_WORKSPACE_V2_REQUIRED, CLOUD_WORKSPACE_V2_REQUIRED_MESSAGE } from "../../platform/cloud-workspace-execution";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
 import {
   describeConnectionRejection,
@@ -104,21 +103,18 @@ export interface WorkbenchStatus {
   tone: "error" | "pending" | "neutral";
   message: string;
   diagnostic?: string;
-  action?: "Retry" | "Open Setup";
+  action?: "Retry";
   connectionPhase?: "connecting" | "reconnecting";
 }
 
 export interface WorkspaceAvailability {
   cloud: boolean;
-  restarting?: boolean;
-  restartFailed?: boolean;
   state?: string;
   connection: ConnectionStatus;
   since: number;
   previouslyConnected?: boolean;
   rejected?: boolean;
   rejection?: ConnectionRejection;
-  setupFailed?: boolean;
   stopError?: { code: string; message: string } | null;
   canWake?: boolean;
 }
@@ -162,12 +158,6 @@ export function describeWorkspaceAvailability(
   now: number,
 ): WorkbenchStatus | null {
   const workspace = input.cloud ? "cloud workspace" : "Zeros engine";
-  if (input.cloud && input.stopError?.code === CLOUD_WORKSPACE_V2_REQUIRED)
-    return { tone: "error", message: CLOUD_WORKSPACE_V2_REQUIRED_MESSAGE };
-  if (input.cloud && input.restarting)
-    return { tone: "pending", message: "Restarting the cloud workspace…" };
-  if (input.cloud && input.restartFailed)
-    return { tone: "error", message: "Couldn't restart this cloud workspace." };
   switch (input.state) {
     case "creating":
     case "provisioning":
@@ -194,14 +184,10 @@ export function describeWorkspaceAvailability(
     case "error":
       return {
         tone: "error",
-        message: input.setupFailed
-          ? "Setup failed."
-          : `Can't reach the ${workspace}.`,
-        action: input.setupFailed ? "Open Setup" : "Retry",
+        message: `Can't reach the ${workspace}.`,
+        action: "Retry",
       };
   }
-  if (input.setupFailed)
-    return { tone: "error", message: "Setup failed.", action: "Open Setup" };
   if (input.rejection) {
     const copy = describeConnectionRejection(input.rejection);
     return {
@@ -239,7 +225,6 @@ export function describeWorkspaceAvailability(
 /** Compact runtime status uses the same availability decision and calm clock
  * as the workbench banner. It never introduces another connection timer. */
 export function describeWorkspaceRuntimeStatus(input: WorkspaceAvailability, now: number): string {
-  if (input.cloud && input.restarting) return "Restarting…";
   const status = describeWorkspaceAvailability(input, now);
   if (status?.tone === "error") return "Needs attention";
   if (["stopped", "sleeping"].includes(input.state ?? "")) return "Sleeping";
@@ -382,6 +367,19 @@ interface StatusSource extends WorkbenchSource {
 
 /** One frame owns its exact target's sources. Old callbacks hold the old
  * instance, so late results cannot set or clear a new owner's banner. */
+// The cloud worker answers reads it doesn't serve yet (turns, review hunks,
+// setup and run logs, pull requests) with CLOUD_V2_UNSUPPORTED. That is a
+// missing feature, not a failed read: Retry can't change it.
+const CLOUD_UNAVAILABLE = /\b(?:is not|isn't|are not|aren't) available in cloud workspaces\b/i;
+const CLOUD_UNAVAILABLE_NOTICE: WorkbenchNotice = { tone: "neutral", message: "This isn't available in cloud workspaces yet." };
+
+export function isCloudUnavailable(error: unknown): boolean {
+  if (!error) return false;
+  if (typeof error === "object" && (error as { code?: unknown }).code === "CLOUD_V2_UNSUPPORTED") return true;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return CLOUD_UNAVAILABLE.test(message);
+}
+
 export class WorkbenchStatusSources {
   private sources = new Map<string, StatusSource>();
   private listeners = new Set<() => void>();
@@ -406,7 +404,12 @@ export class WorkbenchStatusSources {
       this.listeners.delete(listener);
     };
   };
-  update(id: string, source: WorkbenchSource): void {
+  update(id: string, reported: WorkbenchSource): void {
+    // An unavailable cloud feature is absent beside other content, and a
+    // neutral note when it is the tab's own read.
+    const source: WorkbenchSource = isCloudUnavailable(reported.error)
+      ? { ...reported, error: undefined, ...(reported.primary && !reported.hasContent ? { notice: reported.notice ?? CLOUD_UNAVAILABLE_NOTICE } : {}) }
+      : reported;
     const previous = this.sources.get(id);
     const error = source.error || (source.pending ? previous?.error : null);
     // One failed read is transient until its single silent, exact-key retry

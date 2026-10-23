@@ -1,4 +1,3 @@
-import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
 import type { EngineMessage } from "../types";
@@ -17,7 +16,6 @@ const LIFECYCLE_OPS = [
 type WorkspaceRequest = Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>;
 type Targets = readonly { workspaceId: string; designDirectory: string }[];
 interface Internals {
-  cloudWorker: unknown;
   workspace: {
     handle(op: string, params?: Record<string, unknown>): Promise<unknown>;
   };
@@ -39,7 +37,6 @@ interface Internals {
   handleWorkspaceMessage(
     message: WorkspaceRequest,
     client: TransportClient,
-    cloudMutationAdmitted?: boolean,
   ): Promise<void>;
 }
 
@@ -110,19 +107,7 @@ function holdArchive(state: Internals) {
   };
 }
 
-function stubCloudTerritoryRetirement(state: Internals) {
-  vi.spyOn(state.agents, "suspendPooledUtilityWorkspaceTerritory").mockReturnValue();
-  vi.spyOn(state.agents, "retirePooledUtilityWorkspaceTerritory").mockResolvedValue();
-  vi.spyOn(state.agents, "resumePooledUtilityWorkspaceTerritory").mockReturnValue();
-  vi.spyOn(state.agents, "assertWorkspaceDesignAuthorityRetirementsProven").mockReturnValue();
-  vi.spyOn(state.setup, "stopForWorkspaceTerritoryAndProve").mockResolvedValue();
-  vi.spyOn(state.runs, "stopForWorkspaceTerritoryAndProve").mockResolvedValue();
-  return vi
-    .spyOn(state, "retireCodeAgentSessionsForTerritoryChange")
-    .mockResolvedValue();
-}
-
-describe("workspace lifecycle Design scope (Local)", () => {
+describe("workspace lifecycle Design scope", () => {
   it.each(LIFECYCLE_OPS)(
     "%s suspends only the managed workspace's Design grants",
     async (op) => {
@@ -261,138 +246,5 @@ describe("workspace lifecycle Design scope (Local)", () => {
     );
 
     expect(scopes).toEqual([undefined]);
-  });
-});
-
-describe("workspace lifecycle Design scope (cloud worker)", () => {
-  function cloudEngine(port: number) {
-    const state = engine(port);
-    state.cloudWorker = { version: 1 };
-    const scoped = vi
-      .spyOn(state, "withDesignTerritoryTransition")
-      .mockImplementation((_targets, mutation) => mutation());
-    const global = vi
-      .spyOn(state, "withGlobalDesignTerritoryTransition")
-      .mockImplementation((mutation) => mutation());
-    return { state, scoped, global };
-  }
-
-  it.each(LIFECYCLE_OPS)(
-    "%s retires only the managed owner's authority",
-    async (op) => {
-      const { state, scoped, global } = cloudEngine(29_973);
-
-      await state.handleWorkspaceMessage(
-        request(op, managed.id),
-        client(),
-        true,
-      );
-
-      expect(scoped).toHaveBeenCalledExactlyOnceWith(
-        [
-          {
-            workspaceId: managed.id,
-            designDirectory: path.join(managed.path, "Zeros Design"),
-          },
-        ],
-        expect.any(Function),
-      );
-      expect(global).not.toHaveBeenCalled();
-    },
-  );
-
-  it("queues a follow-up lifecycle for the same owner behind its cloud transition", async () => {
-    const state = engine(29_976);
-    state.cloudWorker = { version: 1 };
-    // The owner's authority retirement is covered elsewhere; this test proves
-    // the real cloud transition releases its owner to a queued request.
-    vi.spyOn(state.agents, "suspendPooledUtilityWorkspaceTerritory").mockReturnValue();
-    vi.spyOn(state.agents, "retirePooledUtilityWorkspaceTerritory").mockResolvedValue();
-    vi.spyOn(state.agents, "resumePooledUtilityWorkspaceTerritory").mockReturnValue();
-    vi.spyOn(state.agents, "assertWorkspaceDesignAuthorityRetirementsProven").mockReturnValue();
-    vi.spyOn(state.setup, "stopForWorkspaceTerritoryAndProve").mockResolvedValue();
-    vi.spyOn(state.runs, "stopForWorkspaceTerritoryAndProve").mockResolvedValue();
-    const retired = vi
-      .spyOn(state, "retireCodeAgentSessionsForTerritoryChange")
-      .mockResolvedValue();
-    let finishArchive: (() => void) | undefined;
-    const handled: string[] = [];
-    vi.mocked(state.workspace.handle).mockImplementation(async (op: string) => {
-      handled.push(op);
-      if (op === "workspace.archive")
-        await new Promise<void>((resolve) => {
-          finishArchive = resolve;
-        });
-      return { ok: true };
-    });
-    const receiver = client();
-
-    const archive = state.handleWorkspaceMessage(
-      request("workspace.archive", managed.id),
-      receiver,
-      true,
-    );
-    await vi.waitFor(() => expect(finishArchive).toBeTypeOf("function"));
-    const restore = state.handleWorkspaceMessage(
-      request("workspace.restore", managed.id),
-      receiver,
-      true,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(handled).toEqual(["workspace.archive"]);
-    finishArchive!();
-    await Promise.all([archive, restore]);
-
-    expect(handled).toEqual(["workspace.archive", "workspace.restore"]);
-    expect(receiver.send).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "WORKSPACE_ERROR" }),
-    );
-    expect(retired.mock.calls.map(([workspaceId]) => workspaceId)).toEqual(
-      expect.arrayContaining([managed.id]),
-    );
-    expect(
-      retired.mock.calls.every(([workspaceId]) => workspaceId === managed.id),
-    ).toBe(true);
-  });
-
-  it("does not queue one workspace's cloud lifecycle behind another's", async () => {
-    const state = engine(29_979);
-    state.cloudWorker = { version: 1 };
-    stubCloudTerritoryRetirement(state);
-    const held = holdArchive(state);
-    const receiver = client();
-
-    const archive = state.handleWorkspaceMessage(
-      request("workspace.archive", managed.id),
-      receiver,
-      true,
-    );
-    await held.started();
-    const restore = state.handleWorkspaceMessage(
-      request("workspace.restore", sibling.id),
-      receiver,
-      true,
-    );
-    await vi.waitFor(() =>
-      expect(held.handled).toContain(`workspace.restore:${sibling.id}`),
-    );
-    held.finish();
-    await Promise.all([archive, restore]);
-    expect(receiver.send).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "WORKSPACE_ERROR" }),
-    );
-  });
-
-  it("keeps the primary checkout's lifecycle request on its existing gate", async () => {
-    const { state, scoped, global } = cloudEngine(29_974);
-
-    await state.handleWorkspaceMessage(
-      request("workspace.archive", "local-main"),
-      client(),
-      true,
-    );
-
-    expect(global).toHaveBeenCalledOnce();
-    expect(scoped).not.toHaveBeenCalled();
   });
 });

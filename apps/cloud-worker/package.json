@@ -1,0 +1,32 @@
+{
+  "name": "@zeros/cloud-worker",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Standalone cloud workspace worker with native agent drivers.",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "lint": "eslint src scripts vitest.config.ts",
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.296",
+    "@cursor/sdk": "1.0.37",
+    "@openai/codex": "0.162.1",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
+    "@zeros/protocol": "workspace:*",
+    "node-pty": "^1.1.0",
+    "ws": "^8.21.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
+    "typescript": "5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

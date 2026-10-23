@@ -284,30 +284,6 @@ describe("runFile — Bun native subprocess boundary", () => {
     });
   });
 
-  it("terminates the opted-in cloud fetch process group, then bounds cleanup", async () => {
-    vi.useFakeTimers();
-    let finish!: (code: number) => void;
-    const exited = new Promise<number>(resolve => { finish = resolve; });
-    const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
-      if (signal === "SIGKILL") finish(137);
-      return true;
-    });
-    const spawn = vi.fn((_command: string[], _options: Record<string, unknown>) => ({ pid: 424242, stdout: new Response("").body, stderr: new Response("").body,
-      exited, signalCode: "SIGTERM", killed: true, kill: vi.fn() }));
-    vi.stubGlobal("Bun", { spawn });
-    try {
-      const controller = new AbortController();
-      const running = runFile("git", ["fetch", "--unshallow", "origin"], { signal: controller.signal, processGroup: true });
-      const rejected = expect(running).rejects.toThrow("history limit");
-      controller.abort(new Error("history limit"));
-      expect(spawn.mock.calls[0]?.[1]).toMatchObject({ detached: true });
-      expect(kill).toHaveBeenCalledWith(-424242, "SIGTERM");
-      await vi.advanceTimersByTimeAsync(2000);
-      await rejected;
-      expect(kill).toHaveBeenLastCalledWith(-424242, "SIGKILL");
-    } finally { kill.mockRestore(); vi.useRealTimers(); }
-  });
-
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -1411,42 +1387,6 @@ describe("workspace git/gh credential shims", () => {
   // Cloud-worker identity projection uses Linux uid/gid and ownership
   // semantics. macOS exercises the ordinary same-user broker path elsewhere;
   // asking it to grant a Linux worker identity is an invalid production state.
-  it.runIf(process.platform === "linux")(
-    "projects a broker read-only to the qualified cloud worker identity",
-    async () => {
-      setGitCredentialSourceForTesting({
-        supports({ protocol, host }) {
-          return protocol === "https" && host === "github.com";
-        },
-        async getCredential() {
-          return { username: "x-access-token", password: "worker-secret" };
-        },
-      });
-      const ownerUid = process.getuid?.() ?? 1_000;
-      const ownerGid = process.getgid?.() ?? 1_000;
-      const prepared = await prepareGitCredentialShellEnvironment(
-        "workspace:test",
-        process.env.PATH ?? "",
-        {
-          uid: ownerUid === 0 ? 10_001 : ownerUid,
-          gid: ownerGid === 0 ? 10_001 : ownerGid,
-        },
-      );
-      expect(prepared).not.toBeNull();
-
-      const socket = prepared!.env.ZEROS_GIT_AUTH_SOCKET;
-      const helper = prepared!.env.ZEROS_GIT_AUTH_HELPER;
-      const socketDir = await stat(path.dirname(socket));
-      const socketStat = await stat(socket);
-      const helperDir = await stat(path.dirname(helper));
-      const helperStat = await stat(helper);
-      expect(socketDir.mode & 0o777).toBe(0o710);
-      expect(socketStat.mode & 0o777).toBe(0o660);
-      expect(helperDir.mode & 0o777).toBe(0o750);
-      expect(helperStat.mode & 0o777).toBe(0o750);
-    },
-  );
-
   it("serves the current credential to GitHub without putting it in the shell environment", async () => {
     let token = "first-broker-secret";
     setGitCredentialSourceForTesting({

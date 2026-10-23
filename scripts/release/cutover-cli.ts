@@ -51,7 +51,7 @@ async function main() {
         const parsed = FailedMigration.safeParse(JSON.parse(await readFile(failureFile, "utf8")));
         return parsed.success ? parsed.data : undefined;
       },
-      waitIdentity: () => providers.waitIdentity(manifest, undefined, false),
+      waitIdentity: () => providers.waitIdentity(manifest),
     }, approvals, journal, writeJournal);
     await writeFile(".context/release/cutover-receipt.json", `${JSON.stringify(CutoverReceipt.parse(receipt), null, 2)}\n`, { mode: 0o600 });
     console.log(`Controlled cutover complete for ${config.channel} at ${config.sourceSha}. Rerun this SHA's failed desktop release.`);

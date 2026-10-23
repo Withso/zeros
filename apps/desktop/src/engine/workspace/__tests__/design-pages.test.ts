@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeState, setStateRootForTesting } from "../../git";
+import { insertWorkspace } from "../../git/state";
 import { WorkspaceService } from "../service";
 import { withDesignDirectoryNameLease } from "../../design/directory-registry";
 import { withDesignWorkspaceMutation } from "../../design/document-write-lock";
@@ -40,7 +41,8 @@ describe("page operations through WorkspaceService", () => {
     await writeFile(path.join(root, "code.txt"), "Code\n");
     git("add", "code.txt");
     git("commit", "-qm", "Fixture");
-    service = new WorkspaceService(root, { primaryDesignWorkspace: true });
+    service = new WorkspaceService(root);
+    insertWorkspace(service["localMainEntry"]());
     initial = (
       (await service.handle("design.initialize", params, options)) as {
         snapshot: Snapshot;

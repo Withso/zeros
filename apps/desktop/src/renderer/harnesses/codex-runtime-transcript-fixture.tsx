@@ -6,7 +6,6 @@ import type { SessionUpdate } from "@zeros/protocol/agent-events";
 import { TurnEventList } from "../features/agent/turn-event-list";
 import type { RendererContext } from "../features/agent/renderers/types";
 import { Button } from "../shared/ui/primitives/button";
-import { prepareCachedTranscriptWindow } from "../platform/cloud-transcript-cache-contract";
 
 const owners = ["personal-local", "organization-local", "organization-cloud"] as const;
 type Owner = typeof owners[number];
@@ -66,15 +65,7 @@ export function CodexRuntimeTranscriptFixture({ initialOwner }: { initialOwner: 
   const [alternateChat, setAlternateChat] = useState(false);
   const snapshot = snapshots[owner];
   useEffect(() => {
-    const cloud = snapshots["organization-cloud"];
-    // Exercise the real presentation-only cloud cache on reload. Fixture turn
-    // state stays separate; cached rows do not establish a live or settled turn.
-    const cached = prepareCachedTranscriptWindow({ recordEpoch: null, revision: 1, cursor: null,
-      messages: cloud.messages.map(message => ({ msgId: message.id, kind: message.kind,
-        createdAt: message.createdAt, payload: JSON.stringify(message) })) });
-    sessionStorage.setItem(storageKey, JSON.stringify({ ...snapshots, "organization-cloud": {
-      ...cloud, messages: cached.messages.map(row => JSON.parse(row.payload) as AgentMessage),
-    } }));
+    sessionStorage.setItem(storageKey, JSON.stringify(snapshots));
   }, [snapshots]);
   const children = useMemo(() => {
     const grouped = new Map<string, AgentMessage[]>();

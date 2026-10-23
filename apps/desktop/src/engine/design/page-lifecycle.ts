@@ -11,7 +11,6 @@ import {
   designPageRenameInputSchema,
   type DesignPageSummary,
 } from "@zeros/protocol/design-pages";
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { withDesignDocumentWrite } from "./document-write-lock";
 import { initializeDesignDocumentUnlocked } from "./document-transactions";
 import {
@@ -89,7 +88,6 @@ export async function createDesignPage(
     );
     assertDesignWriteAuthorized();
     await mkdir(target);
-    publishCloudWorkspacePath(target);
     pages.push(page);
     await writeCanvas(workspace, canvas);
     return designCanvasPageCatalog(canvas, undefined, true).find(

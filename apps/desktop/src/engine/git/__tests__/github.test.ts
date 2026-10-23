@@ -35,7 +35,6 @@ import {
 // Not on the barrel: the process-local login cache is an internal hint for
 // branch prefixing, not part of the git layer's public surface.
 import { listRepositoryBranches, cachedGithubLogin } from "../github";
-import { runWithGithubWriteCredential } from "../github-write-context";
 
 const execFileAsync = promisify(execFile);
 
@@ -92,7 +91,7 @@ interface PrPayload {
   body: string | null;
   user: { login: string } | null;
   base: { ref: string };
-  head: { ref: string; label: string; sha: string };
+  head: { ref: string; label: string; sha: string; repo?: { full_name: string } | null };
   mergeable?: boolean | null;
   mergeable_state?: string;
   created_at: string;
@@ -158,6 +157,7 @@ function makeOctokitMock() {
             ref: args.head,
             label: `test-user:${args.head}`,
             sha: "a".repeat(40),
+            repo: { full_name: "Acme/example" },
           },
           mergeable: true,
           mergeable_state: "clean",
@@ -806,16 +806,6 @@ describe("github", () => {
       store.setToken("ghp_test_token");
     });
 
-    it("uses native HEAD for a scoped cloud publication after an agent switches branches", async () => {
-      const ws = getWorkspace(workspaceId);
-      await execFileAsync("git", ["checkout", "-b", "native-cloud-publication"], { cwd: ws.path });
-      const pr = await runWithGithubWriteCredential({ token: "synthetic-proxy-capability", owner: "Acme", repository: "example",
-        apiBaseUrl: "https://example.test/api", gitBaseUrl: "https://example.test/git/", expiresAtMs: Date.now() + 60000 }, () => true,
-      () => createPr({ workspaceId, title: "Native branch", body: "" }));
-      expect(pr.headBranch).toBe("native-cloud-publication");
-      expect(pr.baseBranch).toBe(ws.baseBranch);
-    });
-
     it("creates a draft PR and updates the workspace row", async () => {
       const ws = getWorkspace(workspaceId);
       const pr = await createPr({
@@ -830,6 +820,7 @@ describe("github", () => {
       );
       expect(pr.baseBranch).toBe(ws.baseBranch);
       expect(pr.headBranch).toBe(ws.branch);
+      expect(pr.headRepository).toBe("Acme/example");
 
       const refreshed = getWorkspace(workspaceId);
       expect(refreshed.status).toBe("in-review");

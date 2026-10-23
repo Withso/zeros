@@ -84,9 +84,6 @@ export class LocalOwnerIndex {
   private readonly cache = new Map<string, LocalWorkspaceOwner | "foreign" | null>();
 
   constructor(private readonly ports: LocalOrchestrationPorts) {
-    if (ports.isCloudWorker()) {
-      throw new LocalOrchestrationError("NOT_LOCAL", "Zeros Local CLI runs only on the Mac's local engine.");
-    }
     try {
       this.managed = ports.listManagedWorkspaces();
       this.projects = ports.listProjects();

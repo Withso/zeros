@@ -1,1 +1,0 @@
-sudo -n /usr/bin/python3 -c "import hashlib,json,pathlib;b=pathlib.Path('/etc/zeros/image-build.json').read_bytes();d=json.loads(b);print(json.dumps({'buildSha256':hashlib.sha256(b).hexdigest(),'commit':d['source']['commit'],'contract':d['imageContractSha256'],'profile':d.get('profile')}))"

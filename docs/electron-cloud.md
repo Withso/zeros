@@ -1,0 +1,158 @@
+# Cloud workspaces on one machine: `pnpm electron:cloud`
+
+`pnpm electron:cloud` runs a branch's whole cloud v2 stack: this branch's
+control plane, its worker runtime on real Boat VMs, and the desktop app. Use it
+to test cloud workspace changes before they reach `main`. It is the cloud
+counterpart of [`pnpm electron:local`](local-development.md), which stays
+account-free and Local-only. Nothing is created in Railway or PlanetScale.
+After merge, Alpha is the shared cloud environment.
+
+## What runs
+
+- An isolated PostgreSQL 18 cluster on loopback. This branch's migrations run
+  only there. It allows 40 connections, which keeps PostgreSQL's shared lock
+  table close to a small hosted cluster's, so a migration that holds too many
+  locks fails here first.
+- This branch's control plane on loopback, as the `development` channel. It
+  verifies Alpha's WorkOS tokens and runs cloud v2 with this checkout's own
+  worker signing key, vault key and Codex keyring.
+- The auth web facade for desktop sign-in pages.
+- A named Cloudflare tunnel with stable hostnames per checkout:
+  `api-dev-<owner>.<domain>` and `app-dev-<owner>.<domain>`. Boat VMs reach the
+  control plane's worker API and Codex proxy through it; named tunnels stream
+  server-sent events, which quick tunnels do not. The control plane reaches
+  each VM outbound through Boat's protected route, so nothing listens on your
+  machine's public interfaces.
+- The desktop app built from this branch, pointed at the tunnel origin, unless
+  you pass `--headless`.
+
+Boat VMs are real and billed while they run. The worker runtime is a published
+build pinned by its SHA-256.
+
+## Prerequisites
+
+- macOS: `brew install postgresql@18 cloudflared`, plus Docker (Docker Desktop or
+  OrbStack) to build a worker runtime. Linux x64: PostgreSQL 18, Node 24 and a
+  checksum-verified `cloudflared` on `PATH`.
+- The private profile `zeros-dev-env.json` in the checkout or `~/.zeros-dev`,
+  or `ZEROS_DEV_PROFILE_PATH`. `electron:cloud` reads only its `cloudflare`
+  (a Tunnel Edit and DNS Edit token), `workos` (Alpha), `github` (the Alpha
+  GitHub App), `boat`, `storage` and `fixture` sections. Railway, PlanetScale
+  and registry sections are ignored.
+- For seeding and agent checks, `.env.agent` entries: `ZEROS_DEV_REPOSITORY` and
+  `ZEROS_DEV_GITHUB_INSTALLATION_ID` (the test repository and its Alpha GitHub App
+  installation), `ZEROS_DEV_PASSWORD` (the fixture user's Alpha WorkOS password;
+  required for headless seeding and gate0, optional when you sign in to the app),
+  and test agent keys `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
+  `OPENAI_API_KEY` and `CURSOR_API_KEY`.
+
+## Worker runtime
+
+Startup computes the packager's worker `sourceSha256` from the checkout's build
+inputs, including uncommitted changes. It looks up
+`cloud-v2/runtime/sources/<sourceSha256>.json` in the profile's runtime store.
+A matching index names the immutable archive SHA and build commit. If absent,
+startup builds and publishes the runtime automatically, natively on Linux x64
+with Node 24 or through Docker on a Mac. Storage errors and malformed indices
+stop startup; they do not trigger a new publication. The last selected runtime
+is recorded in private state, and sources changing during selection require a
+restart. Every VM still verifies the archive SHA at boot.
+
+To prepublish from Linux for a Mac without Docker, run this on the same worker
+sources and with the same runtime store:
+
+```sh
+pnpm --dir apps/control-plane cloud-v2:publish-runtime --local
+```
+
+Or package and publish an archive separately:
+
+```sh
+node apps/cloud-worker/scripts/package-runtime.mjs --out /tmp/worker-runtime.tar.gz
+pnpm --dir apps/control-plane cloud-v2:publish-runtime --local --artifact /tmp/worker-runtime.tar.gz
+```
+
+The packager builds natively on Linux x64 with Node 24. Elsewhere it builds in
+Docker (`node:24-bookworm`, `linux/amd64`) from a filtered copy of the source,
+without the checkout, private profile or installed dependencies; `--docker`
+forces that path. Publishing checks the archive and stores it under its
+SHA-256, which it prints. `--local` reads the same private profile as the
+launcher, including the `ZEROS_DEV_PROFILE_PATH` override, and uses its
+`storage` section. Publication also writes the source-hash index. `--runtime`
+can explicitly select the printed SHA when an override is needed. An archive
+must include the packager's `BUILD.json` source hash to be indexed.
+
+## Commands
+
+```sh
+pnpm electron:cloud                              # start and open the app
+pnpm electron:cloud --headless                   # backend only, for agents
+pnpm electron:cloud --runtime <sha256>            # explicit runtime override
+pnpm electron:cloud --seed                         # seed a running stack's test organization
+pnpm electron:cloud --stop                         # stop a running stack
+pnpm electron:cloud --doctor                       # show state and profile issues
+pnpm electron:cloud --reset [--yes]                # delete this checkout's cloud resources and data
+```
+
+`ZEROS_CLOUD_V2_RUNTIME_SHA256` remains an explicit override like `--runtime`;
+leave both unset for source-based selection. `--run-only` disables file watching.
+
+On its first healthy start, the stack seeds its database once: the verified
+WorkOS test user and organization, the Alpha GitHub installation and test
+repository, and the test agent keys through the vault. The exact fixture user
+also receives the `developer` staff role through the audited staff-management
+path, enabling Settings' Internal tab in this local database. Existing fixture
+receipts are upgraded once on the next start; a stronger staff role is kept.
+Alpha's database is never changed. Without
+`ZEROS_DEV_PASSWORD`, sign in to the app first and then run `--seed`. A missing
+input is reported without stopping the stack.
+
+The desktop session persists in this instance's `environments/<owner>/desktop`
+directory under `~/.zeros-dev`; the `dev-instances/local-<owner>` directory holds
+the app bundle. With `ZEROS_DEV_PASSWORD`, the launcher signs the fixture user
+into the desktop automatically if there is no saved session. It uses the Alpha
+Desktop client and the fixture organization, verifies the token in Electron
+main, and consumes a private 0600 handoff before opening the window. Passwords
+and API keys stay in the launcher; tokens never enter argv or environment.
+An existing session is reused, and an unavailable or different saved account
+is preserved. This path is inert in packaged builds and `electron:local`.
+
+Agents run `--headless`, then gate0 against this checkout's tunnel:
+
+```sh
+pnpm --dir apps/control-plane cloud-v2:gate0 --local --agents codex,claude,cursor --runtime <sha256>
+```
+
+gate0 derives its signer from this checkout's private state and checks the
+running stack's owner and run before it creates one workspace. It signs in with
+`ZEROS_DEV_PASSWORD` and needs the seeded organization's Cloud Computer to be
+built.
+
+## Data and cleanup
+
+State persists between runs under `~/.zeros-dev/environments/<owner>/`: the
+database, the derived keys and the desktop profile. Service output stays in
+private logs there: `logs/control-plane.log`, `logs/auth-web.log` and
+`logs/cloudflared.log`, with the previous run's copy as `*.previous.log`. Because the worker signing
+key derives from that state, VMs keep trusting the control plane across
+restarts. Boat sandbox, builder and snapshot names carry the checkout's owner,
+so two checkouts never share a provider resource.
+
+`--stop` waits for this checkout's desktop app, its Vite/watch processes and the
+backend services to exit. Shutdown gives each owned process group time to exit
+gracefully, then escalates within a bounded deadline and confirms it is gone.
+Other checkouts and their apps stay running. A second start refuses an earlier
+run whose shutdown is unconfirmed; its private receipt and data are kept.
+
+`--reset` asks for the owner ID (or `--yes`) and confirms the same app/backend
+shutdown before cleanup. It then runs this checkout's migrator,
+then drains: it fences the database, deletes only this checkout's VMs, builders
+and snapshots, and confirms each is gone. Only then does it remove the
+database, the WorkOS webhook, the DNS records and the tunnel. If anything is
+uncertain, everything is kept; run `--reset` again.
+
+Conductor's archive hook runs `pnpm electron:cloud --reset --yes` when this
+checkout has active local cloud state. Archive proceeds only after the same
+instance retains an `archived` receipt, then performs any hosted Dev cleanup.
+An older branch with local cloud state must switch to a branch that supports
+the reset; branches without that state retain their existing archive behavior.

@@ -1,12 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { QualifiedCloudFilePolicy } from "../files/cloud-file-policy";
 import { isInside, isSensitiveRepoPath } from "../files/read-file";
 import { CodeReviewError } from "./errors";
 
 export interface CodeReviewPathPolicy {
   remote?: boolean;
-  cloudFiles?: QualifiedCloudFilePolicy;
   ownerRoots?: () => readonly string[];
 }
 const denied = () => new CodeReviewError("CODE_REVIEW_PATH_DENIED", "This review file is outside the authorized workspace.");
@@ -32,10 +30,7 @@ function physicalPath(target: string): string {
 
 function assertReviewName(relative: string, policy: CodeReviewPathPolicy): void {
   if (relative.split("/").some((part) => [".git", ".zeros", ".appdata", ".conductor"].includes(part.toLowerCase()))) throw denied();
-  if (policy.remote && !policy.cloudFiles && isSensitiveRepoPath(relative)) throw denied();
-  if (policy.cloudFiles) {
-    try { policy.cloudFiles.assertPath(relative); } catch { throw denied(); }
-  }
+  if (policy.remote && isSensitiveRepoPath(relative)) throw denied();
 }
 
 export function assertCodeReviewPath(root: string, relative: string, policy: CodeReviewPathPolicy = {}, creating = false): void {

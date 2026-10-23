@@ -1,12 +1,10 @@
 import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { resolveGitdir } from "./repo";
-import { gitExecutionIdentity } from "./git-execution-identity";
 
 /** Index-only observations may be retained between requests. Worktree content
  * is deliberately absent: a filesystem watcher can lag an external edit. */
 export async function localIndexFingerprint(root: string): Promise<string | null> {
-  if (gitExecutionIdentity()) return null;
   try {
     const gitDirectory = await resolveGitdir(root);
     const [physicalRoot, physicalGit, rootInfo, gitInfo] = await Promise.all([

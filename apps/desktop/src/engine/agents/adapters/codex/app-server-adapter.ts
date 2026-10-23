@@ -1,6 +1,4 @@
 import type { SteerOutcome } from "@zeros/protocol/messages";
-import {cloudExecutionLifetime,cloudProviderExecution} from "../../cloud-provider-execution";
-import {cloudCodexImage} from "./cloud-policy";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
 import { isCuratedModel } from "../shared/curated-models";
@@ -52,7 +50,6 @@ import {
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { bindCloudCodexThread, cloudCodexCapabilities } from "./cloud-policy";
 import { readCodexSessionInventory } from "./session-inventory";
 import { createCodexToolArtworkResolver } from "./tool-artwork";
 import {
@@ -98,8 +95,6 @@ import {
   nativeHistoryRoot,
   withProviderConnection,
 } from "../shared/provider-connection";
-import { CloudCommandFailureError, decodeCloudCommandFailure } from "@zeros/protocol/cloud-commands";
-import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import { hasKernelExecutionBoundary } from "../../containment/status";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
@@ -304,16 +299,6 @@ const CODEX_MODES: SessionMode[] = [
   },
 ] as never;
 
-// Cloud permission choices control native approvals and Plan. They do not
-// install a workspace sandbox around the provider process.
-const CLOUD_CODEX_MODES: SessionMode[] = CODEX_MODES.map(mode => ({
-  ...mode,
-  description: mode.id === "ask" ? "Prompt before operations requiring approval."
-    : mode.id === "auto-edit" ? "Approve requested operations automatically; permission changes still ask."
-    : mode.id === "read-only" ? "Plan with native read-only permissions."
-    : mode.description,
-}));
-
 export type CodexModeId = "ask" | "auto-edit" | "full-access" | "read-only";
 
 /** Resolve the renderer's persisted permission posture (plus legacy/native
@@ -376,8 +361,7 @@ export interface CodexSession {
    * so the existing load/replay recovery can rebuild that prompt's context. */
   needsHistoryReplay?: boolean;
   territory?: AgentFilesystemTerritory;
-  /** Authoritative placement and original lifecycle. Local keeps native
-   * permissions; cloud policy uses the VM and preserves approvals/read-only. */
+  /** Authoritative placement and original lifecycle. */
   executionBoundary?: PreparedBoundary;
   runtime: CodexAppServerHandle;
   translator: CodexAppServerTranslator;
@@ -504,7 +488,6 @@ export interface CodexSession {
   backgroundWaiting: boolean;
   /** Latest-wins invalidation for overlapping list/terminate refreshes. */
   backgroundRefreshEpoch: number;
-  backgroundInspectionFailed?:boolean;
   /** One self-scheduling revalidation while native terminal rows are visible. */
   backgroundPollTimer: NodeJS.Timeout | null;
   /** Bounded engine-only raw events. The renderer receives only opaque ids and
@@ -1038,22 +1021,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const base = buildInitializeResponse();
     if (!session || !session.runtimeAlive || this.disposing.has(sessionId))
       return advertiseAgentCapabilities(this, base);
-    const cloud = cloudProviderExecution(session.executionBoundary);
-    if (!cloud) return this.initialize();
-    try { cloudExecutionLifetime(cloud).assertLive(); }
-    catch { return advertiseAgentCapabilities(this, base); }
-    // This explicit metadata read joins the bounded refresh. Otherwise a
-    // refusal would return the old picker snapshot until another user turn.
-    await this.discoverModels(session);
-    if (this.sessions.get(sessionId) !== session || !session.runtimeAlive || this.disposing.has(sessionId))
-      return advertiseAgentCapabilities(this, base);
-    try { cloudExecutionLifetime(cloud).assertLive(); }
-    catch { return advertiseAgentCapabilities(this, base); }
-    const models = session.modelState.models;
-    return advertiseAgentCapabilities(this, {
-      ...base,
-      _meta: { ...base._meta, ...(models !== undefined ? { models, modelsAccountScoped: true } : {}) },
-    });
+    return this.initialize();
   }
 
   /** Memoized InitializeResponse so model/list discovery can populate
@@ -1201,35 +1169,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // by model/list's own timeout; never throws.
     await this.discoverModels(session);
     const initialize = await this.initializeSession(session.zerosSessionId);
-    const cloud = cloudProviderExecution(session.executionBoundary);
-    if (cloud) {
-      const exited = !session.runtimeAlive || session.runtime.child.killed ||
-        session.runtime.child.exitCode != null || session.runtime.child.signalCode != null;
-      try {
-        if (session.runtime.cloudFailure) throw session.runtime.cloudFailure;
-        if (this.sessions.get(session.zerosSessionId) !== session || session.cancelRequested)
-          throw new CloudCommandFailureError({ stage: "provider_start", category: "lifecycle_superseded" });
-        try { cloudExecutionLifetime(cloud).assertLive(); }
-        catch (error) {
-          // Native exit closes a live lease with a default lifecycle cause.
-          // A precise earlier authority/credential failure keeps precedence.
-          if (!exited || (error as { code?: unknown })?.code !== "cloud_validation_lifecycle_superseded") throw error;
-          throw new CloudCommandFailureError({ stage: "provider_start", category: "subprocess_exited" });
-        }
-        if (exited)
-          throw new CloudCommandFailureError({ stage: "provider_start", category: "subprocess_exited" });
-      } catch (error) {
-        try {
-          if (this.sessions.get(session.zerosSessionId) === session)
-            await this.disposeSession(session.zerosSessionId);
-          else await session.runtime.dispose();
-        } catch (retirementError) {
-          // Failed retirement proof takes precedence over the startup cause.
-          throw closedCloudFailure(retirementError, "newSession") ?? classifyThreadFailure(retirementError, "newSession");
-        }
-        throw closedCloudFailure(error, "newSession") ?? classifyThreadFailure(error, "newSession");
-      }
-    }
     return {
       // Canonical SessionModeState is { currentModeId, availableModes } — the
       // renderer reads resp.session.modes.availableModes. The old `available`
@@ -1243,7 +1182,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         }),
         modes: {
           currentModeId: session.modeId,
-          availableModes: cloud ? CLOUD_CODEX_MODES : CODEX_MODES,
+          availableModes: CODEX_MODES,
         },
       },
       initialize,
@@ -1310,7 +1249,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }),
       modes: {
         currentModeId: session.modeId,
-        availableModes: cloudProviderExecution(session.executionBoundary) ? CLOUD_CODEX_MODES : CODEX_MODES,
+        availableModes: CODEX_MODES,
       },
       resumedFresh,
     };
@@ -1376,8 +1315,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
 
     try {
-      const cloud=cloudProviderExecution(opts.executionBoundary);
-      if(cloud)bindCloudCodexThread(cloud,source.resumeId);
       const response = await runtime.requestTyped<
         "thread/fork",
         ThreadForkResponse
@@ -1723,13 +1660,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       this.refreshModelsAfterRejection(session, err);
       if (session.exactModelFailure) throw session.exactModelFailure;
       if (session.cancelRequested) return cancelledTurn();
-      if (err instanceof CloudCommandFailureError) throw err;
-      if (cloudProviderExecution(session.executionBoundary)) {
-        const closed = closedCloudFailure(err, "prompt");
-        if (closed) throw closed;
-        const cloudFailure = session.runtime.cloudFailure;
-        if (cloudFailure) throw closedCloudFailure(cloudFailure, "prompt") ?? classifyThreadFailure(cloudFailure, "prompt");
-      }
       // The child exited during this turn — but early enough that runTurn
       // REJECTED (the turn/start RPC was cut off by the client close) rather
       // than resolving "failed". Surface the same recoverable transport-closed
@@ -1965,13 +1895,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
   /** Stop exactly one session-owned Codex background terminal. The renderer's
    * opaque task id is resolved through the latest authoritative snapshot; it
    * is never forwarded or parsed as a native process id. */
-  async backgroundWorkActive(sessionId:string):Promise<boolean>{
-    const session=this.sessions.get(sessionId);
-    if(!session?.runtimeAlive)return false;
-    await this.refreshBackgroundTasks(session,true);
-    return session.backgroundTasks.size>0||session.activeTurns.size>0||session.backgroundInspectionFailed===true;
-  }
-
   async stopBackgroundTask(opts: {
     sessionId: string;
     taskId: string;
@@ -2093,8 +2016,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async updateCredentials(opts: ProviderCredentialUpdate): Promise<void> {
     const session = this.sessions.get(opts.sessionId);
     if (!session) return;
-    if (cloudProviderExecution(session.executionBoundary))
-      throw new Error("A cloud execution keeps the credential it was admitted with");
     if (session.turnActive) {
       session.pendingConnection = opts;
       return;
@@ -2487,14 +2408,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     zerosSessionId?: string;
   }): Promise<{ session: CodexSession; resumedFresh: boolean }> {
     const zerosSessionId = opts.zerosSessionId ?? randomUUID();
-    const cloudExecution = cloudProviderExecution(opts.executionBoundary);
-    // A cloud credential belongs to this admitted execution, not the engine's
-    // Local provider configuration. Never publish it through the global cache.
-    const modelDiscovery = cloudExecution
-      ? new AccountModelDiscovery(() => cloudExecutionLifetime(cloudExecution).signal.aborted ? "" : zerosSessionId,
-        { ttlMs: ACCOUNT_MODEL_TTL_MS, timeoutMs: 5_000 })
-      : this.modelDiscovery;
-    const modelState = modelDiscovery.capture(cloudExecution ? undefined : opts.authenticationContext);
+    const modelDiscovery = this.modelDiscovery;
+    const modelState = modelDiscovery.capture(opts.authenticationContext);
     try {
       await ensureSessionDir(zerosSessionId);
       await writeSessionMeta(zerosSessionId, {
@@ -2654,13 +2569,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // gateway flips the green dot + the UI shows the "sign in"
       // banner — same surface the legacy adapter routes through.
       const stage = opts.kind === "resume" ? "loadSession" : "newSession";
-      throw (cloudProviderExecution(opts.executionBoundary) ? closedCloudFailure(err, stage) : null) ?? classifyBootFailure(err, stage);
+      throw classifyBootFailure(err, stage);
     }
 
     // Disk MCP declarations (stdio AND HTTP) require Customize → Import.
     // Keep provider-installed plugins and the account app bridge in normal
     // chats; restricted actors retain only their explicitly admitted registry.
-    const cloudExtensions = cloudExecution ? cloudCodexCapabilities(cloudExecution).connectedApps : nativeMcpPassthroughEnabled(
+    const cloudExtensions = nativeMcpPassthroughEnabled(
       undefined,
       opts.executionBoundary,
     );
@@ -2761,7 +2676,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
           const isStaleRollout =
             classified instanceof AgentFailureError &&
             classified.failure.kind === "session-expired";
-          if (!isStaleRollout||cloudProviderExecution(opts.executionBoundary)) throw classified;
+          if (!isStaleRollout) throw classified;
           console.warn(
             `[codex-app-server] thread/resume found no rollout for ` +
               `${opts.resumeThreadId}; auto-starting a fresh thread`,
@@ -2801,20 +2716,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
     } catch (err) {
       const stage = opts.kind === "resume" ? "loadSession" : "newSession";
       this.refreshModelsAfterRejection({ modelDiscovery, modelState, runtime }, err);
-      const exited = runtime.child.killed || runtime.child.exitCode != null || runtime.child.signalCode != null;
-      // Capture actual exit before cleanup itself stops the process. Native
-      // exit can race the post-thread admission check before registration.
-      const startupFailure = cloudExecution && exited &&
-        (err as { code?: unknown })?.code === "cloud_validation_lifecycle_superseded"
-        ? new CloudCommandFailureError({ stage: "provider_start", category: "subprocess_exited" }) : err;
-      const runtimeFailure = await withRuntimeDisposeFailure(runtime, startupFailure, Boolean(cloudExecution));
+      const runtimeFailure = await withRuntimeDisposeFailure(runtime, err);
       await removeSessionDir(zerosSessionId).catch(() => {});
       // thread/resume against a rollout codex has cleaned up surfaces
       // as a "no rollout found"-shaped error. Classify so the UI's
       // session-expired pill renders instead of a generic alert. The
       // resume → start fallback above absorbs the common case, so by
       // the time we reach here the error is non-recoverable.
-      throw (cloudExecution ? closedCloudFailure(runtimeFailure, stage) : null) ?? classifyThreadFailure(runtimeFailure, stage);
+      throw classifyThreadFailure(runtimeFailure, stage);
     } finally {
       stopUsageCapture();
     }
@@ -2909,7 +2818,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       modelSelection: new FallbackModelSelection(opts.env?.OPENAI_MODEL?.trim() || threadModel),
       modelState,
       modelDiscovery,
-      accountExtensionsEnabled: !cloudExecution && cloudExtensions,
+      accountExtensionsEnabled: cloudExtensions,
       accountAppBridgeEnabled,
       excludedMcpServers: new Set(
         Object.keys((nativeMcpConfig.mcp_servers ?? {}) as object),
@@ -3148,10 +3057,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private async refreshCommands(session: CodexSession): Promise<void> {
     try {
       const { discoverCommands } = await import("../shared/discovery");
-      const execution=cloudProviderExecution(session.executionBoundary);
       const [fileCmds, skillCmds] = await Promise.all([
-        execution ? (await import("./cloud-project-config")).discoverCloudCodexCommands(execution)
-          : discoverCommands({ agentId: this.agentId, cwd: session.cwd }),
+        discoverCommands({ agentId: this.agentId, cwd: session.cwd }),
         this.discoverSkills(session),
       ]);
       // Custom prompts win over skills on a name clash (prompts are the
@@ -3451,7 +3358,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
     this.clearBackgroundTaskPoll(session);
     const epoch = ++session.backgroundRefreshEpoch;
-    session.backgroundInspectionFailed=true;
     const runtime = session.runtime;
     try {
       if (discoverLoadedDescendants) {
@@ -3569,7 +3475,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
         );
       session.backgroundTasks = nextTasks;
       session.backgroundTaskTargets = nextTargets;
-      session.backgroundInspectionFailed=false;
       if (!unchanged) this.emitBackgroundTasks(session);
       this.scheduleBackgroundTaskPoll(session);
     } catch (error) {
@@ -3746,9 +3651,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
         }
         // Local receipts above already describe every decision. Duplicating
         // each command in the console adds disk I/O throughout long turns.
-        if (cloudProviderExecution(session.executionBoundary)) {
-          console.info(`[codex] auto-approved ${request.method} in mode=auto-edit`);
-        }
         return;
       }
     }
@@ -4317,10 +4219,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
 
       if (block.type === "image" && typeof block.data === "string") {
-        if(cloudProviderExecution(session.executionBoundary)){
-          out.push(cloudCodexImage(block.data,block.mimeType));
-          continue;
-        }
         if (!imagesDir) {
           const { env } = await ensureSessionDir(session.zerosSessionId);
           imagesDir = path.join(env, "codex", "images");
@@ -5418,14 +5316,11 @@ export function codexDisconnectedFailure(): AgentFailureError {
 async function withRuntimeDisposeFailure(
   runtime: CodexAppServerHandle,
   original: unknown,
-  preserveCloudRetirement = false,
 ): Promise<unknown> {
   try {
     await runtime.dispose();
     return original;
   } catch (disposeError) {
-    if (preserveCloudRetirement) return closedCloudFailure(disposeError, "newSession") ??
-      new CloudCommandFailureError({ stage: "containment", category: "attestation_failed" });
     return new AggregateError(
       [original, disposeError],
       "Codex startup failed and its process group did not stop cleanly",
@@ -5440,25 +5335,12 @@ function classifyBootFailure(
   return classifyThreadFailure(err, stage);
 }
 
-/** Lease failures are ordinary Errors with a closed code, not necessarily a
- * named failure class. Preserve only that metadata at cloud-only call sites. */
-function closedCloudFailure(error: unknown, stage: "newSession" | "loadSession" | "prompt"): Error | null {
-  if (error instanceof CloudCommandFailureError) return error;
-  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  const diagnosis = decodeCloudCommandFailure(code);
-  if (diagnosis) return new CloudCommandFailureError(diagnosis);
-  if (isCloudAgentAdmissionCode(code)) return Object.assign(new AgentFailureError({
-    kind: "cloud-credentials-unavailable", stage, agentId: AGENT_ID, message: code,
-  }), { code });
-  return null;
-}
-
 /** Shared by thrown RPC errors and native terminal failures. Already typed
  * failures retain their identity so generated advice is never reclassified. */
 export function classifyThreadFailure(
   err: unknown,
   stage: "newSession" | "loadSession" | "forkSession" | "prompt",
 ): Error {
-  if (err instanceof AgentFailureError || err instanceof CloudCommandFailureError) return err;
+  if (err instanceof AgentFailureError) return err;
   return providerErrorFailure("codex", normalizeProviderError("codex", err), stage);
 }

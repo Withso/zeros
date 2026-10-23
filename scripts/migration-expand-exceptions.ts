@@ -166,6 +166,15 @@ END $$;`],
     "privilege-tightening": [`REVOKE ALL ON FUNCTION cloud_initial_delete_capture_source(uuid,boolean),guard_cloud_initial_delete_capture(),
   require_cloud_initial_delete_capture(),admit_cloud_initial_delete_capture(uuid,bytea,boolean) FROM PUBLIC;`],
   },
+  "0187_cloud_v2_login_refresh.sql": {
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION cloud_v2_login_changed() FROM PUBLIC;"],
+  },
+  "0184_cloud_v2_live_authority.sql": {
+    // The function is new and trigger-only; no existing caller loses a grant.
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION revoke_cloud_v2_security_access() FROM PUBLIC;"],
+  },
+  "0189_cloud_v2_session_signout.sql": {},
+  "0201_cloud_v2_app_sessions.sql": {},
   "0180_cloud_initial_delete_periodic_checkpoint.sql": {},
   "0178_cloud_owner_existing_delete.sql": {},
   "0177_cloud_owner_discard_delete.sql": {
@@ -294,6 +303,12 @@ const ownerDeleteDigests: Record<string,string> = {
 const initialDeleteSourceDigest = "73ff2ed9852c36aff906dc03c688e7bb1036d83db04c7f533f88979b22916a5b";
 // Only durable periodic checkpoints from the same engine may precede the first capture.
 const initialDeletePeriodicSourceDigest = "d4e1a6ee0a5346f91b6c9765f9449406f982464235ff7c9cc2cf7e4752fe249a";
+// Session sign-out still retires app access. Only its VM/token stop is removed;
+// account, organization and workspace revocation retain the complete fence.
+const cloudV2SessionSignoutDigest = "db5bb0cb92d159a89301d5ae5fab410e37ce4bd853b2ca99e2a7b0a4163fa7d9";
+
+// A device sign-out retires only app tickets for the exact verified WorkOS sid.
+const cloudV2AppSessionSignoutDigest = "747fffcd9a89b551618180d11016f3c79018a9f5364c648dc4ce4618ee85d3b4";
 
 // Exact additions retain prior save proof and physical-purge authority.
 const ownerExistingDeleteDigests: Record<string,string> = {
@@ -404,6 +419,10 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
         createHash("sha256").update(statement).digest("hex") === initialDeleteSourceDigest) ||
       (file === "0180_cloud_initial_delete_periodic_checkpoint.sql" && rule === "initial-delete-periodic-source" &&
         createHash("sha256").update(statement).digest("hex") === initialDeletePeriodicSourceDigest) ||
+      (file === "0189_cloud_v2_session_signout.sql" && rule === "session-signout" &&
+        createHash("sha256").update(statement).digest("hex") === cloudV2SessionSignoutDigest) ||
+      (file === "0201_cloud_v2_app_sessions.sql" && rule === "session-scoped-signout" &&
+        createHash("sha256").update(statement).digest("hex") === cloudV2AppSessionSignoutDigest) ||
       (file === "0178_cloud_owner_existing_delete.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");

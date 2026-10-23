@@ -1,4 +1,3 @@
-import { refuseRetiredDevNativeCanary } from "./native-agent-retirement.mjs";
 import { startHosted } from "./hosted-lifecycle.mjs";
 import { persistentConnectionLifecycle } from "./hosted-connections.mjs";
 import { readPrivateJson } from "./state.mjs";
@@ -14,7 +13,7 @@ import { ensureRailwayEnvironment, stopRailwayBackend, configureRailwayBackend, 
 import { hostedCloudflareClient, ensureDevPages, ensureDevPagesDomain, ensureDevDns, verifyDevZone, deleteDevPagesAndDns } from "./hosted-cloudflare.mjs";
 import { ensureHostedWebhook, deleteHostedWebhook } from "./hosted-workos.mjs";
 import { hostedBackendEnvironment, hostedWebEnvironment, hostedPublicProfile } from "./hosted-profile.mjs";
-import { ensureDevImage, deleteDevImages, reconcileRetiredBuilders, retireSupersededDevImages, verifyDevImage, devBoatClient } from "./hosted-image.mjs";
+import { deleteDevImages, reconcileRetiredBuilders } from "./retired-resources.mjs";
 import { devObjectStorage } from "./hosted-storage.mjs";
 import { run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { pollProvider } from "./provider-http.mjs";
@@ -23,25 +22,10 @@ import { endpoints, workosClient } from "./workos.mjs";
 import { packDevOperator, unpackDevOperator } from "./operator-artifact.mjs";
 import { assertCurrentFixtureFunding, bindFixture, verifyFixtureMembership } from "./hosted-fixtures.mjs";
 import { bindHostedProfile } from "./hosted-state.mjs";
-import { retireUnfinishedHostedAgents } from "./hosted-agents.mjs";
-import { hostedAgentCanary, hostedAgentRequest } from "./hosted-agent-canary.mjs";
-import { retireHostedAgentSsh } from "./hosted-agent-ssh.mjs";
-import { inventoryHostedProviders } from "./hosted-inventory.mjs";
+import { retireHostedAgentSsh } from "./railway-tools.mjs";
 import { reserveHostedAdmission, releaseHostedAdmission } from "./hosted-admission.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-
-/** Seeding must size its quota from the candidate being deployed (or the
- * recorded deployment for standalone Seed), never an older image in the
- * generation's cleanup ledger. Drain can run before deployment verification
- * writes state.source; its provider uses the image only for configuration. */
-export function hostedDatabaseWorker(state, build, action) {
-  const inputs = build.workerInputsSha256 ?? state.source?.workerInputsSha256;
-  const worker = state.resources.images?.find(r => r.qualified && !r.deleted && !r.snapshotDeleted &&
-    (!["seed", "agents-inspect", "agents-enable"].includes(action) || (typeof inputs === "string" && /^[a-f0-9]{64}$/.test(inputs) && r.inputsSha256 === inputs)));
-  if (["seed", "agents-inspect", "agents-enable"].includes(action) && !worker) throw new Error("Dev fixture is missing its matching qualified worker image");
-  return worker;
-}
 
 /** Cleanup may happen months after the runtime credential expires. Repair
  * only the recorded branch's privileges, without applying new migrations. */
@@ -96,18 +80,13 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
     }
     await buildBackend(lease, candidate); return candidate;
   };
-  const database = async (lease, action, build, fixtureProof, agentJob) => {
+  const database = async (lease, action, build, fixtureProof) => {
     await lease.fence();
     const state = lease.state;
-    const worker = hostedDatabaseWorker(state, build, action);
     return JSON.parse(await run(process.execPath, [path.join(here, "hosted-database.mjs")], { cwd: root, env, signal: lease.signal,
       timeout: 300_000, label: `Dev database ${action}`, input: JSON.stringify({ action, buildRoot: build.directory,
         owner: state.owner, generation: state.generation, roles: state.resources.planetscale.roles,
-        backendStopped: state.steps.backendStopped && state.steps.railwayDeleted, boat: profile.boat, worker,
-        ...(["agents-inspect", "agents-enable"].includes(action) ? { agentRequest: hostedAgentRequest(state, profile,
-          agentJob?.organizationImageId ? { ...agentJob.image, id: agentJob.organizationImageId } : worker) } : {}),
-        ...(agentJob ? { agentConnection: agentJob.connection, agentChange: { operationId: agentJob.id, actorUserId: agentJob.actorUserId,
-          enabled: true, reason: `Automatic isolated Dev native qualification ${state.owner}/${state.generation}`, evidence: agentJob.evidence } } : {}),
+        backendStopped: state.steps.backendStopped && state.steps.railwayDeleted, boat: profile.boat,
         ...(action === "seed" ? { fixture: bindFixture(state, profile.fixture), fixtureProof } : {}) }) }));
   };
   const seed = async (lease, build) => {
@@ -115,7 +94,7 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
     const fixture = bindFixture(lease.state, profile.fixture); await lease.save();
     const proof = fixture.bootstrapOrganization ? await verifyFixtureMembership(fixture, workosClient(profile)) : undefined;
     const result = await database(lease, "seed", build, proof);
-    progress(result.seeded ? "Dev test member has the standard Pro monthly allowance; initial workspace limits are seeded and operator quota changes are preserved"
+    progress(result.seeded ? "Dev test organization and its staff access are ready"
       : fixture.bootstrapOrganization
         ? "Sign into this Dev app; the launcher will prepare your verified test Organization automatically"
         : "Sign into this Dev app and select the configured Organization; the launcher will prepare its cloud test fixture automatically");
@@ -164,30 +143,10 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       }
     },
     captureSource: source,
-    async ensureImage(lease, build) {
-      const existing = lease.state.resources.images?.some(r => r.inputsSha256 === build.workerInputsSha256 && r.qualified && !r.deleted);
-      progress(existing ? "Verifying the existing cloud worker image" : "Building and qualifying the changed cloud worker image; this can take several minutes");
-      if (!existing) {
-        if (!registry) throw new Error("Dev builder allocation requires the account admission registry");
-        // Unfinished checks qualify the image being replaced and hold the
-        // owner's builder slot; retire them, then free superseded images.
-        if ((lease.state.agentQualifications ?? []).some(job => !job.retired))
-          await retireUnfinishedHostedAgents(lease, hostedAgentCanary(lease, profile, undefined, {
-            reserve: () => { throw new Error("A replaced image's checks cannot allocate"); },
-            release: () => releaseHostedAdmission(registry, lease, profile),
-          }));
-        // The deployed image is the fallback for this build. Release its older
-        // rollback image before competing for shared account snapshot capacity.
-        await retireSupersededDevImages(lease, profile, { keepInputs: [lease.state.source?.workerInputsSha256].filter(Boolean), keepRollback: false });
-        const inventory = await inventoryHostedProviders(profile);
-        // An earlier interrupted attempt can leave a never-started builder
-        // reservation; release it before competing for the owner's slot.
-        await releaseHostedAdmission(registry, lease, profile);
-        await reserveHostedAdmission(registry, lease.state, profile, { kind: "builder", inventory,
-          snapshotName: `dev-${lease.state.owner}-${lease.state.generation.slice(0, 8)}-${build.workerInputsSha256.slice(0, 16)}` });
-      }
-      try { return await ensureDevImage(lease, profile, build, directory, objects, { progress }); }
-      finally { if (registry) await releaseHostedAdmission(registry, lease, profile); }
+    // Cloud v2 workspaces use a Cloud Computer built from Boat's stock image.
+    async ensureImage() {
+      progress("Cloud v2 needs no prebuilt engine image");
+      return null;
     },
     async ensureDatabase(lease) {
       progress(lease.state.resources.planetscale?.name ? "Reusing this checkout's PlanetScale Dev branch and its data" : "Creating this checkout's disposable PlanetScale Dev branch");
@@ -221,7 +180,6 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       finally { await deletePlanetScaleMigrationRole(lease, profile.planetscale, ps); }
     },
     async agents(lease) {
-      if (lease.state.status === "ready" && profile.fixture) refuseRetiredDevNativeCanary();
       if(lease.state.status==='ready' && profile.connections?.enabled && lease.state.connectionRegistration &&
         Date.parse(lease.state.connectionRegistration.expiresAt)<=Date.now()+6*3600000)
         await startHosted(lease,{owner:lease.state.owner,identity:lease.state.identity},profile,this);
@@ -251,7 +209,6 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       progress("Verifying the deployed owner, generation, source and sign-in routing");
       const state = lease.state, p = hostedPublicProfile(state, profile);
       await verifyPlanetScaleRuntimeRole(lease, profile.planetscale, ps);
-      await verifyDevImage(state.resources.images?.find(image => image.inputsSha256 === build.workerInputsSha256 && !image.deleted), profile, devBoatClient(profile.boat, lease.signal));
       await waitForHttp(`${p.apiOrigin}/healthz`, { signal: lease.signal, timeout: 120_000, accept: async response => {
         if (!response.ok) return false;
         const d = (await response.json()).development;

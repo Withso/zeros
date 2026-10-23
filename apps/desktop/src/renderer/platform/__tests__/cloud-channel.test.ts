@@ -51,7 +51,7 @@ describe.each(["beta", "stable"])("%s renderer cloud boundary", releaseChannel =
   });
 
   it("reports the native cloud capability as off without an IPC read", async () => {
-    const { cloudWorkspaceCapability } = await import("../cloud-workspace-access");
+    const { cloudWorkspaceCapability } = await import("../cloud-capability");
     await expect(cloudWorkspaceCapability()).resolves.toEqual({ enabled: false });
     expect(fixture.native).not.toHaveBeenCalled();
   });

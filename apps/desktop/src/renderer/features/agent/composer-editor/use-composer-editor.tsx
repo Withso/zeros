@@ -83,7 +83,6 @@ import { MentionFileSearch } from "../mention-files-cache";
 import { ComposerPrSearch } from "../composer-pr-search";
 import { filterSlashCommands } from "../slash-command-filter";
 import {filterCloudNativeCommands} from "../cloud-native-ui";
-import type {CloudNativeCapabilities} from "@zeros/protocol/cloud-agent-execution";
 import { filterPrs, type PrPickerItem } from "../pr-picker";
 import {
   composerCommandsFor,
@@ -142,7 +141,6 @@ export interface UseComposerEditorOpts {
   originUrl: string | null;
   /** Session-discovered slash commands (merged under the curated floor). */
   availableCommands: AvailableCommand[];
-  cloudNativeCapabilities?: CloudNativeCapabilities;
   placeholder: string;
   /** Plain Enter / ⌘Enter. */
   onSubmit: () => void;
@@ -477,8 +475,8 @@ export function useComposerEditor(
       filterCloudNativeCommands(composerCommandsFor(
         agentId,
         mergeCommands(projectSkills, availableCommands),
-      ),agentId==="codex"?cwd:null,opts.cloudNativeCapabilities),
-    [agentId, availableCommands, projectSkills,cwd,opts.cloudNativeCapabilities],
+      ),agentId==="codex"?cwd:null),
+    [agentId, availableCommands, projectSkills,cwd],
   );
   const slashCommandsRef = useRef(slashCommands);
   slashCommandsRef.current = slashCommands;

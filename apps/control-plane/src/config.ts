@@ -1,8 +1,5 @@
-import type { CodexFingerprintKeys } from "./cloud-workspaces/codex-fingerprint-keys.js";
-import type { RuntimeOidcConfig } from "./cloud-workspaces/runtime-oidc.js";
-import type { RuntimeArtifactStoreConfig } from "./cloud-workspaces/runtime-artifact-store.js";
-import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./cloud-workspaces/agent-credential-config.js";
-import { loadCapabilityKeyring, type CapabilityKeyring } from "./cloud-workspaces/capability-keyring.js";
+import type { CodexFingerprintKeys } from "./agent-credentials/codex-fingerprint-keys.js";
+import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./agent-credentials/agent-credential-config.js";
 // ──────────────────────────────────────────────────────────
 // Config — every knob comes from the environment, validated at boot.
 //
@@ -11,11 +8,6 @@ import { loadCapabilityKeyring, type CapabilityKeyring } from "./cloud-workspace
 // WorkOS and future providers must supply the exact issuer/JWKS contract.
 // ──────────────────────────────────────────────────────────
 
-import {
-  CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
-  MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
-} from "./cloud-workspaces/engine-protocol-version.js";
-import { createPrivateKey } from "node:crypto";
 import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
@@ -24,24 +16,13 @@ import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 import { validateDatabaseConnections } from "./database-config.js";
 import { developmentIdentity, type DevelopmentIdentity } from "./development-environment.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
-import { UPLINK_PATH } from "./realtime/uplink-protocol.js";
-import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
-import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspaces/runtime-config.js";
-import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
+import { cloudWorkspaceChannelEnabled } from "./cloud/channel-policy.js";
 import { loadZerosDevAuthConfig, type ZerosDevAuthConfig } from "./zeros-dev-auth-config.js";
-import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
+import { BOAT_BILLING_ORG_PATTERN } from "./cloud/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { loadWorkerPollIntervals, type WorkerPollIntervals } from "./worker-polling-config.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
-import {
-  DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
-  MAX_ENGINE_HEARTBEAT_INTERVAL_MS,
-  MIN_ENGINE_HEARTBEAT_INTERVAL_MS,
-} from "./cloud-workspaces/engine-heartbeat.js";
-import {
-  loadCloudRuntimeRelayLimits,
-  type CloudRuntimeRelayLimits,
-} from "./cloud-workspaces/runtime-bridge-limits.js";
+import { CloudV2WorkerSigner } from "./cloud/worker-auth.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -199,107 +180,6 @@ export type FeedbackBackendConfig = {
   posthogProjectUrl: string | null;
 };
 
-export type CloudWorkspaceBackendConfig = {
-  runtime?: CloudRuntimeConfig;
-  /** Managed default only. Explicit customer connections select independently. */
-  provider: CloudWorkspaceProviderName;
-  providerProfiles?: Readonly<
-    Partial<
-      Record<CloudWorkspaceProviderName, CloudWorkspaceProvisioningProfile>
-    >
-  >;
-  boat?: { accountScope: string; ttlSeconds: number | null; billingOrg: string };
-  computerMaxConcurrentBuilds?: number;
-  computePolicy?: import("./cloud-workspaces/compute-leases.js").ManagedComputePolicy;
-  apiKey: string;
-  apiUrl: string;
-  target: string;
-  snapshotId: string;
-  sandboxClass?: "container" | "linux-vm";
-  imageRef: string;
-  architecture: "linux/amd64" | "linux/arm64";
-  cpuMillicores: number;
-  memoryMiB: number;
-  storageMiB: number;
-  sourceCommit: string | null;
-  operationTimeoutSeconds: number;
-  autoArchiveMinutes: number;
-  reconcileIntervalMs: number;
-  /** API replicas can leave background work to a separate worker replica. */
-  backgroundWorkersEnabled?: boolean;
-  /** Coordinator-only envelope key for versioned environment secret bindings.
-   * It is independent from setup execution so settings can be prepared while
-   * the unqualified image worker remains disabled. */
-  settingsSecretEncryptionKeys: Readonly<Record<number, string>>;
-  /** S1 issuer origin (iss claim); absent while capabilities are unconfigured. */
-  capabilityIssuer?: string | null;
-  /** Dedicated CLOUD_CAPABILITY_KEYS_JSON keyring for signing-key envelopes. */
-  capabilityKeyring?: CapabilityKeyring;
-  codexRefreshFingerprints?: CodexFingerprintKeys;
-  currentSettingsSecretEncryptionKeyVersion: number | null;
-  /** Legacy V1 alias retained while deployments move to the keyring vars. */
-  settingsSecretKeyV1: string | null;
-  access: {
-    allowedSshHosts: readonly string[];
-    allowedPreviewHostSuffixes: readonly string[];
-    /** Wildcard DNS/TLS boundary; each preview gets a unique subdomain. */
-    previewBaseDomain: string | null;
-  };
-  /** Durable workspace records are independent from sandbox setup execution.
-   * Keeping this block available while the setup worker is paused lets fork,
-   * export, recovery, retention, and key-rotation workflows run without
-   * accidentally admitting an unqualified image. */
-  durability: {
-    objectEncryptionKeys: Readonly<Record<number, string>>;
-    currentObjectEncryptionKeyVersion: number;
-    objectRestoreWindowMs: number;
-  } & (
-    | { objectStoreDirectory: string; s3?: never }
-    | { objectStoreDirectory?: never; s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; prefix?: string } }
-  ) | null;
-  /** Capacity envelope of the portable runtime relay on this process. */
-  bridge: CloudRuntimeRelayLimits;
-  /** Optional signed event sink. The database outbox remains authoritative
-   * while this is absent; events are never silently acknowledged. */
-  outbox: {
-    endpoint: string;
-    signingSecret: string;
-    timeoutMs: number;
-  } | null;
-  /** A second operator gate. Provisioning may be enabled while production
-   * setup remains paused at `setting_up` until the image is qualified. */
-  setupExecution: {
-    controlPlaneOrigin: string;
-    setupSecretEncryptionKeys: Readonly<Record<number, string>>;
-    currentSetupSecretEncryptionKeyVersion: number;
-    setupSecretKeyV1: string | null;
-    engineProtocolVersion: number;
-    enginePort: number;
-    engineHeartbeatIntervalMs: number;
-    intervalMs: number;
-    concurrency: number;
-    timeoutSeconds: number;
-    leaseMs: number;
-    admissionTtlSeconds: number;
-    /** Public realtime origin (as a `wss` URL) advertised to engines that
-     * opt into the uplink at registration, while their organization's
-     * `realtime_uplink` flag is on. Null keeps registration answers
-     * uplink-free. */
-    engineUplinkEndpoint: string | null;
-  } | null;
-};
-
-export type CloudWorkspaceProvisioningProfile = {
-  provider: CloudWorkspaceProviderName;
-  sandboxClass?: "container" | "linux-vm";
-  imageRef: string;
-  architecture: "linux/amd64" | "linux/arm64";
-  cpuMillicores: number;
-  memoryMiB: number;
-  storageMiB: number;
-  sourceCommit: string | null;
-};
-
 export type AuthBackendConfig =
   | {
       provider: "auth0";
@@ -333,7 +213,7 @@ export type Config = {
   databaseMigrationsOnBoot?: boolean;
   databasePoolMax?: number;
   /** Combined preserves existing deployments; dedicated workers and realtime
-   * replicas scale independently (docs/cloud-workspace/realtime.md). */
+   * replicas scale independently. */
   processRole?: "api" | "worker" | "realtime" | "combined";
   /** SIGTERM drain window for WebSocket sessions; 0 closes them at once. */
   shutdownDrainMs?: number;
@@ -343,8 +223,6 @@ export type Config = {
   /** Absent when tracing is disabled; see `traceExportUrl`. */
   tracesUrl?: string;
   traceSampleRatio?: number;
-  /** Receives aggregate cloud health alerts; null disables them. */
-  operationsAlertEmail?: string | null;
   /** All application routes and background writers are disabled during cutover. */
   databaseMaintenanceMode?: boolean;
   auth: AuthBackendConfig;
@@ -366,237 +244,64 @@ export type Config = {
   feedback: FeedbackBackendConfig | null;
   /** Dedicated server credential for automatic titles; absent disables titles. */
   chatTitleApiKey?: string | null;
-  /** Null unless the explicit paid-resource gate and complete provider block
-   * are present. Merely setting a Boat API key never enables creation. */
-  cloudWorkspaces: CloudWorkspaceBackendConfig | null;
   cloudAgentCredentials?: CloudAgentCredentialConfig | null;
-  selectedCloudWorker?: SelectedCloudWorker | null;
-  cloudRuntimePublication?: CloudRuntimePublicationConfig;
-  /** Metadata for release identity; workspace selection is owned separately. */
-  cloudWorkspaceNewRuntimeProfile?: "v4";
-  cloudWorkspaceResumeExistingEnabled?: boolean;
+  /** Cloud workspace v2: Boat VMs run by a small worker. Null unless enabled. */
+  cloudV2?: CloudV2Config | null;
 };
 
-export type CloudRuntimePublicationConfig = RuntimeOidcConfig & RuntimeArtifactStoreConfig & {
-  enabled: boolean;
+export type CloudV2Config = {
+  boat: { apiKey: string; billingOrg?: string };
+  /** https:// origin of the API service; agents reach the model proxy here. */
+  apiUrl: string;
+  /** wss:// origin of the realtime service; the Mac app connects here. */
+  realtimeUrl: string;
+  workerSigningKey: string;
+  workerSigningKeyPrevious?: string;
+  /** The worker runtime every VM runs, by sha256, and where it is stored. */
+  runtime: { sha256: string; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
 };
 
-export type SelectedCloudWorker = {
-  provider: "boat";
-  imageRef: string;
-  sourceSha: string;
-  architecture: "linux/amd64" | "linux/arm64";
-  storageMiB: number;
-};
-
-const CloudWorkspaceEnvSchema = z.object({
-  CLOUD_WORKSPACES_ENABLED: z.literal("true"),
-  CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
-  CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: z.coerce.number().int().min(1).max(32).default(2),
-  // S1 capability issuer origin and its dedicated signing keyring (never the
-  // settings keyring). Optional until the capabilities rollout starts.
-  CLOUD_CAPABILITY_ISSUER: z.string().regex(/^https:\/\/[^/\s]+$/).optional(),
-  CLOUD_CAPABILITY_KEYS_JSON: z.string().min(2).max(4096).optional(),
-  CLOUD_CAPABILITY_CURRENT_KEY_VERSION: z.string().regex(/^[1-9][0-9]{0,4}$/).optional(),
-  CLOUD_WORKSPACE_PROVIDER: z.literal("boat").default("boat"),
-  BOAT_API_KEY: z
-    .string()
-    .trim()
-    .regex(/^[\x21-\x7e]{16,4096}$/)
-    .optional(),
-  BOAT_ACCOUNT_SCOPE: z
-    .string()
-    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/)
-    .optional(),
-  BOAT_BILLING_ORG: z.string().regex(BOAT_BILLING_ORG_PATTERN).optional(),
-  BOAT_SNAPSHOT_ID: z
-    .string()
-    .regex(
-      /^(?!(?:latest|tree|pull|rm|save|current|self|new)$)[a-z0-9][a-z0-9-]{0,62}$/,
-    )
-    .optional(),
-  BOAT_IMAGE_BUILD_SHA256: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .optional(),
-  BOAT_TTL_SECONDS: z
-    .string().regex(/^[1-9][0-9]{0,3}$/).transform(Number)
-    .pipe(z.number().int().min(60).max(3600))
-    .optional(),
-  BOAT_COMPUTE_POLICY_ID: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional(),
-  BOAT_SECONDS_PER_DOLLAR: z.string().regex(/^[1-9][0-9]{0,12}$/).transform(Number)
-    .pipe(z.number().int().max(1_000_000_000_000)).optional(),
-  ZEROS_CLOUD_IMAGE_ARCHITECTURE: z
-    .enum(["linux/amd64", "linux/arm64"])
-    .default("linux/amd64"),
-  ZEROS_CLOUD_SOURCE_COMMIT: z
-    .string()
-    .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
-  CLOUD_WORKSPACE_CPU_MILLICORES: z.coerce
-    .number()
-    .int()
-    .min(250)
-    .max(64_000)
-    .default(2_000),
-  CLOUD_WORKSPACE_MEMORY_MIB: z.coerce
-    .number()
-    .int()
-    .min(512)
-    .max(262_144)
-    .default(4_096),
-  CLOUD_WORKSPACE_STORAGE_MIB: z.coerce
-    .number()
-    .int()
-    .min(1_024)
-    .max(2_097_152)
-    .default(20_480),
-  CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS: z.coerce
-    .number()
-    .int()
-    .min(10)
-    .max(600)
-    .default(180),
-  CLOUD_WORKSPACE_AUTO_ARCHIVE_MINUTES: z.coerce
-    .number()
-    .int()
-    .min(60)
-    .max(43_200)
-    .default(10_080),
-  CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS: z.coerce
-    .number()
-    .int()
-    .min(1_000)
-    .max(300_000)
-    .default(5_000),
-  CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: z
-    .string()
-    .trim()
-    .min(1)
-    .max(253)
-    .optional(),
-  ...CloudAgentCredentialEnvSchema.shape,
-});
-
-export function loadReleaseCanaryBoatConfig(env: NodeJS.ProcessEnv) {
-  const parsed = CloudWorkspaceEnvSchema.pick({ CLOUD_WORKSPACE_PROVIDER: true, BOAT_API_KEY: true,
-    BOAT_ACCOUNT_SCOPE: true, BOAT_BILLING_ORG: true }).safeParse(env);
-  if (!parsed.success || parsed.data.CLOUD_WORKSPACE_PROVIDER !== "boat" || !parsed.data.BOAT_API_KEY ||
-    !parsed.data.BOAT_ACCOUNT_SCOPE || !parsed.data.BOAT_BILLING_ORG) return null;
-  return { apiKey: parsed.data.BOAT_API_KEY, apiUrl: "https://boat.dev/api/v1",
-    accountScope: parsed.data.BOAT_ACCOUNT_SCOPE, billingOrg: parsed.data.BOAT_BILLING_ORG };
+function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
+  const enabled = env.CLOUD_V2_ENABLED?.trim().toLowerCase();
+  if (enabled !== "true") {
+    if (enabled && enabled !== "false") throw new Error("Invalid environment: CLOUD_V2_ENABLED must be true or false");
+    return null;
+  }
+  const apiKey = env.BOAT_API_KEY?.trim();
+  if (!apiKey) throw new Error("Invalid environment: CLOUD_V2_ENABLED requires BOAT_API_KEY");
+  const billingOrg = env.BOAT_BILLING_ORG?.trim();
+  const origin = (name: string, protocol: "https:" | "wss:") => {
+    const raw = env[name]?.trim();
+    let url: URL;
+    try { url = new URL(raw ?? ""); } catch { throw new Error(`Invalid environment: ${name} must be a ${protocol}// origin`); }
+    const local = protocol === "wss:" ? url.protocol === "ws:" : url.protocol === "http:";
+    if ((url.protocol !== protocol && !(local && ["localhost", "127.0.0.1"].includes(url.hostname))) ||
+        url.pathname !== "/" || url.search || url.hash || url.username || url.password)
+      throw new Error(`Invalid environment: ${name} must be a ${protocol}// origin`);
+    return url.origin;
+  };
+  const sha256 = env.CLOUD_V2_RUNTIME_SHA256?.trim() ?? "";
+  if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error("Invalid environment: CLOUD_V2_RUNTIME_SHA256 must name a published worker runtime");
+  const required = (name: string) => {
+    const value = env[name]?.trim();
+    if (!value) throw new Error(`Invalid environment: CLOUD_V2_ENABLED requires ${name}`);
+    return value;
+  };
+  const endpoint = required("CLOUD_V2_RUNTIME_STORE_ENDPOINT");
+  if (!endpoint.startsWith("https://")) throw new Error("Invalid environment: CLOUD_V2_RUNTIME_STORE_ENDPOINT must be https");
+  const workerSigningKey = required("CLOUD_V2_WORKER_SIGNING_KEY"), previous = env.CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS?.trim();
+  new CloudV2WorkerSigner(workerSigningKey, previous);
+  return {
+    boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
+    workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),
+    apiUrl: origin("CLOUD_V2_API_URL", "https:"),
+    realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
+    runtime: { sha256, store: {
+      endpoint, bucket: required("CLOUD_V2_RUNTIME_STORE_BUCKET"),
+      accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY"),
+    } },
+  };
 }
-
-function loadSelectedCloudWorker(env: NodeJS.ProcessEnv): SelectedCloudWorker | null {
-  if (["CLOUD_WORKSPACE_PROVIDER", "BOAT_SNAPSHOT_ID", "BOAT_IMAGE_BUILD_SHA256", "ZEROS_CLOUD_SOURCE_COMMIT",
-    "ZEROS_CLOUD_IMAGE_ARCHITECTURE", "CLOUD_WORKSPACE_STORAGE_MIB"].some(name => !env[name]?.trim())) return null;
-  const parsed = CloudWorkspaceEnvSchema.pick({ CLOUD_WORKSPACE_PROVIDER: true, BOAT_SNAPSHOT_ID: true,
-    BOAT_IMAGE_BUILD_SHA256: true, ZEROS_CLOUD_SOURCE_COMMIT: true, ZEROS_CLOUD_IMAGE_ARCHITECTURE: true,
-    CLOUD_WORKSPACE_STORAGE_MIB: true }).safeParse(env);
-  if (!parsed.success || parsed.data.CLOUD_WORKSPACE_PROVIDER !== "boat" ||
-    !/^[a-f0-9]{40}$/.test(parsed.data.ZEROS_CLOUD_SOURCE_COMMIT)) return null;
-  const value = parsed.data;
-  return { provider: "boat", imageRef: `boat:${value.BOAT_SNAPSHOT_ID}@sha256:${value.BOAT_IMAGE_BUILD_SHA256}`,
-    sourceSha: value.ZEROS_CLOUD_SOURCE_COMMIT, architecture: value.ZEROS_CLOUD_IMAGE_ARCHITECTURE,
-    storageMiB: value.CLOUD_WORKSPACE_STORAGE_MIB };
-}
-
-const CloudWorkspaceSetupEnvSchema = z.object({
-  CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: z.literal("true"),
-  CLOUD_WORKSPACE_CONTROL_PLANE_URL: z.string().url(),
-  CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256).optional(),
-  CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: z.coerce
-    .number()
-    .int()
-    // The default tracks the engine bundled into the qualified image. An
-    // explicit value remains available only for an already-qualified older
-    // image during a rolling deployment, and must stay inside the bridge's
-    // advertised compatibility window.
-    .min(MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION)
-    .max(CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION)
-    .default(CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION),
-  CLOUD_WORKSPACE_ENGINE_PORT: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(65_535)
-    .default(39_393),
-  CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS: z.coerce
-    .number()
-    .int()
-    .min(MIN_ENGINE_HEARTBEAT_INTERVAL_MS)
-    .max(MAX_ENGINE_HEARTBEAT_INTERVAL_MS)
-    .default(DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS),
-  CLOUD_WORKSPACE_SETUP_INTERVAL_MS: z.coerce
-    .number()
-    .int()
-    .min(100)
-    .max(60_000)
-    .default(1_000),
-  CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS: z.coerce
-    .number()
-    .int()
-    .min(30)
-    .max(3_600)
-    .default(1_800),
-  CLOUD_WORKSPACE_SETUP_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
-  CLOUD_WORKSPACE_SETUP_LEASE_MS: z.coerce
-    .number()
-    .int()
-    .min(3_000)
-    .max(3_600_000)
-    .default(60_000),
-  CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS: z.coerce
-    .number()
-    .int()
-    .min(15)
-    .max(900)
-    .default(120),
-});
-
-const CloudWorkspaceDurabilityEnvSchema = z.object({
-  CLOUD_WORKSPACE_OBJECT_KEY_V1: z.string().trim().min(1).max(256).optional(),
-  /** JSON object keyed by positive integer key version. This extends, rather
-   * than replaces, V1 so existing installations retain decrypt capability. */
-  CLOUD_WORKSPACE_OBJECT_KEYS_JSON: z
-    .string()
-    .trim()
-    .min(2)
-    .max(16 * 1024)
-    .optional(),
-  CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(65_535)
-    .default(1),
-  CLOUD_WORKSPACE_OBJECT_STORE_KIND: z.enum(["filesystem", "s3"]).default("filesystem"),
-  CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: z.string().trim().min(2).max(4096).optional(),
-  CLOUD_WORKSPACE_S3_ENDPOINT: z.string().trim().url().optional(),
-  CLOUD_WORKSPACE_S3_REGION: z.string().trim().min(1).max(100).default("auto"),
-  CLOUD_WORKSPACE_S3_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
-  CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: z.string().trim().min(1).max(256).optional(),
-  CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: z.string().trim().min(1).max(256).optional(),
-  CLOUD_WORKSPACE_S3_KEY_PREFIX: z.string().max(100).optional(),
-  /** Live objects outlive their last reference this long, so a point-in-time
-   * database restore finds them. Match the database's backup retention
-   * (PlanetScale: 48 hours); zero collects immediately. */
-  // A blank value keeps the default rather than coercing to zero.
-  CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS: z.preprocess(
-    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
-    z.coerce.number().int().min(0).max(720).default(48),
-  ),
-});
-
-const CloudWorkspaceOutboxEnvSchema = z.object({
-  CLOUD_WORKSPACE_OUTBOX_URL: z.string().trim().url(),
-  CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: z.string().trim().min(32).max(4_096),
-  CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS: z.coerce
-    .number()
-    .int()
-    .min(1_000)
-    .max(60_000)
-    .default(10_000),
-});
 
 function validatedServiceUrl(
   raw: string,
@@ -623,27 +328,6 @@ function validatedServiceUrl(
 
 /** The realtime service origin engines dial for the uplink: a
  * credential-free HTTPS/WSS origin, normalized to `wss`. */
-function validatedRealtimeOrigin(raw: string, name: string): string {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error(`Invalid environment: ${name} must be a credential-free HTTPS or WSS origin`);
-  }
-  if (
-    (url.protocol !== "https:" && url.protocol !== "wss:") ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    url.pathname !== "/"
-  ) {
-    throw new Error(`Invalid environment: ${name} must be a credential-free HTTPS or WSS origin`);
-  }
-  url.protocol = "wss:";
-  return url.toString().replace(/\/+$/, "");
-}
-
 function validatedBrowserUrl(
   raw: string,
   name: string,
@@ -1072,418 +756,6 @@ function loadFeedbackConfig(
   return intercom || linear ? { intercom, linear, posthogProjectUrl } : null;
 }
 
-function validatedDnsName(value: string, name: string): string {
-  const normalized = value.trim().toLowerCase();
-  const labels = normalized.split(".");
-  if (
-    normalized.length < 1 ||
-    normalized.length > 253 ||
-    isIP(normalized) !== 0 ||
-    labels.length < 2 ||
-    labels.some(
-      (label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label),
-    )
-  ) {
-    throw new Error(
-      `Invalid cloud workspace environment: ${name} must contain exact DNS names without schemes, wildcards, ports, or IP addresses`,
-    );
-  }
-  return normalized;
-}
-
-function validatedDnsList(value: string, name: string): string[] {
-  const entries = [
-    ...new Set(value.split(",").map((entry) => validatedDnsName(entry, name))),
-  ];
-  if (entries.length < 1 || entries.length > 8) {
-    throw new Error(
-      `Invalid cloud workspace environment: ${name} must contain 1-8 DNS names`,
-    );
-  }
-  return entries;
-}
-
-function loadCloudWorkspaceConfig(
-  env: NodeJS.ProcessEnv,
-  github: GithubBackendConfig | null,
-): CloudWorkspaceBackendConfig | null {
-  const runtime = loadCloudRuntimeConfig(env);
-  const enabled = env.CLOUD_WORKSPACES_ENABLED?.trim().toLowerCase();
-  const backgroundEnabled = env.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED?.trim().toLowerCase();
-  if (backgroundEnabled && backgroundEnabled !== "true" && backgroundEnabled !== "false") {
-    throw new Error("Invalid environment: CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED must be true or false");
-  }
-  const setupEnabled =
-    env.CLOUD_WORKSPACE_SETUP_WORKER_ENABLED?.trim().toLowerCase();
-  if (setupEnabled && setupEnabled !== "true" && setupEnabled !== "false") {
-    throw new Error(
-      "Invalid environment: CLOUD_WORKSPACE_SETUP_WORKER_ENABLED must be true or false",
-    );
-  }
-  if (enabled !== "true") {
-    if (enabled && enabled !== "false") {
-      throw new Error(
-        "Invalid environment: CLOUD_WORKSPACES_ENABLED must be true or false",
-      );
-    }
-    if (setupEnabled === "true") {
-      throw new Error(
-        "Invalid cloud workspace environment: setup execution requires CLOUD_WORKSPACES_ENABLED=true",
-      );
-    }
-    return null;
-  }
-
-  if (env.CLOUD_WORKSPACE_PROVIDER && env.CLOUD_WORKSPACE_PROVIDER !== "boat") {
-    throw new Error("Invalid cloud workspace environment: CLOUD_WORKSPACE_PROVIDER must be boat");
-  }
-  const requiredProviderFields = [
-    "BOAT_API_KEY", "BOAT_ACCOUNT_SCOPE", "BOAT_BILLING_ORG", "BOAT_SNAPSHOT_ID",
-    "BOAT_IMAGE_BUILD_SHA256", "BOAT_TTL_SECONDS", "BOAT_COMPUTE_POLICY_ID",
-    "BOAT_SECONDS_PER_DOLLAR", "CLOUD_WORKSPACE_STORAGE_MIB",
-  ];
-  for (const name of requiredProviderFields) {
-    if (!env[name]?.trim())
-      throw new Error(
-        `Invalid cloud workspace environment: ${name} is required`,
-      );
-  }
-  const parsed = CloudWorkspaceEnvSchema.safeParse({
-    ...env,
-    CLOUD_WORKSPACE_CPU_MILLICORES: env.CLOUD_WORKSPACE_CPU_MILLICORES ?? "4000",
-    CLOUD_WORKSPACE_MEMORY_MIB: env.CLOUD_WORKSPACE_MEMORY_MIB ?? "8192",
-    CLOUD_WORKSPACES_ENABLED: enabled,
-    CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: backgroundEnabled || undefined,
-  });
-  if (!parsed.success) {
-    throw new Error(
-      "Invalid cloud workspace environment: " +
-        parsed.error.issues
-          .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-          .join("; "),
-    );
-  }
-  if (!github?.privateKey) {
-    throw new Error(
-      "Invalid cloud workspace environment: GITHUB_APP_PRIVATE_KEY is required before cloud provisioning can be enabled",
-    );
-  }
-  try {
-    if (createPrivateKey(github.privateKey).asymmetricKeyType !== "rsa") {
-      throw new Error("not RSA");
-    }
-  } catch {
-    throw new Error(
-      "Invalid cloud workspace environment: GITHUB_APP_PRIVATE_KEY must be a valid RSA private key",
-    );
-  }
-  const value = parsed.data;
-  const bridge = loadCloudRuntimeRelayLimits(env);
-  if (
-    value.CLOUD_WORKSPACE_PROVIDER === "boat" &&
-    (value.ZEROS_CLOUD_IMAGE_ARCHITECTURE !== "linux/amd64" ||
-      ![
-        [2000, 4096],
-        [4000, 8192],
-        [8000, 16384],
-      ].some(
-        ([cpu, memory]) =>
-          cpu === value.CLOUD_WORKSPACE_CPU_MILLICORES &&
-          memory === value.CLOUD_WORKSPACE_MEMORY_MIB,
-      ))
-  )
-    throw new Error(
-      "Invalid cloud workspace environment: Boat requires a supported linux/amd64 CPU/memory profile",
-    );
-  const previewBaseDomain = value.CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN
-    ? validatedDnsName(
-        value.CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN,
-        "CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN",
-      )
-    : null;
-  const { settingsSecretEncryptionKeys, currentSettingsSecretEncryptionKeyVersion, settingsSecretKeyV1, codexRefreshFingerprints } =
-    loadCloudAgentCredentialConfig(env);
-  const capabilityKeyring = loadCapabilityKeyring(env);
-  const durabilityRequested =
-    setupEnabled === "true" ||
-    [
-      env.CLOUD_WORKSPACE_OBJECT_KEY_V1,
-      env.CLOUD_WORKSPACE_OBJECT_KEYS_JSON,
-      env.CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION,
-      env.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY,
-      env.CLOUD_WORKSPACE_OBJECT_STORE_KIND,
-      env.CLOUD_WORKSPACE_S3_ENDPOINT,
-      env.CLOUD_WORKSPACE_S3_BUCKET,
-      env.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID,
-      env.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY,
-      env.CLOUD_WORKSPACE_S3_KEY_PREFIX,
-    ].some((entry) => typeof entry === "string" && entry.trim().length > 0);
-  let durability: CloudWorkspaceBackendConfig["durability"] = null;
-  if (durabilityRequested) {
-    const parsedDurability = CloudWorkspaceDurabilityEnvSchema.safeParse(env);
-    if (!parsedDurability.success) {
-      throw new Error(
-        "Invalid cloud workspace durability environment: " +
-          parsedDurability.error.issues
-            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-            .join("; "),
-      );
-    }
-    const objectEncryptionKeys: Record<number, string> = {};
-    const addObjectKey = (version: number, encoded: unknown, name: string) => {
-      if (
-        !Number.isSafeInteger(version) ||
-        version < 1 ||
-        version > 65_535 ||
-        typeof encoded !== "string" ||
-        !/^[A-Za-z0-9_-]{43}$/.test(encoded)
-      ) {
-        throw new Error(
-          `Invalid cloud workspace durability environment: ${name} must be canonical base64url for exactly 32 bytes`,
-        );
-      }
-      const key = Buffer.from(encoded, "base64url");
-      try {
-        if (key.length !== 32 || key.toString("base64url") !== encoded) {
-          throw new Error("invalid key");
-        }
-      } catch {
-        throw new Error(
-          `Invalid cloud workspace durability environment: ${name} must be canonical base64url for exactly 32 bytes`,
-        );
-      } finally {
-        key.fill(0);
-      }
-      const current = objectEncryptionKeys[version];
-      if (current && current !== encoded) {
-        throw new Error(
-          `Invalid cloud workspace durability environment: conflicting object key version ${version}`,
-        );
-      }
-      objectEncryptionKeys[version] = encoded;
-    };
-    if (parsedDurability.data.CLOUD_WORKSPACE_OBJECT_KEYS_JSON) {
-      let document: unknown;
-      try {
-        document = JSON.parse(
-          parsedDurability.data.CLOUD_WORKSPACE_OBJECT_KEYS_JSON,
-        );
-      } catch {
-        throw new Error(
-          "Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_KEYS_JSON must be a JSON object",
-        );
-      }
-      if (
-        !document ||
-        typeof document !== "object" ||
-        Array.isArray(document) ||
-        Object.keys(document).length < 1 ||
-        Object.keys(document).length > 32
-      ) {
-        throw new Error(
-          "Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_KEYS_JSON must contain 1-32 key versions",
-        );
-      }
-      for (const [rawVersion, encoded] of Object.entries(document)) {
-        if (!/^[1-9][0-9]{0,4}$/.test(rawVersion)) {
-          throw new Error(
-            "Invalid cloud workspace durability environment: object key versions must be integers from 1 through 65535",
-          );
-        }
-        addObjectKey(
-          Number(rawVersion),
-          encoded,
-          `CLOUD_WORKSPACE_OBJECT_KEYS_JSON.${rawVersion}`,
-        );
-      }
-    }
-    if (parsedDurability.data.CLOUD_WORKSPACE_OBJECT_KEY_V1) {
-      addObjectKey(
-        1,
-        parsedDurability.data.CLOUD_WORKSPACE_OBJECT_KEY_V1,
-        "CLOUD_WORKSPACE_OBJECT_KEY_V1",
-      );
-    }
-    const currentObjectEncryptionKeyVersion =
-      parsedDurability.data.CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION;
-    const objectRestoreWindowMs =
-      parsedDurability.data.CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS * 3_600_000;
-    if (!objectEncryptionKeys[currentObjectEncryptionKeyVersion]) {
-      throw new Error(
-        "Invalid cloud workspace durability environment: the current object key version is not present in the keyring",
-      );
-    }
-    const store = parsedDurability.data;
-    if (store.CLOUD_WORKSPACE_OBJECT_STORE_KIND === "s3") {
-      if (store.CLOUD_WORKSPACE_S3_KEY_PREFIX && (env.ZEROS_DEV_ENVIRONMENT !== "hosted" ||
-          store.CLOUD_WORKSPACE_S3_KEY_PREFIX !== `dev/${env.ZEROS_DEV_OWNER}/${env.ZEROS_DEV_GENERATION}/`)) {
-        throw new Error("Invalid cloud workspace object prefix: only the exact hosted Dev generation may select a prefix");
-      }
-      if (!store.CLOUD_WORKSPACE_S3_ENDPOINT || !store.CLOUD_WORKSPACE_S3_BUCKET || !store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || !store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY) {
-        throw new Error("Invalid cloud workspace durability environment: all CLOUD_WORKSPACE_S3 endpoint, bucket and credential fields are required");
-      }
-      if (store.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY) throw new Error("Invalid cloud workspace durability environment: choose one object store");
-      durability = {
-        objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectRestoreWindowMs,
-        s3: {
-          endpoint: validatedServiceUrl(store.CLOUD_WORKSPACE_S3_ENDPOINT, "CLOUD_WORKSPACE_S3_ENDPOINT", { allowPath: false }),
-          region: store.CLOUD_WORKSPACE_S3_REGION,
-          bucket: store.CLOUD_WORKSPACE_S3_BUCKET,
-          accessKeyId: store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID,
-          secretAccessKey: store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY,
-          ...(store.CLOUD_WORKSPACE_S3_KEY_PREFIX ? { prefix: store.CLOUD_WORKSPACE_S3_KEY_PREFIX } : {}),
-        },
-      };
-    } else {
-      if (store.CLOUD_WORKSPACE_S3_ENDPOINT || store.CLOUD_WORKSPACE_S3_BUCKET || store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY || store.CLOUD_WORKSPACE_S3_KEY_PREFIX) throw new Error("Invalid cloud workspace durability environment: S3 configuration requires the s3 store kind");
-      const rawObjectStoreDirectory = store.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY;
-      const objectStoreDirectory = path.resolve(rawObjectStoreDirectory ?? ".");
-      if (!rawObjectStoreDirectory || !path.isAbsolute(rawObjectStoreDirectory) || objectStoreDirectory === path.parse(objectStoreDirectory).root || containsAsciiControl(rawObjectStoreDirectory)) {
-        throw new Error("Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY must be a bounded absolute volume path");
-      }
-      durability = { objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectRestoreWindowMs, objectStoreDirectory };
-    }
-  }
-  let setupExecution: CloudWorkspaceBackendConfig["setupExecution"] = null;
-  if (setupEnabled === "true") {
-    const setup = CloudWorkspaceSetupEnvSchema.safeParse({
-      ...env,
-      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: setupEnabled,
-    });
-    if (!setup.success) {
-      throw new Error(
-        "Invalid cloud workspace setup environment: " +
-          setup.error.issues
-            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-            .join("; "),
-      );
-    }
-    const controlPlaneOrigin = validatedServiceUrl(
-      setup.data.CLOUD_WORKSPACE_CONTROL_PLANE_URL,
-      "CLOUD_WORKSPACE_CONTROL_PLANE_URL",
-      { allowPath: false },
-    );
-    if (setup.data.CLOUD_WORKSPACE_ENGINE_PORT === 22_222) {
-      throw new Error("Invalid cloud workspace setup environment: engine port is invalid");
-    }
-    if (
-      value.CLOUD_WORKSPACE_PROVIDER === "boat" &&
-      (setup.data.CLOUD_WORKSPACE_ENGINE_PORT < 1024 ||
-        setup.data.CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS > 1800)
-    )
-      throw new Error(
-        "Invalid cloud workspace setup environment: Boat requires an unprivileged engine port and CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS <= 1800",
-      );
-    if (currentSettingsSecretEncryptionKeyVersion === null) {
-      throw new Error(
-        "Invalid cloud workspace setup environment: a current cloud workspace secret key is required",
-      );
-    }
-    setupExecution = {
-      controlPlaneOrigin,
-      setupSecretEncryptionKeys: settingsSecretEncryptionKeys,
-      currentSetupSecretEncryptionKeyVersion:
-        currentSettingsSecretEncryptionKeyVersion,
-      setupSecretKeyV1: settingsSecretKeyV1,
-      engineProtocolVersion: setup.data.CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
-      enginePort: setup.data.CLOUD_WORKSPACE_ENGINE_PORT,
-      engineHeartbeatIntervalMs:
-        setup.data.CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS,
-      intervalMs: setup.data.CLOUD_WORKSPACE_SETUP_INTERVAL_MS,
-      concurrency: setup.data.CLOUD_WORKSPACE_SETUP_CONCURRENCY,
-      timeoutSeconds: setup.data.CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS,
-      leaseMs: setup.data.CLOUD_WORKSPACE_SETUP_LEASE_MS,
-      admissionTtlSeconds:
-        setup.data.CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS,
-      engineUplinkEndpoint: env.CLOUD_WORKSPACE_REALTIME_URL?.trim()
-        ? `${validatedRealtimeOrigin(env.CLOUD_WORKSPACE_REALTIME_URL.trim(), "CLOUD_WORKSPACE_REALTIME_URL")}${UPLINK_PATH}`
-        : null,
-    };
-  }
-  const outboxRequested = [
-    env.CLOUD_WORKSPACE_OUTBOX_URL,
-    env.CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET,
-    env.CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS,
-  ].some((entry) => typeof entry === "string" && entry.trim().length > 0);
-  let outbox: CloudWorkspaceBackendConfig["outbox"] = null;
-  if (outboxRequested) {
-    const parsedOutbox = CloudWorkspaceOutboxEnvSchema.safeParse(env);
-    if (!parsedOutbox.success) {
-      throw new Error(
-        "Invalid cloud workspace outbox environment: " +
-          parsedOutbox.error.issues
-            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-            .join("; "),
-      );
-    }
-    let endpoint: string;
-    try {
-      endpoint = validatedServiceUrl(
-        parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_URL,
-        "CLOUD_WORKSPACE_OUTBOX_URL",
-        { allowPath: true },
-      );
-    } catch (error) {
-      throw new Error(
-        `Invalid cloud workspace outbox environment: ${
-          error instanceof Error ? error.message : "invalid endpoint"
-        }`,
-      );
-    }
-    outbox = {
-      endpoint,
-      signingSecret: parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET,
-      timeoutMs: parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS,
-    };
-  }
-  return {
-    runtime,
-    provider: value.CLOUD_WORKSPACE_PROVIDER,
-    ...(value.CLOUD_WORKSPACE_PROVIDER === "boat"
-      ? {
-          boat: {
-            accountScope: value.BOAT_ACCOUNT_SCOPE!,
-            ttlSeconds: value.BOAT_TTL_SECONDS!,
-            billingOrg: value.BOAT_BILLING_ORG!,
-          },
-          computePolicy:{provider:"boat",policyId:value.BOAT_COMPUTE_POLICY_ID!,secondsPerDollar:value.BOAT_SECONDS_PER_DOLLAR!,
-            minimumTtlSeconds:Math.min(600,value.BOAT_TTL_SECONDS!),maximumTtlSeconds:value.BOAT_TTL_SECONDS!,
-            requestMarginSeconds:value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS+5},
-        }
-      : {}),
-    apiKey: value.BOAT_API_KEY!,
-    apiUrl: "https://boat.dev/api/v1",
-    target: "managed",
-    snapshotId: value.BOAT_SNAPSHOT_ID!,
-    imageRef: `boat:${value.BOAT_SNAPSHOT_ID}@sha256:${value.BOAT_IMAGE_BUILD_SHA256}`,
-    architecture: value.ZEROS_CLOUD_IMAGE_ARCHITECTURE,
-    cpuMillicores: value.CLOUD_WORKSPACE_CPU_MILLICORES,
-    memoryMiB: value.CLOUD_WORKSPACE_MEMORY_MIB,
-    storageMiB: value.CLOUD_WORKSPACE_STORAGE_MIB,
-    sourceCommit: value.ZEROS_CLOUD_SOURCE_COMMIT,
-    operationTimeoutSeconds: value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS,
-    autoArchiveMinutes: value.CLOUD_WORKSPACE_AUTO_ARCHIVE_MINUTES,
-    reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
-    backgroundWorkersEnabled: value.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED === "true",
-    computerMaxConcurrentBuilds: value.CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS,
-    settingsSecretEncryptionKeys,
-    capabilityIssuer: value.CLOUD_CAPABILITY_ISSUER ?? null,
-    ...(capabilityKeyring?{capabilityKeyring}:{}),
-    ...(codexRefreshFingerprints?{codexRefreshFingerprints}:{}),
-    currentSettingsSecretEncryptionKeyVersion,
-    settingsSecretKeyV1,
-    access: {
-      allowedSshHosts: [],
-      allowedPreviewHostSuffixes: [],
-      previewBaseDomain,
-    },
-    durability,
-    bridge,
-    outbox,
-    setupExecution,
-  };
-}
-
 const HOSTED_ENVIRONMENTS = {
   alpha: {
     audience: "https://api-alpha.zeros.build",
@@ -1573,74 +845,6 @@ function validateRailwayEnvironment(
   }
 }
 
-const CloudRuntimePublicationEnvSchema = z.object({
-  CLOUD_RUNTIME_PUBLICATION_ENABLED: z.enum(["true", "false"]).default("false"),
-  CLOUD_RUNTIME_OIDC_AUDIENCE: z.string().trim().min(1).max(256).refine(value => !/\s/.test(value)).optional(),
-  CLOUD_RUNTIME_OIDC_REPOSITORY: z.string().max(140).regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/).default("Withso/zeros"),
-  CLOUD_RUNTIME_OIDC_ENVIRONMENT: z.enum(["alpha", "beta", "production", ""]).optional(),
-  CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: z.literal("v4").default("v4"),
-});
-
-function loadCloudRuntimePublicationConfig(env: NodeJS.ProcessEnv, channel: Config["deploymentChannel"]): {
-  publication: CloudRuntimePublicationConfig; newWorkspaceProfile: "v4";
-} {
-  if (!cloudWorkspaceChannelEnabled(channel)) return {
-    publication: { enabled: false, audience: `zeros-control-plane-${channel}`, repository: "Withso/zeros",
-      environment: channel === "production" ? "production" : "beta", s3: null },
-    newWorkspaceProfile: "v4",
-  };
-  const parsed = CloudRuntimePublicationEnvSchema.safeParse(env);
-  if (!parsed.success) {
-    // Enum/url validators can quote their input in issue messages. Diagnostics
-    // at this credential boundary expose environment variable names only.
-    throw new Error("Invalid runtime publication environment: " + parsed.error.issues.map(issue => issue.path.join(".")).join(", "));
-  }
-  const values = parsed.data;
-  const enabled = values.CLOUD_RUNTIME_PUBLICATION_ENABLED === "true";
-  const environment = values.CLOUD_RUNTIME_OIDC_ENVIRONMENT === undefined
-    ? (channel === "beta" || channel === "production" ? channel : "alpha")
-    : values.CLOUD_RUNTIME_OIDC_ENVIRONMENT || null;
-  let s3: CloudRuntimePublicationConfig["s3"] = null;
-  if (enabled) {
-    if (channel !== "alpha" && channel !== "beta" && channel !== "production") {
-      throw new Error("Invalid runtime publication environment: publication requires an alpha, beta or production channel");
-    }
-    if (environment !== channel && !(channel === "alpha" && environment === null)) {
-      throw new Error("Invalid runtime publication environment: CLOUD_RUNTIME_OIDC_ENVIRONMENT must match the deployment channel");
-    }
-    const artifacts = CloudWorkspaceDurabilityEnvSchema.pick({ CLOUD_WORKSPACE_S3_ENDPOINT: true, CLOUD_WORKSPACE_S3_REGION: true,
-      CLOUD_WORKSPACE_S3_BUCKET: true, CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: true, CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: true }).safeParse(env);
-    if (!artifacts.success || !artifacts.data.CLOUD_WORKSPACE_S3_ENDPOINT || !artifacts.data.CLOUD_WORKSPACE_S3_BUCKET ||
-        !artifacts.data.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || !artifacts.data.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY) {
-      throw new Error("Invalid runtime publication environment: all CLOUD_WORKSPACE_S3 endpoint, bucket and credential fields are required");
-    }
-    const store = artifacts.data;
-    let endpoint: string;
-    try {
-      endpoint = validatedServiceUrl(store.CLOUD_WORKSPACE_S3_ENDPOINT!, "CLOUD_WORKSPACE_S3_ENDPOINT", { allowPath: false });
-    } catch {
-      throw new Error("Invalid runtime publication environment: CLOUD_WORKSPACE_S3_ENDPOINT must be an HTTPS origin");
-    }
-    s3 = { endpoint, region: store.CLOUD_WORKSPACE_S3_REGION, bucket: store.CLOUD_WORKSPACE_S3_BUCKET!,
-      accessKeyId: store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID!, secretAccessKey: store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY! };
-  }
-  return { publication: { enabled, audience: values.CLOUD_RUNTIME_OIDC_AUDIENCE ?? `zeros-control-plane-${channel}`,
-    repository: values.CLOUD_RUNTIME_OIDC_REPOSITORY, environment, s3 },
-    newWorkspaceProfile: values.CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE };
-}
-
-/** Alerting is optional: an unusable mailbox disables it with a warning
- * instead of failing boot. */
-function loadOperationsAlertEmail(env: NodeJS.ProcessEnv, diagnostics: ConfigDiagnostics): string | null {
-  const raw = env.OPERATIONS_ALERT_EMAIL?.trim();
-  if (!raw) return null;
-  const parsed = z.string().max(254).email().safeParse(raw);
-  if (parsed.success) return parsed.data;
-  diagnostics.warn("[config] OPERATIONS_ALERT_EMAIL is not one email address; cloud health alerts are disabled");
-  return null;
-}
-
-/** OTLP over https, or plain http only to a Railway private host or this machine. */
 function traceExportUrl(raw: string | undefined): string | undefined {
   const value = raw?.trim();
   if (!value) return undefined;
@@ -1666,11 +870,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development").trim().toLowerCase();
   const deploymentChannel = channel === "alpha" || channel === "beta" || channel === "production" ? channel : "development";
   const cloudChannel = cloudWorkspaceChannelEnabled(deploymentChannel);
-  const resumeFlag = cloudChannel
-    ? env.CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED ?? (deploymentChannel === "alpha" ? "true" : "false") : "false";
-  if (!["true", "false"].includes(resumeFlag)) throw new Error("Invalid cloud workspace resume configuration");
-  if (resumeFlag === "true" && deploymentChannel !== "alpha") throw new Error("Cloud workspace resume is available only on Alpha");
-  const runtime = loadCloudRuntimePublicationConfig(env, deploymentChannel);
   validateDatabaseConnections(e);
   const migrationRole = validateMigrationRole(e.DATABASE_MIGRATION_ROLE);
   const auth = loadAuthConfig(e);
@@ -1717,7 +916,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     }
   }
 
-  const cloudWorkspaces = cloudChannel ? loadCloudWorkspaceConfig(env, github) : null;
   const tracesUrl = traceExportUrl(e.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
   return {
     databaseUrl: parseDatabaseTarget(e.DATABASE_URL).toString(),
@@ -1728,11 +926,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databasePoolMax: e.DATABASE_POOL_MAX,
     processRole: e.CONTROL_PLANE_PROCESS_ROLE,
     shutdownDrainMs: e.CONTROL_PLANE_DRAIN_SECONDS * 1_000,
-    workerPollIntervalsMs: loadWorkerPollIntervals(env, cloudWorkspaces !== null),
+    workerPollIntervalsMs: loadWorkerPollIntervals(env),
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
     ...(tracesUrl ? { tracesUrl } : {}),
     traceSampleRatio: e.CONTROL_PLANE_TRACE_SAMPLE_RATIO,
-    operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
@@ -1747,11 +944,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     github,
     feedback: loadFeedbackConfig(env, diagnostics),
     chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
-    cloudWorkspaces,
     cloudAgentCredentials: cloudChannel ? loadCloudAgentCredentialConfig(env) : null,
-    selectedCloudWorker: cloudChannel ? loadSelectedCloudWorker(env) : null,
-    cloudRuntimePublication: runtime.publication,
-    cloudWorkspaceNewRuntimeProfile: runtime.newWorkspaceProfile,
-    cloudWorkspaceResumeExistingEnabled: resumeFlag === "true",
+    cloudV2: cloudChannel ? loadCloudV2Config(env) : null,
   };
 }

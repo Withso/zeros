@@ -15,14 +15,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ClaudeSdkAdapter } from "../adapter";
-import * as cloudExecutions from "../../../cloud-provider-execution";
-import * as claudeRuntime from "../binary-resolver";
 import * as containedProcess from "../contained-process";
-import * as cloudRuntimeRoot from "../../../containment/cloud-runtime-root.mjs";
-import { cloudRuntimeFixture } from "../../../containment/__tests__/cloud-runtime-fixture";
-import { testCloudRuntime } from "../../../__tests__/helpers/test-cloud-runtime";
-import { bootClaudeExecutionFixture } from "./helpers/boot-execution";
-import { createCloudNativeHome } from "../../../containment/cloud-native-home";
 import { HostExecutionBoundary } from "../../../containment/host-boundary";
 import {
   AgentFailureError,
@@ -32,38 +25,6 @@ import {
 } from "../../../types";
 import type { AvailableCommand, RequestPermissionRequest } from "@zeros/protocol/agent-events";
 import { applyUpdate } from "@zeros/protocol/agent-messages";
-
-vi.mock("../../../containment/cloud-runtime-root.mjs", async original => {
-  const actual = await original<typeof import("../../../containment/cloud-runtime-root.mjs")>();
-  return { ...actual, resolveCloudRuntime: vi.fn(actual.resolveCloudRuntime),
-    resolveCloudRuntimePackagePath: vi.fn(actual.resolveCloudRuntimePackagePath) };
-});
-
-function admittedClaudeRuntimeFixture() {
-  const tree = cloudRuntimeFixture();
-  const runtime = testCloudRuntime();
-  const resolver = cloudRuntimeRoot.createCloudRuntimeResolver({ filesystem: tree.filesystem });
-  const worker = runtime.workerRoot;
-  const sdk = `${worker}/node_modules/@anthropic-ai/claude-agent-sdk`;
-  tree.write(`${worker}/package.json`, {});
-  tree.write(`${sdk}/package.json`, { name: "@anthropic-ai/claude-agent-sdk", exports: "./sdk.mjs" });
-  tree.write(`${sdk}/sdk.mjs`, "export {};");
-  const native = `${worker}/node_modules/${claudeRuntime.claudePlatformPackages()[0]!}/${claudeRuntime.claudeBinaryName()}`;
-  tree.write(native, "scripted-query fixture", 0o555);
-  const authority = vi.spyOn(cloudRuntimeRoot, "resolveCloudRuntime").mockReturnValue({ ...runtime, workerRoot: tree.physical(worker) });
-  // Translate only this disposable VM tree; retain the real pinned-package
-  // admission checks before Node resolves the SDK and executable.
-  const guard = vi.spyOn(cloudRuntimeRoot, "resolveCloudRuntimePackagePath").mockImplementation(file => {
-    if (!file.startsWith(tree.directory + "/")) throw new Error("Unexpected cloud fixture path");
-    return tree.physical(resolver.packagePath(file.slice(tree.directory.length)));
-  });
-  const desktop = vi.spyOn(claudeRuntime, "resolveClaudeCli").mockImplementation(() => {
-    throw new Error("Cloud query consumed the desktop CLI resolver");
-  });
-  return { binary: tree.physical(native), desktop, dispose: () => {
-    desktop.mockRestore(); guard.mockRestore(); authority.mockRestore(); tree.dispose();
-  } };
-}
 
 const TMP_DATA = path.join(os.tmpdir(), `zeros-sdk-test-${process.pid}`);
 let prevDataDir: string | undefined;
@@ -78,36 +39,9 @@ afterAll(async () => {
   await rm(TMP_DATA, { recursive: true, force: true });
 });
 
-async function physicalClaudeHome() {
-  return createCloudNativeHome({ dataRoot: await realpath(TMP_DATA), provider: "claude",
-    conversationId: randomUUID(), executionId: randomUUID() });
-}
-
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-describe("Claude private cloud coordinator policy",()=>{
-  it("applies admitted Claude preferences to a private cloud query and validates live changes", async () => {
-    const boundary = { status: { actor: "agent-code", backend: "cloud-worker" } } as never;
-    const lifetime = { signal: new AbortController().signal, assertLive: vi.fn() };
-    const execution = { mode: "actor-grant-v1", model: "claude-haiku-4-5", cwd: "/srv/zeros/workspace", customization: null,
-      lifetime, coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
-    const original = cloudExecutions.cloudProviderExecution;
-    const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
-    const runtime = admittedClaudeRuntimeFixture();
-    const { queryFn, captured, control } = makeScriptedQuery([[initMsg("cloud-preferences")]]);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
-    try {
-      const { session } = await adapter.newSession({ cwd: "/srv/zeros/workspace", executionBoundary: boundary,
-        env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "0" } });
-      void adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("Continue")] });
-      await tick();
-      expect(captured[0].settings).toMatchObject({ autoMemoryEnabled: false, idleCompaction: false });
-      await adapter.updateConfig({ sessionId: session.executionId, env: { ZEROS_CLAUDE_AUTO_MEMORY: "1", ZEROS_CLAUDE_IDLE_COMPACTION: "1" } });
-      expect(control.flagSettings.at(-1)).toMatchObject({ autoMemoryEnabled: true, idleCompaction: null });
-      await expect(adapter.updateConfig({ sessionId: session.executionId, env: { ZEROS_CLAUDE_IDLE_COMPACTION: "yes" } })).rejects.toThrow(/admission/);
-      expect(runtime.desktop).not.toHaveBeenCalled();
-    } finally { await adapter.dispose(); runtime.dispose(); authority.mockRestore(); }
-  });
+describe("Claude native launch policy",()=>{
 
   it.each(["Personal Local", "organization-local"])("preserves exact %s SDK launch bytes and config roots", async owner => {
     const cwd = path.join(TMP_DATA, owner, "checkout");
@@ -136,35 +70,6 @@ describe("Claude private cloud coordinator policy",()=>{
       expect(JSON.stringify(spawn.mock.calls[0]![0].env)).toBe(JSON.stringify(expectedEnv));
     } finally { spawn.mockRestore(); await adapter.dispose(); await boundary.stopAndProve(); }
   });
-  it("keeps the original physical HOME on cold and resumed queries despite caller root overrides", async () => {
-    const nativeHome = await physicalClaudeHome();
-    const boundary = { status: { actor: "agent-code", backend: "cloud-worker" }, providerHomePath: "/untrusted/boundary-home" } as never;
-    const lifetime = { signal: new AbortController().signal, assertLive: vi.fn() };
-    const execution = { mode: "actor-grant-v1", model: "claude-haiku-4-5", cwd: "/srv/zeros/workspace",
-      customization: null, lifetime, coordinator: { nativeHome }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
-    const original = cloudExecutions.cloudProviderExecution;
-    const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
-    const runtime = admittedClaudeRuntimeFixture();
-    const { queryFn, captured } = makeScriptedQuery([[initMsg("physical-home"), resultOk("physical-home")],
-      [initMsg("physical-home"), resultOk("physical-home")]]);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
-    const env = { ANTHROPIC_MODEL: execution.model, ANTHROPIC_API_KEY: "synthetic-selected-key",
-      HOME: "/untrusted/home", CLAUDE_CONFIG_DIR: "/untrusted/claude", XDG_CONFIG_HOME: "/untrusted/config",
-      TMPDIR: "/untrusted/tmp", ACTOR_PRIVATE: "synthetic-actor-value", ZEROS_PERMISSION_MODE: "plan" };
-    try {
-      const { session } = await adapter.newSession({ cwd: "/untrusted/cwd", env, executionBoundary: boundary });
-      await adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("First")] });
-      await adapter.loadSession({ executionId: session.executionId, cwd: "/untrusted/resume", env: { ...env, ACTOR_PRIVATE: "synthetic-next-actor-value" }, executionBoundary: boundary });
-      await adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("Second")] });
-      expect(captured).toHaveLength(2);
-      for (const options of captured) {
-        expect(options).toMatchObject({ cwd: execution.cwd, permissionMode: "plan", settingSources: [],
-          env: { ...nativeHome.environment(), ANTHROPIC_API_KEY: "synthetic-selected-key" } });
-        expect((options.env as Record<string, string>).HOME).not.toBe("/untrusted/boundary-home");
-      }
-      expect(captured[1]?.env).toMatchObject({ ACTOR_PRIVATE: "synthetic-next-actor-value" });
-    } finally { await adapter.dispose(); runtime.dispose(); authority.mockRestore(); }
-  });
   it.each(["default", "accept-edits", "auto", "plan", "bypass"])("starts the persisted native %s mode before the first prompt", async mode => {
     const {queryFn} = makeScriptedQuery([]);
     const adapter = new ClaudeSdkAdapter(makeCtx([],[]), {queryFn});
@@ -173,248 +78,9 @@ describe("Claude private cloud coordinator policy",()=>{
       expect(session.modes?.currentModeId).toBe(mode);
     } finally {await adapter.dispose();}
   });
-
-  it.each([false, true])("reports an unexpected idle exit but not completed cloud retirement (retired=%s)", async retired => {
-    const nativeHome = await physicalClaudeHome();
-    const boundary = { status: { actor: "agent-code", backend: "cloud-worker" } } as never;
-    const lease = new AbortController();
-    const lifetime = { signal: lease.signal, assertLive: vi.fn() };
-    const execution = { mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null, lifetime, lease: { ...lifetime, admission: { model: "claude-haiku-4-5" } },
-      tools: { call: vi.fn() }, coordinator: { nativeHome }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
-    const original = cloudExecutions.cloudProviderExecution;
-    const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
-    const runtime = admittedClaudeRuntimeFixture();
-    const emitted: SessionNotification[] = [];
-    const live = makePushableQuery();
-    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
-    try {
-      const { session } = await adapter.newSession({ cwd: "/srv/zeros/workspace", executionBoundary: boundary,
-        env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ANTHROPIC_API_KEY: "synthetic-provider-key" } });
-      const turn = adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("Continue")] });
-      await tick();
-      live.push(initMsg("cloud-retirement"), assistantText("Done"), resultOk("cloud-retirement"));
-      await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
-      // The gateway revokes authority (and kills the process) before the
-      // asynchronous adapter disposal. That ordering must remain safe.
-      if (retired) lease.abort();
-      live.fail(new Error("Claude Code process exited with code 137"));
-      await tick();
-      expect(emitted.filter(event => event.update.sessionUpdate === "error_notice")).toHaveLength(retired ? 0 : 1);
-      expect(runtime.desktop).not.toHaveBeenCalled();
-    } finally { await adapter.dispose(); runtime.dispose(); authority.mockRestore(); }
-  });
-
-  it("keeps native workspace tools and fences external credential/model overrides",async()=>{
-    const nativeHome = await physicalClaudeHome();
-    const boundary={status:{actor:"agent-code",backend:"zeros-srt"}} as never;
-    const lease=new AbortController(),assertLive=vi.fn();
-    const execution={mode:"actor-grant-v1",model:"claude-haiku-4-5",customization:null,lifetime:{signal:lease.signal,assertLive},
-      cwd:"/srv/zeros/workspace",tools:{call:vi.fn()},coordinator:{nativeHome},
-      productServers:[{name:"zeros_design",transport:"http",url:"http://127.0.0.1:42000/mcp",headers:{Authorization:"Bearer synthetic-scoped-tool"}}]} as unknown as cloudExecutions.CloudProviderExecution;
-    Object.defineProperty(execution,"lease",{get:()=>{throw new Error("Common Claude policy accessed legacy lease");}});
-    const original=cloudExecutions.cloudProviderExecution;
-    const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
-    const runtime=admittedClaudeRuntimeFixture();
-    const {queryFn,captured}=makeScriptedQuery([[initMsg("cloud-session"),resultOk("cloud-session")]]);
-    const adapter=new ClaudeSdkAdapter(makeCtx([],[]),{queryFn});
-    try{
-      const {session}=await adapter.newSession({cwd:"/untrusted",executionBoundary:boundary,
-        env:{ANTHROPIC_MODEL:"claude-haiku-4-5",ANTHROPIC_API_KEY:"synthetic-provider-key"},
-        cliBinary:"/untrusted/claude",mcpServers:[{name:"untrusted",transport:"stdio",command:"/untrusted/program"}],browserUse:{kind:"claude-agent-sdk"} as never});
-      await adapter.prompt({sessionId:session.executionId,prompt:[{type:"text",text:"Continue"}]});
-      expect(captured[0]).toMatchObject({cwd:"/srv/zeros/workspace",tools:{type:"preset",preset:"claude_code"},strictMcpConfig:true,settingSources:[],
-        settings:{autoMemoryEnabled:true,permissions:{additionalDirectories:[],allow:[],deny:[]}},pathToClaudeCodeExecutable:runtime.binary});
-      expect(Object.keys(captured[0].mcpServers as object).sort()).toEqual(["zeros_design"]);
-      expect(captured[0].plugins).toBeUndefined();expect(captured[0].getOAuthToken).toBeUndefined();
-      expect(captured[0].extraArgs).toEqual({"no-chrome":null,"thinking-display":"summarized"});
-      expect(captured[0].settings).toMatchObject({pluginConfigs:{"agents-md@builtin":{options:{instructionFiles:"claude-md-and-agents-md"}}}});
-      await expect(adapter.setModel({sessionId:session.executionId,model:"unadmitted-model"})).rejects.toThrow(/admission/);
-      await expect(adapter.updateConfig({sessionId:session.executionId,env:{ANTHROPIC_API_KEY:"replaced"}})).rejects.toThrow(/admission/);
-      await adapter.loadSession({executionId:session.executionId,cwd:"/untrusted-resume",executionBoundary:boundary,
-        env:{ANTHROPIC_MODEL:"claude-haiku-4-5",ANTHROPIC_API_KEY:"synthetic-provider-key"}});
-      expect((adapter as unknown as {sessions:Map<string,{cwd:string}>}).sessions.get(session.executionId)?.cwd).toBe("/srv/zeros/workspace");
-      expect(assertLive).toHaveBeenCalled();
-      expect(runtime.desktop).not.toHaveBeenCalled();
-    }finally{await adapter.dispose();runtime.dispose();authority.mockRestore();}
-  });
-});
-
-describe("Claude genuine boot foreground handoff", () => {
-  // Genuine cloud custody requires Linux /proc process births and membership.
-  async function fixture(idleTimeoutMs = 30_000) {
-    const runtime = admittedClaudeRuntimeFixture(), boot = await bootClaudeExecutionFixture(), live = makePushableQuery(), lives=[live];
-    const callbacks: Parameters<typeof containedProcess.spawnContainedClaudeProcess>[1][] = [];
-    const spawn = vi.spyOn(containedProcess,"spawnContainedClaudeProcess").mockImplementation((_options, hooks) => {
-      callbacks.push(hooks); return {} as never;
-    });
-    const queryFn = (params: Parameters<typeof import("@anthropic-ai/claude-agent-sdk").query>[0]) => {
-      params.options?.spawnClaudeCodeProcess?.({ command:"synthetic-cli",args:[],env:{},signal:new AbortController().signal });
-      const current=lives[callbacks.length-1]??(lives[callbacks.length-1]=makePushableQuery());
-      return (current.queryFn as typeof import("@anthropic-ai/claude-agent-sdk").query)(params);
-    };
-    const adapter = new ClaudeSdkAdapter(makeCtx([],[]),{queryFn,idleTimeoutMs});
-    const reservation = boot.factory.reserveBootTurn(boot.execution,boot.selection);
-    const {session} = await adapter.newSession({executionId:boot.execution.executionId,cwd:"/untrusted",env:boot.env,executionBoundary:boot.boundary});
-    return {boot,live,lives,callbacks,adapter,reservation,session,
-      dispose:async()=>{try{await adapter.dispose();}finally{spawn.mockRestore();await boot.dispose();runtime.dispose();}}};
-  }
-  it.skipIf(process.platform !== "linux")("guards an original cold and warm turn even when passive observers are disabled", async () => {
-    const f=await fixture();
-    try{
-      const first=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]});
-      const firstOutcome=first.catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
-      expect(f.callbacks[0]!.beforeUserMessageWrite).toBeTypeOf("function");
-      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid));
-      expect(f.boot.factory.bootScopeActivity([]).foreground).toBe(1);
-      f.live.push(initMsg("warm-boot"),{...resultOk("warm-boot"),user_message_uuid:f.live.inputsSeen[0]!.uuid});
-      expect(await firstOutcome).toMatchObject({stopReason:"end_turn"});
-      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
-      const selected=f.boot.factory.selectBoot(f.boot.input),next=f.boot.factory.reserveBootTurn(f.boot.execution,selected);
-      const second=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("Second")]});
-      const secondOutcome=second.catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(2));
-      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[1]!.uuid));
-      f.live.push({...resultOk("warm-boot"),user_message_uuid:f.live.inputsSeen[1]!.uuid});
-      expect(await secondOutcome).toMatchObject({stopReason:"end_turn"});
-      await f.boot.factory.settleBootTurn(f.boot.execution,next);
-      expect(f.callbacks).toHaveLength(1);expect(f.live.captured).toHaveLength(1);
-      expect(f.boot.request.sync).not.toHaveBeenCalled();
-    }finally{await f.dispose();}
-  });
-  it.skipIf(process.platform !== "linux")("accepts the warm pump configuration while rejecting permission mode on that port", async () => {
-    const f=await fixture();
-    try{
-      const first=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
-      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid));
-      f.live.push(initMsg("warm-config"),{...resultOk("warm-config"),user_message_uuid:f.live.inputsSeen[0]!.uuid});
-      expect(await first).toMatchObject({stopReason:"end_turn"});
-      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
-      const selected=f.boot.factory.selectBoot(f.boot.input),next=f.boot.factory.reserveBootTurn(f.boot.execution,selected);
-      await f.adapter.setMode({sessionId:f.session.executionId,modeId:"plan"});
-      const env={ZEROS_THINKING_EFFORT:"high",ZEROS_FAST_MODE:"1"};
-      await expect(f.adapter.updateConfig({sessionId:f.session.executionId,env})).resolves.toBeUndefined();
-      await expect(f.adapter.updateConfig({sessionId:f.session.executionId,env:{...env,ZEROS_PERMISSION_MODE:"plan"}}))
-        .rejects.toThrow("Cloud provider configuration requires a new credential admission");
-      const second=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("Second")]}).catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(2));
-      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[1]!.uuid));
-      f.live.push({...resultOk("warm-config"),user_message_uuid:f.live.inputsSeen[1]!.uuid});
-      expect(await second).toMatchObject({stopReason:"end_turn"});
-      await f.boot.factory.settleBootTurn(f.boot.execution,next);
-      expect(f.callbacks).toHaveLength(1);expect(f.live.captured).toHaveLength(1);
-      expect(f.boot.request.sync).not.toHaveBeenCalled();
-    }finally{await f.dispose();}
-  });
-  it.skipIf(process.platform !== "linux")("preserves the exact original refusal when the pinned SDK wraps a transport throw", async () => {
-    const f=await fixture();
-    try{
-      const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
-      f.boot.canStart.mockReturnValue(false);
-      expect(f.callbacks[0]!.beforeUserMessageWrite).toBeTypeOf("function");
-      expect(()=>f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid)))
-        .toThrow(expect.objectContaining({code:"cloud_validation_access_denied"}));
-      f.live.fail(new Error("Failed to write to process stdin: synthetic SDK wrapper"));
-      expect(await outcome).toMatchObject({code:"cloud_validation_access_denied"});
-      expect(f.boot.factory.bootScopeActivity([]).foreground).toBe(0);
-    }finally{await f.dispose();}
-  });
-  it.skipIf(process.platform !== "linux")("keeps the genuine boot query warm through the ordinary idle timeout", async () => {
-    const f=await fixture(1);
-    try{
-      const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
-      expect(f.callbacks[0]!.beforeUserMessageWrite).toBeTypeOf("function");
-      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid));
-      f.live.push(initMsg("warm-boot"),{...resultOk("warm-boot"),user_message_uuid:f.live.inputsSeen[0]!.uuid});await outcome;
-      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
-      await new Promise(resolve=>setTimeout(resolve,20));
-      expect(f.live.control.closes).toBe(0);expect(f.boot.execution.lifetime.signal.aborted).toBe(false);
-    }finally{await f.dispose();}
-  });
-  it.skipIf(process.platform !== "linux")("refuses foreground SDK input without an original factory turn reservation", async () => {
-    const f=await fixture();
-    try{
-      f.boot.factory.markNativeHandoff(f.boot.execution,f.reservation);
-      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
-      const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("Unowned")]}).catch(error=>error);
-      await tick();f.live.fail(new Error("Synthetic input without a reservation"));
-      expect(await outcome).toMatchObject({code:"cloud_validation_access_denied"});
-      expect(f.live.inputsSeen).toHaveLength(0);
-    }finally{await f.dispose();}
-  });
-  it.skipIf(process.platform !== "linux")("keeps entered steering on captured authority but never hands the same steering UUID off twice",async()=>{
-    const f=await fixture();
-    try{
-      const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
-      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid));
-      f.boot.canStart.mockReturnValue(false);
-      const steering=f.adapter.steer({sessionId:f.session.executionId,prompt:[textBlock("Continue entered turn")]}).catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(2));
-      const uuid=String(f.live.inputsSeen[1]!.uuid);
-      expect(()=>f.callbacks[0]!.beforeUserMessageWrite!(uuid)).not.toThrow();
-      expect(()=>f.callbacks[0]!.beforeUserMessageWrite!(uuid)).toThrow(expect.objectContaining({code:"cloud_validation_access_denied"}));
-      await f.adapter.cancel({sessionId:f.session.executionId});await steering;await outcome;
-    }finally{await f.dispose();}
-  });
-  it.skipIf(process.platform !== "linux")("rejects a held prior query write without rejecting the newer warm turn",async()=>{
-    const f=await fixture();
-    try{
-      const first=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
-      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
-      const oldUuid=String(f.live.inputsSeen[0]!.uuid),oldWrite=f.callbacks[0]!.beforeUserMessageWrite!;
-      oldWrite(oldUuid);f.live.push(initMsg("warm-boot"),{...resultOk("warm-boot"),user_message_uuid:oldUuid});await first;
-      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
-      await f.adapter.updateConfig({sessionId:f.session.executionId,env:{ZEROS_THINKING_EFFORT:"max"}});
-      const selected=f.boot.factory.selectBoot(f.boot.input),reservation=f.boot.factory.reserveBootTurn(f.boot.execution,selected);
-      let settled=false;
-      const second=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("Second")]}).then(value=>{settled=true;return value;},error=>{settled=true;return error;});
-      await vi.waitFor(()=>expect(f.lives[1]?.inputsSeen).toHaveLength(1));
-      expect(()=>oldWrite(oldUuid)).toThrow(expect.objectContaining({code:"cloud_validation_access_denied"}));
-      await tick();expect(settled).toBe(false);
-      const uuid=String(f.lives[1]!.inputsSeen[0]!.uuid);
-      f.callbacks[1]!.beforeUserMessageWrite!(uuid);f.lives[1]!.push({...resultOk("warm-boot"),user_message_uuid:uuid});
-      expect(await second).toMatchObject({stopReason:"end_turn"});await f.boot.factory.settleBootTurn(f.boot.execution,reservation);
-    }finally{await f.dispose();}
-  });
 });
 
 describe("Claude explicit approval hints", () => {
-  it("offers cloud approvals only for this chat and preserves another actor's explicit Plan",async()=>{
-    const nativeHome = await physicalClaudeHome();
-    const boundary={status:{actor:"agent-code",backend:"cloud-worker"}} as never;
-    const execution={mode:"actor-grant-v1",model:"claude-haiku-4-5",customization:null,cwd:"/srv/zeros/workspace",coordinator:{nativeHome},lifetime:{signal:new AbortController().signal,assertLive:vi.fn()},productServers:[]} as unknown as cloudExecutions.CloudProviderExecution;
-    const original=cloudExecutions.cloudProviderExecution;
-    const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
-    const runtime=admittedClaudeRuntimeFixture();
-    try{
-      for(const mode of ["default","plan"]){
-        const permissions:PermCapture[]=[],{queryFn,captured}=makeScriptedQuery([[initMsg(`actor-${mode}`),resultOk(`actor-${mode}`)]]);
-        const adapter=new ClaudeSdkAdapter(makeCtx([],permissions),{queryFn});
-        try{
-          const {session}=await adapter.newSession({cwd:"/srv/zeros/workspace",executionBoundary:boundary,env:{ANTHROPIC_MODEL:"claude-haiku-4-5",ANTHROPIC_API_KEY:"synthetic-key",ZEROS_PERMISSION_MODE:mode}});
-          const turn=adapter.prompt({sessionId:session.executionId,prompt:[textBlock("Continue")]});await tick();
-          expect(captured[0].permissionMode).toBe(mode);
-          const canUseTool=captured[0].canUseTool as (name:string,input:object,options:object)=>Promise<Record<string,unknown>>;
-          const input={command:"node tool.mjs"},options={signal:new AbortController().signal,toolUseID:`tool-${mode}`,suggestions:[{type:"addRules",behavior:"allow",destination:"session",rules:[{toolName:"Bash",ruleContent:"node tool.mjs"}]}]};
-          const forged=canUseTool("Bash",input,options);
-          const request=permissions.at(-1)!;
-          const offered=request.request as RequestPermissionRequest;
-          expect(offered.options.map(option=>option.optionId)).toEqual(["allow_once","allow_always","reject_once"]);
-          expect(offered.options.map(option=>option.name)).toContain("Allow for this chat");
-          adapter.respondToPermission({permissionId:request.id,response:{outcome:{outcome:"selected",optionId:"allow_project"}}});
-          expect(await forged).toMatchObject({behavior:"deny"});
-          const approved=canUseTool("Bash",input,{...options,toolUseID:`chat-${mode}`});
-          adapter.respondToPermission({permissionId:permissions.at(-1)!.id,response:{outcome:{outcome:"selected",optionId:"allow_always"}}});
-          expect(await approved).toEqual({behavior:"allow",updatedInput:input});
-          await turn;
-        }finally{await adapter.dispose();}
-      }
-    }finally{runtime.dispose();authority.mockRestore();}
-  });
   const hints = [
     { defaultToNo: true },
     { suppressAlwaysAllowRule: true },
@@ -2034,17 +1700,10 @@ describe("ClaudeSdkAdapter", () => {
     } finally { await adapter.dispose(); }
   });
 
-  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+  it.each(["Personal Local", "organization-local"])(
     "does not resume an init-only conversation after failed authentication (%s)",
     async (owner) => {
       const emitted: SessionNotification[] = [];
-      const cloud = owner === "organization-cloud";
-      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
-      const execution = cloud ? { mode: "actor-grant-v1", model: "claude-haiku-4-5", cwd: "/srv/zeros/workspace", customization: null,
-        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() }, coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution : null;
-      const original = cloudExecutions.cloudProviderExecution;
-      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value)) : null;
-      const runtime = cloud ? admittedClaudeRuntimeFixture() : null;
       const { queryFn, captured } = makeScriptedQuery([
         [initMsg("unconfirmed-conversation"), { ...assistantText("Failed to authenticate: OAuth session expired and could not be refreshed"), error: "authentication_failed" },
           { type: "result", subtype: "error_during_execution", is_error: true, errors: ["Failed to authenticate: OAuth session expired and could not be refreshed"] }],
@@ -2052,14 +1711,14 @@ describe("ClaudeSdkAdapter", () => {
       ]);
       const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
       try {
-        const { session } = await adapter.newSession({ cwd: cloud ? "/srv/zeros/workspace" : `/tmp/${owner}`, executionBoundary: boundary,
+        const { session } = await adapter.newSession({ cwd: `/tmp/${owner}`,
           env: { ANTHROPIC_MODEL: "claude-haiku-4-5" } });
         await expect(adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hello")] as never })).rejects.toMatchObject({ failure: { kind: "auth-required" } });
         expect(emitted.filter(n => n.update.sessionUpdate === "provider_binding_update")).toEqual([]);
         await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Continue")] as never });
         expect(captured[1]?.resume).toBeUndefined();
         expect(emitted.filter(n => n.update.sessionUpdate === "provider_binding_update")).toHaveLength(1);
-      } finally { await adapter.dispose(); runtime?.dispose(); authority?.mockRestore(); }
+      } finally { await adapter.dispose(); }
     },
   );
 
@@ -2281,21 +1940,9 @@ describe("ClaudeSdkAdapter", () => {
     }
   });
 
-  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+  it.each(["Personal Local", "organization-local"])(
     "keeps a Monitor alive without counting it as work in %s",
     async (placement) => {
-      const cloud = placement === "organization-cloud";
-      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
-      const execution = cloud ? {
-        mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null,
-        cwd: "/srv/zeros/workspace",
-        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() },
-        coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [],
-      } as unknown as cloudExecutions.CloudProviderExecution : undefined;
-      const original = cloudExecutions.cloudProviderExecution;
-      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution")
-        .mockImplementation((value) => value === boundary ? execution! : original(value)) : undefined;
-      const runtime = cloud ? admittedClaudeRuntimeFixture() : undefined;
       const emitted: SessionNotification[] = [];
       const interrupt = vi.fn(async () => {});
       const live = makePushableQuery({ interrupt });
@@ -2303,9 +1950,7 @@ describe("ClaudeSdkAdapter", () => {
       vi.useFakeTimers();
       try {
         const { session } = await adapter.newSession({
-          cwd: cloud ? "/srv/zeros/workspace" : path.join(TMP_DATA, placement),
-          executionBoundary: boundary,
-          ...(cloud ? { env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ANTHROPIC_API_KEY: "synthetic-provider-key" } } : {}),
+          cwd: path.join(TMP_DATA, placement),
         });
         const snapshot = () => emitted.map((note) => note.update)
           .filter((update) => update.sessionUpdate === "background_tasks_update").at(-1)!;
@@ -2334,7 +1979,6 @@ describe("ClaudeSdkAdapter", () => {
         expect(snapshot()).toMatchObject({ tasks: [], waiting: false });
         await vi.advanceTimersByTimeAsync(5_000);
         expect(live.control.closes).toBe(0);
-        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(true);
 
         const next = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Status")] });
         await flushMicrotasks();
@@ -2347,7 +1991,6 @@ describe("ClaudeSdkAdapter", () => {
         // even though no waiting indicator is shown for it.
         live.push({ type: "system", subtype: "task_notification", task_id: "watch", status: "completed" });
         await flushMicrotasks();
-        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(false);
         live.push({
           type: "assistant", message: { content: [{ type: "tool_use", id: "second-monitor", name: "Monitor",
             input: { command: "watch-checks", description: "Wait for checks", timeout_ms: 300_000 } }] },
@@ -2356,18 +1999,13 @@ describe("ClaudeSdkAdapter", () => {
           task_type: "local_bash", is_backgrounded: true,
         }, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "second-watch" }] });
         await flushMicrotasks();
-        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(true);
         expect(snapshot()).toMatchObject({ tasks: [], waiting: false });
         await adapter.cancel({ sessionId: session.sessionId });
-        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(false);
         expect(interrupt).toHaveBeenCalledOnce();
         expect(live.control.closes).toBe(1);
-        if (runtime) expect(runtime.desktop).not.toHaveBeenCalled();
       } finally {
         await adapter.dispose();
         vi.useRealTimers();
-        runtime?.dispose();
-        authority?.mockRestore();
       }
     },
   );
@@ -7481,21 +7119,9 @@ describe("ClaudeSdkAdapter.steer", () => {
 });
 
 describe("Claude result ownership across background batches", () => {
-  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+  it.each(["Personal Local", "organization-local"])(
     "keeps queued user activity running through unrelated results in %s",
     async placement => {
-      const cloud = placement === "organization-cloud";
-      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
-      const execution = cloud ? {
-        mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null,
-        cwd: "/srv/zeros/workspace",
-        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() },
-        coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [],
-      } as unknown as cloudExecutions.CloudProviderExecution : undefined;
-      const original = cloudExecutions.cloudProviderExecution;
-      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution")
-        .mockImplementation(value => value === boundary ? execution! : original(value)) : undefined;
-      const runtime = cloud ? admittedClaudeRuntimeFixture() : undefined;
       const emitted: SessionNotification[] = [];
       const live = makePushableQuery();
       const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
@@ -7503,9 +7129,7 @@ describe("Claude result ownership across background batches", () => {
         .filter(update => update.sessionUpdate === "background_tasks_update");
       try {
         const { session } = await adapter.newSession({
-          cwd: cloud ? "/srv/zeros/workspace" : path.join(TMP_DATA, placement),
-          executionBoundary: boundary,
-          ...(cloud ? { env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ANTHROPIC_API_KEY: "synthetic-provider-key" } } : {}),
+          cwd: path.join(TMP_DATA, placement),
         });
         const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] });
         await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1));
@@ -7541,8 +7165,6 @@ describe("Claude result ownership across background batches", () => {
         expect(snapshots().at(-1)).toMatchObject({ activity: { state: "idle", startedAt } });
       } finally {
         await adapter.dispose();
-        authority?.mockRestore();
-        runtime?.dispose();
       }
     },
   );

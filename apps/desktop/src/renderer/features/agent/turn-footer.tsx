@@ -1,5 +1,3 @@
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
-import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { TurnUsageCard } from "./turn-usage-card";
 // ──────────────────────────────────────────────────────────
 // TurnFooter — the footer below a settled turn's answer
@@ -76,6 +74,7 @@ import {
   type WorkspaceFileDiffQuery,
 } from "@/renderer/shell/workspace-file-data-cache";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { turnCheckpointsAvailable } from "./chat-feature-availability";
 
 const PILL_PAGE = 10;
 
@@ -357,9 +356,6 @@ export const TurnFilePill = memo(function TurnFilePill({
 });
 
 interface TurnFooterProps {
-  /** Exact workspace owner, available before a session hydrates. */
-  folder?: string | null;
-  agentId?: string | null;
   /** Archived/missing workspaces expose saved metadata and copy only. */
   readOnly?: boolean;
   surfaceActive?: boolean;
@@ -398,7 +394,6 @@ interface TurnFooterProps {
 }
 
 export const TurnFooter = memo(function TurnFooter({
-  folder, agentId,
   readOnly = false,
   surfaceActive = true,
   chatId,
@@ -420,8 +415,6 @@ export const TurnFooter = memo(function TurnFooter({
   onForkIntent,
 }: TurnFooterProps) {
   const openInWorkbench = useOpenFileInWorkbench();
-  const admission = useSessionsStore(state => isCloudWorkspace(folder) && state.sessions[chatId]?.cwd === folder
-    ? state.sessions[chatId]?.cloudAdmissionFailure : null);
   // Stable actions context — identity doesn't change on store mutations, so
   // reading it here doesn't defeat this component's memo. Used to cancel an
   // in-flight turn before a reset spans it.
@@ -443,11 +436,12 @@ export const TurnFooter = memo(function TurnFooter({
   // `enabled` keeps a LIVE turn from reading a row that is still being written;
   // the fetch runs as soon as it settles. A missing row (null) is a legitimate
   // value — turns predating recording, or non-git chats.
+  const checkpoints = turnCheckpointsAvailable(chatId);
   const turnRead = useCachedRead(
     turnRowCache,
-    turnId ? turnRowKey(chatId, turnId) : null,
+    turnId && checkpoints ? turnRowKey(chatId, turnId) : null,
     () => turnGet(chatId, turnId),
-    { maxAgeMs: TURN_ROW_MAX_AGE_MS, enabled: !live && surfaceActive },
+    { maxAgeMs: TURN_ROW_MAX_AGE_MS, enabled: !live && surfaceActive && checkpoints },
   );
   const turn = turnRead.data ?? null;
 
@@ -613,22 +607,6 @@ export const TurnFooter = memo(function TurnFooter({
   // blue directly under the grey shimmer.
   // The footer appears once the turn settles.
   if (live) return null;
-  const cloudAdmission = cloudAdmissionForTurn({ folder, turnId, recoveryFailure,
-    current: admission, agentId });
-  // Admission never started an agent turn. Its one failure banner owns the
-  // refusal without inventing duration, usage or a stopped-agent label.
-  if (cloudAdmission) {
-    if (cloudAdmission.kind === "waiting" || retrying || isInterruptedTurn(turn, fallbackStopReason)) return null;
-    return <TurnFailureCard
-      failure={{ kind: "cloud-admission", message: cloudAdmission.message, newChatAllowed: false }}
-      cloudAdmission={cloudAdmission}
-      folder={folder}
-      agentId={admission?.agentId ?? agentId}
-      readOnly={readOnly}
-      onRetry={!readOnly && isLastTurn ? onRetry : undefined}
-    />;
-  }
-
   const durationMs = turnFooterDuration(turn, events, startedAt);
   // File pills are deliberately disk-authoritative. A rendered tool call is a
   // proposal, not proof that anything landed (permission may be denied, a tool
@@ -703,7 +681,7 @@ export const TurnFooter = memo(function TurnFooter({
             )}
           </IconButton>
         </Tooltip>
-        {!readOnly && (
+        {!readOnly && (onFork || checkpoints) && (
           <DropdownMenu>
             <Tooltip label="Turn actions">
               <DropdownMenuTrigger asChild>
@@ -743,18 +721,20 @@ export const TurnFooter = memo(function TurnFooter({
                   Fork to new tab
                 </DropdownMenuItem>
               )}
-              <DropdownMenuItem
-                disabled={resetting}
-                onSelect={() => {
-                  // Defer so the menu finishes closing (and returns focus) before
-                  // the dialog mounts and traps focus — avoids the Radix
-                  // menu→dialog race that would otherwise dismiss the dialog.
-                  window.setTimeout(() => setConfirmOpen(true), 0);
-                }}
-              >
-                <RotateCcw className="size-3.5" />
-                Reset to this point
-              </DropdownMenuItem>
+              {checkpoints && (
+                <DropdownMenuItem
+                  disabled={resetting}
+                  onSelect={() => {
+                    // Defer so the menu finishes closing (and returns focus) before
+                    // the dialog mounts and traps focus — avoids the Radix
+                    // menu→dialog race that would otherwise dismiss the dialog.
+                    window.setTimeout(() => setConfirmOpen(true), 0);
+                  }}
+                >
+                  <RotateCcw className="size-3.5" />
+                  Reset to this point
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}

@@ -2,9 +2,7 @@ import { EventEmitter } from "node:events";
 import type pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PostgresSecurityEventBroker } from "./security-events.js";
-import { startCloudWorkerNotifications } from "./cloud-workspaces/worker-notifications.js";
-import { CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL, startCloudEngineCheckpointHintNotifications } from "./cloud-workspaces/engine-checkpoint-hints.js";
-import { COMPUTER_TEMPLATE_RETENTION_CHANNEL, CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/computer-template-retention.js";
+import { startWorkerNotifications } from "./worker-notifications.js";
 import { postgresNotificationSubscription } from "./postgres-notifications.js";
 
 const organization = "11111111-1111-4111-8111-111111111111";
@@ -18,18 +16,10 @@ function fixture() {
   const pool = { connect } as unknown as pg.Pool;
   const broker = new PostgresSecurityEventBroker(pool), security = vi.fn();
   broker.subscribe(security);
-  const workos = vi.fn(), hints = { notify: vi.fn(), notifyAll: vi.fn() }, warn = vi.fn();
-  const retention = new CloudComputerTemplateRetentionWorker(pool, {
-    accountScope: "synthetic", billingOrg: "synthetic",
-    journal: { find: vi.fn(), state: vi.fn(), deletion: vi.fn() },
-    client: { request: vi.fn() }, logger: { warn },
-  });
-  const sweep = vi.spyOn(retention, "tick").mockResolvedValue(0);
-  const stopWorker = startCloudWorkerNotifications(pool, { workos }, { warn });
-  const stopHints = startCloudEngineCheckpointHintNotifications(pool, hints, { warn });
-  const stopRetention = retention.start(pool);
-  const stop = async () => { await Promise.all([stopWorker(), stopHints(), stopRetention(), broker.stop()]); };
-  return { clients, connect, pool, broker, security, workos, hints, sweep, warn, stopWorker, stopHints, stopRetention, stop };
+  const workos = vi.fn(), sweep = vi.fn(), warn = vi.fn();
+  const stopWorker = startWorkerNotifications(pool, { workos, security: sweep }, { warn });
+  const stop = async () => { await Promise.all([stopWorker(), broker.stop()]); };
+  return { clients, connect, pool, broker, security, workos, sweep, warn, stopWorker, stop };
 }
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -39,14 +29,13 @@ describe("shared PostgreSQL notifications", () => {
     try {
       await f.broker.start();
       await vi.advanceTimersByTimeAsync(0);
-      f.workos.mockClear(); f.hints.notifyAll.mockClear(); f.warn.mockClear();
+      f.workos.mockClear(); f.warn.mockClear();
       const statements = f.clients[0]!.query.mock.calls.length;
       await vi.advanceTimersByTimeAsync(10 * 60_000 + 1_000);
       expect(f.connect).toHaveBeenCalledOnce();
       expect(f.clients[0]!.release).not.toHaveBeenCalled();
       expect(f.broker.healthy()).toBe(true);
       expect(f.workos).not.toHaveBeenCalled();
-      expect(f.hints.notifyAll).not.toHaveBeenCalled();
       expect(f.warn).not.toHaveBeenCalled();
       expect(f.clients[0]!.query).toHaveBeenCalledTimes(statements);
     } finally { await f.stop(); }
@@ -85,8 +74,7 @@ describe("shared PostgreSQL notifications", () => {
     try {
       await f.broker.start();
       await vi.advanceTimersByTimeAsync(0);
-      info.mockClear(); f.workos.mockClear(); f.hints.notifyAll.mockClear();
-      const old = f.clients[0]!;
+      info.mockClear(); f.workos.mockClear(); const old = f.clients[0]!;
       old.emit("error", new Error("synthetic private idle close")); old.emit("end");
       f.connect.mockRejectedValueOnce(new Error("synthetic private reconnect failure"));
       await vi.advanceTimersByTimeAsync(999);
@@ -108,7 +96,6 @@ describe("shared PostgreSQL notifications", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(info).toHaveBeenCalledExactlyOnceWith("[database] notification listener restored");
       expect(f.workos).toHaveBeenCalledOnce();
-      expect(f.hints.notifyAll).toHaveBeenCalledOnce();
       expect(f.broker.healthy()).toBe(false);
       old.emit("error", new Error("synthetic late socket error"));
       await vi.advanceTimersByTimeAsync(30_000);
@@ -118,19 +105,18 @@ describe("shared PostgreSQL notifications", () => {
     } finally { await f.stop(); }
   });
 
-  it("serves all four consumers through one checked-out connection", async () => {
+  it("serves all remaining consumers through one checked-out connection", async () => {
     const f = fixture();
     try {
       await f.broker.start();
       await vi.advanceTimersByTimeAsync(0);
       expect(f.connect).toHaveBeenCalledTimes(1);
       const sql = f.clients[0]!.query.mock.calls.map(([text]) => text).join("; ");
-      for (const channel of ["zeros_account_maintenance_work", "zeros_security_event", CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL, COMPUTER_TEMPLATE_RETENTION_CHANNEL]) {
+      for (const channel of ["zeros_account_maintenance_work", "zeros_security_event", "zeros_security_publication_work"]) {
         expect(sql).toContain(`LISTEN ${channel}`);
       }
       expect(f.broker.healthy()).toBe(true);
       expect(f.workos).toHaveBeenCalledOnce();
-      expect(f.hints.notifyAll).toHaveBeenCalledOnce();
     } finally { await f.stop(); }
     expect(f.clients[0]!.release).toHaveBeenCalledExactlyOnceWith(true);
     expect(vi.getTimerCount()).toBe(0);
@@ -141,21 +127,19 @@ describe("shared PostgreSQL notifications", () => {
     try {
       await f.broker.start();
       await vi.advanceTimersByTimeAsync(0);
-      f.workos.mockClear(); f.hints.notify.mockClear(); f.sweep.mockClear(); f.security.mockClear();
+      f.workos.mockClear(); f.sweep.mockClear(); f.security.mockClear();
       const connection = f.clients[0]!;
       connection.emit("notification", { channel: "zeros_account_maintenance_work", payload: "private" });
-      connection.emit("notification", { channel: COMPUTER_TEMPLATE_RETENTION_CHANNEL, payload: "invalid" });
+      connection.emit("notification", { channel: "zeros_security_publication_work", payload: "invalid" });
       connection.emit("notification", { channel: "unknown", payload: "" });
       expect(f.workos).not.toHaveBeenCalled();
       expect(f.sweep).not.toHaveBeenCalled();
       expect(f.security).not.toHaveBeenCalled();
       connection.emit("notification", { channel: "zeros_account_maintenance_work", payload: "" });
-      connection.emit("notification", { channel: CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL, payload: `${organization}:1` });
-      connection.emit("notification", { channel: COMPUTER_TEMPLATE_RETENTION_CHANNEL, payload: organization });
+      connection.emit("notification", { channel: "zeros_security_publication_work", payload: "" });
       connection.emit("notification", { channel: "zeros_security_event", payload: "" });
       expect(f.workos).toHaveBeenCalledOnce();
-      expect(f.hints.notify).toHaveBeenCalledExactlyOnceWith(`${organization}:1`);
-      expect(f.sweep).toHaveBeenCalledExactlyOnceWith(organization);
+      expect(f.sweep).toHaveBeenCalledOnce();
       expect(f.security).toHaveBeenCalledOnce();
       await f.stopWorker();
       expect(connection.release).not.toHaveBeenCalled();
@@ -171,15 +155,14 @@ describe("shared PostgreSQL notifications", () => {
     try {
       await f.broker.start();
       await vi.advanceTimersByTimeAsync(0);
-      f.workos.mockClear(); f.hints.notifyAll.mockClear(); f.sweep.mockClear(); f.security.mockClear();
+      f.workos.mockClear(); f.sweep.mockClear(); f.security.mockClear();
       f.clients[0]!.emit("error", new Error("synthetic disconnect"));
       expect(f.broker.healthy()).toBe(false);
       expect(f.security).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(1_000);
       expect(f.connect).toHaveBeenCalledTimes(2);
       expect(f.workos).toHaveBeenCalledOnce();
-      expect(f.hints.notifyAll).toHaveBeenCalledOnce();
-      expect(f.sweep).toHaveBeenCalledExactlyOnceWith(undefined);
+      expect(f.sweep).toHaveBeenCalledOnce();
       expect(f.broker.healthy()).toBe(false);
       await f.broker.start();
       expect(f.broker.healthy()).toBe(true);
@@ -193,7 +176,7 @@ describe("shared PostgreSQL notifications", () => {
     const pool = { connect } as unknown as pg.Pool;
     const broker = new PostgresSecurityEventBroker(pool);
     await broker.start();
-    const stopWorker = startCloudWorkerNotifications(pool, { workos: wake });
+    const stopWorker = startWorkerNotifications(pool, { workos: wake });
     try {
       await vi.advanceTimersByTimeAsync(0);
       expect(connect).toHaveBeenCalledOnce();
@@ -230,15 +213,14 @@ describe("shared PostgreSQL notifications", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(failed.release).toHaveBeenCalledExactlyOnceWith(true);
       expect(f.security).toHaveBeenCalledOnce();
-      expect(f.warn).toHaveBeenCalledTimes(3);
+      expect(f.warn).toHaveBeenCalledOnce();
       expect(JSON.stringify(f.warn.mock.calls)).not.toContain("private");
       expect(f.broker.healthy()).toBe(false);
       f.sweep.mockClear();
       await vi.advanceTimersByTimeAsync(1_000);
       expect(f.connect).toHaveBeenCalledTimes(2);
       expect(f.workos).toHaveBeenCalledOnce();
-      expect(f.hints.notifyAll).toHaveBeenCalledOnce();
-      expect(f.sweep).toHaveBeenCalledExactlyOnceWith(undefined);
+      expect(f.sweep).toHaveBeenCalledOnce();
       expect(f.broker.healthy()).toBe(false);
     } finally { await f.stop(); }
   });
@@ -272,7 +254,7 @@ describe("shared PostgreSQL notifications", () => {
       return { rows: [] };
     });
     const wake = vi.fn();
-    const stopWorker = startCloudWorkerNotifications(pool, { workos: wake });
+    const stopWorker = startWorkerNotifications(pool, { workos: wake });
     await vi.advanceTimersByTimeAsync(0);
     await stopWorker();
     acknowledge();
@@ -291,18 +273,17 @@ describe("shared PostgreSQL notifications", () => {
     let acquire!: (value: ReturnType<typeof client>) => void;
     const connection = client(), connect = vi.fn(() => new Promise<ReturnType<typeof client>>(resolve => { acquire = resolve; }));
     const pool = { connect } as unknown as pg.Pool;
-    const workos = vi.fn(), notify = vi.fn(), notifyAll = vi.fn();
-    const stopWorker = startCloudWorkerNotifications(pool, { workos });
-    const stopHints = startCloudEngineCheckpointHintNotifications(pool, { notify, notifyAll });
+    const workos = vi.fn();
+    const stopWorker = startWorkerNotifications(pool, { workos });
     await vi.advanceTimersByTimeAsync(0);
-    const stopping = Promise.all([stopWorker(), stopHints()]);
+    const stopping = Promise.all([stopWorker()]);
     acquire(connection);
     await stopping;
     expect(connect).toHaveBeenCalledOnce();
     expect(connection.release).toHaveBeenCalledExactlyOnceWith(true);
     expect(connection.query).not.toHaveBeenCalled();
     expect(workos).not.toHaveBeenCalled();
-    expect(notifyAll).not.toHaveBeenCalled();
+
     expect(vi.getTimerCount()).toBe(0);
   });
 

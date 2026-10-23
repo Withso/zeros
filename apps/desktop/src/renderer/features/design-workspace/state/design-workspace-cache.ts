@@ -25,8 +25,6 @@ import {
   designDeletePage,
   designFrame,
   designInsertAsset,
-  designUploadAsset,
-  type CloudDesignAssetUploadInput,
   designFoundationOpen,
   designHistory,
   designRenameFrame,
@@ -1509,21 +1507,6 @@ export async function appendDesignNodeHtmlCached(
       },
     ),
   );
-}
-
-/** Uploads have the same pending-write lane and peer refresh behavior as
- * canvas edits, but are never automatically replayed after a lost reply. */
-export async function uploadDesignAssetCached(workspaceId: string, input: CloudDesignAssetUploadInput): Promise<DesignMutationResultWire> {
-  if (!isCloudWorkspace(workspaceId)) throw new Error("Image upload requires a cloud workspace.");
-  return runLocalDesignMutation(workspaceId, async () => {
-    const sourceVersion = resolveLocalFrameSourceVersion(workspaceId, input.frame, input.sourceVersion);
-    const result = await designUploadAsset(workspaceId, { ...input, sourceVersion });
-    recordLocalFrameGeneration(workspaceId, input.frame, sourceVersion,
-      result.snapshot.frames.find(frame => frame.file === input.frame)?.sourceVersion);
-    const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
-    settleFoundationMutation(workspaceId, input.frame, snapshot, result.foundationRevision);
-    return result.mutation;
-  });
 }
 
 export async function insertDesignAssetCached(

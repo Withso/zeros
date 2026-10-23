@@ -43,14 +43,7 @@ import { exportDesignPng } from "../../platform/design";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { openDesignFramePreview } from "../../platform/bridge/design-context-bridge";
 import { shellOpenUrl } from "../../platform/app";
-import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
-import { cloudWorkspaceCanEdit, useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
-import { useWorkspaceStore, workbenchScopeForFolder } from "../../state/workspace-store";
-import { defaultScopeFor } from "../../shell/workbench/tab-model";
-import { planBrowserOpen } from "../../shell/workbench/use-open-browser";
-import { getOrganizationStoreGeneration } from "../team/team-store";
-import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { cn } from "../../shared/ui/cn";
 import {
   Button,
@@ -966,24 +959,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   );
 });
 
-export function DesignInspector(props: DesignInspectorProps) {
-  return isCloudWorkspace(props.workspaceId)
-    ? <CloudDesignInspector {...props} />
-    : <DesignInspectorContent {...props} />;
-}
-
-function CloudDesignInspector(props: DesignInspectorProps) {
-  const enabled = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(props.workspaceId)?.organizationId);
-  const canEdit = useCloudWorkspaceCanEdit(props.workspaceId ?? undefined);
-  return <DesignInspectorContent {...props} previewAccess={{
-    enabled,
-    allowed: enabled && canEdit && !!props.workspaceId && workspacePreviewAvailable(props.workspaceId),
-    account: getOrganizationStoreGeneration(),
-  }} />;
-}
-
-// Local inspection has no dependency on cloud account discovery or permissions.
-function DesignInspectorContent({
+export function DesignInspector({
   workspaceId,
   pages,
   activePageId,
@@ -1002,20 +978,17 @@ function DesignInspectorContent({
   motionProperties,
   onOpenMotionTimeline,
   zoomActionsRef,
-  previewAccess,
-}: DesignInspectorProps & { previewAccess?: { enabled: boolean; allowed: boolean; account: number } }) {
-  const cloudPreview = isCloudWorkspace(workspaceId);
+}: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
-  const cloudPreviewsEnabled = previewAccess?.enabled === true;
-  const previewAllowed = !cloudPreview || previewAccess?.allowed === true;
-  const previewAccount = previewAccess?.account ?? 0;
+  // Cloud workspaces have no Design preview; the control stays visible and inert.
+  const previewAllowed = !isCloudWorkspace(workspaceId);
   const previewDirectoryId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
   );
   const previewOwner = useMemo(() => ({
     active, workspaceId, directoryId: previewDirectoryId,
-    file: frame?.file, frameId: frame?.frameId, previewAllowed, previewAccount,
-  }), [active, workspaceId, previewDirectoryId, frame?.file, frame?.frameId, previewAllowed, previewAccount]);
+    file: frame?.file, frameId: frame?.frameId,
+  }), [active, workspaceId, previewDirectoryId, frame?.file, frame?.frameId]);
   const [openingPreviewOwner, setOpeningPreviewOwner] = useState<typeof previewOwner | null>(null);
   const openingPreview = openingPreviewOwner === previewOwner;
   const previewOwnerRef = useRef<typeof previewOwner | null>(previewOwner);
@@ -1036,24 +1009,10 @@ function DesignInspectorContent({
           useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId !== directoryId ||
           result.reference.workspaceId !== workspaceId || result.reference.directoryId !== directoryId ||
           result.reference.frame !== frame.file || (frame.frameId && result.reference.frameId !== frame.frameId)) return;
-      if (cloudPreview) {
-        if (getOrganizationStoreGeneration() !== previewAccount || !cloudWorkspaceCanEdit(workspaceId) ||
-            !hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspaceId)?.organizationId) || !workspacePreviewAvailable(workspaceId)) return;
-        const url = new URL(result.previewUrl);
-        if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || Number(url.port) < 1024)
-          throw new Error("Invalid cloud Design preview destination.");
-        // Keep the logical VM URL in its exact workspace's Browser tab. That
-        // tab alone obtains/revokes the existing frame-bound preview grant.
-        const scope = workbenchScopeForFolder(workspaceId);
-        const state = useWorkspaceStore.getState();
-        const current = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
-        const action = planBrowserOpen(current.tabs, current.activeId, { url: result.previewUrl, title: frame.title });
-        if (!action) throw new Error("Invalid cloud Design preview destination.");
-        state.dispatch({ ...action, scope });
-      } else await shellOpenUrl(result.previewUrl);
+      await shellOpenUrl(result.previewUrl);
     } catch (error) {
       if (previewOwnerRef.current === previewOwner)
-        toast.error("Couldn’t open frame preview", { description: cloudPreview ? "Refresh the canvas and try again." : errorMessage(error) });
+        toast.error("Couldn’t open frame preview", { description: errorMessage(error) });
     } finally {
       if (previewOwnerRef.current === previewOwner) setOpeningPreviewOwner(null);
     }
@@ -2247,11 +2206,9 @@ function DesignInspectorContent({
   const exportSection =
     frame && folder && (frameSelected || selectedNodeId) ? (
       <InspectorSection title="Export" data-design-export-section="">
-        {(!cloudPreview || cloudPreviewsEnabled) && (
-          <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active || !previewAllowed} onClick={() => void openPreview()}>
-            <ExternalLink /> Open preview
-          </Button>
-        )}
+        <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active || !previewAllowed} onClick={() => void openPreview()}>
+          <ExternalLink /> Open preview
+        </Button>
         <div className="grid grid-cols-[76px_minmax(0,1fr)] gap-2">
           <InspectorSelect
             label="Export scale"

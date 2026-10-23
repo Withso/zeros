@@ -188,11 +188,6 @@ describe("workbench status contract", () => {
       expect(adapter.empty.retryable).toMatch(/retry/i);
       for (const status of [
         { tone: "neutral" as const, message: "Archived." },
-        {
-          tone: "error" as const,
-          message: "Setup failed.",
-          action: "Open Setup" as const,
-        },
       ])
         expect(describeWorkbenchEmptyState(type, status)).toBe(
           adapter.empty.unavailable,

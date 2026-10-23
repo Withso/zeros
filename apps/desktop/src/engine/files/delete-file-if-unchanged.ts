@@ -1,12 +1,10 @@
 import fs from "node:fs";
-import path from "node:path";
 import { isSensitiveRepoPath } from "./read-file";
 import {
   assertGuardedWorkspaceFilePath,
   inspectExpectedWorkspaceContent,
   WorkspaceFileGuardError,
 } from "./file-content-guard";
-import type { QualifiedCloudFilePolicy } from "./cloud-file-policy";
 import type { WriteFileResult } from "./write-file";
 
 /** Used only to reverse the entire addition of a single exact uncommitted
@@ -15,14 +13,10 @@ export function deleteWorkspaceFileIfUnchanged(
   cwd: string,
   relative: string,
   expectedContent: string,
-  opts?: { remote?: boolean; cloudPolicy?: QualifiedCloudFilePolicy },
+  opts?: { remote?: boolean },
 ): WriteFileResult {
-  let parent:
-    | ReturnType<QualifiedCloudFilePolicy["openWriteParent"]>
-    | undefined;
   try {
-    opts?.cloudPolicy?.assertPath(relative, true);
-    if (opts?.remote && !opts.cloudPolicy && isSensitiveRepoPath(relative))
+    if (opts?.remote && isSensitiveRepoPath(relative))
       throw new WorkspaceFileGuardError(
         "Refusing to change a secret/credential file over a remote connection.",
       );
@@ -32,10 +26,6 @@ export function deleteWorkspaceFileIfUnchanged(
       relative,
       expectedContent,
     );
-    if (opts?.cloudPolicy)
-      parent = opts.cloudPolicy.openWriteParent(relative, target);
-    if (parent)
-      opts!.cloudPolicy!.assertDescriptor(parent.fd, parent.directory, true);
     if (
       inspectExpectedWorkspaceContent(cwd, relative, expectedContent) !==
       generation
@@ -43,11 +33,7 @@ export function deleteWorkspaceFileIfUnchanged(
       throw new WorkspaceFileGuardError(
         "The file changed. Refresh the diff before rejecting it.",
       );
-    fs.unlinkSync(
-      parent
-        ? `/proc/self/fd/${parent.fd}/${path.basename(parent.target)}`
-        : target,
-    );
+    fs.unlinkSync(target);
     return { kind: "success", path: relative, bytes: 0 };
   } catch (error) {
     return {
@@ -59,7 +45,5 @@ export function deleteWorkspaceFileIfUnchanged(
           ? error.message
           : "The file could not be safely removed. Refresh the diff before retrying.",
     };
-  } finally {
-    if (parent) fs.closeSync(parent.fd);
   }
 }

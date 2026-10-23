@@ -1,5 +1,8 @@
+import fs from "node:fs";
 import { spawn, execFileSync } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
+import { groupAlive, signalGroup } from "../electron-local-process-group.mjs";
 
 /** Commands receive explicit environments. Diagnostics never echo argv, env,
  * SQL input or captured provider/driver output, which can contain credentials. */
@@ -88,7 +91,7 @@ export async function withDevPortRetry(launch, { attempts = 3, signal } = {}) {
   }
 }
 
-export async function waitForHttp(url, { signal, timeout = 60_000, headers = {}, accept = response => response.ok } = {}) {
+export async function waitForHttp(url, { signal, timeout = 60_000, headers = {}, accept = response => response.ok, label = "Development service" } = {}) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     signal?.throwIfAborted();
@@ -100,11 +103,11 @@ export async function waitForHttp(url, { signal, timeout = 60_000, headers = {},
     } catch { signal?.throwIfAborted(); }
     await delay(250, undefined, { signal });
   }
-  throw new Error("Development service did not become ready before the deadline");
+  throw new Error(`${label} did not become ready before the deadline`);
 }
 
 export function waitForDevSignIn(profile, options = {}) {
-  return waitForHttp(`${profile.appOrigin}/auth/start`, { ...options, accept: response => {
+  return waitForHttp(`${profile.appOrigin}/auth/start`, { label: "Desktop sign-in through the tunnel", ...options, accept: response => {
     if (response.status !== 303) return false;
     const redirect = new URL(response.headers.get("location") ?? "");
     return redirect.origin === "https://api.workos.com" && redirect.searchParams.get("client_id") === profile.webClientId &&
@@ -112,29 +115,65 @@ export function waitForDevSignIn(profile, options = {}) {
   } });
 }
 
-/** Every service stays in the launcher's process group. An unexpected service
- * exit aborts readiness and tears down the stack; no stale API is accepted. */
+/** Own each service's process group, including descendants whose wrapper has
+ * exited. An unexpected exit aborts readiness; it never proves tree cleanup. */
 export class DevelopmentProcesses {
   children = new Set();
   controller = new AbortController();
   stopping = false;
-  start(label, command, args, options) {
+  stopPromise;
+  grouped = process.platform !== "win32";
+  constructor({ shutdownGraceMs = 20_000, killGraceMs = 5000 } = {}) {
+    this.shutdownGraceMs = shutdownGraceMs;
+    this.killGraceMs = killGraceMs;
+  }
+  start(label, command, args, { logFile, ...options } = {}) {
     if (this.stopping) throw new Error("Development launch was cancelled");
-    const child = spawn(command, args, { ...options, stdio: options.stdio ?? "ignore" });
+    // A service's own output stays in a private log; the previous run's is kept once.
+    let log;
+    if (logFile) {
+      if (fs.existsSync(logFile)) fs.renameSync(logFile, logFile.replace(/\.log$/, ".previous.log"));
+      log = fs.openSync(logFile, "a", 0o600);
+    }
+    let child;
+    try { child = spawn(command, args, { ...options, detached: this.grouped,
+      stdio: log === undefined ? options.stdio ?? "ignore" : ["ignore", log, log] }); }
+    finally { if (log !== undefined) fs.closeSync(log); }
     this.children.add(child);
     child.once("error", () => this.controller.abort(new Error(`${label} could not start`)));
     child.once("exit", () => {
-      this.children.delete(child);
       if (!this.stopping) this.controller.abort(new Error(`${label} exited; restart Zeros Dev`));
     });
     return child;
   }
-  async stop() {
-    if (this.stopping) return;
+  stop() {
+    if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
-    for (const child of this.children) child.kill("SIGTERM");
-    const deadline = Date.now() + 20_000;
-    while (this.children.size && Date.now() < deadline) await delay(100);
-    for (const child of this.children) child.kill("SIGKILL");
+    this.stopPromise = (async () => {
+      const pending = () => {
+        for (const child of this.children) {
+          const running = child.pid && ((child.exitCode === null && child.signalCode === null) ||
+            this.grouped && groupAlive(child.pid));
+          // Once confirmed gone, never signal this PID again on a later stop.
+          if (!running) this.children.delete(child);
+        }
+        return this.children.size > 0;
+      };
+      const signal = name => {
+        for (const child of this.children) {
+          if (this.grouped) signalGroup(child.pid, name);
+          else child.kill(name);
+        }
+      };
+      const wait = async grace => {
+        const deadline = performance.now() + grace;
+        while (pending() && performance.now() < deadline) await delay(50);
+      };
+      if (!pending()) return;
+      signal("SIGTERM"); await wait(this.shutdownGraceMs);
+      if (pending()) { signal("SIGKILL"); await wait(this.killGraceMs); }
+      if (pending()) throw new Error("Development shutdown could not be confirmed; process ownership and existing state were preserved");
+    })();
+    return this.stopPromise;
   }
 }

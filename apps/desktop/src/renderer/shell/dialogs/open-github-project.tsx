@@ -36,7 +36,7 @@ import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { getActiveOrganizationSnapshot, getOrganizationStoreGeneration, useActiveOrganization, useTeams } from "../../features/team/team-store";
 import { parseRemote } from "../pr/github-url";
 import { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
-import { useCloudCreateSource } from "../dispatcher/cloud-create";
+import { useCloudCreateAvailability } from "../dispatcher/cloud-create";
 import { CloudComputerV2CreateNotice, useCloudComputerV2CreateGate } from "../../features/settings/cloud-computer-v2-create-gate";
 import { acceptCloudWorkspaceDocument, cloudProjectForFolder } from "../../state/cloud-workspace-catalog";
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
@@ -98,11 +98,19 @@ function ScopedOpenGithubProjectDialog({
   const organization = useActiveOrganization();
   const cloud = Boolean(organization && !organization.isPersonal);
   const source = useMemo(() => parseRemote(url.trim()), [url]);
-  const createSource = useCloudCreateSource(source, open && cloud);
+  const availability = useCloudCreateAvailability(open && cloud);
   const computer = useCloudComputerV2CreateGate(open && cloud);
-  const cloudReason = cloud ? computer.reason ?? createSource.reason : null;
+  // v2 forks the organization's live Cloud Computer, so only a repository it
+  // has installed can become a cloud workspace.
+  const installed = source?.host === "github.com"
+    ? computer.repositories?.find(row => row.id === `${source.owner}/${source.repo}`.toLowerCase()) ?? null
+    : null;
+  const cloudReason = cloud
+    ? availability.reason ?? computer.reason ??
+      (source?.host === "github.com" && computer.repositories && !installed ? "Add this repository to your Cloud Computer first." : null)
+    : null;
   const dispatch = useWorkspaceDispatch();
-  const cloudIntent = useRef<{ fingerprint: string; key: string; repository: Parameters<typeof createCloudWorkspaceDocument>[0]["repository"] } | null>(null);
+  const cloudIntent = useRef<{ fingerprint: string; key: string; repository: { owner: string; name: string } } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -136,17 +144,13 @@ function ScopedOpenGithubProjectDialog({
         if (source?.host !== "github.com") throw new Error("Choose a GitHub repository.");
         const fingerprint = JSON.stringify([epoch, owner.id, source.owner.toLowerCase(), source.repo.toLowerCase()]);
         if (cloudIntent.current?.fingerprint !== fingerprint) {
-          const options = createSource.options.data;
-          if (!options?.configured) throw new Error("Cloud creation is not enabled for this environment.");
-          if (!options.repository || !options.installations[0]) throw new Error("Connect the GitHub App to this repository in Settings → Integrations.");
-          cloudIntent.current = { fingerprint, key: crypto.randomUUID(), repository: {
-            forge: "github.com", owner: options.repository.owner, name: options.repository.name,
-            revision: `refs/heads/${options.repository.defaultBranch}`, githubInstallationId: options.installations[0].id,
-          } };
+          if (!installed) throw new Error("Add this repository to your Cloud Computer first.");
+          // No base branch: the server starts from the branch its Computer installed.
+          cloudIntent.current = { fingerprint, key: crypto.randomUUID(), repository: { owner: installed.owner, name: installed.name } };
         }
         const intent = cloudIntent.current;
         const workspace = await createCloudWorkspaceDocument({ organizationId: owner.id,
-          ...(owner.defaultTeamId ? { teamId: owner.defaultTeamId } : {}), repository: intent.repository, idempotencyKey: intent.key });
+          repository: intent.repository, idempotencyKey: intent.key });
         if (epoch !== getOrganizationStoreGeneration()) return;
         acceptCloudWorkspaceDocument(workspace);
         cloudIntent.current = null;
@@ -198,8 +202,8 @@ function ScopedOpenGithubProjectDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="max-w-[520px]"
-        onPointerEnter={() => { computer.warm(); createSource.warm(); }}
-        onFocus={() => { computer.warm(); createSource.warm(); }}
+        onPointerEnter={() => { computer.warm(); availability.warm(); }}
+        onFocus={() => { computer.warm(); availability.warm(); }}
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && canSubmit) {
             e.preventDefault();

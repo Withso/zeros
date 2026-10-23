@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AuthTokenContractConfig } from "../auth-token-contract.js";
-import type { CloudAgentCredentialKeys } from "../cloud-workspaces/agent-credential-envelope.js";
+import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import type { GithubConfig } from "./github.js";
 export type DevConnectionsConfig = {
   databaseUrl: string;

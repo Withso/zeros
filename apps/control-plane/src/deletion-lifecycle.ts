@@ -7,11 +7,7 @@ import type { AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { audit } from "./audit.js";
 import { withSystemTx, type Tx } from "./db.js";
-import { eraseCloudWorkspaceCollaborationIdentity } from "./cloud-workspaces/actors.js";
-import {
-  computerTemplateCleanupPending,
-  type ComputerTemplateDeletionJournal,
-} from "./cloud-workspaces/computer-template-retention.js";
+import { scheduleCloudDeletion } from "./cloud/deletion.js";
 import {
   enqueueWorkOSCommand,
   enqueueWorkOSUserDeletionCommand,
@@ -272,106 +268,19 @@ async function notify(
   );
 }
 
-async function assertPersonalHasNoCloudWorkspace(
-  tx: Tx,
-  accountId: string,
-): Promise<void> {
-  const personalOrganizations = await tx.query<{ id: string }>(
-    `SELECT id FROM organizations
-     WHERE created_by = $1 AND is_personal
-     FOR UPDATE`,
-    [accountId],
-  );
-  if (personalOrganizations.rows.length === 0) return;
-  const impossible = await tx.query<{ impossible: boolean }>(
-    `SELECT public.personal_organization_has_cloud_configuration($1)
-              AS impossible`,
-    [accountId],
-  );
-  if (impossible.rows[0]?.impossible) {
-    throw new Error("personal_cloud_workspace_invariant_violation");
-  }
+async function assertAccountCloudPurgeReady(tx: Tx, userId: string): Promise<void> {
+  const pending=await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE creator_user_id=$1 AND state<>'deleted' LIMIT 1 FOR UPDATE",[userId]);
+  if(pending.rowCount) throw new Error("account_cloud_deletion_not_verified");
 }
 
-async function assertOrganizationCloudPurgeReady(
-  tx: Tx,
-  organizationId: string,
-  consumeFencedDeletions: boolean,
-  computerTemplateJournal?: Pick<ComputerTemplateDeletionJournal, "find">,
-): Promise<void> {
-  if (
-    await computerTemplateCleanupPending(tx, organizationId, computerTemplateJournal)
-  ) {
-    throw new Error("organization_computer_template_cleanup_not_verified");
-  }
-  const retainedProviderOperation = await tx.query(
-    `SELECT 1 FROM cloud_workspace_provider_operations
-     WHERE org_id = $1 AND deleted_at IS NULL AND create_closed_at IS NULL AND lost_at IS NULL
-     LIMIT 1 FOR UPDATE`,
-    [organizationId],
-  );
-  if (retainedProviderOperation.rows[0]) {
-    throw new Error("organization_provider_deletion_not_verified");
-  }
-  const retainedWorkspace = await tx.query(
-    `SELECT 1 FROM cloud_workspaces
-     WHERE org_id = $1
-       AND (status <> 'deleted' OR data_deleted_at IS NULL)
-     LIMIT 1 FOR UPDATE`,
-    [organizationId],
-  );
-  if (retainedWorkspace.rows[0]) {
-    throw new Error("organization_cloud_deletion_not_verified");
-  }
-  const retainedBlob = await tx.query(
-    `SELECT 1 FROM workspace_blobs
-     WHERE org_id = $1 AND state <> 'deleted'
-     LIMIT 1 FOR UPDATE`,
-    [organizationId],
-  );
-  if (retainedBlob.rows[0]) {
-    throw new Error("organization_blob_deletion_not_verified");
-  }
-  const activeRotation = await tx.query(
-    `SELECT 1 FROM workspace_blob_rotation_jobs
-     WHERE org_id = $1
-       AND NOT (state IN ('succeeded', 'failed') AND reserved_bytes = 0)
-     LIMIT 1 FOR UPDATE`,
-    [organizationId],
-  );
-  if (activeRotation.rows[0]) {
-    throw new Error("organization_blob_rotation_not_terminal");
-  }
-  const retainedReservation = await tx.query(
-    `SELECT 1 FROM workspace_blob_storage_reservations
-     WHERE org_id = $1 LIMIT 1 FOR UPDATE`,
-    [organizationId],
-  );
-  if (retainedReservation.rows[0]) {
-    throw new Error("organization_blob_reservation_not_released");
-  }
-  const retainedDeletion = await tx.query(
-    `SELECT 1 FROM workspace_blob_object_deletions
-     WHERE org_id = $1
-       AND (fenced_at IS NULL OR reserved_bytes <> 0)
-     LIMIT 1 FOR UPDATE`,
-    [organizationId],
-  );
-  if (retainedDeletion.rows[0]) {
-    throw new Error("organization_blob_deletion_not_fenced");
-  }
-  if (consumeFencedDeletions) {
-    await tx.query(
-      `DELETE FROM cloud_workspace_provider_operations WHERE org_id = $1
-       AND (deleted_at IS NOT NULL OR create_closed_at IS NOT NULL OR lost_at IS NOT NULL)`,
-      [organizationId],
-    );
-    await tx.query(
-      `DELETE FROM workspace_blob_object_deletions
-       WHERE org_id = $1 AND fenced_at IS NOT NULL AND reserved_bytes = 0`,
-      [organizationId],
-    );
-  }
+async function assertOrganizationCloudPurgeReady(tx: Tx, organizationId: string): Promise<void> {
+  const pending=await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE org_id=$1 AND state<>'deleted' LIMIT 1 FOR UPDATE",[organizationId]);
+  if(pending.rowCount) throw new Error("organization_cloud_deletion_not_verified");
+  const computers=await tx.query(`SELECT 1 FROM cloud_v2_computer_builds WHERE org_id=$1 AND
+    (state IN ('queued','building') OR builder_create_pending OR operation_until IS NOT NULL
+     OR (builder_sandbox_id IS NOT NULL AND builder_deleted_at IS NULL)
+     OR snapshot_id IS NOT NULL OR snapshot_deleted_at IS NULL) LIMIT 1 FOR UPDATE`,[organizationId]);
+  if(computers.rowCount) throw new Error("organization_cloud_computer_deletion_not_verified");
 }
 
 async function insertDeletionRequest(
@@ -457,23 +366,7 @@ async function scheduleOrganizationInTransaction(
     );
   }
 
-  // Cloud provider deletion has a separate verified lifecycle. Scheduling an
-  // organization while a provider resource remains would either leak paid
-  // infrastructure or make the 30-day restore promise false.
-  const retainedWorkspace = await tx.query(
-    `SELECT 1 FROM cloud_workspaces
-     WHERE org_id = $1
-       AND (status <> 'deleted' OR data_deleted_at IS NULL)
-     LIMIT 1`,
-    [organization.id],
-  );
-  if (retainedWorkspace.rows[0]) {
-    throw new HttpError(
-      409,
-      "organization_has_cloud_workspaces",
-      "Delete every cloud workspace before scheduling organization deletion.",
-    );
-  }
+  await scheduleCloudDeletion(tx,{organizationId:organization.id});
 
   const members = await tx.query<{ user_id: string; email: string }>(
     `SELECT om.user_id, u.email
@@ -507,12 +400,6 @@ async function scheduleOrganizationInTransaction(
      WHERE id = $1
      RETURNING authorization_revision, data_revision`,
     [organization.id, request.requested_at, request.id, request.purge_after],
-  );
-  await tx.query(
-    `UPDATE cloud_workspace_endpoint_grants
-     SET revoked_at = COALESCE(revoked_at, now())
-     WHERE org_id = $1 AND revoked_at IS NULL`,
-    [organization.id],
   );
   await audit(
     tx,
@@ -784,6 +671,7 @@ async function scheduleAccount(
       });
     }
 
+    await scheduleCloudDeletion(tx,{userId:actor.id});
     const updated = await tx.query<{ auth_revision: string | number }>(
       `UPDATE users
        SET auth_status = 'deletion_pending', deleted_at = $2,
@@ -807,12 +695,6 @@ async function scheduleAccount(
           OR (account_user_id IS NULL
               AND lower(email::text) = lower($3::text))`,
       [actor.id, actor.identity.subject, actor.email],
-    );
-    await tx.query(
-      `UPDATE cloud_workspace_endpoint_grants
-       SET revoked_at = COALESCE(revoked_at, now())
-       WHERE account_user_id = $1 AND revoked_at IS NULL`,
-      [actor.id],
     );
     await enqueueWorkOSCommand(tx, {
       operation: "sessions.revoke_all",
@@ -1344,13 +1226,7 @@ function lifecycleRetryMs(attempt: number): number {
 }
 
 const ORGANIZATION_PURGE_READINESS_ERRORS = new Set([
-  "organization_computer_template_cleanup_not_verified",
-  "organization_cloud_deletion_not_verified",
-  "organization_provider_deletion_not_verified",
-  "organization_blob_deletion_not_verified",
-  "organization_blob_rotation_not_terminal",
-  "organization_blob_reservation_not_released",
-  "organization_blob_deletion_not_fenced",
+  "organization_cloud_deletion_not_verified", "account_cloud_deletion_not_verified",
 ]);
 
 /** Durable final-erasure worker. It never runs before `purge_after`; provider
@@ -1361,9 +1237,6 @@ export class DeletionLifecycleProcessor {
   private readonly workerId: string;
   private readonly logger: Pick<Console, "warn" | "error">;
   private readonly providerLockTimeoutMs: number;
-  private readonly computerTemplateJournal:
-    | Pick<ComputerTemplateDeletionJournal, "find">
-    | undefined;
 
   constructor(
     private readonly pool: pg.Pool,
@@ -1371,12 +1244,10 @@ export class DeletionLifecycleProcessor {
       workerId?: string;
       logger?: Pick<Console, "warn" | "error">;
       providerLockTimeoutMs?: number;
-      computerTemplateJournal?: Pick<ComputerTemplateDeletionJournal, "find">;
     } = {},
   ) {
     this.workerId = options.workerId ?? `deletion:${randomUUID()}`;
     this.logger = options.logger ?? console;
-    this.computerTemplateJournal = options.computerTemplateJournal;
     this.providerLockTimeoutMs = Math.max(
       1,
       Math.trunc(options.providerLockTimeoutMs ?? 30_000),
@@ -1601,9 +1472,8 @@ export class DeletionLifecycleProcessor {
 
       let commandId: string | null = null;
       if (request.target_kind === "account" && request.target_user_id) {
-        // Do not erase the provider identity while an impossible legacy row
-        // would prevent the corresponding Zeros account from finalizing.
-        await assertPersonalHasNoCloudWorkspace(tx, request.target_user_id);
+        // Keep identity and vault material until the VM lifecycle has finished.
+        await assertAccountCloudPurgeReady(tx, request.target_user_id);
         const pendingProviderCommand = await tx.query(
           `SELECT 1
            FROM workos_command_outbox command
@@ -1705,12 +1575,7 @@ export class DeletionLifecycleProcessor {
         if (!organization.rows[0]) {
           throw new Error("organization_purge_state_mismatch");
         }
-        await assertOrganizationCloudPurgeReady(
-          tx,
-          request.target_organization_id,
-          false,
-          this.computerTemplateJournal,
-        );
+        await assertOrganizationCloudPurgeReady(tx, request.target_organization_id);
         const link = await tx.query<{
           workos_organization_id: string | null;
           state: string;
@@ -1872,7 +1737,7 @@ export class DeletionLifecycleProcessor {
       }
       // Defense in depth for a row introduced after provider deletion was
       // requested through privileged maintenance or restored legacy data.
-      await assertPersonalHasNoCloudWorkspace(tx, request.target_user_id!);
+      await assertAccountCloudPurgeReady(tx, request.target_user_id!);
       const account = await tx.query<{ id: string; email: string }>(
         `SELECT id, email FROM users
          WHERE id = $1 AND auth_status = 'deletion_pending'
@@ -2048,11 +1913,6 @@ export class DeletionLifecycleProcessor {
       await tx.query(`DELETE FROM organization_members WHERE user_id = $1`, [
         request.target_user_id,
       ]);
-      await tx.query(
-        `DELETE FROM cloud_workspace_endpoint_grants
-         WHERE account_user_id = $1`,
-        [request.target_user_id],
-      );
       await tx.query(`DELETE FROM security_events WHERE user_id = $1`, [
         request.target_user_id,
       ]);
@@ -2065,7 +1925,10 @@ export class DeletionLifecycleProcessor {
          WHERE created_by = $1 AND is_personal`,
         [request.target_user_id],
       );
-      await eraseCloudWorkspaceCollaborationIdentity(tx, request.target_user_id!);
+      await tx.query("DELETE FROM cloud_v2_workspaces WHERE creator_user_id=$1 AND state='deleted'",[request.target_user_id]);
+      await tx.query("DELETE FROM cloud_agent_credentials WHERE owner_user_id=$1",[request.target_user_id]);
+      await tx.query("DELETE FROM cloud_agent_credential_mutations WHERE owner_user_id=$1",[request.target_user_id]);
+      await tx.query("DELETE FROM dev_connection_references WHERE owner_user_id=$1",[request.target_user_id]);
       await tx.query(`DELETE FROM user_identities WHERE user_id = $1`, [
         request.target_user_id,
       ]);
@@ -2177,9 +2040,7 @@ export class DeletionLifecycleProcessor {
       // prove that every coordinator-owned byte has reached a terminal,
       // fenced state. The Organization row lock also serializes this check
       // against new FK-backed detached-object identities.
-      await assertOrganizationCloudPurgeReady(
-        tx, organizationId, true, this.computerTemplateJournal,
-      );
+      await assertOrganizationCloudPurgeReady(tx, organizationId);
       const members = await tx.query<{ user_id: string; email: string }>(
         `SELECT om.user_id, u.email
          FROM organization_members om
@@ -2230,46 +2091,8 @@ export class DeletionLifecycleProcessor {
             OR ($2::text IS NOT NULL AND command.provider_object_id = $2)`,
         [organizationId, workosOrganizationId],
       );
-      // Immutable v2 records permit only this final-erasure transaction, with
-      // the organization/request and the current worker lease still locked.
-      await tx.query(
-        `SELECT set_config('app.cloud_computer_v2_purge_request_id', $1, true),
-                set_config('app.cloud_computer_v2_purge_worker_id', $2, true),
-                set_config('app.cloud_computer_v2_purge_lease_revision', $3::text, true)`,
-        [request.id, this.workerId, request.lease_revision],
-      );
-      // Sources precede generations; logs/receipts/templates precede builds;
-      // the deferred head pointers disappear before their configurations.
-      for (const table of [
-        "cloud_computer_admin_workspace_requests",
-        "cloud_computer_admin_workspaces",
-        "cloud_workspace_computer_sources",
-        "cloud_computer_build_logs",
-        "cloud_computer_v2_operations",
-        "cloud_computer_templates",
-        "cloud_computer_v2_builds",
-        "cloud_computer_v2_heads",
-        "cloud_computer_v2_config_repositories",
-        "cloud_computer_environment_refs",
-        "cloud_computer_v2_configs",
-      ]) {
-        await tx.query(`DELETE FROM ${table} WHERE org_id = $1`, [
-          organizationId,
-        ]);
-      }
-      await tx.query(
-        `SELECT public.purge_cloud_workspace_operator_configuration($1)`,
-        [request.target_organization_id],
-      );
-      await tx.query(`DELETE FROM workspace_fork_intents WHERE org_id = $1`, [
-        request.target_organization_id,
-      ]);
-      await tx.query(`DELETE FROM cloud_workspaces WHERE org_id = $1`, [
-        request.target_organization_id,
-      ]);
-      await tx.query(`DELETE FROM repositories WHERE org_id = $1`, [
-        request.target_organization_id,
-      ]);
+      await tx.query("DELETE FROM cloud_v2_workspaces WHERE org_id=$1 AND state='deleted'",[organizationId]);
+      await tx.query("SELECT public.purge_organization_entitlement_configuration($1)", [organizationId]);
       await tx.query(`DELETE FROM audit_log WHERE org_id = $1`, [
         request.target_organization_id,
       ]);

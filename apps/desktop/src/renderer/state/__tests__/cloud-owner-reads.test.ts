@@ -2,10 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { RuntimeClient } from "@/renderer/platform/bridge/ws-client";
 import { WorkspaceRuntimeClient } from "@/renderer/platform/bridge/workspace-runtime-client";
 import { bridgeWorkspaceListSnapshot } from "@/renderer/platform/bridge/workspace-bridge";
-import {
-  cloudScopedId,
-  cloudWorkspaceKey,
-} from "@/renderer/platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceKey } from "@/renderer/platform/bridge/cloud-workspace-key";
 import { subscribeChatSnapshots } from "@/renderer/state/chat-snapshot-subscription";
 import { setActiveBridge } from "@/renderer/platform/bridge/active-bridge";
 import {
@@ -38,16 +35,17 @@ it("a cloud-only history revision does not re-read Local through the persistence
       type: "WORKSPACE_RESPONSE",
       result: { chats: [localChat], chatDeletions: [] },
     } as never);
-  const history = vi.fn(async (owner: typeof target) => ({
-    chats: [
-      { id: cloudScopedId(owner, "saved"), folder: cloudWorkspaceKey(owner) },
-    ],
+  // Native mirror rows: the client scopes each to its own owner.
+  const root = "/home/user/Owner/repo";
+  const history = vi.fn(async (_owner: typeof target) => ({
+    chats: [{ id: "saved", folder: root }],
     chatDeletions: [],
     revision,
   }));
   const bridge = new WorkspaceRuntimeClient({
     open: vi.fn(),
     workspaces: () => [],
+    historyRoot: () => root,
     readHistory: history,
   });
   (bridge as unknown as { setStatus: (status: string) => void }).setStatus(

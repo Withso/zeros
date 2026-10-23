@@ -12,10 +12,11 @@ import { agentSessionHasActiveWork, BLANK, useSessionsStore } from "../sessions-
 import type { AgentSessionState } from "../use-agent-session";
 import { lastUserPrompt } from "../auth-prompt-recovery";
 import { classifyRpcError } from "../../../platform/bridge/failure";
+import { canSwitchPristineChat } from "../pristine-chat";
 
 const CHAT = "11111111-1111-4111-8111-111111111111";
 const CLOUD = "cloud://22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333";
-const REVOKED = { version: 1, actor: "agent-code", backend: "cloud-worker", state: "revoked", checkedAt: 42,
+const REVOKED = { version: 1, actor: "agent-code", backend: "zeros-srt", state: "revoked", checkedAt: 42,
   designProtection: { required: false, enforced: false, protectedDirectoryCount: 0 },
   parity: { level: "full", restrictions: [] } } as const;
 
@@ -90,7 +91,7 @@ function harness(cwd = CLOUD, chat = CHAT) {
     ...lifecycle, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey, cloudScopedId, hasBackgroundAgentWork, loadedBackgroundTaskState, agentSessionHasActiveWork,
     WorkspaceRuntimeClient: RecoveryBridge, lastUserPrompt, classifyRpcError, Error,
     reconcileChatMessagesRef: { current: reconcile },
-    closeActivityForSession, closeRouteForSession, invalidateTranscriptRequest,
+    closeActivityForSession, closeRouteForSession, invalidateTranscriptRequest, canSwitchPristineChat, BLANK,
     crypto: { randomUUID }, bridge, getStore: useSessionsStore.getState,
     cancelGenerationsRef: { current: new Map() },
     flushLocalNotificationsRef: { current: vi.fn() },
@@ -107,7 +108,7 @@ function harness(cwd = CLOUD, chat = CHAT) {
     nativeTranscriptSnapshotsRef: mapRef(), cloudFlushRef: mapRef(), queueHeldRef: mapRef(), flushBubbleRef: mapRef(),
     authPromptsRef: mapRef(), turnProducedOutputRef: mapRef(), announcedDirsRef: mapRef(), promptActivityRef: mapRef(),
     capabilityRefreshInFlightRef: mapRef(),
-    useWorkspaceStore: { getState: () => ({ chats: [{ id: chat, folder: cwd, agentId: "codex" }] }) },
+    useWorkspaceStore: { getState: () => ({ chats: [{ id: chat, folder: cwd, agentId: "codex", title: "Untitled" }] }) },
     pauseQueue: () => useSessionsStore.getState().patchSession(chat, { queuePaused: true }),
     evictUnretainedTranscripts: vi.fn(), cancelStalledAdmission: vi.fn(), notifyAgentSendFailure: vi.fn(),
   });
@@ -115,7 +116,7 @@ function harness(cwd = CLOUD, chat = CHAT) {
   return {
     bridge, gate, followUp, sendQueueRef, account, context, reconcile,
     cancel: () => (context.cancel as (id: string) => Promise<void>)(chat),
-    close: () => (context.closeSession as (id: string) => void | Promise<boolean>)(chat),
+    close: (options?: { reason: "agent-switch" }) => (context.closeSession as (id: string, options?: { reason: "agent-switch" }) => void | Promise<boolean>)(chat, options),
     dispose: () => (context.disposeAll as () => void)(),
     recover: () => (context.recoverCloudPrompt as (chat: string, turn: string) => Promise<boolean>)(chat, "turn-1"),
     slot: () => useSessionsStore.getState().sessions[chat],
@@ -125,6 +126,36 @@ function harness(cwd = CLOUD, chat = CHAT) {
 afterEach(() => {
   useSessionsStore.setState({ sessions: {}, executionToChatId: {}, pendingLocalTurns: {}, cancellingChats: new Set() });
   vi.restoreAllMocks();
+});
+
+describe("untouched cloud view retirement", () => {
+  it("clears a failed first-open view without Stop or a nonexistent execution close", () => {
+    const h = harness(); h.sendQueueRef.current.clear();
+    useSessionsStore.getState().patchSession(CHAT, { status: "failed", error: "Cloud conversation is unavailable.",
+      failure: { kind: "protocol-error", stage: "loadSession", agentId: "codex", message: "Cloud conversation is unavailable." },
+      sessionId: null, executionId: null, foregroundTurnId: null, activeTurnStartedAt: null });
+    expect(h.close({ reason: "agent-switch" })).toBeUndefined();
+    expect(h.slot()).toMatchObject({ status: "idle", sessionId: null, transcriptState: "resident", hasTranscript: false,
+      messages: [], error: null, failure: null });
+    expect(h.bridge.request).not.toHaveBeenCalled(); expect(h.bridge.send).not.toHaveBeenCalled();
+  });
+
+  it("retires a reconnecting empty view without Stop or waiting for the worker", () => {
+    const h = harness(); h.sendQueueRef.current.clear();
+    useSessionsStore.getState().patchSession(CHAT, { status: "reconnecting", foregroundTurnId: null, activeTurnStartedAt: null });
+    expect(h.close({ reason: "agent-switch" })).toBeUndefined();
+    expect(h.slot()).toMatchObject({ status: "idle", sessionId: null, transcriptState: "resident", hasTranscript: false, messages: [] });
+    expect(h.bridge.request).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "AGENT_CLOSE_SESSION", chatId: CHAT, agentId: "codex" }), expect.anything());
+    expect((h.bridge.request.mock.calls as unknown[][])[0][0]).not.toHaveProperty("userStop");
+    expect(h.bridge.send).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent-switch retirement after a Send was admitted", async () => {
+    const h = harness();
+    const closing = h.close({ reason: "agent-switch" });
+    expect(h.bridge.request).not.toHaveBeenCalled(); expect(h.bridge.send).not.toHaveBeenCalled();
+    expect(await closing).toBe(false); expect(h.slot().status).toBe("streaming");
+  });
 });
 
 describe("cloud Retry renderer reconciliation", () => {
@@ -332,16 +363,12 @@ describe("cloud Stop renderer lifetime", () => {
     expect(h.sendQueueRef.current.get(CHAT)).toEqual([h.followUp]);
   });
 
-  it.each(["snapshot", "reattachment", "running event"])("keeps the unconfirmed Stop error through a passive %s", async source => {
+  it.each(["reattachment", "running event"])("keeps the unconfirmed Stop error through a passive %s", async source => {
     const h = harness(), pending = h.cancel();
     h.gate.reject(new Error("transport lost")); await pending;
     const original = h.slot().cloudStop, error = h.slot().error, failure = h.slot().failure;
     const store = useSessionsStore.getState();
-    if (source === "snapshot") store.installCloudSnapshot(CHAT, {
-      version: 1, conversationId: CHAT, agentId: "codex", executionId: "execution-1", session: null, initialize: null,
-      activeTurn: null, messages: [], permissions: [], questions: [],
-    });
-    else if (source === "reattachment") store.setSession(CHAT, { ...BLANK, agentId: "codex", cwd: CLOUD, status: "warming" });
+    if (source === "reattachment") store.setSession(CHAT, { ...BLANK, agentId: "codex", cwd: CLOUD, status: "warming" });
     else store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "running", startedAt: 42 } });
     expect(h.slot().cloudStop).toBe(original);
     expect(h.slot().error).toBe(error); expect(h.slot().failure).toBe(failure);
@@ -479,15 +506,9 @@ describe("cloud Stop renderer lifetime", () => {
     expect(h.slot().cloudStop).toBeUndefined();
   });
 
-  it.each(["snapshot", "turn event"])("keeps the Stop clock until retirement despite a terminal %s", async source => {
+  it("keeps the Stop clock until retirement despite a terminal turn event", async () => {
     const h = harness(), pending = h.cancel(), store = useSessionsStore.getState();
-    if (source === "snapshot") store.installCloudSnapshot(CHAT, {
-      version: 1, conversationId: CHAT, agentId: "codex", executionId: "execution-1", session: null, initialize: null,
-      activeTurn: null, messages: [], permissions: [], questions: [],
-      latestTurn: { commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", conversationId: CHAT, executionId: "execution-1",
-        turnId: "turn-1", agentId: "codex", status: "cancelled", stopReason: "cancelled" },
-    });
-    else store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "cancelled", startedAt: 42 } });
+    store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "cancelled", startedAt: 42 } });
     expect(h.slot().activeTurnStartedAt).toBe(42);
     expect(showsStop(h.slot())).toBe(true);
     h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } }); await pending;

@@ -1,4 +1,4 @@
-# Desktop compatibility and preview-free cloud releases
+# Desktop compatibility
 
 ## Channel support window
 
@@ -117,41 +117,10 @@ opt-out storage, anonymous identity, disabled autocapture/session recording
 and runtime metadata remain unchanged. No PostHog project/settings writes are
 performed by this code.
 
-## First cloud release: previews off
+## Cloud capability boundary
 
-Leave `VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES` unset for the first cloud
-release. Cloud workspace Preview/Open controls, run-log preview reads,
-composer boundary-port preview controls, direct preview-grant attempts, Browser
-localhost suggestions and restored cloud preview tabs are gated off. Manual
-VM-local Browser navigation is rejected before loading an iframe. Local
-workspace previews, conversation-owned agent Browser surfaces and ordinary
-external Browser pages keep their behavior.
-
-Cloud-enabled builds no longer require preview suffixes. When supplied, the
-release validator still requires 1–8 unique, exact lowercase DNS suffixes,
-including when the cloud capability is off. A suffix alone does not provide
-routing. A later preview-enabled release must qualify matching
-`CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN`, wildcard DNS/TLS and the authenticated
-proxy before adding the public suffix to both renderer and Electron builds.
-Native development/self-host overrides remain validated; also supply the
-renderer `VITE_*` setting to expose the corresponding UI. Never weaken the
-preview origin/capability boundary to substitute a VM-local localhost URL.
-
-Independent tunnels remain intact:
-
-- `cloud_workspace_tunnel_start` / `startCloudWorkspaceTunnel` requests a
-  device- and port-scoped `kind: tunnel` grant. The broker binds only
-  `127.0.0.1`, and the SSH runtime uses pinned gateway access with OpenSSH `-L`
-  to the remote loopback port. Neither issuance nor forwarding requires a
-  preview base domain or suffix. Managed Boat uses the authenticated runtime
-  tunnel; optional explicit gateway configurations still require valid host pins.
-- Cloud engine/runtime access uses its separate admission and control-plane
-  WebSocket/SSH transport, not the preview origin. Disabling preview URLs does
-  not disable agents or runtime terminals. This does not claim a new Boat
-  application-port-forward implementation or live provider qualification.
-
-Evidence lives in `cloud-workspace-access.ts`, the main access broker/client
-and SSH runtime, and control-plane `cloud-workspaces/access.ts`: the missing
-preview-domain rejection applies only to `kind: preview`. Domain-free unit
-coverage retains tunnel calls; real SSH/provider routing remains a separate
-platform acceptance check.
+Cloud v2 hides Design, browser and simulators. Terminal, file and Git operations
+go through the control plane's connection into the worker; the retired preview
+grants, SSH access broker and desktop
+port-forwarding runtime are removed. Local browser and preview behavior stays
+with the Local engine. See [Cloud workspaces](cloud-workspaces.md).

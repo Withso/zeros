@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   parseBridgeMessage,
@@ -6,8 +6,6 @@ import {
   KNOWN_MESSAGE_TYPES,
   safeParseClientBridgeMessage,
 } from "../schemas";
-import { CloudWorkspacePresenceSchema } from "../cloud-actors";
-import { CloudAgentCredentialActualUseSchema } from "../cloud-events";
 
 const base = { id: "1", timestamp: 0 } as const;
 
@@ -20,30 +18,28 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
       expect(() => parseBridgeMessage({ ...request, chatId })).toThrow(/chatId/);
     }
   });
-  it("round-trips the engine's exact cloud credential-use envelope", () => {
-    const scope = { version: 1, mode: "boot-owner-v1", fundingScope: "workspace-roles-v1", authorityEpoch: 1,
-      organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID(),
-      bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 1 };
-    const use = CloudAgentCredentialActualUseSchema.parse({ version: 1, scope, conversationId: "chat", commandId: randomUUID(),
-      turnId: "turn", executionId: "native", nativeStage: "native_write", firstUseSequence: 2, eventSequence: 4,
-      credentialRun: { version: 1, bootId: scope.bootId, writerEpoch: scope.writerEpoch, fundingOwnerUserId: scope.fundingOwnerUserId,
-        fundingOwnerEpoch: scope.fundingOwnerEpoch, cacheRevision: 1, provider: "cursor", credentialId: randomUUID(),
-        credentialRevision: 1, connectionRevision: 1, adoptionId: randomUUID(), materialVersion: 1, displayName: "Synthetic" } });
-    const frame = { ...base, source: "engine", type: "CLOUD_AGENT_CREDENTIAL_USED", use };
-    expect(parseBridgeMessage(frame)).toEqual(frame);
-    expect(safeParseBridgeMessage(frame)).toEqual(frame);
-    expect(KNOWN_MESSAGE_TYPES).toContain("CLOUD_AGENT_CREDENTIAL_USED");
+  it.each(["CLOUD_AGENT_CREDENTIAL_USED", "GITHUB_NATIVE_GRANT_REQUEST"])("rejects the retired cloud envelope %s", type => {
+    const frame = { ...base, source: "engine", type };
+    expect(() => parseBridgeMessage(frame)).toThrow(/Unknown bridge message type/);
+    expect(safeParseBridgeMessage(frame)).toBeNull();
+    expect(KNOWN_MESSAGE_TYPES).not.toContain(type);
     expect(safeParseClientBridgeMessage(frame)).toBeNull();
   });
-  it("keeps local workspace envelopes unchanged while validating cloud presence separately", () => {
-    const local = { ...base, source: "browser", type: "WORKSPACE_REQUEST", op: "file.read",
-      params: { workspaceId: "ws_local", path: "README.md" } };
-    expect(parseBridgeMessage(local)).toEqual(local);
-    const presence = { ...local, op: "cloudPresence.update", params: { present: true } };
-    expect(parseBridgeMessage(presence)).toEqual(presence);
-    expect(CloudWorkspacePresenceSchema.parse(presence.params)).toEqual({ present: true });
-    for (const params of [{ present: "true" }, { present: true, at: 999999 }, { present: true, deviceId: "override" }])
-      expect(CloudWorkspacePresenceSchema.safeParse(params).success).toBe(false);
+  it.each([
+    { type: "WORKSPACE_REQUEST", op: "list" },
+    { type: "WORKSPACE_REQUEST", op: "workspace.create", params: { repoRoot: "/local/repo" } },
+    { type: "WORKSPACE_REQUEST", op: "git.status", params: { workspaceId: "local-worktree" } },
+    { type: "WORKSPACE_REQUEST", op: "file.read", params: { workspaceId: "ws_local", path: "README.md" } },
+    { type: "PTY_WRITE", sessionId: "local-terminal", data: "fixture" },
+  ])("keeps existing Local bridge messages unchanged: $type $op", payload => {
+    const frame = { ...base, source: "browser", ...payload };
+    expect(parseBridgeMessage(frame)).toEqual(frame);
+    expect(safeParseClientBridgeMessage(frame)).toEqual(frame);
+  });
+  it("keeps the Local protocol entrypoints", () => {
+    const manifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+    expect(manifest.exports).toMatchObject({ ".": "./src/index.ts", "./messages": "./src/messages.ts",
+      "./schemas": "./src/schemas.ts", "./containment": "./src/containment.ts" });
   });
   it("accepts DB_CHANGED (regression: was missing from KNOWN_MESSAGE_TYPES)", () => {
     expect(KNOWN_MESSAGE_TYPES).toContain("DB_CHANGED");

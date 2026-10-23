@@ -35,7 +35,6 @@ import {
 } from "./gitignore";
 import { TOKENS_SEED } from "./document-seeds";
 import { assertDesignWriteAuthorized } from "./write-authority";
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
   assertSafeDesignStoragePath as assertStoragePath,
   atomicWriteDesignStorageFile,
@@ -441,7 +440,6 @@ function applyJournal(
       assertSafeDesignStoragePath(workspace, relative + "/.zeros-validation");
       if (!existsSync(target)) {
         mkdirSync(target);
-        publishCloudWorkspacePath(target);
         syncDesignStorageDirectory(path.dirname(target));
         afterStep?.("directory:" + folder);
       }

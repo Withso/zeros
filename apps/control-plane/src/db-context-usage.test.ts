@@ -16,17 +16,9 @@ const ALLOWED: Record<string, string> = {
   "src/db.ts#withSystemStatement": "The helper itself: sets the system RLS context on the acquired client.",
   "src/db.ts#withSystemTx": "The helper itself: sets the system RLS context on the acquired client.",
   "src/app.ts#createApp": "Health and readiness probes run SELECT 1 only.",
-  "src/chaos/fault-pool.ts#faultInjectingPool":
-    "Chaos tests only: forwards connect and query to the wrapped pool unchanged, so the context helpers still run.",
   "src/postgres-notifications.ts#acquire": "Dedicated LISTEN session; it issues only LISTEN/UNLISTEN.",
   "src/workos-provider-locks.ts#connectBeforeDeadline": "Session holder for WorkOS advisory locks; it never reads tables.",
-  "src/cloud-workspaces/computer-retirement.ts#retire":
-    "Lock-pool session holds the retirement advisory lock; table access uses withSystemTx.",
-  "src/cloud-provider-evidence.ts#databaseClock": "Reads clock_timestamp() only.",
-  "src/cloud-provider-evidence.ts#readBoatInventory":
-    "Operator read-only transaction that sets app.system itself before reading the journal.",
-  "src/dev-agent-qualification.ts#inspectDevAgents":
-    "zeros_development_identity is a hosted-Dev table outside the migrations, without RLS.",
+  "src/cloud/computer.ts#withBuildLock": "Session holder for Computer build/erasure advisory locks only; table access uses separate withSystemTx connections.",
   "src/development-environment.ts#assertHostedDatabaseOwnership":
     "Reads zeros_development_identity (no RLS) and pg_roles to prove runtime privileges.",
   "src/dev-connections/bootstrap.ts#bootstrapDevConnectionDatabase":
@@ -36,10 +28,6 @@ const ALLOWED: Record<string, string> = {
   "src/dev-connections/quarantine.ts#quarantineRestoredConnections":
     "Separate dev_connections database; sets its own broker authority per transaction.",
   "src/dev-connections/store.ts#tx": "Separate dev_connections database; sets role and broker authority per transaction.",
-  "src/load-sim/harness.ts#createSimulator": "Load simulator LISTEN client on a scratch database.",
-  "src/load-sim/server-stats.ts#open": "Load simulator statistics setup on a scratch database.",
-  "src/load-sim/server-stats.ts#transactions": "Load simulator reads pg_stat views only.",
-  "src/load-sim/server-stats.ts#begin": "Load simulator resets and reads pg_stat views only.",
   "src/migrate.ts#withMigrationClient": "Migration runner on the migration-owner connection.",
   "src/migrate.ts#planMigrations": "Migration planner on the migration-owner connection.",
   "src/reset-database.ts#resetPublicSchema": "Operator database reset on the owner connection.",
@@ -47,34 +35,8 @@ const ALLOWED: Record<string, string> = {
   // Operator CLIs open their own transaction and set app.system before any
   // table access, on the pool the operator supplies.
   "src/manage-account-pro.ts#manageAccountPro": "Operator CLI; sets app.system in its own transaction.",
-  "src/manage-cloud-agent-runtime.ts#manageCloudAgentRuntime": "Operator CLI; sets app.system in its own transaction.",
-  "src/manage-cloud-capability-key.ts#manageCloudCapabilityKey":
-    "Operator CLI on the migration-owner pool; sets app.system in its own transaction.",
-  "src/manage-cloud-computer-snapshots.ts#manageCloudComputerSnapshots":
-    "Operator CLI; sets app.system in its own transaction.",
-  "src/manage-cloud-provider-absence.ts#manageCloudProviderAbsence":
-    "Operator CLI; beginProviderAttestation sets app.system in its own transaction.",
-  "src/manage-cloud-provider-loss.ts#manageCloudProviderLoss":
-    "Operator CLI; beginProviderAttestation sets app.system in its own transaction.",
-  "src/manage-cloud-owner-checkpoint-recovery.ts#manageCloudOwnerCheckpointRecovery":
-    "Owner-only CLI; sets app.system in its own transaction before table access and retains the migration-owner role for the discard receipt.",
-  "src/manage-cloud-owner-discard-delete.ts#manageCloudOwnerDiscardDelete":
-    "Owner-only CLI; sets app.system in its own transaction and requires the migration owner for one exact complete-loss Delete receipt.",
-  "src/manage-cloud-owner-existing-delete.ts#manageCloudOwnerExistingDelete":
-    "Owner-only CLI; sets app.system before table access and retains the migration owner for loss on one exact existing Delete.",
-  "src/manage-cloud-initial-delete-capture.ts#manageCloudInitialDeleteCapture":
-    "Owner-only CLI; sets app.system before table access and retains the migration owner for the first live capture on one exact accepted Delete.",
-  "src/manage-cloud-rollout-flag.ts#manageCloudRolloutFlag":
-    "Operator CLI on the migration-owner pool; sets app.system in its own transaction.",
-  "src/manage-cloud-workspace-deletion.ts#manageCloudWorkspaceDeletion":
-    "Operator CLI; sets app.system in its own transaction.",
   "src/manage-cloud-workspace-entitlement.ts#manageCloudWorkspaceEntitlement":
     "Operator CLI; sets app.system in its own transaction.",
-  "src/manage-cloud-workspace-object-rotation.ts#manageCloudWorkspaceObjectRotationRetry":
-    "Operator CLI; sets app.system in its own transaction.",
-  "src/manage-cloud-workspace-object-storage.ts#manageCloudWorkspaceObjectStorage":
-    "Operator CLI; sets app.system in its own transaction.",
-  "src/manage-cloud-workspace-quota.ts#manageCloudWorkspaceQuota": "Operator CLI; sets app.system in its own transaction.",
   "src/manage-staff.ts#manageStaffRole": "Operator CLI; sets app.system in its own transaction.",
   "src/manage-workos-provider-erasure.ts#inspectWorkOSProviderErasureReadiness":
     "Operator CLI; sets app.system in its own transaction.",

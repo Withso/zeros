@@ -21,7 +21,6 @@ import {
   authenticationTurnOutput,
   authenticationTurnState,
 } from "./auth-prompt-recovery";
-import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import type { ComposerAttachment } from "./composer-attachments";
 import type { ComposerSegment } from "./composer-editor";
 import { pickStartedAt } from "./activity-hud";
@@ -29,10 +28,10 @@ import { MessageView, type RendererContext } from "./renderers";
 import { TurnContainer, TurnPromptHeader, type EditAgentContext } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
 import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
+import { messageEditAvailable } from "./chat-feature-availability";
 import type { Turn } from "./turn-grouping";
 import type { AgentMessage, AgentSessionState, AgentTextMessage } from "./use-agent-session";
 
-const NO_EVENTS: AgentMessage[] = [];
 
 /** Handlers shared by every turn. Their identities must not change while the
  *  conversation streams; AgentChat routes each through its newest closure. */
@@ -46,7 +45,7 @@ export interface TranscriptTurnActions {
   retryTurn: (prompt: AgentTextMessage, events: AgentMessage[], newChat: boolean) => Promise<void>;
   warmRetryTranscript: (prompt: AgentTextMessage, events: AgentMessage[]) => void;
   continueTurn: () => void;
-  forkToNewTab: (messageId: string, text: string, nativeFork: boolean) => void;
+  forkToNewTab: (messageId: string, text: string) => void;
   warmForkToNewTab: (messageId: string, text: string) => void;
   signIn: () => void;
   stopWorkflow?: (taskId: string) => void;
@@ -57,10 +56,8 @@ export interface TranscriptTurnActions {
 export interface TranscriptTurnShared {
   chatId: string | null | undefined;
   folder: string | null | undefined;
-  footerAgentId: string | null | undefined;
   agentDisplayName: string;
   signInAgentId: string | null;
-  cloudAdmissionFailure: AgentSessionState["cloudAdmissionFailure"];
   surfaceActive: boolean;
   deferContent: boolean;
   scrollRoot: HTMLElement | null;
@@ -70,7 +67,6 @@ export interface TranscriptTurnShared {
   hasChatThread: boolean;
   designRole: boolean;
   /** Codex in a cloud workspace whose runtime can fork natively. */
-  nativeFork: boolean;
   setEditingMessageId: (id: string | null) => void;
   setActivePromptEl: (element: HTMLDivElement | null) => void;
   /** Renderer context without per-message streaming fields; TurnEventList
@@ -128,39 +124,26 @@ export const TranscriptTurn = memo(function TranscriptTurn({
 }: TranscriptTurnProps) {
   const { actions, ctx } = shared;
   const prompt = turn.userPrompt;
-  const cloudAdmission = useMemo(
-    () =>
-      cloudAdmissionForTurn({
-        folder: shared.folder,
-        turnId: prompt?.id,
-        recoveryFailure: prompt?.recoveryFailure,
-        current: shared.cloudAdmissionFailure,
-        agentId: shared.signInAgentId,
-      }),
-    [shared.folder, prompt, shared.cloudAdmissionFailure, shared.signInAgentId],
-  );
-  const authState = cloudAdmission
-    ? null
-    : authenticationTurnState({
-        userPrompt: prompt,
-        events: turn.events,
-        failureKind: tail?.failureKind,
-        isTail: isVisualTail,
-        inFlight: turnInFlight,
-        recovered,
-        readOnly: shared.transcriptReadOnly,
-      });
+  const authState = authenticationTurnState({
+    userPrompt: prompt,
+    events: turn.events,
+    failureKind: tail?.failureKind,
+    isTail: isVisualTail,
+    inFlight: turnInFlight,
+    recovered,
+    readOnly: shared.transcriptReadOnly,
+  });
   const authRequired = !shared.transcriptReadOnly && authState === "sign-in";
   const authStopped = authState === "stopped" || authState === "signed-in";
   const visibleEvents = useMemo(
-    () => (cloudAdmission ? NO_EVENTS : authState ? authenticationTurnOutput(turn.events) : turn.events),
-    [cloudAdmission, authState, turn.events],
+    () => (authState ? authenticationTurnOutput(turn.events) : turn.events),
+    [authState, turn.events],
   );
 
   const promptId = prompt?.id;
   const promptText = prompt?.text;
   const editable =
-    !!prompt &&
+    !!prompt && messageEditAvailable(shared.folder) &&
     !(shared.transcriptReadOnly || prompt.autoAction || prompt.localFrom || prompt.queued || turn.isSteer);
   const onEdit = useCallback(
     (editedText: string, attachments: ComposerAttachment[], segments: ComposerSegment[]) =>
@@ -180,10 +163,9 @@ export const TranscriptTurn = memo(function TranscriptTurn({
     () => actions.retryTurn(prompt!, providerEvents, true),
     [actions, prompt, providerEvents],
   );
-  const nativeFork = shared.nativeFork && isVisualTail;
   const fork = useCallback(
-    () => actions.forkToNewTab(promptId!, promptText!, nativeFork),
-    [actions, promptId, promptText, nativeFork],
+    () => actions.forkToNewTab(promptId!, promptText!),
+    [actions, promptId, promptText],
   );
   const forkIntent = useCallback(
     () => actions.warmForkToNewTab(promptId!, promptText!),
@@ -255,7 +237,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
             <TurnEventList
               events={visibleEvents}
               usageEvents={turn.providerEvents}
-              failureTurnId={!cloudAdmission && !authRequired && shared.chatId ? turn.recordedTurnId ?? undefined : undefined}
+              failureTurnId={!authRequired && shared.chatId ? turn.recordedTurnId ?? undefined : undefined}
               isActive={isActiveProviderSegment}
               isStreaming={turnInFlight && !authStopped}
               showActivity={isVisualTail}
@@ -283,8 +265,6 @@ export const TranscriptTurn = memo(function TranscriptTurn({
                 shared.chatId &&
                 ownsProviderFooter ? (
                   <TurnFooter
-                    folder={shared.folder}
-                    agentId={shared.footerAgentId}
                     readOnly={shared.readOnly}
                     surfaceActive={shared.surfaceActive}
                     chatId={shared.chatId}

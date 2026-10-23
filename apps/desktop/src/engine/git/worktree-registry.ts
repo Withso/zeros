@@ -115,7 +115,6 @@ async function registryLockKey(
     cwd,
     ["rev-parse", "--path-format=absolute", "--git-common-dir"],
     {
-      ...(opts.identity ? { identity: opts.identity } : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     },

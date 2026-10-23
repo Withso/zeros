@@ -1,5 +1,4 @@
 import type { ChangesHistory } from "@zeros/protocol/changes-history";
-import type { CloudLifecycleDeferred } from "./cloud-lifecycle-result";
 // ──────────────────────────────────────────────────────────
 // Native bindings — Git, GitHub, detach, and cross-tool IPC
 // ──────────────────────────────────────────────────────────
@@ -24,8 +23,6 @@ import type {
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
 import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
-import { bridgeCloudDesignUploadAsset, type CloudDesignAssetUploadInput } from "./bridge/design-bridge";
-export type { CloudDesignAssetUploadInput } from "./bridge/design-bridge";
 import type {
   WorkingDirectoriesWire,
   WorkspaceFileListing,
@@ -354,6 +351,9 @@ export interface PR {
   headBranch: string;
   /** Absent when connected to an older engine build. */
   headSha?: string;
+  /** owner/name of the head branch's repository: another repository for a fork
+   *  pull request, null when GitHub no longer has it, absent on older engines. */
+  headRepository?: string | null;
   mergeableState: string;
   isMergeable: boolean | null;
   /** Commits the BASE has that this PR's head doesn't (GitHub compare).
@@ -847,10 +847,6 @@ export async function designStage(workspaceId: string): Promise<{ ok: true }> {
   return bridgeDesignStage(requireBridge("stage designs"), workspaceId);
 }
 
-export async function designUploadAsset(workspaceId: string, input: CloudDesignAssetUploadInput): Promise<DesignMutationReplyWire> {
-  return bridgeCloudDesignUploadAsset(requireBridge("upload a design image"), workspaceId, input);
-}
-
 export async function designSave(workspaceId: string): Promise<{ ok: true }> {
   return bridgeDesignSave(requireBridge("validate designs"), workspaceId);
 }
@@ -954,7 +950,7 @@ export async function workspaceCreateFromBranchStatus(args: {
 export async function workspaceDelete(args: {
   workspaceId: string;
   includeBranch: boolean;
-}): Promise<void | CloudLifecycleDeferred> {
+}): Promise<void> {
   return bridgeWorkspaceDelete(requireBridge("delete the workspace"), args);
 }
 
@@ -1030,7 +1026,7 @@ export interface RestoreResult {
 export async function workspaceArchive(args: {
   workspaceId: string;
   stashUncommitted?: boolean;
-}): Promise<ArchiveResult | CloudLifecycleDeferred> {
+}): Promise<ArchiveResult> {
   return bridgeWorkspaceArchive(requireBridge("archive the workspace"), {
     stashUncommitted: true,
     ...args,

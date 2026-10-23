@@ -1,15 +1,15 @@
 import { z } from "zod";
 import { HttpError } from "../authz.js";
-import { CloudAgentModelSchema } from "../cloud-workspaces/agent-credentials.js";
+import { CloudAgentModelSchema } from "../agent-credentials/agent-credentials.js";
 import {
   CloudAgentCredentialMaterialSchema,
   parseCloudAgentCredential,
   type CloudAgentCredentialMaterial,
-} from "../cloud-workspaces/agent-credential-envelope.js";
+} from "../agent-credentials/agent-credential-envelope.js";
 import {
   parseCodexNativeCache,
   type CodexNativeAuthCache,
-} from "../cloud-workspaces/codex-auth-cache.js";
+} from "../agent-credentials/codex-auth-cache.js";
 
 export const AUDIENCE = "zeros-dev-connections-v1";
 export const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,256}$/);

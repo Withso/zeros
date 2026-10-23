@@ -2,13 +2,12 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import type { Config } from "./config.js";
-import { createReleaseIdentityRoutes, qualifiedWorkerMatrix } from "./release-identity.js";
-import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
+import { createReleaseIdentityRoutes } from "./release-identity.js";
 
 const sha = "a".repeat(40);
 const manifest = [{ name: "0001_initial.sql", checksum: `sha256:${"b".repeat(64)}` }];
 const rollbackManifest = [...manifest, { name: "0121_cloud_github_connection_authority.sql", checksum: `sha256:${"c".repeat(64)}` }];
-const config = { deploymentChannel: "alpha", databaseMaintenanceMode: false, cloudWorkspaces: null } as Config;
+const config = { deploymentChannel: "alpha", databaseMaintenanceMode: false, cloudV2: null } as Config;
 function harness(overrides: Partial<Config> = {}, ledger: Array<{ name: string; checksum: string | null; phase?: string | null }> = manifest, expected = manifest) {
   const readLedger = vi.fn(async () => ledger);
   const app = createReleaseIdentityRoutes({ ...config, ...overrides }, {} as pg.Pool, {
@@ -17,104 +16,7 @@ function harness(overrides: Partial<Config> = {}, ledger: Array<{ name: string; 
   return { app, readLedger };
 }
 describe("public release readiness", () => {
-  it.each(["beta", "production"] as const)("does not read cloud health, registry or qualification on %s", async channel => {
-    const readWorkerQualified = vi.fn(async () => { throw new Error("cloud qualification unavailable"); });
-    const readRuntimeIdentity = vi.fn(async () => { throw new Error("cloud registry unavailable"); });
-    const readHealth = vi.fn(async () => { throw new Error("cloud health unavailable"); });
-    const app = createReleaseIdentityRoutes({ ...config, deploymentChannel: channel, selectedCloudWorker: {
-      provider: "boat", imageRef: `boat:fixture@sha256:${"c".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096,
-    }, cloudRuntimePublication: { enabled: false, audience: "fixture", repository: "example/zeros", environment: channel, s3: null } }, {} as pg.Pool, {
-      sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest,
-      readWorkerQualified, readRuntimeIdentity, cloudWorkspaceHealthService: { read: readHealth },
-    });
-    const response = await app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ready: true, cloud: { enabled: false, ready: true, state: "disabled" },
-      worker: null, workerQualified: false, migrations: { state: "current" } });
-    expect(readHealth).not.toHaveBeenCalled();
-    expect(readWorkerQualified).not.toHaveBeenCalled();
-    expect(readRuntimeIdentity).not.toHaveBeenCalled();
-  });
 
-  it("adds optional v4 metadata without changing any v1 readiness field", async () => {
-    const legacy = await (await harness().app.request("/v1/release-identity")).json();
-    const runtimeV4 = { newWorkspaceProfile: "v4" as const,
-      newestApprovedBase: { baseImageId: "zeros-v2-test-base", baseCompatibilityId: `bc1-${"c".repeat(64)}`, sourceCommit: "b".repeat(40) },
-      newestRegisteredRuntime: { runtimeId: `r1-${"d".repeat(64)}`, sourceCommit: sha, revoked: false },
-      qualificationSummary: { enabledKinds: 0, mcpQualifiedKinds: 0, smokeKinds: 0 } };
-    const readRuntimeIdentity = vi.fn(async () => runtimeV4);
-    const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaceNewRuntimeProfile: "v4", cloudRuntimePublication: {
-      enabled: true, audience: "zeros-control-plane-alpha", repository: "Withso/zeros", environment: "alpha", s3: null,
-    } }, {} as pg.Pool, { sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest, readRuntimeIdentity });
-    const response = await app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ...legacy, runtimeV4 });
-    expect(readRuntimeIdentity).toHaveBeenCalledOnce();
-  });
-
-  it("omits unreadable v4 metadata without making v1 readiness depend on qualification", async () => {
-    const app = createReleaseIdentityRoutes({ ...config, cloudRuntimePublication: {
-      enabled: false, audience: "zeros-control-plane-alpha", repository: "Withso/zeros", environment: "alpha", s3: null,
-    } }, {} as pg.Pool, { sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest,
-      readRuntimeIdentity: async () => { throw new Error("https://private.example.test?token=private-sentinel"); } });
-    const response = await app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    const body = await response.json();
-    expect(body).not.toHaveProperty("runtimeV4");
-    expect(body).toMatchObject({ version: 1, ready: true });
-    expect(JSON.stringify(body).includes("private")).toBe(false);
-  });
-
-  it("does not query the runtime registry while migrations are pending", async () => {
-    const readRuntimeIdentity = vi.fn();
-    const app = createReleaseIdentityRoutes({ ...config, cloudRuntimePublication: {
-      enabled: false, audience: "zeros-control-plane-alpha", repository: "Withso/zeros", environment: "alpha", s3: null,
-    } }, {} as pg.Pool, { sourceSha: sha, readManifest: async () => manifest, readLedger: async () => [], readRuntimeIdentity });
-    expect((await app.request("/v1/release-identity")).status).toBe(503);
-    expect(readRuntimeIdentity).not.toHaveBeenCalled();
-  });
-
-  it("never treats a historical v3 image qualification as a supported worker", () => {
-    const rows = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"].map(credential_kind => ({
-      credential_kind, runtime_contract_sha256: "c".repeat(64), profile: "zeros-cloud-worker-v3", enabled: true, mcp_qualified: true }));
-    expect(qualifiedWorkerMatrix(rows)).toBe(false);
-  });
-  it("requires the enabled three-kind MCP-qualified matrix on one v4 runtime and base", () => {
-    const rows = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"].map(credential_kind => ({
-      credential_kind, runtime_id: `r1-${"c".repeat(64)}`, base_compatibility_id: `bc1-${"b".repeat(64)}`,
-      profile: "zeros-cloud-worker-v4", enabled: true, mcp_qualified: true }));
-    expect(qualifiedWorkerMatrix(rows)).toBe(true);
-    expect(qualifiedWorkerMatrix(rows.slice(1))).toBe(false);
-    for (const changed of [{ enabled: false }, { mcp_qualified: false }, { profile: "zeros-cloud-worker-v3" },
-      { runtime_id: `r1-${"d".repeat(64)}` }, { base_compatibility_id: `bc1-${"e".repeat(64)}` }, { runtime_id: "invalid" }]) {
-      expect(qualifiedWorkerMatrix([{ ...rows[0], ...changed }, ...rows.slice(1)])).toBe(false);
-    }
-    expect(qualifiedWorkerMatrix(Array.from({ length: 101 }, () => rows[0]))).toBe(false);
-  });
-  it("verifies a selected worker's actual approval before customer cloud is enabled", async () => {
-    const worker = { provider: "boat" as const, imageRef: `boat:zeros-beta-fixture@sha256:${"c".repeat(64)}`,
-      sourceSha: sha, architecture: "linux/amd64" as const, storageMiB: 20480 };
-    const readWorkerQualified = vi.fn(async () => true);
-    const app = createReleaseIdentityRoutes({ ...config, selectedCloudWorker: worker }, {} as pg.Pool, {
-      sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest, readWorkerQualified,
-    });
-    const response = await app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ cloud: { enabled: false, state: "disabled" }, worker, workerQualified: true });
-    expect(readWorkerQualified).toHaveBeenCalledWith(worker.provider, worker.imageRef);
-  });
-  it("does not query or report cloud-off qualification across maintenance or an incomplete schema", async () => {
-    for (const maintenance of [false, true]) {
-      const readWorkerQualified = vi.fn(async () => true);
-      const app = createReleaseIdentityRoutes({ ...config, databaseMaintenanceMode: maintenance, selectedCloudWorker: {
-        provider: "boat", imageRef: `boat:zeros-fixture@sha256:${"c".repeat(64)}`, sourceSha: sha,
-        architecture: "linux/amd64", storageMiB: 20480 } }, {} as pg.Pool, {
-        sourceSha: sha, readManifest: async () => manifest, readLedger: async () => maintenance ? manifest : [], readWorkerQualified,
-      });
-      expect(await (await app.request("/v1/release-identity")).json()).toMatchObject({ ready: false, workerQualified: false });
-      expect(readWorkerQualified).not.toHaveBeenCalled();
-    }
-  });
   it("reports a verified exact identity without authentication and shares polls", async () => {
     const { app, readLedger } = harness();
     const [a, b] = await Promise.all([app.request("/v1/release-identity"), app.request("/v1/release-identity")]);
@@ -194,18 +96,13 @@ describe("public release readiness", () => {
     expect(await response.json()).toMatchObject({ ready: false, maintenance: true, migrations: { state: "pending" } });
   });
   it("coalesces a hundred anonymous polls even with different query strings", async () => {
-    const readLedger = vi.fn(async () => manifest), readWorkerQualified = vi.fn(async () => true);
-    const read = vi.fn(async () => ({ enabled: true, backgroundWorkers: "enabled" as const, setupExecution: "enabled" as const,
-      durability: "enabled" as const, outboxDelivery: "retained" as const, operationalState: "healthy" as const, reasons: [] }));
-    const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaces: {
-      provider: "boat", imageRef: `boat:zeros-fixture@sha256:${"c".repeat(64)}`, sourceCommit: sha,
-      architecture: "linux/amd64", storageMiB: 4096,
-    } as NonNullable<Config["cloudWorkspaces"]> }, {} as pg.Pool, {
-      sourceSha: sha, readManifest: async () => manifest, readLedger, readWorkerQualified, cloudWorkspaceHealthService: { read },
+    const readLedger = vi.fn(async () => manifest);
+    const app = createReleaseIdentityRoutes({ ...config, cloudV2: {} as NonNullable<Config["cloudV2"]> }, {} as pg.Pool, {
+      sourceSha: sha, readManifest: async () => manifest, readLedger,
     });
     const responses = await Promise.all(Array.from({ length: 100 }, (_, n) => app.request(`/v1/release-identity?uncached=${n}`)));
     expect(responses.every(response => response.status === 200)).toBe(true);
-    expect(readLedger).toHaveBeenCalledOnce(); expect(read).toHaveBeenCalledOnce(); expect(readWorkerQualified).toHaveBeenCalledOnce();
+    expect(readLedger).toHaveBeenCalledOnce();
   });
   it("rejects checksum drift and never reflects ledger data or driver errors", async () => {
     const { app } = harness({}, [{ name: "postgres://private", checksum: "secret" }]);
@@ -216,12 +113,7 @@ describe("public release readiness", () => {
       readManifest: async () => manifest, readLedger: async () => { throw new Error("sensitive-driver-message"); } });
     expect(await (await failed.request("/v1/release-identity")).text()).not.toContain("sensitive");
   });
-  it("never calls an enabled but unmeasured cloud subsystem ready", async () => {
-    const { app } = harness({ cloudWorkspaces: { provider: "boat", apiKey: "never-public" } as NonNullable<Config["cloudWorkspaces"]> });
-    const response = await app.request("/v1/release-identity");
-    expect(response.status).toBe(503);
-    expect(await response.text()).not.toContain("never-public");
-  });
+
   it("exposes controlled state and rejects unknown source identity", async () => {
     const app = createReleaseIdentityRoutes(config, {} as pg.Pool, {
       sourceSha: "untrusted\nvalue", readManifest: async () => manifest, readLedger: async () => [],
@@ -229,207 +121,5 @@ describe("public release readiness", () => {
     });
     expect(await (await app.request("/v1/release-identity")).json()).toMatchObject({ ready: false, sourceSha: null, migrations: { state: "controlled" } });
   });
-  it.each(["boat"] as const)("reports only the public %s worker tuple after cloud readiness", async provider => {
-    const imageRef = provider === "boat" ? `boat:zeros-fixture@sha256:${"c".repeat(64)}` : "11111111-1111-4111-8111-111111111111";
-    const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaces: {
-      provider, imageRef, sourceCommit: sha, architecture: "linux/amd64", storageMiB: 4096, apiKey: "private-fixture-key",
-    } as NonNullable<Config["cloudWorkspaces"]> }, {} as pg.Pool, {
-      sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest,
-      readWorkerQualified: async (actualProvider, actualImage) => {
-        expect(actualProvider).toBe(provider); expect(actualImage).toBe(imageRef); return true;
-      },
-      cloudWorkspaceHealthService: { read: async () => ({ enabled: true, backgroundWorkers: "enabled", setupExecution: "enabled", durability: "enabled",
-        outboxDelivery: "retained", operationalState: "healthy", reasons: ["private-diagnostic"] }) },
-    });
-    const response = await app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    const body = await response.json();
-    expect(body.worker).toEqual({ provider, imageRef, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 });
-    expect(body.workerQualified).toBe(true);
-    expect(JSON.stringify(body)).not.toContain("private");
-  });
-  it("does not present a configured image as qualified when approval is missing or unreadable", async () => {
-    for (const unavailable of [false, true]) {
-      const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaces: {
-        provider: "boat", imageRef: `boat:zeros-fixture@sha256:${"c".repeat(64)}`, sourceCommit: sha,
-        architecture: "linux/amd64", storageMiB: 4096,
-      } as NonNullable<Config["cloudWorkspaces"]> }, {} as pg.Pool, {
-        sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest,
-        readWorkerQualified: async () => { if (unavailable) throw new Error("private-owner-row"); return false; },
-        cloudWorkspaceHealthService: { read: async () => ({ enabled: true, backgroundWorkers: "enabled", setupExecution: "enabled",
-          durability: "enabled", outboxDelivery: "enabled", operationalState: "healthy", reasons: [] }) },
-      });
-      const body = await (await app.request("/v1/release-identity")).json();
-      expect(body.workerQualified).toBe(false);
-      expect(JSON.stringify(body)).not.toContain("private-owner-row");
-    }
-  });
-});
 
-describe("readiness with deferred retired Boat deletions", () => {
-  const health = { enabled: true as const, backgroundWorkers: "enabled" as const, setupExecution: "enabled" as const,
-    durability: "enabled" as const, outboxDelivery: "retained" as const, operationalState: "degraded" as const,
-    reasons: ["deletion_intent_stalled"] };
-  function deferred(overrides: Partial<Config> = {}, measured: CloudWorkspaceHealth = health, eligible = true, qualified = true,
-    controlPlaneReady?: boolean) {
-    const read = vi.fn(async () => measured);
-    const readForRelease = vi.fn(async () => ({ health: measured, stalledDeletionsDeferred: eligible,
-      ...(controlPlaneReady === undefined ? {} : { controlPlaneReady }) }));
-    const readWorkerQualified = vi.fn(async () => qualified);
-    const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaces: {
-      provider: "boat", imageRef: `boat:zeros-fixture@sha256:${"c".repeat(64)}`, sourceCommit: sha,
-      architecture: "linux/amd64", storageMiB: 4096,
-    } as NonNullable<Config["cloudWorkspaces"]>, ...overrides }, {} as pg.Pool, {
-      sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest,
-      readWorkerQualified, cloudWorkspaceHealthService: { read, readForRelease },
-    });
-    return { app, read, readForRelease, readWorkerQualified };
-  }
-  afterEach(() => vi.useRealTimers());
-
-  it.each(["deletion_jobs_failed", "deletion_provider_stalled", "deletion_intent_stalled", "object_deletion_stalled",
-    "provider_orphans_stalled", "lifecycle_stalled", "object_rotation_failed", "compute_usage_disagreement"])(
-    "admits a CP repair release when %s was classified as unrelated cleanup", async reason => {
-      const measured = { ...health, reasons: [reason] };
-      const test = deferred({}, measured, false, true, true);
-      const response = await test.app.request("/v1/release-identity");
-      expect(response.status).toBe(200);
-      const body = await response.json();
-      expect(body).toMatchObject({ ready: true, workerQualified: true });
-      expect(body.cloud).toEqual({ enabled: true, ready: true, state: "healthy" });
-      expect(body).not.toHaveProperty("deferredReadiness");
-      expect(body).not.toHaveProperty("controlPlaneReady");
-      expect(JSON.stringify(body)).not.toContain(reason);
-      expect(measured).toEqual({ ...health, reasons: [reason] });
-      expect(test.readWorkerQualified).toHaveBeenCalledOnce();
-    },
-  );
-
-  it.each(["setup_lease_expired", "engine_lease_expired", "access_revocation_stalled", "outbox_stalled",
-    "idle_stop_blocked", "durability_stalled", "compute_settlement_stalled", "compute_lease_expired",
-    "compute_platform_exposure", "unknown_health_signal"])(
-    "keeps %s blocking alongside cleanup even if a reader claims eligibility", async reason => {
-      const test = deferred({}, { ...health, reasons: ["deletion_jobs_failed", reason] }, false, true, true);
-      expect((await test.app.request("/v1/release-identity")).status).toBe(503);
-      expect(test.readWorkerQualified).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(["lifecycle_stalled", "object_rotation_failed"])("requires SQL to classify %s as cleanup", async reason => {
-    const test = deferred({}, { ...health, reasons: [reason] }, false, true, false);
-    expect((await test.app.request("/v1/release-identity")).status).toBe(503);
-  });
-
-  it("honors a negative CP projection even with an eligible legacy deletion deferral", async () => {
-    const test = deferred({}, health, true, true, false);
-    expect((await test.app.request("/v1/release-identity")).status).toBe(503);
-  });
-
-  it.each([{ backgroundWorkers: "paused" as const }, { setupExecution: "paused" as const }, { durability: "disabled" as const }])(
-    "keeps posture requirements on cleanup-only releases: %j", async posture => {
-      const test = deferred({}, { ...health, ...posture, reasons: ["object_deletion_stalled"] }, false, true, true);
-      expect((await test.app.request("/v1/release-identity")).status).toBe(503);
-    },
-  );
-
-  it("keeps missing worker qualification false on a cleanup-only release", async () => {
-    const test = deferred({}, { ...health, reasons: ["object_deletion_stalled"] }, false, false, true);
-    const response = await test.app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ workerQualified: false });
-    expect(test.readWorkerQualified).toHaveBeenCalledOnce();
-  });
-
-  it.each(["alpha"] as const)(
-    "stays ready on %s with degraded operational health and real qualification", async deploymentChannel => {
-      const test = deferred({ deploymentChannel });
-      const response = await test.app.request("/v1/release-identity");
-      expect(response.status).toBe(200);
-      const body = await response.json();
-      expect(body).toMatchObject({ ready: true, channel: deploymentChannel, workerQualified: true,
-        cloud: { enabled: true, ready: true, state: "healthy", operationalState: "degraded" },
-        deferredReadiness: { kind: "retired-boat-deletions" } });
-      expect(body).not.toHaveProperty("alphaReadinessException");
-      expect(test.readForRelease).toHaveBeenCalledWith();
-      expect(test.read).not.toHaveBeenCalled();
-      expect(test.readWorkerQualified).toHaveBeenCalledOnce();
-    },
-  );
-
-  it.each(["beta", "production"] as const)("keeps %s independent of cloud health and qualification", async deploymentChannel => {
-    const test = deferred({ deploymentChannel });
-    const response = await test.app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ready: true, channel: deploymentChannel,
-      worker: null, workerQualified: false, cloud: { enabled: false, ready: true, state: "disabled" } });
-    expect(test.read).not.toHaveBeenCalled();
-    expect(test.readForRelease).not.toHaveBeenCalled();
-    expect(test.readWorkerQualified).not.toHaveBeenCalled();
-  });
-
-  it("never expires while the deletion remains provider-owned", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-10-07T12:00:00.000Z"));
-    const test = deferred();
-    expect((await test.app.request("/v1/release-identity")).status).toBe(200);
-    vi.setSystemTime(new Date("2027-10-07T12:00:00.000Z"));
-    const response = await test.app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ deferredReadiness: { kind: "retired-boat-deletions" } });
-    expect(test.readForRelease).toHaveBeenCalledTimes(2);
-  });
-
-  it("keeps Local and organization local workspaces outside cloud readiness", async () => {
-    const test = deferred({ cloudWorkspaces: null });
-    const response = await test.app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    expect(await response.json()).not.toHaveProperty("deferredReadiness");
-    expect(test.readForRelease).not.toHaveBeenCalled();
-    expect(test.read).not.toHaveBeenCalled();
-  });
-
-  it("requires an eligible retirement inventory", async () => {
-    const test = deferred({}, health, false);
-    const response = await test.app.request("/v1/release-identity");
-    expect(response.status).toBe(503);
-    expect(await response.json()).not.toHaveProperty("deferredReadiness");
-    expect(test.readWorkerQualified).not.toHaveBeenCalled();
-  });
-
-  it("does not mark a healthy identity as deferred", async () => {
-    const test = deferred({}, { ...health, operationalState: "healthy", reasons: [] }, false);
-    const response = await test.app.request("/v1/release-identity");
-    expect(response.status).toBe(200);
-    const body = await response.json();
-    expect(body.cloud).toEqual({ enabled: true, ready: true, state: "healthy" });
-    expect(body).not.toHaveProperty("deferredReadiness");
-  });
-
-  it.each(["engine_lease_expired", "durability_stalled", "access_revocation_stalled", "deletion_jobs_failed", "deletion_provider_stalled"])(
-    "retains the %s blocker", async reason => {
-      const test = deferred({}, { ...health, reasons: [...health.reasons, reason] });
-      expect((await test.app.request("/v1/release-identity")).status).toBe(503);
-    },
-  );
-
-  it("never manufactures worker qualification", async () => {
-    const test = deferred({}, health, true, false);
-    const body = await (await test.app.request("/v1/release-identity")).json();
-    expect(body.workerQualified).toBe(false);
-    expect(test.readWorkerQualified).toHaveBeenCalledOnce();
-  });
-
-  it("retains maintenance and paused-worker blockers", async () => {
-    const maintenance = deferred({ databaseMaintenanceMode: true });
-    expect((await maintenance.app.request("/v1/release-identity")).status).toBe(503);
-    expect(maintenance.readForRelease).not.toHaveBeenCalled();
-    const paused = deferred({}, { ...health, backgroundWorkers: "paused" });
-    expect((await paused.app.request("/v1/release-identity")).status).toBe(503);
-  });
-
-  it.each([{ setupExecution: "paused" as const }, { durability: "disabled" as const }])(
-    "retains disabled setup and durability blockers: %j", async posture => {
-      expect((await deferred({}, { ...health, ...posture }).app.request("/v1/release-identity")).status).toBe(503);
-    },
-  );
 });

@@ -1,11 +1,9 @@
-import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import { assertCloudChannelState, HostedReceipt, HostedServicesReceipt, MigrationReceipt, PromotionError, ReleaseIdentity, requireCheck, type PromotionConfig, type Surface } from "./contracts";
 
 export type PromotionDependencies = {
   assertCurrent(): Promise<void>;
   inspect(): Promise<void>;
   betaReceipt(): Promise<void>;
-  checkWorker(): Promise<void>;
   migration(execute: boolean): Promise<unknown>;
   retarget(): Promise<void>;
   deploy(): Promise<string>;
@@ -17,14 +15,12 @@ export type PromotionDependencies = {
 /** No rollback after schema advancement. Every ambiguous mutation stops this
  * chain; a human reconciles provider state before retrying a failed run. */
 export async function promoteServices(config: PromotionConfig, deps: PromotionDependencies) {
-  if (config.requireQualifiedWorker) refuseRetiredWorkerPromotion();
   let stage = "Beta receipt";
   try {
     if (config.channel === "production") await deps.betaReceipt();
     stage = "preflight";
     await deps.assertCurrent();
     await deps.inspect();
-    await deps.checkWorker();
     stage = "migration plan";
     const plan = MigrationReceipt.parse(await deps.migration(false));
     requireCheck(plan.mode === "plan" && plan.database === config.database && plan.branch.name === config.databaseBranch, "Migration plan target mismatch");
@@ -66,13 +62,11 @@ export async function promote(config: PromotionConfig, deps: PromotionDependenci
   return { ...services, status: "success" as const };
 }
 
-export type FinalizationDependencies = Pick<PromotionDependencies, "assertCurrent" | "inspect" | "checkWorker" | "deploy" | "waitDeployment" | "waitIdentity"> & {
-  workerPromoted: boolean;
+export type FinalizationDependencies = Pick<PromotionDependencies, "assertCurrent" | "inspect" | "deploy" | "waitDeployment" | "waitIdentity"> & {
   verifyPages(surface: Surface): Promise<void>;
 };
 
 export async function finalizePromotion(config: PromotionConfig, value: unknown, deps: FinalizationDependencies) {
-  if (config.requireQualifiedWorker || deps.workerPromoted) refuseRetiredWorkerPromotion();
   let stage = "services receipt";
   try {
     const services = HostedServicesReceipt.parse(value);
@@ -89,8 +83,6 @@ export async function finalizePromotion(config: PromotionConfig, value: unknown,
     stage = "current source and provider state";
     await deps.assertCurrent(); await deps.inspect();
     for (const surface of config.surfaces) await deps.verifyPages(surface);
-    stage = "qualified worker handoff";
-    await deps.checkWorker();
     const railwayDeploymentId = services.railwayDeploymentId;
     stage = "final API readiness";
     const backend = ReleaseIdentity.parse(await deps.waitIdentity());
@@ -98,9 +90,7 @@ export async function finalizePromotion(config: PromotionConfig, value: unknown,
     requireCheck(backend.channel === config.channel && backend.sourceSha === config.sourceSha &&
       backend.migrations.head === services.backend.migrations.head && backend.migrations.expectedHead === services.backend.migrations.expectedHead &&
       backend.migrations.manifestSha256 === services.backend.migrations.manifestSha256, "Final API source or migration manifest changed after services promotion");
-    // The API must keep the exact worker tuple served at the services handoff.
-    requireCheck(backend.cloud.enabled === services.backend.cloud.enabled &&
-      JSON.stringify(backend.worker) === JSON.stringify(services.backend.worker), "The API's worker tuple changed after services promotion");
+    requireCheck(backend.cloud.enabled === services.backend.cloud.enabled, "Cloud capability changed after services promotion");
     return HostedReceipt.parse({ ...services, status: "success", runAttempt: config.runAttempt, backend, railwayDeploymentId, completedAt: new Date().toISOString() });
   } catch (error) {
     throw new PromotionError(error instanceof PromotionError ? error.message : `Hosted finalization stopped at ${stage}; no desktop publication was authorized.`);

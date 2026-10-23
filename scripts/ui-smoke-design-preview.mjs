@@ -131,58 +131,22 @@ export async function runDesignPreviewSmoke({ page, check }) {
   await page.evaluate(() => window.__designPreviewRace.visible(true));
   check("hiding Local retires a preview reply delivered in the same browser task", true);
 
+  const intentsBefore = await page.evaluate(() => window.__designPreviewRace.browserIntents.length);
   await page.evaluate(() => window.__designPreviewRace.cloud());
   await expect(open).toBeVisible();
-  await request();
-  await page.evaluate(() => window.__designPreviewRace.resolve());
-  await expect.poll(() => page.evaluate(() => window.__designPreviewRace.browsers().length)).toBe(1);
-  expect(await page.evaluate(() => window.__designPreviewRace.browsers()[0].url)).toBe("http://127.0.0.1:12345/preview/phone.html/");
-  expect(await page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
-  await request();
-  await page.evaluate(() => window.__designPreviewRace.resolve());
-  expect(await page.evaluate(() => window.__designPreviewRace.browsers().length)).toBe(1);
-  expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
-  check("cloud Open preview reuses the exact workspace Browser destination without opening Mac loopback", true);
-
-  await request();
-  await page.evaluate(() => window.__designPreviewRace.resolve({}, "https://other.example.test/preview/"));
-  expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
-  expect(await page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
-  await expect(page.getByText("Refresh the canvas and try again.", { exact: true })).toBeVisible();
-  check("cloud preview rejects a non-VM destination with short action copy", true);
-
-  await request();
-  await page.evaluate(() => window.__designPreviewRace.role(false));
-  await page.evaluate(() => window.__designPreviewRace.resolve());
   await expect(open).toBeDisabled();
-  expect(await page.evaluate(() => window.__designPreviewRace.browsers().length)).toBe(1);
-  expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
-  await page.evaluate(() => window.__designPreviewRace.role(true));
-  await request();
-  await page.evaluate(async () => {
-    window.__designPreviewRace.visible(false);
-    await window.__designPreviewRace.resolve();
-  });
+  expect(await page.evaluate(() => window.__designPreviewRace.pending())).toBe(false);
+  expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(intentsBefore);
+  expect(await page.evaluate(() => window.__designPreviewRace.browsers().length)).toBe(0);
   expect(await page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
-  expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
-  check("cloud permission loss and hiding retire pending preview intents", true);
+  check("cloud workspaces open no Design preview, workspace Browser or Mac loopback", true);
 
-  await page.evaluate(() => window.__designPreviewRace.visible(true));
-  await request();
-  await page.evaluate(() => window.__designPreviewRace.local());
-  await page.evaluate(() => window.__designPreviewRace.resolve());
-  expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
-  expect(await page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
-  await page.evaluate(() => window.__designPreviewRace.cloud());
-  await request();
   await page.evaluate(() => window.__designPreviewRace.accountChanged());
-  await page.evaluate(() => window.__designPreviewRace.resolve());
-  expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
   await page.evaluate(() => window.__designPreviewRace.local());
   await expect(open).toBeVisible();
   await expect(open).toBeEnabled();
   await request();
   await page.evaluate(() => window.__designPreviewRace.resolve());
   await expect.poll(() => page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(3);
-  check("workspace/account changes cancel cloud opens and signed-out Local still opens normally", true);
+  check("signed-out Local still opens previews normally after a cloud owner", true);
 }
