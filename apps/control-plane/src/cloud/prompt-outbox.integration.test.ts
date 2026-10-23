@@ -93,6 +93,16 @@ suite("durable cloud prompt delivery", () => {
     expect((await (await status()).json()).items[0].payload).toEqual(input);
   });
 
+  it("can refresh receipt states without reading or retransmitting saved prompt bodies", async () => {
+    const input = prompt(); expect((await submit(input)).status).toBe(201);
+    const response = await app().request(`/v1/cloud-v2/workspaces/${workspace.id}/prompts?chatId=native-chat&includePayload=false`);
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.items).toMatchObject([{ receipt: { userMessageId: input.userMessageId }, state: "queued", payload: null }]);
+    expect(JSON.stringify(result)).not.toContain("Reply with exactly");
+    expect((await (await status()).json()).items[0].payload).toEqual(input);
+  });
+
   it("orders concurrent sends per chat and does not dispatch the next before the first settles", async () => {
     const inputs = Array.from({ length: 6 }, () => prompt());
     const responses = await Promise.all(inputs.map(input => submit(input)));
@@ -303,5 +313,53 @@ suite("durable cloud prompt delivery", () => {
     expect(await store.listChats(workspace.id)).toMatchObject({ chats: [{ id: input.chatId, agentId: "codex", folder: "/home/user/example/project" }] });
     expect((await store.messageWindow(workspace.id, input.chatId, { limit: 100 })).messages).toEqual([]);
     expect((await (await status()).json()).items[0]).toMatchObject({ payload: input, state: "queued" });
+  });
+
+  it("settles a refused inbox or cold start without inventing provider acceptance", async () => {
+    const input = prompt(); await submit(input); const item = await inbox();
+    const outcome = { userMessageId: input.userMessageId, deliveryId: item.deliveryId, state: "failed" };
+    expect((await worker("outcome", { ...outcome, deliveryId: randomUUID() })).status).toBe(409);
+    expect((await worker("outcome", { ...outcome, state: "accepted" })).status).toBe(400);
+    expect((await worker("outcome", outcome)).status).toBe(200);
+    expect((await (await status()).json()).items[0]).toMatchObject({ state: "failed", payload: input });
+    await submit(prompt()); expect((await pull()).prompts[0]?.receipt.sequence).toBe("2");
+  });
+
+  it("repairs a missed terminal report from disk after reboot without permitting dispatch", async () => {
+    const input = prompt(); await submit(input); const item = await inbox(), dispatchId = randomUUID();
+    await worker("begin", { userMessageId: input.userMessageId, deliveryId: item.deliveryId, dispatchId });
+    boot = randomUUID(); await store.acceptWorkerHello(token, boot); await pull();
+    expect((await worker("outcome", { userMessageId: input.userMessageId, dispatchId: randomUUID(), state: "completed" })).status).toBe(409);
+    expect((await worker("outcome", { userMessageId: input.userMessageId, dispatchId, state: "accepted" })).status).toBe(409);
+    expect((await worker("outcome", { userMessageId: input.userMessageId, dispatchId, state: "completed" })).status).toBe(200);
+    expect((await (await status()).json()).items[0].state).toBe("completed");
+    expect((await pull()).prompts).toEqual([]);
+  });
+
+  it("offers a steering message during the preceding turn but never overtakes queued work", async () => {
+    await submit(); const item = await inbox();
+    await worker("begin", { userMessageId: item.receipt.userMessageId, deliveryId: item.deliveryId, dispatchId: randomUUID() });
+    const steer = prompt(randomUUID(), { mode: "steer" }); await submit(steer);
+    expect((await pull()).prompts[0]?.receipt.userMessageId).toBe(steer.userMessageId);
+    await submit(prompt()); await submit(prompt(randomUUID(), { mode: "steer" }));
+    expect((await pull()).prompts).toEqual([]);
+  });
+
+  it("redelivers a lost pull response promptly while excluding the current worker's confirmed inbox", async () => {
+    await submit(); const first = (await pull()).prompts[0]!;
+    const retry = await worker("pull", { waitMs: 0, held: [] });
+    expect(retry.status).toBe(200);
+    expect((await retry.json()).prompts[0]).toEqual(first);
+    const held = await worker("pull", { waitMs: 0, held: [first.receipt.userMessageId] });
+    expect((await held.json()).prompts).toEqual([]);
+  });
+
+  it("lets the current worker durably fence an older desktop's bridge Stop", async () => {
+    await submit(); await submit();
+    expect((await worker("stop", { chatId: "native-chat", throughEpoch: "0" })).status).toBe(200);
+    expect((await (await status()).json()).items.map((item: { state: string }) => item.state)).toEqual(["cancelled", "cancelled"]);
+    const next = prompt(); await submit(next);
+    await worker("stop", { chatId: "native-chat", throughEpoch: "0" });
+    expect((await pull()).prompts[0]?.receipt.userMessageId).toBe(next.userMessageId);
   });
 });

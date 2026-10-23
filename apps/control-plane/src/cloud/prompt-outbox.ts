@@ -124,16 +124,17 @@ export class CloudV2PromptOutbox {
     });
   }
 
-  async list(id: string, userId: string, chatId: string, after = "0", limit = 100): Promise<{ epoch: string; items: CloudV2PromptStatus[]; nextAfter: string | null }> {
+  async list(id: string, userId: string, chatId: string, after = "0", limit = 100, includePayload = true): Promise<{ epoch: string; items: CloudV2PromptStatus[]; nextAfter: string | null }> {
     return withSystemTx(this.pool, async tx => {
       await this.owned(tx, id, userId, false);
       const chat = (await tx.query<{ epoch: string; next_sequence: string }>("SELECT epoch::text,next_sequence::text FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2", [id, chatId])).rows[0];
       const { rows } = await tx.query<Row>(`WITH candidates AS (
-        SELECT user_message_id,sequence,payload_bytes FROM cloud_v2_prompt_outbox
+        SELECT user_message_id,sequence,CASE WHEN $6::boolean THEN payload_bytes ELSE 0 END AS payload_bytes FROM cloud_v2_prompt_outbox
         WHERE workspace_id=$1 AND chat_id=$2 AND sequence>$3 ORDER BY sequence LIMIT $4),
         bounded AS (SELECT user_message_id,sum(payload_bytes) OVER (ORDER BY sequence) AS bytes FROM candidates)
-        SELECT p.* FROM cloud_v2_prompt_outbox p JOIN bounded b USING(user_message_id)
-        WHERE p.workspace_id=$1 AND b.bytes<=$5 ORDER BY p.sequence`, [id, chatId, after, limit, this.limits.readBytes]);
+        SELECT p.receipt,p.state,p.cancel_requested,p.sequence,CASE WHEN $6::boolean THEN p.payload ELSE NULL END AS payload
+        FROM cloud_v2_prompt_outbox p JOIN bounded b USING(user_message_id)
+        WHERE p.workspace_id=$1 AND b.bytes<=$5 ORDER BY p.sequence`, [id, chatId, after, limit, this.limits.readBytes, includePayload]);
       const last = rows.at(-1)?.sequence;
       return { epoch: chat?.epoch ?? "0", items: rows.map(status), nextAfter: last && BigInt(last) < BigInt(chat?.next_sequence ?? "0") ? last : null };
     }, { consistentRead: true });
@@ -144,6 +145,18 @@ export class CloudV2PromptOutbox {
       await this.owned(tx, id, userId, true);
       if (authority?.authentication && !await securityStreamAuthority(tx, authority))
         throw new HttpError(401, "session_revoked", "Authentication is no longer current");
+      return this.stopChat(tx, id, chatId, throughEpoch);
+    });
+  }
+
+  async stopWorker(token: string, bootId: string, input: { chatId: string; throughEpoch: string }): Promise<{ chatId: string; epoch: string }> {
+    return withSystemTx(this.pool, async tx => {
+      const workspace = await this.worker(tx, token, bootId);
+      return this.stopChat(tx, workspace.id, input.chatId, input.throughEpoch);
+    });
+  }
+
+  private async stopChat(tx: Tx, id: string, chatId: string, throughEpoch: string): Promise<{ chatId: string; epoch: string }> {
       const chat = await this.chat(tx, id, chatId);
       if (BigInt(throughEpoch) > BigInt(chat.epoch)) throw new HttpError(409, "prompt_epoch_changed", "Conversation delivery changed");
       if (throughEpoch !== chat.epoch) return { chatId, epoch: chat.epoch };
@@ -155,10 +168,9 @@ export class CloudV2PromptOutbox {
         updated_at=clock_timestamp() WHERE workspace_id=$1 AND chat_id=$2 AND state IN ${PENDING}`, [id, chatId]);
       await notify(tx, id);
       return { chatId, epoch };
-    });
   }
 
-  async pull(token: string, bootId: string): Promise<CloudV2PromptPullReply> {
+  async pull(token: string, bootId: string, held?: string[]): Promise<CloudV2PromptPullReply> {
     return withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx, token, bootId), id = workspace.id;
       if (workspace.state !== "running") return { prompts: [], stops: [] };
@@ -172,13 +184,15 @@ export class CloudV2PromptOutbox {
         JOIN cloud_v2_prompt_chats c USING(workspace_id,chat_id)
         WHERE p.workspace_id=$1 AND p.state IN ('queued','inboxed') AND p.epoch=c.epoch AND p.access_epoch=$2
           AND NOT p.cancel_requested AND p.payload IS NOT NULL
-          AND (p.worker_boot_id IS DISTINCT FROM $3 OR p.lease_until IS NULL OR p.lease_until<=clock_timestamp())
+          AND ($5::text[] IS NOT NULL AND NOT p.user_message_id=ANY($5::text[]) OR $5::text[] IS NULL
+            AND (p.worker_boot_id IS DISTINCT FROM $3 OR p.lease_until IS NULL OR p.lease_until<=clock_timestamp()))
           AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox older WHERE older.workspace_id=p.workspace_id
-            AND older.chat_id=p.chat_id AND older.sequence<p.sequence AND older.state IN ${PENDING})
+            AND older.chat_id=p.chat_id AND older.sequence<p.sequence AND older.state IN ${PENDING}
+            AND (p.payload->>'mode' IS DISTINCT FROM 'steer' OR older.state IN ('queued','inboxed')))
         ORDER BY p.created_at,p.chat_id,p.sequence LIMIT 16),
         bounded AS (SELECT user_message_id,sum(payload_bytes) OVER (ORDER BY created_at,chat_id,sequence) AS bytes FROM candidates)
         SELECT p.* FROM cloud_v2_prompt_outbox p JOIN bounded b USING(user_message_id)
-        WHERE p.workspace_id=$1 AND b.bytes<=$4 ORDER BY p.created_at,p.chat_id,p.sequence`, [id, workspace.access_epoch, bootId, this.limits.readBytes])).rows;
+        WHERE p.workspace_id=$1 AND b.bytes<=$4 ORDER BY p.created_at,p.chat_id,p.sequence`, [id, workspace.access_epoch, bootId, this.limits.readBytes, held ?? null])).rows;
       const prompts: CloudV2PromptPullReply["prompts"] = [];
       for (const row of rows) {
         const deliveryId = row.worker_boot_id === bootId && row.delivery_id ? row.delivery_id : randomUUID();
@@ -229,11 +243,16 @@ export class CloudV2PromptOutbox {
     });
   }
 
-  async outcome(token: string, bootId: string, input: { userMessageId: string; dispatchId: string; state: "accepted" | "completed" | "failed" | "cancelled" | "interrupted" }): Promise<{ state: CloudV2PromptState }> {
+  async outcome(token: string, bootId: string, input: { userMessageId: string; dispatchId?: string | undefined; deliveryId?: string | undefined; state: "accepted" | "completed" | "failed" | "cancelled" | "interrupted" }): Promise<{ state: CloudV2PromptState }> {
     return withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx, token, bootId), row = await this.row(tx, workspace.id, input.userMessageId);
-      if (terminal(row.state)) return { state: row.state };
-      if (row.worker_boot_id !== bootId || row.dispatch_id !== input.dispatchId || !["dispatching", "accepted"].includes(row.state)) throw conflict();
+      // The current process may repair a saved terminal result from its old
+      // boot. That is evidence from disk, never permission to call a provider.
+      if (row.dispatch_id) {
+        if (row.dispatch_id !== input.dispatchId) throw conflict();
+        if (input.state === "accepted" && (row.worker_boot_id !== bootId || row.state === "interrupted")) throw conflict();
+      } else if (row.worker_boot_id !== bootId || row.delivery_id !== input.deliveryId || input.state === "accepted") throw conflict();
+      if (terminal(row.state) && row.state !== "interrupted") return { state: row.state };
       await tx.query(`UPDATE cloud_v2_prompt_outbox SET state=$3,updated_at=clock_timestamp(),
         terminal_at=CASE WHEN $3='accepted' THEN NULL ELSE clock_timestamp() END
         WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, input.userMessageId, input.state]);

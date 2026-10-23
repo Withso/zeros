@@ -2,6 +2,8 @@ import { expect, it } from "vitest";
 import * as shared from "@zeros/protocol/cloud-v2-relay";
 // Test-only: the control plane deploys independently and mirrors Zod 4 in Zod 3.
 import * as control from "../../../control-plane/src/cloud/contract";
+import * as sharedPrompts from "@zeros/protocol/cloud-v2-prompts";
+import * as controlPrompts from "../../../control-plane/src/cloud/prompt-contract";
 import { CLIENT_A, WORKSPACE_ID, config } from "./worker-fixtures";
 
 it("keeps the standalone control-plane constants identical to the worker contract", () => {
@@ -16,7 +18,7 @@ const cases = {
     { t: "frame", clientId: "*", frame: { type: "DB_CHANGED" } }, history,
     { t: "idle", idle: true }, { t: "request", id: CLIENT_A, kind: "github-token" }, { t: "stop-ack", id: CLIENT_A },
   ],
-  CloudV2ControlFrameSchema: [config, { t: "open", clientId: CLIENT_A }, { t: "close", clientId: CLIENT_A },
+  CloudV2ControlFrameSchema: [config, { ...config, promptOutbox: 1 }, { t: "prompts" }, { t: "open", clientId: CLIENT_A }, { t: "close", clientId: CLIENT_A },
     { t: "frame", clientId: CLIENT_A, frame: { type: "AGENT_CANCEL" } }, { t: "stop", id: CLIENT_A },
     { t: "reply", id: CLIENT_A, token: "synthetic-github-token", expiresAt: 1 }, { t: "refusal", id: CLIENT_A, code: "unavailable" }],
   CloudV2WorkerHelloSchema: [{ protocol: 2, bootId: WORKSPACE_ID, runtimeSha256: "a".repeat(64) }],
@@ -45,5 +47,34 @@ it("rejects stale protocol, malformed revisions and oversized or unordered histo
       expect(contract.CloudV2WorkerHistorySchema.safeParse({ ...cases.CloudV2WorkerHistorySchema[0], sequence }).success).toBe(false);
     expect(contract.CloudV2WorkerHistorySchema.safeParse({ ...cases.CloudV2WorkerHistorySchema[0],
       messages: { ...history.messages, rows: Array.from({ length: 501 }, () => history.messages.rows[0]) } }).success).toBe(false);
+  }
+});
+
+it("keeps durable HTTP prompt bounds and strict schemas identical across Zod versions", () => {
+  const payload = { chatId: "chat", userMessageId: CLIENT_A, agentId: "codex", model: "gpt-6-luna", effort: "low",
+    prompt: [{ type: "text", text: "ok" }], startedAt: 1 };
+  const receipt = { workspaceId: WORKSPACE_ID, chatId: "chat", userMessageId: CLIENT_A,
+    sequence: "1", epoch: "0", workspaceState: "running", acceptedAt: new Date(0).toISOString() };
+  const examples = {
+    CloudV2PromptSchema: payload,
+    CloudV2PromptReceiptSchema: receipt,
+    CloudV2PromptPullSchema: { waitMs: 25_000, held: [CLIENT_A] },
+    CloudV2PromptPullReplySchema: { prompts: [{ payload, receipt, deliveryId: CLIENT_A }], stops: [] },
+    CloudV2PromptBeginSchema: { userMessageId: CLIENT_A, deliveryId: CLIENT_A, dispatchId: WORKSPACE_ID },
+    CloudV2PromptOutcomeSchema: { userMessageId: CLIENT_A, dispatchId: WORKSPACE_ID, state: "completed" },
+    CloudV2PromptStopSchema: { chatId: "chat", throughEpoch: "1" },
+  };
+  expect(controlPrompts.CLOUD_V2_MAX_PROMPT_BYTES).toBe(sharedPrompts.CLOUD_V2_MAX_PROMPT_BYTES);
+  for (const key of Object.keys(examples) as Array<keyof typeof examples>) {
+    expect(controlPrompts[key].parse(examples[key])).toEqual(sharedPrompts[key].parse(examples[key]));
+    for (const invalid of [null, {}, { ...examples[key], unknown: true }]) {
+      expect(controlPrompts[key].safeParse(invalid).success).toBe(false);
+      expect(sharedPrompts[key].safeParse(invalid).success).toBe(false);
+    }
+  }
+  for (const schemas of [controlPrompts, sharedPrompts]) {
+    expect(schemas.CloudV2PromptSchema.safeParse({ ...payload, chatId: "cloud:foreign" }).success).toBe(false);
+    expect(schemas.CloudV2PromptPullSchema.safeParse({ waitMs: 25_001 }).success).toBe(false);
+    expect(schemas.CloudV2PromptOutcomeSchema.safeParse({ userMessageId: CLIENT_A, deliveryId: CLIENT_A, state: "accepted" }).success).toBe(false);
   }
 });

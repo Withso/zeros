@@ -31,11 +31,13 @@ export type CloudV2RelayDeps = {
   retryBaseMs?: number; retryMaxMs?: number; idleMs?: number;
 };
 type ConfigFlight = { worker: WebSocket; requested: boolean; force: boolean; promise: Promise<boolean> };
+type DeliveredPrompt = { worker: WebSocket; agentId?: string };
 type Room = {
   workspace: CloudV2Workspace; accessEpoch: string; revoked: boolean;
   worker: WebSocket | null; ready: boolean; loginRevision: string | null; configAt: number;
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
   clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
+  delivered: Map<string, Map<string, DeliveredPrompt>>;
   stops: Map<string, (ok: boolean) => void>; abort: AbortController; wakeRequested: boolean; wakeAllowed: boolean;
 };
 function reject(socket: Duplex): void {
@@ -84,6 +86,13 @@ export class CloudV2Relay {
     this.rooms.clear(); this.server.close();
   }
 
+  /** Best-effort latency hint only. Explicit enqueue owns wake; no app, room
+   * or worker connection is created to deliver this notification. */
+  hintPrompts(workspaceId: string): void {
+    const room = this.rooms.get(workspaceId);
+    if (!this.closed && room?.ready && !room.revoked) send(room.worker, { t: "prompts" });
+  }
+
   /** Used by lifecycle replicas too: Stop must work when no app is attached. */
   async stopWorkspace(workspace: CloudV2Workspace, timeoutMs = 25_000): Promise<boolean> {
     const epoch = await this.deps.store.accessEpoch(workspace.id);
@@ -111,14 +120,14 @@ export class CloudV2Relay {
     }
     if (!room) {
       room = { workspace, accessEpoch, revoked: false, worker: null, ready: false, loginRevision: null, configAt: 0,
-        clients: new Map(), queued: new Map(), stops: new Map(), abort: new AbortController(), wakeRequested: false, wakeAllowed: false };
+        clients: new Map(), queued: new Map(), delivered: new Map(), stops: new Map(), abort: new AbortController(), wakeRequested: false, wakeAllowed: false };
       this.rooms.set(workspace.id, room);
     }
     return room;
   }
 
   private revoke(room: Room): void {
-    room.revoked = true; room.ready = false; room.abort.abort(); room.queued.clear(); clearTimeout(room.idleTimer);
+    room.revoked = true; room.ready = false; room.abort.abort(); room.queued.clear(); room.delivered.clear(); clearTimeout(room.idleTimer);
     room.worker?.close(4001, "access_revoked"); room.worker = null;
     for (const finish of room.stops.values()) finish(false);
     for (const { ws } of room.clients.values()) ws.close(4001, "access_revoked");
@@ -202,7 +211,7 @@ export class CloudV2Relay {
             for (const [clientId, client] of room.clients) {
               if (client.ws.readyState !== WebSocket.OPEN) continue;
               send(ws, { t: "open", clientId });
-              for (const frame of room.queued.get(clientId) ?? []) send(ws, { t: "frame", clientId, frame });
+              for (const frame of room.queued.get(clientId) ?? []) this.forward(room, ws, clientId, frame);
             }
             room.queued.clear();
             for (const id of room.stops.keys()) send(ws, { t: "stop", id });
@@ -227,16 +236,47 @@ export class CloudV2Relay {
         const frame = CloudV2WorkerFrameSchema.parse(binary ? null : parse(data));
         if (frame.t === "stop-ack") { room.stops.get(frame.id)?.(true); return; }
         if (frame.t !== "frame") { ws.close(4003, "invalid_carrier"); return; }
+        const requestId = (frame.frame as { requestId?: unknown } | null)?.requestId;
+        if (typeof requestId === "string") room.delivered.get(frame.clientId)?.delete(requestId);
         if (frame.clientId === "*") for (const { ws: client } of room.clients.values()) send(client, frame.frame);
         else send(room.clients.get(frame.clientId)?.ws ?? null, frame.frame);
       } catch { ws.close(4003, "invalid_frame"); }
     });
     ws.on("close", () => {
+      this.failDelivered(room, ws);
       if (room.worker !== ws) return;
       room.worker = null; room.ready = false; room.loginRevision = null;
       // A close during initial configuration is handled by connect's retry.
       if (!room.dialing) this.ensureConnected(room);
     });
+  }
+
+  private forward(room: Room, worker: WebSocket, clientId: string, frame: unknown): void {
+    const request = frame as { id?: unknown; type?: unknown; agentId?: unknown } | null;
+    if ((request?.type === "AGENT_PROMPT" || request?.type === "AGENT_STEER") && typeof request.id === "string" && request.id.length <= 256) {
+      const pending = room.delivered.get(clientId) ?? new Map<string, DeliveredPrompt>();
+      if (pending.size >= MAX_QUEUED_FRAMES && !pending.has(request.id)) { room.clients.get(clientId)?.ws.close(1013, "too_many_prompts"); return; }
+      pending.set(request.id, { worker, ...(typeof request.agentId === "string" ? { agentId: request.agentId } : {}) });
+      room.delivered.set(clientId, pending);
+    }
+    send(worker, { t: "frame", clientId, frame });
+  }
+
+  /** A no-timeout legacy prompt RPC cannot survive losing its reply channel.
+   * Settle only frames actually forwarded to this socket. Wake/dial queues
+   * belong to the successor and must not be rejected or replayed here. New
+   * desktops recover durable turn outcomes through the HTTPS receipt. */
+  private failDelivered(room: Room, worker: WebSocket): void {
+    if (room.revoked) return;
+    for (const [clientId, pending] of room.delivered) {
+      for (const [requestId, request] of pending) if (request.worker === worker) {
+        pending.delete(requestId);
+        send(room.clients.get(clientId)?.ws ?? null, { id: randomUUID(), timestamp: Date.now(), source: "engine", type: "AGENT_ERROR",
+          requestId, ...(request.agentId ? { agentId: request.agentId } : {}), code: "transport-closed",
+          message: "The worker connection ended before this turn finished. Reconnect to check the turn." });
+      }
+      if (!pending.size) room.delivered.delete(clientId);
+    }
   }
 
   /** Committed revision polling repairs missed transactional notifications. */
@@ -314,7 +354,7 @@ export class CloudV2Relay {
     ws.on("close", () => { this.detachApp(room, clientId); });
   }
   private detachApp(room: Room, clientId: string): void {
-    const attached = room.clients.delete(clientId); room.queued.delete(clientId);
+    const attached = room.clients.delete(clientId); room.queued.delete(clientId); room.delivered.delete(clientId);
     if (attached && room.ready) send(room.worker, { t: "close", clientId });
     this.idle(room);
   }
@@ -322,7 +362,7 @@ export class CloudV2Relay {
     if (!await this.authorized(room) || !room.clients.has(clientId)) return;
     let frame: unknown;
     try { frame = parse(data); } catch { ws.close(4003, "invalid_frame"); return; }
-    if (room.ready) { send(room.worker, { t: "frame", clientId, frame }); return; }
+    if (room.ready && room.worker) { this.forward(room, room.worker, clientId, frame); return; }
     // Connection housekeeping is not explicit workspace activity. Bridge
     // payload validation still belongs to the worker when it is online.
     const type = (frame as { type?: unknown } | null)?.type;
@@ -330,7 +370,7 @@ export class CloudV2Relay {
     const answer = await this.deps.answerOffline(room.workspace, frame).catch(() => null);
     if (!await this.authorized(room) || !room.clients.has(clientId)) return;
     if (answer) { send(ws, answer); return; }
-    if (room.ready) { send(room.worker, { t: "frame", clientId, frame }); return; }
+    if (room.ready && room.worker) { this.forward(room, room.worker, clientId, frame); return; }
     const queue = room.queued.get(clientId) ?? [];
     if (queue.length >= MAX_QUEUED_FRAMES) { ws.close(1013, "workspace_starting"); return; }
     queue.push(frame); room.queued.set(clientId, queue);

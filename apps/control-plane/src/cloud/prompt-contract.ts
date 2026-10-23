@@ -51,12 +51,14 @@ export const CloudV2PromptStatusSchema = z.object({ receipt: CloudV2PromptReceip
 export type CloudV2PromptStatus = z.infer<typeof CloudV2PromptStatusSchema>;
 export const CloudV2PromptStopSchema = z.object({ chatId: CloudV2PromptIdSchema, throughEpoch: CloudV2PromptCounterSchema }).strict();
 export const CloudV2PromptStopReplySchema = z.object({ chatId: CloudV2PromptIdSchema, epoch: CloudV2PromptCounterSchema }).strict();
-export const CloudV2PromptPullSchema = z.object({ waitMs: z.number().int().min(0).max(CLOUD_V2_PROMPT_POLL_MS) }).strict();
+export const CloudV2PromptPullSchema = z.object({ waitMs: z.number().int().min(0).max(CLOUD_V2_PROMPT_POLL_MS),
+  held: z.array(CloudV2PromptIdSchema).max(128).optional() }).strict();
 export const CloudV2PromptDeliverySchema = z.object({ receipt: CloudV2PromptReceiptSchema, payload: CloudV2PromptSchema, deliveryId: z.string().uuid() }).strict();
 export type CloudV2PromptDelivery = z.infer<typeof CloudV2PromptDeliverySchema>;
 export const CloudV2PromptPullReplySchema = z.object({ prompts: z.array(CloudV2PromptDeliverySchema).max(16), stops: z.array(CloudV2PromptStopReplySchema).max(128) }).strict();
 export type CloudV2PromptPullReply = z.infer<typeof CloudV2PromptPullReplySchema>;
 export const CloudV2PromptAckSchema = z.object({ userMessageId: CloudV2PromptIdSchema, deliveryId: z.string().uuid() }).strict();
 export const CloudV2PromptBeginSchema = CloudV2PromptAckSchema.extend({ dispatchId: z.string().uuid() });
-export const CloudV2PromptOutcomeSchema = z.object({ userMessageId: CloudV2PromptIdSchema, dispatchId: z.string().uuid(),
-  state: z.enum(["accepted", "completed", "failed", "cancelled", "interrupted"]) }).strict();
+export const CloudV2PromptOutcomeSchema = z.object({ userMessageId: CloudV2PromptIdSchema, dispatchId: z.string().uuid().optional(),
+  deliveryId: z.string().uuid().optional(), state: z.enum(["accepted", "completed", "failed", "cancelled", "interrupted"]) }).strict()
+  .refine(value => !!value.dispatchId || (!!value.deliveryId && value.state !== "accepted"));

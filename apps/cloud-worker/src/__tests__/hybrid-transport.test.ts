@@ -75,6 +75,18 @@ it("registers its process boot and rereads the worker credential on every HTTP c
   await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
   expect(f.requests.every(request => request.authorized)).toBe(true);
 });
+it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
+  const f = await fixture();
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1");
+  expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
+  await f.rotate();
+  vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-rotated-worker-token");
+    expect(new Headers(init?.headers).get("x-zeros-worker-boot")).toBe(f.transport.bootId);
+    return Response.json({ prompts: [], stops: [] });
+  });
+  expect(await f.transport.promptRequest("pull", { waitMs: 25_000 })).toEqual({ prompts: [], stops: [] });
+});
 it("retries a lost history acknowledgement with the same boot, sequence and rows before sending a new snapshot", async () => {
   const f = await fixture(); f.loseReply();
   expect(await f.transport.send({ t: "history", chats: [{ id: "chat" }] })).toBe(false);

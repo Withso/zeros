@@ -24,9 +24,10 @@ export function createCloudV2PromptRoutes(outbox: CloudV2PromptOutbox): Hono {
   });
   app.get(path, async c => {
     const parsed = z.object({ chatId: CloudV2PromptIdSchema, after: CloudV2PromptCounterSchema.default("0"),
-      limit: z.coerce.number().int().min(1).max(100).default(100) }).strict().safeParse(c.req.query());
+      limit: z.coerce.number().int().min(1).max(100).default(100),
+      includePayload: z.enum(["true", "false"]).default("true") }).strict().safeParse(c.req.query());
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid message status request");
-    return c.json(await outbox.list(id(c.req.param("id")), c.get("user").id, parsed.data.chatId, parsed.data.after, parsed.data.limit));
+    return c.json(await outbox.list(id(c.req.param("id")), c.get("user").id, parsed.data.chatId, parsed.data.after, parsed.data.limit, parsed.data.includePayload === "true"));
   });
   app.post(`${path}/stop`, body, async c => {
     const parsed = CloudV2PromptStopSchema.safeParse(await c.req.json().catch(() => null));

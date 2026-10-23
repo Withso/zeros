@@ -26,6 +26,7 @@ import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
 import { cloudV2SandboxName } from "./resource-names.js";
+import { CloudV2PromptSignals } from "./prompt-signals.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 /** Boat stock image home; repositories live at <home>/<owner>/<name>. */
@@ -95,6 +96,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
     return {
       t: "config",
+      ...(v2.promptOutbox ? { promptOutbox: 1 as const } : {}),
       loginRevision: await store.loginRevision(workspace.id) ?? "0",
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
@@ -109,6 +111,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     computers,
     installedRepositories: organizationId => store.installedRepositories(organizationId),
     bridgeBaseUrl: v2.realtimeUrl,
+    promptOutbox: v2.promptOutbox === true,
   };
   const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
@@ -124,7 +127,18 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     logger: console,
   }) : null;
   const relay = roles.relay ? connections : null;
-  const workers: CloudV2WorkerRouteDeps = { store, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256 };
+  const promptSignals = new CloudV2PromptSignals();
+  const workers: CloudV2WorkerRouteDeps = { store, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    promptOutbox: v2.promptOutbox === true, waitForPrompts: (id, ms, signal) => promptSignals.wait(id, ms, signal) };
+  const promptChanges = v2.promptOutbox ? postgresNotificationSubscription(listenerPool, {
+    channels: ["zeros_cloud_v2_prompts"],
+    onReady: () => promptSignals.wakeAll(),
+    onNotification: notice => {
+      if (!/^[a-f0-9-]{36}$/.test(notice.payload ?? "")) return;
+      promptSignals.wake(notice.payload!); connections?.hintPrompts(notice.payload!);
+    },
+  }) : null;
+  void promptChanges?.start().catch(() => {});
   const loginChanges = relay ? postgresNotificationSubscription(listenerPool, {
     channels: ["zeros_cloud_v2_logins"],
     onReady: () => { void relay.refreshLogins(); },
@@ -158,5 +172,5 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     sandboxName: workspace => cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner),
     logger: console,
   }) : null;
-  return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges };
+  return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges, promptChanges, promptSignals };
 }

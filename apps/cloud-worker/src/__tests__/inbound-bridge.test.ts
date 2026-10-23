@@ -84,6 +84,13 @@ it("routes Stop acknowledgements to the requesting replica only", async () => {
   expect(two.frames).toEqual([]);
 });
 
+it("accepts an authenticated prompt hint with no app client and no payload", async () => {
+  const f = await fixture(), cp = await f.connect();
+  cp.ws.send(JSON.stringify({ t: "prompts" }));
+  await expect.poll(() => f.incoming).toEqual([{ t: "prompts" }]);
+  expect(cp.ws.readyState).toBe(WebSocket.OPEN);
+});
+
 it("closes quiesced replicas after Stop, preserving each outstanding Stop acknowledgement", async () => {
   const f = await fixture(), one = await f.connect(), two = await f.connect(), idle = await f.connect();
   const ids = [randomUUID(), randomUUID()];

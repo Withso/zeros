@@ -115,6 +115,30 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  it("settles only prompts forwarded to a lost worker and preserves prompts queued for its successor", async () => {
+    const forwarded: any[][] = [];
+    workerServer.on("connection", ws => { const frames: any[] = []; forwarded.push(frames); ws.on("message", raw => frames.push(JSON.parse(String(raw)))); });
+    const a = await app(), replies: any[] = []; a.on("message", raw => replies.push(JSON.parse(String(raw))));
+    await vi.waitFor(() => expect(forwarded[0]?.some(frame => frame.t === "open")).toBe(true));
+    const previous = { type: "AGENT_PROMPT", id: "old-request", agentId: "codex", chatId: "chat", sessionId: "execution", prompt: [] };
+    a.send(JSON.stringify(previous));
+    await vi.waitFor(() => expect(forwarded[0].some(frame => frame.frame?.id === previous.id)).toBe(true));
+    state = "starting"; connectedWorkers[0].terminate();
+    await vi.waitFor(() => expect(replies.some(frame => frame.requestId === previous.id && frame.type === "AGENT_ERROR")).toBe(true));
+    const queued = { ...previous, id: "queued-for-next-worker" }; a.send(JSON.stringify(queued));
+    await vi.waitFor(() => expect(deps.answerOffline).toHaveBeenCalledWith(expect.anything(), queued));
+    expect(replies.some(frame => frame.requestId === queued.id)).toBe(false);
+    state = "running";
+    await vi.waitFor(() => expect(forwarded[1]?.some(frame => frame.frame?.id === queued.id)).toBe(true));
+    expect(forwarded[1].some(frame => frame.frame?.id === previous.id)).toBe(false);
+    const clientId = forwarded[1].find(frame => frame.t === "open").clientId;
+    connectedWorkers[1].send(JSON.stringify({ t: "frame", clientId, frame: { type: "AGENT_PROMPT_COMPLETE", requestId: queued.id } }));
+    await vi.waitFor(() => expect(replies.some(frame => frame.requestId === queued.id && frame.type === "AGENT_PROMPT_COMPLETE")).toBe(true));
+    connectedWorkers[1].terminate();
+    await vi.waitFor(() => expect(forwarded.length).toBe(3));
+    expect(replies.filter(frame => frame.requestId === queued.id)).toHaveLength(1);
+  });
+
   it("never sends an obsolete config after a newer credential revision commits during its read", async () => {
     const w = await worker();
     const frames: any[] = [];

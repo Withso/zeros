@@ -3,7 +3,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameS
   CloudV2WorkerFrameSchema, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { InboundBridge } from "./inbound-bridge";
 import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
-import type { Transport, TransportHandlers } from "./transport";
+import type { PromptOperation, Transport, TransportHandlers } from "./transport";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type HybridStatus = "connected" | "disconnected" | "credential-unavailable" | "unauthorized" | "stopped" | "protocol-error";
@@ -107,6 +107,10 @@ export class HybridTransport implements Transport {
     if (this.listening) { await this.listener.dispose(); this.listening = false; }
     this.handlers?.close();
   }
+  async promptRequest(operation: PromptOperation, body: unknown, signal?: AbortSignal): Promise<unknown> {
+    try { return await this.request(`prompts/${operation}`, body, signal, operation === "pull" ? 35_000 : 10_000); }
+    catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
+  }
   private recover(): void {
     if (this.stopped) return;
     if (this.recovering) { this.recoverRequested = true; return; }
@@ -200,16 +204,21 @@ export class HybridTransport implements Transport {
     this.retry = setTimeout(() => { this.retry = undefined; this.recover(); }, delay);
     this.retry.unref();
   }
-  private async request(path: string, body?: unknown): Promise<Record<string, unknown>> {
+  private async request(path: string, body?: unknown, signal?: AbortSignal, timeoutMs = 10_000): Promise<Record<string, unknown>> {
     const token = await readWorkerToken(this.options.tokenFile ?? WORKER_TOKEN_FILE);
     if (this.stopped) throw new Error("Worker stopped.");
     const controller = new AbortController(); this.requests.add(controller);
-    const timer = setTimeout(() => controller.abort(), 10_000); timer.unref();
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, timeoutMs); timer.unref();
     try {
       const payload = body === undefined ? undefined : JSON.stringify(body);
       if (payload && Buffer.byteLength(payload) > CLOUD_V2_MAX_FRAME_BYTES) throw new Error("Worker payload too large.");
       const response = await (this.options.fetch ?? fetch)(new URL(`/v2/cloud/worker/${path}`, this.options.apiUrl), {
-        method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId },
+        method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
+          // An HTTP header is ignored by older control planes; adding a JSON
+          // field would break their strict hello schema before configuration.
+          ...(path === "hello" ? { "X-Zeros-Worker-Features": "prompt-outbox-v1" } : {}) },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) { await response.body?.cancel(); throw new HttpFailure(response.status); }
@@ -225,6 +234,6 @@ export class HybridTransport implements Transport {
       const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid worker control response.");
       return value as Record<string, unknown>;
-    } finally { clearTimeout(timer); this.requests.delete(controller); }
+    } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); this.requests.delete(controller); }
   }
 }

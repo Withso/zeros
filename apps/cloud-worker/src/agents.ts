@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { BackgroundTasksUpdate, InitializeResponse, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import { createMessage, type AgentLoadSessionMessage, type AgentNewSessionMessage, type AgentPromptMessage, type AgentSteerMessage, type BridgeMessage, type SteerOutcome } from "@zeros/protocol/messages";
 import type { CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
+import type { CloudV2PromptDelivery } from "@zeros/protocol/cloud-v2-prompts";
 import type { Driver } from "./drivers/driver";
 import { agentTiming, type TimingObserver, type TimingSpan } from "./agent-timings";
 import { recordUser, userMessage, type InboxEntry, type SessionStore, type SteerReceipt } from "./sessions/session-store";
 import { WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./workspace/scope";
 import { CodexModelAvailability, type ModelDiscoveryOptions } from "./credentials/model-availability";
+import { preparePromptFiles } from "./prompt-files";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -22,6 +24,8 @@ interface Runtime {
   settling?: Promise<void>; steers: Map<string, Promise<SteerReceipt>>;
   waiters: Map<string, Waiter[]>;
   turnTiming?: TimingSpan;
+  turnFailureNotice?: boolean;
+  outboxSteering?: Promise<void>;
 }
 
 const VERSIONS = { codex: "0.162.1", claude: "0.3.296", cursor: "1.0.37" };
@@ -42,6 +46,8 @@ export class Agents {
   private readonly chats = new Map<string, Runtime>();
   private config: WorkerConfig;
   private readonly models: CodexModelAvailability;
+  private outboxDispatch?: (entry: InboxEntry) => Promise<boolean>;
+  private outboxStop?: (chatId: string, throughEpoch: string) => Promise<string>;
 
   constructor(
     private readonly store: SessionStore,
@@ -59,6 +65,75 @@ export class Agents {
     return { ...initialized(agentId), _meta: this.models.metadata(agentId === "codex") };
   }
   get busy(): boolean { return [...this.routes.values()].some((route) => !!route.active || this.hasBackground(route)); }
+
+  setOutboxDispatch(dispatch?: (entry: InboxEntry) => Promise<boolean>, stop?: (chatId: string, throughEpoch: string) => Promise<string>): void {
+    this.outboxDispatch = dispatch; this.outboxStop = stop;
+  }
+
+  async receiveOutbox(item: CloudV2PromptDelivery): Promise<InboxEntry> {
+    const { payload, receipt } = item;
+    if (receipt.workspaceId !== this.scope.workspace.id || receipt.chatId !== payload.chatId || receipt.userMessageId !== payload.userMessageId)
+      throw new WorkspaceError("WORKSPACE_NOT_FOUND", "This message belongs to another workspace.");
+    // Waking preserves the execution the app holds, as well as its native
+    // conversation. Re-adopt only the current persisted execution (M069).
+    const metadata = this.store.metadata(payload.chatId);
+    if (metadata?.executionId) this.readopt(metadata.executionId, payload.agentId, payload.chatId);
+    await this.open({ id: "outbox", send: async () => {} }, createMessage({ type: "AGENT_NEW_SESSION", source: "browser",
+      chatId: payload.chatId, agentId: payload.agentId, cwd: this.scope.root, workspaceId: this.scope.workspace.id,
+      env: { ...(payload.model ? { [MODEL_ENV[payload.agentId]]: payload.model } : {}), ...(payload.effort ? { ZEROS_THINKING_EFFORT: payload.effort } : {}) },
+    }), true);
+    const route = this.chats.get(payload.chatId)!;
+    route.admitting++;
+    try { await route.cancelling; this.assertCurrent(route); return await this.store.receiveOutbox(item); }
+    finally { route.admitting--; }
+  }
+
+  resumeOutbox(chatId: string): void {
+    const route = this.chats.get(chatId);
+    if (!route || route.closed || route.outboxSteering) return;
+    const next = this.store.outboxEntries(chatId).find(({ entry }) => entry.state === "queued" && entry.outbox?.acknowledged)?.entry;
+    if (route.active && route.nativeRunning && next?.outbox?.mode === "steer" && !next.outbox.steerDeclined &&
+        next.outbox.model === route.model && next.outbox.effort === route.effort) {
+      const active = route.active, stopping = route.stopping;
+      route.outboxSteering = (async () => {
+        const content = await preparePromptFiles(this.scope, next.prompt);
+        const entry = await this.store.prepareOutboxDispatch(chatId, next.requestId, true);
+        if (!entry) return;
+        let outcome: SteerOutcome = "interrupted";
+        if (await this.outboxDispatch?.(entry)) {
+          if (route.closed || stopping !== route.stopping) outcome = "interrupted";
+          else if (route.active !== active || !route.nativeRunning) outcome = "queued";
+          else outcome = await route.driver!.steer(content);
+        }
+        await this.store.finishOutboxSteer(chatId, entry.requestId, outcome, active.userMessageId);
+        if (outcome === "delivered") await this.update(route, { sessionId: route.id,
+          update: { sessionUpdate: "user_message_recorded", message: userMessage(entry, active.userMessageId) } });
+      })().catch(async () => {
+        await this.store.finishOutboxSteer(chatId, next.requestId, "interrupted", active.userMessageId);
+      }).finally(() => { route.outboxSteering = undefined; this.resumeOutbox(chatId); });
+    } else this.pump(route);
+  }
+
+  async stopOutbox(chatId: string, epoch: string): Promise<void> {
+    const route = this.chats.get(chatId), active = route?.active;
+    const freshEpoch = BigInt(this.store.deliveryEpoch(chatId)) < BigInt(epoch);
+    const interrupt = !!route && (active ? (active.outbox
+      ? BigInt(active.outbox.epoch) < BigInt(epoch)
+      : active.cancelRequested || freshEpoch) : this.hasBackground(route) && freshEpoch);
+    const running = !!route?.nativeRunning;
+    if (interrupt && route) { route.stopping++; if (active) active.cancelRequested = true; }
+    await this.store.stopOutbox(chatId, epoch);
+    if (interrupt && route) {
+      if (!active?.outbox) await this.store.stop(chatId);
+      await route.driver?.interrupt();
+      if (running) await route.pumping;
+    }
+  }
+
+  async fenceOutbox(): Promise<void> {
+    for (const { chatId, entry } of this.store.outboxEntries())
+      await this.stopOutbox(chatId, (BigInt(entry.outbox!.epoch) + 1n).toString());
+  }
 
   async handle(client: AppClient, message: BridgeMessage): Promise<void> {
     try {
@@ -126,6 +201,7 @@ export class Agents {
   async closeChat(chatId: string, shutdown = false): Promise<void> {
     const route = this.chats.get(chatId);
     if (!route) return;
+    if (!shutdown && this.outboxStop) await this.stop(route);
     await this.retire(route);
     if (!shutdown) await this.store.retireExecution(chatId, route.id);
     if (this.store.metadata(chatId)?.chat) await this.store.stop(chatId, () => this.chats.get(chatId) === route);
@@ -182,7 +258,7 @@ export class Agents {
     if (route.closed || this.chats.get(route.chatId) !== route) throw new WorkspaceError("session-expired", "This execution has ended. Reopen the conversation to continue.");
   }
 
-  private async open(client: AppClient, message: AgentNewSessionMessage | AgentLoadSessionMessage): Promise<void> {
+  private async open(client: AppClient, message: AgentNewSessionMessage | AgentLoadSessionMessage, deferDriver = false): Promise<void> {
     this.scope.folder(message.cwd, true); this.scope.assertId(message.workspaceId);
     if (message.type === "AGENT_NEW_SESSION" && message.agentRole === "design") throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Design is not available in cloud workspaces.");
     const agentId = this.agent(message.agentId);
@@ -243,6 +319,7 @@ export class Agents {
       throw error;
     }
     route.preparing = undefined;
+    if (deferDriver) return;
     await this.ensureDriver(route, timing);
     this.assertCurrent(route);
     timing.mark("driver_ready");
@@ -272,7 +349,15 @@ export class Agents {
       route.driver = driver; route.login = key; route.pendingNative = undefined;
       route.unsubscribe = driver.onEvent((event) => {
         if (route.closed || route.driver !== driver) return;
+        const active = route.active;
+        if (route.nativeRunning && active?.outbox && !active.outbox.accepted) {
+          active.outbox.accepted = true;
+          void this.store.acceptOutbox(route.chatId, active.requestId).catch(() => this.stop(route));
+        }
         const notification = { ...event, sessionId: route.id };
+        if (active && notification.update.sessionUpdate === "error_notice" && !notification.update.parentToolId &&
+            !notification.update.recoverable && notification.update.severity === "error" &&
+            (!notification.update.turnFailure || notification.update.turnFailure.turnId === active.userMessageId)) route.turnFailureNotice = true;
         if (notification.update.sessionUpdate === "background_tasks_update") {
           route.background = notification.update; this.activity();
         }
@@ -339,37 +424,62 @@ export class Agents {
   }
 
   private pump(route: Runtime): void {
-    if (route.pumping || route.closed || this.hasBackground(route)) return;
+    if (route.pumping || route.closed || route.outboxSteering || this.hasBackground(route)) return;
     route.pumping = (async () => {
       while (!route.closed && !route.cancelling && !this.hasBackground(route)) {
         const stopping = route.stopping;
-        const entry = await this.store.claim(route.chatId);
+        let entry = await this.store.claim(route.chatId);
         if (!entry) break;
         route.turnTiming = agentTiming(route.agentId, route.chatId, "turn", this.onTiming, route.waiters.get(entry.requestId)?.[0]?.receivedAt);
-        route.active = entry; this.activity();
-        await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
-        await this.turnState(route, entry, "running");
+        route.active = entry; route.turnFailureNotice = false; this.activity();
+        if (!entry.outbox) {
+          await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
+          await this.turnState(route, entry, "running");
+        }
         let response: PromptResponse | undefined, error: string | undefined;
         try {
+          const content = entry.outbox ? await preparePromptFiles(this.scope, entry.prompt) : entry.prompt;
+          if (entry.outbox && (route.model !== entry.outbox.model || route.effort !== entry.outbox.effort)) {
+            route.model = entry.outbox.model; route.effort = entry.outbox.effort; route.login = undefined;
+            await this.store.update(route.chatId, draft => { draft.chat!.model = route.model ?? null; draft.chat!.effort = route.effort ?? ""; });
+          }
           await this.ensureDriver(route);
           route.turnTiming.mark("driver_ready");
           if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
           else {
+            if (entry.outbox) {
+              const prepared = await this.store.prepareOutboxDispatch(route.chatId, entry.requestId);
+              if (!prepared) response = { stopReason: "cancelled" };
+              else {
+                entry = prepared; route.active = entry;
+                if (!await this.outboxDispatch?.(entry)) response = { stopReason: "cancelled" };
+                if (!response && !route.closed && stopping === route.stopping) {
+                  await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
+                  await this.turnState(route, entry, "running");
+                }
+              }
+            }
             if (route.pendingNative) {
               await this.store.bind(route.chatId, route.agentId, route.pendingNative);
               route.pendingNative = undefined;
               await this.update(route, { sessionId: route.id, update: { sessionUpdate: "provider_binding_update", providerBinding: this.store.metadata(route.chatId)!.chat!.providerBinding! } });
             }
             if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
-            else { route.nativeRunning = true; response = await route.driver!.prompt(entry.prompt); }
+            else if (!response) { route.nativeRunning = true; response = await route.driver!.prompt(content); }
           }
         } catch (failure) { error = publicError(failure); }
         finally { route.nativeRunning = false; }
         route.settling = (async () => {
           await route.events;
           await Promise.all([...route.steers.values()]);
+          await route.outboxSteering;
           await this.store.finish(route.chatId, entry.requestId, response ? { ...response, userMessageId: entry.userMessageId } : undefined, error);
           const receipt = this.store.receipt(route.chatId, entry.requestId)!;
+          if (entry.outbox && receipt.error && !route.turnFailureNotice) {
+            const notice: SessionNotification = { sessionId: route.id, update: { sessionUpdate: "error_notice", noticeId: `outbox:${entry.userMessageId}`,
+              severity: "error", message: receipt.error, turnFailure: { turnId: entry.userMessageId, kind: "protocol-error" }, at: Date.now() } };
+            await this.store.fold(route.chatId, notice); await this.update(route, notice);
+          }
           route.turnTiming?.mark("turn_done"); route.turnTiming = undefined;
           await this.turnState(route, entry, receipt.state === "cancelled" ? "cancelled" : receipt.state === "failed" ? "failed" : "completed", receipt.response?.stopReason);
           for (const waiter of route.waiters.get(entry.requestId) ?? []) await this.receipt(route, receipt, waiter);
@@ -421,6 +531,10 @@ export class Agents {
     route.stopping++;
     await route.preparing;
     this.assertCurrent(route);
+    if (this.outboxStop) {
+      const epoch = await this.outboxStop(route.chatId, this.store.deliveryEpoch(route.chatId));
+      await this.store.stopOutbox(route.chatId, epoch);
+    }
     await this.store.stop(route.chatId, () => !route.closed && this.chats.get(route.chatId) === route);
     await route.driver?.interrupt();
   }

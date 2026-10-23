@@ -250,6 +250,8 @@ export type Config = {
 };
 
 export type CloudV2Config = {
+  /** Enable only after publishing the matching outbox-capable runtime. */
+  promptOutbox?: boolean;
   boat: { apiKey: string; billingOrg?: string };
   /** https:// origin of the API service; agents reach the model proxy here. */
   apiUrl: string;
@@ -270,6 +272,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
   const apiKey = env.BOAT_API_KEY?.trim();
   if (!apiKey) throw new Error("Invalid environment: CLOUD_V2_ENABLED requires BOAT_API_KEY");
   const billingOrg = env.BOAT_BILLING_ORG?.trim();
+  const promptOutbox = env.CLOUD_V2_PROMPT_OUTBOX_ENABLED?.trim().toLowerCase();
+  if (promptOutbox && !["true", "false"].includes(promptOutbox)) throw new Error("Invalid environment: CLOUD_V2_PROMPT_OUTBOX_ENABLED must be true or false");
   const origin = (name: string, protocol: "https:" | "wss:") => {
     const raw = env[name]?.trim();
     let url: URL;
@@ -293,6 +297,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
   new CloudV2WorkerSigner(workerSigningKey, previous);
   return {
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
+    promptOutbox: promptOutbox === "true",
     workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),

@@ -21,6 +21,7 @@ import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/git
 import { commandRunner } from "./workspace/commands";
 import { Terminals } from "./terminals/service";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
+import { PromptInbox } from "./prompt-inbox";
 
 interface WorkerOptions {
   directory: string;
@@ -47,6 +48,7 @@ export class CloudWorker {
   private agents?: Agents;
   private chats?: ChatService;
   private history?: HistoryMirror;
+  private promptInbox?: PromptInbox;
   private workspace?: WorkspaceService;
   private terminals?: Terminals;
   private readonly tokens: GithubTokens;
@@ -104,6 +106,7 @@ export class CloudWorker {
     if (this.disposed) return;
     this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect();
     await this.configuring.catch(() => {});
+    await this.promptInbox?.dispose();
     await this.terminals?.dispose();
     await this.workspace?.dispose();
     await this.agents?.dispose();
@@ -128,6 +131,7 @@ export class CloudWorker {
     // Checkout preparation can be waiting for this reply. Never queue control
     // replies behind configuration or behind ordinary app work.
     if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
+    if (message.t === "prompts") { this.promptInbox?.hint(); return; }
     if (message.t === "stop") {
       // The VM can stop only after the native turn's final rows reach the HTTP
       // mirror. Keep the transport alive until this correlated ack is sent.
@@ -221,6 +225,10 @@ export class CloudWorker {
       }));
     } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); this.agents!.configure(config); }
     this.history!.connect();
+    if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
+      this.promptInbox ??= new PromptInbox(this.store!, this.agents!, (op, body, signal) => this.options.transport.promptRequest!(op, body, signal));
+      this.promptInbox.start();
+    } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
     await this.reportIdle(true);
   }
@@ -229,6 +237,7 @@ export class CloudWorker {
   private async prepareStop(): Promise<void> {
     clearInterval(this.heartbeat);
     await this.configuring;
+    await this.promptInbox?.dispose();
     await this.agents?.dispose();
     await this.terminals?.dispose();
   }

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import { applyUpdate, type AgentMessage, type AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { AgentPromptBubble, SteerOutcome } from "@zeros/protocol/messages";
@@ -9,6 +10,20 @@ import { CloudV2MessageRowSchema, type CloudV2MessageRow } from "@zeros/protocol
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import { coerceChat, messageWindow, upsertRows, type ChatRow, type MessageWindow } from "./chat-history";
 import { WorkspaceError } from "../workspace/scope";
+import { CloudV2PromptCounterSchema, CloudV2PromptStateSchema, type CloudV2PromptDelivery, type CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
+
+const outboxInputSchema = z.object({ deliveryId: z.string().uuid(), epoch: CloudV2PromptCounterSchema, sequence: CloudV2PromptCounterSchema,
+  model: z.string().max(256).optional(), effort: z.string().max(64).optional(), mode: z.enum(["prompt", "steer"]).optional(),
+  acknowledged: z.boolean(), dispatchId: z.string().uuid().optional(), accepted: z.boolean().optional(),
+  steerDeclined: z.boolean().optional(), reported: CloudV2PromptStateSchema.optional() }).strict();
+
+export interface OutboxInput {
+  deliveryId: string; epoch: string; sequence: string;
+  model?: string; effort?: string; mode?: "prompt" | "steer";
+  acknowledged: boolean; dispatchId?: string; accepted?: boolean;
+  steerDeclined?: boolean;
+  reported?: CloudV2PromptState;
+}
 
 export interface PromptInput {
   requestId: string;
@@ -17,6 +32,8 @@ export interface PromptInput {
   bubble?: AgentPromptBubble;
   startedAt: number;
   promptId?: string;
+  /** Present only for capability-gated HTTPS sends, never for Local/legacy. */
+  outbox?: OutboxInput;
 }
 export interface InboxEntry extends PromptInput {
   state: "queued" | "running" | "completed" | "cancelled" | "failed" | "interrupted";
@@ -43,6 +60,7 @@ export interface SessionData {
    * re-adopts only this one, so replaced or closed routes stay refused. */
   executionId?: string;
   paused: boolean;
+  deliveryEpoch?: string;
   /** Live reducer state; only rows are serialized to disk. */
   messages: AgentMessage[];
   rows: CloudV2MessageRow[];
@@ -120,16 +138,21 @@ export class SessionStore {
       if (typeof value.chatId !== "string" || store.filename(value.chatId) !== name ||
           !Array.isArray(value.rows) || !Array.isArray(value.inbox) || !Array.isArray(value.steers) ||
           (value.executionId !== undefined && typeof value.executionId !== "string") ||
+          (value.deliveryEpoch !== undefined && !CloudV2PromptCounterSchema.safeParse(value.deliveryEpoch).success) ||
+          value.inbox.some(entry => entry.outbox !== undefined && !outboxInputSchema.safeParse(entry.outbox).success) ||
           (value.chat !== null && (!coerceChat(value.chat) || value.chat.id !== value.chatId))) throw new Error("Invalid persisted chat.");
       value.messages = transcript(value.rows);
       if (Number.isSafeInteger(value.ordinal) && value.ordinal! > store.nextOrdinal) store.nextOrdinal = value.ordinal!;
       store.sessions.set(value.chatId, value);
       // Mark native dispatch BEFORE calling the driver. After a crash there is
       // no evidence that it was unconsumed, so only a fresh explicit send resumes.
-      if (value.inbox.some((entry) => entry.state === "running") || value.steers.some((entry) => entry.outcome === "pending")) {
+      if (value.inbox.some((entry) => entry.state === "running" || entry.state === "queued" && (entry.outbox?.acknowledged || !!entry.outbox?.dispatchId)) || value.steers.some((entry) => entry.outcome === "pending")) {
         await store.update(value.chatId, (draft) => {
           draft.paused = true;
-          for (const entry of draft.inbox) if (entry.state === "running") {
+          // A prior boot's inbox ACK is no authority for this process. Pull
+          // again before dispatch so Stop and authorization are revalidated.
+          for (const entry of draft.inbox) if (entry.state === "queued" && entry.outbox) entry.outbox.acknowledged = false;
+          for (const entry of draft.inbox) if (entry.state === "running" || entry.state === "queued" && !!entry.outbox?.dispatchId) {
             entry.state = "interrupted";
             entry.error = "The worker restarted before this turn finished. Send a new message to continue.";
           }
@@ -169,7 +192,8 @@ export class SessionStore {
 
   hasQueued(chatId: string): boolean {
     const value = this.sessions.get(chatId);
-    return !!value?.chat && !value.paused && value.inbox.some((entry) => entry.state === "queued");
+    const entry = value?.chat && value.inbox.find(entry => entry.state === "queued" && (!value.paused || !!entry.outbox));
+    return !!entry && (!entry.outbox || entry.outbox.acknowledged);
   }
 
   receipt(chatId: string, requestId: string): InboxEntry | undefined {
@@ -351,10 +375,13 @@ export class SessionStore {
   async enqueue(chatId: string, input: PromptInput, admit?: () => void): Promise<{ entry: InboxEntry; duplicate: boolean }> {
     return this.change(chatId, (draft) => {
       admit?.();
+      if (input.outbox && BigInt(input.outbox.epoch) > BigInt(draft.deliveryEpoch ?? "0")) draft.deliveryEpoch = input.outbox.epoch;
       const existing = draft.inbox.find((entry) => entry.requestId === input.requestId || entry.userMessageId === input.userMessageId);
       if (existing) {
         if (JSON.stringify(existing.prompt) !== JSON.stringify(input.prompt) || JSON.stringify(existing.bubble) !== JSON.stringify(input.bubble))
           throw new Error("That message was already submitted with different content.");
+        if (input.outbox) existing.outbox = { ...input.outbox, ...existing.outbox, deliveryId: input.outbox.deliveryId,
+          acknowledged: false, reported: undefined };
         return { entry: existing, duplicate: true };
       }
       const entry: InboxEntry = { ...input, state: "queued" };
@@ -370,8 +397,9 @@ export class SessionStore {
 
   async claim(chatId: string): Promise<InboxEntry | undefined> {
     return this.change(chatId, (draft) => {
-      if (draft.paused || draft.inbox.some((entry) => entry.state === "running")) return undefined;
-      const entry = draft.inbox.find((entry) => entry.state === "queued");
+      if (draft.inbox.some((entry) => entry.state === "running")) return undefined;
+      const entry = draft.inbox.find((entry) => entry.state === "queued" && (!draft.paused || !!entry.outbox));
+      if (entry?.outbox) return entry.outbox.acknowledged ? entry : undefined;
       if (entry) { entry.state = "running"; recordUser(draft, entry); }
       return entry;
     });
@@ -380,7 +408,8 @@ export class SessionStore {
   async finish(chatId: string, requestId: string, response?: PromptResponse, error?: string): Promise<void> {
     await this.update(chatId, (draft) => {
       const entry = draft.inbox.find((entry) => entry.requestId === requestId);
-      if (!entry || entry.state !== "running") return;
+      if (!entry || (entry.state !== "running" && !(entry.outbox && entry.state === "queued"))) return;
+      if (entry.outbox) recordUser(draft, entry);
       entry.state = entry.cancelRequested || response?.stopReason === "cancelled" ? "cancelled" : error ? "failed" : "completed";
       entry.response = entry.state === "cancelled" ? { ...response, stopReason: "cancelled" } : response;
       entry.error = error;
@@ -391,6 +420,84 @@ export class SessionStore {
     if (this.sessions.get(chatId)?.executionId !== executionId) return;
     await this.update(chatId, (draft) => { if (draft.executionId === executionId) draft.executionId = undefined; });
   }
+
+  outboxEntries(chatId?: string): Array<{ chatId: string; entry: InboxEntry }> {
+    return structuredClone([...this.sessions.values()].filter(value => value.chat && (!chatId || value.chatId === chatId))
+      .flatMap(value => value.inbox.filter(entry => entry.outbox).map(entry => ({ chatId: value.chatId, entry }))));
+  }
+
+  async receiveOutbox(item: CloudV2PromptDelivery): Promise<InboxEntry> {
+    const { payload, receipt, deliveryId } = item;
+    const { entry } = await this.enqueue(payload.chatId, { requestId: `outbox:${payload.userMessageId}`,
+      userMessageId: payload.userMessageId, prompt: payload.prompt, bubble: payload.bubble, startedAt: payload.startedAt,
+      outbox: { deliveryId, epoch: receipt.epoch, sequence: receipt.sequence, model: payload.model, effort: payload.effort, mode: payload.mode, acknowledged: false } });
+    return entry;
+  }
+
+  async acknowledgeOutbox(chatId: string, requestId: string, state: CloudV2PromptState): Promise<void> {
+    await this.update(chatId, draft => {
+      const entry = draft.inbox.find(value => value.requestId === requestId);
+      if (!entry?.outbox) return;
+      entry.outbox.acknowledged = true;
+      if (entry.state === "queued" && (["cancelled", "failed", "interrupted", "completed"].includes(state) ||
+          BigInt(entry.outbox.epoch) < BigInt(draft.deliveryEpoch ?? "0"))) {
+        entry.state = state === "failed" || state === "interrupted" || state === "completed" ? state : "cancelled";
+        entry.cancelRequested = true;
+      }
+    });
+  }
+
+  /** This is the narrow uncertainty boundary: after this fsync a crash may
+   * have reached the provider. A new process reports interrupted, never replay. */
+  async prepareOutboxDispatch(chatId: string, requestId: string, steering = false): Promise<InboxEntry | undefined> {
+    return this.change(chatId, draft => {
+      const entry = draft.inbox.find(value => value.requestId === requestId);
+      if (!entry?.outbox || entry.state !== "queued" || !entry.outbox.acknowledged || entry.cancelRequested ||
+          BigInt(entry.outbox.epoch) < BigInt(draft.deliveryEpoch ?? "0")) return undefined;
+      entry.outbox.dispatchId ??= randomUUID();
+      entry.state = "running";
+      if (!steering) recordUser(draft, entry);
+      return entry;
+    });
+  }
+
+  async finishOutboxSteer(chatId: string, requestId: string, outcome: SteerOutcome, turnId: string): Promise<void> {
+    await this.update(chatId, draft => {
+      const entry = draft.inbox.find(value => value.requestId === requestId);
+      if (!entry?.outbox || entry.state !== "running") return;
+      if (entry.cancelRequested) entry.state = "cancelled";
+      else if (outcome === "queued") { entry.state = "queued"; entry.outbox.steerDeclined = true; }
+      else if (outcome === "delivered") { entry.state = "completed"; entry.outbox.accepted = true; recordUser(draft, entry, turnId); }
+      else entry.state = "interrupted";
+    });
+  }
+
+  async acceptOutbox(chatId: string, requestId: string): Promise<void> {
+    await this.update(chatId, draft => {
+      const entry = draft.inbox.find(value => value.requestId === requestId);
+      if (entry?.outbox && entry.state === "running") entry.outbox.accepted = true;
+    });
+  }
+
+  async reportOutbox(chatId: string, requestId: string, state: CloudV2PromptState): Promise<void> {
+    await this.update(chatId, draft => {
+      const entry = draft.inbox.find(value => value.requestId === requestId);
+      if (entry?.outbox) entry.outbox.reported = state;
+    });
+  }
+
+  async stopOutbox(chatId: string, epoch: string): Promise<void> {
+    if (!this.metadata(chatId)?.chat) return;
+    await this.update(chatId, draft => {
+      if (BigInt(epoch) > BigInt(draft.deliveryEpoch ?? "0")) draft.deliveryEpoch = epoch;
+      for (const entry of draft.inbox) if (entry.outbox && BigInt(entry.outbox.epoch) < BigInt(epoch)) {
+        if (entry.state === "queued") entry.state = "cancelled";
+        if (entry.state === "running" || entry.state === "cancelled") entry.cancelRequested = true;
+      }
+    });
+  }
+
+  deliveryEpoch(chatId: string): string { return this.sessions.get(chatId)?.deliveryEpoch ?? "0"; }
 
   async stop(chatId: string, current: () => boolean = () => true): Promise<void> {
     await this.update(chatId, (draft) => {
