@@ -6,6 +6,8 @@ import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
+import { CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS } from "./workspace-access.js";
+import { CloudV2PromptOutbox } from "./prompt-outbox.js";
 
 import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 
@@ -72,14 +74,6 @@ function workspace(row: Row): CloudV2Workspace {
   };
 }
 
-// Every long-lived capability also needs a live account and membership.
-const LIVE_ACCESS = `EXISTS (
-  SELECT 1 FROM organization_members m
-  JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
-  JOIN users u ON u.id = m.user_id AND u.auth_status = 'active' AND u.deleted_at IS NULL
-  WHERE m.org_id = w.org_id AND m.user_id = w.creator_user_id
-    AND NOT o.is_personal AND o.cloud_workspaces_allowed)`;
-
 // WorkOS sid is the device/session authority, independent of the workspace's
 // account/membership epoch. Do not let a lost broker notification keep it live.
 const LIVE_SESSION = `s.provider = 'workos' AND s.user_id = w.creator_user_id
@@ -105,7 +99,8 @@ async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promi
 }
 
 export class CloudV2Store {
-  constructor(private readonly pool: pg.Pool) {}
+  readonly prompts: CloudV2PromptOutbox;
+  constructor(private readonly pool: pg.Pool) { this.prompts = new CloudV2PromptOutbox(pool); }
 
   async createWorkspace(input: CreateWorkspace): Promise<CloudV2Workspace> {
     return withSystemTx(this.pool, tx => this.insertWorkspace(tx, input));
@@ -313,12 +308,23 @@ export class CloudV2Store {
   /** Workspaces running with no activity since `before`. */
   async idleSince(before: Date, limit = 50): Promise<CloudV2Workspace[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
-      `SELECT ${COLUMNS} FROM cloud_v2_workspaces
+      `SELECT ${COLUMNS} FROM cloud_v2_workspaces w
        WHERE state = 'running' AND coalesce(active_at, updated_at) < $1
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
+           AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)
        ORDER BY coalesce(active_at, updated_at) LIMIT $2`,
       [before, limit],
     ));
     return rows.map(workspace);
+  }
+
+  /** Recheck at the mutation, so a send between idle discovery and Stop wins. */
+  async stopIdle(id: string, before: Date): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces w SET state='stopping',attempts=0,
+      next_attempt_at=NULL,updated_at=clock_timestamp()
+      WHERE id=$1 AND state='running' AND coalesce(active_at,updated_at)<$2
+        AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
+          AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)`, [id, before]));
   }
 
   /** A one-use app connect ticket, or a worker model-proxy token. */
@@ -447,6 +453,7 @@ export class CloudV2Store {
       await tx.query(`UPDATE cloud_v2_workspaces SET worker_token_hash = NULL, worker_boot_id = NULL WHERE id = $1`, [id]);
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE workspace_id = $1`, [id]);
       if (!history) return;
+      await tx.query(`DELETE FROM cloud_v2_prompt_chats WHERE workspace_id = $1`, [id]);
       await tx.query(`DELETE FROM cloud_v2_messages WHERE workspace_id = $1`, [id]);
       await tx.query(`DELETE FROM cloud_v2_chats WHERE workspace_id = $1`, [id]);
     });

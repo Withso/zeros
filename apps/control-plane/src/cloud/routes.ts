@@ -10,6 +10,7 @@ import type { CloudV2InstalledRepository, CloudV2Store, CloudV2Workspace } from 
 import { CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
 import { readCloudV2History } from "./history.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
+import { createCloudV2PromptRoutes } from "./prompt-routes.js";
 
 const CONNECT_TICKET_TTL_MS = 60_000;
 export const CLOUD_V2_CAPABILITIES: CloudV2Capabilities = {
@@ -29,7 +30,9 @@ const CreateSchema = z.object({
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow">;
+  store: Pick<CloudV2Store, "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow"> & Partial<Pick<CloudV2Store, "prompts">>;
+  /** Roll out only with a runtime that advertises durable prompt delivery. */
+  promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
@@ -39,8 +42,9 @@ export type CloudV2RouteDeps = {
   branchPrefix?: string;
 };
 
-function document(workspace: CloudV2Workspace) {
-  return { ...workspace, placement: "cloud" as const, version: 2 as const, capabilities: CLOUD_V2_CAPABILITIES };
+function workspaceDocument(workspace: CloudV2Workspace, promptOutbox: boolean) {
+  return { ...workspace, placement: "cloud" as const, version: 2 as const,
+    capabilities: { ...CLOUD_V2_CAPABILITIES, ...(promptOutbox ? { promptOutbox: 1 as const } : {}) } };
 }
 
 function slug(value: string): string {
@@ -49,6 +53,11 @@ function slug(value: string): string {
 
 export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const app = new Hono();
+  const document = (workspace: CloudV2Workspace) => workspaceDocument(workspace, deps.promptOutbox === true);
+  if (deps.promptOutbox) {
+    if (!deps.store.prompts) throw new Error("Cloud prompt store is required");
+    app.route("/", createCloudV2PromptRoutes(deps.store.prompts));
+  }
   const prefix = deps.branchPrefix ?? "zeros/";
   const json = bodyLimit({ maxSize: 16 * 1024, onError: c => c.json({ error: { code: "payload_too_large", message: "Request is too large" } }, 413) });
 

@@ -151,6 +151,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     store,
     compute,
     runtime,
+    prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
     publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
     stopWorker: workspace => connections!.stopWorkspace(workspace),
     bootEnv: workspace => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: v2.runtime.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
