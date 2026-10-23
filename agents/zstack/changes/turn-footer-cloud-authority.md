@@ -26,3 +26,8 @@
   its conversation list. The worker relay regression verifies that publication.
 - Process diagnostics must show executable names rather than complete command
   lines: host-injected authentication arguments can otherwise enter tool output.
+- CodeQL caught quadratic backtracking in a moved shell command-name parser.
+  Shared code extraction also needs adversarial-input checks: use bounded edge
+  scans for trimming instead of an unanchored repeated suffix regexp. The
+  protocol parser regression bounds a 500,000-parenthesis near miss in a child
+  process and verifies that a later legitimate edit remains attributed.

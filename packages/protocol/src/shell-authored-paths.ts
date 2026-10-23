@@ -113,7 +113,13 @@ function shellTokens(command: string): string[] {
 }
 
 function commandName(raw: string): string {
-  return nodePath.basename(raw.replace(/^\(+/, "").replace(/\)+$/, ""));
+  // Scan from the edges once. An unanchored trailing-parenthesis regexp can
+  // backtrack quadratically on a tool-supplied run followed by another byte.
+  let start = 0;
+  let end = raw.length;
+  while (start < end && raw[start] === "(") start += 1;
+  while (end > start && raw[end - 1] === ")") end -= 1;
+  return nodePath.basename(raw.slice(start, end));
 }
 
 function isAssignment(raw: string): boolean {
