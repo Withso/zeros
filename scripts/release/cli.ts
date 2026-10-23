@@ -6,7 +6,7 @@ import { finalizePromotion, promote, promoteServices } from "./promotion";
 import { createProviders } from "./providers";
 import { githubClient } from "./github";
 import { assertCheckout, migrationManifest } from "./source";
-import { command } from "./io";
+import { migrationReceipt } from "./migration-command";
 
 export async function main() {
   const mode = process.argv[2];
@@ -29,9 +29,7 @@ export async function main() {
       })
     : await (mode === "--services" ? promoteServices : promote)(config, { ...providers, assertCurrent,
         betaReceipt: async () => { await github.betaReceipt(); },
-        migration: async execute => JSON.parse(await command("pnpm", ["exec", "tsx", "scripts/release/migration-cli.ts", execute ? "--execute" : "--plan"], {
-          env: { ...process.env, NODE_ENV: "production", CONTROL_PLANE_MIGRATION_APPROVALS: "" }, timeout: 50 * 60_000,
-        })),
+        migration: execute => migrationReceipt(execute, { ...process.env, NODE_ENV: "production", CONTROL_PLANE_MIGRATION_APPROVALS: "" }),
         waitIdentity: () => providers.waitIdentity(manifest),
       });
   await mkdir(".context/release", { recursive: true, mode: 0o700 });
