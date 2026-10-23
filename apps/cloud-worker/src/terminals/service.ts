@@ -172,7 +172,9 @@ export class Terminals {
       native = await (this.options.spawn ?? nativeSpawn)({ shell: "/bin/bash", args: this.options.shellArgs ?? ["-l"],
         // Keep the descriptor owned by the worker while the native fork chdirs.
         cwd: `/proc/${process.pid}/fd/${descriptor.fd}`, cols, rows,
-        env: { ...workerChildEnvironment(this.options.environment, this.options.gitEnvironment), TERM: "xterm-256color" },
+        // bash keeps an inherited PWD that names its working directory, so the
+        // prompt shows the checkout instead of the held descriptor's /proc path.
+        env: { ...workerChildEnvironment(this.options.environment, this.options.gitEnvironment), TERM: "xterm-256color", PWD: cwd },
       });
       await this.files.assertDescriptor(descriptor);
       const session: Session = { sessionId: message.sessionId, workspaceId: this.scope.workspace.id, cwd, createdAt: Date.now(), cols, rows,

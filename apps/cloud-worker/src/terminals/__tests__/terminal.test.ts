@@ -1,4 +1,4 @@
-import { symlink } from "node:fs/promises";
+import { realpath, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import type { BridgeMessage } from "@zeros/protocol/messages";
@@ -116,6 +116,11 @@ it("checks native cwd and login exclusions and gives a terminal only runtime/bro
   await service.handle(a.client, frame("PTY_CREATE", { sessionId: "valid", cwd: root, cols: 9999, rows: 0 }));
   expect(launches[0]).toMatchObject({ cols: 500, rows: 24, env: { GH_ZEROS_BROKER_SOCKET: "/fixture/socket", GIT_ASKPASS: "/fixture/askpass", TERM: "xterm-256color" } });
   expect(launches[0].env).not.toHaveProperty("ZEROS_WORKER_TOKEN"); expect(launches[0].env).not.toHaveProperty("CURSOR_API_KEY"); expect(launches[0].env).not.toHaveProperty("GH_TOKEN");
+  // The shell starts in the worker's held descriptor (/proc/<pid>/fd/<n>), and
+  // bash trusts an inherited PWD naming the same inode. Without the real path
+  // the prompt showed "/proc/18863/fd/27" instead of the checkout.
+  expect(launches[0].cwd).toMatch(/^\/proc\/\d+\/fd\/\d+$/);
+  expect(launches[0].env.PWD).toBe(await realpath(root));
 });
 
 it("honors kill while native spawn is pending", async () => {
