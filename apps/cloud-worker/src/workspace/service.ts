@@ -16,6 +16,7 @@ export interface WorkspaceServiceOptions {
   publish?: (frame: BridgeMessage) => void;
   lookupPr?: (branch: string) => Promise<PrSummary>;
   watch?: boolean;
+  historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
 }
 
 /** Native wire contract from engine/workspace/service.ts and git/types.ts,
@@ -35,7 +36,7 @@ export class WorkspaceService {
 
   private constructor(readonly scope: WorkspaceScope, private readonly directory: string, private readonly options: WorkspaceServiceOptions) {
     this.run = options.run ?? commandRunner(scope.root);
-    this.git = new GitService(scope, { run: this.run, baseBranch: () => this.state.baseBranch,
+    this.git = new GitService(scope, { run: this.run, historyDiff: options.historyDiff, baseBranch: () => this.state.baseBranch,
       setBaseBranch: branch => this.update(state => ({ ...state, baseBranch: branch })), changed: () => this.invalidate(true) });
     this.files = new FileService(scope, this.run, () => this.invalidate(false));
     if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content));

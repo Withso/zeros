@@ -413,7 +413,7 @@
         "button": 2
       },
       "apps/desktop/src/renderer/features/agent/turn-footer.tsx": {
-        "button": 3
+        "button": 1
       },
       "apps/desktop/src/renderer/features/agent/turn-usage-card.tsx": {
         "button": 1

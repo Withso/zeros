@@ -12,6 +12,7 @@ interface GitOptions {
   baseBranch?: () => string;
   setBaseBranch?: (branch: string) => Promise<void>;
   changed?: () => void;
+  historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
 }
 const WRITE_OPS = new Set(["git.stage", "git.unstage", "git.discard", "git.clean", "git.commit", "git.push", "git.pull", "git.rebase", "git.fetch", "git.stashSave", "git.stashPop", "git.stashApply", "git.stashDrop", "git.checkoutBranch", "git.createBranch", "git.renameBranch", "git.changeTarget", "git.merge", "git.cherryPick", "git.revert", "git.continue", "git.abort", "git.deleteBranch", "git.tagCreate", "git.tagDelete"]);
 export const DEFERRED_GIT_OPS = ["git.reset", "git.restore", "git.stageHunk", "git.unstageHunk", "git.discardHunk", "git.initInPlace", "git.repoBranchCatalog", "git.listAllBranches"] as const;
@@ -153,7 +154,7 @@ export class GitService {
       case "git.changeLineCounts": return this.counts(true);
       case "git.hasChanges": return { hasChanges: (await this.counts() as { all: number }).all > 0 };
       case "git.diff": {
-        if (params.history !== undefined) return unsupported();
+        if (params.history !== undefined) return this.options.historyDiff?.(params) ?? unsupported();
         const range = await this.comparison(params);
         const paths = [params.filePath, params.oldFilePath].filter(value => value !== undefined).map(value => this.scope.relative(value));
         if (params.fullContext === true && !paths.length) throw new WorkspaceError("VALIDATION_FAILED", "Full context requires a file.");

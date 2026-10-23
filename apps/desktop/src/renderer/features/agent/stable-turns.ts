@@ -5,6 +5,7 @@ function sameTurn(previous: Turn, next: Turn): boolean {
     previous.userPrompt === next.userPrompt &&
     previous.recordedTurnId === next.recordedTurnId &&
     previous.recordedStartedAt === next.recordedStartedAt &&
+    previous.recordedSummary === next.recordedSummary &&
     previous.isSteer === next.isSteer &&
     previous.events.length === next.events.length &&
     previous.events.every((event, index) => event === next.events[index]) &&

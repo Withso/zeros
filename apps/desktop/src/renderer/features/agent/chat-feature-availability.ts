@@ -6,8 +6,8 @@ export function permissionModesAvailable(folder: string | null | undefined): boo
   return !isCloudWorkspace(folder);
 }
 
-/** Turn checkpoints (changed files, reset and undo) are Local-only for now:
- * the cloud v2 worker does not serve turn records. */
+/** Reset/undo and native footer reads remain Local-only. Cloud footers use
+ * mirrored summaries; explicit Review reads the worker's recorded diffs. */
 export function turnCheckpointsAvailable(chatId: string): boolean {
   return !parseCloudScopedId(chatId);
 }
