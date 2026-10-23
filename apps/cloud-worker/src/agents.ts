@@ -122,10 +122,12 @@ export class Agents {
     }
   }
 
-  async closeChat(chatId: string): Promise<void> {
+  /** Shutdown keeps each chat's execution for the next worker to re-adopt. */
+  async closeChat(chatId: string, shutdown = false): Promise<void> {
     const route = this.chats.get(chatId);
     if (!route) return;
     await this.retire(route);
+    if (!shutdown) await this.store.retireExecution(chatId, route.id);
     if (this.store.metadata(chatId)?.chat) await this.store.stop(chatId, () => this.chats.get(chatId) === route);
     if (this.chats.get(chatId) === route) this.chats.delete(chatId);
     this.activity();
@@ -147,7 +149,7 @@ export class Agents {
   async flush(): Promise<void> {
     await Promise.all([...this.routes.values()].map(async (route) => { await route.events; await route.settling; }));
   }
-  async dispose(): Promise<void> { this.models.dispose(); for (const id of [...this.chats.keys()]) await this.closeChat(id); }
+  async dispose(): Promise<void> { this.models.dispose(); for (const id of [...this.chats.keys()]) await this.closeChat(id, true); }
 
   private agent(id: string): CloudV2Agent {
     if (id !== "codex" && id !== "claude" && id !== "cursor") throw new WorkspaceError("agent-not-found", "Unknown cloud agent.");
@@ -155,10 +157,24 @@ export class Agents {
   }
 
   private route(message: { agentId: string; sessionId: string; executionId?: string; chatId?: string }): Runtime {
-    const route = this.routes.get(message.executionId ?? message.sessionId);
+    const id = message.executionId ?? message.sessionId;
+    const route = this.routes.get(id) ?? this.readopt(id, message.agentId, message.chatId);
     if (!route || route.closed || route.agentId !== message.agentId || (message.chatId && route.chatId !== message.chatId))
       throw new WorkspaceError("session-expired", "This execution has ended. Reopen the conversation to continue.");
     if (message.executionId && message.sessionId !== message.executionId) throw new WorkspaceError("session-expired", "Conflicting execution routes.");
+    return route;
+  }
+
+  /** A worker restart ends its routes, not the app's executions. Only a
+   * chat's persisted execution comes back; replaced or closed ones stay fenced. */
+  private readopt(id: string, agentId: string, requestedChat?: string): Runtime | undefined {
+    const chatId = requestedChat ?? this.store.chatForExecution(id);
+    const metadata = chatId && !this.chats.has(chatId) ? this.store.metadata(chatId) : undefined;
+    if (!chatId || !metadata?.chat || metadata.executionId !== id || metadata.chat.agentId !== agentId) return undefined;
+    this.scope.folder(metadata.chat.folder);
+    const route: Runtime = { id, chatId, agentId: this.agent(agentId), model: metadata.chat.model ?? undefined, effort: metadata.chat.effort || undefined,
+      admitting: 0, events: Promise.resolve(), stopping: 0, closed: false, waiters: new Map(), steers: new Map() };
+    this.chats.set(chatId, route); this.routes.set(id, route);
     return route;
   }
 
@@ -171,7 +187,8 @@ export class Agents {
     if (message.type === "AGENT_NEW_SESSION" && message.agentRole === "design") throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Design is not available in cloud workspaces.");
     const agentId = this.agent(message.agentId);
     const requested = message.type === "AGENT_LOAD_SESSION" ? message.executionId ?? message.sessionId : undefined;
-    const found = requested ? this.routes.get(requested) : undefined;
+    // An adoption probe never starts a native process for a restarted worker.
+    const found = requested ? this.routes.get(requested) ?? (message.type === "AGENT_LOAD_SESSION" && !message.adoptOnly ? this.readopt(requested, agentId, message.chatId) : undefined) : undefined;
     const chatId = message.chatId ?? found?.chatId;
     if (!chatId) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "A conversation is required.");
     const timing = agentTiming(agentId, chatId, "open", this.onTiming);
@@ -211,7 +228,7 @@ export class Agents {
       const selected = route;
       selected.preparing = (async () => {
         await retiring;
-        const chat = await this.store.selectAgent({ id: chatId, folder: this.scope.root, agentId, agentName: NAMES[agentId],
+        const chat = await this.store.selectAgent({ id: chatId, folder: this.scope.root, agentId, agentName: NAMES[agentId], executionId: selected.id,
           // These existing open couriers carry selections only. Credentials
           // always come from the control plane, never the caller's env.
           model: message.env?.[MODEL_ENV[agentId]] || undefined, effort: message.env?.ZEROS_THINKING_EFFORT || undefined,

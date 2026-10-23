@@ -39,6 +39,9 @@ export interface SessionData {
   chatId: string;
   chat: ChatRow | null;
   nativeSessionId?: string;
+  /** The worker route the app holds for this chat. A restarted worker
+   * re-adopts only this one, so replaced or closed routes stay refused. */
+  executionId?: string;
   paused: boolean;
   /** Live reducer state; only rows are serialized to disk. */
   messages: AgentMessage[];
@@ -116,6 +119,7 @@ export class SessionStore {
       if (value.version !== 1 || value.workspaceKey !== workspaceKey) throw new Error("Session store belongs to a different workspace or version.");
       if (typeof value.chatId !== "string" || store.filename(value.chatId) !== name ||
           !Array.isArray(value.rows) || !Array.isArray(value.inbox) || !Array.isArray(value.steers) ||
+          (value.executionId !== undefined && typeof value.executionId !== "string") ||
           (value.chat !== null && (!coerceChat(value.chat) || value.chat.id !== value.chatId))) throw new Error("Invalid persisted chat.");
       value.messages = transcript(value.rows);
       if (Number.isSafeInteger(value.ordinal) && value.ordinal! > store.nextOrdinal) store.nextOrdinal = value.ordinal!;
@@ -146,9 +150,14 @@ export class SessionStore {
   }
 
   /** Routing reads must not clone the transcript on every prompt or event. */
-  metadata(chatId: string): Pick<SessionData, "chat" | "nativeSessionId" | "paused"> | undefined {
+  metadata(chatId: string): Pick<SessionData, "chat" | "nativeSessionId" | "executionId" | "paused"> | undefined {
     const value = this.sessions.get(chatId);
-    return value ? structuredClone({ chat: value.chat, nativeSessionId: value.nativeSessionId, paused: value.paused }) : undefined;
+    return value ? structuredClone({ chat: value.chat, nativeSessionId: value.nativeSessionId, executionId: value.executionId, paused: value.paused }) : undefined;
+  }
+
+  chatForExecution(executionId: string): string | undefined {
+    for (const value of this.sessions.values()) if (value.chat && value.executionId === executionId) return value.chatId;
+    return undefined;
   }
 
   history(chatId: string): readonly CloudV2MessageRow[] { return this.sessions.get(chatId)?.rows ?? []; }
@@ -234,10 +243,12 @@ export class SessionStore {
 
   /** Serialize selection with the inbox and imported history. Only untouched
    * conversations may change provider; a queued first Send already owns it. */
-  async selectAgent(input: { id: string; folder: string; agentId: string; agentName: string; model?: string; effort?: string }, admit: () => void): Promise<ChatRow> {
-    const initial = coerceChat({ ...input, createdAt: Date.now(), updatedAt: Date.now() })!;
+  async selectAgent(input: { id: string; folder: string; agentId: string; agentName: string; model?: string; effort?: string; executionId: string }, admit: () => void): Promise<ChatRow> {
+    const { executionId, ...selection } = input;
+    const initial = coerceChat({ ...selection, createdAt: Date.now(), updatedAt: Date.now() })!;
     return this.change(input.id, (draft) => {
       admit();
+      draft.executionId = executionId;
       const chat = draft.chat!;
       if (chat.agentId !== input.agentId) {
         if (established(draft)) throw new WorkspaceError("session-expired", "This conversation belongs to another agent.");
@@ -267,7 +278,7 @@ export class SessionStore {
     // resurrect a conversation after a deletion races its initial creation.
     await this.change(chatId, (draft) => {
       draft.chat = null; draft.rows = []; draft.messages = []; draft.inbox = []; draft.steers = [];
-      draft.nativeSessionId = undefined; draft.paused = true;
+      draft.nativeSessionId = undefined; draft.executionId = undefined; draft.paused = true;
     }, null, true);
   }
 
@@ -374,6 +385,11 @@ export class SessionStore {
       entry.response = entry.state === "cancelled" ? { ...response, stopReason: "cancelled" } : response;
       entry.error = error;
     });
+  }
+
+  async retireExecution(chatId: string, executionId: string): Promise<void> {
+    if (this.sessions.get(chatId)?.executionId !== executionId) return;
+    await this.update(chatId, (draft) => { if (draft.executionId === executionId) draft.executionId = undefined; });
   }
 
   async stop(chatId: string, current: () => boolean = () => true): Promise<void> {

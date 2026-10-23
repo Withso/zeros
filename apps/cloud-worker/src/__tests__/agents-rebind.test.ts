@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudV2ControlFrameSchema, type CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { BridgeMessage } from "@zeros/protocol/messages";
@@ -306,4 +306,56 @@ it("saves already received stream events when Stop closes the current execution"
   finally { held.release(); await closing; }
   const page = await f.op("messages.window", { chatId: "chat" }) as { messages: Array<{ msgId: string; payload: string }> };
   expect(page.messages.map(row => JSON.parse(row.payload)).find(row => row.messageId === "answer")?.text).toBe("one two");
+});
+
+// Waking a stopped VM restarts its worker. The renderer still holds each open
+// chat's execution, so a Send, Stop or model change for it must not fail as
+// "This execution has ended" and strand the chat.
+describe("a worker restart", () => {
+  const prompt = (sessionId: string, text: string) => browserFrame("AGENT_PROMPT", { agentId: "claude", sessionId, executionId: sessionId, prompt: [{ type: "text", text }] });
+  async function finish(f: Awaited<ReturnType<typeof setup>>, frame: ReturnType<typeof browserFrame>, driverIndex: number) {
+    await f.relay.request(CLIENT_A, frame);
+    await expect.poll(() => f.drivers[driverIndex]?.driver.prompts.length).toBe(1);
+    f.drivers[driverIndex].driver.complete(); await f.worker.flush();
+    await expect.poll(() => f.relay.response(frame.id)?.type).toBe("AGENT_PROMPT_COMPLETE");
+  }
+
+  it("keeps the chat's execution, so the next Send resumes the same native conversation", async () => {
+    const f = await setup(), current = session(await f.open("claude"));
+    await finish(f, prompt(current.sessionId, "before"), 0);
+    await f.restart();
+    // Reconnect probes stay misses; only real work starts a native process.
+    expect(await f.request("AGENT_LOAD_SESSION", { agentId: "claude", sessionId: current.sessionId, chatId: "chat", cwd: WORKSPACE_KEY, adoptOnly: true }))
+      .toMatchObject({ type: "AGENT_ERROR", code: "session-expired" });
+    expect(f.drivers).toHaveLength(1);
+    await finish(f, prompt(current.sessionId, "after"), 1);
+    expect(f.drivers).toHaveLength(2);
+    expect(f.drivers[1].driver.opened).toMatchObject({ sessionId: current.sessionId, nativeSessionId: `native-${current.sessionId}` });
+    expect(session(await f.open("claude")).sessionId).toBe(current.sessionId);
+  });
+
+  it("confirms Stop and applies a model change for that execution", async () => {
+    const f = await setup(), current = session(await f.open("claude"));
+    await f.restart();
+    expect(await f.request("AGENT_CANCEL", { agentId: "claude", chatId: "chat", sessionId: current.sessionId, executionId: current.sessionId }))
+      .toMatchObject({ type: "WORKSPACE_RESPONSE", result: { conversationId: "chat", state: "cancelled" } });
+    await f.relay.request(CLIENT_A, browserFrame("AGENT_SET_MODEL", { agentId: "claude", sessionId: current.sessionId, executionId: current.sessionId, model: "claude-haiku-5-5" }));
+    await expect.poll(() => f.drivers.at(-1)?.driver.model).toBe("claude-haiku-5-5");
+    expect(f.relay.bridge("AGENT_ERROR")).toHaveLength(0);
+  });
+
+  it("still refuses executions the chat replaced or closed before the restart", async () => {
+    const f = await setup(), replaced = session(await f.open("cursor"));
+    const current = session(await f.open("claude"));
+    const closed = session(await f.open("claude", "closed"));
+    expect((await f.request("AGENT_CLOSE_SESSION", { agentId: "claude", chatId: "closed", sessionId: closed.sessionId, userStop: true })).type).toBe("AGENT_SESSION_CLOSED");
+    await f.restart();
+    for (const [agentId, sessionId] of [["cursor", replaced.sessionId], ["claude", closed.sessionId]] as const)
+      expect(await f.request("AGENT_PROMPT", { agentId, sessionId, prompt: [{ type: "text", text: "stale" }] }))
+        .toMatchObject({ type: "AGENT_ERROR", code: "session-expired" });
+    expect(await f.request("AGENT_PROMPT", { agentId: "claude", sessionId: current.sessionId, chatId: "closed", prompt: [{ type: "text", text: "foreign" }] }))
+      .toMatchObject({ type: "AGENT_ERROR", code: "session-expired" });
+    expect(f.drivers.every(row => row.driver.prompts.length === 0)).toBe(true);
+    await finish(f, prompt(current.sessionId, "current"), 3);
+  });
 });
