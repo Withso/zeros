@@ -518,6 +518,10 @@ export function DesignCanvas({
     view.frameSelected && !view.selectedNodeId
       ? selectedFrameRootDetails
       : null;
+  // Motion uses the inspector's style target, including the outer frame root.
+  // Selection, rather than runtime readback readiness, keeps the timeline open.
+  const motionNodeDetails = selectedNodeDetails ?? frameLayoutOwnerDetails;
+  const motionTargetSelected = view.frameSelected || Boolean(view.selectedNodeId);
   /** The one auto-layout owner whose padding and gaps the canvas edits: a
    * single selected layer, or the selected frame's root. A multi-selection
    * has none — editing its primary alone would surprise. */
@@ -803,10 +807,10 @@ export function DesignCanvas({
   ]);
 
   useEffect(() => {
-    if (motionTimelineOpen && !view.selectedNodeId) {
+    if (motionTimelineOpen && !motionTargetSelected) {
       onMotionTimelineOpenChange(false);
     }
-  }, [motionTimelineOpen, onMotionTimelineOpenChange, view.selectedNodeId]);
+  }, [motionTimelineOpen, motionTargetSelected, onMotionTimelineOpenChange]);
 
   // DOM owner for viewport bounds, focus scoping, and pointer-relative zoom.
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -857,7 +861,7 @@ export function DesignCanvas({
   // The theme matrix is a persistent non-modal tool window launched from the
   // canvas toolbar, so it may coexist with canvas and inspector work.
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
-  const motionOverlayOwner = `${workspaceId ?? ""}\u0000${snapshot?.directoryId ?? view.directoryId ?? ""}\u0000${selectedFrame?.file ?? ""}\u0000${selectedNodeDetails?.oid ?? ""}`;
+  const motionOverlayOwner = `${workspaceId ?? ""}\u0000${snapshot?.directoryId ?? view.directoryId ?? ""}\u0000${selectedFrame?.file ?? ""}\u0000${motionNodeDetails?.oid ?? ""}`;
   const [motionOverlayState, setMotionOverlayState] =
     useState<DesignMotionOverlayState>({
       owner: "",
@@ -2297,7 +2301,7 @@ export function DesignCanvas({
         !motionTimelineOpen ||
         !workspaceId ||
         !selectedFrame ||
-        !selectedNodeDetails
+        !motionNodeDetails
       ) {
         return;
       }
@@ -2305,22 +2309,22 @@ export function DesignCanvas({
         workspaceId,
         frame: selectedFrame.file,
         sourceVersion: selectedFrame.sourceVersion,
-        nodeId: selectedNodeDetails.oid,
+        nodeId: motionNodeDetails.oid,
         motion: designMotionPreviewInput(draft, currentTime, playing),
       });
     },
-    [motionTimelineOpen, selectedFrame, selectedNodeDetails, workspaceId],
+    [motionTimelineOpen, selectedFrame, motionNodeDetails, workspaceId],
   );
 
   const clearMotionPreview = useCallback(async () => {
-    if (!workspaceId || !selectedFrame || !selectedNodeDetails) return;
+    if (!workspaceId || !selectedFrame || !motionNodeDetails) return;
     await clearDesignNodeStylePreviewTransient({
       workspaceId,
       frame: selectedFrame.file,
       sourceVersion: selectedFrame.sourceVersion,
-      nodeId: selectedNodeDetails.oid,
+      nodeId: motionNodeDetails.oid,
     });
-  }, [selectedFrame, selectedNodeDetails, workspaceId]);
+  }, [selectedFrame, motionNodeDetails, workspaceId]);
 
   const saveMotion = useCallback(
     async (draft: DesignMotionTimelineDraft) => {
@@ -2328,7 +2332,7 @@ export function DesignCanvas({
       if (
         !workspaceId ||
         !selectedFrame ||
-        !selectedNodeDetails ||
+        !motionNodeDetails ||
         !foundation
       ) {
         throw new Error(
@@ -2357,7 +2361,7 @@ export function DesignCanvas({
           {
             operationId: `animation:${crypto.randomUUID()}`,
             type: "node.set-styles",
-            nodeId: selectedNodeDetails.oid,
+            nodeId: motionNodeDetails.oid,
             styles: {
               "animation-name": draft.name,
               "animation-duration": draft.duration,
@@ -2374,12 +2378,12 @@ export function DesignCanvas({
         ],
       });
     },
-    [canvasFoundation.data, selectedFrame, selectedNodeDetails, workspaceId],
+    [canvasFoundation.data, selectedFrame, motionNodeDetails, workspaceId],
   );
 
   const deleteMotion = useCallback(async () => {
     const foundation = canvasFoundation.data;
-    if (!workspaceId || !selectedFrame || !selectedNodeDetails || !foundation) {
+    if (!workspaceId || !selectedFrame || !motionNodeDetails || !foundation) {
       throw new Error("The selected element is not ready for motion editing.");
     }
     await applyDesignTransactionCached(workspaceId, selectedFrame.file, {
@@ -2388,13 +2392,13 @@ export function DesignCanvas({
       documentId: foundation.summary.documentId,
       baseRevision: foundation.summary.revision,
       actor: { kind: "human", id: "desktop" },
-      intent: `Remove motion from ${selectedNodeDetails.name}`,
+      intent: `Remove motion from ${motionNodeDetails.name}`,
       createdAt: Date.now(),
       operations: [
         {
           operationId: `animation:${crypto.randomUUID()}`,
           type: "node.set-styles",
-          nodeId: selectedNodeDetails.oid,
+          nodeId: motionNodeDetails.oid,
           styles: {
             animation: null,
             "animation-name": "none",
@@ -2412,7 +2416,7 @@ export function DesignCanvas({
         },
       ],
     });
-  }, [canvasFoundation.data, selectedFrame, selectedNodeDetails, workspaceId]);
+  }, [canvasFoundation.data, selectedFrame, motionNodeDetails, workspaceId]);
 
   // Arrow keys on several selected frames move them together, in the nudge
   // lifecycle of one frame: presses while the key is held land as one canvas
@@ -5977,7 +5981,7 @@ export function DesignCanvas({
         !event.ctrlKey &&
         !event.altKey &&
         event.key.toLowerCase() === "a" &&
-        view.selectedNodeId
+        motionTargetSelected
       ) {
         event.preventDefault();
         onMotionTimelineOpenChange(!motionTimelineOpen);
@@ -6046,6 +6050,7 @@ export function DesignCanvas({
     hitStackMenu,
     nudgeSelectedNode,
     motionTimelineOpen,
+    motionTargetSelected,
     navigateToNode,
     onMotionTimelineOpenChange,
     onDeleteFrame,
@@ -8146,7 +8151,7 @@ export function DesignCanvas({
           open={motionTimelineOpen}
           ownerKey={selectedFrame?.file ?? "frame"}
           sessionOwnerKey={motionOverlayOwner}
-          details={selectedNodeDetails}
+          details={motionNodeDetails}
           definitions={
             canvasFoundation.data?.foundation.keyframes ??
             EMPTY_DESIGN_KEYFRAME_DEFINITIONS
@@ -8244,7 +8249,7 @@ export function DesignCanvas({
               shortcut="⇧A"
               tooltipSide="right"
               pressed={motionTimelineOpen}
-              disabled={!workspaceId || !selectedFrame || !view.selectedNodeId}
+              disabled={!workspaceId || !selectedFrame || !motionTargetSelected}
               aria-keyshortcuts="Shift+A"
               onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
             >

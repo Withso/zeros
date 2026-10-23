@@ -1807,7 +1807,9 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   and cannot be overtaken by later writes or Undo. Document read failures and
   transaction conflicts retain their normal error and recovery handling.
 - **Motion:** node-local keyframe tracks, preview, playback, and paths exist only
-  in explicit Motion mode. Draft identity is workspace + directory + frame +
+  in explicit Motion mode. Selecting an outer frame targets its authored frame
+  root or document body, matching the inspector, for opening, previewing, saving
+  and deleting motion. Draft identity is workspace + directory + frame +
   node, not source revision. Unrelated keyframe refreshes preserve unsaved
   drafts, and a save acknowledges only the draft it wrote. Pending saves and
   deletions retain that exact owner through selection round trips; their late

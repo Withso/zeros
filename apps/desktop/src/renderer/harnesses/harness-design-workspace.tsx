@@ -79,6 +79,9 @@ function withDesignRuntime(source: string, sourceVersion: string): string {
 const layoutGestureHarness = new URLSearchParams(window.location.search).has(
   "layoutGestures",
 );
+const frameMotionHarness = new URLSearchParams(window.location.search).has(
+  "frameMotion",
+);
 // `?designTokens`: the home frame is styled by an imported source and the
 // linked tokens.css, as a composed document carries them, so the inspector
 // can name tokens and their sources.
@@ -149,6 +152,10 @@ const homeSource = designTokensHarness
       p { max-width: 620px; margin: 0; color: dimgray; font-size: 24px; line-height: 1.5; }
       .button { width: fit-content; border-radius: 999px; background: black; color: white; padding: 16px 24px; }
       .harness-layer { display: none; }
+      ${frameMotionHarness ? `
+      main { animation: wash 18s linear infinite; }
+      @keyframes wash { from { opacity: 0.6; } to { opacity: 1; } }
+      ` : ""}
     </style>
   </head>
   <body data-oid="home-body">
@@ -456,7 +463,16 @@ async function main() {
           variants: [],
           components: [],
         },
-        keyframes: [],
+        keyframes: frameMotionHarness && file === "home.html"
+          ? [{
+              file: "home.html",
+              name: "wash",
+              keyframes: [
+                { offset: 0, styles: { opacity: "0.6" } },
+                { offset: 100, styles: { opacity: "1" } },
+              ],
+            }]
+          : [],
       },
     } as never);
   }

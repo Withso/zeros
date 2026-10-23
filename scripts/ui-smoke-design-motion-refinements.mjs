@@ -1,5 +1,131 @@
 import { expect } from "@playwright/test";
 
+export async function runDesignFrameMotionSmoke({ page, check }) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?frameMotion`,
+    { waitUntil: "networkidle" },
+  );
+  const frame = page.locator('[data-design-frame-row="home.html"]');
+  const canvas = page.locator("[data-design-canvas-viewport]");
+  const toggle = page.getByRole("button", {
+    name: "Toggle motion timeline",
+    exact: true,
+  });
+  const timeline = page.getByRole("region", { name: "Motion timeline" });
+  const duration = timeline.getByLabel("Animation duration", { exact: true });
+  const points = timeline.getByRole("button", { name: /opacity keyframe at/ });
+  const close = () =>
+    timeline.getByRole("button", { name: "Close motion timeline" }).click();
+  const root = () => page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]',
+  ).locator('[data-oid="home-main"]');
+  const selection = () => page.evaluate(async () => {
+    const { designWorkspaceView } = await import(
+      "/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts"
+    );
+    const { frameSelected, selectedNodeId } = designWorkspaceView("ws_design_harness");
+    return { frameSelected, selectedNodeId };
+  });
+
+  await frame.click();
+  await expect(page.getByRole("button", { name: "Edit motion wash" })).toBeVisible();
+  await expect.poll(selection).toEqual({ frameSelected: true, selectedNodeId: null });
+  await expect(toggle).toBeEnabled();
+  await page.getByRole("button", { name: "Edit motion wash" }).click();
+  await expect(timeline).toBeVisible();
+  await expect(duration).toHaveValue("18");
+  await expect(points).toHaveCount(2);
+  await close();
+  await page.getByRole("button", { name: "Open motion timeline", exact: true }).click();
+  await expect(timeline).toBeVisible();
+  await close();
+  await toggle.click();
+  await expect(timeline).toBeVisible();
+  await close();
+  await canvas.focus();
+  await page.keyboard.press("Shift+A");
+  await expect(timeline).toBeVisible();
+  await expect(duration).toHaveValue("18");
+  await expect.poll(selection).toEqual({ frameSelected: true, selectedNodeId: null });
+  check("a selected main frame opens its authored motion from the inspector, toolbar and shortcut", true);
+
+  await timeline.getByRole("button", { name: "Play motion preview", exact: true }).click();
+  await expect.poll(() => root().evaluate((node) =>
+    node.getAnimations().some((animation) => animation.effect?.target === node && animation.playState === "running"),
+  )).toBe(true);
+  await timeline.getByRole("button", { name: "Pause motion preview", exact: true }).click();
+  await duration.fill("12");
+  await duration.press("Enter");
+  await timeline.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(timeline.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await expect.poll(() => root().evaluate((node) => node.style.animationDuration)).toBe("12s");
+  expect(await page.evaluate(() => window.__zerosHarnessFoundation.transactions.at(-1)))
+    .toMatchObject({ frame: "home.html", nodeIds: ["home-main"] });
+  await expect.poll(selection).toEqual({ frameSelected: true, selectedNodeId: null });
+  check("main-frame motion previews and saves against the authored root", true);
+
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  await expect(duration).toHaveValue("300");
+  await expect(points).toHaveCount(0);
+  await frame.click();
+  await expect(duration).toHaveValue("12");
+  await expect(points).toHaveCount(2);
+  await page.locator('[data-design-frame-row="pricing.html"]').click();
+  await expect(duration).toHaveValue("300");
+  await expect(points).toHaveCount(0);
+  await frame.click();
+  await expect(duration).toHaveValue("12");
+  await expect(points).toHaveCount(2);
+  check("frame and child motion drafts stay isolated through selection round trips", true);
+
+  await timeline.getByRole("button", { name: "Delete motion", exact: true }).click();
+  await expect(points).toHaveCount(0);
+  await expect.poll(() => root().evaluate((node) => node.style.animationName)).toBe("none");
+  expect(await page.evaluate(() => window.__zerosHarnessFoundation.transactions.at(-1)))
+    .toMatchObject({ frame: "home.html", nodeIds: ["home-main"] });
+  await canvas.focus();
+  await page.keyboard.press("Escape");
+  await expect(timeline).toBeHidden();
+  await expect(toggle).toBeDisabled();
+  check("deleting main-frame motion targets its root and deselection closes the timeline", true);
+}
+
+export async function runDesignDocumentMotionSmoke({ page, check }) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?authoredFrame`,
+    { waitUntil: "networkidle" },
+  );
+  await page.locator('[data-design-frame-row="home.html"]').click();
+  const toggle = page.getByRole("button", { name: "Toggle motion timeline", exact: true });
+  await expect(toggle).toBeEnabled();
+  await toggle.click();
+  const timeline = page.getByRole("region", { name: "Motion timeline" });
+  const points = timeline.getByRole("button", { name: /opacity keyframe at/ });
+  await expect(timeline).toBeVisible();
+  await expect(points).toHaveCount(0);
+  await timeline.getByLabel("Motion property", { exact: true }).fill("opacity");
+  await timeline.getByLabel("Motion property", { exact: true }).press("Enter");
+  await expect(points).toHaveCount(2);
+  await timeline.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(timeline.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => window.__zerosHarnessFoundation.transactions.at(-1)))
+    .toMatchObject({ frame: "home.html", nodeIds: ["::zeros-document-body"] });
+  const runtime = () => page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]',
+  );
+  await expect.poll(() => runtime().locator("body").evaluate((node) => node.style.animationName))
+    .toMatch(/^motion-/);
+  expect(await runtime().locator('[data-oid="home-main"]').evaluate((node) => node.style.animationName))
+    .toBe("");
+  await timeline.getByRole("button", { name: "Delete motion", exact: true }).click();
+  await expect(points).toHaveCount(0);
+  await expect.poll(() => runtime().locator("body").evaluate((node) => node.style.animationName))
+    .toBe("none");
+  check("a document without an explicit frame root creates and deletes motion on its body", true);
+}
+
 async function openMotion(page) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(
@@ -1032,6 +1158,8 @@ export async function runDesignMotionDirectoryAcknowledgementIsolationSmoke({
 }
 
 export async function runDesignMotionRefinementsSmoke(context) {
+  await runDesignFrameMotionSmoke(context);
+  await runDesignDocumentMotionSmoke(context);
   await runDesignMotionPauseWithInvalidDraftSmoke(context);
   await runDesignMotionPauseAfterFieldCommitSmoke(context);
   await runDesignMotionKeyboardControlScopeSmoke(context);
