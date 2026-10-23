@@ -17,6 +17,7 @@ import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { ControlPlaneError } from "../features/team/control-plane";
 import type { Project } from "./projects-store";
 import { clearCloudComposerPrs } from "./read-caches";
+import { forgetSidebarRepositoryFilter, sidebarRepositoryFilterOwner } from "./sidebar-list-preferences";
 
 export const cloudWorkspaceDetails =
   new KeyedAsyncCache<CloudWorkspaceDocument>(128);
@@ -24,6 +25,11 @@ let documents: readonly CloudWorkspaceDocument[] = [];
 let rows: readonly Workspace[] = [];
 let projects: readonly Project[] = [];
 let ownerByKey = new Map<string, Project>();
+let repositoryFilterOwners = new Map<string, string>();
+// Catalog placeholders lack worker branch/status/PR metadata. Keep provenance
+// on immutable rows so attaching for the first time cannot invent activity.
+const catalogOnlyRows = new WeakSet<Workspace>();
+export const isCloudWorkspaceCatalogOnlyRow = (row: Workspace): boolean => catalogOnlyRows.has(row);
 let epoch = 0;
 let catalogConfirmed = false;
 export const cloudCatalogGeneration = () => epoch;
@@ -140,7 +146,7 @@ export function cloudWorkspaceDocument(
   );
 }
 
-function rebuild(documentsChanged = false): void {
+function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {}): void {
   const knownKeys = new Set(
     documents
       .filter(canReadCloudWorkspace)
@@ -154,6 +160,7 @@ function rebuild(documentsChanged = false): void {
   for (const key of engineRows.keys())
     if (!knownKeys.has(key)) engineRows.delete(key);
   const nextProjects = new Map<string, Project>();
+  const nextFilterOwners = new Map<string, string>();
   const nextOwners = new Map<string, Project>();
   const prior = new Map(rows.map((row) => [row.id, row]));
   const nextRows = documents
@@ -181,6 +188,7 @@ function rebuild(documentsChanged = false): void {
           addedAt: Date.parse(doc.createdAt),
         };
       nextProjects.set(projectKey, project);
+      nextFilterOwners.set(project.id, sidebarRepositoryFilterOwner(doc.createdBy, doc.organizationId));
       nextOwners.set(key, project);
       const engine = engineRows.get(key);
       const row: Workspace = {
@@ -213,14 +221,26 @@ function rebuild(documentsChanged = false): void {
               : "running",
       };
       const old = prior.get(key);
-      return old && JSON.stringify(old) === JSON.stringify(row) ? old : row;
+      const next = old && catalogOnlyRows.has(old) === !engine && JSON.stringify(old) === JSON.stringify(row) ? old : row;
+      if (!engine) catalogOnlyRows.add(next);
+      return next;
     });
   ownerByKey = nextOwners;
   const newProjects = [...nextProjects.values()];
   const projectsChanged =
     newProjects.length !== projects.length ||
     newProjects.some((row, i) => row !== projects[i]);
-  if (projectsChanged) projects = newProjects;
+  if (projectsChanged) {
+    const retainedIds = new Set(newProjects.map(project => project.id));
+    if (pruneRepositoryFilters) {
+      for (const project of projects) {
+        const owner = repositoryFilterOwners.get(project.id);
+        if (!retainedIds.has(project.id) && owner !== undefined) forgetSidebarRepositoryFilter(project.id, owner);
+      }
+    }
+    projects = newProjects;
+  }
+  repositoryFilterOwners = nextFilterOwners;
   const nextById = new Map(nextRows.map(row => [row.id, row]));
   const changed = [...rows.filter(row => nextById.get(row.id) !== row),
     ...nextRows.filter(row => prior.get(row.id) !== row)];
@@ -455,7 +475,8 @@ export function clearCloudWorkspaceCatalog(): void {
   localStopVersions.clear();
   // Account retirement invalidates subscribers even before the first create
   // receipt or list has published any confirmed documents.
-  rebuild(true);
+  // Retiring an account's in-memory catalog is not repository deletion.
+  rebuild(true, { pruneRepositoryFilters: false });
 }
 
 type LifecycleIntent = { id: string; task?: Promise<CloudWorkspaceDocument>; owner?: number; generation?: number; version?: number; reason?: "interaction" };

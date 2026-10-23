@@ -24,6 +24,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { forgetRepoHistoryPreference } from "./repo-history-preferences";
+import { forgetSidebarRepositoryFilter } from "./sidebar-list-preferences";
 import { getSetting, setSetting } from "../platform/settings";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { isWorktreePath } from "./workspace-resolution";
@@ -394,6 +395,7 @@ export function removeProject(projectId: string): void {
   const target = projects.find((p) => p.id === projectId);
   gitRevisions.delete(projectId);
   forgetRepoHistoryPreference(projectId);
+  forgetSidebarRepositoryFilter(projectId);
   const next = projects.filter((p) => p.id !== projectId);
   saveProjects(next);
   // Removing the LAST project must ALSO clear the backup. saveProjects() leaves

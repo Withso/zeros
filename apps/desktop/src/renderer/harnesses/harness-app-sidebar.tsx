@@ -195,6 +195,49 @@ localStorage.setItem(
 );
 
 Object.assign(window, {
+  appSidebarSeedCloud: async () => {
+    const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
+    const { setActiveOrganizationSelection } = await import("../features/team/active-team");
+    const { controlPlane } = await import("../features/team/control-plane");
+    const { acceptCloudWorkspaceDocument, getCloudProjects, getCloudWorkspaceRows } = await import("../state/cloud-workspace-catalog");
+    const { notifyProjectsChanged, setWorkspaceRowsForTesting } = await import("../state/use-projects");
+    const organizationId = "11111111-1111-4111-8111-111111111111";
+    const otherOrganizationId = "44444444-4444-4444-8444-444444444444";
+    const organizations = [organizationId, otherOrganizationId].map((id, index) => ({
+      id, name: `Organization ${index + 1}`, slug: `organization-${index + 1}`, logo: null, isPersonal: false,
+      role: "owner" as const, defaultTeamId: id, workspaceCapabilities: { local: true, cloud: true },
+      teamCapabilities: { multiple: false as const, canCreate: false as const },
+    }));
+    const membership = { user: { id: "55555555-5555-4555-8555-555555555555", email: "fixture@example.test", displayName: "Fixture", staffRole: null }, organizations, teams: organizations };
+    controlPlane.me = async () => membership;
+    acceptOrganizationSnapshot(membership);
+    const fixtures = [
+      { id: "22222222-2222-4222-8222-222222222222", organizationId, name: "cloud-one" },
+      { id: "33333333-3333-4333-8333-333333333333", organizationId, name: "cloud-two" },
+      { id: "66666666-6666-4666-8666-666666666666", organizationId: otherOrganizationId, name: "cloud-other" },
+    ];
+    for (const fixture of fixtures) acceptCloudWorkspaceDocument({
+      ...fixture, teamId: fixture.organizationId, createdBy: membership.user.id, placement: "cloud", status: "stopped", version: 1,
+      error: null, createdAt: "2026-09-26T00:00:00Z", updatedAt: "2026-09-26T00:00:00Z", deletedAt: null,
+      capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+      repository: { forge: "github.com", owner: "example", name: fixture.name, revision: "refs/heads/main" },
+      generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "stopped", lastObservedAt: null },
+    });
+    // Mirror the production catalog lifecycle into the shared read cache. The
+    // fixture has no authenticated lifecycle controller or live cloud bridge.
+    for (const project of getCloudProjects()) {
+      setWorkspaceRowsForTesting(project.repoSlug, getCloudWorkspaceRows().filter(row => row.repoSlug === project.repoSlug));
+    }
+    notifyProjectsChanged();
+    setActiveOrganizationSelection(organizationId, false);
+    useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
+    Object.assign(window, { appSidebarSelectOwner: (id: string | null) => {
+      setActiveOrganizationSelection(id, id === null);
+      useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
+    } });
+    return { organizationId, otherOrganizationId, keys: fixtures.map(fixture => `cloud://${fixture.organizationId}/${fixture.id}`),
+      projectIds: getCloudProjects().map(project => project.id) };
+  },
   appSidebarRequests: requests,
   __ZEROS_NATIVE__: {
     on: () => () => {},
@@ -292,7 +335,7 @@ const ConversationPane = params.has("conversation")
 const { DispatcherPage } = await import("../shell/dispatcher/dispatcher-modal");
 const { RepoPage } = await import("../features/repositories/repo-page");
 const { DashboardPage } = await import("../features/dashboard/dashboard-page");
-const { useProjects } = await import("../state/use-projects");
+const { useProjects, notifyWorkspacesChanged } = await import("../state/use-projects");
 const { AddProjectProvider, useAddProject } =
   await import("../shell/add-project-provider");
 const { ActionsCtx } = await import("../features/agent/sessions-context");
@@ -378,6 +421,18 @@ const auth = {
 } as AuthContextValue;
 
 Object.assign(window, {
+  appSidebarUpdateWorkspace: (id: string, patch: Partial<Workspace>) => {
+    const index = rows.findIndex(row => row.id === id);
+    if (index < 0) throw new Error("Unknown fixture workspace");
+    rows[index] = { ...rows[index], ...patch };
+    notifyWorkspacesChanged(rows[index].repoSlug);
+  },
+  appSidebarRecordActivity: (id: string, at: number) => {
+    const row = rows.find(row => row.id === id);
+    if (row) useWorkspaceStore.getState().dispatch({ type: "RECORD_WORKSPACE_ACTIVITY", folder: row.path, at });
+  },
+  appSidebarUpdateChat: (workspaceId: string) =>
+    useWorkspaceStore.getState().dispatch({ type: "TOUCH_CHAT", id: `chat-${workspaceId}` }),
   appSidebarSetWidth: setHomeSidebarWidth,
   appSidebarNavigate: (page: "customize" | "settings" | "dashboard") =>
     useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page }),

@@ -148,12 +148,12 @@ export async function checkSidebarUnopenedFolder({ page, check, harnessBase }) {
   const originalChats = await page.evaluate(
     () => window.appSidebarState().chats,
   );
-  for (const presentation of ["Grouped", "Ungrouped"]) {
+  for (const presentation of ["Repository", "Status", "None"]) {
     await page
       .getByRole("button", { name: "Filter workspaces", exact: true })
       .click();
     await page
-      .getByRole("menuitem", { name: presentation, exact: true })
+      .getByRole("menuitemradio", { name: presentation, exact: true })
       .click();
     await expect(folder).toBeVisible();
     await folder.click();
@@ -223,12 +223,12 @@ export async function checkSidebarRetiredLocalMain({
       id: "chat-legacy-main",
       folder: `/fixture/zeros${query.includes("subdirectory") ? "/packages/app" : ""}`,
     });
-    for (const presentation of ["Ungrouped", "Grouped"]) {
+    for (const presentation of ["None", "Repository"]) {
       await page
         .getByRole("button", { name: "Filter workspaces", exact: true })
         .click();
       await page
-        .getByRole("menuitem", { name: presentation, exact: true })
+        .getByRole("menuitemradio", { name: presentation, exact: true })
         .click();
       await expect(page.locator('[data-workspace-id^="local:"]')).toHaveCount(
         0,

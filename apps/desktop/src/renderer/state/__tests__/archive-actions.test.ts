@@ -12,6 +12,7 @@ import {
 } from "../pending-workspaces";
 import { selectActiveFolder, useWorkspaceStore } from "../store";
 import { peekWorkspacesFor, setWorkspaceRowsForTesting } from "../use-projects";
+import { setSidebarRepositoryIds, setSidebarWorkspaceSort } from "../sidebar-list-preferences";
 import {
   workspaceArchive,
   workspaceDelete,
@@ -105,6 +106,8 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  setSidebarRepositoryIds("local", []);
+  setSidebarWorkspaceSort("updated");
   vi.clearAllMocks();
   codeReviewCache.clear();
   hunkReviewCache.clear();
@@ -133,8 +136,37 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  setSidebarRepositoryIds("local", []);
+  setSidebarWorkspaceSort("updated");
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("sidebar archive presentation", () => {
+  it.each(["updated", "created"] as const)("repoints using the selected %s order", async sort => {
+    setSidebarWorkspaceSort(sort);
+    const updatedLeft = { ...left, lastActiveAt: 200 };
+    const updatedRight = { ...right, lastActiveAt: 100 };
+    setWorkspaceRowsForTesting(target.repoSlug, [updatedLeft, target, updatedRight]);
+    vi.mocked(workspaceArchive).mockResolvedValue(result());
+    await archiveWorkspaceWithFeedback(target, dispatch);
+    // Updated paints left, right, target; Created paints left, target, right.
+    expect(selectActiveFolder(useWorkspaceStore.getState())).toBe(sort === "updated" ? right.path : left.path);
+    expect(peekWorkspacesFor(target.repoSlug)).toEqual([updatedLeft, updatedRight]);
+  });
+
+  it("repoints to a visible repository when the archived destination is filtered out", async () => {
+    const other = { ...right, id: "other", repoRoot: "/other", repoSlug: "other", path: "/other/workspace" };
+    vi.mocked(loadProjects).mockReturnValue([...loadProjects(), { id: "other-project", name: "Other", repoRoot: "/other", repoSlug: "other", originUrl: null, addedAt: 2 }]);
+    setWorkspaceRowsForTesting("other", [other]);
+    setSidebarRepositoryIds("local", ["other-project"]);
+    vi.mocked(workspaceArchive).mockResolvedValue(result());
+    try {
+      await archiveWorkspaceWithFeedback(target, dispatch);
+      expect(selectActiveFolder(useWorkspaceStore.getState())).toBe(other.path);
+      expect(peekWorkspacesFor("other")).toEqual([other]);
+    } finally { setWorkspaceRowsForTesting("other", []); }
+  });
 });
 
 function seedReviewCaches(folder: string, workspaceId = target.id) {

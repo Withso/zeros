@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControlPlaneError } from "../../features/team/control-plane";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { resetSidebarListPreferencesForTests, setSidebarRepositoryIds, sidebarRepositoryFilterOwner, sidebarRepositoryIds } from "../sidebar-list-preferences";
+import { changedSidebarWorkspaceFolders } from "../../shell/sidebar-workspace-activity";
+import { peekWorkspacesFor, setWorkspaceRowsForTesting } from "../use-projects";
 const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), forget: vi.fn(), projects: vi.fn(() => [] as unknown[]), rollout: false }));
 vi.mock("../../platform/cloud-workspace-access", async importOriginal => ({
   ...await importOriginal<typeof import("../../platform/cloud-workspace-access")>(), forgetCloudWorkspacePortForwarding:api.forget,
@@ -15,6 +18,7 @@ vi.mock("../../platform/cloud-workspaces", async (importOriginal) => ({
 vi.mock("../projects-store", () => ({ loadProjects: api.projects }));
 import {
   acceptCloudWorkspaceDocument,
+  acceptCloudEngineWorkspace,
   clearCloudWorkspaceCatalog,
   cloudCatalogNeedsFastRefresh,
   cloudWorkspaceDocument,
@@ -72,9 +76,75 @@ function doc(version: number, status = "ready"): CloudWorkspaceDocument {
     },
   };
 }
+
+it("prunes a sidebar repository filter only when its last cloud workspace is removed", () => {
+  const second = { ...doc(1), id: "33333333-3333-4333-8333-333333333333" };
+  acceptCloudWorkspaceDocument(doc(1));
+  acceptCloudWorkspaceDocument(second);
+  const project = getCloudProjects()[0];
+  const owner = sidebarRepositoryFilterOwner(doc(1).createdBy, target.organizationId);
+  setSidebarRepositoryIds(owner, [project.id]);
+  acceptCloudWorkspaceDocument({ ...doc(2, "deleted"), deletedAt: "2026-09-26T00:00:02Z" });
+  expect(sidebarRepositoryIds(owner)).toEqual([project.id]);
+  acceptCloudWorkspaceDocument({ ...doc(3, "deleted"), id: second.id, deletedAt: "2026-09-26T00:00:03Z" });
+  expect(sidebarRepositoryIds(owner)).toEqual([]);
+});
+
+it("retains repository filters through a cloud account reset and reload", () => {
+  acceptCloudWorkspaceDocument(doc(1));
+  const project = getCloudProjects()[0];
+  const owner = sidebarRepositoryFilterOwner(doc(1).createdBy, target.organizationId);
+  setSidebarRepositoryIds(owner, [project.id]);
+  clearCloudWorkspaceCatalog();
+  expect(sidebarRepositoryIds(owner)).toEqual([project.id]);
+  acceptCloudWorkspaceDocument(doc(1));
+  expect(sidebarRepositoryIds(owner)).toEqual([project.id]);
+});
+
+it("prunes a removed cloud repository only for the account that owned its workspaces", () => {
+  acceptCloudWorkspaceDocument(doc(1));
+  const project = getCloudProjects()[0];
+  const owner = sidebarRepositoryFilterOwner(doc(1).createdBy, target.organizationId);
+  const otherAccount = sidebarRepositoryFilterOwner("other-account", target.organizationId);
+  setSidebarRepositoryIds(owner, [project.id]);
+  setSidebarRepositoryIds(otherAccount, [project.id]);
+  acceptCloudWorkspaceDocument({ ...doc(2, "deleted"), deletedAt: "2026-09-26T00:00:02Z" });
+  expect(sidebarRepositoryIds(owner)).toEqual([]);
+  expect(sidebarRepositoryIds(otherAccount)).toEqual([project.id]);
+});
+
+it("does not turn the first cloud metadata load into recent workspace activity", () => {
+  acceptCloudWorkspaceDocument(doc(1));
+  const catalog = getCloudWorkspaceRows();
+  acceptCloudEngineWorkspace(target, { ...catalog[0], branch: "real-branch", status: "in-review", prNumber: 42 });
+  const loaded = getCloudWorkspaceRows();
+  expect(changedSidebarWorkspaceFolders(catalog, loaded)).toEqual([]);
+  acceptCloudEngineWorkspace(target, { ...loaded[0], status: "done" });
+  expect(changedSidebarWorkspaceFolders(loaded, getCloudWorkspaceRows())).toEqual([loaded[0].path]);
+});
+
+it("retains cloud metadata provenance through an unchanged shared workspace cache refresh", () => {
+  acceptCloudWorkspaceDocument(doc(1));
+  const catalog = getCloudWorkspaceRows();
+  const slug = catalog[0].repoSlug;
+  try {
+    setWorkspaceRowsForTesting(slug, [...catalog]);
+    acceptCloudEngineWorkspace(target, { ...catalog[0] });
+    setWorkspaceRowsForTesting(slug, [...getCloudWorkspaceRows()]);
+    const loaded = peekWorkspacesFor(slug)!;
+    expect(changedSidebarWorkspaceFolders(catalog, loaded)).toEqual([]);
+    acceptCloudEngineWorkspace(target, { ...loaded[0], status: "done" });
+    setWorkspaceRowsForTesting(slug, [...getCloudWorkspaceRows()]);
+    expect(changedSidebarWorkspaceFolders(loaded, peekWorkspacesFor(slug)!)).toEqual([loaded[0].path]);
+  } finally {
+    setWorkspaceRowsForTesting(slug, []);
+  }
+});
+
 beforeEach(() => {
   api.rollout = false;
   clearCloudWorkspaceCatalog();
+  resetSidebarListPreferencesForTests();
   vi.clearAllMocks();
   api.forget.mockResolvedValue(undefined);
   api.projects.mockReturnValue([]);

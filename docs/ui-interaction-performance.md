@@ -331,20 +331,32 @@ and validation of a remembered workspace once its exact repository list settles.
 - The organization switcher names device Personal "Local" and sizes to its
   label, truncating long names. Destinations are Home (the Dashboard) and
   Customize; Create is an action and, like a repository's +, never paints as
-  selected. The profile row opens Settings. Rows are 30px, labels 13px, with 2px
-  between repository and workspace rows; repository names and workspace glyphs
+  selected. The profile row opens Settings. Repository and workspace rows are
+  32px (destinations remain 30px), labels 13px, with 2px between rows and
+  repository groups; repository names and workspace glyphs
   stay on fg2. Adding a repository lives on Create, the welcome view and the
   menu bar.
 - Collapsing is one persisted app preference. The sidebar stays mounted but
   hidden; the traffic lights and the toggle then float over the content's
   top-left corner at the same position, the first chat strip reserves that
   corner in its leading slot, and Home pages start below it.
-- Workspaces are Grouped by default: every registered Git repository is a
-  header (even with no workspaces), with its in-flight creates and workspaces
-  newest first. Ungrouped is one mixed newest-first list whose rows lead with
-  their repository icon and trail with agent state. These are the only two
-  presentations; a persisted Active or repository-only filter folds into
-  Ungrouped or Grouped when painted and is written back once.
+- Group offers Repository (default), Status and None. Repository retains every
+  registered Git repository header, even without workspaces. Status uses Home's
+  five lifecycle groups, excluding Archive; None is a mixed list. Mixed rows
+  lead with repository identity and trail with agent state. The released
+  `grouped`/`ungrouped` preference values remain readable; legacy Active and
+  repository-only values fold into None and Repository.
+- Filter → Repo searches repository names and remote identities, supports
+  multiple selections and All repositories, and restores selections by Local
+  owner or account/organization. Filters are bounded, validated on read and
+  pruned on repository or owner removal. They never navigate or wake a VM.
+- Sort by offers Updated (default) and Created, newest first within each group.
+  Updated combines confirmed workspace activity, chat metadata and deliberate
+  actions such as prompts, edits and terminal input. Confirmed status, PR,
+  branch and setup changes also advance its persisted clock. Opening a row,
+  warming a session or receiving an unchanged snapshot never advances it.
+  Created remains fixed. Pending creates lead their group. Archive navigation
+  follows this same filtered ordering; Back/Forward skips filtered-out rows.
 - A header's icon becomes its disclosure chevron on hover; + (Create for that
   repository) is always visible; settings and ⋯ (Create workspace, Create from…,
   Configuration, Remove repository) appear on hover or keyboard focus.
