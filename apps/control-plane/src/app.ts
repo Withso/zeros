@@ -24,6 +24,8 @@ import { ClientCompatibility, createClientCompatibilityMiddleware } from "./clie
 import { createAuthMiddleware } from "./auth.js";
 import { createCloudV2ProxyRoutes, CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./cloud/proxy.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./cloud/routes.js";
+import { createMcpServices } from "./mcp/composition.js";
+import { createMcpPublicRoutes, createMcpRoutes } from "./mcp/routes.js";
 import { createCloudV2WorkerRoutes, CLOUD_V2_WORKER_API, type CloudV2WorkerRouteDeps } from "./cloud/worker-routes.js";
 import { createPrivateRateLimitKey, rateLimit } from "./ratelimit.js";
 import { clientAddress } from "./client-address.js";
@@ -343,6 +345,9 @@ export function createApp(
     app.route("/", createGithubUnconfiguredRoutes());
   }
 
+  const mcp = createMcpServices(pool, config);
+  if (mcp) app.route("/", createMcpPublicRoutes(mcp.oauth));
+
   // Railway's edge supplies X-Real-IP for the original client. Mirror the
   // retired feedback Worker's pre-auth abuse boundary so anonymous callers
   // cannot fan out body buffering or JWT/JWKS work. Invalid/missing values
@@ -389,6 +394,7 @@ export function createApp(
 
   app.route("/", createFeedbackRoutes(config.feedback));
   app.route("/", createChatTitleRoutes(config.chatTitleApiKey));
+  if (mcp) app.route("/", createMcpRoutes(mcp.store, mcp.oauth));
   app.route("/", createAccountRecoveryRoutes(pool));
   app.route("/", createDeletionLifecycleRoutes(pool));
   if (config.workos?.opsOrigin && config.deploymentChannel !== "beta") {

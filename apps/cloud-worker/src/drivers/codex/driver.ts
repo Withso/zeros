@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
-import type { Driver, DriverOpen } from "../driver";
+import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
 import { WorkspaceError } from "../../workspace/scope";
 import { normalizeProviderError } from "../shared/provider-error";
 import { driverTiming } from "../../agent-timings";
@@ -101,6 +101,7 @@ export class CodexDriver implements Driver {
         ...(input.nativeSessionId ? { threadId: input.nativeSessionId, excludeTurns: true } : {}),
         cwd: input.cwd, ...(input.model ? { model: input.model } : {}),
         modelProvider: "zeros_proxy", approvalPolicy: "never", sandbox: "danger-full-access",
+        ...(input.mcpServers ? { config: { mcp_servers: Object.fromEntries(Object.entries(input.mcpServers).map(([name, server]) => [name, { url: server.url, http_headers: server.headers }])) } } : {}),
       });
       if (this.state !== "opening" || typeof response?.thread?.id !== "string" || !response.thread.id)
         throw new Error("Codex returned an invalid session.");
@@ -283,8 +284,7 @@ export class CodexDriver implements Driver {
     if (this.state !== "ready" || !this.rpc || !this.nativeSessionId) throw new Error("Codex driver is not ready.");
   }
   private redact(message: string): string {
-    const token = this.input?.proxy?.token;
-    return token ? message.split(token).join("[redacted]").split(JSON.stringify(token).slice(1, -1)).join("[redacted]") : message;
+    return redactDriverMessage(message, this.input);
   }
   private error(error: unknown): Error {
     const native = normalizeProviderError("codex", error);

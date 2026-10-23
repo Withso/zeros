@@ -132,6 +132,25 @@ describe("kvToMap / mapToKV", () => {
 });
 
 describe("serverFromDraft", () => {
+  it("preserves significant whitespace and embedded newlines in existing arguments", () => {
+    const server = { name: "literal-args", transport: "stdio", command: "node", args: ["  spaced  ", "", "first\nsecond"] };
+    expect(serverFromDraft(draftFromServer(server), server).args).toEqual(server.args);
+  });
+  it("rejects malformed URLs and embedded URL credentials before saving", () => {
+    for (const url of ["https://", "https://user:password@example.com/mcp", "https://example.com/mcp#fragment"]) {
+      expect(draftError(httpDraft({ url }), new Set())).not.toBeNull();
+    }
+  });
+  it("rejects duplicate environment keys and case-insensitive duplicate headers", () => {
+    const env = [{ id: 1, key: "TOKEN", value: "a" }, { id: 2, key: " TOKEN ", value: "b" }];
+    expect(draftError(stdioDraft({ env }), new Set())).toMatch(/duplicate/i);
+    const headers = [{ id: 1, key: "Authorization", value: "a" }, { id: 2, key: "authorization", value: "b" }];
+    expect(draftError(httpDraft({ headers }), new Set())).toMatch(/duplicate/i);
+  });
+  it("rejects header injection and invalid environment names", () => {
+    expect(draftError(httpDraft({ headers: [{ id: 1, key: "X-Test", value: "a\r\nb" }] }), new Set())).toMatch(/header/i);
+    expect(draftError(stdioDraft({ env: [{ id: 1, key: "BAD=NAME", value: "a" }] }), new Set())).toMatch(/variable/i);
+  });
   it("builds a stdio server, splitting args by line and trimming", () => {
     const s = serverFromDraft(stdioDraft({ argsText: " -y \n @upstash/context7-mcp \n\n" }), null);
     expect(s).toEqual({

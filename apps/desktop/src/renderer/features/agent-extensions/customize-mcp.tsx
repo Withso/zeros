@@ -57,6 +57,8 @@ import { useBridge } from "../../platform/bridge/use-bridge";
 import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
 import { shellOpenUrl } from "../../platform/app";
 import {
+  workspaceOp,
+  type SettingsReadWire,
   bridgeMcpGatewayAuthorize,
   bridgeMcpGatewayCancelAuth,
   bridgeMcpGatewayReconnect,
@@ -67,7 +69,7 @@ import {
   type ComposedMcpServerWire,
   type GatewayBackendStatusWire,
 } from "../../platform/bridge/workspace-bridge";
-import { useSettingsLayer } from "../settings/use-settings";
+import { primeSettingsLayer, useSettingsLayer } from "../settings/use-settings";
 import { SettingsSection } from "../settings/settings-ui";
 import {
   asString,
@@ -80,6 +82,7 @@ import {
   withToolDisabled,
   type RawServer,
 } from "./mcp-server-model";
+import { mcpConnectionCache, mcpConnectionKey } from "./mcp-connection-status";
 import { McpImportDialog } from "./mcp-import-dialog";
 import type { ResolvedCustomizeScope } from "./customize-page";
 import { useCachedRead } from "../../state/use-cached-read";
@@ -161,14 +164,14 @@ function HeadlessAuthModal({
         <DialogBody>
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
-              <span className="text-fg1 text-[14px] font-medium">
+              <span className="text-fg1 text-sm font-medium">
                 Authorization URL
               </span>
               <div className="flex gap-2">
                 <Input
                   readOnly
                   value={state?.url ?? ""}
-                  className="font-mono text-xs"
+                  className="font-sans text-sm"
                   onFocus={(e) => e.currentTarget.select()}
                 />
                 <Button
@@ -187,14 +190,14 @@ function HeadlessAuthModal({
               </div>
             </div>
             <div className="flex flex-col gap-1.5">
-              <span className="text-fg1 text-[14px] font-medium">
+              <span className="text-fg1 text-sm font-medium">
                 Code or redirect URL
               </span>
               <Input
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
                 placeholder="code=… or the full …/callback?code=… URL"
-                className="font-mono text-xs"
+                className="font-sans text-sm"
                 autoFocus
               />
               <p className="text-fg2 text-xs">
@@ -225,19 +228,18 @@ function HeadlessAuthModal({
 // ── List row ─────────────────────────────────────────────
 
 function ServerRow({
+  verificationOwner,
   server,
   busy,
-  repoScope,
   gateway,
   onToggle,
   onEdit,
   onRemove,
 }: {
   server: RawServer;
+  verificationOwner: string;
   busy: boolean;
-  /** True in a repo scope — gateway-auth entries get the "User-only" chip. */
-  repoScope: boolean;
-  /** Gateway controls for a gateway-fronted (oauth/header) server, user scope only. */
+  /** Gateway controls for this exact user or repository configuration. */
   gateway?: {
     status?: GatewayBackendStatusWire;
     error?: string | null;
@@ -258,7 +260,9 @@ function ServerRow({
   const enabled = isEnabled(server);
   const isOauth = server.auth === "oauth";
   const gatewayManaged = isOauth || server.auth === "header";
-  const st = gateway?.status?.state;
+  const verificationKey = mcpConnectionKey(verificationOwner, server);
+  const verification = useSyncExternalStore(useCallback(listener => mcpConnectionCache.subscribe(verificationKey, listener), [verificationKey]), useCallback(() => mcpConnectionCache.getSnapshot(verificationKey), [verificationKey]));
+  const st = gateway?.status?.state ?? (verification.data?.status === "connected" ? "connected" : undefined);
   const gwDown = gatewayManaged && !!gateway?.error;
   const allTools = gateway?.status?.tools ?? [];
   const disabledSet = new Set(disabledToolsOf(server));
@@ -273,15 +277,7 @@ function ServerRow({
         ? "border-border1 text-fg1"
         : "border-border1 text-fg2",
   );
-  const chipText = gwDown
-    ? "Gateway unavailable"
-    : st === "connected"
-      ? `${gateway?.status?.toolCount ?? 0}/${allTools.length} tools`
-      : st === "error"
-        ? "error"
-        : st === "needs-auth"
-          ? "OAuth · sign in"
-          : "connecting…";
+  const chipText = !enabled ? "Disabled" : st === "connected" ? "Connected" : "Needs connection";
   return (
     <div className={cn("flex flex-col gap-2 py-3.5", !enabled && "opacity-60")}>
       <div className="flex items-center justify-between gap-4">
@@ -297,16 +293,10 @@ function ServerRow({
           </span>
           <span className="min-w-0">
             <span className="flex items-center gap-1.5">
-              <span className="text-fg1 truncate text-[14px] font-medium">
+              <span className="text-fg1 truncate text-sm font-medium">
                 {name}
               </span>
-              {repoScope && gatewayManaged && (
-                <Tooltip label="Requires user scope">
-                  <span className="border-red-primary/40 text-red-primary text-xxs shrink-0 rounded-sm border px-1 py-px font-medium select-none">
-                    User-only auth
-                  </span>
-                </Tooltip>
-              )}
+
             </span>
             <span className="text-fg2 block truncate text-xs">
               {description || (
@@ -316,8 +306,7 @@ function ServerRow({
           </span>
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
-          {!repoScope &&
-            gatewayManaged &&
+          {
             (canExpand ? (
               <Tooltip label="Show tools">
                 <button
@@ -347,7 +336,7 @@ function ServerRow({
                 <span className={chipCls}>{chipText}</span>
               </Tooltip>
             ))}
-          {!repoScope && isOauth && gateway && !gwDown && st === "needs-auth" && (
+          {isOauth && gateway && !gwDown && st === "needs-auth" && (
             <Button
               variant="secondary"
               size="sm"
@@ -362,7 +351,7 @@ function ServerRow({
               Sign in
             </Button>
           )}
-          {!repoScope &&
+          {
             isOauth &&
             gateway?.onBeginHeadless &&
             !gwDown &&
@@ -379,8 +368,8 @@ function ServerRow({
                 </Button>
               </Tooltip>
             )}
-          {!repoScope && gateway?.signingIn && <Button variant="ghost" size="sm" onClick={gateway.onCancel}>Cancel</Button>}
-          {!repoScope && gateway && st === "error" && <Button variant="ghost" size="sm" disabled={busy || gateway.signingIn} onClick={gateway.onReconnect}>Reconnect</Button>}
+          { gateway?.signingIn && <Button variant="ghost" size="sm" onClick={gateway.onCancel}>Cancel</Button>}
+          { gateway && st === "error" && <Button variant="ghost" size="sm" disabled={busy || gateway.signingIn} onClick={gateway.onReconnect}>Reconnect</Button>}
           <Switch
             checked={enabled}
             onCheckedChange={onToggle}
@@ -502,7 +491,7 @@ function NewServerCard({
         <Plus className="size-4" />
       </span>
       <span className="flex min-w-0 flex-col">
-        <span className="text-fg1 text-[14px] font-medium">New MCP server</span>
+        <span className="text-fg1 text-sm font-medium">New MCP server</span>
         <span className="text-fg2 text-xs">Add a custom MCP server</span>
       </span>
     </button>
@@ -523,13 +512,13 @@ export function CustomizeMcpSection({
    *  gateway status polling (active-only effects stay off hidden surfaces). */
   surfaceActive?: boolean;
   onNew: () => void;
-  onEdit: (index: number) => void;
+  onEdit: (server: RawServer) => void;
   /** Repo scope's footnote link — jump to the User scope's list. */
   onSwitchToUser: () => void;
 }) {
   const isUser = scope.kind === "user";
   const repoRoot = scope.kind === "repo" ? scope.project.repoRoot : undefined;
-  const { layer, loading, error, write } = useSettingsLayer(
+  const { layer, loading, error } = useSettingsLayer(
     isUser ? "user" : "repo-local",
     repoRoot,
   );
@@ -539,6 +528,8 @@ export function CustomizeMcpSection({
   const [importing, setImporting] = useState(false);
   // Guard against a stale write resolving after the component changed servers.
   const writeSeq = useRef(0);
+  const mutating = useRef(false);
+  useEffect(() => () => { writeSeq.current++; }, []);
 
   // ── Gateway controls (user scope only) — the one user-global gateway
   // fronts every auth:"oauth"/"header" backend. Local engines open the
@@ -549,14 +540,14 @@ export function CustomizeMcpSection({
     useCallback((changed) => bridge?.onExecutionIdentityChange(changed) ?? (() => {}), [bridge]),
     useCallback(() => bridge ? runtimeExecutionKey(bridge.executionIdentity) : "", [bridge]),
   );
-  const statusKey = bridge && isUser ? mcpGatewayStatusKey(bridge, execution) : null;
+  const statusKey = bridge ? mcpGatewayStatusKey(bridge, execution, repoRoot) : null;
   const gatewayRead = useCachedRead(mcpGatewayStatusCache, statusKey, async (key) => {
-    const matches = () => bridge && key === mcpGatewayStatusKey(bridge, runtimeExecutionKey(bridge.executionIdentity));
+    const matches = () => bridge && key === mcpGatewayStatusKey(bridge, runtimeExecutionKey(bridge.executionIdentity), repoRoot);
     if (!bridge || !matches()) throw new Error("MCP connection changed.");
-    const snapshot = await bridgeMcpGatewayStatus(bridge);
+    const snapshot = await bridgeMcpGatewayStatus(bridge, repoRoot);
     if (!matches()) throw new Error("MCP connection changed.");
     return snapshot;
-  }, { enabled: surfaceActive && isUser, maxAgeMs: 3000 });
+  }, { enabled: surfaceActive, maxAgeMs: 30_000 });
   const gwStatus = useMemo(() => new Map((gatewayRead.data?.servers ?? []).map((s) => [s.name, s])), [gatewayRead.data]);
   const gwHealth = gatewayRead.data ?? { running: false, error: null };
   const refreshGateway = gatewayRead.refresh;
@@ -585,15 +576,13 @@ export function CustomizeMcpSection({
     setHeadlessAuth(null);
     setHeadlessBusy(false);
     return () => { generation.current++; };
-  }, [bridge, execution, isUser]);
+  }, [bridge, execution, repoRoot]);
   useEffect(() => {
-    if (!isUser || !surfaceActive) return;
-    // Keep slow startup and token renewal visible; pause while the app is hidden.
-    const poll = () => { if (document.visibilityState !== "hidden") refreshGateway(); };
-    const timer = setInterval(poll, 3000);
-    document.addEventListener("visibilitychange", poll);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
-  }, [refreshGateway, isUser, surfaceActive]);
+    if (!surfaceActive) return;
+    const refresh = () => { if (document.visibilityState !== "hidden") refreshGateway(); };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [refreshGateway, surfaceActive]);
   const previousServers = useRef({ key: statusKey, servers });
   useEffect(() => {
     if (statusKey && previousServers.current.key === statusKey && previousServers.current.servers !== servers) {
@@ -604,7 +593,7 @@ export function CustomizeMcpSection({
   const cancelSignIn = async (name: string) => {
     if (!bridge) return;
     const attempt = ++authAttempt.current;
-    await bridgeMcpGatewayCancelAuth(bridge, name);
+    await bridgeMcpGatewayCancelAuth(bridge, name, repoRoot);
     if (attempt !== authAttempt.current) return;
     authPending.current = false;
     setSigningIn(null);
@@ -620,7 +609,7 @@ export function CustomizeMcpSection({
     let awaitingCode = false;
     setSigningIn(name);
     try {
-      const st = await bridgeMcpGatewayAuthorize(bridge, name);
+      const st = await bridgeMcpGatewayAuthorize(bridge, name, repoRoot);
       if (attempt !== authAttempt.current) return;
       if (statusKey) mcpGatewayStatusCache.invalidate(statusKey);
       if (st.state === "connected")
@@ -630,7 +619,7 @@ export function CustomizeMcpSection({
       if (attempt !== authAttempt.current) return;
       if (shouldUseHeadlessMcpAuth(e)) {
         try {
-          const url = await bridgeMcpGatewayBeginAuth(bridge, name);
+          const url = await bridgeMcpGatewayBeginAuth(bridge, name, repoRoot);
           if (attempt !== authAttempt.current) return;
           setHeadlessAuth({ server: name, url });
           awaitingCode = true;
@@ -669,7 +658,7 @@ export function CustomizeMcpSection({
     let awaitingCode = false;
     setSigningIn(name);
     try {
-      const url = await bridgeMcpGatewayBeginAuth(bridge, name);
+      const url = await bridgeMcpGatewayBeginAuth(bridge, name, repoRoot);
       if (attempt !== authAttempt.current) return;
       setHeadlessAuth({ server: name, url });
       awaitingCode = true;
@@ -691,7 +680,7 @@ export function CustomizeMcpSection({
     const attempt = ++authAttempt.current;
     setHeadlessBusy(true);
     try {
-      const st = await bridgeMcpGatewayCompleteAuth(bridge, server, code);
+      const st = await bridgeMcpGatewayCompleteAuth(bridge, server, code, repoRoot);
       if (attempt !== authAttempt.current) return;
       if (statusKey) mcpGatewayStatusCache.invalidate(statusKey);
       if (st.state === "connected")
@@ -713,33 +702,26 @@ export function CustomizeMcpSection({
     }
   };
 
-  const persist = async (
-    next: RawServer[],
-    successMsg?: string,
-  ): Promise<boolean> => {
+  const persist = async (previous: RawServer | null, server: RawServer | null, successMsg?: string): Promise<boolean> => {
+    if (!bridge || mutating.current) return false;
+    mutating.current = true;
     const seq = ++writeSeq.current;
     setBusy(true);
     try {
-      await write({ mcp: { servers: next } });
-      if (successMsg && seq === writeSeq.current) toast.success(successMsg);
+      const result = await workspaceOp(bridge, server ? "mcp.saveServer" : "mcp.deleteServer", {
+        layer: isUser ? "user" : "repo-local", ...(repoRoot ? { repoRoot } : {}), previous, ...(server ? { server } : {}),
+      }) as Pick<SettingsReadWire, "path" | "doc">;
+      primeSettingsLayer(isUser ? "user" : "repo-local", repoRoot, result);
+      if (seq === writeSeq.current) { if (successMsg) toast.success(successMsg); refreshGateway(); }
       return true;
-    } catch {
-      toast.error("Couldn't save MCP servers");
+    } catch (error) {
+      if (seq === writeSeq.current) toast.error(error instanceof Error ? error.message : "Couldn’t save this MCP server.");
       return false;
-    } finally {
-      if (seq === writeSeq.current) setBusy(false);
-    }
+    } finally { mutating.current = false; if (seq === writeSeq.current) setBusy(false); }
   };
-
-  const handleRemove = (index: number) =>
-    void persist(
-      servers.filter((_, i) => i !== index),
-      "MCP server removed",
-    );
-  const handleToggle = (index: number, enabled: boolean) =>
-    void persist(withToggled(servers, index, enabled));
-  const handleToolToggle = (index: number, tool: string, disabled: boolean) =>
-    void persist(withToolDisabled(servers, index, tool, disabled));
+  const handleRemove = (index: number) => void persist(servers[index], null, "MCP server removed");
+  const handleToggle = (index: number, enabled: boolean) => void persist(servers[index], withToggled([servers[index]], 0, enabled)[0]);
+  const handleToolToggle = (index: number, tool: string, disabled: boolean) => void persist(servers[index], withToolDisabled([servers[index]], 0, tool, disabled)[0]);
 
   // Cursor caps total MCP tools at ~40; sum the ENABLED tools across connected
   // gateway servers so the user can keep under it (a lower bound — direct
@@ -783,12 +765,12 @@ export function CustomizeMcpSection({
   );
   const handleOverride = (c: ComposedMcpServerWire) =>
     void persist(
-      [...servers, rawFromComposed(c)],
+      null, rawFromComposed(c),
       `Added ${c.name} to your servers`,
     );
 
   const scopeBlurb = isUser
-    ? "MCP servers managed in Zeros apply to every local repo. View native configurations under each agent's tab, or import a server here to manage it in Zeros. Changes apply to new chats."
+    ? "Connect tools and services across your local projects. Changes apply to new chats."
     : `MCP servers for ${scope.kind === "repo" ? scope.project.name : "this repo"} and its local workspaces. Saved privately on this device; changes apply to new chats here.`;
 
   return (
@@ -843,10 +825,9 @@ export function CustomizeMcpSection({
                   <ServerRow
                     key={rowKeys[index]}
                     server={server}
+                    verificationOwner={statusKey ?? "unavailable-local"}
                     busy={busy}
-                    repoScope={!isUser}
                     gateway={
-                      isUser &&
                       (server.auth === "oauth" || server.auth === "header")
                         ? {
                             status: gwStatus.get(asString(server.name))?.url === server.url ? gwStatus.get(asString(server.name)) : undefined,
@@ -854,7 +835,7 @@ export function CustomizeMcpSection({
                             signingIn: signingIn === asString(server.name),
                             signInBlocked: signingIn !== null || headlessAuth !== null,
                             onCancel: () => { void cancelSignIn(asString(server.name)).catch(() => toast.error("Couldn't cancel sign-in.")); },
-                            onReconnect: () => { if (bridge) void bridgeMcpGatewayReconnect(bridge).then(refreshGateway).catch(() => toast.error("Couldn't reconnect MCP servers.")); },
+                            onReconnect: () => { if (bridge) void bridgeMcpGatewayReconnect(bridge, repoRoot).then(refreshGateway).catch(() => toast.error("Couldn't reconnect MCP servers.")); },
                             onSignIn: () =>
                               void handleSignIn(asString(server.name)),
                             onToolToggle: (tool, disabled) =>
@@ -865,7 +846,7 @@ export function CustomizeMcpSection({
                         : undefined
                     }
                     onToggle={(enabled) => handleToggle(index, enabled)}
-                    onEdit={() => onEdit(index)}
+                    onEdit={() => onEdit(server)}
                     onRemove={() => handleRemove(index)}
                   />
                 ))}

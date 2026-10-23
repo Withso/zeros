@@ -25,6 +25,11 @@ const cases = {
   CloudV2WorkerHistorySchema: [{ ...history, bootId: WORKSPACE_ID, sequence: 1 }],
   CloudV2WorkerActivitySchema: [{ idle: false }],
   CloudV2WorkerActivityReplySchema: [{ loginRevision: "3", state: "running" }],
+  RuntimeMcpServerSchema: [
+    { id: WORKSPACE_ID, name: "fixture", transport: "stdio", command: "tool", args: ["literal arg"], cwd: "~", env: { KEY: "fixture" }, listen_url: "http://127.0.0.1:3333/mcp" },
+    { id: WORKSPACE_ID, name: "fixture", transport: "http", url: "https://example.test/mcp", headers: { "X-Key": "fixture" }, auth: "oauth", disabled_tools: ["blocked"] },
+    { id: WORKSPACE_ID, name: "fixture", transport: "sse", url: "https://example.test/sse" },
+  ],
 } as const;
 
 it.each(Object.keys(cases) as Array<keyof typeof cases>)("keeps %s acceptance and strictness in sync", name => {
@@ -35,6 +40,20 @@ it.each(Object.keys(cases) as Array<keyof typeof cases>)("keeps %s acceptance an
       expect(shared[name].safeParse(invalid).success).toBe(false);
       expect(control[name].safeParse(invalid).success).toBe(false);
     }
+  }
+});
+
+it("keeps optional MCP capability/config bounds identical and rejects secret-bearing extension fields", () => {
+  const server = cases.RuntimeMcpServerSchema[1];
+  const capabilities = cases.CloudV2WorkerFrameSchema[0].capabilities;
+  for (const contract of [shared, control]) {
+    expect(contract.CloudV2WorkerFrameSchema.safeParse({ ...cases.CloudV2WorkerFrameSchema[0], capabilities: { ...capabilities, mcp: 1 } }).success).toBe(true);
+    expect(contract.CloudV2WorkerFrameSchema.safeParse({ ...cases.CloudV2WorkerFrameSchema[0], capabilities: { ...capabilities, mcp: 2 } }).success).toBe(false);
+    expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, mcpServers: cases.RuntimeMcpServerSchema }).success).toBe(true);
+    expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, mcpServers: Array.from({ length: 129 }, () => server) }).success).toBe(false);
+    for (const patch of [{ name: "x".repeat(129) }, { id: "11111111-1111-9111-1111-111111111111" }, { refresh_token: "forbidden" },
+      { headers: Object.fromEntries(Array.from({ length: 129 }, (_, i) => [`KEY_${i}`, "fixture"])) }, { headers: { KEY: "x".repeat(16385) } }])
+      expect(contract.RuntimeMcpServerSchema.safeParse({ ...server, ...patch }).success).toBe(false);
   }
 });
 

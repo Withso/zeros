@@ -45,11 +45,15 @@ function RadioGroup({
 function RadioGroupItem({
   value,
   label,
+  description,
+  variant = "default",
   className,
   children,
   ...props
 }: Omit<React.ComponentProps<typeof RadioGroupPrimitive.Item>, "children"> & {
   label: React.ReactNode;
+  description?: React.ReactNode;
+  variant?: "default" | "card";
   children?: React.ReactNode;
 }) {
   return (
@@ -59,6 +63,8 @@ function RadioGroupItem({
         value={value}
         className={cn(
           "group flex cursor-pointer items-center gap-2 text-left focus-visible:outline-none",
+          "disabled:cursor-not-allowed disabled:opacity-50",
+          variant === "card" && "border-border1 bg-bg1-highlight hover:bg-bg1-hover flex-row-reverse justify-between gap-4 rounded-lg border p-4",
           className,
         )}
         {...props}
@@ -75,9 +81,12 @@ function RadioGroupItem({
         >
           <RadioGroupPrimitive.Indicator className="bg-fg1 size-2 rounded-full" />
         </span>
-        {/* 14px matches the settings NAME scale and opts out of the
-            .settings-type-scale shrink (see settings-ui.tsx). */}
-        <span className="text-fg1 text-[14px]">{label}</span>
+        {/* Use the 14px token without the text-sm class that Settings
+            reduces to its smaller control scale. */}
+        <span className="flex min-w-0 flex-col gap-1">
+          <span className="text-fg1 text-(length:--text-sm)">{label}</span>
+          {description && <span className="text-fg3 text-xs leading-relaxed">{description}</span>}
+        </span>
       </RadioGroupPrimitive.Item>
       {children && <div className="ml-6">{children}</div>}
     </div>

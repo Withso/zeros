@@ -115,6 +115,19 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  it.each([false, true])("delivers optional MCP config only after WebSocket upgrade support=%s", async supported => {
+    if (supported) workerServer.on("headers", headers => { headers.push("X-Zeros-Worker-Features: mcp-v1"); });
+    const mcpServers = [{ id: workspaceId, name: "fixture", transport: "http" as const, url: "https://mcp.example.test" }];
+    const original = deps.config;
+    deps.config = async ws => ({ ...await original(ws), mcpServers });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.some(frame => frame.t === "config")).toBe(true));
+    if (supported) expect(frames.find(frame => frame.t === "config").mcpServers).toEqual(mcpServers);
+    else expect(frames.find(frame => frame.t === "config")).not.toHaveProperty("mcpServers");
+  });
+
   it("settles only prompts forwarded to a lost worker and preserves prompts queued for its successor", async () => {
     const forwarded: any[][] = [];
     workerServer.on("connection", ws => { const frames: any[] = []; forwarded.push(frames); ws.on("message", raw => frames.push(JSON.parse(String(raw)))); });

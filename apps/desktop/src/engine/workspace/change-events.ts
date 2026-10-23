@@ -33,6 +33,7 @@ const PROJECT_MUTATIONS = new Set([
 ]);
 
 const SETTINGS_MUTATIONS = new Set([
+  "mcp.saveServer", "mcp.deleteServer",
   "settings.syncPreferences",
   "settings.syncAgentPreferences",
   "skills.saveZeros",

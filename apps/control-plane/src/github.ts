@@ -27,6 +27,7 @@ import { GithubCloudUserAccess } from "./github-user-access.js";
 import { createGithubAppJwt } from "./github-app-jwt.js";
 import { githubCommitProfile, type GithubCommitProfile } from "./github-git-author.js";
 import { rateLimit } from "./ratelimit.js";
+import { rememberMcpRepositories } from "./mcp/repositories.js";
 
 export { createGithubAppJwt };
 
@@ -1392,6 +1393,8 @@ export function createGithubRoutes(
       if (await authorize(tx) !== fingerprint) throw new HttpError(409,"github_authorization_changed","GitHub connection changed. Try again.");
       await tx.query(`INSERT INTO cloud_github_connections(org_id,owner_user_id,installation_id) VALUES($1,$2,$3)
         ON CONFLICT(org_id,owner_user_id,installation_id) DO UPDATE SET verified_at=now()`, [body.organizationId,userId,installation.id]);
+      if (source || repositories) await rememberMcpRepositories(tx, { organizationId: body.organizationId, userId,
+        installationId: installation.id, fingerprint, repositories: source ? [source] : repositories!.repositories });
     });
     return c.json(source ? { installationId: installation.id, repository: source } : repositories ?? { connected: true, installationId: installation.id });
   });

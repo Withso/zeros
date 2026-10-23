@@ -30,6 +30,8 @@ export const CloudV2CapabilitiesSchema = z.object({
   git: z.boolean(),
   agents: z.array(CloudV2AgentSchema).max(3),
   promptOutbox: z.literal(1).optional(),
+  /** Configuration delivery is sent only after a worker advertises this version. */
+  mcp: z.literal(1).optional(),
 }).strict();
 export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
 
@@ -80,6 +82,22 @@ export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
 const proxy = z.object({ baseUrl: z.url(), token: z.string().min(16).max(4096), expiresAt: z.number().int() }).strict();
 const secret = z.string().min(16).max(16384);
 
+const mcpValues = z.record(z.string().min(1).max(256), z.string().max(16384))
+  .refine(value => Object.keys(value).length <= 128, "Too many MCP values");
+const mcpIdentity = { id: z.uuid(), name: z.string().min(1).max(128) };
+/** Private delivery only. These values must never enter history or diagnostics. */
+export const RuntimeMcpServerSchema = z.discriminatedUnion("transport", [
+  z.object({ ...mcpIdentity, transport: z.literal("stdio"), command: z.string().min(1).max(4096),
+    args: z.array(z.string().max(8192)).max(128).optional(), cwd: z.string().max(4096).optional(),
+    env: mcpValues.optional(), listen_url: z.string().min(1).max(4096).optional(),
+  }).strict(),
+  ...(["http", "sse"] as const).map(transport => z.object({ ...mcpIdentity, transport: z.literal(transport),
+    url: z.string().min(1).max(4096), headers: mcpValues.optional(), auth: z.enum(["none", "header", "oauth"]).optional(),
+    disabled_tools: z.array(z.string().min(1).max(256)).max(1024).optional(),
+  }).strict()),
+]);
+export type RuntimeMcpServer = z.infer<typeof RuntimeMcpServerSchema>;
+
 export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("prompts") }).strict(),
   z.object({ t: z.literal("open"), clientId }).strict(),
@@ -93,6 +111,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     t: z.literal("config"),
     promptOutbox: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
+    mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(),
     workspace: z.object({
       id: z.uuid(),
       organizationId: z.uuid(),

@@ -4,6 +4,8 @@ import type { CloudV2Workspace } from "./store.js";
 
 /** Only the control plane can read this route's private port credential. */
 export type WorkerRoute = { workspace: CloudV2Workspace; accessEpoch: string; url: string | null; token: string | null; bootId: string | null };
+const mcpPeers = new WeakSet<WebSocket>();
+export const workerSupportsMcp = (socket: WebSocket): boolean => mcpPeers.has(socket);
 
 export function dialWorker(route: WorkerRoute, grant: string): Promise<WebSocket> {
   if (!route.url || !route.token) throw new Error("Worker route unavailable.");
@@ -18,6 +20,9 @@ export function dialWorker(route: WorkerRoute, grant: string): Promise<WebSocket
       maxPayload: CLOUD_V2_MAX_FRAME_BYTES, perMessageDeflate: false, followRedirects: false, handshakeTimeout: 3000,
     });
     const fail = () => { ws.terminate(); reject(new Error("Worker connection unavailable.")); };
+    ws.on("upgrade", response => {
+      if (String(response.headers["x-zeros-worker-features"] ?? "").split(",").map(value => value.trim()).includes("mcp-v1")) mcpPeers.add(ws);
+    });
     ws.on("error", fail);
     ws.on("unexpected-response", (_request, response) => { response.resume(); fail(); });
     ws.once("open", () => { ws.off("error", fail); ws.on("error", () => {}); resolve(ws); });

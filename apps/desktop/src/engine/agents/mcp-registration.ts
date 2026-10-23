@@ -2,7 +2,7 @@ import type { McpServerRegistration } from "./types";
 import { withoutLocalDevelopment } from "../env/local-development";
 
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/;
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;
 
 /** Materialize an HTTP MCP registration for SDKs that do not support
  * environment-backed headers themselves. The secret stays out of the durable
@@ -12,6 +12,16 @@ export function materializeMcpServerRegistration(
   registration: McpServerRegistration,
   env: Readonly<Record<string, string | undefined>>,
 ): McpServerRegistration {
+  if (registration.transport === "stdio" && registration.envFromEnv) {
+    const values = { ...(registration.env ?? {}) };
+    for (const [name, reference] of Object.entries(registration.envFromEnv)) {
+      if (!ENV_NAME.test(name) || !ENV_NAME.test(reference)) throw new Error("An MCP server has an invalid credential reference.");
+      if (env[reference] === undefined) throw new Error("An MCP server is missing a saved variable. Edit the server to enter it again.");
+      values[name] = env[reference]!;
+    }
+    const { envFromEnv: _references, ...rest } = registration;
+    return { ...rest, env: withoutLocalDevelopment(values) };
+  }
   if (registration.transport === "stdio" && registration.env && "ZEROS_LOCAL_DEVELOPMENT" in registration.env) {
     return { ...registration, env: withoutLocalDevelopment(registration.env) };
   }

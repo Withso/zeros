@@ -3,7 +3,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CustomizePage } from "../features/agent-extensions/customize-page";
 import {
@@ -17,6 +17,15 @@ import type { ExtensionEntry } from "@zeros/protocol/agent-extensions";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { getSetting, setSetting } from "../platform/settings";
 import { upsertProject } from "../state/projects-store";
+import { Toaster } from "../shared/ui/primitives/elements/toast";
+
+declare global {
+  interface Window {
+    mcpFormFixture: { failSave: boolean; probeCount: number; saveCount: number; setSurfaceActive?: (active: boolean) => void };
+  }
+}
+window.mcpFormFixture = { failSave: false, probeCount: 0, saveCount: 0 };
+const connectedServers = new Set<string>();
 
 if (!getSetting("customize:selection", null))
   setSetting("customize:selection", { category: "skills", provider: "zeros" });
@@ -66,8 +75,37 @@ RuntimeClient.prototype.request = async function <
     result = { layer: params.layer, path: `${scope}/.zeros/settings.local.toml`, doc, warnings: [] };
     document.getElementById("last-write")!.textContent = JSON.stringify(params);
   }
+  if (request.op === "mcp.saveServer" || request.op === "mcp.deleteServer") {
+    if (window.mcpFormFixture.failSave) throw new Error("MCP secrets could not be saved securely. Try again.");
+    const current = settings.get(scope) ?? {};
+    const servers = ((current.mcp as { servers?: Record<string, unknown>[] } | undefined)?.servers ?? []);
+    const previous = params.previous as Record<string, unknown> | null;
+    const index = previous ? servers.findIndex(row => previous.credential_id ? row.credential_id === previous.credential_id : row.name === previous.name) : -1;
+    const server = params.server as Record<string, unknown>;
+    const next = request.op === "mcp.deleteServer" ? servers.filter((_, offset) => offset !== index)
+      : index < 0 ? [...servers, server] : servers.map((row, offset) => offset === index ? server : row);
+    const doc = { ...current, mcp: { servers: next } };
+    settings.set(scope, doc);
+    result = { layer: params.layer, path: `${scope}/.zeros/settings.local.toml`, doc, warnings: [] };
+    window.mcpFormFixture.saveCount++;
+    // This output models ordinary configuration, never the private secret pipe.
+    document.getElementById("last-write")!.textContent = JSON.stringify({ layer: params.layer, repoRoot: params.repoRoot, server });
+  }
+  if (request.op === "mcp.probe") {
+    window.mcpFormFixture.probeCount++;
+    const server = params.server as Record<string, unknown>;
+    const needsAuth = server.auth === "oauth" && !connectedServers.has(String(server.name));
+    result = { status: needsAuth ? "needs-auth" : "connected", toolCount: needsAuth ? 0 : 3,
+      stages: [{ stage: "validation", status: "passed" }, { stage: "transport", status: "passed" },
+        { stage: "initialize", status: needsAuth ? "needs-auth" : "passed" }, { stage: "tools", status: needsAuth ? "needs-auth" : "passed" }] };
+  }
+  if (request.op === "mcp.gateway.authorize") {
+    connectedServers.add(String(params.server));
+    result = { status: { name: params.server, state: "connected", toolCount: 3 } };
+  }
   if (request.op === "mcp.resolveComposed") result = { servers: [], warnings: [] };
-  if (request.op === "mcp.gateway.status") result = { running: true, error: null, servers: gatewayServers.map(({ name, url }) => ({ name, url, state: gatewayState, toolCount: 0, detail: "Connection unavailable (503)" })) };
+  if (request.op === "mcp.gateway.status") result = { running: true, error: null, servers: [...settings.values()].flatMap(doc => ((doc.mcp as { servers?: { name: string; url?: string; auth?: string }[] } | undefined)?.servers ?? []))
+    .filter(server => server.auth === "oauth" || connectedServers.has(server.name)).map(({ name, url }) => ({ name, url, state: connectedServers.has(name) ? "connected" : gatewayState, toolCount: connectedServers.has(name) ? 3 : 0, detail: "Connection unavailable (503)" })) };
   if (request.op === "extensions.list") {
     inventoryProviders.push(String(params.provider));
     document.getElementById("inventory-providers")!.textContent =
@@ -149,16 +187,22 @@ const auth: AuthContextValue = {
   signOut: async () => {},
   signOutEverywhere: async () => {},
 };
-createRoot(document.getElementById("root")!).render(
+function Harness() {
+  const [surfaceActive, setSurfaceActive] = useState(true);
+  window.mcpFormFixture.setSurfaceActive = setSurfaceActive;
+  return (
   <AuthContext.Provider value={auth}>
     <TooltipProvider>
       <BridgeProvider>
         <main className="h-screen">
-          <CustomizePage />
+          <CustomizePage surfaceActive={surfaceActive} />
           <output id="last-write" hidden />
           <output id="inventory-providers" hidden />
+          <Toaster />
         </main>
       </BridgeProvider>
     </TooltipProvider>
-  </AuthContext.Provider>,
-);
+  </AuthContext.Provider>
+  );
+}
+createRoot(document.getElementById("root")!).render(<Harness />);

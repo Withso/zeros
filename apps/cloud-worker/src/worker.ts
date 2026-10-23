@@ -22,6 +22,7 @@ import { commandRunner } from "./workspace/commands";
 import { Terminals } from "./terminals/service";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
 import { PromptInbox } from "./prompt-inbox";
+import { McpGateway } from "./mcp/gateway";
 
 interface WorkerOptions {
   directory: string;
@@ -46,6 +47,7 @@ export class CloudWorker {
   private scope?: WorkspaceScope;
   private store?: SessionStore;
   private agents?: Agents;
+  private mcp?: McpGateway;
   private chats?: ChatService;
   private history?: HistoryMirror;
   private promptInbox?: PromptInbox;
@@ -80,7 +82,7 @@ export class CloudWorker {
         if (this.disposed) return;
         this.online = true; this.idle = undefined; this.tokens.connect();
         await this.send({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.0.0",
-          capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"] } });
+          capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
       },
       frame: (raw) => this.receive(raw),
       close: () => {
@@ -110,6 +112,7 @@ export class CloudWorker {
     await this.terminals?.dispose();
     await this.workspace?.dispose();
     await this.agents?.dispose();
+    await this.mcp?.dispose();
     await this.store?.flush();
     await this.history?.flush();
     for (const unsubscribe of this.unsubscribers) unsubscribe();
@@ -208,11 +211,13 @@ export class CloudWorker {
         run: commandRunner(scope.root, this.gitEnvironment), ...this.options.workspaceServices, publish: (frame) => { void this.broadcast(frame); },
       });
       this.scope = scope; this.store = store;
+      this.mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport) });
+      await this.mcp.configure(config.mcpServers ?? [], config.loginRevision);
       this.agents = new Agents(store, scope, this.options.drivers ?? {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
-        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery);
+        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, () => this.mcp!.providers());
       this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId));
       this.history = new HistoryMirror(store, this.options.transport);
@@ -223,7 +228,7 @@ export class CloudWorker {
       }), store.onError((chatId) => {
         this.options.onError?.("storage"); void this.agents!.closeChat(chatId).catch(() => {});
       }));
-    } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); this.agents!.configure(config); }
+    } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
     this.history!.connect();
     if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
       this.promptInbox ??= new PromptInbox(this.store!, this.agents!, (op, body, signal) => this.options.transport.promptRequest!(op, body, signal));
@@ -240,6 +245,7 @@ export class CloudWorker {
     await this.promptInbox?.dispose();
     await this.agents?.dispose();
     await this.terminals?.dispose();
+    await this.mcp?.dispose();
   }
   private async send(frame: CloudV2WorkerFrame): Promise<boolean> {
     if (!this.online) return false;

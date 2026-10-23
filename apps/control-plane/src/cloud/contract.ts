@@ -24,6 +24,7 @@ export const CloudV2CapabilitiesSchema = z.object({
   git: z.boolean(),
   agents: z.array(CloudV2AgentSchema).max(3),
   promptOutbox: z.literal(1).optional(),
+  mcp: z.literal(1).optional(),
 }).strict();
 export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
 
@@ -74,6 +75,23 @@ export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
 const proxy = z.object({ baseUrl: z.string().url(), token: z.string().min(16).max(4096), expiresAt: z.number().int() }).strict();
 const secret = z.string().min(16).max(16384);
 
+const mcpValues = z.record(z.string().min(1).max(256), z.string().max(16384))
+  .refine(value => Object.keys(value).length <= 128, "Too many MCP values");
+// Zod 3's uuid() accepts versions/variants rejected by the shared Zod 4 wire.
+export const McpUuidSchema = z.string().regex(/^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/i);
+const mcpIdentity = { id: McpUuidSchema, name: z.string().min(1).max(128) };
+export const RuntimeMcpServerSchema = z.discriminatedUnion("transport", [
+  z.object({ ...mcpIdentity, transport: z.literal("stdio"), command: z.string().min(1).max(4096),
+    args: z.array(z.string().max(8192)).max(128).optional(), cwd: z.string().max(4096).optional(),
+    env: mcpValues.optional(), listen_url: z.string().min(1).max(4096).optional(),
+  }).strict(),
+  z.object({ ...mcpIdentity, transport: z.literal("http"), url: z.string().min(1).max(4096), headers: mcpValues.optional(),
+    auth: z.enum(["none", "header", "oauth"]).optional(), disabled_tools: z.array(z.string().min(1).max(256)).max(1024).optional() }).strict(),
+  z.object({ ...mcpIdentity, transport: z.literal("sse"), url: z.string().min(1).max(4096), headers: mcpValues.optional(),
+    auth: z.enum(["none", "header", "oauth"]).optional(), disabled_tools: z.array(z.string().min(1).max(256)).max(1024).optional() }).strict(),
+]);
+export type RuntimeMcpServer = z.infer<typeof RuntimeMcpServerSchema>;
+
 export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("prompts") }).strict(),
   z.object({ t: z.literal("open"), clientId }).strict(),
@@ -87,6 +105,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     t: z.literal("config"),
     promptOutbox: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
+    mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(),
     workspace: z.object({
       id: z.string().uuid(),
       organizationId: z.string().uuid(),

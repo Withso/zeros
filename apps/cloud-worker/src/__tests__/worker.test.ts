@@ -49,6 +49,27 @@ async function setup(driverSetup?: (driver: FakeDriver) => void) {
 }
 
 describe("worker bridge routing through a fake relay", () => {
+  it.each(["configuration", "sign-in"])("delivers scoped MCP capabilities and replaces drivers between turns on %s change", async change => {
+    const { relay, drivers, worker, chat, prompt } = await setup();
+    const id = randomUUID(), mcp = { id, name: "fixture", transport: "http", url: "https://mcp.example.test", headers: { "X-Api-Key": "upstream-fixture-secret" } };
+    await relay.receive({ ...config, loginRevision: "1", mcpServers: [mcp] });
+    const sessionId = await chat();
+    expect(Object.values(drivers[0].opened?.mcpServers ?? {})).toMatchObject([{ type: "http", url: expect.stringContaining(`/mcp/${id}`) }]);
+    expect(JSON.stringify(drivers[0].opened)).not.toContain("upstream-fixture-secret");
+    const request = prompt(sessionId);
+    await relay.request(CLIENT_A, request);
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    await relay.receive({ ...config, loginRevision: "2", mcpServers: change === "configuration" ? [] : [mcp] });
+    expect(drivers[0].disposed).toBe(false);
+    drivers[0].complete(); await worker.flush();
+    await relay.request(CLIENT_A, prompt(sessionId));
+    await expect.poll(() => drivers.length).toBe(2);
+    if (change === "configuration") expect(drivers[1].opened?.mcpServers).toEqual({});
+    else expect(drivers[1].opened?.mcpServers).toEqual(drivers[0].opened?.mcpServers);
+    expect(drivers[0].disposed).toBe(true);
+    drivers[1].complete(); await worker.flush();
+  });
+
   it.each(["low", "high", "max", "ultracode"])("opens a pinned chat with its %s effort at the native driver", async effort => {
     const { relay, drivers, op } = await setup();
     await op("chats.upsert", { chat: { id: "cheap-chat", folder: WORKSPACE_KEY, agentId: "codex", model: "gpt-6-luna", effort } });

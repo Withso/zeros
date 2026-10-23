@@ -6,6 +6,7 @@
   "description": "Shared Zeros bridge protocol \u2014 wire types, Zod schemas, protocol versioning, crypto seams, and transport-agnostic runtime primitives consumed across desktop renderer, Electron, and engine process boundaries.",
   "type": "module",
   "exports": {
+    "./mcp-secrets": "./src/mcp-secrets.ts",
     "./design-relocation": "./src/design-relocation.ts",
     "./cloud-runtime-connection": "./src/cloud-runtime-connection.ts",
     "./composer-mode": "./src/composer-mode.ts",

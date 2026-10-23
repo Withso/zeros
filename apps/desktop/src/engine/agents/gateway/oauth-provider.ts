@@ -35,6 +35,8 @@ import type {
 
 /** Per-backend stored credentials, keyed by canonical resource URI. */
 export interface BackendCredentials {
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
   oauthConfig?: string;
   oauthSecret?: { clientId: string; value: string };
   tokens?: OAuthTokens;
@@ -52,7 +54,18 @@ export interface BackendCredentials {
 export class OAuthVault {
   private readonly creds = new Map<string, BackendCredentials>();
   private readonly revisions = new Map<string, number>();
+  private readonly operations = new Map<string, Promise<unknown>>();
   constructor(private readonly onChange?: () => void) {}
+
+  /** Shared across project gateways: rotating refresh tokens and explicit
+   * credential transactions for one identity must not race each other. */
+  exclusive<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const previous = this.operations.get(key) ?? Promise.resolve();
+    const result = previous.then(run, run);
+    this.operations.set(key, result);
+    void result.finally(() => { if (this.operations.get(key) === result) this.operations.delete(key); }).catch(() => {});
+    return result;
+  }
 
   private entry(resourceUri: string): BackendCredentials {
     let e = this.creds.get(resourceUri);
@@ -68,13 +81,13 @@ export class OAuthVault {
   }
   revision(resourceUri: string): number { return this.revisions.get(resourceUri) ?? 0; }
   private advance(resourceUri: string): void { this.revisions.set(resourceUri, this.revision(resourceUri) + 1); }
-  bindOAuth(resourceUri: string, clientId?: string, scope?: string): number {
+  bindOAuth(resourceUri: string, clientId?: string, scope?: string, mode?: string): number {
     const entry = this.entry(resourceUri);
-    const config = JSON.stringify([clientId ?? "", [...new Set((scope ?? "").split(/\s+/).filter(Boolean))].sort()]);
+    const config = JSON.stringify([clientId ?? "", [...new Set((scope ?? "").split(/\s+/).filter(Boolean))].sort(), ...(mode && mode !== "auto" ? [mode] : [])]);
     // Legacy default registrations remain usable. Explicit new configuration
     // must never reuse another client's tokens or broader authorization.
     if (entry.oauthConfig !== config) {
-      if (entry.oauthConfig !== undefined || clientId || scope) {
+      if (entry.oauthConfig !== undefined || clientId || scope || (mode && mode !== "auto")) {
         delete entry.tokens;
         delete entry.client;
         this.advance(resourceUri);
@@ -149,6 +162,20 @@ export class OAuthVault {
   snapshot(): Record<string, BackendCredentials> {
     return structuredClone(Object.fromEntries(this.creds));
   }
+  readEntry(key: string): BackendCredentials | undefined {
+    const value = this.creds.get(key);
+    return value ? structuredClone(value) : undefined;
+  }
+  replaceEntry(key: string, value: BackendCredentials | undefined): void {
+    if (value) this.creds.set(key, structuredClone(value));
+    else this.creds.delete(key);
+    this.advance(key);
+    this.onChange?.();
+  }
+  getHeaders(key: string): Record<string, string> {
+    const entry = this.creds.get(key);
+    return { ...(entry?.header ? { [entry.header.name]: entry.header.value } : {}), ...entry?.headers };
+  }
   /** Re-seed from the durable store at boot (no onChange — this isn't a write). */
   restore(data: Record<string, BackendCredentials> | null | undefined): void {
     for (const key of this.creds.keys()) this.advance(key);
@@ -162,6 +189,9 @@ export interface ZerosOAuthProviderDeps {
   vault: OAuthVault;
   /** Canonical resource URI (RFC 8707) — the vault key + the audience. */
   resourceUri: string;
+  credentialKey?: string;
+  clientMode?: "auto" | "metadata" | "dynamic" | "custom";
+  clientMetadataOrigin?: string;
   /** The loopback callback URL (fixed, registered as the redirect_uri). */
   redirectUrl: string;
   /** Shown on the AS consent screen. */
@@ -184,16 +214,26 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
   private currentState: string | null = null;
   private lastAuthorizationUrl: string | null = null;
 
+  private get vaultKey(): string { return this.deps.credentialKey ?? this.deps.resourceUri; }
   constructor(private readonly deps: ZerosOAuthProviderDeps) {
-    this.revision = deps.vault.bindOAuth(deps.resourceUri, deps.staticClientId, deps.scope);
+    this.revision = deps.vault.bindOAuth(this.vaultKey, deps.staticClientId, deps.scope, deps.clientMode);
+  }
+  get clientMetadataUrl(): string | undefined {
+    if (this.deps.clientMode === "dynamic" || this.deps.clientMode === "custom" || this.deps.staticClientId) return undefined;
+    try {
+      const url = new URL("/.well-known/mcp-client.json", this.deps.clientMetadataOrigin ?? "");
+      if (url.protocol !== "https:") return undefined;
+      url.searchParams.set("redirect_uri", this.deps.redirectUrl);
+      return url.href;
+    } catch { return undefined; }
   }
   cancel(): void { this.cancelled = true; this.interactive = false; this.verifier = null; }
   private assertCurrent(): void {
-    if (this.cancelled || this.deps.vault.revision(this.deps.resourceUri) !== this.revision) throw new Error("MCP authorization changed or was cancelled. Start sign-in again.");
+    if (this.cancelled || this.deps.vault.revision(this.vaultKey) !== this.revision) throw new Error("MCP authorization changed or was cancelled. Start sign-in again.");
   }
   invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier"): void {
     this.assertCurrent();
-    this.deps.vault.invalidateOAuth(this.deps.resourceUri, scope);
+    this.deps.vault.invalidateOAuth(this.vaultKey, scope);
     if (scope === "all" || scope === "verifier") this.verifier = null;
   }
 
@@ -235,10 +275,10 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
   clientInformation(): OAuthClientInformationMixed | undefined {
     this.assertCurrent();
     if (this.deps.staticClientId) {
-      const secret = this.deps.vault.getOAuthSecret(this.deps.resourceUri, this.deps.staticClientId);
+      const secret = this.deps.vault.getOAuthSecret(this.vaultKey, this.deps.staticClientId);
       return { client_id: this.deps.staticClientId, ...(secret ? { client_secret: secret } : {}) };
     }
-    const stored = this.deps.vault.getClient(this.deps.resourceUri);
+    const stored = this.deps.vault.getClient(this.vaultKey);
     if (stored) {
       // A DCR client is bound to the redirect URI registered with the
       // authorization server. Reusing it after a channel's callback port moves
@@ -251,7 +291,7 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
       ) {
         return stored;
       }
-      this.deps.vault.clearClient(this.deps.resourceUri);
+      this.deps.vault.clearClient(this.vaultKey);
     }
     return undefined;
   }
@@ -261,7 +301,7 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
     // Only a full registration (with client_id) is worth persisting for reuse.
     if ("client_id" in info && info.client_id) {
       this.deps.vault.setClient(
-        this.deps.resourceUri,
+        this.vaultKey,
         info as OAuthClientInformationFull,
       );
     }
@@ -277,6 +317,9 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
     const meta = state.authorizationServerMetadata as
       | { issuer?: string; code_challenge_methods_supported?: unknown }
       | undefined;
+    if (this.deps.clientMode === "metadata" && (!this.clientMetadataUrl || !(meta as { client_id_metadata_document_supported?: boolean } | undefined)?.client_id_metadata_document_supported)) {
+      throw new Error("This service does not support Zeros’ published identity. Choose Automatic or your own client.");
+    }
     const issuer = meta?.issuer;
     if (issuer) {
       const reason = issuerMismatchReason(issuer, state.authorizationServerUrl);
@@ -300,14 +343,14 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
 
   tokens(): OAuthTokens | undefined {
     this.assertCurrent();
-    return this.deps.vault.getTokens(this.deps.resourceUri);
+    return this.deps.vault.getTokens(this.vaultKey);
   }
 
   saveTokens(tokens: OAuthTokens): void {
     this.assertCurrent();
     // The SDK calls this after the code exchange and every refresh, persisting
     // a rotated refresh_token atomically here.
-    this.deps.vault.setTokens(this.deps.resourceUri, tokens);
+    this.deps.vault.setTokens(this.vaultKey, tokens);
   }
 
   redirectToAuthorization(authorizationUrl: URL): void {

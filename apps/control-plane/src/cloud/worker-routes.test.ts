@@ -81,6 +81,29 @@ it("rechecks authority after a slow token provider and returns a typed refusal",
   expect(await response.text()).not.toContain("never-disclose");
 });
 
+it("delivers MCP only to feature-advertising workers over both HTTP config carriers", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  const mcpServers = [{ id: randomUUID(), name: "fixture", transport: "http" as const, url: "https://mcp.example.test" }];
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, mcpServers });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    expect((await (await f.request(path, body)).json()).config).not.toHaveProperty("mcpServers");
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "prompt-outbox-v1,mcp-v1" })).json()).config.mcpServers).toEqual(mcpServers);
+  }
+});
+
+it("fences refreshed MCP authorization by the exact worker boot and never returns provider errors", async () => {
+  const f = fixture(), id = randomUUID();
+  f.deps.mcpAuthorization = vi.fn(async () => ({ headers: { Authorization: "Bearer fixture-mcp" }, expiresAt: 5000 }));
+  expect((await f.request(`mcp/${id}/authorization`, { force: true }, { "x-zeros-worker-boot": randomUUID() })).status).toBe(401);
+  expect(f.deps.mcpAuthorization).not.toHaveBeenCalled();
+  const response = await f.request(`mcp/${id}/authorization`, { force: true });
+  expect(await response.json()).toEqual({ headers: { Authorization: "Bearer fixture-mcp" }, expiresAt: 5000 });
+  expect(f.deps.mcpAuthorization).toHaveBeenCalledWith(expect.objectContaining({ repository: "o/r" }), id, true);
+  vi.mocked(f.deps.mcpAuthorization).mockImplementationOnce(async () => { f.revoke(); return { headers: { Authorization: "never-disclose" } }; });
+  const revoked = await f.request(`mcp/${id}/authorization`, {});
+  expect(revoked.status).toBe(401); expect(await revoked.text()).not.toContain("never-disclose");
+});
+
 it("refuses an outbox-incompatible worker before accepting its hello", async () => {
   const f = fixture(true), body = { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) };
   expect((await f.request("hello", body)).status).toBe(409);

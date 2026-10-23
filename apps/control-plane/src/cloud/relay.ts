@@ -11,7 +11,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsMcp, type WorkerRoute } from "./worker-connection.js";
 
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
 const BRIDGE_PATH = /^\/v2\/cloud\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/bridge$/;
@@ -280,9 +280,9 @@ export class CloudV2Relay {
   }
 
   /** Committed revision polling repairs missed transactional notifications. */
-  async refreshLogins(scope?: { ownerUserId: string; organizationId?: string }): Promise<void> {
+  async refreshLogins(scope?: { ownerUserId?: string; organizationId?: string }): Promise<void> {
     await Promise.all([...this.rooms.values()].map(async room => {
-      if (!room.ready || !room.worker || (scope && (scope.ownerUserId !== room.workspace.creatorUserId ||
+      if (!room.ready || !room.worker || (scope && ((scope.ownerUserId && scope.ownerUserId !== room.workspace.creatorUserId) ||
           (scope.organizationId && scope.organizationId !== room.workspace.organizationId)))) return;
       const ws = room.worker;
       await this.refreshConfig(room, ws, Date.now() - room.configAt >= CONFIG_REFRESH_MS).catch(() => ws.close(1011, "config_unavailable"));
@@ -310,7 +310,8 @@ export class CloudV2Relay {
       if (!await this.authorized(room) || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      send(ws, { ...config, loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
+      const { mcpServers, ...legacy } = config;
+      send(ws, { ...legacy, ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
     } while (flight.requested);
     return true;
   }

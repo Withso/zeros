@@ -70,6 +70,11 @@ function settingsLayerKey(layerName: SettingsLayer, repoRoot?: string): string {
   return JSON.stringify([layerName, repoRoot ?? null]);
 }
 
+/** Publish a native transactional save to the same keyed settings readers. */
+export function primeSettingsLayer(layer: SettingsLayer, repoRoot: string | undefined, result: Pick<SettingsReadWire, "path" | "doc">): void {
+  settingsLayerCache.setData(settingsLayerKey(layer, repoRoot), { ...result, layer, exists: true });
+}
+
 /** Bind a cache key to React with stable, immutable snapshots. */
 function useSettingsSnapshot<T>(
   cache: KeyedAsyncCache<T>,

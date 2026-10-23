@@ -10,14 +10,8 @@
   ],
   "debt": {
     "arbitrary-value": {
-      "apps/desktop/src/renderer/features/agent-extensions/customize-mcp.tsx": {
-        "text-[14px]": 4
-      },
       "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
         "pl-[clamp(1.5rem,5vw,6.25rem)]": 1
-      },
-      "apps/desktop/src/renderer/features/agent-extensions/mcp-server-form.tsx": {
-        "text-[14px]": 6
       },
       "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
         "z-[5]": 1,
@@ -133,9 +127,6 @@
         "ml-[-0.45rem]": 1,
         "mr-[-0.35rem]": 1,
         "mr-[-0.45rem]": 1
-      },
-      "apps/desktop/src/renderer/shared/ui/primitives/radio-group.tsx": {
-        "text-[14px]": 1
       },
       "apps/desktop/src/renderer/shared/ui/primitives/scroll-area.tsx": {
         "p-[1px]": 2
@@ -352,9 +343,6 @@
         "button": 1
       },
       "apps/desktop/src/renderer/features/agent-extensions/mcp-import-dialog.tsx": {
-        "button": 1
-      },
-      "apps/desktop/src/renderer/features/agent-extensions/mcp-server-form.tsx": {
         "button": 1
       },
       "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {

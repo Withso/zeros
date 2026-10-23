@@ -2656,11 +2656,13 @@ export interface McpGatewayStatusWire {
  * Host-local; returns a not-running result when unavailable. */
 export async function bridgeMcpGatewayStatus(
   bridge: RuntimeClient,
+  repoRoot?: string,
 ): Promise<McpGatewayStatusWire> {
   const r = (await workspaceOp(
     bridge,
     "mcp.gateway.status",
-    {},
+    { ...(repoRoot ? { repoRoot } : {}) },
+    120_000,
   )) as Partial<McpGatewayStatusWire>;
   return {
     running: r.running ?? false,
@@ -2674,9 +2676,10 @@ export async function bridgeMcpGatewayStatus(
 export async function bridgeMcpGatewayAuthorize(
   bridge: RuntimeClient,
   server: string,
+  repoRoot?: string,
 ): Promise<GatewayBackendStatusWire> {
   const r = (await workspaceOp(bridge, "mcp.gateway.authorize", {
-    server,
+    server, ...(repoRoot ? { repoRoot } : {}),
   }, 330_000)) as {
     status: GatewayBackendStatusWire;
   };
@@ -2687,15 +2690,16 @@ export async function bridgeMcpGatewayAuthorize(
 export async function bridgeMcpGatewayDisconnect(
   bridge: RuntimeClient,
   server: string,
+  repoRoot?: string,
 ): Promise<void> {
-  await workspaceOp(bridge, "mcp.gateway.disconnect", { server });
+  await workspaceOp(bridge, "mcp.gateway.disconnect", { server, ...(repoRoot ? { repoRoot } : {}) });
 }
 
-export async function bridgeMcpGatewayCancelAuth(bridge: RuntimeClient, server: string): Promise<void> {
-  await workspaceOp(bridge, "mcp.gateway.cancelAuth", { server });
+export async function bridgeMcpGatewayCancelAuth(bridge: RuntimeClient, server: string, repoRoot?: string): Promise<void> {
+  await workspaceOp(bridge, "mcp.gateway.cancelAuth", { server, ...(repoRoot ? { repoRoot } : {}) });
 }
-export async function bridgeMcpGatewayReconnect(bridge: RuntimeClient): Promise<void> {
-  await workspaceOp(bridge, "mcp.gateway.reconnect", {}, 120_000);
+export async function bridgeMcpGatewayReconnect(bridge: RuntimeClient, repoRoot?: string): Promise<void> {
+  await workspaceOp(bridge, "mcp.gateway.reconnect", { ...(repoRoot ? { repoRoot } : {}) }, 120_000);
 }
 export async function bridgeMcpGatewaySetOAuthSecret(bridge: RuntimeClient, url: string, clientId: string, value: string): Promise<void> {
   await workspaceOp(bridge, "mcp.gateway.setOAuthSecret", { url, clientId, value });
@@ -2726,9 +2730,10 @@ export async function bridgeMcpGatewaySetHeaderSecret(
 export async function bridgeMcpGatewayBeginAuth(
   bridge: RuntimeClient,
   server: string,
+  repoRoot?: string,
 ): Promise<string> {
   const r = (await workspaceOp(bridge, "mcp.gateway.beginAuth", {
-    server,
+    server, ...(repoRoot ? { repoRoot } : {}),
   }, 60_000)) as {
     authorizationUrl?: string;
   };
@@ -2742,9 +2747,10 @@ export async function bridgeMcpGatewayCompleteAuth(
   bridge: RuntimeClient,
   server: string,
   code: string,
+  repoRoot?: string,
 ): Promise<GatewayBackendStatusWire> {
   const r = (await workspaceOp(bridge, "mcp.gateway.completeAuth", {
-    server,
+    server, ...(repoRoot ? { repoRoot } : {}),
     code,
   }, 120_000)) as {
     status: GatewayBackendStatusWire;

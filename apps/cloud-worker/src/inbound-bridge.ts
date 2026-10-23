@@ -31,7 +31,9 @@ export class InboundBridge {
   private failures = 0;
   private failureWindow = 0;
 
-  constructor(private readonly options: Options) {}
+  constructor(private readonly options: Options) {
+    this.websockets.on("headers", headers => { headers.push("X-Zeros-Worker-Features: mcp-v1"); });
+  }
 
   async start(receive: (frame: CloudV2ControlFrame) => Promise<void>): Promise<AddressInfo> {
     this.verifier = new WorkerTokenVerifier({ ...this.options, publicKeys: this.options.publicKeys ?? await readWorkerPublicKeys(this.options.publicKeysFile) });

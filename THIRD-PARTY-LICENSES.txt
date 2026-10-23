@@ -32,7 +32,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.296: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.37: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (667 resolved package/version records)
+PACKAGE INVENTORY (683 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.296
@@ -626,7 +626,7 @@ PACKAGE INVENTORY (667 resolved package/version records)
 
 @modelcontextprotocol/sdk@1.32.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Anthropic, PBC (https://anthropic.com)
   Source: https://github.com/modelcontextprotocol/typescript-sdk
   License documents: 5e13dbbc1d12
@@ -1727,7 +1727,7 @@ abort-controller@3.0.0
 
 accepts@2.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/jshttp/accepts
   License documents: 71f83c4c0621
 
@@ -1740,14 +1740,14 @@ agent-device@0.21.26
 
 ajv-formats@3.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Evgeny Poberezkin
   Source: https://github.com/ajv-validator/ajv-formats
   License documents: 9df3bb69929a
 
 ajv@8.20.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Evgeny Poberezkin
   Source: https://github.com/ajv-validator/ajv
   License documents: 9b6a90e9be78
@@ -1839,6 +1839,12 @@ body-parser@2.3.0
   Source: https://github.com/expressjs/body-parser
   License documents: 23d466b1b134
 
+body-parser@2.4.0
+  License: MIT
+  Surfaces: control plane
+  Source: https://github.com/expressjs/body-parser
+  License documents: 23d466b1b134
+
 bowser@2.14.1
   License: MIT
   Surfaces: control plane
@@ -1869,14 +1875,14 @@ builder-util-runtime@9.7.0
 
 bytes@3.1.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: TJ Holowaychuk <tj@vision-media.ca> (http://tjholowaychuk.com)
   Source: https://github.com/visionmedia/bytes.js
   License documents: e3b44af06661
 
 call-bind-apply-helpers@1.0.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/call-bind-apply-helpers
   License documents: 5e325595b4ea
@@ -1890,7 +1896,7 @@ call-bind@1.0.9
 
 call-bound@1.0.4
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/call-bound
   License documents: 5e325595b4ea
@@ -1993,9 +1999,16 @@ content-disposition@1.1.0
   Source: https://github.com/jshttp/content-disposition
   License documents: bd47ce7b88c7
 
+content-disposition@2.0.1
+  License: MIT
+  Surfaces: control plane
+  Author: Douglas Christopher Wilson <doug@somethingdoug.com>
+  Source: https://github.com/jshttp/content-disposition
+  License documents: bd47ce7b88c7
+
 content-type@1.0.5
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/jshttp/content-type
   License documents: 257aed989141
@@ -2007,16 +2020,23 @@ content-type@2.0.0
   Source: https://github.com/jshttp/content-type
   License documents: 257aed989141
 
+content-type@2.1.0
+  License: MIT
+  Surfaces: control plane
+  Author: Douglas Christopher Wilson <doug@somethingdoug.com>
+  Source: https://github.com/jshttp/content-type
+  License documents: 257aed989141
+
 cookie-signature@1.2.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: TJ Holowaychuk <tj@learnboost.com>
   Source: https://github.com/visionmedia/node-cookie-signature
   License documents: 0dd4e4733348
 
 cookie@0.7.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Roman Shtylman <shtylman@gmail.com>
   Source: https://github.com/jshttp/cookie
   License documents: fe9538ec27e7
@@ -2030,7 +2050,7 @@ core-js@3.49.0
 
 cors@2.8.6
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Troy Goode <troygoode@gmail.com> (https://github.com/troygoode/)
   Source: https://github.com/expressjs/cors
   License documents: 1aa9a12863ee
@@ -2058,7 +2078,7 @@ crelt@1.0.6
 
 cross-spawn@7.0.6
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: André Cruz <andre@moxy.studio>
   Source: https://github.com/moxystudio/node-cross-spawn
   License documents: aaa78451b6fe
@@ -2079,7 +2099,7 @@ csstype@3.2.3
 
 debug@4.4.3
   License: MIT
-  Surfaces: marketing standalone deployment, root pnpm workspace
+  Surfaces: control plane, marketing standalone deployment, root pnpm workspace
   Author: Josh Junon (https://github.com/qix-)
   Source: https://github.com/debug-js/debug
   License documents: 23eb8602cd59
@@ -2114,7 +2134,7 @@ define-data-property@1.1.4
 
 depd@2.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/dougwilson/nodejs-depd
   License documents: bd134b41da59
@@ -2169,14 +2189,14 @@ dompurify@3.4.17
 
 dunder-proto@1.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/es-shims/dunder-proto
   License documents: 2b770a704c15
 
 ee-first@1.1.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jonathan Ong <me@jongleberry.com> http://jongleberry.com
   Source: https://github.com/jonathanong/ee-first
   License documents: 965ef284f7f4
@@ -2197,7 +2217,7 @@ electron@43.7.7
 
 encodeurl@2.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/pillarjs/encodeurl
   License documents: 7585ea7bba61
 
@@ -2210,14 +2230,14 @@ entities@6.0.1
 
 es-define-property@1.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/es-define-property
   License documents: 5e325595b4ea
 
 es-errors@1.3.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/es-errors
   License documents: 5e325595b4ea
@@ -2229,9 +2249,16 @@ es-object-atoms@1.1.1
   Source: https://github.com/ljharb/es-object-atoms
   License documents: 5e325595b4ea
 
+es-object-atoms@1.1.2
+  License: MIT
+  Surfaces: control plane
+  Author: Jordan Harband <ljharb@gmail.com>
+  Source: https://github.com/ljharb/es-object-atoms
+  License documents: 5e325595b4ea
+
 escape-html@1.0.3
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/component/escape-html
   License documents: 255aa557a1f5
 
@@ -2251,7 +2278,7 @@ estree-util-is-identifier-name@3.0.0
 
 etag@1.8.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/jshttp/etag
   License documents: a7996721249a
 
@@ -2276,9 +2303,16 @@ eventsource-parser@3.0.6
   Source: ssh://git@github.com/rexxars/eventsource-parser
   License documents: 0ed3f0dbbe73
 
+eventsource-parser@3.1.1
+  License: MIT
+  Surfaces: control plane
+  Author: Espen Hovlandsdal <espen@hovlandsdal.com>
+  Source: ssh://git@github.com/rexxars/eventsource-parser
+  License documents: 835eb611a233
+
 eventsource@3.0.7
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Espen Hovlandsdal <espen@hovlandsdal.com>
   Source: https://git@github.com/EventSource/eventsource
   License documents: f683a72ffe6a
@@ -2297,9 +2331,23 @@ express-rate-limit@8.3.2
   Source: https://github.com/express-rate-limit/express-rate-limit
   License documents: df66e8e76a24
 
+express-rate-limit@8.7.1
+  License: MIT
+  Surfaces: control plane
+  Author: Nathan Friedly http://nfriedly.com/
+  Source: https://github.com/express-rate-limit/express-rate-limit
+  License documents: a752c164b458
+
 express@5.2.1
   License: MIT
   Surfaces: root pnpm workspace
+  Author: TJ Holowaychuk <tj@vision-media.ca>
+  Source: https://github.com/expressjs/express
+  License documents: 95a5762890e5
+
+express@5.3.0
+  License: MIT
+  Surfaces: control plane
   Author: TJ Holowaychuk <tj@vision-media.ca>
   Source: https://github.com/expressjs/express
   License documents: 95a5762890e5
@@ -2320,7 +2368,7 @@ fast-content-type-parse@3.0.0
 
 fast-deep-equal@3.1.3
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Evgeny Poberezkin
   Source: https://github.com/epoberezkin/fast-deep-equal
   License documents: 7bf9b2de73a6
@@ -2346,6 +2394,13 @@ fast-uri@3.1.8
   Source: https://github.com/fastify/fast-uri
   License documents: df7464922225
 
+fast-uri@3.1.9
+  License: BSD-3-Clause
+  Surfaces: control plane
+  Author: Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)
+  Source: https://github.com/fastify/fast-uri
+  License documents: df7464922225
+
 fdir@6.5.0
   License: MIT
   Surfaces: root pnpm workspace
@@ -2362,7 +2417,7 @@ fflate@0.4.9
 
 finalhandler@2.1.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/pillarjs/finalhandler
   License documents: 47dcccf62bf4
@@ -2383,13 +2438,13 @@ for-each@0.3.5
 
 forwarded@0.2.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/jshttp/forwarded
   License documents: bd47ce7b88c7
 
 fresh@2.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: TJ Holowaychuk <tj@vision-media.ca> (http://tjholowaychuk.com)
   Source: https://github.com/jshttp/fresh
   License documents: a0ec0dab16b3
@@ -2409,14 +2464,14 @@ fsevents@2.3.3
 
 function-bind@1.1.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Raynos <raynos2@gmail.com>
   Source: https://github.com/Raynos/function-bind
   License documents: 916586c760c1
 
 get-intrinsic@1.3.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/get-intrinsic
   License documents: 39c5ec504cf6
@@ -2430,7 +2485,7 @@ get-nonce@1.0.1
 
 get-proto@1.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/get-proto
   License documents: be46ce1e3b04
@@ -2444,7 +2499,7 @@ get-stream@6.0.1
 
 gopd@1.2.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/gopd
   License documents: d90bf0a089da
@@ -2470,7 +2525,7 @@ has-property-descriptors@1.0.2
 
 has-symbols@1.1.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com> http://ljharb.codes
   Source: https://github.com/inspect-js/has-symbols
   License documents: 206c1adcf206
@@ -2485,6 +2540,13 @@ has-tostringtag@1.0.2
 hasown@2.0.2
   License: MIT
   Surfaces: root pnpm workspace
+  Author: Jordan Harband <ljharb@gmail.com>
+  Source: https://github.com/inspect-js/hasOwn
+  License documents: bf9b0d665be2
+
+hasown@2.0.4
+  License: MIT
+  Surfaces: control plane
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/inspect-js/hasOwn
   License documents: bf9b0d665be2
@@ -2575,7 +2637,7 @@ html-void-elements@3.0.0
 
 http-errors@2.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jonathan Ong <me@jongleberry.com> (http://jongleberry.com)
   Source: https://github.com/jshttp/http-errors
   License documents: dcb94ff9b1e0
@@ -2590,6 +2652,13 @@ human-signals@2.1.0
 iconv-lite@0.7.2
   License: MIT
   Surfaces: root pnpm workspace
+  Author: Alexander Shtuchkin <ashtuchkin@gmail.com>
+  Source: https://github.com/pillarjs/iconv-lite
+  License documents: f9c6da891840
+
+iconv-lite@0.7.3
+  License: MIT
+  Surfaces: control plane
   Author: Alexander Shtuchkin <ashtuchkin@gmail.com>
   Source: https://github.com/pillarjs/iconv-lite
   License documents: f9c6da891840
@@ -2617,7 +2686,7 @@ immutable@5.1.9
 
 inherits@2.0.4
   License: ISC
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/isaacs/inherits
   License documents: 69be713b3d6c
 
@@ -2634,9 +2703,16 @@ ip-address@10.7.1
   Source: https://github.com/beaugunderson/ip-address
   License documents: f8d791359a50
 
+ip-address@10.7.4
+  License: MIT
+  Surfaces: control plane
+  Author: Beau Gunderson <beau@beaugunderson.com> (https://beaugunderson.com/)
+  Source: https://github.com/beaugunderson/ip-address
+  License documents: f8d791359a50
+
 ipaddr.js@1.9.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: whitequark <whitequark@whitequark.org>
   Source: https://github.com/whitequark/ipaddr.js
   License documents: 62568a2d1337
@@ -2699,7 +2775,7 @@ is-plain-obj@4.1.0
 
 is-promise@4.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: ForbesLindesay
   Source: https://github.com/then/is-promise
   License documents: 5e733eb92ed0
@@ -2727,7 +2803,7 @@ isarray@2.0.5
 
 isexe@2.0.0
   License: ISC
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/)
   Source: https://github.com/isaacs/isexe
   License documents: 4ec3d4c66cd8
@@ -2776,14 +2852,14 @@ json-schema-to-ts@3.1.1
 
 json-schema-traverse@1.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Evgeny Poberezkin
   Source: https://github.com/epoberezkin/json-schema-traverse
   License documents: 7bf9b2de73a6
 
 json-schema-typed@8.0.2
   License: BSD-2-Clause
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Remy Rylan https://github.com/RemyRylan
   Source: https://github.com/RemyRylan/json-schema-typed
   License documents: 2701eb669226
@@ -2874,7 +2950,7 @@ marked@18.0.2
 
 math-intrinsics@1.1.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/es-shims/math-intrinsics
   License documents: 2b770a704c15
@@ -2991,9 +3067,16 @@ media-typer@1.1.0
   Source: https://github.com/jshttp/media-typer
   License documents: bd47ce7b88c7
 
+media-typer@1.1.1
+  License: MIT
+  Surfaces: control plane
+  Author: Douglas Christopher Wilson <doug@somethingdoug.com>
+  Source: https://github.com/jshttp/media-typer
+  License documents: bd47ce7b88c7
+
 merge-descriptors@2.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/sindresorhus/merge-descriptors
   License documents: 70b126abc64d
 
@@ -3202,13 +3285,13 @@ micromark@4.0.2
 
 mime-db@1.54.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/jshttp/mime-db
   License documents: cc1dfd4dafa2
 
 mime-types@3.0.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/jshttp/mime-types
   License documents: 71f83c4c0621
 
@@ -3249,7 +3332,7 @@ minimisted@2.0.1
 
 ms@2.1.3
   License: MIT
-  Surfaces: marketing standalone deployment, root pnpm workspace
+  Surfaces: control plane, marketing standalone deployment, root pnpm workspace
   Source: https://github.com/vercel/ms
   License documents: 1662fae9b531
 
@@ -3269,6 +3352,12 @@ nanoid@3.3.18
 negotiator@1.0.0
   License: MIT
   Surfaces: root pnpm workspace
+  Source: https://github.com/jshttp/negotiator
+  License documents: 553d4d20029a
+
+negotiator@1.1.0
+  License: MIT
+  Surfaces: control plane
   Source: https://github.com/jshttp/negotiator
   License documents: 553d4d20029a
 
@@ -3300,14 +3389,14 @@ npm-run-path@4.0.1
 
 object-assign@4.1.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Sindre Sorhus <sindresorhus@gmail.com> sindresorhus.com
   Source: https://github.com/sindresorhus/object-assign
   License documents: 6fb9754611c2
 
 object-inspect@1.13.4
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: James Halliday <mail@substack.net> http://substack.net
   Source: https://github.com/inspect-js/object-inspect
   License documents: bd40cc437e28
@@ -3318,9 +3407,15 @@ on-finished@2.4.1
   Source: https://github.com/jshttp/on-finished
   License documents: 8089bcc08845
 
+on-finished@2.4.2
+  License: MIT
+  Surfaces: control plane
+  Source: https://github.com/jshttp/on-finished
+  License documents: 8089bcc08845
+
 once@1.4.0
   License: ISC
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/)
   Source: https://github.com/isaacs/once
   License documents: 4ec3d4c66cd8
@@ -3375,20 +3470,20 @@ parse5@7.3.0
 
 parseurl@1.3.3
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/pillarjs/parseurl
   License documents: 11d017c3b9f1
 
 path-key@3.1.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Sindre Sorhus <sindresorhus@gmail.com> sindresorhus.com
   Source: https://github.com/sindresorhus/path-key
   License documents: 48da2f39e100
 
 path-to-regexp@8.4.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/pillarjs/path-to-regexp
   License documents: 4eeb3271453a
 
@@ -3468,7 +3563,7 @@ pify@4.0.1
 
 pkce-challenge@5.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: crouchcd
   Source: https://github.com/crouchcd/pkce-challenge
   License documents: da3ece2d2daf
@@ -3655,7 +3750,7 @@ prosemirror-view@1.42.3
 
 proxy-addr@2.0.8
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/jshttp/proxy-addr
   License documents: a7996721249a
@@ -3680,6 +3775,12 @@ qs@6.16.0
   Source: https://github.com/ljharb/qs
   License documents: e7dc37bf662d
 
+qs@6.16.1
+  License: BSD-3-Clause
+  Surfaces: control plane
+  Source: https://github.com/ljharb/qs
+  License documents: e7dc37bf662d
+
 query-selector-shadow-dom@1.0.1
   License: MIT
   Surfaces: root pnpm workspace
@@ -3700,9 +3801,16 @@ range-parser@1.2.1
   Source: https://github.com/jshttp/range-parser
   License documents: f655e6291356
 
+range-parser@1.3.0
+  License: MIT
+  Surfaces: control plane
+  Author: TJ Holowaychuk <tj@vision-media.ca> (http://tjholowaychuk.com)
+  Source: https://github.com/jshttp/range-parser
+  License documents: f655e6291356
+
 raw-body@3.0.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jonathan Ong <me@jongleberry.com> (http://jongleberry.com)
   Source: https://github.com/stream-utils/raw-body
   License documents: 37876d7de8bd
@@ -3825,7 +3933,7 @@ remark-stringify@11.0.0
 
 require-from-string@2.0.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Vsevolod Strukchinsky <floatdrop@gmail.com> github.com/floatdrop
   Source: https://github.com/floatdrop/require-from-string
   License documents: 6ee0feb1f6ef
@@ -3839,7 +3947,7 @@ rope-sequence@1.3.4
 
 router@2.2.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/pillarjs/router
   License documents: d0bca4e51715
@@ -3853,7 +3961,7 @@ safe-buffer@5.2.1
 
 safer-buffer@2.1.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Nikita Skovoroda <chalkerx@gmail.com> https://github.com/ChALkeR
   Source: https://github.com/ChALkeR/safer-buffer
   License documents: 4bc935e71be1
@@ -3887,14 +3995,14 @@ semver@7.7.4
 
 send@1.2.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: TJ Holowaychuk <tj@vision-media.ca>
   Source: https://github.com/pillarjs/send
   License documents: 25a328069fe7
 
 serve-static@2.2.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/expressjs/serve-static
   License documents: 63b9a188d7d4
@@ -3908,7 +4016,7 @@ set-function-length@1.2.2
 
 setprototypeof@1.2.0
   License: ISC
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Wes Todd
   Source: https://github.com/wesleytodd/setprototypeof
   License documents: 76d6d1ea0c26
@@ -3922,14 +4030,14 @@ sha.js@2.4.12
 
 shebang-command@2.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Kevin Mårtensson <kevinmartensson@gmail.com> github.com/kevva
   Source: https://github.com/kevva/shebang-command
   License documents: 69dee148a2cc
 
 shebang-regex@3.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Sindre Sorhus <sindresorhus@gmail.com> sindresorhus.com
   Source: https://github.com/sindresorhus/shebang-regex
   License documents: 48da2f39e100
@@ -3957,28 +4065,28 @@ shiki@4.0.2
 
 side-channel-list@1.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/side-channel-list
   License documents: 5e325595b4ea
 
 side-channel-map@1.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/side-channel-map
   License documents: 5e325595b4ea
 
 side-channel-weakmap@1.0.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/side-channel-weakmap
   License documents: cfc3f455254c
 
 side-channel@1.1.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/side-channel
   License documents: cfc3f455254c
@@ -4055,7 +4163,7 @@ standardwebhooks@1.0.0
 
 statuses@2.0.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/jshttp/statuses
   License documents: 512cfa4d5e7a
 
@@ -4149,7 +4257,7 @@ to-buffer@1.2.2
 
 toidentifier@1.0.1
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/component/toidentifier
   License documents: a832d679750e
@@ -4198,7 +4306,7 @@ tweetnacl@0.14.5
 
 type-is@2.1.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/jshttp/type-is
   License documents: 23d466b1b134
 
@@ -4328,7 +4436,7 @@ universalify@2.0.1
 
 unpipe@1.0.0
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/stream-utils/unpipe
   License documents: 1a526fbe8d85
@@ -4369,7 +4477,7 @@ util-deprecate@1.0.2
 
 vary@1.1.2
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/jshttp/vary
   License documents: bd47ce7b88c7
@@ -4453,14 +4561,14 @@ which-typed-array@1.1.20
 
 which@2.0.2
   License: ISC
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me)
   Source: https://github.com/isaacs/node-which
   License documents: 4ec3d4c66cd8
 
 wrappy@1.0.2
   License: ISC
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/)
   Source: https://github.com/npm/wrappy
   License documents: 4ec3d4c66cd8
@@ -4481,7 +4589,7 @@ xtend@4.0.2
 
 zod-to-json-schema@3.25.2
   License: ISC
-  Surfaces: root pnpm workspace
+  Surfaces: control plane, root pnpm workspace
   Author: Stefan Terdell
   Source: https://github.com/StefanTerdell/zod-to-json-schema
   License documents: 7beaa85b57d7
@@ -4514,7 +4622,7 @@ zwitch@2.0.4
   Source: https://github.com/wooorm/zwitch
   License documents: ca4662cb5d1b
 
-LICENSE AND NOTICE TEXTS (337 unique documents)
+LICENSE AND NOTICE TEXTS (339 unique documents)
 ------------------------
 
 ================================================================================
@@ -8152,8 +8260,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 23d466b1b134
 SHA-256: 23d466b1b134b415b66fa50c6526b4cf3e7b9258554da88d3abb371721e7ce68
-Applies to: body-parser@2.3.0, type-is@2.1.0
-Source labels: body-parser@2.3.0 — LICENSE; type-is@2.1.0 — LICENSE
+Applies to: body-parser@2.3.0, body-parser@2.4.0, type-is@2.1.0
+Source labels: body-parser@2.3.0 — LICENSE; body-parser@2.4.0 — LICENSE; type-is@2.1.0 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -8272,8 +8380,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT 257aed989141
 SHA-256: 257aed98914108e91a337912727b6a802eef218248507f74b76faffaff517a38
-Applies to: content-type@1.0.5, content-type@2.0.0
-Source labels: content-type@1.0.5 — LICENSE; content-type@2.0.0 — LICENSE
+Applies to: content-type@1.0.5, content-type@2.0.0, content-type@2.1.0
+Source labels: content-type@1.0.5 — LICENSE; content-type@2.0.0 — LICENSE; content-type@2.1.0 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -11477,8 +11585,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 553d4d20029a
 SHA-256: 553d4d20029a24e315b428a1a54a9e109eaa340f2e958a4f50a92362c2c4070b
-Applies to: negotiator@1.0.0
-Source labels: negotiator@1.0.0 — LICENSE
+Applies to: negotiator@1.0.0, negotiator@1.1.0
+Source labels: negotiator@1.0.0 — LICENSE; negotiator@1.1.0 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -11953,8 +12061,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 5e325595b4ea
 SHA-256: 5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292
-Applies to: call-bind-apply-helpers@1.0.2, call-bound@1.0.4, es-define-property@1.0.1, es-errors@1.3.0, es-object-atoms@1.1.1, possible-typed-array-names@1.1.0, side-channel-list@1.0.1, side-channel-map@1.0.1
-Source labels: call-bind-apply-helpers@1.0.2 — LICENSE; call-bound@1.0.4 — LICENSE; es-define-property@1.0.1 — LICENSE; es-errors@1.3.0 — LICENSE; es-object-atoms@1.1.1 — LICENSE; possible-typed-array-names@1.1.0 — LICENSE; side-channel-list@1.0.1 — LICENSE; side-channel-map@1.0.1 — LICENSE
+Applies to: call-bind-apply-helpers@1.0.2, call-bound@1.0.4, es-define-property@1.0.1, es-errors@1.3.0, es-object-atoms@1.1.1, es-object-atoms@1.1.2, possible-typed-array-names@1.1.0, side-channel-list@1.0.1, side-channel-map@1.0.1
+Source labels: call-bind-apply-helpers@1.0.2 — LICENSE; call-bound@1.0.4 — LICENSE; es-define-property@1.0.1 — LICENSE; es-errors@1.3.0 — LICENSE; es-object-atoms@1.1.1 — LICENSE; es-object-atoms@1.1.2 — LICENSE; possible-typed-array-names@1.1.0 — LICENSE; side-channel-list@1.0.1 — LICENSE; side-channel-map@1.0.1 — LICENSE
 ================================================================================
 
 MIT License
@@ -13460,8 +13568,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT 8089bcc08845
 SHA-256: 8089bcc08845ec143e5761f4a101a65b8c792a0dedbfeeb90a15560c0b77f768
-Applies to: on-finished@2.4.1
-Source labels: on-finished@2.4.1 — LICENSE
+Applies to: on-finished@2.4.1, on-finished@2.4.2
+Source labels: on-finished@2.4.1 — LICENSE; on-finished@2.4.2 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -13892,6 +14000,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+================================================================================
+DOCUMENT 835eb611a233
+SHA-256: 835eb611a23301b27115ca1be9f754c876e643ceb7fe63049c6b50609a1cafeb
+Applies to: eventsource-parser@3.1.1
+Source labels: eventsource-parser@3.1.1 — LICENSE
+================================================================================
+
+MIT License
+
+Copyright (c) 2026 Espen Hovlandsdal <espen@hovlandsdal.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 DOCUMENT 83c57837c777
@@ -15029,8 +15166,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 95a5762890e5
 SHA-256: 95a5762890e5c1c9808921cef095661fc482c5e1f0bba31446ac85595df6237c
-Applies to: express@5.2.1
-Source labels: express@5.2.1 — LICENSE
+Applies to: express@5.2.1, express@5.3.0
+Source labels: express@5.2.1 — LICENSE; express@5.3.0 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -16450,6 +16587,35 @@ License: BSD-3-clause-svgpan
  The views and conclusions contained in the software and documentation are those
  of the authors and should not be interpreted as representing official policies,
  either expressed or implied, of Andrea Leofreddi.
+
+================================================================================
+DOCUMENT a752c164b458
+SHA-256: a752c164b45840ef677e68c738aefabfd665ee9f112ada4538761301a97118b0
+Applies to: express-rate-limit@8.7.1
+Source labels: express-rate-limit@8.7.1 — license
+================================================================================
+
+MIT License
+
+Copyright 2023 Nathan Friedly, Vedant K
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 DOCUMENT a7996721249a
@@ -17976,8 +18142,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT bd47ce7b88c7
 SHA-256: bd47ce7b88c7759630d1e2b9fcfa170a0f1fde522be09e13fb1581a79d090400
-Applies to: content-disposition@1.1.0, forwarded@0.2.0, media-typer@1.1.0, vary@1.1.2
-Source labels: content-disposition@1.1.0 — LICENSE; forwarded@0.2.0 — LICENSE; media-typer@1.1.0 — LICENSE; vary@1.1.2 — LICENSE
+Applies to: content-disposition@1.1.0, content-disposition@2.0.1, forwarded@0.2.0, media-typer@1.1.0, media-typer@1.1.1, vary@1.1.2
+Source labels: content-disposition@1.1.0 — LICENSE; content-disposition@2.0.1 — LICENSE; forwarded@0.2.0 — LICENSE; media-typer@1.1.0 — LICENSE; media-typer@1.1.1 — LICENSE; vary@1.1.2 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -18093,8 +18259,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT bf9b0d665be2
 SHA-256: bf9b0d665be2a689851eea667ca9f42066ea1d903b38349c51e6a44b2577680a
-Applies to: hasown@2.0.2, set-function-length@1.2.2
-Source labels: hasown@2.0.2 — LICENSE; set-function-length@1.2.2 — LICENSE
+Applies to: hasown@2.0.2, hasown@2.0.4, set-function-length@1.2.2
+Source labels: hasown@2.0.2 — LICENSE; hasown@2.0.4 — LICENSE; set-function-length@1.2.2 — LICENSE
 ================================================================================
 
 MIT License
@@ -20795,8 +20961,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT df7464922225
 SHA-256: df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
-Applies to: fast-uri@3.1.8
-Source labels: fast-uri@3.1.8 — LICENSE
+Applies to: fast-uri@3.1.8, fast-uri@3.1.9
+Source labels: fast-uri@3.1.8 — LICENSE; fast-uri@3.1.9 — LICENSE
 ================================================================================
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -23099,8 +23265,8 @@ License: Expat
 ================================================================================
 DOCUMENT e7dc37bf662d
 SHA-256: e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1
-Applies to: qs@6.16.0
-Source labels: qs@6.16.0 — LICENSE.md
+Applies to: qs@6.16.0, qs@6.16.1
+Source labels: qs@6.16.0 — LICENSE.md; qs@6.16.1 — LICENSE.md
 ================================================================================
 
 BSD 3-Clause License
@@ -23790,8 +23956,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT f655e6291356
 SHA-256: f655e6291356ec0de7a8f0e69f294961a2cea86678ec94588be1e6a492e278ab
-Applies to: range-parser@1.2.1
-Source labels: range-parser@1.2.1 — LICENSE
+Applies to: range-parser@1.2.1, range-parser@1.3.0
+Source labels: range-parser@1.2.1 — LICENSE; range-parser@1.3.0 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -23961,8 +24127,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT f8d791359a50
 SHA-256: f8d791359a50cbcac82c29cb7b0b1b889b28be76fdd35b8ee33f0f7c8704702a
-Applies to: ip-address@10.7.1
-Source labels: ip-address@10.7.1 — LICENSE
+Applies to: ip-address@10.7.1, ip-address@10.7.4
+Source labels: ip-address@10.7.1 — LICENSE; ip-address@10.7.4 — LICENSE
 ================================================================================
 
 Copyright (C) 2011 by Beau Gunderson
@@ -23988,8 +24154,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT f9c6da891840
 SHA-256: f9c6da891840e8951696e472b3c7d6f6d3ab2c7325f1dd30c0813244c15b288c
-Applies to: iconv-lite@0.7.2
-Source labels: iconv-lite@0.7.2 — LICENSE
+Applies to: iconv-lite@0.7.2, iconv-lite@0.7.3
+Source labels: iconv-lite@0.7.2 — LICENSE; iconv-lite@0.7.3 — LICENSE
 ================================================================================
 
 Copyright (c) 2011 Alexander Shtuchkin

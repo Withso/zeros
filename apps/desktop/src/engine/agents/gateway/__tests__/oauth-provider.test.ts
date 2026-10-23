@@ -95,6 +95,26 @@ describe("ZerosOAuthProvider", () => {
     expect(make({ scope: "a b" }).provider.clientMetadata.scope).toBe("a b");
   });
 
+  it.each(["metadata", "dynamic"] as const)("does not reuse an unbound legacy grant after selecting %s identity", clientMode => {
+    const vault = new OAuthVault();
+    vault.setTokens("https://fabric/mcp", tokens({ refresh_token: "old-grant" }));
+    vault.setClient("https://fabric/mcp", { client_id: "legacy-registration", redirect_uris: ["http://127.0.0.1:24302/callback"] });
+    const provider = new ZerosOAuthProvider({ ...makeDeps({ vault, openBrowser: vi.fn() }), clientMode, clientMetadataOrigin: "https://control.example.test" });
+    expect(provider.tokens()).toBeUndefined();
+    expect(provider.clientInformation()).toBeUndefined();
+  });
+
+  it("binds published identity to the active service and exact loopback callback", () => {
+    const deps = makeDeps({ vault: new OAuthVault(), openBrowser: vi.fn() });
+    const provider = new ZerosOAuthProvider({ ...deps, clientMetadataOrigin: "https://control.example.test" });
+    const metadata = new URL(provider.clientMetadataUrl!);
+    expect(metadata.origin).toBe("https://control.example.test");
+    expect(metadata.pathname).toBe("/.well-known/mcp-client.json");
+    expect(metadata.searchParams.get("redirect_uri")).toBe(deps.redirectUrl);
+    expect(new ZerosOAuthProvider({ ...deps, clientMode: "dynamic", clientMetadataOrigin: "https://control.example.test" }).clientMetadataUrl).toBeUndefined();
+    expect(new ZerosOAuthProvider({ ...deps, clientMetadataOrigin: "http://127.0.0.1:3100" }).clientMetadataUrl).toBeUndefined();
+  });
+
   it("state() generates a fresh value + remembers it for CSRF validation", async () => {
     const { provider } = make();
     expect(provider.expectedState).toBeNull();

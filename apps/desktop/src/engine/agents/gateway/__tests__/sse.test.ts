@@ -491,7 +491,7 @@ describe("MCP gateway explicit SSE", () => {
       if (auth === "header")
         vault.setHeader(resource, {
           name: "Authorization",
-          value: "Bearer fixture",
+          value: "Bearer ${TOKEN}",
         });
       else
         vault.setTokens(resource, {
@@ -506,6 +506,7 @@ describe("MCP gateway explicit SSE", () => {
         auth,
         source: "user",
         headers: { "X-Version": "1", authorization: "stale-configured-token" },
+        variables: { TOKEN: "fixture" },
       };
       await gw.start([definition]);
       expect(gw.getStatuses()).toMatchObject([

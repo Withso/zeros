@@ -9,6 +9,7 @@ import { recordUser, userMessage, type InboxEntry, type SessionStore, type Steer
 import { WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./workspace/scope";
 import { CodexModelAvailability, type ModelDiscoveryOptions } from "./credentials/model-availability";
 import { preparePromptFiles } from "./prompt-files";
+import type { DriverMcpServers } from "./mcp/gateway";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -58,6 +59,7 @@ export class Agents {
     private readonly activity: () => void,
     private readonly onTiming?: TimingObserver,
     modelDiscovery?: ModelDiscoveryOptions,
+    private readonly mcpProviders?: () => Promise<DriverMcpServers>,
   ) { this.config = config; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); }
 
   configure(config: WorkerConfig): void { this.config = config; this.models.configure(config); }
@@ -336,7 +338,9 @@ export class Agents {
     this.assertCurrent(route);
     if (route.opening) return route.opening;
     const login = this.config.agents[route.agentId];
-    const key = JSON.stringify(login);
+    // Personal MCP sign-in changes readiness without changing the shared
+    // server definition. Reopen between turns after that pushed revision.
+    const key = JSON.stringify([login, this.config.mcpServers ?? [], this.config.mcpServers?.length ? this.config.loginRevision : undefined]);
     if (route.driver && (route.login === key || route.nativeRunning || this.hasBackground(route))) return;
     if (!login || ("expiresAt" in login && login.expiresAt <= Date.now())) throw new WorkspaceError("auth-required", "Connect this agent before sending a message.");
     const factory = this.factories[route.agentId];
@@ -377,7 +381,10 @@ export class Agents {
         if (!this.hasBackground(route) && !route.active) this.pump(route);
       });
       try {
+        const mcpServers = await this.mcpProviders?.();
+        this.assertCurrent(route);
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort,
+          ...(mcpServers ? { mcpServers } : {}),
           onTiming: stage => {
             if (!route.closed && this.chats.get(route.chatId) === route && route.driver === driver)
               (route.turnTiming ?? openingTiming)?.mark(stage);

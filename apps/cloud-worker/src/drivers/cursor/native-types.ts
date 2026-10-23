@@ -1,4 +1,5 @@
 import type { AgentOptions, SDKUserMessage } from "@cursor/sdk";
+import type { DriverMcpServers } from "../../mcp/gateway";
 
 export const CURSOR_VERSION = "1.0.37";
 export type { AgentUsage as CursorAgentUsage } from "@cursor/sdk";
@@ -25,7 +26,7 @@ export interface NativeSDK {
   create(options: AgentOptions): Promise<NativeAgent>;
   resume(id: string, options: AgentOptions): Promise<NativeAgent>;
 }
-export interface OpenParams { cwd: string; nativeSessionId?: string; model: string }
+export interface OpenParams { cwd: string; nativeSessionId?: string; model: string; mcpServers?: DriverMcpServers }
 export interface PromptParams { turnId: string; content: SDKUserMessage; model: string }
 export type HostEvent = { t: "event"; turnId: string; kind: "started" | "delta" | "step" | "message" | "result" | "error"; value: unknown };
 export type HostRequest = { id: number; method: string; params: unknown };
