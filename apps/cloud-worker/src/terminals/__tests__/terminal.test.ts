@@ -5,7 +5,7 @@ import type { BridgeMessage } from "@zeros/protocol/messages";
 import type { AppClient } from "../../agents";
 import { browserFrame } from "../../__tests__/worker-fixtures";
 import { repositoryFixture } from "../../workspace/__tests__/repository-fixture";
-import { Terminals, type TerminalProcess, type TerminalSpawnOptions } from "../service";
+import { Terminals, terminalName, type TerminalProcess, type TerminalSpawnOptions } from "../service";
 import { TerminalMirror } from "../mirror";
 import { TerminalMirror as LocalMirror } from "../../../../desktop/src/engine/pty/mirror";
 
@@ -135,6 +135,27 @@ it.skipIf(process.platform !== "linux")("starts a real shell in the held descrip
   await vi.waitFor(() => expect(output()).toMatch(/cwd=\S+\r\n/), { timeout: 10_000 });
   expect(output()).toContain(`cwd=${await realpath(root)}\r\n`);
 });
+
+// The owner's naming: zeros@<number>-<the workspace's own repositories>. The
+// image's ~/.bashrc prompt showed only "[branch]:path", so the worker names the
+// shell once; a prompt the user sets afterwards stays.
+it("names the workspace computer zeros@<number>-<repository names>", () => {
+  expect(terminalName("6e595941-737f-4cc5-8262-657df823aedf", ["Withso/zeros-dev-fixture"])).toBe("zeros@5313-zeros-dev-fixture");
+  expect(terminalName("22222222-2222-4222-8222-222222222222", ["Withso/zeros", "Withso/Docs Site!"])).toBe("zeros@2306-zeros+docs-site");
+  expect(terminalName("22222222-2222-4222-8222-222222222222", ["$(touch x)'`\\"])).toBe("zeros@2306-touch-x");
+});
+it.skipIf(process.platform !== "linux")("shows that name in a real shell's prompt, once, without overriding the user's own prompt", async () => {
+  const { scope, root } = await repositoryFixture();
+  const service = new Terminals(scope, { environment: { PATH: process.env.PATH, HOME: root }, shellArgs: ["--norc", "--noprofile", "-i"] }); services.push(service);
+  const a = client("a");
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "named", cwd: root }));
+  // eslint-disable-next-line no-control-regex -- intentional: drop the prompt's color and paste-mode escapes
+  const output = () => a.frames.map(message => message.type === "PTY_DATA" ? message.data : "").join("").replace(/\x1b\[[0-9;]*m|\x1b\[\?2004[hl]/g, "");
+  await vi.waitFor(() => expect(output()).toContain("zeros@2306-repo:"), { timeout: 10_000 });
+  await service.handle(a.client, frame("PTY_WRITE", { sessionId: "named", data: "PS1='mine> '\r" }));
+  await service.handle(a.client, frame("PTY_WRITE", { sessionId: "named", data: "echo done\r" }));
+  await vi.waitFor(() => expect(output()).toMatch(/done\r\nmine> $/), { timeout: 10_000 });
+}, 30_000);
 
 it("honors kill while native spawn is pending", async () => {
   const { scope } = await repositoryFixture(); const native = new FakeProcess(); let release!: () => void, entered = false;

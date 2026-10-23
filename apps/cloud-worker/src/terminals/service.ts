@@ -36,6 +36,20 @@ interface Session extends PtyTerminalInfo {
 }
 interface Pending { owner?: AppClient; cancelled: boolean; promise: Promise<Session> }
 
+/** The workspace computer's name in its shells, as the owner chose it:
+ * zeros@<number>-<the workspace's own repository names>. The number is stable
+ * per workspace; names are reduced to characters safe inside a prompt. */
+export function terminalName(workspaceId: string, repositories: readonly string[]): string {
+  const number = 1000 + Number.parseInt(workspaceId.replace(/-/g, "").slice(0, 8), 16) % 9000;
+  const names = repositories.map(repository => (repository.split("/").pop() ?? "").toLowerCase()
+    .replace(/[^a-z0-9._]+/g, "-").replace(/^[-.]+|[-.]+$/g, "")).filter(Boolean);
+  return `zeros@${Number.isFinite(number) ? number : 1000}-${names.join("+") || "workspace"}`;
+}
+
+/** Runs once before the first prompt, after the image's ~/.bashrc, so it wins
+ * over the "[branch]:path" prompt but never over one the user sets later. */
+const namePrompt = (name: string): string => `PS1='\\[\\e[32m\\]${name}\\[\\e[0m\\]:\\[\\e[34m\\]\\w\\[\\e[0m\\]\\$ '; unset PROMPT_COMMAND`;
+
 const dim = (value: number | undefined, fallback: number): number => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(500, Math.max(2, Math.floor(value))) : fallback;
 const nativeSpawn = async ({ shell, args, cwd, cols, rows, env }: TerminalSpawnOptions): Promise<TerminalProcess> => {
   const pty = await import("node-pty");
@@ -176,7 +190,8 @@ export class Terminals {
         cwd: `/proc/${process.pid}/fd/${descriptor.fd}`, cols, rows,
         // bash keeps an inherited PWD that names its working directory, so the
         // prompt shows the checkout instead of the held descriptor's /proc path.
-        env: { ...workerChildEnvironment(this.options.environment, this.options.gitEnvironment), TERM: "xterm-256color", PWD: cwd },
+        env: { ...workerChildEnvironment(this.options.environment, this.options.gitEnvironment), TERM: "xterm-256color", PWD: cwd,
+          PROMPT_COMMAND: namePrompt(terminalName(this.scope.workspace.id, [this.scope.workspace.repository])) },
       });
       await this.files.assertDescriptor(descriptor);
       const session: Session = { sessionId: message.sessionId, workspaceId: this.scope.workspace.id, cwd, createdAt: Date.now(), cols, rows,
