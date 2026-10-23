@@ -244,6 +244,7 @@ import { consumeFreshCloudChat } from "./fresh-cloud-chats";
 import { tryRestoreLiveChatDraft } from "./composer-live-drafts";
 import { useCloudPromptOutbox } from "./use-cloud-prompt-outbox";
 import { cloudPromptHasLegacyActivity, projectCloudPromptSession } from "./cloud-prompt-presentation";
+import { definitiveCloudStopFailure } from "./cloud-turn-presentation";
 import { CloudPromptHandoff } from "./cloud-prompt-handoff";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
@@ -2469,6 +2470,7 @@ export function AgentSessionsProvider({
       cloudQueue,
       wakeIntent,
       followUpBehavior = "queue",
+      onCommitted,
     ) => {
       const original = getStore().sessions[chatId];
       const steerSubmission = (messageId: string) => {
@@ -2490,7 +2492,7 @@ export function AgentSessionsProvider({
         await migrateCloudSends(chatId);
         if (cancelledSince(cancelGenerationsRef.current, chatId, generation)) throw new Error("Stopped before sending. Your draft has been kept.");
         await cloudPrompts.send(chatId, { text, displayText, attachments, bubbleAttachments, segments, cloudQueue }, {
-          autoAction, mode: followUpBehavior === "steer" ? "steer" : "prompt", accepted: onAccepted,
+          autoAction, mode: followUpBehavior === "steer" ? "steer" : "prompt", accepted: onAccepted, committed: onCommitted,
         });
         return;
       }
@@ -4412,9 +4414,20 @@ export function AgentSessionsProvider({
       // Ready follow-ups prepare silently, without cloudSendWait presentation.
       // Their readiness flight is still cancelled by Stop.
       cloudSendWaitRef.current.cancel(chatId);
+      const presentedStop = getStore().presentCloudStop(chatId);
       if (cloudPrompts.available(chatId)) {
         const legacy = cloudPromptHasLegacyActivity(getStore().sessions[chatId]);
-        await migrateCloudSends(chatId);
+        const account = cloudCatalogGeneration();
+        const ownsPreparation = () => account === cloudCatalogGeneration() &&
+          (!presentedStop || getStore().sessions[chatId]?.cloudStop?.operationId === presentedStop.operationId);
+        try { await migrateCloudSends(chatId); } catch {
+          if (presentedStop && ownsPreparation()) {
+            getStore().rejectCloudStopPresentation(chatId, presentedStop.operationId);
+            getStore().patchSession(chatId, { cloudStop: { ...presentedStop, state: "failed", preparing: false } });
+          }
+          return;
+        }
+        if (!ownsPreparation()) return;
         await cloudPrompts.stop(chatId);
         if (!legacy) return;
       }
@@ -4532,17 +4545,22 @@ export function AgentSessionsProvider({
             const terminalFailure = failure ?? (result.state === "failed" ? {
               kind: "protocol-error" as const, stage: "prompt" as const, agentId, message: "The cloud turn failed.",
             } : null);
+            if (turnId) getStore().recordCloudTurnEnd(chatId, turnId, { source: "native",
+              status: terminalFailure ? "failed" : result.state === "cancelled" ? "cancelled" : "completed",
+              stopReason: terminalFailure ? null : result.state === "cancelled" ? "cancelled" : slot.lastStopReason });
             getStore().setCancelling(chatId, false);
             getStore().patchSession(chatId, { ...loadedBackgroundTaskState(), cloudStop: undefined, cloudPromptPending: false,
               status: terminalFailure ? "failed" : "ready", error: terminalFailure?.message ?? null, failure: terminalFailure,
               lastStopReason: result.state === "cancelled" && !terminalFailure ? "cancelled" : slot.lastStopReason, activeTurnStartedAt: null,
               pendingPermission: null, pendingPermissions: [], pendingQuestions: [] });
             return true;
-          } catch {
+          } catch (error) {
             if (!ownsStop()) return false;
-            const message = "Stop could not be confirmed. Reconnect to check this turn.";
+            const refused = definitiveCloudStopFailure(error);
+            if (refused) getStore().rejectCloudStopPresentation(chatId, operationId);
+            const message = refused ? "Stop was refused. Try Stop again." : "Stop could not be confirmed. Reconnect to check this turn.";
             const slot = getStore().sessions[chatId], failure = slot.failure?.stage !== "cancel" ? slot.failure : null;
-            getStore().patchSession(chatId, { cloudStop: { operationId, turnId, state: "unconfirmed" }, error: failure?.message ?? message,
+            getStore().patchSession(chatId, { cloudStop: { operationId, turnId, state: refused ? "failed" : "unconfirmed" }, error: failure?.message ?? message,
               failure: failure ?? { kind: "transport-closed", stage: "cancel", agentId, message } });
             return false;
           } finally {

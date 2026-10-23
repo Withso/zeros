@@ -1,6 +1,7 @@
 import type { AgentSessionState } from "./use-agent-session";
 import { agentFamily } from "./model-catalog";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { cloudPresentationRunning } from "./cloud-turn-presentation";
 
 export type AgentActivity = "running" | "waiting" | null;
 
@@ -19,6 +20,8 @@ export function chatAgentActivity(
   slot: AgentSessionState | undefined,
   pendingLocalTurnId?: string | null,
 ): AgentActivity {
+  const presented = slot && cloudPresentationRunning(slot, pendingLocalTurnId);
+  if (presented !== undefined) return presented ? "running" : null;
   if (slot?.cloudStop && isCloudWorkspace(slot.cwd)) return "running";
   if (slot?.cloudPromptPending && isCloudWorkspace(slot.cwd)) return null;
   if (pendingLocalTurnId) return "running";
@@ -32,6 +35,16 @@ export function chatAgentActivity(
 /** Shared by the transcript and tabs. A settled send and a live Claude
  * continuation are independent; task/child traffic alone is not parent work. */
 export function agentActivity(
+  slot: AgentSessionState | undefined,
+  pendingLocalTurnId?: string | null,
+): AgentActivity {
+  const presented = slot && cloudPresentationRunning(slot, pendingLocalTurnId);
+  if (presented !== undefined) return presented ? "running" : null;
+  return agentExecutionActivity(slot, pendingLocalTurnId);
+}
+
+/** Safety gates retain native work independently of the cloud feedback clock. */
+export function agentExecutionActivity(
   slot: AgentSessionState | undefined,
   pendingLocalTurnId?: string | null,
 ): AgentActivity {

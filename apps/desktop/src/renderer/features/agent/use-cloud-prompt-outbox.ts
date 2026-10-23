@@ -11,7 +11,8 @@ import { hasCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-
 import { CloudPromptCoordinator } from "./cloud-prompt-coordinator";
 import { createCloudPromptJournal } from "./cloud-prompt-journal";
 import { promptTerminal, promptOwnerKey, type CloudPromptChannel, type CloudPromptOwner, type PromptJournalRecord } from "./cloud-prompt-channel";
-import { cloudPromptView, cloudPromptSessionPatch } from "./cloud-prompt-presentation";
+import { cloudPromptView, cloudPromptSessionPatch, cloudPromptHasLegacyActivity } from "./cloud-prompt-presentation";
+import { cloudTurnEnding, cloudTurnStart } from "./cloud-turn-presentation";
 import { BLANK, useSessionsStore } from "./sessions-store";
 import type { QueuedEditPayload } from "./sessions-context";
 import type { BridgeMessage } from "../../platform/bridge/messages";
@@ -26,6 +27,7 @@ export class CloudPromptRuntime {
   private restoredAccount?: string;
   private readonly restored = new Set<string>();
   private readonly channels = new Map<string, CloudPromptChannel>();
+  private readonly stopFlights = new Map<string, { id: string; promise: Promise<boolean> }>();
   private activeChat?: string | null;
   private queued = false;
   private stopped = false;
@@ -60,18 +62,38 @@ export class CloudPromptRuntime {
   private publish(chatId: string, record: PromptJournalRecord): void {
     const state = useSessionsStore.getState(), slot = state.sessions[chatId];
     if (!slot || slot.cwd !== cloudWorkspaceKey(record.owner)) return;
-    const view = cloudPromptView(record, cloudWorkspaceDocument(record.owner)?.status ?? "stopped", slot.cloudOutbox);
+    const refusedStop = record.stop?.state === "failed" ? record.stop.id : undefined;
+    const retained = refusedStop ? Object.fromEntries(Object.entries(slot.cloudTurnPresentations ?? {}).map(([id, value]) =>
+      [id, value.source === "stop" && value.operationId === refusedStop ? { startedAt: value.startedAt, status: "running" as const, source: "send" as const } : value])) : slot.cloudTurnPresentations;
+    let view = cloudPromptView({ ...record, entries: record.entries.map(entry => {
+      const presentation = retained?.[entry.payload.userMessageId];
+      return presentation ? { ...entry, presentation } : entry;
+    }) }, cloudWorkspaceDocument(record.owner)?.status ?? "stopped", slot.cloudOutbox);
+    if (view.pendingId && cloudPromptHasLegacyActivity(slot, view)) view = { ...view, pendingId: undefined };
     if (view === slot.cloudOutbox) return;
-    const patch = cloudPromptSessionPatch(slot, view);
-    state.patchSession(chatId, patch);
+    if (view.pendingId && !view.presentations?.[view.pendingId]) {
+      const row = view.rows.find(row => row.id === view.pendingId)!;
+      const wasQueued = slot.cloudOutbox?.rows.some(value => value.id === row.id) && slot.cloudOutbox.pendingId !== row.id;
+      view = { ...view, presentations: { ...view.presentations, [row.id]: { startedAt: wasQueued ? Date.now() : row.createdAt, status: "running", source: "send" } } };
+    }
+    const patch = cloudPromptSessionPatch({ ...slot, cloudTurnPresentations: retained }, view);
+    const pendingId = view.pendingId && !cloudTurnEnding({ ...slot, ...patch }, view.pendingId) ? view.pendingId : null;
+    // One publication owns both the saved bubble and its first-frame pending
+    // turn. Never consume a legacy sender's independent pending owner.
+    const ownsPending = !state.pendingLocalTurns[chatId] || view.rows.some(row => row.id === state.pendingLocalTurns[chatId]);
+    state.patchSession(chatId, patch, ownsPending ? pendingId : undefined);
+    const channel = this.channels.get(promptOwnerKey(record.owner));
+    if (channel) for (const [id, value] of Object.entries(patch.cloudTurnPresentations ?? {})) {
+      if (value !== slot.cloudTurnPresentations?.[id]) void channel.rememberPresentation(id, value).catch(() => {});
+    }
     if (record.entries.some(entry => promptTerminal(entry.state) && entry.state !== slot.cloudOutbox?.states[entry.payload.userMessageId])) {
       this.historyChanged(chatId);
     }
     if (!view.stopId && !view.activeId && slot.foregroundTurnId && promptTerminal(view.states[slot.foregroundTurnId])) {
-      state.setPendingLocalTurn(chatId, null); state.setCancelling(chatId, false);
+      state.setCancelling(chatId, false);
     }
   }
-  async send(chatId: string, input: QueuedEditPayload, options: { id?: string; autoAction?: string; mode?: "prompt" | "steer"; accepted?: () => void; deferDelivery?: boolean } = {}): Promise<void> {
+  async send(chatId: string, input: QueuedEditPayload, options: { id?: string; autoAction?: string; mode?: "prompt" | "steer"; accepted?: () => void; committed?: () => void; deferDelivery?: boolean } = {}): Promise<void> {
     const owner = this.context(chatId); if (!owner) throw new Error("Cloud message delivery is unavailable for this conversation.");
     const chat = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId), state = useSessionsStore.getState();
     const slot = state.sessions[chatId], agentId = chat?.agentId ?? slot?.agentId;
@@ -90,6 +112,7 @@ export class CloudPromptRuntime {
         bubble: { retryText: prepared.text, displayText: prepared.displayText ?? prepared.text, attachments: prepared.bubbleAttachments,
           segments: prepared.segments, ...(options.autoAction ? { autoAction: options.autoAction } : {}) } });
     });
+    if (this.coordinator.owns(channel)) options.committed?.();
     if (options.deferDelivery) return;
     // The optimistic bubble already exists. Finish the foreground send after
     // its HTTPS attempt, independently of bridge readiness and provider work.
@@ -100,7 +123,37 @@ export class CloudPromptRuntime {
   }
   async stop(chatId: string): Promise<boolean> {
     const owner = this.context(chatId); if (!owner) return false;
-    const channel = this.channel(owner); await channel.stop(); await this.coordinator.flush(channel); return true;
+    const state = useSessionsStore.getState(), stop = state.presentCloudStop(chatId);
+    const channel = this.channel(owner), slot = useSessionsStore.getState().sessions[chatId];
+    const key = promptOwnerKey(owner), existing = this.stopFlights.get(key);
+    if (existing && existing.id === stop?.operationId) return existing.promise;
+    const current = () => this.coordinator.owns(channel) && useSessionsStore.getState().sessions[chatId]?.cloudStop?.operationId === stop?.operationId;
+    const unconfirmed = () => {
+      if (!stop || !current()) return;
+      const store = useSessionsStore.getState(), slot = store.sessions[chatId]!;
+      store.patchSession(chatId, { cloudStop: { ...slot.cloudStop!, state: "unconfirmed" } });
+      void channel.unconfirmedStop(stop.operationId).catch(() => {});
+    };
+    const promise = (async () => {
+      const timer = setTimeout(unconfirmed, 15_000);
+      let prepared = channel.snapshot.stop?.throughEpoch !== undefined;
+      try {
+        await channel.stop(stop ? { id: stop.operationId, turnId: stop.turnId, requestedAt: stop.requestedAt ?? Date.now(),
+          startedAt: slot && stop.turnId ? cloudTurnStart(slot, stop.turnId) : Date.now() } : undefined);
+        prepared = true;
+        await this.coordinator.flush(channel); return true;
+      } catch {
+        if (prepared) unconfirmed();
+        else if (stop && current()) {
+          const store = useSessionsStore.getState();
+          store.rejectCloudStopPresentation(chatId, stop.operationId);
+          store.patchSession(chatId, { cloudStop: { ...store.sessions[chatId]!.cloudStop!, state: "failed", preparing: false } });
+        }
+        return false;
+      } finally { clearTimeout(timer); if (this.stopFlights.get(key)?.id === stop?.operationId) this.stopFlights.delete(key); }
+    })();
+    if (stop) this.stopFlights.set(key, { id: stop.operationId, promise });
+    return promise;
   }
   async confirmStop(chatId: string): Promise<boolean> {
     const owner = this.context(chatId); if (!owner) return false;
@@ -149,7 +202,7 @@ export class CloudPromptRuntime {
     if (!slot) return;
     if (update.sessionUpdate === "turn_state" && update.turnId) {
       const known = slot.cloudOutbox?.rows.some(row => row.id === update.turnId);
-      if (known && !promptTerminal(slot.cloudOutbox?.states[update.turnId])) {
+      if (known && !cloudTurnEnding(slot, update.turnId) && !promptTerminal(slot.cloudOutbox?.states[update.turnId])) {
         // A headless delivery creates/adopts its own route. The authenticated
         // worker's exact chat+message identity authorizes this route handoff;
         // a late terminal event for another message cannot replace it.
@@ -168,7 +221,14 @@ export class CloudPromptRuntime {
         // Stream chunks do not rescan conversations or start network reads.
         for (const [key, slot] of Object.entries(state.sessions)) {
           const old = previous.sessions[key];
-          if (!old || slot.cwd !== old.cwd || slot.agentId !== old.agentId || old.cloudOutbox && !slot.cloudOutbox) { reconcile(); break; }
+          if (slot.cloudTurnPresentations !== old?.cloudTurnPresentations) {
+            const owner = this.context(key), channel = owner && this.channels.get(promptOwnerKey(owner));
+            if (channel && this.coordinator.owns(channel)) for (const [id, value] of Object.entries(slot.cloudTurnPresentations ?? {})) {
+              if (value !== old?.cloudTurnPresentations?.[id]) void channel.rememberPresentation(id, value).catch(() => {});
+            }
+          }
+          if (!old || slot.cwd !== old.cwd || slot.agentId !== old.agentId || old.cloudOutbox && !slot.cloudOutbox ||
+              cloudPromptHasLegacyActivity(old) && !cloudPromptHasLegacyActivity(slot)) { reconcile(); break; }
         }
       }),
       subscribeCloudPromptErasure(target => {

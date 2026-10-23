@@ -86,3 +86,12 @@ it("expires terminal bodies and their owner metadata without dropping a pending 
     expect((await store.read(stopped)).stop?.id).toBe("stop");
   } finally { vi.useRealTimers(); }
 });
+
+it("reads old journal entries and discards malformed optional presentation without losing retry bytes", async () => {
+  const f = database(), store = createCloudPromptJournal(f.factory);
+  const old = entry("old"), malformed = { ...entry("bad"), presentation: { startedAt: -1, endedAt: "later", status: "cancelled", source: "stop" } };
+  await store.change(owner, record => ({ ...record, entries: [old, malformed as unknown as PromptJournalEntry] }));
+  const restored = await createCloudPromptJournal(f.factory).read(owner);
+  expect(restored.entries.map(row => row.payload)).toEqual([old.payload, malformed.payload]);
+  expect(restored.entries.every(row => row.presentation === undefined)).toBe(true);
+});

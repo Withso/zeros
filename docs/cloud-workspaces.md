@@ -300,11 +300,33 @@ and saved earlier. Idle Stop adds no access revocation before history flush.
 
 Saved future bubbles are a presentation projection, separate from native
 transcript rows. Their IDs reconcile with worker history; an earlier turn's
-output cannot attach to a later queued bubble. Receipts settle interrupted or
-refused sends visibly, preserve Retry and release later messages. Only actual
-provider activity drives working indicators. Hidden chat views own no polling;
-one application coordinator resumes pending deliveries, with at most 64 active
-conversations and four concurrent requests. Idle conversations have no timer.
+output cannot attach to a later queued bubble. On a running VM, the head
+prompt's bubble and pending-turn working indicator publish together after the
+private journal commits, with elapsed time anchored at renderer Send. That
+commit also clears the submitted composer and saved draft before HTTPS replies,
+only if the editor still contains the submitted document. Failed private writes
+and newer edits retain their draft. Follow-ups start their own clock only when
+they become the head or are dispatched; an
+unavailable VM keeps the queue and Starting workspace presentation. These
+client clocks survive reload and never grant delivery or execution authority.
+Receipts settle interrupted or refused sends visibly, preserve Retry and release
+later messages. An uncertain send retains its original repairable attempt.
+
+An exact native terminal fact mounts the footer immediately, even while its
+receipt remains accepted. Stop also ends presentation synchronously: Send
+returns, the stopped pill and footer appear, and duration freezes at the click.
+Cancellation operations, delivery epochs and queue fences remain in force until
+confirmed independently. Native completion or failure can correct an optimistic
+Stop without extending its clock; final text, foreign-turn events and later
+metadata cannot. A definitive Stop refusal restores only its exact turn;
+timeout or disconnection keeps the stopped presentation with the unconfirmed
+notice and Retry Stop. Optional journal presentation metadata never changes the
+immutable retry payload; malformed metadata is discarded without losing it.
+The resident clock/ending map retains at most 256 turns per chat.
+
+Hidden chat views own no polling; one application coordinator resumes pending
+deliveries, with at most 64 active conversations and four concurrent requests.
+Idle conversations have no timer.
 
 The CP accepts at most 8 MiB per prompt, 128 pending messages and 32 MiB of
 pending bodies per workspace, with 10,000 retained receipts. Terminal bodies

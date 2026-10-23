@@ -1,6 +1,7 @@
 import { CloudV2PromptSchema } from "@zeros/protocol/cloud-v2-prompts";
 import { emptyPromptJournal, promptOwnerKey, promptTerminal, type CloudPromptJournal, type CloudPromptOwner,
   type PromptJournalEntry, type PromptJournalRecord } from "./cloud-prompt-channel";
+import { validCloudTurnPresentation } from "./cloud-turn-presentation";
 
 type Meta = Omit<PromptJournalRecord, "entries"> & { key: string; pending?: boolean };
 type StoredEntry = { key: string; ownerKey: string; entry: PromptJournalEntry };
@@ -51,7 +52,8 @@ export function createCloudPromptJournal(factory: IDBFactory | undefined = typeo
         if (stored && (stored.version !== 1 || promptOwnerKey(stored.owner) !== key)) throw unavailable();
         const entries = (rows.result as StoredEntry[]).map(row => {
           if (row.ownerKey !== key || !CloudV2PromptSchema.safeParse(row.entry?.payload).success || row.entry.payload.chatId !== owner.chatId) throw unavailable();
-          return row.entry;
+          return row.entry.presentation !== undefined && !validCloudTurnPresentation(row.entry.presentation)
+            ? { ...row.entry, presentation: undefined } : row.entry;
         }).sort((a, b) => a.order - b.order);
         done({ ...(stored ?? emptyPromptJournal(owner)), entries });
       } catch (error) { fail(error instanceof Error ? error : unavailable()); }

@@ -661,14 +661,37 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   capability keep their admission queue. With `promptOutbox: 1`, saved prompts
   appear immediately as ordinary bubbles while the VM is running, including
   behind another turn. Queue cards describe unavailable compute only. Future
-  bubbles are separate from native rows; activity and the working footer belong
-  to the actual provider turn, even when it is not the visual tail. A receipt
+  bubbles are separate from native rows. On a running VM the head bubble and
+  existing pending-turn indicator publish together after the journal commit,
+  with the clock starting at renderer Send before any HTTPS/provider response.
+  That private commit releases the submitted composer and saved draft with the
+  existing unchanged-document guard. A failed commit or newer typing keeps the
+  draft; a later HTTPS reply cannot clear it a second time.
+  A follow-up starts its clock when it becomes the head or is dispatched, not
+  while another turn owns activity. Its exact clock survives reload. Activity
+  and the working footer belong to that turn even when it is not the visual
+  tail; an older legacy bridge turn keeps ownership until its native ending.
+  A receipt
   for a refused or interrupted send keeps that bubble and an explicit Retry
   action visible; it never disappears or leaves later sends paused. Worker
   restart settles it once as “The worker restarted before this turn finished”.
   Inbox delivery is not provider acceptance and cannot settle a legacy bridge
   turn without that turn's own confirmation.
   Provider facts (model fallback, usage limits) stay plain inline text.
+- Cloud turn feedback is independent of delivery retirement. An exact native
+  terminal fact mounts its footer immediately, including while the durable
+  receipt remains `accepted`, and freezes the duration. Final text and another
+  turn's terminal event do not prove completion. Stop synchronously returns the
+  composer to Send, shows **STOPPED BY USER** and the footer, and freezes that
+  turn's clock before any journal, migration or HTTPS wait. Late running events,
+  chunks and receipts may reconcile content but cannot restart presentation.
+  Native completion or provider failure replaces the optimistic stopped label
+  without extending the duration. A definitive refusal restores only the same
+  operation's turn; timeout/disconnection retains the stopped view with the
+  unconfirmed notice and Retry Stop. Repeated Stop joins the original operation,
+  while a follow-up keeps its own identity behind the cancellation fence.
+  Local Personal and organization-local retain their existing Send/Stop and
+  background-continuation clock behavior.
 - Authentication failures have one product Sign in notice. In history, show a
   compact **Sign-in required** status until a later turn in that conversation
   produces genuine root model work, then show **Signed in**. A new prompt,

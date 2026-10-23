@@ -124,6 +124,32 @@ describe("durable cloud prompt channel", () => {
     expect(f.api.enqueue).not.toHaveBeenCalled(); expect(f.channel.snapshot.entries[0]?.state).toBe("cancelled");
     expect(f.channel.snapshot.stop).toBeUndefined();
   });
+  it("uses cancellation custody rather than optional presentation to keep a restored Retry Stop behind a future send", async () => {
+    const f = fixture();
+    await f.channel.enqueue(async () => prompt("one")); await f.channel.flush();
+    f.rows.get("one")!.state = "accepted"; await f.channel.refresh();
+    await f.channel.stop({ id: "first-stop", turnId: "one", requestedAt: 2, startedAt: 1 }); await f.channel.flush();
+    await f.channel.enqueue(async () => prompt("two"));
+    await f.journal.change(owner, record => ({ ...record, entries: record.entries.map(entry => ({ ...entry, presentation: undefined })) }));
+    const reopened = f.make();
+    await reopened.stop({ id: "restored-stop", turnId: "one", requestedAt: 3, startedAt: 1 }); await reopened.flush();
+    expect(f.api.stop.mock.calls).toEqual([["0"]]);
+    expect(f.order).toEqual(["one", "two"]);
+    expect(f.rows.get("two")?.receipt.epoch).toBe("1");
+  });
+  it("does not cancel future private sends when retrying the same unconfirmed Stop", async () => {
+    const f = fixture(), stop = f.api.stop.getMockImplementation()!;
+    await f.channel.enqueue(async () => prompt("one")); await f.channel.flush();
+    const intent = { id: "stop", turnId: "one", requestedAt: 2, startedAt: 1 };
+    await f.channel.stop(intent);
+    f.api.stop.mockImplementationOnce(async epoch => { await stop(epoch); throw new TypeError("lost reply"); });
+    await f.channel.flush();
+    await f.channel.enqueue(async () => prompt("two"));
+    await f.channel.stop(intent); await f.channel.flush();
+    expect(f.api.stop.mock.calls).toEqual([["0"], ["0"]]);
+    expect(f.order).toEqual(["one", "two"]);
+    expect(f.rows.get("two")?.receipt.epoch).toBe("1");
+  });
   it("blocks dispatch as soon as Stop is requested, even while its private fence waits for attachment preparation", async () => {
     const f = fixture(); await f.channel.enqueue(async () => prompt("one"));
     const attachment = defer<CloudV2Prompt>();
