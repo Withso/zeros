@@ -13,7 +13,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-async function remote(holdDelete = false) {
+async function remote(holdDelete = false, pages = [["fixture"]]) {
   const sessions = new Set<StreamableHTTPServerTransport>();
   const methods: string[] = [];
   const http = createServer(async (request, response) => {
@@ -23,7 +23,11 @@ async function remote(holdDelete = false) {
     if (existing) { await existing.handleRequest(request, response); return; }
     if (request.method !== "POST") { response.writeHead(400).end(); return; }
     const server = new Server({ name: "probe-fixture", version: "1" }, { capabilities: { tools: {} } });
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "fixture", inputSchema: { type: "object" as const } }] }));
+    server.setRequestHandler(ListToolsRequestSchema, async request => {
+      const page = Number(request.params?.cursor ?? 0);
+      return { tools: (pages[page] ?? []).map(name => ({ name, inputSchema: { type: "object" as const } })),
+        ...(page + 1 < pages.length ? { nextCursor: String(page + 1) } : {}) };
+    });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
     sessions.add(transport);
     await server.connect(transport);
@@ -42,9 +46,20 @@ describe("native MCP connection checks", () => {
   it("terminates the initialized remote session after reading its tools", async () => {
     const server = await remote();
     const vault = new OAuthVault();
-    expect(await probeMcpServer(server.config, {}, vault)).toMatchObject({ status: "connected", toolCount: 1 });
+    expect(await probeMcpServer(server.config, {}, vault)).toMatchObject({ status: "connected", toolCount: 1, tools: ["fixture"] });
     expect(server.methods).toContain("DELETE");
     expect(vault.snapshot()).toEqual({});
+  });
+
+  it("reports every discovered name, including disabled tools and later pages", async () => {
+    const server = await remote(false, [["read_file"], ["delete_file"]]);
+    expect(await probeMcpServer({ ...server.config, disabled_tools: ["delete_file"] }, {}, new OAuthVault()))
+      .toMatchObject({ status: "connected", toolCount: 2, tools: ["read_file", "delete_file"] });
+  });
+
+  it("distinguishes an authoritative empty catalog from tools not yet listed", async () => {
+    const server = await remote(false, [[]]);
+    expect(await probeMcpServer(server.config, {}, new OAuthVault())).toMatchObject({ status: "connected", toolCount: 0, tools: [] });
   });
 
   it.each(["cancellation", "deadline"])("bounds remote session cleanup by the probe's %s", async reason => {

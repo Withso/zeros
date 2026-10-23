@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { HttpError } from "../authz.js";
 import { mergeMcpSecrets, McpDraftSchema } from "./model.js";
 import { probeMcp } from "./probe.js";
 import type { McpStore } from "./store.js";
@@ -23,15 +24,21 @@ function fixture() {
     probeMcp(store as unknown as McpStore, oauth as unknown as McpOAuth, randomUUID(), randomUUID(), raw, signal, fetcher) };
 }
 
-async function remote() {
+async function remote(options: { tools?: boolean; page?: (cursor?: string) => { names: string[]; nextCursor?: string } } = {}) {
   const sessions = new Set<StreamableHTTPServerTransport>(), requests: Array<{ method?: string; authorization?: string }> = [];
+  const cursors: Array<string | undefined> = [];
   const http = createServer(async (req, res) => {
     requests.push({ method: req.method, authorization: req.headers.authorization });
     const existing = [...sessions].find(session => session.sessionId === req.headers["mcp-session-id"]);
     if (existing) { await existing.handleRequest(req, res); return; }
-    const server = new Server({ name: "fixture", version: "1" }, { capabilities: { tools: {} } });
-    server.setRequestHandler(ListToolsRequestSchema, async request => ({ tools: [{ name: request.params?.cursor ? "second" : "first", inputSchema: { type: "object" as const } }],
-      ...(request.params?.cursor ? {} : { nextCursor: "next" }) }));
+    const server = new Server({ name: "fixture", version: "1" }, { capabilities: options.tools === false ? {} : { tools: {} } });
+    if (options.tools !== false) server.setRequestHandler(ListToolsRequestSchema, async request => {
+      cursors.push(request.params?.cursor);
+      const page = options.page?.(request.params?.cursor) ?? { names: [request.params?.cursor ? "second" : "first"],
+        ...(request.params?.cursor ? {} : { nextCursor: "next" }) };
+      return { tools: page.names.map(name => ({ name, inputSchema: { type: "object" as const } })),
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
+    });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
     sessions.add(transport); await server.connect(transport); await transport.handleRequest(req, res);
   });
@@ -45,21 +52,70 @@ async function remote() {
       ...(["GET", "HEAD"].includes(incoming.method) ? {} : { body: await incoming.text() }),
     });
   };
-  return { fetcher, requests };
+  return { fetcher, requests, cursors };
 }
 
 describe("unsaved MCP verification", () => {
   it("performs real initialization and paged tool discovery, then terminates the probe session without saving", async () => {
     const f = fixture(), server = await remote();
-    expect(await f.probe({ config }, server.fetcher)).toEqual({ status: "connected", toolCount: 2,
+    expect(await f.probe({ config }, server.fetcher)).toEqual({ status: "connected", toolCount: 2, tools: ["first", "second"],
       stages: ["validation", "transport", "initialize", "tools"].map(stage => ({ stage, status: "passed" })) });
     expect(server.requests.some(request => request.method === "DELETE")).toBe(true);
     expect(f.store.put).not.toHaveBeenCalled();
   });
 
+  it("includes disabled names and deduplicates exact names across pages without changing the raw count", async () => {
+    const f = fixture(), server = await remote({ page: cursor => cursor
+      ? { names: ["blocked", "allowed", "Case.Tool"] }
+      : { names: ["allowed", "blocked"], nextCursor: "next" } });
+    expect(await f.probe({ config: { ...config, disabled_tools: ["blocked", "not-advertised"] } }, server.fetcher))
+      .toMatchObject({ status: "connected", toolCount: 5, tools: ["allowed", "blocked", "Case.Tool"] });
+    expect(server.cursors).toEqual([undefined, "next"]);
+    expect(f.store.put).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("returns an authoritative empty catalog with tools capability %s", async tools => {
+    const f = fixture(), server = await remote({ tools, page: () => ({ names: [] }) });
+    expect(await f.probe({ config }, server.fetcher)).toMatchObject({ status: "connected", toolCount: 0, tools: [] });
+    expect(server.cursors).toHaveLength(tools ? 1 : 0);
+  });
+
+  it("returns the complete catalog at the existing page and tool limits", async () => {
+    const f = fixture(), names = Array.from({ length: 1024 }, (_, index) => `tool-${index}`);
+    const server = await remote({ page: cursor => {
+      const page = Number(cursor ?? 0);
+      return { names: names.slice(page * 100, page === 9 ? undefined : (page + 1) * 100),
+        ...(page === 9 ? {} : { nextCursor: String(page + 1) }) };
+    } });
+    expect(await f.probe({ config }, server.fetcher)).toMatchObject({ status: "connected", toolCount: 1024, tools: names });
+    expect(server.cursors).toHaveLength(10);
+  });
+
+  it.each(["tools", "pages"])("does not publish a partial catalog after exceeding the %s bound", async limit => {
+    const f = fixture(), server = await remote({ page: cursor => limit === "tools"
+      ? cursor ? { names: Array.from({ length: 1024 }, () => "duplicate") } : { names: ["first"], nextCursor: "next" }
+      : { names: [`page-${cursor ?? 0}`], nextCursor: String(Number(cursor ?? 0) + 1) } });
+    const result = await f.probe({ config }, server.fetcher);
+    expect(result).toMatchObject({ status: "failed", stages: expect.arrayContaining([{ stage: "tools", status: "failed" }]) });
+    expect(result).not.toHaveProperty("tools");
+    expect(result).not.toHaveProperty("toolCount");
+    expect(server.cursors).toHaveLength(limit === "tools" ? 2 : 10);
+    expect(server.requests.some(request => request.method === "DELETE")).toBe(true);
+  });
+
+  it("does not publish a discovered catalog after membership is revoked", async () => {
+    const f = fixture(), server = await remote();
+    f.store.requireMember.mockRejectedValue(new HttpError(404, "not_found", "MCP configuration not found"));
+    await expect(f.probe({ config }, server.fetcher)).rejects.toMatchObject({ status: 404 });
+    expect(server.cursors).toEqual([undefined, "next"]);
+    expect(server.requests.some(request => request.method === "DELETE")).toBe(true);
+  });
+
   it("reports only attempted stages when sign-in is absent and uses connected unsaved OAuth when provided", async () => {
     const f = fixture(), fetcher = vi.fn<FetchLike>();
-    expect(await f.probe({ config: { ...config, auth: "oauth" } }, fetcher)).toMatchObject({ status: "needs-auth", stages: [{ stage: "validation", status: "passed" }] });
+    const absent = await f.probe({ config: { ...config, auth: "oauth" } }, fetcher);
+    expect(absent).toMatchObject({ status: "needs-auth", stages: [{ stage: "validation", status: "passed" }] });
+    expect(absent).not.toHaveProperty("tools");
     expect(fetcher).not.toHaveBeenCalled();
     const server = await remote(), oauthAttemptId = randomUUID();
     expect((await f.probe({ config: { ...config, auth: "oauth" }, oauthAttemptId }, server.fetcher)).status).toBe("connected");
@@ -74,7 +130,9 @@ describe("unsaved MCP verification", () => {
     f.oauth.draftAuthorization.mockImplementation(() => new Promise(() => {}));
     const pending = f.probe({ config: { ...config, auth: "oauth" }, oauthAttemptId: randomUUID() }, fetcher);
     await vi.advanceTimersByTimeAsync(20_001);
-    expect(await pending).toMatchObject({ status: "failed", message: "Connection check timed out or was cancelled" });
+    const result = await pending;
+    expect(result).toMatchObject({ status: "failed", message: "Connection check timed out or was cancelled" });
+    expect(result).not.toHaveProperty("tools");
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -82,6 +140,7 @@ describe("unsaved MCP verification", () => {
     const f = fixture(), fetcher = vi.fn<FetchLike>(async () => new Response("fixture-private-error", { status: 401 }));
     const result = await f.probe({ config }, fetcher);
     expect(result).toMatchObject({ status: "needs-auth", stages: [{ stage: "validation", status: "passed" }, { stage: "transport", status: "passed" }, { stage: "initialize", status: "needs-auth" }] });
+    expect(result).not.toHaveProperty("tools");
     expect(JSON.stringify(result)).not.toContain("fixture-private-error");
   });
 });

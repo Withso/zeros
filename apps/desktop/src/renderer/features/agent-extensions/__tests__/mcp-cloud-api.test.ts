@@ -18,10 +18,25 @@ vi.mock("../../../platform/cloud-github", () => ({
   readCloudGithubRepositories: mocks.repositories,
 }));
 
-import { cloudMcpKey, readCloudMcpRepositories } from "../mcp-cloud-api";
+import { cloudMcpKey, probeCloudMcp, readCloudMcpRepositories } from "../mcp-cloud-api";
 
 const organization = "11111111-1111-4111-8111-111111111111";
 const installation = (id: string, connected = true, suspendedAt: string | null = null) => ({ id, connected, suspendedAt });
+
+describe("MCP probe inventory compatibility", () => {
+  it.each([undefined, [], ["allowed", "disabled"]])("preserves unknown, empty and complete inventories: %j", async tools => {
+    const response = { status: "connected", stages: [], toolCount: tools?.length ?? 2, ...(tools === undefined ? {} : { tools }) };
+    mocks.request.mockImplementation(async (_path, schema) => schema.parse(response));
+    const result = await probeCloudMcp(cloudMcpKey(organization), { name: "tools", transport: "http", url: "https://tools.example.test/mcp" }, {}, null, new AbortController().signal);
+    expect(result.tools).toEqual(tools);
+    if (tools === undefined) expect(result).not.toHaveProperty("tools");
+  });
+
+  it("rejects an oversized inventory at the renderer boundary", async () => {
+    mocks.request.mockImplementation(async (_path, schema) => schema.parse({ status: "connected", stages: [], tools: Array.from({ length: 1025 }, (_, index) => `tool_${index}`) }));
+    await expect(probeCloudMcp(cloudMcpKey(organization), { name: "tools", transport: "http", url: "https://tools.example.test/mcp" }, {}, null, new AbortController().signal)).rejects.toThrow();
+  });
+});
 
 describe("MCP organization project admission", () => {
   beforeEach(() => {

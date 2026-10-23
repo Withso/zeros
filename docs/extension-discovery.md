@@ -36,6 +36,18 @@ STDIO processes start only when an agent admits the configuration. OAuth
 **Connect** opens the provider login; polling exists only during an active
 organization sign-in and stops on cancellation, navigation or owner replacement.
 
+The editor's Tools section shows the complete discovered inventory, including
+disabled names. Test and Refresh share the bounded connection check; a failed
+refresh retains the last confirmed inventory for that exact configuration.
+An empty catalog differs from one not yet listed. Search and 50-row pages bound
+rendering for large catalogs. Tool choices stay in the draft until Save,
+preserve restrictions on names absent from the latest catalog, and do not
+restart discovery. Switches are editable only for gateway-controlled remote
+servers and an authorized editor: Local OAuth/API-key connections and all
+organization HTTP/SSE connections. Direct Local connections, STDIO, and
+read-only shared definitions show disabled switches. STDIO processes are never
+started merely to list their tools in this editor.
+
 ## Provider contracts
 
 Audited against the repository pins on 2026-09-10: Codex protocol 0.153.4,

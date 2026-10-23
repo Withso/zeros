@@ -12,6 +12,8 @@ export interface ProbeResult {
   status: "connected" | "needs-auth" | "failed";
   stages: Array<{ stage: "validation" | "transport" | "initialize" | "tools"; status: "passed" | "failed" | "needs-auth" }>;
   toolCount?: number;
+  /** Complete upstream names, including disabled tools; absent until discovery succeeds. */
+  tools?: string[];
   message?: string;
 }
 /** Only the native runtime may execute an unsaved command. The control plane
@@ -52,12 +54,14 @@ export async function probeMcp(store: McpStore, oauth: McpOAuth, org: string, us
     await client.connect(transport as Transport, { signal: controller.signal, timeout: 20_000 });
     initialized = true; stages.push({ stage: "initialize", status: "passed" });
     let toolCount = 0;
+    const tools = new Set<string>();
     if (client.getServerCapabilities()?.tools) {
       let cursor: string | undefined;
       for (let page = 0; page < 10; page++) {
         const result = await client.listTools(cursor ? { cursor } : {}, { signal: controller.signal, timeout: 20_000 });
         toolCount += result.tools.length;
         if (toolCount > 1024) throw new Error("MCP tools limit exceeded");
+        for (const tool of result.tools) tools.add(tool.name);
         cursor = result.nextCursor;
         if (!cursor) break;
         if (page === 9) throw new Error("MCP tools page limit exceeded");
@@ -65,7 +69,7 @@ export async function probeMcp(store: McpStore, oauth: McpOAuth, org: string, us
     }
     stages.push({ stage: "tools", status: "passed" });
     await withMcpSignal(store.requireMember(org, user), controller.signal);
-    return { status: "connected", stages, toolCount };
+    return { status: "connected", stages, toolCount, tools: [...tools] };
   } catch (error) {
     if (error instanceof HttpError && ([401,403,404].includes(error.status) || !stages.length)) throw error;
     const needsAuth = unauthorized || (error instanceof HttpError && error.code === "mcp_auth_required");

@@ -225,6 +225,21 @@ describe("serverFromDraft", () => {
     expect("future_key" in serverFromDraft(stdioDraft(), null)).toBe(false);
   });
 
+  it("edits tool policy with the draft, preserves undiscovered names and can allow every tool again", () => {
+    const server = { name: "tools", transport: "http", url: "https://example.test/mcp", auth: "oauth", disabled_tools: ["delete", "unlisted"] };
+    const draft = draftFromServer(server);
+    expect(draft).toMatchObject({ disabledTools: ["delete", "unlisted"] });
+    expect(serverFromDraft({ ...draft, disabledTools: ["unlisted", "write"] }, server).disabled_tools).toEqual(["unlisted", "write"]);
+    expect(serverFromDraft({ ...draft, disabledTools: [] }, server)).not.toHaveProperty("disabled_tools");
+  });
+
+  it("omits remote tool policy when switching to STDIO without losing the unsaved remote choices", () => {
+    const remote = httpDraft({ disabledTools: ["delete"] });
+    const process = { ...remote, transport: "stdio" as const, command: "node" };
+    expect(serverFromDraft(process, null)).not.toHaveProperty("disabled_tools");
+    expect(serverFromDraft({ ...process, transport: "http" }, null)).toHaveProperty("disabled_tools", ["delete"]);
+  });
+
   it("round-trips a description (UI-only field), omitting it when blank", () => {
     const server: RawServer = {
       name: "ctx7",

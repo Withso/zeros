@@ -13,6 +13,8 @@ export interface McpProbeResult {
   status: "connected" | "needs-auth" | "failed";
   stages: { stage: "validation" | "transport" | "initialize" | "tools"; status: "passed" | "failed" | "needs-auth" }[];
   toolCount?: number;
+  /** Complete discovered names, before any configured tool restrictions. */
+  tools?: string[];
 }
 
 /** A draft probe never launches commands, opens a browser, registers a client,
@@ -57,7 +59,7 @@ export async function probeMcpServer(raw: unknown, changes: McpGatewaySecretChan
     stages.push({ stage: "transport", status: "passed" }, { stage: "initialize", status: "passed" });
     const result = client.getServerCapabilities()?.tools ? await client.listTools(undefined, { signal: combined }) : { tools: [] };
     stages.push({ stage: "tools", status: "passed" });
-    return { status: "connected", stages, toolCount: result.tools.length };
+    return { status: "connected", stages, toolCount: result.tools.length, tools: result.tools.map(tool => tool.name) };
   } catch (error) {
     const status = error instanceof UnauthorizedError || ((error instanceof StreamableHTTPError || error instanceof SseError) && error.code === 401) ? "needs-auth" : "failed";
     if (!stages.some(row => row.stage === "transport")) stages.push({ stage: "transport", status: reached ? "passed" : "failed" });

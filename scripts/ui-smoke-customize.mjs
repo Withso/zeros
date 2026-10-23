@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { runMcpFormSmoke } from "./ui-smoke-mcp-form.mjs";
 import { runOrganizationMcpSmoke } from "./ui-smoke-mcp-organization.mjs";
+import { runMcpToolsSmoke } from "./ui-smoke-mcp-tools.mjs";
 
 export async function runCustomizeSmoke({ page, check }) {
   await page.goto(
@@ -92,6 +93,7 @@ export async function runCustomizeSmoke({ page, check }) {
     fullPage: true,
   });
   await runMcpConcurrentAuthSmoke({ page, check });
+  await runMcpToolsSmoke({ page, check });
   await runOrganizationMcpSmoke({ page, check });
 }
 

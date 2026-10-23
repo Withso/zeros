@@ -54,7 +54,7 @@ export async function removeCloudMcp(key: string, extension: CloudMcpExtension):
   });
   assertMcpOwnerKey(key); cloudMcpCache.invalidate(key);
 }
-const probeSchema = z.object({ status: z.enum(["connected", "needs-auth", "failed"]), stages: z.array(z.object({ stage: z.enum(["validation", "transport", "initialize", "tools"]), status: z.enum(["passed", "failed", "needs-auth"]) })), toolCount: z.number().optional(), message: z.string().optional() });
+const probeSchema = z.object({ status: z.enum(["connected", "needs-auth", "failed"]), stages: z.array(z.object({ stage: z.enum(["validation", "transport", "initialize", "tools"]), status: z.enum(["passed", "failed", "needs-auth"]) })), toolCount: z.number().optional(), tools: z.array(z.string()).max(1024).optional(), message: z.string().optional() });
 export function probeCloudMcp(key: string, config: RawServer, secrets: McpSecretChanges, initial: CloudMcpExtension | null, signal: AbortSignal) {
   const organizationId = assertMcpOwnerKey(key);
   return cloudAccountRequest(`${base(organizationId)}/mcp/probe`, probeSchema, { body: {

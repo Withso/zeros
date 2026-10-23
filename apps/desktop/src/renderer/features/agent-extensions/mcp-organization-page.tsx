@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ChevronRight, Plus, Trash2 } from "lucide-react";
 import { Button } from "../../shared/ui/primitives/button";
 import { Switch } from "../../shared/ui/primitives/switch";
@@ -86,6 +86,8 @@ function OrganizationMcpEditor({ initial, organization, ownerKey, projects, proj
   const [owner, setOwner] = useState<"organization" | "user">(() => initial?.owner ?? (canShare ? "organization" : "user"));
   const [project, setProject] = useState(initial?.repository ?? "all");
   const [id] = useState(() => initial?.id ?? crypto.randomUUID());
+  const verificationKey = initial ? mcpConnectionKey(ownerKey, initial.config, initial) : "new-organization-mcp";
+  const verification = useSyncExternalStore(useCallback(listener => mcpConnectionCache.subscribe(verificationKey, listener), [verificationKey]), useCallback(() => mcpConnectionCache.getSnapshot(verificationKey), [verificationKey]));
   const [connected, setConnected] = useState(() => initial ? initial.config.auth === "oauth"
     ? initial.oauth?.status === "connected"
     : mcpConnectionCache.getSnapshot(mcpConnectionKey(ownerKey, initial.config, initial)).data?.status === "connected" : false);
@@ -147,6 +149,7 @@ function OrganizationMcpEditor({ initial, organization, ownerKey, projects, proj
     loading: projectsLoading, ...(!initial ? { onOwnerChange: setOwner, onProjectChange: setProject } : {}),
   }} onSave={onSave} onBack={onBack} probe={probe} onVerified={onVerified} surfaceActive={surfaceActive} readOnly={initial ? !initial.canEdit : false}
     {...(initial ? { savedConnection: { status: connected ? "connected" as const : "needs-connection" as const, connecting,
+      tools: verification.data?.tools,
       ...(initial.config.auth === "oauth" ? { onConnect: () => void connect(), onCancel: () => { cancel(); setConnecting(false); } } : {}),
     } } : {})} />;
 }

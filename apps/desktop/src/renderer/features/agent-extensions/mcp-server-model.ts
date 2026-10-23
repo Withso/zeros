@@ -68,6 +68,8 @@ export interface Draft {
   oauthClientSecret: string;
   clearOAuthClientSecret: boolean;
   oauthMode?: OAuthClientMode;
+  /** Absent on older callers; an explicit empty list allows every tool. */
+  disabledTools?: string[];
 }
 
 export function asString(v: unknown): string {
@@ -150,6 +152,7 @@ export function draftFromServer(s: RawServer | null): Draft {
     oauthScopes: Array.isArray(s?.oauth_scopes) ? s.oauth_scopes.filter((v): v is string => typeof v === "string").join(" ") : "",
     oauthClientSecret: "",
     clearOAuthClientSecret: false,
+    disabledTools: s ? disabledToolsOf(s) : [],
     ...(s?.oauth_client_mode === "auto" || s?.oauth_client_mode === "metadata" || s?.oauth_client_mode === "dynamic" || s?.oauth_client_mode === "custom"
       ? { oauthMode: s.oauth_client_mode }
       : {}),
@@ -197,9 +200,9 @@ const DRAFT_OWNED_KEYS = new Set([
 
 /** Build the clean server object a Save persists, carrying forward from the
  *  entry being edited what the form doesn't own: `enabled: false` (the on/off
- *  toggle lives on the list row), `disabled_tools` (the list row's per-tool
- *  allowlist — editing a description must not reset a curated set), and any
- *  unknown keys. Empty optionals are omitted so the TOML stays tidy. */
+ *  toggle lives on the list row), remote `disabled_tools` when an older caller
+ *  does not edit tool policy, and any unknown keys. Empty optionals are omitted
+ *  so the TOML stays tidy. */
 export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
   const carried: RawServer = {};
   if (prior) {
@@ -208,12 +211,8 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
     }
   }
   const enabled = prior && prior.enabled === false ? { enabled: false } : {};
-  const disabledTools =
-    prior &&
-    Array.isArray(prior.disabled_tools) &&
-    prior.disabled_tools.length > 0
-      ? { disabled_tools: prior.disabled_tools }
-      : {};
+  const toolPolicy = d.disabledTools ?? (prior ? disabledToolsOf(prior) : []);
+  const disabledTools = toolPolicy.length ? { disabled_tools: toolPolicy } : {};
   const description = d.description.trim()
     ? { description: d.description.trim() }
     : {};
@@ -230,7 +229,6 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
       ...(d.listenUrl?.trim() ? { listen_url: d.listenUrl.trim() } : {}),
       ...(args.length ? { args } : {}),
       ...(Object.keys(env).length ? { env } : {}),
-      ...disabledTools,
       ...enabled,
     };
   }

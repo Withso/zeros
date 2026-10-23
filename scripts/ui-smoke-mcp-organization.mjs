@@ -62,6 +62,7 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
       const input = request.postDataJSON();
       const needsAuth = input.config.auth === "oauth" && !completeAuth;
       return json({ status: needsAuth ? "needs-auth" : "connected", toolCount: 2,
+        ...(!needsAuth ? { tools: ["org_read", "org_write"] } : {}),
         stages: [{ stage: "transport", status: "passed" }, { stage: "initialize", status: needsAuth ? "needs-auth" : "passed" }, { stage: "tools", status: needsAuth ? "needs-auth" : "passed" }] });
     }
     if (url.pathname.endsWith("/mcp/oauth/start")) return json({ attemptId: attempt, authorizationUrl: "https://identity.example.test/authorize", expiresAt: Date.now() + 60_000 });
@@ -116,16 +117,19 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     await field("Header name 1").fill("Authorization");
     await field("Header value 1").fill("fixture-private-value");
     await expect(section("Runtime")).toContainText("Connected · 2 tools available");
+    await expect(section("Tools").getByRole("switch", { name: "Allow org_write", exact: true })).toBeEnabled();
+    await section("Tools").getByRole("switch", { name: "Allow org_write", exact: true }).click();
     await button("Add server").click();
     const savedRow = () => page.getByRole("button").filter({ hasText: "private-api" });
     await expect(savedRow()).toContainText("Connected");
-    expect(lastWrite).toMatchObject({ owner: "user", repository: "team-a/project", config: { headers: { Authorization: "${zeros.secret}" } }, secrets: { headers: { Authorization: "fixture-private-value" } } });
+    expect(lastWrite).toMatchObject({ owner: "user", repository: "team-a/project", config: { headers: { Authorization: "${zeros.secret}" }, disabled_tools: ["org_write"] }, secrets: { headers: { Authorization: "fixture-private-value" } } });
     check("Organisation projects use authorized owner/repo names and private credentials travel separately from config", true);
 
     holdProbe = true;
     await savedRow().click();
     await expect(section("Runtime")).toContainText("Checking connection");
     await expect(section("Connection")).toContainText("Connected");
+    await expect(section("Tools").getByRole("switch", { name: "Allow org_write", exact: true })).not.toBeChecked();
     releaseProbe?.(); holdProbe = false;
     await expect(section("Runtime")).toContainText("Connected · 2 tools available");
     rows.get(orgA)[0].revision++;
@@ -158,6 +162,8 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     completeAuth = true;
     await button("Connect").click();
     await expect(section("Connection")).toContainText("Connected");
+    await expect(section("Tools").getByRole("switch", { name: "Allow org_read", exact: true })).toBeDisabled();
+    await expect(section("Tools").getByRole("switch", { name: "Allow org_write", exact: true })).toBeDisabled();
     check("Member editors remain read-only, allow personal sign-in, and cancel polling while hidden", true);
     await selectOwner(orgA, userA);
     await expect(savedRow()).toContainText("Needs connection");

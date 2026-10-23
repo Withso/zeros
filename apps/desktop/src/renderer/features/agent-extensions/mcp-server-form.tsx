@@ -109,12 +109,14 @@ function LocalMcpEditor({ initial: source, initialProject, onBack, onSaved, surf
       }, 16_000) as McpProbeResult;
     } finally { signal.removeEventListener("abort", cancel); }
   }, [bridge, repoRoot, initial, id]);
+  const gateway = initial ? status.data?.servers.find(row => row.name === initial.name && row.url === initial.url) : undefined;
   return <McpServerEditor initial={initial} target={{ organization: false, owner: "user", project,
     projects: projects.map(row => ({ value: row.repoRoot, label: row.name })),
     ...(!initial ? { onProjectChange: setProject } : {}), loading: !layer || loading,
   }} onSave={onSave} onBack={onBack} onSaved={onSaved ? () => onSaved(repoRoot) : onBack} probe={probe} onVerified={onVerified} surfaceActive={surfaceActive}
     {...(initial ? { savedConnection: {
-      status: status.data?.servers.some(row => row.name === initial.name && row.url === initial.url && row.state === "connected") || (initial.auth !== "oauth" && verification.data?.status === "connected") ? "connected" as const : "needs-connection" as const,
+      status: gateway?.state === "connected" || (initial.auth !== "oauth" && verification.data?.status === "connected") ? "connected" as const : "needs-connection" as const,
+      tools: verification.data ? verification.data.tools : gateway?.tools,
       connecting, ...(initial.auth === "oauth" ? { onConnect: () => void connect(), onCancel: () => { cancelAuth(); setConnecting(false); } } : {}),
     } } : {})} />;
 }

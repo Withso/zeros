@@ -8,10 +8,11 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger, toast } from "../.
 import { ZerosSpinner } from "../../shared/ui/loading";
 import { MCP_IMPORT_MAX_BYTES, parseMcpConfiguration } from "./mcp-configuration-import";
 import { mcpUrlError, nextKvId, secureDraftFromServer, type Draft, type KV, type OAuthClientMode, type RawServer } from "./mcp-server-model";
+import { McpToolsSection } from "./mcp-tools-section";
 
 /** Ephemeral draft comparison, including write-only edits but excluding row IDs. */
 function connectionDraftKey(draft: Draft): string {
-  const { name: _name, description: _description, argsText: _argsText, env, headers, ...connection } = draft;
+  const { name: _name, description: _description, argsText: _argsText, disabledTools: _disabledTools, env, headers, ...connection } = draft;
   const values = (rows: KV[]) => rows.map(({ id: _id, ...row }) => row);
   return JSON.stringify([connection, values(env), values(headers)]);
 }
@@ -20,12 +21,14 @@ export interface McpProbeResult {
   status: "connected" | "needs-auth" | "failed";
   stages: { stage: "validation" | "transport" | "initialize" | "tools"; status: "passed" | "failed" | "needs-auth" }[];
   toolCount?: number;
+  tools?: string[];
   protocolVersion?: string;
   message?: string;
 }
 export interface McpProjectOption { value: string; label: string }
 export interface McpSavedConnection {
   status: "connected" | "needs-connection";
+  tools?: string[];
   connecting?: boolean;
   onConnect?: () => void;
   onCancel?: () => void;
@@ -134,31 +137,46 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
   const fileInput = useRef<HTMLInputElement>(null);
   const importGeneration = useRef(0);
   const [probeAttempt, setProbeAttempt] = useState(0);
-  const [connection, setConnection] = useState<{ key: string; checking?: boolean; result?: McpProbeResult } | null>(null);
+  const requestedProbe = useRef<{ key: string; action: "test" | "refresh" } | null>(null);
+  const [connection, setConnection] = useState<{ key: string; configurationKey: string; checking?: boolean; result?: McpProbeResult } | null>(null);
+  const [catalog, setCatalog] = useState<{ key: string; tools: string[] } | null>(null);
   const effectiveDraft = useMemo(() => ({ ...draft, args: args.map(row => row.value) }), [draft, args]);
   const initialDraft = useMemo(() => secureDraftFromServer(initial), [initial]);
   const connectionChanged = Boolean(initial && connectionDraftKey(effectiveDraft) !== connectionDraftKey(initialDraft));
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft(current => ({ ...current, [key]: value }));
-  const probeKey = JSON.stringify([target.owner, target.project, connectionDraftKey(effectiveDraft), probeAttempt,
+  const configurationKey = JSON.stringify([target.owner, target.project, connectionDraftKey(effectiveDraft),
     draft.auth === "oauth" ? savedConnection?.status : undefined]);
+  const probeKey = JSON.stringify([configurationKey, probeAttempt]);
+  const currentProbeKey = useRef(probeKey);
+  currentProbeKey.current = probeKey;
+  const requestProbe = (action: "test" | "refresh") => {
+    requestedProbe.current = { key: configurationKey, action };
+    setProbeAttempt(value => value + 1);
+  };
   const latestDraft = useRef(effectiveDraft);
   latestDraft.current = effectiveDraft;
   useEffect(() => {
     if (!probe || !surfaceActive || busy || savedConnection?.connecting || draft.transport === "stdio" || !draft.url.trim() || mcpUrlError(draft.url)) return;
     const abort = new AbortController();
+    const action = requestedProbe.current?.key === configurationKey ? requestedProbe.current.action : undefined;
     const timer = setTimeout(() => {
-      setConnection({ key: probeKey, checking: true });
-      void probe(latestDraft.current, abort.signal).then(result => {
-        if (!abort.signal.aborted) {
-          setConnection({ key: probeKey, result });
-          if (!connectionChanged) onVerified?.(latestDraft.current, result);
-        }
-      }).catch(() => {
-        if (!abort.signal.aborted) setConnection({ key: probeKey, result: { status: "failed", stages: [] } });
-      });
-    }, 600);
+      requestedProbe.current = null;
+      const checkedDraft = latestDraft.current;
+      setConnection(previous => ({ key: probeKey, configurationKey, checking: true,
+        ...(previous?.configurationKey === configurationKey ? { result: previous.result } : {}),
+      }));
+      const finish = (result: McpProbeResult) => {
+        if (abort.signal.aborted || currentProbeKey.current !== probeKey) return;
+        setConnection({ key: probeKey, configurationKey, result });
+        if (result.status === "connected" && result.tools !== undefined) setCatalog({ key: configurationKey, tools: result.tools });
+        if (!connectionChanged) onVerified?.(checkedDraft, result);
+        if (action && result.status !== "connected") toast.error(action === "refresh" ? "Could not refresh tools. Check the connection and try again."
+          : result.status === "needs-auth" ? "Connect your account before testing this server." : "Could not connect to this MCP server.");
+      };
+      void probe(checkedDraft, abort.signal).then(finish).catch(() => finish({ status: "failed", stages: [] }));
+    }, action ? 0 : 600);
     return () => { clearTimeout(timer); abort.abort(); };
-  }, [probe, probeKey, draft.transport, draft.url, surfaceActive, busy, onVerified, connectionChanged, savedConnection?.connecting]);
+  }, [probe, probeKey, configurationKey, draft.transport, draft.url, surfaceActive, busy, onVerified, connectionChanged, savedConnection?.connecting]);
 
   const fill = (server: RawServer) => {
     const next = secureDraftFromServer(server);
@@ -183,13 +201,17 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
     if (saving.current) return;
     saving.current = true; setBusy(true);
     try {
-      await onSave(effectiveDraft, connection?.key === probeKey ? connection.result : undefined);
+      const verification = connection?.configurationKey === configurationKey ? connection.result : undefined;
+      await onSave(effectiveDraft, verification && tools !== undefined ? { ...verification, tools } : verification);
       if (mounted.current) { toast.success(initial ? "MCP server saved" : "MCP server added"); onSaved(); }
     } catch (error) {
       if (mounted.current) toast.error(error instanceof Error ? error.message : "Could not save the MCP server.");
     } finally { saving.current = false; if (mounted.current) setBusy(false); }
   };
   const selectedClient = OAUTH_CLIENTS.find(row => row.value === draft.oauthMode) ?? OAUTH_CLIENTS[0];
+  const tools = catalog?.key === configurationKey ? catalog.tools : !connectionChanged ? savedConnection?.tools : undefined;
+  const canProbe = Boolean(probe && draft.transport !== "stdio" && draft.url.trim() && !mcpUrlError(draft.url));
+  const checking = connection?.key === probeKey && Boolean(connection.checking);
   const savedStatus = !connectionChanged && connection?.key === probeKey && connection.result
     ? connection.result.status === "connected" ? "connected" : "needs-connection" : savedConnection?.status;
   return <div className="flex min-w-0 flex-col gap-8" {...(!surfaceActive ? { inert: "" } : {})}>
@@ -199,6 +221,13 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
     </nav>
     <div className="flex flex-col gap-1"><h1 className="text-fg1 m-0 text-lg font-medium">{initial ? "Edit MCP server" : "Add MCP server"}</h1>
       <p className="text-fg3 m-0 text-sm">Connect tools and services your agents can use.</p></div>
+    {(initial || canProbe) && <McpToolsSection key={configurationKey} tools={tools} disabledTools={draft.disabledTools ?? []}
+      controlled={draft.transport !== "stdio" && (target.organization || draft.auth === "oauth" || draft.auth === "header")}
+      editable={!readOnly && !busy && !savedConnection?.connecting} checking={checking}
+      actionsDisabled={!canProbe || busy || Boolean(savedConnection?.connecting) || !surfaceActive}
+      emptyHint={draft.transport === "stdio" ? "Tool discovery is unavailable here for STDIO connections."
+        : draft.auth === "oauth" && savedConnection?.status !== "connected" ? "Connect your account to list tools." : "Not listed yet. Refresh to load tools."}
+      onChange={value => set("disabledTools", value)} onTest={() => requestProbe("test")} onRefresh={() => requestProbe("refresh")} />}
     {savedConnection && <Section title="Connection"><div className={CARD}>
       <SelectRow label="Status" hint={savedStatus === "connected" ? "The last connection check succeeded." : draft.transport === "stdio" ? "This process connects when an agent starts in the selected project." : draft.auth === "oauth" ? "Connect your account to make this server available to your agents." : "Check this server’s connection before your agents use it."}>
         <div className="flex items-center gap-3">
@@ -207,7 +236,6 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
           </span>
           {savedConnection.connecting ? <Button variant="secondary" onClick={savedConnection.onCancel}><ZerosSpinner className="size-3.5" />Cancel</Button>
             : savedConnection.onConnect && <Button variant="secondary" disabled={Boolean(connectionChanged) || busy} onClick={savedConnection.onConnect}>Connect</Button>}
-          {!savedConnection.onConnect && probe && draft.transport !== "stdio" && <Button variant="secondary" onClick={() => setProbeAttempt(value => value + 1)}>Test connection</Button>}
         </div>
       </SelectRow>
       {connectionChanged && <p className="text-fg3 m-0 text-xs">Save your changes before connecting.</p>}
@@ -254,7 +282,7 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
           </> : <>
             <Field label="URL" htmlFor={`${id}-url`}><Input id={`${id}-url`} value={draft.url} onChange={event => set("url", event.target.value)} placeholder="https://mcp.example.com/mcp" className="text-fg1 font-sans" spellCheck={false} autoComplete="off" /></Field>
             <ConnectionStatus state={connection?.key === probeKey ? connection : {}} />
-            {probe && draft.url && !mcpUrlError(draft.url) && <div className="flex justify-end"><Button variant="ghost" size="compact" disabled={connection?.key === probeKey && connection.checking} onClick={() => setProbeAttempt(value => value + 1)}>Check connection</Button></div>}
+            {probe && draft.url && !mcpUrlError(draft.url) && <div className="flex justify-end"><Button variant="ghost" size="compact" disabled={checking} onClick={() => requestProbe("test")}>Check connection</Button></div>}
           </>}
         </div>
       </div></Section>

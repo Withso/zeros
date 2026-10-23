@@ -33,3 +33,20 @@ editor browser regression covers that distinction.
 Environment: a custom-user PostgreSQL cluster may lack the conventional
 `postgres` role used by development-profile fixtures. Verify that isolated
 fixture prerequisite before treating the failure as a product regression.
+
+The Tools extension keeps discovery separate from policy: complete catalogs
+include disabled names, unknown differs from authoritative empty, and failed
+refreshes retain only the exact configuration's names. Only gateway-enforced
+paths expose editable switches; policy edits must not restart discovery or
+discard restrictions on currently absent names. Native/CP real-transport tests,
+model/cache tests and the production Local/organization smoke encode these
+rules, including late responses, read-only members and bounded catalog rows.
+Switching a restricted remote draft to STDIO must omit its remote-only policy
+from the saved process definition; a retained model regression covers this
+strict cloud-schema boundary and preserves the unsaved HTTP choices.
+Adding catalogs to a status cache also changes its memory cost: reuse the
+shared weighted budget, in addition to its entry count, and test eviction
+without dropping the active or newest complete snapshot.
+The browser bridge fixture copies tool arrays like real IPC; sharing its mutable
+input array hid a refreshed name behind a memoized projection. Toast captures
+also honor the shared six-second error lifetime instead of a shorter wait.
