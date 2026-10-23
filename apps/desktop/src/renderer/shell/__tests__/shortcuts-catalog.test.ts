@@ -25,6 +25,19 @@ describe("SHORTCUT_CATEGORIES", () => {
     expect(new Set(shortcutIds).size).toBe(shortcutIds.length);
   });
 
+  it("shows Command+Option+/ as the shortcut for opening the panel", () => {
+    const shortcut = SHORTCUT_CATEGORIES.flatMap(
+      (category) => category.shortcuts,
+    ).find((entry) => entry.id === "show-shortcuts");
+    expect(shortcut?.keys).toEqual(["⌥⌘/"]);
+  });
+
+  it("reserves Command+K for the command palette", () => {
+    const matches = SHORTCUT_CATEGORIES.flatMap(category => category.shortcuts)
+      .filter(shortcut => shortcut.keys.includes("⌘K"));
+    expect(matches.map(shortcut => shortcut.id)).toEqual(["command-palette"]);
+  });
+
   it("gives every shortcut a label and non-empty key chords", () => {
     for (const category of SHORTCUT_CATEGORIES) {
       expect(category.shortcuts.length).toBeGreaterThan(0);

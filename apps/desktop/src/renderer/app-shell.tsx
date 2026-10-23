@@ -74,6 +74,8 @@ import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
 import { useOpenBrowserHotkey } from "./shell/use-open-browser-hotkey";
 import { useShortcutsHotkey } from "./shell/use-shortcuts-hotkey";
 import { ShortcutsPalette } from "./shell/shortcuts-palette";
+import { CommandPaletteController } from "./shell/command-palette-controller";
+import { useCommandPaletteHotkey } from "./shell/use-command-palette-hotkey";
 import { FeedbackDialog } from "./shell/dialogs/feedback-dialog";
 import { onFeedbackDialogRequest } from "./shell/feedback-controller";
 import {
@@ -958,7 +960,7 @@ function ShellRouter() {
 
   // ⌥⌘F anywhere opens the feedback dialog. One dialog instance lives HERE;
   // the shortcuts palette and any other surface summon it through the
-  // feedback-controller pub/sub. Like ⌘/ it also fires inside
+  // feedback-controller pub/sub. Like ⌥⌘/ it also fires inside
   // editable surfaces — the chord types nothing, and feedback is most often
   // written right after something went wrong in a composer. Match on
   // `e.code` (Option remaps `e.key` glyphs on macOS — see ⌥⌘T above).
@@ -979,20 +981,25 @@ function ShellRouter() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  // ⌘/ anywhere toggles the glass shortcuts palette. Unlike the chords above
-  // it fires inside editable surfaces too (⌘/ types nothing, and the palette
+  // ⌥⌘/ anywhere toggles the glass shortcuts palette. Unlike the chords above
+  // it fires inside editable surfaces too (⌥⌘/ types nothing, and the palette
   // must open from — and close over — a focused composer). See
   // apps/desktop/src/renderer/shell/use-shortcuts-hotkey.ts.
-  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
+  const [palette, setPalette] = React.useState<"commands" | "shortcuts" | null>(null);
   const toggleShortcuts = React.useCallback(
-    () => setShortcutsOpen((prev) => !prev),
+    () => setPalette((prev) => prev === "shortcuts" ? null : "shortcuts"),
     [],
   );
   useShortcutsHotkey(toggleShortcuts);
+  const toggleCommands = React.useCallback(
+    () => setPalette((prev) => prev === "commands" ? null : "commands"),
+    [],
+  );
+  useCommandPaletteHotkey(toggleCommands);
 
   // ⇧⌘L copies recent app logs — an INTERNAL feature; the listener only
   // attaches for allowlisted accounts with the flag on (Settings →
-  // Internal). Deliberately absent from the ⌘/ catalog. See
+  // Internal). Deliberately absent from the ⌥⌘/ catalog. See
   // apps/desktop/src/renderer/shell/use-copy-logs-hotkey.ts.
   useCopyLogsHotkey();
 
@@ -1020,9 +1027,15 @@ function ShellRouter() {
           toggleWorkbench={toggleWorkbench}
           revealWorkbench={revealWorkbench}
         />
+        {palette === "commands" && <CommandPaletteController
+          onDismiss={() => setPalette(current => current === "commands" ? null : current)}
+          onShowShortcuts={() => setPalette("shortcuts")}
+          revealWorkbench={revealWorkbench}
+          toggleWorkbench={toggleWorkbench}
+        />}
       </AddProjectProvider>
-      {/* ⌘/ glass shortcuts palette — floats (portalled) above everything. */}
-      <ShortcutsPalette open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+      {/* ⌥⌘/ glass shortcuts palette — floats (portalled) above everything. */}
+      <ShortcutsPalette open={palette === "shortcuts"} onOpenChange={open => setPalette(current => open ? "shortcuts" : current === "shortcuts" ? null : current)} />
       {/* ⌥⌘F feedback dialog — the app's single instance (see above). */}
       <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
     </div>

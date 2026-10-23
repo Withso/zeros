@@ -35,6 +35,7 @@ import {
   MAX_PERSISTED_WORKBENCH_SCOPES,
 } from "../../shell/workbench/tab-model";
 import type { Action } from "../store";
+import { buildDirectFileOpenAction } from "../../shell/workbench/direct-file-open";
 
 const dispatch = (action: Action) =>
   useWorkspaceStore.getState().dispatch(action);
@@ -446,6 +447,21 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
     expect(slice().tabs.find((tab) => tab.id === review.id)?.reviewSubtab).toBe(
       "checks",
     );
+  });
+
+  it.each([
+    ["local", "/repo/literal-file"],
+    ["cloud", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"],
+  ])("opens a literal filename in the %s fixed home without trimming its identity", (_placement, folder) => {
+    dispatch({ type: "SET_NEW_AGENT_FOLDER", folder });
+    const home = slice().tabs.find(tab => tab.type === "files")!;
+    const path = " notes #1.ts ";
+    dispatch(buildDirectFileOpenAction(slice().tabs, path, { scope: folder, literalPath: true }));
+    expect(slice().tabs.find(tab => tab.id === home.id)?.filePath).toBe(path);
+    const count = slice().tabs.length;
+    dispatch(buildDirectFileOpenAction(slice().tabs, path, { scope: folder, literalPath: true }));
+    expect(slice().tabs.length).toBe(count);
+    expect(slice().activeId).toBe(home.id);
   });
 
   it("keeps Review, Changes, and viewer choices isolated per worktree", () => {
