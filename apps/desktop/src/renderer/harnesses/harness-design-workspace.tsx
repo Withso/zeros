@@ -16,6 +16,11 @@ import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
 } from "@zeros/protocol/design-runtime";
 import { designFrameGeometryError } from "@zeros/design-core";
+import {
+  mutateDesignKeyframes,
+  readDesignKeyframes,
+  type DesignKeyframeInput,
+} from "@zeros/design-web/css";
 import { designRelocationSchema, designRelocationStyles } from "@zeros/protocol/design-relocation";
 import type {
   DesignFoundationOpenWire,
@@ -463,16 +468,9 @@ async function main() {
           variants: [],
           components: [],
         },
-        keyframes: frameMotionHarness && file === "home.html"
-          ? [{
-              file: "home.html",
-              name: "wash",
-              keyframes: [
-                { offset: 0, styles: { opacity: "0.6" } },
-                { offset: 100, styles: { opacity: "1" } },
-              ],
-            }]
-          : [],
+        keyframes: readDesignKeyframes({
+          [file]: file === "home.html" ? homeSource : pricingSource,
+        }),
       },
     } as never);
   }
@@ -1146,6 +1144,9 @@ async function main() {
                 html?: string;
                 mode?: string;
                 styles?: Record<string, string>;
+                file?: string;
+                name?: string;
+                keyframes?: DesignKeyframeInput[];
                 frame?: string;
                 geometry?: {
                   x: number;
@@ -1199,8 +1200,23 @@ async function main() {
               operation.nodeId ? [operation.nodeId] : [],
             ),
           });
+          let transactionSource = currentHomeSource;
+          for (const operation of transaction?.operations ?? []) {
+            if (
+              operation.type === "keyframes.set" &&
+              operation.file === frameFile &&
+              operation.name &&
+              operation.keyframes
+            ) {
+              transactionSource = mutateDesignKeyframes(
+                transactionSource,
+                { name: operation.name, keyframes: operation.keyframes },
+                operation.file,
+              );
+            }
+          }
           const parsed = new DOMParser().parseFromString(
-            currentHomeSource,
+            transactionSource,
             "text/html",
           );
           if (textOperation?.nodeId) {
@@ -1319,6 +1335,9 @@ async function main() {
                 foundation: {
                   ...previousFoundation.foundation,
                   revision: `harness:${nextSourceVersion}`,
+                  ...(frameMotionHarness ? {
+                    keyframes: readDesignKeyframes({ [frameFile]: currentHomeSource }),
+                  } : {}),
                 },
               },
             );

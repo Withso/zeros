@@ -1809,7 +1809,10 @@ original unsnapped geometry writes nothing and preserves authored sizing.
 - **Motion:** node-local keyframe tracks, preview, playback, and paths exist only
   in explicit Motion mode. Selecting an outer frame targets its authored frame
   root or document body, matching the inspector, for opening, previewing, saving
-  and deleting motion. Draft identity is workspace + directory + frame +
+  and deleting motion. Foundation reads keyframes from CSS files and authored
+  HTML `<style>` blocks. Editing an inline animation replaces its existing
+  named block in place, preserves surrounding HTML/CSS, and keeps byte-exact
+  Undo/Redo; ambiguous names fail without changing source. Draft identity is workspace + directory + frame +
   node, not source revision. Unrelated keyframe refreshes preserve unsaved
   drafts, and a save acknowledges only the draft it wrote. Pending saves and
   deletions retain that exact owner through selection round trips; their late

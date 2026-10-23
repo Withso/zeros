@@ -55,6 +55,9 @@ export async function runDesignFrameMotionSmoke({ page, check }) {
     node.getAnimations().some((animation) => animation.effect?.target === node && animation.playState === "running"),
   )).toBe(true);
   await timeline.getByRole("button", { name: "Pause motion preview", exact: true }).click();
+  await points.first().click();
+  await timeline.getByLabel("opacity keyframe value", { exact: true }).fill("0.4");
+  await timeline.getByLabel("opacity keyframe value", { exact: true }).press("Enter");
   await duration.fill("12");
   await duration.press("Enter");
   await timeline.getByRole("button", { name: "Save", exact: true }).click();
@@ -64,6 +67,24 @@ export async function runDesignFrameMotionSmoke({ page, check }) {
     .toMatchObject({ frame: "home.html", nodeIds: ["home-main"] });
   await expect.poll(selection).toEqual({ frameSelected: true, selectedNodeId: null });
   check("main-frame motion previews and saves against the authored root", true);
+  const savedSource = await page.evaluate(async () => {
+    const cache = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    const savedFrame = cache.designWorkspaceSnapshotCache.getSnapshot("ws_design_harness").data
+      .frames.find((item) => item.file === "home.html");
+    return cache.designFrameDocumentCache.getSnapshot(cache.designFrameDocumentKey(
+      "ws_design_harness", savedFrame.file, savedFrame.sourceVersion,
+    )).data.source;
+  });
+  expect(savedSource).toMatch(/@keyframes\s+wash\s*\{\s*0%\s*\{\s*opacity:\s*0\.4;/);
+  await expect.poll(() => root().evaluate((node) => {
+    const rules = Array.from(node.ownerDocument.styleSheets)
+      .flatMap((sheet) => Array.from(sheet.cssRules));
+    // The mounted runtime appends confirmed keyframe overrides; the last
+    // matching rule is effective while the original source DOM stays mounted.
+    const effective = rules.filter((rule) => rule instanceof CSSKeyframesRule && rule.name === "wash").at(-1);
+    return effective?.cssRules[0]?.style.opacity;
+  })).toBe("0.4");
+  check("main-frame keyframe edits persist in the authored HTML style block", true);
 
   await page.locator('[data-design-layer-id="home-heading"]').click();
   await expect(duration).toHaveValue("300");
@@ -77,6 +98,8 @@ export async function runDesignFrameMotionSmoke({ page, check }) {
   await frame.click();
   await expect(duration).toHaveValue("12");
   await expect(points).toHaveCount(2);
+  await points.first().click();
+  await expect(timeline.getByLabel("opacity keyframe value", { exact: true })).toHaveValue("0.4");
   check("frame and child motion drafts stay isolated through selection round trips", true);
 
   await timeline.getByRole("button", { name: "Delete motion", exact: true }).click();

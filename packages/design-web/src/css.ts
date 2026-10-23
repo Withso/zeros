@@ -610,10 +610,10 @@ function conditionsFor(node: Declaration): string[] {
 }
 
 function authoredStylesheets(
-  state: DesignWebDocumentState,
+  files: Readonly<Record<string, string>>,
 ): AuthoredStylesheet[] {
   const stylesheets: AuthoredStylesheet[] = [];
-  for (const [file, source] of Object.entries(state.files)) {
+  for (const [file, source] of Object.entries(files)) {
     if (file.toLowerCase().endsWith(".css")) {
       stylesheets.push({ file, source, offsetBase: 0 });
       continue;
@@ -664,7 +664,7 @@ function stylesheetCandidates(
   runtimeSelectors: ReadonlySet<string> = new Set(),
 ): StylesheetCandidate[] {
   const candidates: StylesheetCandidate[] = [];
-  for (const stylesheet of authoredStylesheets(state)) {
+  for (const stylesheet of authoredStylesheets(state.files)) {
     const { file, source, offsetBase } = stylesheet;
     let root: postcss.Root;
     try {
@@ -1181,17 +1181,23 @@ function designKeyframeOffset(value: string): number | null {
     : null;
 }
 
-/** Read authored CSS motion into deterministic, bounded timeline data. Complex
- * or malformed selectors are ignored without hiding the rest of the file. */
+/** Read CSS files and HTML style blocks into bounded timeline data. Complex
+ * or malformed selectors are ignored without hiding the remaining styles. */
 export function readDesignKeyframes(
   files: Readonly<Record<string, string>>,
 ): DesignAuthoredKeyframes[] {
   const definitions: DesignAuthoredKeyframes[] = [];
-  for (const file of Object.keys(files).sort()) {
-    if (!file.toLowerCase().endsWith(".css")) continue;
+  const stylesheets = authoredStylesheets(files).sort((left, right) =>
+    left.file < right.file
+      ? -1
+      : left.file > right.file
+        ? 1
+        : left.offsetBase - right.offsetBase,
+  );
+  for (const { file, source } of stylesheets) {
     let root: postcss.Root;
     try {
-      root = postcss.parse(files[file]!, { from: file });
+      root = postcss.parse(source, { from: file });
     } catch {
       continue;
     }
@@ -1241,8 +1247,8 @@ export function readDesignKeyframes(
   return definitions;
 }
 
-/** Create or surgically replace one named keyframe block. Neighboring CSS is
- * byte-preserved; transaction inverses restore the previous block exactly. */
+/** Create or surgically replace one named keyframe block. HTML edits require
+ * an existing block; neighboring HTML/CSS and transaction inverses stay exact. */
 export function mutateDesignKeyframes(
   source: string,
   input: { name: string; keyframes: readonly DesignKeyframeInput[] },
@@ -1285,31 +1291,45 @@ export function mutateDesignKeyframes(
   const block = `@keyframes ${input.name} {\n${keyframes
     .map((keyframe) => `  ${keyframe.offset}% { ${keyframe.styles.join(" ")} }`)
     .join("\n")}\n}`;
-  const root = postcss.parse(source);
-  const matches: AtRule[] = [];
-  root.walkAtRules((rule) => {
-    if (
-      rule.name.toLowerCase() === "keyframes" &&
-      rule.params.trim() === input.name
-    ) {
-      matches.push(rule);
-    }
-  });
+  const html = sourceFile.toLowerCase().endsWith(".html");
+  if (html && /<\/style(?:\s|\/|>)/i.test(block)) {
+    throw new Error("Design keyframe values cannot close an HTML style block.");
+  }
+  const stylesheets = html
+    ? authoredStylesheets({ [sourceFile]: source })
+    : [{ file: sourceFile, source, offsetBase: 0 }];
+  const matches: Array<{ rule: AtRule; offsetBase: number }> = [];
+  for (const stylesheet of stylesheets) {
+    const root = postcss.parse(stylesheet.source, { from: sourceFile });
+    root.walkAtRules((rule) => {
+      if (
+        rule.name.toLowerCase() === "keyframes" &&
+        rule.params.trim() === input.name
+      ) {
+        matches.push({ rule, offsetBase: stylesheet.offsetBase });
+      }
+    });
+  }
   if (matches.length > 1) {
     throw new Error(`Design keyframes are ambiguous: ${input.name}`);
   }
   const match = matches[0];
   if (!match) {
+    // New motions use a CSS file. Never guess an HTML insertion point or
+    // append CSS outside a style element when the authored target disappeared.
+    if (html) {
+      throw new Error(`Design keyframes not found in HTML: ${input.name}`);
+    }
     const separator =
       source.length === 0 ? "" : source.endsWith("\n") ? "\n" : "\n\n";
     return `${source}${separator}${block}\n`;
   }
-  const start = match.source?.start?.offset;
-  const end = match.source?.end?.offset;
+  const start = match.rule.source?.start?.offset;
+  const end = match.rule.source?.end?.offset;
   if (start === undefined || end === undefined) {
     throw new Error(`Design keyframes have no authored span: ${input.name}`);
   }
-  return `${source.slice(0, start)}${block}${source.slice(end)}`;
+  return `${source.slice(0, match.offsetBase + start)}${block}${source.slice(match.offsetBase + end)}`;
 }
 
 export function readDesignCssDiagnostics(
