@@ -438,6 +438,10 @@ export class RuntimeClient {
   }
 
   private engineCapabilities = new Set<string>();
+  private readyInstanceId: string | undefined;
+  /** The engine process this socket last confirmed. Cloud workers announce a
+   * new one after a restart; a dropped socket alone never clears it. */
+  get engineInstanceId(): string | undefined { return this.readyInstanceId; }
   supportsEngineCapability(capability: string, _workspaceId?: string): boolean {
     return this._status === "connected" && this.isOpen() && this.engineCapabilities.has(capability);
   }
@@ -1041,9 +1045,10 @@ export class RuntimeClient {
    *  app message object. */
   private handleIncoming(msg: BridgeMessage): void {
     if (msg.type === "ENGINE_READY") {
-      const wire = msg as unknown as { capabilities?: unknown };
+      const wire = msg as unknown as { capabilities?: unknown; instanceId?: unknown };
       this.engineCapabilities = new Set(Array.isArray(wire.capabilities) && wire.capabilities.length <= 64
         ? wire.capabilities.filter((value): value is string => typeof value === "string" && value.length <= 128) : []);
+      this.readyInstanceId = typeof wire.instanceId === "string" && /^[A-Za-z0-9-]{8,64}$/.test(wire.instanceId) ? wire.instanceId : undefined;
       this.finishCloudHandshake?.();
     }
     // ENGINE_READY confirms the engine is fully initialized.

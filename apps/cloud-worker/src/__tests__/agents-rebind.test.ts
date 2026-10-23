@@ -334,6 +334,17 @@ describe("a worker restart", () => {
     expect(session(await f.open("claude")).sessionId).toBe(current.sessionId);
   });
 
+  // Its shells are gone, so the app keeps each terminal tab and starts a fresh
+  // shell instead of treating the old ones as closed on another device.
+  it("announces a new engine instance, while reconnects to the same process keep it", async () => {
+    const f = await setup();
+    const before = f.relay.bridge("ENGINE_READY").map(item => (item.frame as { instanceId?: string }).instanceId);
+    expect(before).toHaveLength(2); expect(before[0]).toMatch(/^[0-9a-f-]{36}$/); expect(before[1]).toBe(before[0]);
+    await f.restart();
+    const after = (f.relay.bridge("ENGINE_READY")[0].frame as { instanceId?: string }).instanceId;
+    expect(after).toMatch(/^[0-9a-f-]{36}$/); expect(after).not.toBe(before[0]);
+  });
+
   it("confirms Stop and applies a model change for that execution", async () => {
     const f = await setup(), current = session(await f.open("claude"));
     await f.restart();

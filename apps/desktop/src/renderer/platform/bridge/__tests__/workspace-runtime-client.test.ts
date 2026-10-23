@@ -110,6 +110,23 @@ describe("file reference ownership", () => {
 
 
 
+describe("cloud terminal continuity", () => {
+  // A woken VM restarts its worker and loses every shell. Only a changed engine
+  // instance lets the terminal store keep the tabs and start fresh shells.
+  it("uses the worker process announced by ENGINE_READY, falling back to the workspace for older workers", async () => {
+    const peer = fakePeer(a), open = vi.fn(async () => peer.peer);
+    Object.assign(peer.peer.client, { executionIdentity: { kind: "cloud", engineInstanceId: a.workspaceId } });
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    try {
+      await client.warmWorkspace(a);
+      expect(client.cloudEngineInstanceId(cloudWorkspaceKey(a))).toBe(a.workspaceId);
+      Object.assign(peer.peer.client, { engineInstanceId: "44444444-4444-4444-8444-444444444444" });
+      expect(client.cloudEngineInstanceId(cloudWorkspaceKey(a))).toBe("44444444-4444-4444-8444-444444444444");
+      expect(client.cloudEngineInstanceId(cloudWorkspaceKey(b))).toBeUndefined();
+    } finally { client.dispose(); }
+  });
+});
+
 describe("workspace runtime routing", () => {
   it("reuses a healthy running v2 peer for repeated send preparation, but obtains fresh admission after stop", async () => {
     const peer = fakePeer(a), replacement = fakePeer(a);

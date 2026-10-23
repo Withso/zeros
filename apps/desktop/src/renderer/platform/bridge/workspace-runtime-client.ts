@@ -622,7 +622,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const entry = this.peers.get(cloudWorkspaceKey(target));
     if (!entry || entry.retired || entry.identity !== this.identity(target)) return undefined;
     const identity = entry.client.executionIdentity;
-    return identity?.kind === "cloud" ? identity.engineInstanceId : undefined;
+    // Workers announce their process; older ones only have the workspace.
+    return identity?.kind === "cloud" ? entry.client.engineInstanceId ?? identity.engineInstanceId : undefined;
   }
 
   onWorkspaceStatusChange(folder: string, listener: () => void): () => void {

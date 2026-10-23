@@ -234,6 +234,9 @@ export interface EngineReadyMessage extends BaseMessage {
   minProtocolVersion?: number;
   /** Additive cloud backend contracts available over the workspace bridge. */
   capabilities?: string[];
+  /** A cloud worker's random per-process id. A new value means the worker
+   *  restarted, so its shells are gone; a reconnect keeps the same value. */
+  instanceId?: string;
 }
 
 /** Engine → clients broadcast: a list-changing write hit the engine DB. Clients

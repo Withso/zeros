@@ -27,12 +27,20 @@ describe("passive transport requests", () => {
     Object.assign(state, { ws: { readyState: 1, send, close: () => {} }, handshakeReady: true, _status: "connected" });
     state.handleIncoming({ type: "ENGINE_READY", capabilities: ["workspace.resourceUsage.v1"] } as unknown as BridgeMessage);
     expect(client.supportsEngineCapability("workspace.resourceUsage.v1")).toBe(true);
+    expect(client.engineInstanceId).toBeUndefined();
+    state.handleIncoming({ type: "ENGINE_READY", instanceId: "44444444-4444-4444-8444-444444444444" } as unknown as BridgeMessage);
+    expect(client.engineInstanceId).toBe("44444444-4444-4444-8444-444444444444");
+    state.handleIncoming({ type: "ENGINE_READY", instanceId: "x".repeat(200) } as unknown as BridgeMessage);
+    expect(client.engineInstanceId).toBeUndefined();
+    state.handleIncoming({ type: "ENGINE_READY", instanceId: "44444444-4444-4444-8444-444444444444" } as unknown as BridgeMessage);
     expect(await client.requestConnected({ type: "WORKSPACE_REQUEST", op: "workspace.resourceUsage" })).toMatchObject({ result: { confirmed: true } });
     expect(send).toHaveBeenCalledOnce();
     state.ws.readyState = 3;
     await expect(client.requestConnected({ type: "WORKSPACE_REQUEST" })).rejects.toThrow(/disconnected/);
     state.setStatus("disconnected");
     expect(client.supportsEngineCapability("workspace.resourceUsage.v1")).toBe(false);
+    // A dropped socket proves nothing about the worker process.
+    expect(client.engineInstanceId).toBe("44444444-4444-4444-8444-444444444444");
     expect(state.queuedRequests).toEqual([]); client.dispose();
   });
 });

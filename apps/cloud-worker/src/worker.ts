@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
@@ -38,6 +39,8 @@ interface Client extends AppClient { rejected: boolean }
 /** One VM, one checkout, many app sockets. The relay is a carrier for ordinary
  * bridge frames; this process owns validation, agent work and durable history. */
 export class CloudWorker {
+  /** Changes with every process, so the app can tell a restart (its shells are gone) from a reconnect. */
+  private readonly instanceId = randomUUID();
   private readonly clients = new Map<string, Client>();
   private scope?: WorkspaceScope;
   private store?: SessionStore;
@@ -151,7 +154,7 @@ export class CloudWorker {
       await this.configuring;
       if (!this.scope || !this.online || this.clients.get(client.id) !== client) return;
       await client.send(createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
-        protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL }));
+        protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL, instanceId: this.instanceId }));
       return;
     }
     const client = this.clients.get(message.clientId);
