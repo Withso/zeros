@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { runSidebarWorkspaceFilters } from "./ui-smoke-sidebar-filters.mjs";
 import { appSidebarRegressionChecks } from "./ui-smoke-app-sidebar-regressions.mjs";
+import { runWorkspaceHoverCards } from "./ui-smoke-workspace-hover-card.mjs";
 
 // App sidebar contract: Repository grouping by default with every workspace under
 // its repository; Status and None are also available; repository headers
@@ -490,6 +491,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   }
 
   await runSidebarWorkspaceFilters({ page, check, harnessBase });
+  await runWorkspaceHoverCards({ page, check, harnessBase });
 
   expect(errors).toEqual([]);
   check("app sidebar interactions have no browser exceptions", true);

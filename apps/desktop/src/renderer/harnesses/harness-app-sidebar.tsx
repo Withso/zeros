@@ -14,6 +14,7 @@ import type { Project } from "../state/projects-store";
 import type { ProcessMetricsSnapshot } from "../platform/process-metrics";
 
 const params = new URLSearchParams(location.search);
+const hoverCards = params.has("hover-cards");
 const legacyMainFolder = params.has("legacy-main")
   ? `/fixture/zeros${params.has("subdirectory") ? "/packages/app" : ""}`
   : null;
@@ -131,6 +132,21 @@ if (params.has("dashboard")) {
   if (params.has("large-dashboard")) rows.push(...Array.from({ length: 250 }, (_, index) => ({ ...rows[0],
     id: `ws-bulk-${index}`, branch: `zeros/task-${String(index).padStart(3, "0")}`, path: `/fixture-workspaces/zeros/bulk-${index}` })));
 }
+if (hoverCards) {
+  const now = Date.now();
+  for (const row of rows) {
+    row.createdAt = now - 3_600_000;
+    row.lastActiveAt = now - 29 * 60_000;
+  }
+  Object.assign(rows.find(row => row.id === "ws-boston")!, {
+    prNumber: 42, prState: "ready", prUrl: "https://github.com/example/zeros/pull/42",
+  });
+  Object.assign(rows.find(row => row.id === "ws-seville")!, {
+    prNumber: 43, prState: "merged", prUrl: "https://github.com/example/ocolors/pull/43",
+  });
+  changeLines["ws-atlanta"] = { additions: 2318, deletions: 388 };
+  changeLines["ws-boston"] = { additions: 3506, deletions: 839 };
+}
 const runningIds = new Set(["ws-boston"]);
 const requests: { op: string; params?: Record<string, unknown> }[] = [];
 let deferChangeLines = false;
@@ -240,6 +256,21 @@ Object.assign(window, {
       repository: { forge: "github.com", owner: "example", name: fixture.name, revision: "refs/heads/main" },
       generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "stopped", lastObservedAt: null },
     });
+    if (hoverCards) {
+      const cloudChats = fixtures.map(fixture => ({
+        ...chats[0],
+        id: `cloud:${fixture.organizationId}:${fixture.id}:chat`,
+        folder: `cloud://${fixture.organizationId}/${fixture.id}`,
+        title: `${fixture.name} activity`,
+      }));
+      useWorkspaceStore.setState(state => ({ chats: [...state.chats, ...cloudChats] }));
+      for (const chat of cloudChats) useSessionsStore.getState().setSession(chat.id, {
+        ...BLANK, cwd: chat.folder, transcriptState: "resident", messages: [{
+          id: `${chat.id}-reply`, kind: "text", role: "agent",
+          text: `Saved progress for ${chat.title}.`, createdAt: Date.now() - 60_000,
+        }],
+      });
+    }
     // Mirror the production catalog lifecycle into the shared read cache. The
     // fixture has no authenticated lifecycle controller or live cloud bridge.
     for (const project of getCloudProjects()) {
@@ -272,7 +303,7 @@ Object.assign(window, {
 });
 
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
-setActiveBridge({
+const fixtureBridge = {
   status: "connected",
   onStatusChange: () => () => {},
   onMessage: () => () => {},
@@ -316,6 +347,11 @@ setActiveBridge({
         await new Promise<void>((resolve) => pendingChangeLines.push(resolve));
       }
     }
+    if (hoverCards && message.op === "git.hasChanges") result = { hasChanges: true };
+    if (hoverCards && message.op === "workspace.archive") {
+      const row = rows.find(row => row.id === message.params?.workspaceId);
+      result = { archivedAt: Date.now(), stashRef: null, ...(row ? { workspace: { ...row, archivedAt: Date.now() } } : {}) };
+    }
     if (message.op === "workspace.runInfo")
       result = {
         actions: runningIds.has(String(message.params?.workspaceId))
@@ -350,7 +386,20 @@ setActiveBridge({
       };
     return { type: "WORKSPACE_RESPONSE", result };
   },
-} as unknown as RuntimeClient);
+} as unknown as RuntimeClient;
+setActiveBridge(fixtureBridge);
+// PR buttons read the provider's connection as well as the request singleton.
+// Use the real provider with a synthetic Local transport in this scenario.
+const { BridgeProvider } = await import("../platform/bridge/use-bridge");
+const { Fragment } = await import("react");
+const FixtureBridgeProvider = hoverCards ? BridgeProvider : Fragment;
+if (hoverCards) {
+  const { RuntimeClient: FixtureRuntimeClient } = await import("../platform/bridge/ws-client");
+  FixtureRuntimeClient.prototype.connect = async function () {
+    (this as unknown as { setStatus(status: string): void }).setStatus("connected");
+  };
+  FixtureRuntimeClient.prototype.request = fixtureBridge.request;
+}
 
 const { useWorkspaceStore } = await import("../state/store");
 const { AppSidebar } = await import("../shell/app-sidebar");
@@ -388,7 +437,7 @@ const chats = rows.map(
       agentName: "Claude",
       model: null,
       effort: "high",
-      title: params.has("dashboard") ? ({
+      title: hoverCards ? (row.id === "ws-atlanta" ? "Workspace overview and sidebar filters" : `Updates in ${String(row.branch).replace("zeros/", "")}`) : params.has("dashboard") ? ({
         "ws-atlanta": "Refine Home dashboard",
         "ws-boston": "Improve workspace startup",
         "ws-seville": "Add keyboard shortcuts",
@@ -398,7 +447,7 @@ const chats = rows.map(
         "ws-missing": "Recover workspace files",
       }[row.id] ?? row.branch.replace("zeros/", "")) : "Chat",
       createdAt: 1,
-      updatedAt: params.has("dashboard") ? row.lastActiveAt ?? row.createdAt : 1,
+      updatedAt: hoverCards ? Date.now() - 29 * 60_000 : params.has("dashboard") ? row.lastActiveAt ?? row.createdAt : 1,
       archived: false,
       messages: [],
     }) as unknown as ChatThread,
@@ -410,11 +459,22 @@ const saved = useWorkspaceStore.getState();
 if (saved.chats.length === 0) {
   useWorkspaceStore.setState({ chats });
 }
+if (hoverCards) {
+  for (const chat of chats) useSessionsStore.getState().setSession(chat.id, {
+    ...BLANK, cwd: chat.folder, agentId: "claude", sessionId: `execution-${chat.id}`,
+    transcriptState: "resident", messages: [{
+      id: `${chat.id}-reply`, kind: "text", role: "agent",
+      text: "Added filters and verified workspace switching. The latest changes are ready for review.",
+      createdAt: chat.updatedAt,
+    }],
+  });
+}
 
 const sessions = {
   listAgents: async () => agents,
   getSession: (id: string) => useSessionsStore.getState().sessions[id],
   hydrateChat: async (id: string) => {
+    if (hoverCards) requests.push({ op: "fixture.hydrateChat", params: { chatId: id } });
     if (!ConversationPane || useSessionsStore.getState().sessions[id]) return;
     useSessionsStore.getState().setSession(id, {
       ...BLANK,
@@ -441,7 +501,10 @@ const sessions = {
     });
   },
   ensureSession: async () => {},
-  sendPrompt: async () => {},
+  prepareForSend: () => null,
+  sendPrompt: async (chatId: string, text: string) => {
+    if (hoverCards) requests.push({ op: "fixture.sendPrompt", params: { chatId, text } });
+  },
   releaseQueue: () => {},
   setRetainedChatIds: () => {},
   loadIntoChat: async () => true,
@@ -588,6 +651,7 @@ function Harness() {
 
 createRoot(document.getElementById("root")!).render(
   <AuthContext.Provider value={auth}>
+    <FixtureBridgeProvider>
     <ActionsCtx.Provider value={sessions}>
       <TooltipProvider>
         <AddProjectProvider>
@@ -595,5 +659,6 @@ createRoot(document.getElementById("root")!).render(
         </AddProjectProvider>
       </TooltipProvider>
     </ActionsCtx.Provider>
+    </FixtureBridgeProvider>
   </AuthContext.Provider>,
 );

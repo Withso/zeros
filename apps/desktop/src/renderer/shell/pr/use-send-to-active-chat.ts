@@ -54,14 +54,17 @@ export interface SendToActiveChatArgs {
 
 export function useSendToActiveChat(
   workspacePath: string,
+  /** Background workspace controls pin their own chat instead of the selected one. */
+  targetChatId?: string | null,
 ): (args: SendToActiveChatArgs) => boolean {
   // Capture the click's chat across PR preflight awaits. Reading the global
   // active id when those finish would redirect the action after navigation.
   const activeChatId = useActiveChatId();
+  const chatId = targetChatId === undefined ? activeChatId : targetChatId;
   const sendToChat = useSendToChat(workspacePath);
   return useCallback(
-    (args: SendToActiveChatArgs) => sendToChat(activeChatId, args),
-    [activeChatId, sendToChat],
+    (args: SendToActiveChatArgs) => sendToChat(chatId, args),
+    [chatId, sendToChat],
   );
 }
 
