@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +28,16 @@ const row = (id: string, role: "user" | "agent", extra: Partial<AgentTextMessage
 const prompt = (id: string) => ({ requestId: id, userMessageId: `user-${id}`, prompt: [{ type: "text" as const, text: id }], startedAt: 100 });
 
 describe("durable per-chat sessions", () => {
+  it("retains and refuses corrupt outbox epochs instead of dispatching them after restart", async () => {
+    const { directory, store } = await setup();
+    await store.enqueue("chat", prompt("one"));
+    const path = join(directory, (await readdir(directory)).find(name => name.endsWith(".json"))!);
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    saved.inbox[0].outbox = { deliveryId: "11111111-1111-4111-8111-111111111111", epoch: "-1", sequence: "1", acknowledged: true };
+    const corrupt = JSON.stringify(saved); await writeFile(path, corrupt);
+    await expect(SessionStore.open(directory, workspace)).rejects.toThrow("Invalid persisted chat");
+    expect(await readFile(path, "utf8")).toBe(corrupt);
+  });
   it("keeps native identity, creation time and rich rows across restart and stale metadata writes", async () => {
     const { store, directory } = await setup();
     await store.bind("chat", "codex", "native-thread");

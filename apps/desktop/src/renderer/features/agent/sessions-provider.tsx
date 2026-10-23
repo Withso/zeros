@@ -241,6 +241,9 @@ import {
 } from "./session-close-lifecycle";
 import { consumeFreshCloudChat } from "./fresh-cloud-chats";
 import { tryRestoreLiveChatDraft } from "./composer-live-drafts";
+import { useCloudPromptOutbox } from "./use-cloud-prompt-outbox";
+import { cloudPromptHasLegacyActivity, projectCloudPromptSession } from "./cloud-prompt-presentation";
+import { CloudPromptHandoff } from "./cloud-prompt-handoff";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
 // It used to run at most once per chat to avoid clobbering a mode the user
@@ -504,6 +507,7 @@ export function AgentSessionsProvider({
   const reconcileChatMessagesRef = useRef<(chatId: string) => Promise<void>>(
     async () => {},
   );
+  const cloudPrompts = useCloudPromptOutbox(chatId => { void reconcileChatMessagesRef.current(chatId).catch(() => {}); });
 
   // An engine turn can stream while a reloaded renderer is still hydrating its
   // disk window and therefore has no exact session slot to receive pushes. Mark
@@ -932,8 +936,10 @@ export function AgentSessionsProvider({
     };
     const unsubCreated = bridge.on("AGENT_SESSION_CREATED", raw => admissionMetadata(raw as AgentSessionCreatedMessage));
     const unsubLoaded = bridge.on("AGENT_SESSION_LOADED", raw => admissionMetadata(raw as AgentSessionLoadedMessage));
+    const unsubOutboxReady = bridge.on("ENGINE_READY", raw => cloudPrompts.observe(raw));
 
     const unsubUpdate = bridge.on("AGENT_SESSION_UPDATE", (raw) => {
+      cloudPrompts.observe(raw);
       const msg = raw as {
         agentId: string;
         notification: SessionNotification;
@@ -1279,6 +1285,7 @@ export function AgentSessionsProvider({
       unsubUpdate();
       unsubCreated();
       unsubLoaded();
+      unsubOutboxReady();
       unsubBoundaryStatus();
       unsubBoundaryPorts();
       unsubPerm();
@@ -1300,7 +1307,7 @@ export function AgentSessionsProvider({
       // the dying socket). The timer's own status guard ("streaming" only)
       // keeps a stale fire from resurrecting a card on a dead/reset chat.
     };
-  }, [bridge]);
+  }, [bridge, cloudPrompts]);
 
   // ── Actions ─────────────────────────────────────────────
 
@@ -1415,6 +1422,23 @@ export function AgentSessionsProvider({
     }>(),
   );
   const cloudFlushRef = useRef(new Map<string, NonNullable<ReturnType<typeof sendQueueRef.current.get>>[number]>());
+  const cloudHandoffRef = useRef(new CloudPromptHandoff());
+  const migrateCloudSends = useCallback((chatId: string) => cloudHandoffRef.current.run({
+    chatId, queue: sendQueueRef.current,
+    cancelReadiness: () => { cloudSendWaitRef.current.cancel(chatId); cloudSendPreparationRef.current.cancel(chatId); },
+    save: entry => cloudPrompts.send(chatId, { text: entry.args[1], displayText: entry.args[2], attachments: entry.args[3],
+      bubbleAttachments: entry.args[4], segments: entry.args[5], cloudQueue: entry.cloudQueue }, { id: entry.bubbleId, autoAction: entry.args[6], deferDelivery: true }),
+    remove: entry => {
+      const slot = getStore().sessions[chatId];
+      if (slot) getStore().patchSession(chatId, { messages: slot.messages.filter(message => message.id !== entry.bubbleId ||
+        message.kind !== "text" || !message.queued), cloudSendWait: undefined, queuePaused: false });
+    },
+  }), [cloudPrompts, getStore]);
+
+  useEffect(() => subscribeCloudWorkspaces(() => {
+    for (const chatId of sendQueueRef.current.keys()) if (cloudPrompts.available(chatId))
+      void migrateCloudSends(chatId).then(() => cloudPrompts.refresh(chatId)).catch(() => { /* Keep the original queue and draft; an explicit Send can retry. */ });
+  }), [cloudPrompts, migrateCloudSends]);
 
   const pauseQueue = useCallback(
     (chatId: string) => {
@@ -2460,6 +2484,15 @@ export function AgentSessionsProvider({
       if (cloudTarget && !hasCloudWorkspaceAccountAccess(cloudTarget.organizationId))
         throw new Error("Cloud workspace run access is required to send a message");
       const cloudSend = cloudComputerV2 && cloudTarget !== null;
+      if (cloudSend && cloudPrompts.available(chatId) && !flushBubbleRef.current.has(chatId)) {
+        const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+        await migrateCloudSends(chatId);
+        if (cancelledSince(cancelGenerationsRef.current, chatId, generation)) throw new Error("Stopped before sending. Your draft has been kept.");
+        await cloudPrompts.send(chatId, { text, displayText, attachments, bubbleAttachments, segments, cloudQueue }, {
+          autoAction, mode: followUpBehavior === "steer" ? "steer" : "prompt", accepted: onAccepted,
+        });
+        return;
+      }
       const flushedCloud = cloudSend && flushBubbleRef.current.has(chatId) ? cloudFlushRef.current.get(chatId) : undefined;
       const cloudAccount = isCloudWorkspace(chat?.folder ?? original?.cwd) ? cloudCatalogGeneration() : undefined;
       if (flushedCloud) cloudFlushRef.current.delete(chatId);
@@ -4209,6 +4242,8 @@ export function AgentSessionsProvider({
       prepareForSend,
       cloudComputerV2,
       refreshModelCatalog,
+      cloudPrompts,
+      migrateCloudSends,
     ],
   );
   sendPromptRef.current = sendPrompt;
@@ -4376,6 +4411,12 @@ export function AgentSessionsProvider({
       // Ready follow-ups prepare silently, without cloudSendWait presentation.
       // Their readiness flight is still cancelled by Stop.
       cloudSendWaitRef.current.cancel(chatId);
+      if (cloudPrompts.available(chatId)) {
+        const legacy = cloudPromptHasLegacyActivity(getStore().sessions[chatId]);
+        await migrateCloudSends(chatId);
+        await cloudPrompts.stop(chatId);
+        if (!legacy) return;
+      }
       const undispatched = getStore().sessions[chatId];
       const pendingSendId = undispatched?.cloudSendWait?.turnId;
       if (isCloudWorkspace(undispatched?.cwd) && !undispatched?.cloudStop && pendingSendId && !sendingChatsRef.current.has(chatId) &&
@@ -4549,10 +4590,11 @@ export function AgentSessionsProvider({
       } as const;
       bridge.send(stop);
     },
-    [bridge, getStore, cancelStalledAdmission, evictUnretainedTranscripts, pauseQueue],
+    [bridge, getStore, cancelStalledAdmission, evictUnretainedTranscripts, pauseQueue, cloudPrompts, migrateCloudSends],
   );
 
-  const recoverCloudPrompt = useCallback<SessionsActions["recoverCloudPrompt"]>(async (chatId, turnId) => {
+  const recoverCloudPrompt = useCallback<SessionsActions["recoverCloudPrompt"]>(async (chatId, turnId, retry = false) => {
+    if (cloudPrompts.available(chatId)) return cloudPrompts.recover(chatId, turnId, retry);
     const original = getStore().sessions[chatId];
     if (!isCloudWorkspace(original?.cwd)) return false;
     if (!original?.agentId || !(bridge instanceof WorkspaceRuntimeClient))
@@ -4582,7 +4624,7 @@ export function AgentSessionsProvider({
       failure, cloudPromptPending: false, activeTurnStartedAt: null,
       lastStopReason: response.type === "AGENT_PROMPT_COMPLETE" ? response.stopReason : null });
     return true;
-  }, [bridge, getStore]);
+  }, [bridge, getStore, cloudPrompts]);
 
   const respondToPermission = useCallback<
     SessionsActions["respondToPermission"]
@@ -6493,7 +6535,7 @@ export function AgentSessionsProvider({
   );
 
   const getSession = useCallback<SessionsActions["getSession"]>(
-    (chatId) => getStore().sessions[chatId],
+    (chatId) => { const slot = getStore().sessions[chatId]; return slot && projectCloudPromptSession(slot); },
     [getStore],
   );
 
@@ -6501,7 +6543,7 @@ export function AgentSessionsProvider({
     (chatId) =>
       closeActivityForSession(getStore().sessions[chatId], {
         localSendInFlight: sendingChatsRef.current.has(chatId) || cloudSendPreparationRef.current.has(chatId),
-        queuedCount: sendQueueRef.current.get(chatId)?.length ?? 0,
+        queuedCount: (sendQueueRef.current.get(chatId)?.length ?? 0) + (getStore().sessions[chatId]?.cloudOutbox?.pendingCount ?? 0),
       }),
     [getStore],
   );
@@ -6580,6 +6622,28 @@ export function AgentSessionsProvider({
         getStore().setSession(chatId, { ...BLANK, cwd: slot?.cwd ?? chat!.folder, transcriptState: "resident" });
         return;
       }
+      if (cloudPrompts.available(chatId)) {
+        const account = cloudCatalogGeneration(), generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+        const promise = (async () => {
+          try {
+            await migrateCloudSends(chatId);
+            if (!await cloudPrompts.confirmStop(chatId) || account !== cloudCatalogGeneration() ||
+                cancelledSince(cancelGenerationsRef.current, chatId, generation)) return false;
+            // During capability rollout an older bridge turn may have no
+            // outbox receipt. Its empty outbox is not native retirement proof.
+            if (cloudPromptHasLegacyActivity(slot)) {
+              if (!bridge || !agentId) return false;
+              const expectedRoute = closeRouteForSession(getStore().sessions[chatId]), response = await requestClose();
+              if (account !== cloudCatalogGeneration() || cancelledSince(cancelGenerationsRef.current, chatId, generation) ||
+                  response.type !== "AGENT_SESSION_CLOSED" || response.agentId !== agentId ||
+                  (response.chatId !== undefined ? response.chatId !== chatId :
+                    !expectedRoute.executionId || (response.executionId ?? response.sessionId) !== expectedRoute.executionId)) return false;
+            }
+            release(); return true;
+          } catch { return false; }
+        })().finally(() => { if (cloudClosesRef.current.get(chatId) === promise) cloudClosesRef.current.delete(chatId); });
+        cloudClosesRef.current.set(chatId, promise); return promise;
+      }
       if (isCloudWorkspace(slot?.cwd ?? chat?.folder)) {
         const account = cloudCatalogGeneration(), cwd = slot?.cwd, turnId = slot?.foregroundTurnId;
         const executionId = slot?.executionId ?? slot?.sessionId;
@@ -6649,7 +6713,7 @@ export function AgentSessionsProvider({
       // the scroll anchor and policies; only explicit reset/delete removes those.
       release();
     },
-    [bridge, cancel, getStore],
+    [bridge, cancel, getStore, cloudPrompts, migrateCloudSends],
   );
 
   // The actions object is stable across renders. No `sessions` field —

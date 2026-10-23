@@ -90,6 +90,7 @@ function harness() {
   vi.stubGlobal("cancelAnimationFrame", cancelAnimationFrame);
   const release = vi.fn();
   const context: Record<string, unknown> = {
+    cloudPrompts: { observe: vi.fn() },
     bridge, document, flushLocalNotificationsRef, isCloudWorkspace, useSessionsStore, canBatchLocalTranscriptUpdate, permissionPolicyOption, cloudReplyOwnership, agentUpdateFlushMode,
     takePrebindDirty, markPrebindDirty, createAgentUpdateFlushScheduler, AGENT_UPDATE_BACKLOG_LIMIT,
     markPrebindGoalSnapshot: vi.fn(), trackAgentPermissionDecided: vi.fn(), trackAgentPromptFinished: vi.fn(),

@@ -4,15 +4,22 @@ import { expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { createCloudV2WorkerRoutes, type CloudV2WorkerRouteDeps } from "./worker-routes.js";
 import { newCloudV2Token } from "./tokens.js";
-import type { CloudV2Workspace } from "./store.js";
+import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 
-function fixture() {
+function fixture(prompts = false) {
   const bootId = randomUUID(), token = newCloudV2Token("worker").token;
   const w = { id: randomUUID(), organizationId: randomUUID(), creatorUserId: randomUUID(), repository: "o/r", branch: "w", baseBranch: "main", state: "running", accessEpoch: "0", loginRevision: "0" } as CloudV2Workspace & { accessEpoch: string; loginRevision: string };
   let allowed = true, revision = "0";
+  let notify!: () => void;
+  const notified = new Promise<void>(resolve => { notify = resolve; });
+  const cancelWait = vi.fn();
+  const pull = vi.fn(async () => ({ prompts: [], stops: [] as { chatId: string; epoch: string }[] }));
   const deps: CloudV2WorkerRouteDeps = {
     runtimeSha256: "a".repeat(64),
+    promptOutbox: prompts,
+    waitForPrompts: vi.fn(() => ({ wait: notified, dispose: cancelWait })),
     store: {
+      prompts: { pull } as unknown as CloudV2Store["prompts"],
       acceptWorkerHello: vi.fn(async value => allowed && value === token ? w : null),
       workerSession: vi.fn(async (value, boot) => allowed && value === token && boot === bootId ? { ...w, loginRevision: revision } : null),
       accessEpoch: vi.fn(async () => allowed ? "0" : null),
@@ -31,7 +38,8 @@ function fixture() {
     method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "x-zeros-worker-boot": bootId, "content-type": "application/json", ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  return { bootId, token, deps, request, revoke: () => { allowed = false; }, revise: (value: string) => { revision = value; } };
+  return { bootId, token, deps, request, notify, cancelWait, pull,
+    revoke: () => { allowed = false; }, revise: (value: string) => { revision = value; } };
 }
 it("accepts outbound hello and returns configuration, refusing stale runtimes", async () => {
   const f = fixture();
@@ -71,4 +79,36 @@ it("rechecks authority after a slow token provider and returns a typed refusal",
   const response = await f.request("github-token", {});
   expect(response.status).toBe(401);
   expect(await response.text()).not.toContain("never-disclose");
+});
+
+it("refuses an outbox-incompatible worker before accepting its hello", async () => {
+  const f = fixture(true), body = { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) };
+  expect((await f.request("hello", body)).status).toBe(409);
+  expect(f.deps.store.acceptWorkerHello).not.toHaveBeenCalled();
+  expect((await f.request("hello", body, { "x-zeros-worker-features": "prompt-outbox-v1" })).status).toBe(200);
+  expect(await (await f.request("config")).json()).toMatchObject({ config: { promptOutbox: 1 } });
+});
+
+it("registers a long poll before reading, releases it on a hint, and never marks activity", async () => {
+  const f = fixture(true);
+  let answered = false;
+  const response = f.request("prompts/pull", { waitMs: 25_000 }).then(value => { answered = true; return value; });
+  await expect.poll(() => f.pull.mock.calls.length).toBe(1);
+  expect(answered).toBe(false);
+  expect(f.deps.waitForPrompts).toHaveBeenCalledBefore(f.pull);
+  f.pull.mockResolvedValueOnce({ prompts: [], stops: [{ chatId: "chat", epoch: "1" }] });
+  f.notify();
+  expect(await (await response).json()).toEqual({ prompts: [], stops: [{ chatId: "chat", epoch: "1" }] });
+  expect(f.cancelWait).toHaveBeenCalledTimes(1);
+  expect(f.deps.store.markActive).not.toHaveBeenCalled();
+});
+
+it("rechecks worker authority when a long poll wakes", async () => {
+  const f = fixture(true);
+  const response = f.request("prompts/pull", { waitMs: 25_000 });
+  await expect.poll(() => f.pull.mock.calls.length).toBe(1);
+  f.revoke(); f.notify();
+  expect((await response).status).toBe(401);
+  expect(f.pull).toHaveBeenCalledTimes(1);
+  expect(f.cancelWait).toHaveBeenCalledTimes(1);
 });

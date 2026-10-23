@@ -12,6 +12,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
   placement: z.literal("cloud"),
   status: z.string().min(1).max(64),
   capabilities: z.object({
+    promptOutbox: z.literal(1).optional(),
     canWrite: z.boolean(),
     // Older servers do not project edit authority. Consumers must fail closed.
     canEdit: z.boolean().optional(),

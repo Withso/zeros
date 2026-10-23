@@ -5,12 +5,15 @@ import { HttpError } from "../authz.js";
 import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, type CloudV2ControlFrame } from "./contract.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
+import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema } from "./prompt-contract.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
-  store: Pick<CloudV2Store, "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory">;
+  store: Pick<CloudV2Store, "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory"> & Partial<Pick<CloudV2Store, "prompts">>;
   runtimeSha256: string;
+  promptOutbox?: boolean;
+  waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
   config(workspace: CloudV2Workspace): Promise<ConfigFrame>;
   githubToken(workspace: CloudV2Workspace): Promise<{ token: string; expiresAt: number }>;
 };
@@ -42,7 +45,8 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (revision === null || !await deps.store.workerSession(token, bootId)) throw unauthorized();
     const config = await deps.config(workspace);
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
-    if (revision === await deps.store.loginRevision(workspace.id)) return { ...config, loginRevision: revision };
+    if (revision === await deps.store.loginRevision(workspace.id)) return { ...config, loginRevision: revision,
+      ...(deps.promptOutbox ? { promptOutbox: 1 } : {}) };
   }
   throw new HttpError(503, "configuration_changing", "Worker configuration is changing");
 }
@@ -56,6 +60,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   app.post(`${CLOUD_V2_WORKER_API}/hello`, async c => {
     const input = await body(c, CloudV2WorkerHelloSchema);
     if (input.runtimeSha256 !== deps.runtimeSha256) throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
+    if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))
+      throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     const workspace = await deps.store.acceptWorkerHello(bearer(c), input.bootId);
     if (!workspace) throw unauthorized();
     return c.json({ config: await configuration(deps, workspace, bearer(c), input.bootId) });
@@ -85,5 +91,43 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     if (!await deps.store.workerSession(auth.token, auth.bootId)) throw unauthorized();
     return c.json(granted);
   });
+  if (deps.promptOutbox) {
+    const outbox = deps.store.prompts;
+    if (!outbox) throw new Error("Cloud prompt store is required");
+    app.post(`${CLOUD_V2_WORKER_API}/prompts/pull`, async c => {
+      const auth = await session(c, deps);
+      const { waitMs, held } = await body(c, CloudV2PromptPullSchema);
+      const waiter = waitMs ? deps.waitForPrompts?.(auth.workspace.id, waitMs, c.req.raw.signal) : undefined;
+      try {
+        const first = await outbox.pull(auth.token, auth.bootId, held);
+        if (!waiter || first.prompts.length || first.stops.length) return c.json(first);
+        await waiter.wait;
+        if (c.req.raw.signal.aborted) throw new HttpError(503, "request_cancelled", "Delivery poll ended");
+        await session(c, deps);
+        return c.json(await outbox.pull(auth.token, auth.bootId, held));
+      } finally { waiter?.dispose(); }
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/prompts/ack`, async c => {
+      const auth = await session(c, deps);
+      return c.json(await outbox.ack(auth.token, auth.bootId, await body(c, CloudV2PromptAckSchema)));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/prompts/begin`, async c => {
+      const auth = await session(c, deps);
+      return c.json(await outbox.begin(auth.token, auth.bootId, await body(c, CloudV2PromptBeginSchema)));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/prompts/outcome`, async c => {
+      const auth = await session(c, deps);
+      return c.json(await outbox.outcome(auth.token, auth.bootId, await body(c, CloudV2PromptOutcomeSchema)));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/prompts/stop-ack`, async c => {
+      const auth = await session(c, deps);
+      await outbox.ackStop(auth.token, auth.bootId, await body(c, CloudV2PromptStopReplySchema));
+      return c.json({ ok: true });
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/prompts/stop`, async c => {
+      const auth = await session(c, deps);
+      return c.json(await outbox.stopWorker(auth.token, auth.bootId, await body(c, CloudV2PromptStopSchema)));
+    });
+  }
   return app;
 }

@@ -54,6 +54,13 @@ describe("cloud request account boundaries", () => {
     expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse(capabilities).canEdit).toBeUndefined();
     for (const canEdit of [true, false]) expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse({ ...capabilities, canEdit }).canEdit).toBe(canEdit);
   });
+  it("preserves the outbox capability through the v2 and shared document boundaries", async () => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111", row = v2Workspace(id, "running");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...row, capabilities: { ...row.capabilities, promptOutbox: 1 } } })));
+    expect(CloudWorkspaceDocumentSchema.parse(await getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).capabilities.promptOutbox).toBe(1);
+    expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse({ canWrite: true, canManage: true, canStart: false, startUnavailableReason: null }).promptOutbox).toBeUndefined();
+  });
   it("maps a v2 workspace into the shared document and rejects a changed identity", async () => {
     state.session.mockResolvedValue(session);
     const id = "11111111-1111-4111-8111-111111111111";

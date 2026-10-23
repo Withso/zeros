@@ -91,6 +91,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
   const connection = (status: string) => { connectionStatus = status; for (const changed of connectionListeners) changed(); };
 
   const provider: any = { ...lifecycle, ...retention, hasBackgroundAgentWork, Error, BLANK: {}, useCallback: (fn: unknown) => fn, isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId,
+    cloudPrompts: { available: () => false, send: vi.fn() }, migrateCloudSends: vi.fn(async () => {}),
     hasCloudWorkspaceAccountAccess: (organizationId: string) => cloudWorkspaceAccountAccess(account.me, organizationId),
     cloudComputerV2: cloud && cloudWorkspaceAccountAccess(account.me), WorkspaceRuntimeClient, bridge: new WorkspaceRuntimeClient(), getStore: () => store, useWorkspaceStore: { getState: () => workspace },
     refreshModelCatalog: vi.fn(), cloudCatalogGeneration: () => 1, cloudWorkspaceDocument: () => doc, prepareForSend: prepare, cloudSendWaitRef: { current: wait },
@@ -150,6 +151,24 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it("submits an outbox-capable Send without waiting for a disconnected bridge or agent admission", async () => {
+    const h = harness(true, "ready"), saved = deferred();
+    h.connection("disconnected"); h.provider.bridge = null;
+    h.provider.cloudPrompts.available = () => true;
+    h.provider.cloudPrompts.send.mockImplementation(async (_chat: string, _input: unknown, options: { accepted?(): void }) => { await saved.promise; options.accepted?.(); });
+    const sending = h.send(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.provider.cloudPrompts.send).toHaveBeenCalledWith("chat", expect.objectContaining({ text: expect.any(String), cloudQueue: expect.anything() }), expect.objectContaining({ mode: "prompt" }));
+    expect(h.clear).not.toHaveBeenCalled(); saved.resolve(); await sending; await vi.advanceTimersByTimeAsync(0);
+    expect(h.clear).toHaveBeenCalledOnce(); expect(h.queue.size).toBe(0);
+    expect(h.prepare).not.toHaveBeenCalled(); expect(h.provider.ensureSessionRef.current).not.toHaveBeenCalled();
+    expect(h.delivered).not.toHaveBeenCalled(); expect(h.store.sessions.chat.cloudSendWait).toBeUndefined();
+  });
+  it("retains the draft if the durable Send fails before its private commit", async () => {
+    const h = harness(true, "ready"); h.provider.cloudPrompts.available = () => true;
+    h.provider.cloudPrompts.send.mockRejectedValue(new Error("Private message storage is unavailable"));
+    await h.send(); expect(h.clear).not.toHaveBeenCalled(); expect(h.queue.size).toBe(0);
+    expect(h.failureNotice).toHaveBeenCalledOnce(); expect(h.prepare).not.toHaveBeenCalled();
+  });
   it("keeps a send queued through a 25-second drop, re-adopts its session and delivers once on reconnect", async () => {
     const h = harness(true, "ready");
     Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "old-route" });

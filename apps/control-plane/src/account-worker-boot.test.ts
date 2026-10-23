@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const f = vi.hoisted(() => ({
-  role: "combined", channel: "alpha", cloudEnabled: false, workosEnabled: true, maintenance: false, migrationState: "current",
+  role: "combined", channel: "alpha", cloudEnabled: false, promptOutbox: false, workosEnabled: true, maintenance: false, migrationState: "current",
   apiPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
   workerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
   listenerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
@@ -13,6 +13,7 @@ const f = vi.hoisted(() => ({
   brokerConstructor: vi.fn(), broker: { stop: vi.fn(async () => {}) },
   cloud: vi.fn(), lifecycle: { start: vi.fn() }, lifecycleStop: vi.fn(async () => {}),
   loginChanges: { stop: vi.fn(async () => {}) }, relay: { close: vi.fn(), handleUpgrade: vi.fn() },
+  promptChanges: { stop: vi.fn(async () => {}) }, promptSignals: { wakeAll: vi.fn() },
   routes: {}, proxy: {}, server: { on: vi.fn(), close: vi.fn() },
 }));
 vi.mock("./config.js", async original => {
@@ -23,6 +24,7 @@ vi.mock("./config.js", async original => {
     CONTROL_PLANE_PROCESS_ROLE: f.role, RAILWAY_ENVIRONMENT_NAME: f.channel,
     CLOUD_V2_WORKER_SIGNING_KEY: generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
     CLOUD_V2_ENABLED: String(f.cloudEnabled), BOAT_API_KEY: "synthetic-never-used",
+    CLOUD_V2_PROMPT_OUTBOX_ENABLED: String(f.promptOutbox),
     CLOUD_V2_API_URL: "https://api.example.test", CLOUD_V2_REALTIME_URL: "wss://realtime.example.test",
     CLOUD_V2_RUNTIME_SHA256: "a".repeat(64), CLOUD_V2_RUNTIME_STORE_ENDPOINT: "https://storage.example.test",
     CLOUD_V2_RUNTIME_STORE_BUCKET: "test", CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: "fixture", CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: "fixture",
@@ -53,7 +55,7 @@ vi.mock("@hono/node-server", () => ({ serve: f.serve }));
 let oldTerm: ReturnType<typeof process.listeners>, oldInt: ReturnType<typeof process.listeners>;
 beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks(); vi.useFakeTimers();
-  f.role = "combined"; f.channel = "alpha"; f.cloudEnabled = false; f.workosEnabled = true; f.maintenance = false; f.migrationState = "current";
+  f.role = "combined"; f.channel = "alpha"; f.cloudEnabled = false; f.promptOutbox = false; f.workosEnabled = true; f.maintenance = false; f.migrationState = "current";
   oldTerm = process.listeners("SIGTERM"); oldInt = process.listeners("SIGINT");
   for (const pool of [f.apiPool, f.workerPool, f.listenerPool]) {
     pool.query.mockImplementation(() => { throw new Error("unexpected database query"); });
@@ -65,6 +67,7 @@ beforeEach(() => {
   f.cloud.mockImplementation((config, _pool, roles) => config.cloudV2 ? {
     routes: f.routes, proxy: f.proxy, connections: f.relay, workers: {}, relay: roles.relay ? f.relay : null,
     lifecycle: roles.lifecycle ? f.lifecycle : null, loginChanges: roles.relay ? f.loginChanges : null,
+    promptChanges: config.cloudV2.promptOutbox ? f.promptChanges : null, promptSignals: f.promptSignals,
   } : null);
   f.serve.mockImplementation((_options, ready) => { ready({ port: 8080 }); return f.server; });
   f.server.close.mockImplementation(callback => callback());
@@ -134,16 +137,22 @@ describe("account workers and cloud v2 boot composition", () => {
   });
 
   it("shares the broker with v2 and stops listeners before draining all owned pools", async () => {
-    f.cloudEnabled = true;
+    f.cloudEnabled = true; f.promptOutbox = true;
     const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     await import("./index.js");
     expect(f.cloud).toHaveBeenCalledExactlyOnceWith(expect.anything(), f.workerPool, { relay: true, lifecycle: true }, f.broker, f.listenerPool);
     expect(f.lifecycle.start).toHaveBeenCalledOnce();
+    let releasePromptListener!: () => void;
+    f.promptChanges.stop.mockImplementationOnce(() => new Promise<void>(resolve => { releasePromptListener = resolve; }));
     const shutdown = process.listeners("SIGTERM").find(listener => !oldTerm.includes(listener))!;
     shutdown("SIGTERM"); await vi.advanceTimersByTimeAsync(0);
     expect(f.relay.close).toHaveBeenCalledOnce(); expect(f.lifecycleStop).toHaveBeenCalledOnce();
     expect(f.loginChanges.stop).toHaveBeenCalledOnce(); expect(f.broker.stop).toHaveBeenCalledOnce();
     expect(f.stopNotifications).toHaveBeenCalledOnce(); expect(f.workos.stop).toHaveBeenCalledOnce(); expect(f.securityStop).toHaveBeenCalledOnce();
+    expect(f.promptSignals.wakeAll).toHaveBeenCalledOnce(); expect(f.promptChanges.stop).toHaveBeenCalledOnce();
+    expect(f.promptSignals.wakeAll.mock.invocationCallOrder[0]).toBeLessThan(f.server.close.mock.invocationCallOrder[0]!);
+    for (const pool of [f.apiPool, f.workerPool, f.listenerPool]) expect(pool.end).not.toHaveBeenCalled();
+    releasePromptListener(); await vi.advanceTimersByTimeAsync(0);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool]) expect(pool.end).toHaveBeenCalledOnce();
     expect(exit).toHaveBeenCalledWith(0);
   });

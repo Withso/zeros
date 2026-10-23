@@ -9,7 +9,8 @@ vi.mock("../../features/team/control-plane", () => ({
   },
 }));
 import { createCloudWorkspaceDocument } from "../cloud-workspaces";
-import { getCloudV2InstalledRepositories } from "../cloud-v2";
+import { subscribeCloudPromptErasure } from "../cloud-prompt-erasure";
+import { changeCloudV2Workspace, getCloudV2InstalledRepositories } from "../cloud-v2";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const session = { access_token: "synthetic-session", user: { sub: "provider-subject", accountId: "55555555-5555-4555-8555-555555555555" } };
@@ -74,4 +75,17 @@ describe("Cloud Computer repositories for members", () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ repositories: null })));
     expect(await getCloudV2InstalledRepositories(organizationId)).toBeNull();
   });
+});
+
+it("erases private prompts only after an exact successful workspace deletion, never on Stop or a failed delete", async () => {
+  const row = workspace("main"), target = { organizationId, workspaceId: row.id }, erased = vi.fn(), unsub = subscribeCloudPromptErasure(erased);
+  const fetch = vi.fn(async () => Response.json({ workspace: row })); vi.stubGlobal("fetch", fetch);
+  try {
+    await changeCloudV2Workspace(target, "stop"); expect(erased).not.toHaveBeenCalled();
+    fetch.mockRejectedValueOnce(new Error("offline"));
+    await expect(changeCloudV2Workspace(target, "delete")).rejects.toThrow(); expect(erased).not.toHaveBeenCalled();
+    fetch.mockResolvedValueOnce(Response.json({ workspace: { ...row, organizationId: "33333333-3333-4333-8333-333333333333" } }));
+    await expect(changeCloudV2Workspace(target, "delete")).rejects.toThrow(/identity/); expect(erased).not.toHaveBeenCalled();
+    await changeCloudV2Workspace(target, "delete"); expect(erased).toHaveBeenCalledExactlyOnceWith(target);
+  } finally { unsub(); }
 });

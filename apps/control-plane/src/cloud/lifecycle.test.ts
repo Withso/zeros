@@ -17,7 +17,7 @@ function workspace(state: CloudV2Workspace["state"], extra: Partial<CloudV2Works
   };
 }
 
-function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[] } = {}) {
+function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"] } = {}) {
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
     resume: vi.fn(async () => {}),
@@ -42,6 +42,7 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
   const stopWorker = vi.fn(async () => true);
   const lifecycle = new CloudV2Lifecycle({
     store, compute, now: () => NOW, sleep: async () => {},
+    ...(options.stopIdle ? { stopIdle: options.stopIdle } : {}),
     publicKeys, sealPortToken: () => ({ encrypted: true }), stopWorker,
     runtime: { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" },
     bootEnv: ws => ({ CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: ws.id }),
@@ -51,6 +52,14 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
 }
 
 describe("cloud v2 lifecycle", () => {
+  it("lets the pending-work-aware idle transition run without revoking the worker before its final flush", async () => {
+    const idle = workspace("running"), stopIdle = vi.fn(async () => {});
+    const f = setup([], { idle: [idle], stopIdle });
+    await f.lifecycle.tick();
+    expect(stopIdle).toHaveBeenCalledWith(idle.id, new Date(NOW - CLOUD_V2_IDLE_STOP_MS));
+    expect(f.store.revoke).not.toHaveBeenCalled();
+    expect(f.store.transition).not.toHaveBeenCalled();
+  });
   it("persists an encrypted protected route before delivering a boot token, on both create and wake", async () => {
     for (const state of ["creating", "starting"] as const) {
       const f = setup([workspace(state, { boatSandboxId: "bx_test" })]);

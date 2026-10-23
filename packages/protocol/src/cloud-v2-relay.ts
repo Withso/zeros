@@ -29,6 +29,7 @@ export const CloudV2CapabilitiesSchema = z.object({
   files: z.boolean(),
   git: z.boolean(),
   agents: z.array(CloudV2AgentSchema).max(3),
+  promptOutbox: z.literal(1).optional(),
 }).strict();
 export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
 
@@ -80,6 +81,7 @@ const proxy = z.object({ baseUrl: z.url(), token: z.string().min(16).max(4096), 
 const secret = z.string().min(16).max(16384);
 
 export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
+  z.object({ t: z.literal("prompts") }).strict(),
   z.object({ t: z.literal("open"), clientId }).strict(),
   z.object({ t: z.literal("close"), clientId }).strict(),
   z.object({ t: z.literal("frame"), clientId, frame }).strict(),
@@ -89,6 +91,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
    * owns proxy token refresh. */
   z.object({
     t: z.literal("config"),
+    promptOutbox: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
     workspace: z.object({
       id: z.uuid(),

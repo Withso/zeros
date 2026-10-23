@@ -101,6 +101,7 @@ function setup(agentId = "claude", status = "streaming") {
   );
   const flush = new Map<string, string>();
   const context: any = {
+    cloudPrompts: { available: () => false }, migrateCloudSends: vi.fn(async () => {}),
     ...lifecycle,
     hasBackgroundAgentWork,
     isCloudWorkspace,

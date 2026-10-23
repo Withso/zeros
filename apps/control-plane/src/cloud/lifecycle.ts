@@ -26,6 +26,9 @@ export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
 export type CloudV2LifecycleDeps = {
   store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute">;
+  /** Optional for older compositions; the shipped store always provides it. */
+  prompts?: CloudV2Store["prompts"];
+  stopIdle?: (id: string, before: Date) => Promise<void>;
   compute: CloudV2Compute;
   /** The worker runtime every VM must run; installed on create and on wake. */
   runtime: CloudV2Runtime;
@@ -89,16 +92,22 @@ export class CloudV2Lifecycle {
 
   private building: Promise<void> | null = null;
   private cleaning: Promise<void> | null = null;
+  private lastPromptPrune = 0;
 
   async tick(): Promise<void> {
     const now = this.deps.now?.() ?? Date.now();
+    await this.deps.prompts?.wakePending();
+    if (now - this.lastPromptPrune > 10 * 60_000) {
+      await this.deps.prompts?.prune(); this.lastPromptPrune = now;
+    }
     if (this.building && this.deps.builds?.cleanup && !this.cleaning)
       this.cleaning = this.deps.builds.cleanup().catch(() => {}).finally(() => { this.cleaning = null; });
     // A build can take many minutes; it never blocks workspace lifecycle steps.
     if (this.deps.builds && !this.building)
       this.building = this.deps.builds.tick().catch(() => {}).finally(() => { this.building = null; });
     for (const idle of await this.deps.store.idleSince(new Date(now - CLOUD_V2_IDLE_STOP_MS))) {
-      await this.deps.store.transition(idle.id, ["running"], "stopping");
+      if (this.deps.stopIdle) await this.deps.stopIdle(idle.id, new Date(now - CLOUD_V2_IDLE_STOP_MS));
+      else await this.deps.store.transition(idle.id, ["running"], "stopping");
     }
     for (const workspace of await this.deps.store.claimPending(BATCH, LEASE_MS)) {
       try {

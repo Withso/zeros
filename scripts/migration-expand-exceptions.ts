@@ -175,6 +175,10 @@ END $$;`],
   },
   "0189_cloud_v2_session_signout.sql": {},
   "0201_cloud_v2_app_sessions.sql": {},
+  "0202_cloud_v2_prompt_outbox.sql": {
+    "privilege-tightening": ["fence_cloud_v2_prompts()", "erase_cloud_v2_chat_prompts()"]
+      .map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+  },
   "0180_cloud_initial_delete_periodic_checkpoint.sql": {},
   "0178_cloud_owner_existing_delete.sql": {},
   "0177_cloud_owner_discard_delete.sql": {
@@ -310,6 +314,13 @@ const cloudV2SessionSignoutDigest = "db5bb0cb92d159a89301d5ae5fab410e37ce4bd853b
 // A device sign-out retires only app tickets for the exact verified WorkOS sid.
 const cloudV2AppSessionSignoutDigest = "747fffcd9a89b551618180d11016f3c79018a9f5364c648dc4ce4618ee85d3b4";
 
+// Additive erasure of only the new outbox tables, on existing authorized
+// workspace/chat deletion and account/membership loss; not device sign-out.
+const cloudV2PromptErasureDigests: Record<string, string> = {
+  "prompt-erasure": "23435db47b7ff78bd18959be462f4a56554d22d0308141b5bf91f8dece7e180c",
+  "chat-prompt-erasure": "f60ad7f894f37de2af9632bcab7104db5cdc4db0310063c8c37244109ea8f8a5",
+};
+
 // Exact additions retain prior save proof and physical-purge authority.
 const ownerExistingDeleteDigests: Record<string,string> = {
   "new-table-privileges": "5dcd878e4e2935bddcf73f215d27bd635dde05c6ecea4e29b07911e0ed542699",
@@ -423,6 +434,8 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
         createHash("sha256").update(statement).digest("hex") === cloudV2SessionSignoutDigest) ||
       (file === "0201_cloud_v2_app_sessions.sql" && rule === "session-scoped-signout" &&
         createHash("sha256").update(statement).digest("hex") === cloudV2AppSessionSignoutDigest) ||
+      (file === "0202_cloud_v2_prompt_outbox.sql" &&
+        createHash("sha256").update(statement).digest("hex") === cloudV2PromptErasureDigests[rule]) ||
       (file === "0178_cloud_owner_existing_delete.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");

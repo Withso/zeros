@@ -132,8 +132,10 @@ function shutdown(signal: string): void {
   stopGithubCleanup();
   console.log(`[control-plane] ${signal}; draining`);
   cloudV2?.connections?.close();
+  cloudV2?.promptSignals.wakeAll();
   const backgroundStopped = Promise.allSettled([
     stopCloudV2Lifecycle(), stopWorkerNotifications(), cloudV2?.loginChanges?.stop() ?? Promise.resolve(),
+    cloudV2?.promptChanges?.stop() ?? Promise.resolve(),
     workosSync?.stop() ?? Promise.resolve(), securityEventBroker.stop(), stopSecurityEventPublisher(),
   ]);
   const deadline = setTimeout(() => process.exit(1), 15_000 + (config.shutdownDrainMs ?? 0));

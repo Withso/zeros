@@ -19,6 +19,7 @@
 
 import { useCallback, useContext, useMemo, useSyncExternalStore } from "react";
 import { createChatRenderSnapshot } from "./local-live-text";
+import { projectCloudPromptSession } from "./cloud-prompt-presentation";
 
 import type {
   AgentSessionControls,
@@ -76,7 +77,7 @@ export function useChatSession(
   );
   const getSnapshot = useMemo(() => {
     const select = isolateLiveText && liveUpdates ? createChatRenderSnapshot() : (slot: AgentSessionState) => slot;
-    return () => select(useSessionsStore.getState().sessions[chatId] ?? BLANK);
+    return () => select(projectCloudPromptSession(useSessionsStore.getState().sessions[chatId] ?? BLANK));
   }, [chatId, isolateLiveText, liveUpdates]);
   const slot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const stopBackgroundTask = useCallback(

@@ -37,8 +37,12 @@ import {
   bridgeMessageWindow,
   bridgeMessageWindowOlder,
   bridgeChatSnapshot,
+  bridgeChatDelete,
 } from "../workspace-bridge";
 import type { RuntimeClient } from "../ws-client";
+import { clearTeamStore } from "../../../features/team/team-store";
+import { subscribeCloudPromptErasure } from "../../cloud-prompt-erasure";
+import { cloudScopedId } from "../cloud-workspace-key";
 
 /** Minimal RuntimeClient stand-in: request() returns a canned message and
  *  records the outgoing op so we can assert the wire shape. */
@@ -53,6 +57,28 @@ function fakeBridge(resp: unknown, seen: { op?: string; type?: string } = {}) {
 }
 
 describe("chat snapshot authority", () => {
+  it("does not erase a later account from a held chat-deletion response", async () => {
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+    const erased = vi.fn(), unsub = subscribeCloudPromptErasure(erased);
+    let reply!: (value: unknown) => void;
+    const bridge = { request: () => new Promise(resolve => { reply = resolve; }) } as unknown as RuntimeClient;
+    try {
+      const deleting = bridgeChatDelete(bridge, cloudScopedId(target, "chat"));
+      clearTeamStore(); reply({ type: "WORKSPACE_RESPONSE", result: {} }); await deleting;
+      expect(erased).not.toHaveBeenCalled();
+    } finally { unsub(); }
+  });
+  it("erases private prompt retries only after confirmed cloud chat deletion, with exact owner identity", async () => {
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+    const id = cloudScopedId(target, "conversation"), erased = vi.fn(), unsub = subscribeCloudPromptErasure(erased);
+    try {
+      const rejected = { request: async () => { throw new Error("offline"); } } as unknown as RuntimeClient;
+      await expect(bridgeChatDelete(rejected, id)).rejects.toThrow("offline"); expect(erased).not.toHaveBeenCalled();
+      await bridgeChatDelete(fakeBridge({ type: "WORKSPACE_RESPONSE", result: {} }), "personal-chat"); expect(erased).not.toHaveBeenCalled();
+      await bridgeChatDelete(fakeBridge({ type: "WORKSPACE_RESPONSE", result: {} }), id);
+      expect(erased).toHaveBeenCalledExactlyOnceWith({ ...target, chatId: "conversation" });
+    } finally { unsub(); }
+  });
   it.each([undefined, {}, { chats: null }, { chats: "invalid" }])("rejects malformed history instead of confirming an empty Local workspace (%j)", async result => {
     await expect(bridgeChatSnapshot(fakeBridge({ type: "WORKSPACE_RESPONSE", result }))).rejects.toThrow(/conversation list/);
   });

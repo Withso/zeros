@@ -79,8 +79,8 @@ existing quiet grace; longer gaps show Connecting or Reconnecting, and real
 rejections and prolonged failures still use the existing error escalation.
 Only lifecycle documents or an explicit Restart can report a compute transition.
 
-An explicit cloud navigation, interaction or queued-send attempt owns one
-ephemeral wake intent. Carry it through readiness retries, admission replacement,
+On bridge-based cloud paths, an explicit navigation, interaction or queued-send
+attempt owns one ephemeral wake intent. Carry it through readiness retries, admission replacement,
 and any preparation before enqueueing; allocate it only when the work begins.
 A ready/busy preparation does not write a wake intent. It rechecks current
 account, owner, access, Stop, lifecycle, live admission and physical root.
@@ -94,9 +94,10 @@ receipt is never send authority: native commands retain their checkpoint and
 execution fences.
 An uncertain response retries the same idempotency ID and initiating reason;
 a definitive refusal needs a new explicit attempt. Stop, account replacement,
-owner deletion and the original attempt deadline retire old work. Cloud prompt
-preparation spends at most ten seconds while both the workspace and its bridge
-are ready. Disconnection and reconnect time pause that budget; the undispatched
+owner deletion and the original attempt deadline retire old work. Without the
+durable prompt capability, cloud prompt preparation spends at most ten seconds
+while both the workspace and its bridge are ready. Disconnection and reconnect
+time pause that budget; the undispatched
 FIFO survives, re-adopts the session and drains once the bridge returns. A healthy
 running v2 bridge is reused across send preparation. The whole attempt is capped at
 180 seconds including a wake, with elapsed time beside Starting workspace.
@@ -106,6 +107,19 @@ Explicit Retry renews the intent; reconnect, catalog, history, hover and selecti
 restore never do. This identity stays in renderer memory, outside persisted
 messages and provider commands. Local Personal and organization-local behavior
 is unchanged.
+
+With `capabilities.promptOutbox: 1`, cloud Send commits a private retry journal
+and submits authenticated HTTPS without waiting for bridge admission. It paints
+an ordinary user bubble immediately for a running VM; only unavailable compute
+uses the queue card. A CP receipt confirms saved delivery, independently of
+provider acceptance. An unconfirmed send stays visible and repairs with the same
+ID after reconnect or app restart. Stop persists its epoch before the request,
+and account/owner generations fence every late response, including A → B → A.
+Keep future saved bubbles out of canonical native rows so stream chunks remain
+under the turn that produced them. A process-owned, bounded coordinator handles
+pending work; retained chat views do not poll. See
+[durable prompt delivery](cloud-workspaces.md#durable-prompt-delivery) for the
+FIFO, restart, retention and erasure contracts.
 
 Cloud catalog polling is not a transcript mutation. Retain the cloud history
 revision and unchanged snapshot references, deduplicate concurrent history warms,
@@ -120,9 +134,11 @@ If it shared a read that retired after that cleanup, it retries once after the
 read releases its identity. This recovery must not start an agent, wake a VM,
 poll on ordinary failures, or reactivate a hidden surface.
 
-Cloud v2 workspaces keep no renderer transcript cache. A running workspace's
-worker and a stopped workspace's control-plane history mirror both answer with
-authoritative pages, so cloud chats never paint provisional presentation rows.
+Cloud v2 workspaces keep no renderer cache of native transcript pages. A running
+workspace's worker and a stopped workspace's control-plane history mirror both
+answer with authoritative pages. The durable prompt retry journal is separate:
+its saved user bubbles project beside those pages until exact message IDs
+reconcile. It never substitutes locally cached provider output for native history.
 The v1 native cloud cache, its immutable-head provenance rules and its paint
 smoke were retired with the v1 runtime.
 

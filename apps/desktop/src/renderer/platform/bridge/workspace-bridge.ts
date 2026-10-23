@@ -20,6 +20,7 @@ import type {
 
 import type { RuntimeClient } from "./ws-client";
 import { cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
+import { prepareCloudPromptErasure } from "../cloud-prompt-erasure";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
 import type {
@@ -657,7 +658,11 @@ export async function bridgeChatDelete(
   bridge: RuntimeClient,
   id: string,
 ): Promise<void> {
+  const cloud = parseCloudScopedId(id), erase = cloud && prepareCloudPromptErasure({
+    organizationId: cloud.organizationId, workspaceId: cloud.workspaceId, chatId: cloud.id,
+  });
   await workspaceOp(bridge, "chats.delete", { id });
+  if (erase) erase();
 }
 
 export async function bridgeChatClearProviderIdentity(

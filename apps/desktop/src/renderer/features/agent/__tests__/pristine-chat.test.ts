@@ -21,6 +21,7 @@ describe("pristine chat identity", () => {
     { transcriptState: "loading" as const }, { transcriptState: "cold" as const }, { hasTranscript: true },
     { providerBinding: providerBindingForResume("codex", "native") }, { foregroundTurnId: "first-send" },
     { activeTurnStartedAt: 0 }, { cloudPromptPending: true },
+    { cloudOutbox: { rows: [{ id: "saved", kind: "text" as const, role: "user" as const, text: "ok", createdAt: 1 }], states: {}, pendingCount: 1, waiting: false } },
     { messages: [{ id: "sent", kind: "text" as const, role: "user" as const, text: "ok", createdAt: 1 }] },
   ])("refuses non-pristine cloud evidence %j", patch => {
     expect(canSwitchPristineChat(chat(), { ...BLANK, ...patch })).toBe(false);

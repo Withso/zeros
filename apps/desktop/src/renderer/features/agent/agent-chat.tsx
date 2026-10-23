@@ -65,6 +65,7 @@ import {
 } from "../../state/store";
 import { newChatId } from "../../state/chat-id";
 import { retryAgentTurn, warmRetryTranscript } from "./retry-agent-turn";
+import { cloudPromptTurnActivity } from "./cloud-prompt-presentation";
 import { expandMentionsInText } from "./mentions";
 import {
   useComposerEditor,
@@ -265,7 +266,6 @@ import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
 import {
   groupMessagesIntoTurns,
   isProviderTurnTail,
-  isTailProviderTurnSegment,
   turnKey,
 } from "./turn-container";
 import { useLocalLiveTextSource } from "./local-live-text";
@@ -3376,7 +3376,7 @@ function AgentChatBody({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = Boolean(isCloudWorkspace(session.cwd) && session.cloudStop) || !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
+  const composerStreaming = Boolean(isCloudWorkspace(session.cwd) && (session.cloudStop || session.cloudOutbox?.pendingCount && !session.cloudOutbox.waiting)) || !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
     status: backgroundContinuationActive ? "streaming" : session.status,
     hasPendingLocalTurn: pendingLocalTurnId !== null,
     planReview: Boolean(planReview),
@@ -5007,6 +5007,7 @@ function AgentChatBody({
               // UI, while every segment sharing that provider turn stays live
               // so its streaming tool group does not collapse mid-run.
               const isVisualTail = i === turns.length - 1;
+              const receipt = cloudPromptTurnActivity(session, turns, i);
               // One answer for the shimmer AND the footer (see tailTurnInFlight):
               // they are two halves of the same claim, and computing them apart
               // is what let a reopened chat show the working shimmer while
@@ -5019,11 +5020,14 @@ function AgentChatBody({
                   key={turnKey(turn)}
                   turn={turn}
                   isVisualTail={isVisualTail}
-                  isActiveProviderSegment={isTailProviderTurnSegment(turns, i)}
+                  isActiveProviderSegment={receipt.active}
+                  isActivityTail={receipt.activityTail}
+                  durablePrompt={receipt.durable}
+                  receiptState={receipt.state}
                   ownsProviderFooter={isProviderTurnTail(turns, i)}
                   turnIsPendingLocal={turnIsPendingLocal}
                   turnInFlight={tailTurnInFlight({
-                    sessionStreaming: isStreaming,
+                    sessionStreaming: isStreaming && (!session.cloudOutbox || receipt.active),
                     pendingLocalTurn: turnIsPendingLocal,
                     hasEvents: turn.events.length > 0,
                   })}
@@ -5047,7 +5051,7 @@ function AgentChatBody({
                       : undefined
                   }
                   shared={transcriptShared}
-                  tail={isVisualTail ? transcriptTail : null}
+                  tail={receipt.current ? transcriptTail : null}
                 />
               );
             })}

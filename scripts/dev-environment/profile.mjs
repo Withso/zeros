@@ -75,6 +75,7 @@ function cloudV2Environment(workspace, profile, apiOrigin, env) {
     throw new Error("electron:cloud needs the private profile's storage endpoint, bucket, accessKeyId and secretAccessKey for worker runtimes");
   return {
     CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: apiOrigin, CLOUD_V2_REALTIME_URL: apiOrigin.replace(/^https:/, "wss:"),
+    CLOUD_V2_PROMPT_OUTBOX_ENABLED: env.CLOUD_V2_PROMPT_OUTBOX_ENABLED ?? "true",
     CLOUD_V2_RUNTIME_SHA256: runtime, CLOUD_V2_RUNTIME_STORE_ENDPOINT: s.endpoint, CLOUD_V2_RUNTIME_STORE_BUCKET: s.bucket,
     CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: s.accessKeyId, CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: s.secretAccessKey,
     BOAT_API_KEY: b.apiKey, ...(b.billingOrg ? { BOAT_BILLING_ORG: b.billingOrg } : {}),

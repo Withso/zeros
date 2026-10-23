@@ -131,6 +131,79 @@ unset. Start restores the workspace by clearing the flag, as does a connect
 request that wakes a stopped workspace. Archive is refused during creation or
 deletion.
 
+## Durable prompt delivery
+
+Workspaces advertising `capabilities.promptOutbox: 1` accept sends over
+authenticated HTTPS independently of the streaming bridge. The desktop first
+commits the message ID, selected agent/model/effort and attachment bytes to a
+private retry journal, keyed by backend, account, organization, workspace and
+native chat ID. It paints the user bubble immediately. A running VM shows an
+ordinary bubble even while another turn runs; a queue card is reserved for a
+VM that is creating, setting up, waking or otherwise unavailable.
+
+`POST /v1/cloud-v2/workspaces/:id/prompts` returns a receipt only after the
+database commits. It performs no VM or provider I/O. The same
+`(workspace, userMessageId)` and payload return the original receipt; a changed
+payload returns 409. A committed send owns one explicit wake when needed.
+Status reads and retries of that receipt do not create another wake. A lost
+HTTP response is repaired using the original ID and bytes. Before a CP receipt
+exists, the app says the message is saved on this device; its private journal
+resumes delivery after app restart. If private storage cannot commit, the draft
+stays in the composer. The old in-memory FIFO transfers in order and removes
+each entry only after that private commit.
+
+The worker pulls through `/v2/cloud/worker/prompts/*`. A hint over an existing
+hybrid connection shortens the wait; a missed hint is repaired by a bounded
+long poll. Polling holds no database connection, reports no activity and never
+keeps an idle VM warm. Nothing polls or dials a stopped VM. Pending explicit
+work prevents idle stop and resumes delivery when the VM is ready.
+
+Delivery has separate durable boundaries:
+
+| Receipt state | Meaning |
+| --- | --- |
+| `queued` | The control plane saved the message. |
+| `inboxed` | The VM fsynced its inbox before acknowledging delivery. |
+| `dispatching` | The VM saved its dispatch intent and the CP rechecked the chat epoch, boot and access before provider handoff. |
+| `accepted` | The provider accepted the turn. This is separate from inbox delivery. |
+| `completed`, `failed`, `cancelled`, `interrupted` | Terminal outcome; no automatic provider replay. |
+
+Prompts drain in chat order; explicit steering retains its existing meaning.
+Delivery re-adopts the saved execution and native conversation after a wake.
+A restart during an uncertain provider handoff or an unfinished turn records
+`interrupted`, shown as “The worker restarted before this turn finished”. Retry
+is an explicit new send with a new ID. The system never treats missing provider
+acceptance as proof that it is safe to run the old turn again. Legacy bridge
+requests actually sent to a lost worker also settle; frames queued for its
+replacement are left intact.
+
+`POST .../prompts/stop` advances the chat's delivery epoch and atomically cancels
+undelivered rows. Claims recheck that epoch; already dispatched work receives an
+interrupt and settles through its own receipt. Retried Stop uses the original
+epoch and cannot cancel a later send. Account, organization or workspace access
+loss fences delivery. Signing out one device does not discard work authorized
+and saved earlier. Idle Stop adds no access revocation before history flush.
+
+Saved future bubbles are a presentation projection, separate from native
+transcript rows. Their IDs reconcile with worker history; an earlier turn's
+output cannot attach to a later queued bubble. Receipts settle interrupted or
+refused sends visibly, preserve Retry and release later messages. Only actual
+provider activity drives working indicators. Hidden chat views own no polling;
+one application coordinator resumes pending deliveries, with at most 64 active
+conversations and four concurrent requests. Idle conversations have no timer.
+
+The CP accepts at most 8 MiB per prompt, 128 pending messages and 32 MiB of
+pending bodies per workspace, with 10,000 retained receipts. Terminal bodies
+compact after seven days or under the 64 MiB retained-body budget; original
+hashes and receipts survive compaction for idempotency. Private retry storage is
+bounded to 64 MiB and 2,048 entries, with seven-day terminal/refused retention.
+Recovery reads completed history from native pages instead of importing its
+payloads into the private retry quota ahead of pending messages.
+Chat/workspace erasure removes the corresponding outbox and private journal
+records. Account and owner changes fence stale replies and never expose or
+erase another owner's saved work. Local Personal and organization-local keep
+their existing send paths.
+
 ## Configuration
 
 The control plane reads these names in
@@ -139,6 +212,7 @@ The control plane reads these names in
 | Environment variable | Purpose |
 | --- | --- |
 | `CLOUD_V2_ENABLED` | Enables the v2 routes, the app bridge relay and lifecycle roles. |
+| `CLOUD_V2_PROMPT_OUTBOX_ENABLED` | Enables durable HTTPS sends and advertises `promptOutbox: 1`. Defaults to `false`; enable only with a compatible worker runtime. `electron:cloud` defaults it to `true`. |
 | `BOAT_API_KEY`, optional `BOAT_BILLING_ORG` | Boat provisioning and billing. |
 | `CLOUD_V2_API_URL`, `CLOUD_V2_REALTIME_URL` | Public HTTPS API (also the worker's outbound origin) and the app's WSS bridge origin. |
 | `CLOUD_V2_WORKER_SIGNING_KEY`, optional `CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS` | Ed25519 PKCS#8 private key (base64 DER) that signs worker grants. VMs trust both public keys after their next create or wake, so a rotation keeps the previous key until every running VM has woken with the new trust file. |
@@ -168,3 +242,25 @@ workspaces; create and wake apply the
 configured pin. Tests use fake worker connections and native provider streams;
 live verification must also cover the private route, stop, offline history, wake
 and deletion.
+
+### Outbox rollout
+
+Apply expand migration `0202_cloud_v2_prompt_outbox.sql`, publish the compatible
+worker and select its runtime SHA before enabling the flag. The worker's hello
+advertises `X-Zeros-Worker-Features: prompt-outbox-v1`; an enabled CP refuses
+an incompatible hello. Refresh existing workers onto that runtime/configuration
+before accepting new outbox work. A flag change alone does not update a detached
+worker immediately: creation/wake installs the selected runtime and hello
+receives configuration. Plan those refreshes after running turns have settled.
+
+Older desktops continue using the bridge path; live streaming is unchanged.
+For rollback, settle or explicitly cancel saved work before disabling the
+outbox routes or downgrading workers. Keep the additive schema and receipt
+history. Disabling the flag cannot deliver already committed rows through an
+older desktop's memory queue.
+
+Live qualification includes receipt latency, app quit and reconnect with queued
+messages, stopped-VM FIFO delivery, same-ID replay, Stop racing delivery,
+sign-out versus real access loss, wake into the same chat and a mid-turn worker
+restart. Existing gate0 provider turns still exercise the legacy bridge path;
+test the new HTTPS path separately without silently adding provider turns.
