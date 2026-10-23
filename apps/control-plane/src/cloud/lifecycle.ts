@@ -4,6 +4,8 @@
 // the worker credential is delivered by command after boot, never in the
 // sandbox definition, so it can be rotated on any retry.
 import type { CloudV2Compute, CloudV2CommandResult } from "./boat.js";
+import { BoatSnapshotExpiredError } from "./boat-client.js";
+import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { CLOUD_V2_WORKER_PORT } from "./contract.js";
@@ -39,6 +41,11 @@ export type CloudV2LifecycleDeps = {
   sleep?: (ms: number) => Promise<void>;
   logger?: Pick<Console, "warn">;
 };
+
+/** Boat no longer has the VM, or deleted the disk of one stopped 14 days. */
+function sandboxLost(error: unknown): boolean {
+  return error instanceof BoatSnapshotExpiredError || (error instanceof CloudProviderError && error.code === "provider_not_found");
+}
 
 function errorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code;
@@ -99,7 +106,11 @@ export class CloudV2Lifecycle {
       } catch (error) {
         const code = errorCode(error);
         this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code})`);
-        if (workspace.attempts >= MAX_ATTEMPTS) await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
+        // Retrying cannot wake or stop a VM that is gone; say so at once.
+        if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error)) {
+          await this.deps.store.revoke(workspace.id, false);
+          await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing" });
+        } else if (workspace.attempts >= MAX_ATTEMPTS) await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
         else await this.deps.store.defer(workspace.id, workspace.state, Math.min(5_000 * 2 ** workspace.attempts, 5 * 60_000), { failure: true });
       }
     }

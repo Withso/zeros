@@ -41,6 +41,7 @@ const STATUS: Record<CloudV2Workspace["state"], string> = {
 const ERRORS: Record<string, string> = {
   cloud_computer_build_required: "Build this organization's Cloud Computer first.",
   worker_boot_timeout: "The workspace computer did not start in time. Delete it and create a new one.",
+  sandbox_missing: "This workspace's computer no longer exists. Delete it and create a new one.",
 };
 
 export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocument {

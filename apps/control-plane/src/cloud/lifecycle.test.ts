@@ -157,6 +157,29 @@ describe("cloud v2 lifecycle", () => {
     expect(lost.store.defer).not.toHaveBeenCalled();
   });
 
+  // Boat answers 404 for a VM it no longer has, and refuses to resume a disk
+  // it deleted after 14 stopped days. Retrying for minutes cannot recover
+  // either; the workspace showed "stopping" or "waking" until it gave up.
+  it("fails at once when Boat no longer has the VM or its disk, for both wake and stop", async () => {
+    const { CloudProviderError } = await import("./provider-error.js");
+    const { BoatSnapshotExpiredError } = await import("./boat-client.js");
+    const missing = () => new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 });
+    for (const [state, call, error] of [["starting", "resume", missing()], ["stopping", "stop", missing()], ["starting", "resume", new BoatSnapshotExpiredError()]] as const) {
+      const f = setup([workspace(state, { boatSandboxId: "bx_gone1", updatedAt: new Date(NOW - 5_000).toISOString() })]);
+      vi.mocked(f.compute[call]).mockRejectedValueOnce(error);
+      await f.lifecycle.tick();
+      expect(f.store.transition).toHaveBeenCalledWith(expect.any(String), [state], "failed", { errorCode: "sandbox_missing" });
+      expect(f.store.revoke).toHaveBeenCalledWith(expect.any(String), false);
+      expect(f.store.defer).not.toHaveBeenCalled();
+    }
+    // Any other refusal keeps the bounded retry.
+    const busy = setup([workspace("stopping", { boatSandboxId: "bx_abc1" })]);
+    vi.mocked(busy.compute.stop).mockRejectedValueOnce(new CloudProviderError("provider_request_failed", "Boat API request did not succeed", false, { httpStatus: 409 }));
+    await busy.lifecycle.tick();
+    expect(busy.store.transition).not.toHaveBeenCalled();
+    expect(busy.store.defer).toHaveBeenCalledWith(expect.any(String), "stopping", 10_000, { failure: true });
+  });
+
   it("writes the token through base64 without ever putting it in shell syntax", () => {
     const command = deliverWorkerTokenCommand(token);
     expect(command).not.toContain(token);
