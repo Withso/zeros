@@ -45,6 +45,14 @@ the owning model search as inside the catalog while preserving pointer-outside
 dismissal. Assert data-state=open as well as visibility when an interaction is
 required to keep a popup open; retained exit DOM is not evidence of open state.
 
+Menu-opened dialogs must restore focus to a persistent trigger, not the retired
+menu item. GitHub's disconnect dialog had no return target; an exiting menu
+masked that omission when the dialog was closed quickly. Wait for the menu's
+actual retirement, then check Escape, Cancel and Close against the surviving
+trigger. Keep inactive settings from reclaiming focus. Radix schedules its
+unmount autofocus on the next task, so smoke must await focus independently of
+visibility; immediate focus sampling after immediate dismissal is a race.
+
 Encoded in the shared anchored-overlay motion, all six popup primitives,
 `docs/ui-interaction-performance.md`, and `scripts/ui-smoke-overlay-dismissal.mjs`.
 Coverage includes nested layers, the real repository/model menus, both themes,

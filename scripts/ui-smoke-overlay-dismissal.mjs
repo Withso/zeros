@@ -429,6 +429,7 @@ export async function runOverlayDismissalSmoke({ page, check, harnessBase }) {
   }
   failures.push(
     ...(await runModelCatalogFocusSmoke({ page, check, harnessBase })),
+    ...(await runGithubOverlayFocusSmoke({ page, check, harnessBase })),
     ...(await runOverlayEarlyEscapeSmoke({ page, check, harnessBase })),
   );
   return failures;
@@ -573,6 +574,38 @@ export async function runOverlayEarlyEscapeSmoke({ page, check, harnessBase }) {
   } catch (error) {
     failures.push(name);
     check(name, false, String(error));
+  }
+  return failures;
+}
+
+export async function runGithubOverlayFocusSmoke({ page, check, harnessBase }) {
+  const failures = [];
+  for (const dismissal of ["escape", "cancel", "close"]) {
+    const name = `GitHub disconnect ${dismissal} restores its persistent menu trigger after the menu retires`;
+    try {
+      await page.goto(`${harnessBase}/harness-github-settings.html`);
+      const trigger = page.getByRole("button", {
+        name: "More actions for GitHub App",
+      });
+      await trigger.click();
+      await page.getByRole("menuitem", { name: "Disconnect", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Disconnect GitHub App?" });
+      await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+      // A still-closing menu can return focus late and conceal a dialog with
+      // no surviving return target. The dialog must own its complete lifetime.
+      await expect(page.locator("[data-radix-menu-content]")).toHaveCount(0);
+      if (dismissal === "escape") await page.keyboard.press("Escape");
+      else await dialog.getByRole("button", {
+        name: dismissal === "cancel" ? "Cancel" : "Close",
+        exact: true,
+      }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+      check(name, true);
+    } catch (error) {
+      failures.push(name);
+      check(name, false, String(error));
+    }
   }
   return failures;
 }
