@@ -130,6 +130,68 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
     "logout and reload retain Personal's legacy local collection without network access",
     true,
   );
+
+  await page.setViewportSize({ width: 1000, height: 600 });
+  await page.getByRole("button", { name: "Use many organizations" }).click();
+  await switcher.click();
+  const memberships = page.getByRole("menuitem", { name: /^Membership / });
+  const names = Array.from({ length: 20 }, (_, index) => `Membership ${String(index + 1).padStart(2, "0")}`);
+  await expect(memberships).toHaveText(names);
+  const menu = page.getByRole("menu");
+  expect(await menu.evaluate(node => getComputedStyle(node).overflowY)).toBe("auto");
+  expect(await menu.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  await page.getByRole("menuitem", { name: "Membership 19", exact: true }).click();
+  await expect(switcher).toHaveText("Membership 19");
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+  await page.mouse.move(950, 550);
+  await switcher.focus();
+  await page.keyboard.press("Enter");
+  const active = page.getByRole("menuitem", { name: "Membership 19", exact: true });
+  await expect(active).toHaveAttribute("aria-current", "true");
+  await expect(active).toBeFocused();
+  await expect(active).toBeInViewport();
+  expect(await menu.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("menuitem", { name: "Membership 20", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(switcher).toBeFocused();
+  check("all twenty memberships keep their order in one scroll surface with active-row focus and keyboard navigation", true);
+
+  await page.reload();
+  await expect(switcher).toHaveText("Membership 19");
+  await switcher.click();
+  await expect(memberships).toHaveText(names);
+  await expect(active).toHaveAttribute("aria-current", "true");
+  await expect(active).toBeInViewport();
+  await expect(page.getByRole("menuitem", { name: "Sign in", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("menuitem", { name: "Manage organization", exact: true })).toHaveCount(0);
+  expect(await page.evaluate(async () => {
+    const { getTeamStoreState } = await import("/apps/desktop/src/renderer/features/team/team-store.ts");
+    return getTeamStoreState().me === null;
+  })).toBe(true);
+  check("offline reload restores the selected organization and full list without account authority, retaining Sign in", true);
+  await page.keyboard.press("Escape");
+
+  await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?organizations`);
+  await page.locator('[data-workspace-id="ws-boston"]').click();
+  const destination = { page: "workspace", folder: "/fixture-workspaces/zeros/boston", chatId: "chat-ws-boston" };
+  const selected = () => page.evaluate(() => window.appSidebarState());
+  await expect.poll(selected).toMatchObject(destination);
+  const selectOrganization = async name => {
+    await expect(page.locator('[role="menu"]')).toHaveCount(0);
+    await switcher.click();
+    await page.getByRole("menuitem", { name, exact: true }).click();
+  };
+  await selectOrganization("Membership 01");
+  await expect.poll(selected).toMatchObject({ page: "dashboard" });
+  await selectOrganization("Local");
+  await expect.poll(selected).toMatchObject(destination);
+  check("the real sidebar restores Local's workspace and chat after an organization round trip", true);
+  await page.reload();
+  await selectOrganization("Membership 01");
+  await selectOrganization("Local");
+  await expect.poll(selected).toMatchObject(destination);
+  check("per-organization workspace and chat destinations survive reload", true);
 }
 
 async function main() {

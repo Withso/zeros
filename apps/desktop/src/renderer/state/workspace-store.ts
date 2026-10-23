@@ -78,6 +78,7 @@ import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fres
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
 import { localTranscriptCache } from "./local-transcript-cache";
 import { loadProjects } from "./projects-store";
+import { pruneOrganizationDestinations } from "./organization-destination-cache";
 import {
   findProjectForFolder,
   folderIsOwnedByProject,
@@ -1103,6 +1104,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           projects,
           removedFolders,
         );
+      pruneOrganizationDestinations(destination => folderWasRemoved(destination.folder));
       const removedActiveRepo = state.activeRepoId === action.projectId;
       const removedWorkspaceFilter =
         workspaceListFilterProjectId(state.workspaceListFilter) ===
@@ -1181,6 +1183,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           folderIsOwnedByProject(folder, project.id, projects, [
             action.folder,
           ]));
+      pruneOrganizationDestinations(destination => folderWasRemoved(destination.folder));
       const activeChatRemoved = state.activeChatId
         ? state.chats.some(
             (chat) =>
@@ -1324,8 +1327,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pendingChatHydrationFolder: next.pendingChatHydrationFolder && removed(next.pendingChatHydrationFolder) ? null : next.pendingChatHydrationFolder,
         lastWorkspaceByRepoRoot: removeRecordKeysMatching(next.lastWorkspaceByRepoRoot, removed),
         ...(activeRemoved ? {
-          activePage: "dashboard",
-          lastHomePage: "dashboard",
+          activePage: state.activePage === "workspace" ? "dashboard" : state.activePage,
+          lastHomePage: state.activePage === "workspace" ? "dashboard" : state.lastHomePage,
           activeChatId: null,
           newAgentFolder: null,
           lastWorkspaceFolder: null,

@@ -523,6 +523,20 @@ const auth = {
   signOutEverywhere: async () => {},
 } as AuthContextValue;
 
+if (params.has("organizations")) {
+  const { accountPresentationOwner, bindAccountPresentationOwner } = await import("../platform/account-presentation-cache");
+  const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
+  const { controlPlane } = await import("../features/team/control-plane");
+  const { default: fixture } = await import("../../../../../scripts/__tests__/fixtures/organization-list.json");
+  const organizations = fixture as import("../features/team/control-plane").OrganizationSummary[];
+  const user = { sub: "navigation-account", email: "navigation@example.test", name: null, provider: "workos" as const };
+  const me = { user: { id: user.sub, email: user.email, displayName: null, staffRole: null }, organizations, teams: organizations };
+  bindAccountPresentationOwner(accountPresentationOwner("https://api.example.test", user.sub));
+  acceptOrganizationSnapshot(me);
+  controlPlane.me = async () => me;
+  Object.assign(auth, { status: "authenticated", storedUser: user, userId: user.sub, email: user.email });
+}
+
 Object.assign(window, {
   dashboardReleaseArchives: (fail = false) => {
     deferDashboardArchives = false;
@@ -576,6 +590,7 @@ Object.assign(window, {
       createProjectId: state.createWorkspaceProjectId,
       filter: state.workspaceListFilter,
       folder: state.lastWorkspaceFolder,
+      chatId: state.activeChatId,
       repoView: state.activeRepoId
         ? state.repoPageViewByProject[state.activeRepoId]
         : undefined,

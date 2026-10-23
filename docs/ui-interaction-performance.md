@@ -24,6 +24,7 @@ round trip to restore it. Key it by the smallest semantic owner that can vary:
 | ---------------------------------------------------------------- | ------------------------------------ |
 | Home destination or app-wide presentation preference             | app                                  |
 | Repository hub selected tab                                     | project id                           |
+| Last workspace and chat when switching organizations            | organization id; account/backend for cloud |
 | Selected workspace                                               | repository root                      |
 | Active chat, workbench tabs, Changes/Review choices, terminal tab | workspace folder                    |
 | Open file and explicit viewer mode                                | workbench tab id inside the workspace |
@@ -46,13 +47,29 @@ snapshot settles and proves it missing. `undefined`/cold is not an empty list;
 keep the remembered identity while revalidating, then apply an authoritative
 fallback as a new atomic navigation if necessary.
 
-Cloud reload restores the saved workspace/chat identity before authentication
-releases cached content. Only a confirmed chat snapshot for that exact cloud
-workspace can invalidate its saved chat; the Local engine's list cannot. Do not
-persist an early Local-only list over the cloud cache before its authorized
-restore completes. Sign-out, account replacement and authoritative workspace
-deletion prune the destination and its descendants atomically. A cold cloud
-selection must not fall back to an unrelated Local chat.
+Organization switching restores the owner's last known workspace and chat in
+one `OPEN_WORKSPACE` navigation, or Dashboard when no valid destination is
+known. The versioned device map retains at most 128 organizations and 512 KiB;
+cloud entries additionally carry the account/backend fence. Known Local rows
+and registered folders, and readable cloud catalog presentation, can restore
+without a network read or VM wake. Workspace/repository deletion and confirmed
+membership loss prune the corresponding entries; account replacement and
+sign-out retire cloud entries while retaining device-owned Local navigation.
+
+Cloud reload restores the saved organization/workspace/chat identity and panels
+when main confirms the stored account, before waiting for live-token refresh.
+Bounded, versioned membership, catalog and chat metadata snapshots are fenced by
+backend and account; they release presentation only, never bearer authority or
+membership ownership side effects. Cold membership and capped catalog reads
+cannot confirm an empty catalog. Only a complete catalog or exact deletion
+evidence can prune a missing workspace, and only a confirmed chat snapshot for
+that exact workspace can invalidate its saved chat; the Local engine's list
+cannot. Do not persist an early Local-only list over the cloud cache before its
+same-account restore completes. Sign-out, account/backend replacement and
+authoritative workspace deletion prune the destination and its descendants,
+including separately persisted cloud repository selections. Preserve a visible
+Local destination while retiring remembered cloud state. A cold cloud selection
+must not fall back to an unrelated Local chat.
 
 Workspace existence and chat-history readiness are separate facts. Both Local
 and Cloud wait for the selected workspace's first authoritative chat list before

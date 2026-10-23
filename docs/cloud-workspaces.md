@@ -153,6 +153,53 @@ unset. Start restores the workspace by clearing the flag, as does a connect
 request that wakes a stopped workspace. Archive is refused during creation or
 deletion.
 
+## Restart presentation
+
+The desktop reads main's stored account identity through `auth_get_session_user`
+before waiting for a live access token. That identity releases same-account
+presentation while refresh is pending or offline; it never supplies a bearer,
+staff access, settings authority or membership reconciliation. The selected
+organization, workspace, chat and panels remain in place during revalidation.
+Confirmed sign-out or account/backend replacement retires the old bearer and
+presentation before the next account opens. Late reads and writes are fenced by
+the account generation, including A → B → A.
+
+Versioned metadata envelopes in the Chromium profile are scoped by backend URL
+and account ID. The organization snapshot keeps the complete membership list,
+including cloud-disabled organizations, and the selected organization (up to
+1,024 memberships and 1 MiB, without inline logos). The catalog keeps up to 512
+documents and 2 MiB and reconstructs repository/workspace rows; cloud chat
+metadata keeps up to 512 chats and 1 MiB. Both bounds prioritize the selected
+destination. Invalid or oversized envelopes are ignored; an oversized replacement
+write removes the older envelope so it cannot resurrect removed rows. Quota failures
+are best-effort, and the unwired `cloud-chats:v1` cache is discarded rather than
+promoted across accounts. Sign-out and account/backend replacement purge these
+snapshots; confirmed workspace deletion removes its durable metadata and scoped
+navigation. Local Personal and organization-local data retain their own storage.
+
+Switching organizations also restores that organization's last known workspace
+and chat atomically. Its bounded device map keeps Local destinations separately
+from account/backend-fenced cloud entries; unreadable or unknown targets fall
+back to Dashboard. Cached catalog presentation is sufficient to restore, and
+switching never creates a VM wake intent. Deletion, confirmed membership loss
+and account retirement prune the corresponding memories.
+
+The organization switcher restores its cached rows without publishing a fake
+`/v1/me` response or running ownership repair. Refresh-on-open keeps those rows
+and the active check; long lists scroll within the shared menu. A global cloud
+catalog read waits for authoritative membership and reads every eligible
+organization. Membership arrival triggers validation immediately. The current
+per-organization endpoint caps lists at 200 rows without a continuation cursor:
+such a result is incomplete and may update known rows, but cannot prove an
+omitted workspace was deleted. Only complete observations or exact deletion
+evidence prune missing destinations. Restoring metadata never wakes a VM.
+
+A transactional change feed remains a follow-up: catalog/history writes and
+deletion tombstones would advance a sequence in the same database transaction,
+with scoped cursors and a bounded snapshot fallback after cursor expiry. This
+change introduces no sync endpoint or worker protocol; revalidation uses the
+existing catalog and history window/older-page reads.
+
 ## Durable prompt delivery
 
 Workspaces advertising `capabilities.promptOutbox: 1` accept sends over

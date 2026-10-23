@@ -106,15 +106,16 @@ export function OrganizationSwitcher({
     reload,
   } = useOrganizations();
   const selected = useActiveOrganization();
-  const { email, status: authStatus, startBrowserSignIn, signOut } = useAuth();
+  const { email, status: authStatus, storedUser, startBrowserSignIn, signOut } = useAuth();
   const sessionActions = organizationSwitcherSessionActions(
     authStatus,
     me?.capabilities?.createOrganization === true,
   );
-  const active = sessionActions.showManagement
+  const showMemberships = sessionActions.showManagement || !!storedUser;
+  const active = showMemberships
     ? selected
     : PERSONAL_ORGANIZATION;
-  const organizations = sessionActions.showManagement
+  const organizations = showMemberships
     ? availableOrganizations
     : desktopOrganizationChoices(null);
   const label = active
@@ -140,7 +141,7 @@ export function OrganizationSwitcher({
       // New memberships can arrive after sign-in from another device or Dev
       // provisioning. Open immediately with the account's retained snapshot;
       // the shared store deduplicates refreshes and fences account changes.
-      if (next && sessionActions.showManagement) void reload();
+      if (next && showMemberships) void reload();
     }}>
       {/* Sized to its name, up to the sidebar's width; a long organization
           name truncates while the icon and trailing chevron stay whole. 4px
@@ -165,6 +166,7 @@ export function OrganizationSwitcher({
           <DropdownMenuItem
             key={organization.id}
             className="gap-2"
+            aria-current={organization.id === active?.id ? "true" : undefined}
             onSelect={() => {
               setActiveOrganizationSelection(
                 organization.id,

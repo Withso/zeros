@@ -4,14 +4,14 @@ import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { resetSidebarListPreferencesForTests, setSidebarRepositoryIds, sidebarRepositoryFilterOwner, sidebarRepositoryIds } from "../sidebar-list-preferences";
 import { changedSidebarWorkspaceFolders } from "../../shell/sidebar-workspace-activity";
 import { peekWorkspacesFor, setWorkspaceRowsForTesting } from "../use-projects";
-const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), forget: vi.fn(), projects: vi.fn(() => [] as unknown[]), rollout: false }));
+const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), forget: vi.fn(), projects: vi.fn(() => [] as unknown[]), rollout: false, complete: true }));
 vi.mock("../../platform/cloud-workspace-access", async importOriginal => ({
   ...await importOriginal<typeof import("../../platform/cloud-workspace-access")>(), forgetCloudWorkspacePortForwarding:api.forget,
 }));
 vi.mock("../cloud-workspace-stream-rollout", () => ({ cloudCatalogStreamRolloutEnabled: () => api.rollout }));
 vi.mock("../../platform/cloud-workspaces", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../platform/cloud-workspaces")>()),
-  listCloudWorkspaceDocuments: api.list,
+  listCloudWorkspaceCatalogSnapshot: async (...args: unknown[]) => ({ workspaces: await api.list(...args), catalogVersion: null, complete: api.complete }),
   getCloudWorkspaceDocument: api.read,
   changeCloudWorkspaceLifecycle: api.lifecycle,
 }));
@@ -20,6 +20,7 @@ import {
   acceptCloudWorkspaceDocument,
   acceptCloudEngineWorkspace,
   clearCloudWorkspaceCatalog,
+  cloudWorkspaceCatalogConfirmed,
   cloudCatalogNeedsFastRefresh,
   cloudWorkspaceDocument,
   canReadCloudWorkspace,
@@ -143,6 +144,7 @@ it("retains cloud metadata provenance through an unchanged shared workspace cach
 
 beforeEach(() => {
   api.rollout = false;
+  api.complete = true;
   clearCloudWorkspaceCatalog();
   resetSidebarListPreferencesForTests();
   vi.clearAllMocks();
@@ -186,6 +188,40 @@ describe("organization-scoped catalog fallback", () => {
   afterEach(() => api.list.mockReset());
   const other = { organizationId: "33333333-3333-4333-8333-333333333333", workspaceId: "44444444-4444-4444-8444-444444444444" };
   const otherDoc = () => ({ ...doc(6), id: other.workspaceId, organizationId: other.organizationId, teamId: other.organizationId });
+
+  it.each(["global", "scoped"])("retains omitted rows from an incomplete %s list until a complete observation", async scope => {
+    acceptCloudWorkspaceDocument(doc(6));
+    const retained = cloudWorkspaceDocument(target);
+    const listed = { ...doc(7), id: other.workspaceId };
+    api.complete = false;
+    api.list.mockResolvedValueOnce([listed]);
+    await refreshCloudWorkspaceCatalog(scope === "scoped" ? [target.organizationId] : undefined);
+    expect(cloudWorkspaceCatalogConfirmed()).toBe(false);
+    expect(cloudWorkspaceDocument(target)).toBe(retained);
+    expect(getCloudWorkspaceRows()).toHaveLength(2);
+    api.complete = true;
+    api.list.mockResolvedValueOnce([listed]);
+    await refreshCloudWorkspaceCatalog(scope === "scoped" ? [target.organizationId] : undefined);
+    expect(cloudWorkspaceDocument(target)).toBeUndefined();
+    expect(getCloudWorkspaceRows()).toHaveLength(1);
+    expect(cloudWorkspaceCatalogConfirmed()).toBe(scope === "global");
+  });
+
+  it("keeps identical native workspace IDs distinct across organization reads and removal", async () => {
+    const another = { ...otherDoc(), id: target.workspaceId };
+    acceptCloudWorkspaceDocument(doc(6));
+    acceptCloudWorkspaceDocument(another);
+    const retained = cloudWorkspaceDocument(target);
+    api.list.mockResolvedValueOnce([{ ...another, version: 7 }]);
+    await refreshCloudWorkspaceCatalog([other.organizationId]);
+    expect(cloudWorkspaceDocument(target)).toBe(retained);
+    expect(cloudWorkspaceDocument({ ...other, workspaceId: target.workspaceId })?.version).toBe(7);
+    expect(getCloudProjects()).toHaveLength(2);
+    api.list.mockResolvedValueOnce([]);
+    await refreshCloudWorkspaceCatalog([other.organizationId]);
+    expect(cloudWorkspaceDocument(target)).toBe(retained);
+    expect(getCloudWorkspaceRows()).toHaveLength(1);
+  });
 
   it("reads only uncovered organizations without pruning or moving another owner's snapshot", async () => {
     acceptCloudWorkspaceDocument(doc(6)); acceptCloudWorkspaceDocument(otherDoc());
