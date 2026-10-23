@@ -39,7 +39,9 @@ interface Pending { owner?: AppClient; cancelled: boolean; promise: Promise<Sess
 const dim = (value: number | undefined, fallback: number): number => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(500, Math.max(2, Math.floor(value))) : fallback;
 const nativeSpawn = async ({ shell, args, cwd, cols, rows, env }: TerminalSpawnOptions): Promise<TerminalProcess> => {
   const pty = await import("node-pty");
-  return pty.spawn(shell, args, { cwd, cols, rows, env, name: "xterm-256color" });
+  // node-pty sets PWD to the spawn cwd, so env passes the shell its own.
+  const [file, argv] = env.PWD ? ["/usr/bin/env", [`PWD=${env.PWD}`, shell, ...args]] : [shell, args];
+  return pty.spawn(file, argv, { cwd, cols, rows, env, name: "xterm-256color" });
 };
 
 /** Shared shells survive app disconnects. Each shell has a serialized screen

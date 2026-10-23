@@ -123,6 +123,19 @@ it("checks native cwd and login exclusions and gives a terminal only runtime/bro
   expect(launches[0].env.PWD).toBe(await realpath(root));
 });
 
+// node-pty replaces PWD with the spawn cwd, so only a real shell proves what
+// the prompt shows.
+it.skipIf(process.platform !== "linux")("starts a real shell in the held descriptor that reports the checkout path", async () => {
+  const { scope, root } = await repositoryFixture();
+  const service = new Terminals(scope, { environment: { PATH: process.env.PATH, HOME: root }, shellArgs: ["--norc", "--noprofile", "-i"] }); services.push(service);
+  const a = client("a");
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "real", cwd: root }));
+  await service.handle(a.client, frame("PTY_WRITE", { sessionId: "real", data: "printf 'cwd=%s\\n' \"$PWD\"\r" }));
+  const output = () => a.frames.map(message => message.type === "PTY_DATA" ? message.data : "").join("");
+  await vi.waitFor(() => expect(output()).toMatch(/cwd=\S+\r\n/), { timeout: 10_000 });
+  expect(output()).toContain(`cwd=${await realpath(root)}\r\n`);
+});
+
 it("honors kill while native spawn is pending", async () => {
   const { scope } = await repositoryFixture(); const native = new FakeProcess(); let release!: () => void, entered = false;
   const gate = new Promise<void>(resolve => { release = resolve; });
