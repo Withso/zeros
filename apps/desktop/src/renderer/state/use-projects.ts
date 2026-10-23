@@ -1,4 +1,4 @@
-import { cloudProjectForFolder } from "./cloud-workspace-catalog";
+import { cloudProjectForFolder, isCloudWorkspaceCatalogOnlyRow } from "./cloud-workspace-catalog";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { isCloudRepositorySlug, isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 // ──────────────────────────────────────────────────────────
@@ -294,6 +294,9 @@ function sameWorkspace(a: Workspace, b: Workspace): boolean {
   const right = b as unknown as Record<string, unknown>;
   const keys = Object.keys(left);
   return (
+    // A placeholder and a confirmed worker snapshot can have equal values but
+    // different provenance. Keep the latter for subsequent update comparisons.
+    isCloudWorkspaceCatalogOnlyRow(a) === isCloudWorkspaceCatalogOnlyRow(b) &&
     keys.length === Object.keys(right).length &&
     keys.every((key) => left[key] === right[key])
   );

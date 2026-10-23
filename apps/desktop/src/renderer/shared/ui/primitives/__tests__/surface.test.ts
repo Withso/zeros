@@ -120,7 +120,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_WORKSPACE_ROW_CLS",
       tag: "div",
       original:
-        "group/workspace relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1",
+        "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1",
       icon: false,
     },
     // shell/sidebar-workspace-row.tsx pending workspace
@@ -130,7 +130,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_WORKSPACE_ROW_CLS",
       tag: "div",
       original:
-        "group/workspace relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1",
+        "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1",
       icon: false,
     },
     // shell/sidebar-repository-header.tsx repository header
@@ -140,7 +140,7 @@ describe("Surface markup equivalence", () => {
       constant: "REPOSITORY_HEADER_CLS",
       tag: "div",
       original:
-        "group/repo relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none hover:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover",
+        "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none hover:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover",
       icon: false,
     },
   ];

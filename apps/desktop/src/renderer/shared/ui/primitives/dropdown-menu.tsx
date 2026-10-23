@@ -256,18 +256,20 @@ const DropdownMenuRadioItem = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.RadioItem>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.RadioItem> & {
     indicator?: "dot" | "check";
+    indicatorSide?: "start" | "end";
   }
->(({ className, children, indicator = "dot", ...props }, ref) => (
+>(({ className, children, indicator = "dot", indicatorSide = "start", ...props }, ref) => (
   <DropdownMenuPrimitive.RadioItem
     ref={ref}
     className={cn(
       "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       MENU_ITEM_RADIUS,
+      indicatorSide === "end" && "pr-8 pl-2",
       className,
     )}
     {...props}
   >
-    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+    <span className={cn("absolute flex size-3.5 items-center justify-center", indicatorSide === "end" ? "right-2" : "left-2")}>
       <DropdownMenuPrimitive.ItemIndicator>
         {indicator === "check" ? (
           <Check className="size-3.5" />

@@ -71,17 +71,14 @@ import {
 } from "./store";
 import {
   findProjectForFolder,
-  findWorkspaceForFolder,
   folderIsOwnedByProject,
   folderIsWithinRoot,
 } from "./workspace-resolution";
-import {
-  pendingWorkspaceNeighborAfterArchive,
-  workspaceNeighborAfterArchive,
-} from "./archive-navigation";
-import type { WorkspaceTabActivity } from "./workspace-list-filter";
-import { getActiveOrganizationSnapshot } from "../features/team/team-store";
-import { filterRowsForOrganization } from "../features/team/organization-capabilities";
+import { getActiveOrganizationSnapshot, getActiveOrganizationIdSnapshot, getTeamStoreState } from "../features/team/team-store";
+import { filterRowsForOrganization, filterProjectsForOrganization } from "../features/team/organization-capabilities";
+import { buildSidebarWorkspaceEntries, sidebarNeighborAfterRemoval, sidebarWorkspaceListFilter } from "../shell/sidebar-workspace-model";
+import { sidebarWorkspaceActivity } from "../shell/sidebar-workspace-activity";
+import { getSidebarListPreferences, sidebarRepositoryFilterOwner, sidebarRepositoryIds } from "./sidebar-list-preferences";
 import {
   dedupePendingCreates,
   selectLiveVisible,
@@ -108,8 +105,8 @@ export function workspaceOwnsFolder(
 
 /** Where should the view land after `leaving` goes away (archive / delete)?
  * Project the cached cross-repository union through the currently persisted
- * top-bar filter, then choose the nearest surviving tab to the left (or the
- * right edge fallback). Null means that filter is empty and Create owns the
+ * sidebar grouping, repository filter and sort, then choose the nearest
+ * surviving row before it (or after it). Null means that filter is empty and Create owns the
  * next workspace-route frame. No engine round-trip or later repair effect. */
 function pickRepointTarget(leaving: Workspace): {
   folder: string;
@@ -117,52 +114,22 @@ function pickRepointTarget(leaving: Workspace): {
   validationPending: boolean;
 } | null {
   const state = useWorkspaceStore.getState();
-  const projects = loadProjects();
   const activeOrganization = getActiveOrganizationSnapshot();
+  const organizationId = getActiveOrganizationIdSnapshot();
+  const projects = filterProjectsForOrganization(loadProjects(), activeOrganization, organizationId);
   const confirmed = filterRowsForOrganization(
     peekLiveWorkspaceUnion(),
     activeOrganization,
   );
-  const cached = selectLiveVisible(
+  const cached = [...selectLiveVisible(
     confirmed,
     usePendingWorkspacesStore.getState().archiveIntents,
-  );
+  )];
   const seenIds = new Set(cached.map((workspace) => workspace.id));
-  if (!seenIds.has(leaving.id)) cached.push(leaving);
-
-  const activeAtByWorkspaceId = new Map<string, number>();
-  for (const [folder, activeAt] of Object.entries(
-    state.workspaceActivityByFolder,
-  )) {
-    const workspace = findWorkspaceForFolder(folder, cached);
-    if (!workspace) continue;
-    activeAtByWorkspaceId.set(
-      workspace.id,
-      Math.max(activeAtByWorkspaceId.get(workspace.id) ?? 0, activeAt),
-    );
-  }
-  const activity: WorkspaceTabActivity = {
-    activeAtByWorkspaceId,
-  };
+  if (!seenIds.has(leaving.id)) cached.push({ ...leaving, archivedAt: null, present: true });
   // Exclude rows whose confirmed mutation is pending — a burst-archive must
   // never repoint onto a workspace that is itself on its way out.
   const archivingIds = usePendingWorkspacesStore.getState().archivingIds;
-  const next = workspaceNeighborAfterArchive({
-    leaving,
-    rows: cached,
-    projects,
-    filter: state.workspaceListFilter,
-    busyIds: archivingIds,
-    activity,
-  });
-  if (next && !(next.id in archivingIds)) {
-    return {
-      folder: next.path,
-      repoRoot: next.repoRoot,
-      validationPending: peekWorkspacesFor(next.repoSlug) === undefined,
-    };
-  }
-
   // A pending create is already a visible/openable tab with an exact prepared
   // path. Do not jump to Create merely because its engine Workspace row has not
   // landed yet; use the same left-then-right ordering contract as confirmed
@@ -175,28 +142,30 @@ function pickRepointTarget(leaving: Workspace): {
     ),
     confirmed,
   );
-  const pendingNext = pendingWorkspaceNeighborAfterArchive({
-    leaving,
+  const entries = buildSidebarWorkspaceEntries({
+    filter: sidebarWorkspaceListFilter(state.workspaceListFilter),
+    sort: getSidebarListPreferences().sort,
+    repositoryIds: sidebarRepositoryIds(sidebarRepositoryFilterOwner(getTeamStoreState().me?.user.id, organizationId)),
+    workspaces: cached,
     pending,
     projects,
-    filter: state.workspaceListFilter,
-    activity,
-    activeAtByFolder: new Map(Object.entries(state.workspaceActivityByFolder)),
+    activity: { activeAtByWorkspaceId: sidebarWorkspaceActivity(cached, state.chats, state.workspaceActivityByFolder) },
   });
-  if (pendingNext?.path) {
+  const next = sidebarNeighborAfterRemoval(entries, leaving, archivingIds);
+  if (next?.kind === "pending" && next.pending.path) {
     return {
-      folder: pendingNext.path,
-      repoRoot: pendingNext.repoRoot,
+      folder: next.pending.path,
+      repoRoot: next.project.repoRoot,
       validationPending: true,
     };
   }
   // A visible permanent-delete row may still own the only surviving surface.
   // Archive intents were excluded above and can never become a destination.
-  return next
+  return next?.kind === "workspace"
     ? {
-        folder: next.path,
-        repoRoot: next.repoRoot,
-        validationPending: peekWorkspacesFor(next.repoSlug) === undefined,
+        folder: next.workspace.path,
+        repoRoot: next.workspace.repoRoot,
+        validationPending: peekWorkspacesFor(next.workspace.repoSlug) === undefined,
       }
     : null;
 }
@@ -233,7 +202,7 @@ function detachWorkspaceRuntimeState(
 
 /** If we just archived/deleted the workspace whose chat is the active target,
  *  its worktree is going away — repoint the active selection to the neighbor
- *  painted by the current Grouped/Ungrouped/Active/repository filter so the
+ *  painted by the sidebar's current grouping, repository filter and sort so the
  *  (possibly
  *  hidden) open chat isn't stranded on a deleted folder. Lands on a REAL chat at the target when one
  *  exists (last-viewed, else most-recent) — a null selection renders a dead

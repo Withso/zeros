@@ -64,12 +64,12 @@ import { RepositoryIconDialog } from "./repository-icon-dialog";
 // creating from + or collapsing leaves no header looking selected. The name
 // stays on the default fg2 tier.
 const REPOSITORY_HEADER_CLS =
-  "group/repo relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none hover:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover)";
+  "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none hover:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover)";
 const REPOSITORY_TOGGLE_CLS =
   "group/toggle flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 text-left text-xs font-medium text-inherit outline-none focus-visible:ring-2 focus-visible:ring-highlighted-bright/50";
 const REPOSITORY_CHIP_CLS =
   "inline-flex size-4 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium text-fg2";
-// Row actions: 24px squares inside the 30px row, on the sidebar's own hover.
+// Row actions: 24px squares inside the 32px row, on the sidebar's own hover.
 export const SIDEBAR_ROW_ACTION_CLS =
   "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-fg2 outline-none transition-[background-color,color] duration-120 ease-out hover:bg-bg2-hover hover:text-fg1 focus-visible:ring-2 focus-visible:ring-highlighted-bright/50 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 [&_svg]:size-3.5";
 // A pointer-placed context menu can leave a trailing click on the row it

@@ -71,11 +71,11 @@ export async function runFolderReviewSmoke({ page, check }) {
   await expect(managedTab).toHaveCount(1);
   await expect(rootTab).toHaveCount(0);
   await expect(page.locator("[data-folder-state]")).toHaveText(chats);
-  for (const filter of ["Ungrouped", "Grouped"]) {
+  for (const group of ["None", "Status", "Repository"]) {
     await page
       .getByRole("button", { name: "Filter workspaces", exact: true })
       .click();
-    await page.getByRole("menuitem", { name: filter, exact: true }).click();
+    await page.getByRole("menuitemradio", { name: group, exact: true }).click();
     await expect(managedTab).toHaveCount(1);
     await expect(rootTab).toHaveCount(0);
   }

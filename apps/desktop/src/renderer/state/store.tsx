@@ -204,8 +204,8 @@ export type WorkspaceState = {
 
   activePage: WorkspacePage;
 
-  /** Persisted sidebar workspace presentation (Grouped / Ungrouped). Older
-   * builds also stored Active and `repo:<id>` repository filters. */
+  /** Persisted sidebar grouping (Repository / Status / None), retaining the
+   * grouped/ungrouped values. Older builds also stored Active and `repo:<id>`. */
   workspaceListFilter: WorkspaceListFilter;
 
   /** Bounded, persisted clock of deliberate workspace actions, keyed by the

@@ -2337,7 +2337,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   }
 }
 
-/** Record one deliberate action without subscribing the caller to the store.
+/** Record one meaningful action or confirmed workspace metadata update.
  * Selection-only surfaces must never call this helper. */
 export function recordWorkspaceActivity(folder: string): void {
   useWorkspaceStore.getState().dispatch({

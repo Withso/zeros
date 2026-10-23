@@ -90,11 +90,11 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 // --- CONSTANTS ---
 
-// Full-width 30px row on the sidebar's hover/selection fill. Selection is
+// Full-width 32px row on the sidebar's hover/selection fill. Selection is
 // colour-only (fg1 on sidebar-bg-hover); rows never shift. `transition-none`
 // keeps a switch from cross-fading the old and new selection.
 const SIDEBAR_WORKSPACE_ROW_CLS =
-  "group/workspace relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
+  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
 // Grouped rows sit under their repository header: the state glyph centres on
 // the header's name column. Ungrouped rows (repository icon first) and
 // standalone folder rows align with the headers' own icon column instead.

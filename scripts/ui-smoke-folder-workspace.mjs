@@ -15,9 +15,9 @@ export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
       memory: state.lastWorkspaceByRepoRoot,
     };
   });
-  const selectFilter = async (name) => {
+  const selectGroup = async (name) => {
     await page.getByRole("button", { name: "Filter workspaces", exact: true }).click();
-    await page.getByRole("menuitem", { name, exact: true }).click();
+    await page.getByRole("menuitemradio", { name, exact: true }).click();
   };
 
   await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
@@ -54,8 +54,8 @@ export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
   const saved = await snapshot();
   expect(saved.folder).toBe(cwd);
   const tab = page.locator('[data-workspace-id="local:to-do-app"]');
-  for (const name of ["Grouped", "Ungrouped"]) {
-    await selectFilter(name);
+  for (const name of ["Repository", "Status", "None"]) {
+    await selectGroup(name);
     await expect(tab).toHaveCount(1);
   }
   await page.getByRole("button", { name: "Show dashboard", exact: true }).click();
@@ -66,7 +66,7 @@ export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
   expect((await snapshot()).folder).toBe(cwd);
   expect((await snapshot()).chatId).toBe(saved.chatId);
   expect((await snapshot()).chats).toEqual(saved.chats);
-  check("Saved subdirectory chats remain in Grouped and Ungrouped and reopen from the dashboard at the exact cwd", true);
+  check("Saved subdirectory chats remain in every grouping and reopen from the dashboard at the exact cwd", true);
 
   const nested = await page.evaluate(async () => {
     const { upsertProject } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
@@ -103,13 +103,13 @@ export async function runFolderWorkspaceSmoke({ page, check }) {
   await expect(tab).toContainText("To-do app");
   await expect(tab.locator("svg.lucide-folder")).toHaveCount(1);
   // A plain folder is its own standalone row: no repository header names it
-  // a second time, in either presentation.
+  // a second time, in any grouping.
   await expect(page.locator("[data-sidebar-repository]")).toHaveCount(0);
-  for (const filter of ["Ungrouped", "Grouped"]) {
+  for (const group of ["None", "Status", "Repository"]) {
     await page
       .getByRole("button", { name: "Filter workspaces", exact: true })
       .click();
-    await page.getByRole("menuitem", { name: filter, exact: true }).click();
+    await page.getByRole("menuitemradio", { name: group, exact: true }).click();
     await expect(tab).toHaveCount(1);
     await expect(tab.locator("svg.lucide-folder")).toHaveCount(1);
     await expect(page.locator('[data-workspace-tab="true"]')).toHaveCount(1);
