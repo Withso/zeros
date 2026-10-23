@@ -7,6 +7,7 @@ import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DevelopmentProcesses } from "../dev-environment/processes.mjs";
 import { acquireWorkspaceLock, ensureWorkspace, readPrivateJson, saveWorkspace } from "../dev-environment/state.mjs";
+import { REBOOT_RECOVERED, recoverLaunchAfterReboot } from "../dev-environment/reboot-recovery.mjs";
 
 const directories: string[] = [];
 const directory = () => {
@@ -122,14 +123,16 @@ const ast = ts.createSourceFile("launcher.mjs", source, ts.ScriptTarget.Latest, 
 const callbacks = ast.statements.filter((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) &&
   ["start", "stop", "main"].includes(node.name?.text ?? "")).map(node => node.getText(ast));
 expect(callbacks).toHaveLength(3);
-function launcher() {
+function launcher({ boot = "this-boot" } = {}) {
   const root = directory(), workspace = ensureWorkspace({ repositoryRoot: root, homeDir: root, env: {} });
-  workspace.state.launcher = { port: 4242, token: "synthetic-supervisor-token", runId: "prior-run", pid: process.pid };
+  workspace.state.launcher = { port: 4242, token: "synthetic-supervisor-token", runId: "prior-run", pid: process.pid, boot };
   saveWorkspace(workspace);
   const fetch = vi.fn(async () => ({ ok: true }));
   const createServer = vi.fn(() => { throw new Error("A second supervisor must not start"); });
   const context = vm.createContext({ fs, path, readPrivateJson, saveWorkspace, acquireWorkspaceLock, DevelopmentProcesses,
     profileIssues: () => [], systemEnvironment: () => ({}), process, AbortController, globalThis: { AbortSignal },
+    REBOOT_RECOVERED, currentBoot: () => "this-boot",
+    recoverLaunchAfterReboot: (value: typeof workspace) => recoverLaunchAfterReboot(value, { boot: "this-boot" }),
     randomUUID: () => "new-run", createServer, fetch, delay: async () => {}, console: { log: vi.fn(), warn: vi.fn() } });
   vm.runInContext(callbacks.join("\n") + "\nglobalThis.callbacks = {start, stop, main};", context);
   return { workspace, fetch, createServer, context,
@@ -171,6 +174,22 @@ describe("electron:cloud launcher shutdown proof", () => {
     const prior = structuredClone(h.workspace);
     await h.callbacks.stop(prior);
     expect(h.context.console.log).toHaveBeenCalledWith(expect.stringMatching(/desktop.*stopped/i));
+  });
+  it("clears a launch from an earlier boot on stop and start, instead of waiting on its dead supervisor", async () => {
+    const stopped = launcher({ boot: "earlier-boot" });
+    stopped.fetch.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    await stopped.callbacks.stop(stopped.workspace);
+    expect(stopped.context.console.log).toHaveBeenCalledWith(REBOOT_RECOVERED);
+    expect(readPrivateJson(stopped.workspace.file).launcher).toBeUndefined();
+    const started = launcher({ boot: "earlier-boot" });
+    await expect(started.callbacks.start(started.workspace, {})).rejects.toThrow("A second supervisor must not start");
+    expect(started.context.console.log).toHaveBeenCalledWith(REBOOT_RECOVERED);
+  });
+  it("keeps an unreachable supervisor from this boot unconfirmed", async () => {
+    const h = launcher();
+    h.fetch.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    await expect(h.callbacks.stop(h.workspace)).rejects.toThrow(/supervisor is unavailable/i);
+    expect(readPrivateJson(h.workspace.file).launcher).toMatchObject({ boot: "this-boot" });
   });
   it("reset never starts drain or removes data after an unconfirmed desktop stop", async () => {
     const h = launcher(), ensure = vi.fn(() => h.workspace), lock = vi.fn(() => () => {});

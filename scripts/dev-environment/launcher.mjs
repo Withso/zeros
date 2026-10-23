@@ -15,6 +15,7 @@ import { startPostgres, pickServicePorts, migratePostgres, databaseCommand } fro
 import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
+import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
 import { createDesktopSignIn } from "./desktop-sign-in.mjs";
 import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
 
@@ -71,7 +72,10 @@ async function stop(workspace) {
     const response = await fetch(`http://127.0.0.1:${receipt.port}/stop`, { method: "POST", redirect: "error",
       headers: { authorization: `Bearer ${receipt.token}` }, signal: globalThis.AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error();
-  } catch { throw new Error("The Dev supervisor is unavailable; existing state was preserved. Inspect pnpm dev:doctor before recovering its processes."); }
+  } catch {
+    if (recoverLaunchAfterReboot(workspace)) { console.log(REBOOT_RECOVERED); return; }
+    throw new Error("The Dev supervisor is unavailable; existing state was preserved. Inspect pnpm dev:doctor before recovering its processes.");
+  }
   const deadline = Date.now() + 45_000;
   while (fs.existsSync(path.join(workspace.directory, "run.lock"))) {
     if (Date.now() > deadline) throw new Error("Development shutdown has not completed; retry after it drains");
@@ -88,7 +92,9 @@ async function stop(workspace) {
 async function start(workspace, profile) {
   if (workspace.state.status !== "active") throw new Error("This development workspace is archived or awaiting cleanup; finish pnpm electron:cloud --reset before restarting it");
   // A dead supervisor PID alone does not prove that its desktop descendants
-  // exited. Do not recover the lock and overwrite that run's only receipt.
+  // exited. Do not recover the lock and overwrite that run's only receipt,
+  // unless the machine has rebooted since, which ends every process.
+  if (recoverLaunchAfterReboot(workspace)) console.log(REBOOT_RECOVERED);
   if (workspace.state.launcher)
     throw new Error("The previous launch has not confirmed shutdown; run pnpm electron:cloud --stop before starting again. Existing state was preserved.");
   const issues = profileIssues(profile, { cloud: Boolean(profile.cloud) });
@@ -109,7 +115,7 @@ async function start(workspace, profile) {
       response.writeHead(202).end(); abort();
     });
     server.listen(0, "127.0.0.1"); await once(server, "listening");
-    workspace.state.launcher = { port: server.address().port, token, runId, pid: process.pid };
+    workspace.state.launcher = { port: server.address().port, token, runId, pid: process.pid, boot: currentBoot() ?? undefined };
     saveWorkspace(workspace);
     await verifyAlpha(profile); signal.throwIfAborted();
     // No integration secrets enter compilers, dependency installers or Electron.
