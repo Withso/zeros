@@ -1,3 +1,5 @@
+import type { ChangedFile } from "./changes-parse";
+
 /** Reconcile the Changes viewer against a newly confirmed ordered file list.
  *
  * Keep a surviving selection. On first open, choose the first row. If an
@@ -33,4 +35,16 @@ export function reconcileChangesSelection(
   }
 
   return nextPaths[0];
+}
+
+/** A recorded tool may name the source of a later rename. An exact current
+ * path wins if that name has since been reused for a different changed file. */
+export function findRequestedChange(
+  files: readonly ChangedFile[],
+  path: string,
+): ChangedFile | undefined {
+  return (
+    files.find((file) => file.path === path) ??
+    files.find((file) => file.oldPath === path)
+  );
 }

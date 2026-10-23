@@ -43,6 +43,8 @@ import React, {
 import { FileDiff, Folders, Search } from "lucide-react";
 
 import { useWorkspaceDispatch } from "@/renderer/state/store";
+import { workbenchScopeForFolder } from "@/renderer/state/workspace-store";
+import { relativeWorkspaceFilePath } from "@/renderer/platform/workspace-file-path";
 import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
 import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
 import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
@@ -54,9 +56,15 @@ import { useChatCwd } from "../../use-chat-cwd";
 import { triggerGitRefresh, useGitRefreshKey } from "../../use-git-refresh-key";
 import { useOpenFileInWorkbench, type OpenFileOpts } from "../use-open-file";
 import { type WorkbenchTab } from "../tab-model";
-import { useWorkbenchDirtyEditorIds } from "./code-editor/editor-state";
+import {
+  isWorkbenchEditorDirty,
+  useWorkbenchDirtyEditorIds,
+} from "./code-editor/editor-state";
 import { changeOpenIntent } from "./changes-open-intent";
-import { reconcileChangesSelection } from "./changes-selection";
+import {
+  findRequestedChange,
+  reconcileChangesSelection,
+} from "./changes-selection";
 import { filterChangeSections } from "./changes-search";
 import {
   ChangesList,
@@ -104,7 +112,8 @@ export const ChangesWorkbenchSurface = React.memo(
   function ChangesWorkbenchSurface({ tab, active, scope }: TabBodyProps) {
     const cwd = useChatCwd();
     const { workspace, isLocalMain, changesTarget } = useSourceTarget();
-    const { project } = useActiveWorkspace();
+    const { project, loading: workspaceLoading } = useActiveWorkspace();
+    const dispatch = useWorkspaceDispatch();
     // The same live refresh bus as the File tabs: agent turn-end / git
     // writes / editor saves re-pull the list, the PR row, and the open diff.
     const gitRefresh = useGitRefreshKey(cwd, changesTarget, active);
@@ -116,6 +125,36 @@ export const ChangesWorkbenchSurface = React.memo(
     // Publish instead of a raw git error.
     const trunkRoot = isLocalMain ? workspace?.repoRoot || null : null;
     const { nonGit, checked } = useTrunkGitState(trunkRoot, gitRefresh, active);
+
+    // Plain folders and unborn repositories have no Changes model to resolve
+    // a tool request. Their exact source file still belongs in Files.
+    useLayoutEffect(() => {
+      if (
+        !active ||
+        !cwd ||
+        !tab.filePath ||
+        tab.changesRequestedFile !== tab.filePath ||
+        isWorkbenchEditorDirty(tab.id) ||
+        (!nonGit && (workspaceLoading || changesTarget))
+      ) return;
+      const root = (isLocalMain ? workspace?.repoRoot : workspace?.path) ?? cwd;
+      const filePath = relativeWorkspaceFilePath(
+        cwd,
+        `${root.replace(/\/+$/, "")}/${tab.filePath}`,
+      );
+      if (filePath) {
+        dispatch({
+          type: "OPEN_REQUESTED_CHANGES_FILE",
+          scope: scope ?? workbenchScopeForFolder(cwd),
+          id: tab.id,
+          path: tab.filePath,
+          filePath,
+        });
+      }
+    }, [
+      active, cwd, tab, scope, nonGit, workspaceLoading, changesTarget,
+      isLocalMain, workspace, dispatch,
+    ]);
 
     // Writes that bypass the engine bridge (discard, git init) nudge the exact
     // cwd's refresh consumers — including this tab's own gitRefresh key.
@@ -278,7 +317,7 @@ function viewFromIntent(
   };
 }
 
-function ChangesSurface({
+export function ChangesSurface({
   tab,
   active,
   scope,
@@ -535,14 +574,49 @@ function ChangesSurface({
   // missing-file pane. Never replace an unsaved draft automatically.
   useLayoutEffect(() => {
     if (!active || model.loading) return;
+    const requested =
+      model.scope.kind === "all" && !model.turnFilter
+        ? tab.changesRequestedFile
+        : undefined;
+    const selectedDisappeared = !!selected && !orderedPaths.includes(selected);
+    if (selectedDisappeared && dirtyEditorIds.has(tab.id)) return;
+    if (
+      selected && requested === selected && selectedDisappeared &&
+      model.hasContent && !model.error
+    ) {
+      const renamed = findRequestedChange(diffFiles, selected);
+      if (renamed) {
+        applySelection(
+          renamed.path,
+          changeOpenIntent(model.scope, model.turnFilter, renamed),
+        );
+        return;
+      }
+      // Only the exact successful comparison can prove this request absent.
+      // Consume it together with the Files open, so returning to Changes does
+      // not repeat the redirect. Files paths are relative to the chat's cwd,
+      // while Changes paths are relative to the owning Git root.
+      const filePath = relativeWorkspaceFilePath(
+        cwd,
+        `${folder.replace(/\/+$/, "")}/${selected}`,
+      );
+      if (filePath && cwd) {
+        dispatch({
+          type: "OPEN_REQUESTED_CHANGES_FILE",
+          scope: scope ?? workbenchScopeForFolder(cwd),
+          id: tab.id,
+          path: selected,
+          filePath,
+        });
+      }
+      return;
+    }
     const nextSelected = reconcileChangesSelection(
       previousOrderedPaths.current,
       orderedPaths,
       selected,
-      model.scope.kind === "all" && !model.turnFilter ? tab.changesRequestedFile : undefined,
+      requested,
     );
-    const selectedDisappeared = !!selected && !orderedPaths.includes(selected);
-    if (selectedDisappeared && dirtyEditorIds.has(tab.id)) return;
     previousOrderedPaths.current = orderedPaths;
     if (nextSelected === selected) return;
     if (nextSelected) {
@@ -577,10 +651,13 @@ function ChangesSurface({
   }, [
     active,
     model.loading,
+    model.error,
+    model.hasContent,
     model.effectiveSections,
     model.scope,
     model.turnFilter,
     orderedPaths,
+    diffFiles,
     selected,
     tab.changesRequestedFile,
     dirtyEditorIds,
@@ -588,6 +665,8 @@ function ChangesSurface({
     applySelection,
     dispatch,
     scope,
+    cwd,
+    folder,
   ]);
 
   // A sidebar click navigates THIS tab in place — unless that would destroy

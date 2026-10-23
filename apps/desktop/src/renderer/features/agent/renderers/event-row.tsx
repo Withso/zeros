@@ -149,7 +149,7 @@ export const EventRow = memo(function EventRow({
       kind={meta.targetKind}
       data-file-path={path}
       title={hoverPreview || (path && destination === "file" && imagePreviewMimeType(path)) ? undefined : path ?? meta.target}
-      aria-label={`Open ${accessibleTarget}${destination === "changes" ? " in Changes" : ""}`}
+      aria-label={`Open ${accessibleTarget}`}
       aria-disabled={!canOpen || undefined}
       onPointerEnter={warmFile}
       onFocus={warmFile}

@@ -67,6 +67,13 @@ Real errors, cancellations and unreported completions retain normal treatment.
   active. Unknown provider resource schemes stay readable without invoking an
   arbitrary OS handler. Generated HTML is source content in Files, not trusted
   app code. Do not bypass existing image size or binary-preview limits.
+- Edit file pills prefer their exact Branch comparison, including a recorded
+  source path that Git now reports as renamed. Ignored and unchanged targets
+  open in Files. Use the cached comparison when available; a cold request
+  waits for its own successful comparison before falling back. Preserve the
+  chat's working folder when translating Git-root-relative paths, consume the
+  request with the Files navigation, and keep newer selections and unsaved
+  editors intact. A failed comparison is not evidence of an unchanged file.
 - Code-agent startup instructions place task files (plans, notes, logs,
   screenshots, handoffs) in `.context/<task>/` and ask agents not to commit
   them unless the user asks. Read relevant existing context, pass exact paths
