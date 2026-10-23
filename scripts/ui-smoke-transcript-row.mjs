@@ -123,5 +123,69 @@ export async function checkEmptyChatTranscriptRow({ page, check, harnessBase, sc
     provisional.total > 0 && provisional.missing === 0 && provisional.loading === 0,
     `${provisional.total} frames: ${provisional.missing} without the row, ${provisional.loading} with Loading`);
   await page.evaluate(() => window.transcriptRowFixture.setDelay(0));
+  await checkCloudTranscriptRow({ page, check, harnessBase, screenshotDir });
   await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1_000);
+}
+
+async function checkCloudTranscriptRow({ page, check, harnessBase, screenshotDir }) {
+  const prompt = "Research the cloud workspace";
+  await page.goto(`${harnessBase}/harness-transcript-row.html?cloud&resident&hold`);
+  const pane = page.locator('[data-chat-pane="chat-empty"]');
+  const pill = pane.getByRole("button", { name: `transcript of ${prompt}` });
+  await expect(pill).toBeVisible();
+  expect(await page.evaluate(() => ({ first: window.transcriptRowFixture.rowAtFirstRead,
+    created: window.transcriptRowFixture.createdCommits, grace: window.transcriptRowFixture.graceTimers })))
+    .toEqual({ first: true, created: 0, grace: 0 });
+  await page.getByRole("button", { name: "Empty B", exact: true }).click();
+  await expect(page.locator('[data-chat-pane="chat-empty-b"]').getByRole("button", { name: `transcript of ${prompt}` })).toBeVisible();
+  expect(await page.evaluate(() => window.transcriptRowFixture.summaryReads)).toBe(1);
+  expect(await page.evaluate(() => window.transcriptRowFixture.createdCommits)).toBe(0);
+  check("Two new cloud tabs paint resident transcript pills before the shared summary read, with no Created/Branched commit or grace timer", true);
+
+  const deleted = await page.evaluate(async () => {
+    const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
+    const f = window.transcriptRowFixture;
+    useWorkspaceStore.getState().dispatch({ type: "DELETE_CHAT", id: f.senderId });
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return { answers: f.summaryAnswers, pill: document.querySelector('[data-chat-pane="chat-empty-b"]')?.textContent.includes("Add chat transcripts") };
+  });
+  expect(deleted).toEqual({ answers: 0, pill: false });
+  check("Deleting the only memory-seeded cloud transcript removes its pill before the held summary read answers", true);
+
+  await page.goto(`${harnessBase}/harness-transcript-row.html?cloud&resident`);
+  await expect(pill).toBeVisible();
+
+  await page.evaluate(prompt => {
+    const f = window.transcriptRowFixture;
+    f.setRows([{ chatId: f.senderId, folder: f.folder, title: "Untitled", summary: prompt, summaryAt: 0,
+      agentId: "codex", agentName: "Codex", userMessageCount: 1, lastMessageAt: 1 }]);
+  }, prompt);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("zeros-cloud-transcript-summaries:v1")?.includes("Research the cloud workspace")), { timeout: 10_000 }).toBe(true);
+
+  // No resident prompt survives this navigation: the account envelope is the
+  // only synchronous source, and the engine still holds its answer for 3 s.
+  await page.goto(`${harnessBase}/harness-transcript-row.html?cloud`);
+  await expect(pill).toBeVisible();
+  expect(await page.evaluate(() => ({ first: window.transcriptRowFixture.rowAtFirstRead,
+    created: window.transcriptRowFixture.createdCommits, grace: window.transcriptRowFixture.graceTimers })))
+    .toEqual({ first: true, created: 0, grace: 0 });
+  check("A cloud restart paints the account-scoped transcript pills in the first commit while the summary read is held", true);
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    if (screenshotDir) await page.screenshot({ path: `${screenshotDir}/cloud-transcript-row-${theme}.png`, animations: "disabled" });
+  }
+  await page.evaluate(() => { window.transcriptRowFixture.failSummaries = true; });
+  await expect.poll(() => page.evaluate(() => window.transcriptRowFixture.summaryAnswers), { timeout: 10_000 }).toBe(1);
+  await expect(pill).toBeVisible();
+  expect(await page.evaluate(() => window.transcriptRowFixture.createdCommits)).toBe(0);
+  check("A stopped-cloud summary failure keeps the confirmed transcript pills without a workspace-row flash", true);
+
+  await page.evaluate(() => {
+    localStorage.removeItem("zeros-cloud-transcript-summaries:v1");
+    window.transcriptRowFixture.setRows([]); window.transcriptRowFixture.setDelay(0);
+  });
+  await page.reload();
+  await expect(pane.getByText("Created", { exact: true })).toBeVisible();
+  await expect(pane.getByText("Add chat transcripts", { exact: true })).toHaveCount(0);
+  check("A cloud workspace containing only untouched Untitled tabs shows workspace rows after a confirmed empty list", true);
 }

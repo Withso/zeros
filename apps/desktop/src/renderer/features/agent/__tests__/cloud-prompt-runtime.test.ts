@@ -20,6 +20,8 @@ import { groupMessagesIntoTurns } from "../turn-grouping";
 import { CloudPromptRuntime } from "../use-cloud-prompt-outbox";
 import { BLANK, useSessionsStore } from "../sessions-store";
 import { cloudScopedId, cloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
+import { accountPresentationOwner, bindAccountPresentationOwner } from "../../../platform/account-presentation-cache";
+import { retireCloudTranscriptSummaries, visibleTranscriptSummaries } from "../chat-transcript-summaries-cache";
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const owner = { ...target, backend: "https://api.example.test", accountId: "account", chatId: "chat" };
 const chatId = cloudScopedId(target, "chat"), cwd = cloudWorkspaceKey(target);
@@ -110,6 +112,19 @@ function deferred<T>() {
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
 }
+it("shows the first privately committed cloud prompt in sibling transcript pills before HTTPS", async () => {
+  bindAccountPresentationOwner(accountPresentationOwner(owner.backend, owner.accountId));
+  retireCloudTranscriptSummaries();
+  const response = deferred<never>(); f.api.enqueue.mockReturnValue(response.promise);
+  const runtime = new CloudPromptRuntime();
+  const sending = runtime.send(chatId, { text: "Research the project" }, { id: "one" });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(useSessionsStore.getState().sessions[chatId]?.cloudOutbox?.rows[0]?.id).toBe("one");
+  const rows = visibleTranscriptSummaries(cwd, [], cloudScopedId(target, "sibling"));
+  response.resolve(undefined as never); await sending;
+  bindAccountPresentationOwner(null); retireCloudTranscriptSummaries();
+  expect(rows).toMatchObject([{ chatId, summary: "Research the project", userMessageCount: 1 }]);
+});
 it("publishes the head bubble and its pending-turn indicator in one snapshot after journal commit, before HTTPS", async () => {
   vi.setSystemTime(10_000);
   const runtime = new CloudPromptRuntime();

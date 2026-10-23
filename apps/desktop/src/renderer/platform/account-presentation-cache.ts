@@ -4,6 +4,7 @@ const OWNER_KEY = "zeros-account-presentation-owner:v1";
 export const ORGANIZATION_PRESENTATION_KEY = "organizations:v1";
 export const CLOUD_CATALOG_PRESENTATION_KEY = "cloud-catalog:v1";
 export const CLOUD_CHATS_PRESENTATION_KEY = "cloud-chats:v2";
+export const CLOUD_TRANSCRIPT_SUMMARIES_PRESENTATION_KEY = "cloud-transcript-summaries:v1";
 let owner: string | null | undefined;
 let generation = 0;
 
@@ -21,7 +22,7 @@ export function bindAccountPresentationOwner(next: string | null): { changed: bo
   owner = next;
   generation++;
   if (retire) {
-    for (const key of [ORGANIZATION_PRESENTATION_KEY, CLOUD_CATALOG_PRESENTATION_KEY, CLOUD_CHATS_PRESENTATION_KEY, "cloud-chats:v1"])
+    for (const key of [ORGANIZATION_PRESENTATION_KEY, CLOUD_CATALOG_PRESENTATION_KEY, CLOUD_CHATS_PRESENTATION_KEY, CLOUD_TRANSCRIPT_SUMMARIES_PRESENTATION_KEY, "cloud-chats:v1"])
       writePreferenceCache(`zeros-${key}`, null);
   }
   writePreferenceCache(OWNER_KEY, next);

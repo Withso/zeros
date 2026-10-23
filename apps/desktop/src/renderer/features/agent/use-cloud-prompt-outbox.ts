@@ -16,6 +16,8 @@ import { cloudTurnEnding, cloudTurnStart } from "./cloud-turn-presentation";
 import { BLANK, useSessionsStore } from "./sessions-store";
 import type { QueuedEditPayload } from "./sessions-context";
 import type { BridgeMessage } from "../../platform/bridge/messages";
+import { accountPresentationOwner, getAccountPresentationOwner } from "../../platform/account-presentation-cache";
+import { noteLocalChatPrompt } from "./chat-transcript-summaries-cache";
 
 /** Process-owned delivery, independent of React's retained chat surfaces and
  * the current bridge. Hooks only subscribe it to exact account/catalog changes. */
@@ -112,7 +114,14 @@ export class CloudPromptRuntime {
         bubble: { retryText: prepared.text, displayText: prepared.displayText ?? prepared.text, attachments: prepared.bubbleAttachments,
           segments: prepared.segments, ...(options.autoAction ? { autoAction: options.autoAction } : {}) } });
     });
-    if (this.coordinator.owns(channel)) options.committed?.();
+    if (this.coordinator.owns(channel)) {
+      const saved = channel.snapshot.entries.find(entry => entry.payload.userMessageId === id)?.payload;
+      if (saved && getAccountPresentationOwner() === accountPresentationOwner(owner.backend, owner.accountId))
+        noteLocalChatPrompt({ chatId, folder: cloudWorkspaceKey(owner), promptId: id, at: startedAt,
+          text: saved.bubble?.displayText ?? frozen.displayText ?? frozen.text,
+          title: chat?.title, agentId, agentName: chat?.agentName });
+      options.committed?.();
+    }
     if (options.deferDelivery) return;
     // The optimistic bubble already exists. Finish the foreground send after
     // its HTTPS attempt, independently of bridge readiness and provider work.

@@ -44,7 +44,7 @@ import {
   loadLegacyActiveChatId,
 } from "./chat-boot-cache";
 import { cloudFolderForChatId, resolveBootActiveChatId } from "./boot-active-chat";
-import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "../platform/bridge/cloud-workspace-key";
 import { setSetting } from "../platform/settings";
 import { ACTIVE_CHAT_KEY } from "./chats-local-cache";
 import {
@@ -77,6 +77,7 @@ import { startAttachmentSourceMaintenance } from "../features/agent/attachment-s
 import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
 import { localTranscriptCache, cloudTranscriptCache } from "./local-transcript-cache";
+import { retainCloudTranscriptSummaries } from "../features/agent/chat-transcript-summaries-cache";
 import { loadProjects } from "./projects-store";
 import { pruneOrganizationDestinations } from "./organization-destination-cache";
 import {
@@ -2309,12 +2310,16 @@ function noteChatTranscriptLifecycle(state: WorkspaceState, action: Action): voi
     forgetFreshCloudChat(action.id);
     localTranscriptCache.forget(action.id);
     cloudTranscriptCache.forget(action.id);
+    const cloud = parseCloudScopedId(action.id);
+    if (cloud) retainCloudTranscriptSummaries(chatId => chatId !== action.id, folder => folder === cloudWorkspaceKey(cloud));
   } else if (action.type === "HYDRATE_CHATS" && action.confirmedCloudWorkspaces?.length) {
     const confirmed = new Set(action.confirmedCloudWorkspaces);
     const known = new Set(action.chats.map(chat => chat.id));
     cloudTranscriptCache.retain((chatId, folder) => !confirmed.has(folder) || known.has(chatId));
+    retainCloudTranscriptSummaries(chatId => known.has(chatId), folder => confirmed.has(folder));
   } else if (action.type === "PRUNE_CLOUD_WORKSPACES") {
     cloudTranscriptCache.retain((_chatId, folder) => !action.folders.includes(folder));
+    retainCloudTranscriptSummaries(() => false, folder => action.folders.includes(folder), true);
   }
 }
 

@@ -36,6 +36,7 @@ import { useOpenScriptsSettings } from "@/renderer/shell/workbench/tabs/setup-ta
 import { workspaceLabel } from "@/renderer/shell/workspace-tabs";
 import { ZerosSpinner } from "@/renderer/shared/ui/primitives";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import {
   useProjectForFolder,
   useWorkspacesFor,
@@ -233,7 +234,9 @@ export function ChatProvenance({
 
   const shape = provenanceBlockShape(hasTranscripts);
 
-  if (!workspace) return null;
+  // Known cloud transcripts already identify this exact folder. Their pills
+  // do not depend on the separate workspace-detail read used by Created rows.
+  if (!workspace && !(shape === "transcripts" && isCloudWorkspace(folder))) return null;
   // "Haven't looked yet" — say nothing at all rather than commit to a shape
   // this frame and change it the next. See provenanceBlockShape.
   if (shape === "waiting") return null;
@@ -245,7 +248,7 @@ export function ChatProvenance({
       {/* Not rendered at all when a transcript row will take this block —
           unmounted rather than hidden, so SetupRow's bridge read never fires
           for a block nobody sees. */}
-      {shape === "workspace" && (
+      {shape === "workspace" && workspace && (
         <>
           <Row icon={<FolderClosed className="size-3.5" aria-hidden="true" />}>
             <span className="shrink-0">Created</span>

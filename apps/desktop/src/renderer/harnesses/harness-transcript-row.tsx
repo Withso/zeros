@@ -1,4 +1,4 @@
-// Production AgentChat empty state in a Local workspace; synthetic engine whose
+// Production AgentChat empty state in Local/cloud; synthetic engine whose
 // transcript-list answer can be held open, to prove the row never waits blank.
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
@@ -9,6 +9,7 @@ import type { RuntimeClient } from "../platform/bridge/ws-client";
 import type { Workspace } from "../platform/git";
 import type { ChatSummaryWire } from "../features/agent/agent-history-client";
 import type { SessionsActions } from "../features/agent/sessions-context";
+import { cloudScopedId, cloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 
 // One localStorage epoch per test run: a reload inside the run is an app
 // restart that keeps persisted state; a new run starts clean.
@@ -19,7 +20,12 @@ if (!sessionStorage.getItem(epochKey)) {
 }
 const repo = { id: "example", name: "Example", repoRoot: "/fixture/example", repoSlug: "example", originUrl: null, addedAt: 1 };
 localStorage.setItem("zeros-projects-v1", JSON.stringify([repo]));
-const folder = "/Users/dev/zeros/workspaces/example/amber";
+const params = new URLSearchParams(location.search), cloud = params.has("cloud");
+const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+const folder = cloud ? cloudWorkspaceKey(target) : "/Users/dev/zeros/workspaces/example/amber";
+const fixturePrefix = cloud ? "fixture:cloud-summary" : "fixture:summary";
+const delayKey = cloud ? "fixture:cloud-summaries-delay" : "fixture:summaries-delay";
+const chatId = (id: string) => cloud ? cloudScopedId(target, id) : id;
 const workspace: Workspace = {
   id: "amber", branch: "dev/Amber", repoRoot: repo.repoRoot, repoSlug: repo.repoSlug, path: folder, baseBranch: "main",
   status: "in-progress", createdAt: 1, archivedAt: null, stashRef: null, archiveSnapshot: null, prNumber: null,
@@ -28,9 +34,16 @@ const workspace: Workspace = {
 
 const fixture = {
   /** The engine's transcript-list answer waits this long. */
-  summariesDelayMs: Number(sessionStorage.getItem("fixture:summaries-delay") ?? 0),
+  summariesDelayMs: Number(sessionStorage.getItem(delayKey) ?? (cloud ? 3_000 : 0)),
   /** The engine's chats; they survive a reload like the engine database. */
-  rows: JSON.parse(sessionStorage.getItem("fixture:summary-rows") ?? "[]") as ChatSummaryWire[],
+  rows: JSON.parse(sessionStorage.getItem(`${fixturePrefix}-rows`) ?? "[]") as ChatSummaryWire[],
+  folder,
+  senderId: chatId("chat-sender"),
+  failSummaries: false,
+  holdSummaries: params.has("hold"),
+  summaryReleases: [] as Array<() => void>,
+  graceTimers: 0,
+  createdCommits: 0,
   summaryReads: 0,
   summaryAnswers: 0,
   /** performance.now() of the first list request (the empty chat's mount)
@@ -43,17 +56,24 @@ const fixture = {
   listeners: new Map<string, Set<(message: unknown) => void>>(),
   setRows(rows: ChatSummaryWire[]) {
     this.rows = rows;
-    sessionStorage.setItem("fixture:summary-rows", JSON.stringify(rows));
+    sessionStorage.setItem(`${fixturePrefix}-rows`, JSON.stringify(rows));
   },
   setDelay(ms: number) {
     this.summariesDelayMs = ms;
-    sessionStorage.setItem("fixture:summaries-delay", String(ms));
+    sessionStorage.setItem(delayKey, String(ms));
   },
   emit(type: string, message: unknown) {
     for (const listener of this.listeners.get(type) ?? []) listener(message);
   },
 };
 Object.assign(window, { transcriptRowFixture: fixture });
+if (cloud) {
+  const timeout = window.setTimeout.bind(window);
+  window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+    if (delay === 400) fixture.graceTimers++;
+    return timeout(handler, delay, ...args);
+  }) as typeof window.setTimeout;
+}
 window.__ZEROS_NATIVE__ = { on: () => () => {}, async invoke<T>(): Promise<T> { return null as T; } } as never;
 
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
@@ -78,8 +98,10 @@ setActiveBridge({
         fixture.rowAtFirstRead = !!document.querySelector('[data-chat-pane="chat-empty"]')?.textContent
           ?.includes("Add chat transcripts");
       }
+      if (fixture.holdSummaries) await new Promise<void>(resolve => fixture.summaryReleases.push(resolve));
       if (fixture.summariesDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, fixture.summariesDelayMs));
       fixture.summaryAnswers += 1;
+      if (fixture.failSummaries) return { type: "WORKSPACE_ERROR", op: request.op, code: "CLOUD_V2_STOPPED", message: "Workspace stopped" };
       result = { summaries: fixture.rows.filter((row) => row.folder === request.params?.folder &&
         row.chatId !== request.params?.excludeChatId) };
     }
@@ -95,11 +117,35 @@ const { loadAgents } = await import("../features/agent/agents-cache");
 const { useWorkspaceStore } = await import("../state/workspace-store");
 const { Button, TooltipProvider } = await import("../shared/ui/primitives");
 
-const chats = ["chat-sender", "chat-empty"].map((id) => ({ id, folder, agentId: "codex", agentName: "Codex", title: "Untitled",
+if (cloud) {
+  const { installAccountPresentationIdentity } = await import("../state/account-presentation");
+  const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
+  const { acceptCloudWorkspaceDocument } = await import("../state/cloud-workspace-catalog");
+  installAccountPresentationIdentity({ sub: target.organizationId, email: "fixture@example.test", name: "Fixture", provider: "workos" });
+  const organization = { id: target.organizationId, slug: "fixture", name: "Example organization", logo: null,
+    isPersonal: false, role: "admin" as const, defaultTeamId: target.organizationId,
+    workspaceCapabilities: { local: true, cloud: true }, teamCapabilities: { multiple: false as const, canCreate: false as const } };
+  acceptOrganizationSnapshot({ user: { id: target.organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: null },
+    organizations: [organization], teams: [organization] });
+  acceptCloudWorkspaceDocument({ id: target.workspaceId, organizationId: target.organizationId, teamId: target.organizationId,
+    createdBy: target.organizationId, name: "Transcript fixture", placement: "cloud", status: "ready", version: 1, error: null, deletedAt: null,
+    createdAt: "2026-10-01T10:00:00Z", updatedAt: "2026-10-01T10:00:00Z",
+    capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+    repository: { forge: "github.com", owner: "example", name: "project", revision: "refs/heads/main" },
+    generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
+      observedState: "running", lastObservedAt: null },
+  });
+}
+
+const names = cloud ? ["chat-sender", "chat-empty", "chat-empty-b"] : ["chat-sender", "chat-empty"];
+const chats = names.map((id) => ({ id: chatId(id), folder, agentId: "codex", agentName: "Codex", title: "Untitled",
   model: "gpt-6.1-sol", effort: "high" as const, permissionMode: "auto" as const, createdAt: 1, updatedAt: 1 }));
-useWorkspaceStore.setState({ chats, activeChatId: "chat-empty", activePage: "workspace" });
+useWorkspaceStore.setState({ chats, activeChatId: chatId("chat-empty"), activePage: "workspace" });
 for (const chat of chats) useSessionsStore.getState().setSession(chat.id, { ...BLANK, agentId: "codex", agentName: "Codex",
   cwd: folder, status: "ready", transcriptState: "resident" });
+if (cloud && params.has("resident")) useSessionsStore.getState().patchSession(chatId("chat-sender"), {
+  messages: [{ id: "first-prompt", kind: "text", role: "user", text: "Research the cloud workspace", createdAt: 1 }],
+});
 
 const actions = {
   getSession: (chatId: string) => useSessionsStore.getState().sessions[chatId],
@@ -112,6 +158,7 @@ const actions = {
   holdQueue: () => {}, releaseQueue: () => {},
 } satisfies Partial<SessionsActions>;
 await loadAgents(actions.listAgents);
+if (cloud) await (await import("../features/agent/workspace-agent-registry")).warmCloudAgentRegistry(folder);
 
 function Chat({ id, active }: { id: string; active: boolean }) {
   const session = useChatSession(id);
@@ -124,14 +171,14 @@ function Harness() {
     <TooltipProvider delayDuration={100}>
       <main className="bg-bg1 text-fg1 flex h-screen flex-col">
         <nav className="flex gap-2 p-4">
-          {["Sender", "Empty"].map((label, index) => <Button key={label} onClick={() => {
+          {(cloud ? ["Sender", "Empty A", "Empty B"] : ["Sender", "Empty"]).map((label, index) => <Button key={label} onClick={() => {
             useWorkspaceStore.setState({ activeChatId: chats[index].id });
             setSelected(index);
           }}>{label}</Button>)}
           <Button onClick={() => setMount((value) => value + 1)}>Remount chat</Button>
         </nav>
         <div className="flex min-h-0 w-full max-w-3xl flex-1 flex-col">
-          {chats.map((chat, index) => <div key={chat.id} data-chat-pane={chat.id}
+          {chats.map((chat, index) => <div key={chat.id} data-chat-pane={names[index]}
             className={selected === index ? "flex min-h-0 flex-1 flex-col" : "hidden"}
             {...(selected === index ? {} : { inert: "" })}>
             <Chat key={mount} id={chat.id} active={selected === index} />
@@ -142,8 +189,9 @@ function Harness() {
   </ActionsCtx.Provider>;
 }
 new MutationObserver((_, observer) => {
-  if (!document.querySelector('[data-chat-pane="chat-empty"]')?.textContent?.includes("Created")) return;
+  if (![...document.querySelectorAll('[data-chat-pane^="chat-empty"]')].some(pane => pane.textContent?.includes("Created"))) return;
+  fixture.createdCommits++;
   fixture.workspaceRowsAt = performance.now();
-  observer.disconnect();
+  if (!cloud) observer.disconnect();
 }).observe(document.body, { childList: true, subtree: true, characterData: true });
 createRoot(document.getElementById("root")!).render(<Harness />);

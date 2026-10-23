@@ -16,6 +16,7 @@ import { completeCloudChatCacheRestore, loadCloudChatCache, pruneCloudChatCache,
 import { pruneOrganizationDestinations } from "./organization-destination-cache";
 import { folderIsWithinRoot } from "./workspace-resolution";
 import { cloudTranscriptCache } from "./local-transcript-cache";
+import { retireCloudTranscriptSummaries, retainCloudTranscriptSummaries } from "../features/agent/chat-transcript-summaries-cache";
 
 let offCatalog: (() => void) | undefined;
 
@@ -25,6 +26,7 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
   const owner = user && CONTROL_PLANE_URL ? accountPresentationOwner(CONTROL_PLANE_URL, user.accountId ?? user.sub) : null;
   const { changed, retire } = bindAccountPresentationOwner(owner);
   if (!changed) return;
+  retireCloudTranscriptSummaries();
   cloudTranscriptCache.bindOwner(owner, retire);
   offCatalog?.();
   offCatalog = undefined;
@@ -78,6 +80,8 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
     pruneCloudChatCache(change.removedWorkspaceIds);
     if (change.removedWorkspaceIds.length) cloudTranscriptCache.retain((_chatId, folder) =>
       !change.removedWorkspaceIds.includes(folder));
+    if (change.removedWorkspaceIds.length) retainCloudTranscriptSummaries(() => false,
+      folder => change.removedWorkspaceIds.includes(folder), true);
     if (change.removedWorkspaceIds.length) pruneOrganizationDestinations(destination =>
       change.removedWorkspaceIds.some(folder => folderIsWithinRoot(destination.folder, folder)));
   });

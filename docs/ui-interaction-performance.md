@@ -224,7 +224,7 @@ must revalidate it after each await; a newer inline prompt takes precedence.
 
 An empty chat's provenance block (workspace rows, or "Add chat transcripts"
 when another chat in the folder has a prompt) never waits blank on the
-transcript list. Local folders share one list per folder: every empty chat
+transcript list. Both placements share one list per folder: every empty chat
 reads the same snapshot and drops itself locally, so a new or returning tab
 paints a list another tab already confirmed, and only the visible empty chat
 reads. The last list per folder is persisted (24 folders, 32 rows, 120-character
@@ -233,8 +233,21 @@ engine once. A prompt sent from this renderer appears as a pending row at once
 and yields when the engine reports that many prompts or later activity for the
 chat; an unconfirmed row expires after two minutes. With nothing known, the
 workspace rows stand in after a 400 ms grace and the transcript row replaces
-them when the list lands. Cloud folders keep their exact (folder, excluded
-chat) read.
+them when the list lands. Cloud lists additionally belong to the exact
+account/backend lifetime and use the account presentation envelope with the
+same 24-folder, 32-row, 120-character bounds. Sign-out or account/backend
+replacement purges them; confirmed chat/workspace deletion prunes them and
+fences pending reads and disk writes. Same-folder resident or cached user
+prompts seed pills synchronously; an Untitled tab or a title alone is not
+evidence of history. Private cloud prompt commits publish the pending overlay
+before HTTPS acceptance. Known nonempty cloud pills render on the first frame,
+without a grace timer or a dependency on workspace details. Errors retain the
+confirmed list; only confirmed empty or nothing known after grace shows
+workspace rows. Cloud pending overlays have their own 24-folder / 32-row limit
+and retain at most 128 prompt identities per row; Local retention is unchanged.
+Hidden tabs start no reads/timers, including queued invalidation reads after
+the last visible consumer leaves, and passive reads never wake
+a VM.
 
 Sending immediately after Stop may race the cancelled command's durable
 retirement. Resume can retry only when the entire revision advance is accounted
