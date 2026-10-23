@@ -1,6 +1,7 @@
 import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
 import { expect } from "@playwright/test";
 import { runTooltipSmoke } from "./ui-smoke-tooltips.mjs";
+import { runOverlayDismissalSmoke } from "./ui-smoke-overlay-dismissal.mjs";
 
 export async function runOverlayPositioningSmoke({ page, check, harnessBase }) {
   await page.goto(`${harnessBase}/harness-overlay-positioning.html`, {
@@ -248,6 +249,7 @@ export async function runOverlayPositioningSmoke({ page, check, harnessBase }) {
       await expect(page.getByTestId("result")).toHaveText("copy:file-01.ts");
     },
   );
+  failures.push(...await runOverlayDismissalSmoke({ page, check, harnessBase }));
   await runDesignContextMenuPositioningSmoke({ page, check, harnessBase });
   await runTooltipSmoke({ page, check, harnessBase });
   page.off("pageerror", onError);

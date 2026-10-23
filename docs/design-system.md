@@ -240,8 +240,11 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
   it and so paints above it. `z-0`…`z-2` are free inside one component.
   Overlays use the shared primitives; never fix stacking with a big number.
 - **Motion** animate only color, background, border, opacity, shadow, and
-  transform: `transition-colors duration-120 ease-out` for hovers; overlays use
-  their primitive's enter/exit animation. Respect reduced motion.
+  transform: `transition-colors duration-120 ease-out` for hovers. Anchored menus,
+  pickers, popovers, tooltips and hover cards use the shared entry motion and
+  disappear immediately on close: their anchor can hide or unmount in that same
+  commit. Dialogs and sheets retain their own viewport-based motion. Respect
+  reduced motion.
 
 ## 7. Controls, radius, spacing
 

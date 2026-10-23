@@ -142,20 +142,18 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await page
     .getByRole("button", { name: "More actions for 0colors", exact: true })
     .click();
-  // A pointer can leave the selected item after the new picker takes focus,
-  // while Radix still retains the closing menu for its exit animation.
+  // The source picker must take focus after the old anchored menu retires.
+  // A late pointer-out from its former item must not reclaim that focus.
   await page.evaluate(() => {
     const item = [...document.querySelectorAll('[role="menuitem"]')].find(
       (element) => element.textContent === "Create from…",
     );
     const menu = item.closest('[data-radix-menu-content]');
-    // Hold the exit phase until the event is delivered, even on a slow host.
-    menu.style.animationPlayState = "paused";
-    window.__sidebarSourceLeaveSent = false;
+    window.__sidebarSourceMenuRetired = null;
     const leaveAfterFocus = (event) => {
       if (event.target.getAttribute?.("aria-label") !== "Search sources") return;
       document.removeEventListener("focusin", leaveAfterFocus, true);
-      if (!item?.isConnected) return;
+      window.__sidebarSourceMenuRetired = !menu.isConnected;
       item.dispatchEvent(
         new PointerEvent("pointerout", {
           bubbles: true,
@@ -163,8 +161,6 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
           relatedTarget: event.target,
         }),
       );
-      menu.style.animationPlayState = "";
-      window.__sidebarSourceLeaveSent = true;
     };
     document.addEventListener("focusin", leaveAfterFocus, true);
   });
@@ -174,14 +170,20 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   ).toContainText("0colors");
   const source = page.getByRole("dialog", { name: "Create from source" });
   await expect
-    .poll(() => page.evaluate(() => window.__sidebarSourceLeaveSent))
+    .poll(() => page.evaluate(() => window.__sidebarSourceMenuRetired))
     .toBe(true);
   await expect(source).toBeVisible();
   await expect(
     source.getByRole("searchbox", { name: "Search sources" }),
   ).toBeFocused();
-  await page.waitForTimeout(400);
+  await source.evaluate((node) =>
+    Promise.all(node.getAnimations().map((animation) => animation.finished)),
+  );
   await expect(source).toBeVisible();
+  await expect(
+    source.getByRole("searchbox", { name: "Search sources" }),
+  ).toBeFocused();
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(source).toHaveCount(0);
   check(

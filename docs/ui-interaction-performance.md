@@ -607,6 +607,19 @@ sizes must take the minimum of their preferred size and the primitive's availabl
 size. Submenus portal out of the parent menu's scroll container. Select preserves
 its layout-column boundary and dismisses on window resize.
 
+Anchored popups disappear on close through `ANCHORED_OVERLAY_MOTION`; only entry
+animates, and reduced motion disables it. Do not retain an exit animation after
+a trigger or owner can hide, unmount or change: the live positioner can measure
+that retired anchor at the viewport origin. Closed content must neither paint
+nor intercept input, including nested portals and rapid reopen attempts.
+
+Focus can enter a popup before Radix installs its document Escape listener.
+The shared `useOverlayEscape` content fallback handles that first key after
+descendant/consumer handlers, respects cancellation, and leaves child portals
+to their own handlers. Do not call an Escape guard twice for the same native
+event. Controlled closure must also release the root's native-surface overlay
+intent even when Radix did not call `onOpenChange`.
+
 External surfaces such as the file tree retain ownership of selection and
 dismissal, but supply the shared context menu with a live row anchor. Mark a
 portaled file menu with `data-file-tree-context-menu-root="true"` so the tree
@@ -616,7 +629,10 @@ tests when its workspace or active state changes.
 
 `scripts/ui-smoke-overlay-positioning.mjs`, included in `pnpm test:ui-smoke`,
 exercises pane movement, window resizing, constrained menu scrolling, submenus,
-keyboard focus, retained file-tree owners and canvas anchors in Chromium.
+keyboard focus, retained file-tree owners and canvas anchors in Chromium. Its
+dismissal suite samples DOM commits and animation frames, covers the real model
+and repository menus, and checks owner switching, rapid reopen, first-focus
+Escape, native overlay intent cleanup and reduced motion.
 
 ## Zeros implementation map
 

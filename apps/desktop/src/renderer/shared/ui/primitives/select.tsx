@@ -5,6 +5,7 @@ import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 import { Select as SelectPrimitive } from "radix-ui"
 
 import { cn } from "@/renderer/shared/ui/cn"
+import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion"
 import {
   MENU_ITEM_RADIUS,
   MENU_SEPARATOR,
@@ -24,6 +25,8 @@ interface SelectAnchorContextValue {
 }
 const SelectAnchorContext =
   React.createContext<SelectAnchorContextValue | null>(null)
+const useClientLayoutEffect =
+  typeof window === "undefined" ? React.useEffect : React.useLayoutEffect
 
 function Select({
   onOpenChange,
@@ -40,6 +43,11 @@ function Select({
   const [openState, setOpenState] = React.useState(defaultOpen ?? false)
   const open = openProp ?? openState
   const anchor = React.useMemo(() => ({ triggerRef, open }), [open])
+  // Navigation/owner changes can close a controlled Select without Radix's
+  // callback. Release its token so the next popup can announce native parking.
+  useClientLayoutEffect(() => {
+    publishOverlay(open)
+  }, [open, publishOverlay])
   return (
     <SelectAnchorContext.Provider value={anchor}>
       <SelectPrimitive.Root
@@ -199,7 +207,8 @@ function SelectContent({
           onCloseAutoFocus?.(event)
         }}
         className={cn(
-          "relative z-dropdown max-h-(--radix-select-content-available-height) max-w-(--radix-select-content-available-width) min-w-[min(8rem,var(--radix-select-content-available-width))] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto overscroll-contain border border-border2 bg-bg3 text-fg1 shadow-[var(--shadow-dropdown)] data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
+          ANCHORED_OVERLAY_MOTION,
+          "relative z-dropdown max-h-(--radix-select-content-available-height) max-w-(--radix-select-content-available-width) min-w-[min(8rem,var(--radix-select-content-available-width))] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto overscroll-contain border border-border2 bg-bg3 text-fg1 shadow-[var(--shadow-dropdown)]",
           MENU_SURFACE_RADIUS,
           position === "popper" &&
             "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
