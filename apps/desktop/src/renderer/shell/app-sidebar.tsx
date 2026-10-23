@@ -104,7 +104,6 @@ import { ZerosSpinner } from "../shared/ui/loading";
 import { Button } from "../shared/ui/primitives/button";
 import { StatusIcon } from "../shared/ui/primitives/status-icon";
 import { toast } from "../shared/ui/primitives/elements";
-import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { branchDisplayName } from "../shared/lib/branch-name";
 import { useAddProject } from "./add-project-provider";
 import { prepareChatView } from "./conversation/chat-intent";

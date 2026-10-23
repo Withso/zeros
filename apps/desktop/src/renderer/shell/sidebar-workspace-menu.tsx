@@ -235,7 +235,7 @@ export function SidebarWorkspaceMenu({
                       )
                     }
                   >
-                    <span className="min-w-0" title={project.repoRoot}>
+                    <span className="min-w-0">
                       <span className="block truncate">{label}</span>
                       {repositories.some(
                         (other) =>

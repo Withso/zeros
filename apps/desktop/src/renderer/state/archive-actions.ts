@@ -71,7 +71,6 @@ import {
 } from "./store";
 import {
   findProjectForFolder,
-  findWorkspaceForFolder,
   folderIsOwnedByProject,
   folderIsWithinRoot,
 } from "./workspace-resolution";
