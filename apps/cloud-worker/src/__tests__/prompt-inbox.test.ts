@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { CloudWorker } from "../worker";
-import { SessionStore } from "../sessions/session-store";
+import { SessionStore, type SessionData } from "../sessions/session-store";
 import { CLIENT_A, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
 
 const directories: string[] = [], workers: CloudWorker[] = [];
@@ -235,11 +235,50 @@ it("settles a cold-start failure without a dispatch permit and saves a safe fail
   relay.enqueue({ prompts: [delivery()], stops: [] });
   await until(() => relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(true);
   expect(relay.calls.some(call => call.op === "begin")).toBe(false);
+  await until(async () => (await persisted(f.directory))[0].rows.some((row: { kind: string }) => row.kind === "error_notice")).toBe(true);
   const disk = (await persisted(f.directory))[0];
   expect(disk.inbox[0].state).toBe("failed");
   expect(disk.rows.some((row: { payload: string }) => JSON.parse(row.payload).kind === "error_notice")).toBe(true);
   expect(JSON.stringify(disk)).not.toContain("private diagnostic");
   expect(driver.prompts).toHaveLength(0);
+});
+
+it.each(["open", "prompt"] as const)("keeps a failed %s outcome unreported until its notice is durable", async stage => {
+  const relay = new PullRelay(), driver = new FakeDriver(), item = delivery(), write = defer();
+  const storage = SessionStore.prototype as unknown as { save(data: SessionData): Promise<void> };
+  const save = storage.save;
+  let savingNotice = false, reported: SessionData | undefined;
+  vi.spyOn(storage, "save").mockImplementation(async function(this: typeof storage, data) {
+    if (data.rows.some(row => row.kind === "error_notice")) { savingNotice = true; await write.promise; }
+    await save.call(this, data);
+  });
+  if (stage === "open") driver.open = async () => { throw new Error("private diagnostic must not appear"); };
+  const f = await setup({ relay, driver });
+  relay.onOutcome = async body => {
+    if (body.state === "failed") reported = (await persisted(f.directory))[0];
+    return { state: body.state };
+  };
+  try {
+    relay.enqueue({ prompts: [item], stops: [] });
+    if (stage === "prompt") { await until(() => driver.prompts.length).toBe(1); driver.fail(); }
+    await until(() => savingNotice).toBe(true);
+    const pulls = relay.calls.filter(call => call.op === "pull").length;
+    await relay.receive({ t: "prompts" });
+    // Join the reporting loop while the actual notice write is held. An
+    // unrelated hint must not let the failed receipt overtake that write.
+    await until(() => relay.calls.some(call => call.op === "outcome" && call.body.state === "failed") ||
+      relay.calls.filter(call => call.op === "pull").length > pulls).toBe(true);
+    expect(relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(false);
+    expect((await persisted(f.directory))[0].inbox[0].state).toBe(stage === "open" ? "queued" : "running");
+    write.resolve();
+    await until(() => reported).toBeDefined();
+    expect(reported!.inbox[0]).toMatchObject({ userMessageId: item.receipt.userMessageId, state: "failed" });
+    expect(reported!.rows.map(row => JSON.parse(row.payload))).toMatchObject([
+      { id: item.receipt.userMessageId, kind: "text", role: "user" },
+      { kind: "error_notice", turnFailure: { turnId: item.receipt.userMessageId } },
+    ]);
+    expect(JSON.stringify(reported)).not.toContain("private diagnostic");
+  } finally { write.resolve(); }
 });
 
 it("keeps the provider's actionable failure instead of replacing it with a generic inbox notice", async () => {
