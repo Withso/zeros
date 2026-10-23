@@ -10,6 +10,8 @@ import { WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./worksp
 import { CodexModelAvailability, type ModelDiscoveryOptions } from "./credentials/model-availability";
 import { preparePromptFiles } from "./prompt-files";
 import type { DriverMcpServers } from "./mcp/gateway";
+import { TurnService } from "./workspace/turns";
+import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -27,6 +29,7 @@ interface Runtime {
   turnTiming?: TimingSpan;
   turnFailureNotice?: boolean;
   outboxSteering?: Promise<void>;
+  checkpointTurnId?: string;
 }
 
 const VERSIONS = { codex: "0.162.1", claude: "0.3.296", cursor: "1.0.37" };
@@ -43,6 +46,7 @@ const publicError = (error: unknown): string => error instanceof WorkspaceError 
 /** Executions are worker-owned routes; provider resume ids never select a
  * live process. Client disconnects do not change a conversation's lifetime. */
 export class Agents {
+  readonly turns: TurnService;
   private readonly routes = new Map<string, Runtime>();
   private readonly chats = new Map<string, Runtime>();
   private config: WorkerConfig;
@@ -60,7 +64,7 @@ export class Agents {
     private readonly onTiming?: TimingObserver,
     modelDiscovery?: ModelDiscoveryOptions,
     private readonly mcpProviders?: () => Promise<DriverMcpServers>,
-  ) { this.config = config; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); }
+  ) { this.config = config; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
 
   configure(config: WorkerConfig): void { this.config = config; this.models.configure(config); }
   private initialized(agentId: CloudV2Agent): InitializeResponse {
@@ -359,12 +363,15 @@ export class Agents {
           void this.store.acceptOutbox(route.chatId, active.requestId).catch(() => this.stop(route));
         }
         const notification = { ...event, sessionId: route.id };
+        const hadBackground = this.hasBackground(route);
         if (active && notification.update.sessionUpdate === "error_notice" && !notification.update.parentToolId &&
             !notification.update.recoverable && notification.update.severity === "error" &&
             (!notification.update.turnFailure || notification.update.turnFailure.turnId === active.userMessageId)) route.turnFailureNotice = true;
         if (notification.update.sessionUpdate === "background_tasks_update") {
           route.background = notification.update; this.activity();
         }
+        const backgroundTurnId = hadBackground && notification.update.sessionUpdate === "background_tasks_update" &&
+          !this.hasBackground(route) && !route.nativeRunning ? route.checkpointTurnId : undefined;
         route.events = route.events.then(async () => {
           // A replacement must not inherit queued events from the old agent.
           // Stop of this same execution still saves everything already received.
@@ -377,6 +384,10 @@ export class Agents {
           }
           await this.store.fold(route.chatId, notification);
           await this.update(route, notification);
+          if (backgroundTurnId) {
+            const prompt = await this.turns.finish(route.chatId, backgroundTurnId);
+            await this.publishRecordedTurn(route, prompt);
+          }
         }).catch(async () => { if (!route.closed) await this.stop(route); });
         if (!this.hasBackground(route) && !route.active) this.pump(route);
       });
@@ -434,6 +445,8 @@ export class Agents {
     if (route.pumping || route.closed || route.outboxSteering || this.hasBackground(route)) return;
     route.pumping = (async () => {
       while (!route.closed && !route.cancelling && !this.hasBackground(route)) {
+        await route.events;
+        if (route.closed || route.cancelling || this.hasBackground(route)) break;
         const stopping = route.stopping;
         let entry = await this.store.claim(route.chatId);
         if (!entry) break;
@@ -472,7 +485,13 @@ export class Agents {
               await this.update(route, { sessionId: route.id, update: { sessionUpdate: "provider_binding_update", providerBinding: this.store.metadata(route.chatId)!.chat!.providerBinding! } });
             }
             if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
-            else if (!response) { route.nativeRunning = true; response = await route.driver!.prompt(content); }
+            else if (!response) {
+              await this.turns.begin(route.chatId, entry, route.agentId);
+              route.checkpointTurnId = entry.userMessageId;
+              // Stop can arrive while the pre-turn snapshot is being captured.
+              if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
+              else { route.nativeRunning = true; response = await route.driver!.prompt(content); }
+            }
           }
         } catch (failure) { error = publicError(failure); }
         finally { route.nativeRunning = false; }
@@ -486,6 +505,11 @@ export class Agents {
             : undefined;
           await this.store.finish(route.chatId, entry.requestId, response ? { ...response, userMessageId: entry.userMessageId } : undefined, error, notice);
           const receipt = this.store.receipt(route.chatId, entry.requestId)!;
+          const recordedPrompt = await this.turns.finish(route.chatId, entry.userMessageId, {
+            status: receipt.state === "cancelled" ? "cancelled" : receipt.state === "failed" ? "failed" : "completed",
+            stopReason: receipt.response?.stopReason ?? null,
+          });
+          await this.publishRecordedTurn(route, recordedPrompt);
           if (notice && receipt.error) await this.update(route, notice);
           route.turnTiming?.mark("turn_done"); route.turnTiming = undefined;
           await this.turnState(route, entry, receipt.state === "cancelled" ? "cancelled" : receipt.state === "failed" ? "failed" : "completed", receipt.response?.stopReason);
@@ -594,6 +618,13 @@ export class Agents {
   private hasBackground(route: Runtime): boolean { return !!route.background && (route.background.tasks.length > 0 || (!!route.background.activity && route.background.activity.state !== "idle")); }
   private update(route: Runtime, notification: SessionNotification): Promise<void> {
     return this.broadcast(createMessage({ type: "AGENT_SESSION_UPDATE", source: "engine", agentId: route.agentId, executionId: route.id, chatId: route.chatId, notification }));
+  }
+  private async publishRecordedTurn(route: Runtime, prompt: AgentTextMessage | undefined): Promise<void> {
+    if (!prompt) return;
+    await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: prompt } });
+    // The file watcher can fire before this record is ready. Every device,
+    // including one without the chat open, needs the completed history now.
+    await this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["workspaces"], workspaceIds: [this.scope.workspace.id] }));
   }
   private turnState(route: Runtime, entry: InboxEntry, state: "running" | "completed" | "failed" | "cancelled", stopReason?: PromptResponse["stopReason"]): Promise<void> {
     return this.update(route, { sessionId: route.id, update: { sessionUpdate: "turn_state", turnId: entry.userMessageId, state, startedAt: entry.startedAt, ...(stopReason ? { stopReason } : {}) } });

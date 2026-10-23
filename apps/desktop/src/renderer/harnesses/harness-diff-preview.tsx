@@ -15,7 +15,7 @@ async function main() {
   const { TooltipProvider } = await import("../shared/ui/primitives/tooltip");
   const { EditCard } = await import("../features/agent/renderers/tool-edit");
   const { EventRow } = await import("../features/agent/renderers/event-row");
-  const { TurnFilePill } = await import("../features/agent/turn-footer");
+  const { TurnFileRow } = await import("../features/agent/turn-footer");
   const { CodeEditor } = await import("../shell/workbench/tabs/code-editor");
   const { MarkdownPreview } =
     await import("../shell/workbench/tabs/file-viewer");
@@ -372,7 +372,7 @@ async function main() {
             <EventRow message={{ ...read, id: "image-read", toolCallId: "image-read", rawInput: { file_path: "art/logo.svg" } }} ctx={ctx} detail={<div>Image read</div>} />
           </div>
           <div data-testid="footer-host" className="flex">
-            <TurnFilePill
+            <TurnFileRow
               file={{
                 path: footerPath,
                 status: "modified",

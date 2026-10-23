@@ -36,6 +36,8 @@
     "./schemas": "./src/schemas.ts",
     "./github-auth": "./src/github-auth.ts",
     "./github-review": "./src/github-review.ts",
+    "./turns": "./src/turns.ts",
+    "./turn-attribution": "./src/turn-attribution.ts",
     "./changes-history": "./src/changes-history.ts",
     "./code-review": "./src/code-review.ts",
     "./git-review-actions": "./src/git-review-actions.ts",

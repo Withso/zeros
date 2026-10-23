@@ -3,13 +3,14 @@
 import { coerceChat } from "../sessions/chat-history";
 import type { SessionStore } from "../sessions/session-store";
 import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./scope";
+import { TurnService } from "./turns";
 
 export const UNSUPPORTED_CHAT_OPS = [
-  "messages.clear", "messages.truncateFrom", "turns.list", "turns.get", "turns.diff", "turns.reset", "turns.undoReset", "messages.search",
+  "messages.clear", "messages.truncateFrom", "turns.reset", "turns.undoReset", "messages.search",
 ] as const;
 
 export class ChatService {
-  constructor(private readonly store: SessionStore, private readonly scope: WorkspaceScope, private readonly closeChat: (chatId: string) => Promise<void>) {}
+  constructor(private readonly store: SessionStore, private readonly scope: WorkspaceScope, private readonly closeChat: (chatId: string) => Promise<void>, private readonly turns = new TurnService(store, scope)) {}
 
   async handle(op: string, params: Record<string, unknown>): Promise<unknown> {
     this.scope.assertId(params.workspaceId);
@@ -17,6 +18,7 @@ export class ChatService {
     const number = (key: string): number | undefined => typeof params[key] === "number" && Number.isFinite(params[key]) ? params[key] : undefined;
     const chatId = () => reqString(params, "chatId");
     switch (op) {
+      case "turns.get": case "turns.list": case "turns.diff": return this.turns.handle(op, params);
       case "chats.list": return this.store.list();
       case "chats.titleSeeds": return { seeds: this.store.titleSeeds(Array.isArray(params.chatIds) ? params.chatIds.filter((id): id is string => typeof id === "string") : []) };
       case "chats.summariesForFolder": return { summaries: this.store.summariesForFolder(this.scope.folder(reqString(params, "folder")), typeof params.excludeChatId === "string" ? params.excludeChatId : undefined) };
@@ -38,6 +40,7 @@ export class ChatService {
         const id = reqString(params, "id");
         await this.closeChat(id);
         await this.store.delete(id);
+        await this.turns.deleteChatSnapshots(id).catch(() => {});
         return { ok: true };
       }
       case "messages.window": return this.store.window(chatId(), number("limit"), number("before"));

@@ -23,6 +23,7 @@ import {
 
 import type { ChangedFile } from "./changes-parse";
 import type { Scope } from "./changes-scope";
+import { rememberChangeLines } from "../../workspace-change-line-cache";
 
 export type ChangesSectionKind = "changes" | "committed";
 
@@ -505,8 +506,25 @@ export function writeChangesSections(
   scope: Scope,
   sections: CachedChangesSection[],
   baseBranch?: string,
+  observation?: number,
 ): void {
   const key = changesSnapshotKey(workspaceId, scope, baseBranch);
+  if (scope.kind === "all") {
+    let additions = 0;
+    let deletions = 0;
+    for (const section of sections) {
+      for (const file of section.files) {
+        additions += file.additions;
+        deletions += file.deletions;
+      }
+    }
+    rememberChangeLines(
+      workspaceId,
+      { additions, deletions },
+      baseBranch,
+      observation,
+    );
+  }
   if (sectionCache.get(key) === sections) return;
   writeBounded(sectionCache, key, sections, MAX_SECTION_KEYS);
   persistChangesSections(workspaceId, scope, sections, baseBranch);

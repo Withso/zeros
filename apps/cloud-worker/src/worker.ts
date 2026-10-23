@@ -208,6 +208,7 @@ export class CloudWorker {
       // bridge rows must round-trip through the renderer's existing mapper.
       for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
       this.workspace = await WorkspaceService.open(scope, this.options.directory, {
+        historyDiff: params => this.agents!.turns.historyDiff(params),
         run: commandRunner(scope.root, this.gitEnvironment), ...this.options.workspaceServices, publish: (frame) => { void this.broadcast(frame); },
       });
       this.scope = scope; this.store = store;
@@ -219,11 +220,12 @@ export class CloudWorker {
       }, config,
         (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, () => this.mcp!.providers());
       this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
-      this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId));
+      this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId), this.agents.turns);
       this.history = new HistoryMirror(store, this.options.transport);
       this.unsubscribers.push(store.onChange((change) => {
         if (!change.chat && !change.deleted && !change.rows.length) return;
-        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length ? ["messages"] : [])],
+        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length ? ["messages"] : []), ...(change.deleted ? ["workspaces"] : [])],
+          ...(change.deleted ? { workspaceIds: [scope.workspace.id] } : {}),
           ...(change.rows.length ? { chatIds: [change.chatId] } : {}) }));
       }), store.onError((chatId) => {
         this.options.onError?.("storage"); void this.agents!.closeChat(chatId).catch(() => {});

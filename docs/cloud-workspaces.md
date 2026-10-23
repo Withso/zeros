@@ -141,6 +141,28 @@ It mirrors chat metadata, deletions and message rows to the control plane.
 The app can read that history while the VM sleeps. This history mirror is
 separate from repository files; there is no Mac checkout synchronization.
 
+For new Git-backed turns, the worker captures pre/post trees through a scratch
+index and hidden `refs/zeros/turns/` refs. It intersects the native tool paths
+with that disk comparison, so denied edits, unchanged files and unrelated
+paths do not become turn changes. Claude, Codex and Cursor use the same path
+attribution as Local, through the shared protocol package; the worker still
+does not import the Local engine. Staging and the checked-out branch stay intact.
+Background completion serializes with the first terminal capture, and saved
+comparisons and chat deletion refresh connected Changes views. Deleting a chat releases
+its snapshot refs; oversized aggregate patches return file metadata so Review
+can still list and select individual files.
+Turn records and snapshot IDs stay on the VM. An optional `turnSummary` on the
+opening user message mirrors the file counts and timing without native paths
+or snapshot IDs. Imports cannot replace that worker-owned summary.
+
+The footer renders the mirrored summary without connecting to the worker.
+Explicit Review opens Changes with that exact turn range; file clicks read
+the recorded diff through `turns.diff`. Cloud hover/focus does not prefetch a
+diff or wake the VM. These reads require a worker runtime containing turn
+recording, installed on create or wake; older turns without snapshots do not
+gain a reconstructed comparison. Older workers may still refuse `turns.list`,
+which the renderer treats as unavailable history. Reset/undo remain Local-only.
+
 The lifecycle loop stops a running VM after ten minutes without activity
 reports. Turns and recent terminal input/output keep reports flowing; an
 untouched shell eventually becomes idle. Passive history reads do not wake

@@ -467,6 +467,9 @@ describe("worker bridge routing through a fake relay", () => {
     expect(batches.every((batch) => batch.length <= CLOUD_V2_MAX_HISTORY_ROWS)).toBe(true);
     expect(new Set(batches.flat().map((row) => row.msgId)).size).toBe(1001);
     await op("chats.delete", { id: "chat" });
+    expect(relay.bridge("DB_CHANGED").at(-1)?.frame).toMatchObject({
+      kinds: expect.arrayContaining(["workspaces"]), workspaceIds: [WORKSPACE_ID],
+    });
     expect(await op("chats.list")).toMatchObject({ result: { chats: [{ id: "other" }], chatDeletions: ["chat"] } });
     expect(await op("chats.upsert", { chat: { id: "chat", folder: WORKSPACE_KEY } })).toMatchObject({ type: "WORKSPACE_ERROR" });
     expect(relay.frames.some((frame) => frame.t === "history" && frame.chatDeletions?.includes("chat"))).toBe(true);
@@ -483,7 +486,7 @@ describe("worker bridge routing through a fake relay", () => {
   it("exposes the deferred chat operations as explicit unsupported errors", async () => {
     const { op } = await setup();
     expect(UNSUPPORTED_CHAT_OPS).toEqual([
-      "messages.clear", "messages.truncateFrom", "turns.list", "turns.get", "turns.diff", "turns.reset", "turns.undoReset", "messages.search",
+      "messages.clear", "messages.truncateFrom", "turns.reset", "turns.undoReset", "messages.search",
     ]);
     for (const name of UNSUPPORTED_CHAT_OPS) expect(await op(name)).toMatchObject({ type: "WORKSPACE_ERROR", code: "CLOUD_V2_UNSUPPORTED", op: name });
   });

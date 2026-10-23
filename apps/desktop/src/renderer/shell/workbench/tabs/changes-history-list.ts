@@ -1,7 +1,6 @@
 import { gitLog, type Commit } from "@/renderer/platform/git";
 import { turnsList, type TurnInfo } from "@/renderer/platform/turns";
 import type { TurnHistoryCursor } from "@zeros/protocol/changes-history";
-import { isCloudWorkspace, parseCloudScopedId } from "@/renderer/platform/bridge/cloud-workspace-key";
 
 const PAGE_SIZE = 500;
 
@@ -29,11 +28,8 @@ export async function loadChangesCommits(
 
 export async function loadChangesTurns(
   workspaceId: string,
-  folder?: string,
+  _folder?: string,
 ): Promise<TurnInfo[]> {
-  // Turn checkpoints are Local-only for now; cloud v2 serves no turn records.
-  // A cloud workspace may arrive as its folder key or a scoped resource id.
-  if (isCloudWorkspace(workspaceId) || isCloudWorkspace(folder) || parseCloudScopedId(workspaceId)) return [];
   try {
     return await readChangesTurns(workspaceId);
   } catch (error) {
