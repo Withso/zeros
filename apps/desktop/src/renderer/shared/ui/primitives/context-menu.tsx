@@ -255,24 +255,33 @@ ContextMenuSubTrigger.displayName = ContextMenuPrimitive.SubTrigger.displayName;
 const ContextMenuSubContent = React.forwardRef<
   React.ComponentRef<typeof ContextMenuPrimitive.SubContent>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.SubContent>
->(({ className, ...props }, ref) => (
-  <ContextMenuPrimitive.Portal>
-    <ContextMenuPrimitive.SubContent
-      ref={ref}
-      collisionPadding={8}
-      updatePositionStrategy="always"
-      className={cn(
-        MENU_SURFACE_RADIUS,
-        ANCHORED_OVERLAY_MOTION,
-        "border-border2 bg-bg3 text-fg1 z-dropdown max-h-(--radix-popper-available-height) max-w-(--radix-popper-available-width) min-w-[min(8rem,var(--radix-popper-available-width))] overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
-        MENU_SURFACE_INSET,
-        className,
-      )}
-      {...props}
-      style={{ ...props.style, ...CONTEXT_MENU_VARIABLES }}
-    />
-  </ContextMenuPrimitive.Portal>
-));
+>(({ className, onEscapeKeyDown, onKeyDown, ...props }, ref) => {
+  const context = React.useContext(MenuAnchorContext);
+  const escapeHandlers = useOverlayEscape({
+    onEscapeKeyDown,
+    onKeyDown,
+    onDismiss: () => context?.setOpen(false),
+  });
+  return (
+    <ContextMenuPrimitive.Portal>
+      <ContextMenuPrimitive.SubContent
+        ref={ref}
+        collisionPadding={8}
+        updatePositionStrategy="always"
+        className={cn(
+          MENU_SURFACE_RADIUS,
+          ANCHORED_OVERLAY_MOTION,
+          "border-border2 bg-bg3 text-fg1 z-dropdown max-h-(--radix-popper-available-height) max-w-(--radix-popper-available-width) min-w-[min(8rem,var(--radix-popper-available-width))] overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
+          MENU_SURFACE_INSET,
+          className,
+        )}
+        {...props}
+        {...escapeHandlers}
+        style={{ ...props.style, ...CONTEXT_MENU_VARIABLES }}
+      />
+    </ContextMenuPrimitive.Portal>
+  );
+});
 ContextMenuSubContent.displayName = ContextMenuPrimitive.SubContent.displayName;
 
 const ContextMenuContent = React.forwardRef<

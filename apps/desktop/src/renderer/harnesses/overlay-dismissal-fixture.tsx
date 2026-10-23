@@ -59,7 +59,8 @@ export function OverlayDismissalFixture() {
     () => listenForNativeSurfaceOverlayIntent(setNativeOverlayActive),
     [],
   );
-  const escapeOnFirstFocus = query.has("escape-on-focus")
+  const escapeOnFirstFocus =
+    query.has("escape-on-focus") || query.has("escape-on-submenu-focus")
     ? (event: React.FocusEvent<HTMLElement>) => {
         if (escapedOnFocus.current) return;
         escapedOnFocus.current = true;
@@ -101,11 +102,21 @@ export function OverlayDismissalFixture() {
             <button data-testid="dismissal-trigger">{owner} actions</button>
           </Trigger>
         </span>
-        <Content data-testid="dismissal-content" onFocus={escapeOnFirstFocus}>
+        <Content
+          data-testid="dismissal-content"
+          onFocus={query.has("escape-on-focus") ? escapeOnFirstFocus : undefined}
+        >
           <Item onSelect={choose}>Choose option</Item>
           <Sub>
             <SubTrigger>Nested options</SubTrigger>
-            <SubContent data-testid="dismissal-submenu">
+            <SubContent
+              data-testid="dismissal-submenu"
+              onFocus={
+                query.has("escape-on-submenu-focus")
+                  ? escapeOnFirstFocus
+                  : undefined
+              }
+            >
               <Item onSelect={choose}>Choose nested option</Item>
             </SubContent>
           </Sub>
@@ -122,12 +133,19 @@ export function OverlayDismissalFixture() {
         </span>
         <PopoverContent
           data-testid="dismissal-content"
-          onFocus={escapeOnFirstFocus}
+          onFocus={query.has("escape-on-focus") ? escapeOnFirstFocus : undefined}
         >
           <button onClick={choose}>Choose option</button>
           <Popover>
             <PopoverTrigger>Nested options</PopoverTrigger>
-            <PopoverContent data-testid="dismissal-submenu">
+            <PopoverContent
+              data-testid="dismissal-submenu"
+              onFocus={
+                query.has("escape-on-submenu-focus")
+                  ? escapeOnFirstFocus
+                  : undefined
+              }
+            >
               <button onClick={choose}>Choose nested option</button>
             </PopoverContent>
           </Popover>

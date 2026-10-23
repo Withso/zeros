@@ -428,8 +428,75 @@ export async function runOverlayDismissalSmoke({ page, check, harnessBase }) {
     }
   }
   failures.push(
+    ...(await runModelCatalogFocusSmoke({ page, check, harnessBase })),
     ...(await runOverlayEarlyEscapeSmoke({ page, check, harnessBase })),
   );
+  return failures;
+}
+
+export async function runModelCatalogFocusSmoke({ page, check, harnessBase }) {
+  const failures = [];
+  for (const [owner, suffix] of [
+    ["Local", ""],
+    ["organization-local", "&owner=organization"],
+    ["organization-cloud", "&placement=cloud"],
+  ]) {
+    const name = `Model picker (${owner}): favoriting after editing keeps the catalog and search active`;
+    try {
+      await page.goto(
+        `${harnessBase}/harness-model-menu.html?defaults=claude${suffix}`,
+      );
+      const pill = page.getByRole("button", { name: /^Model:/ });
+      await expect(pill).toBeVisible();
+      const selectionLabel = pill.locator("[data-model-pill-label]");
+      const originalSelection = await selectionLabel.innerText();
+      await pill.click();
+      await page.getByTestId("selected-model-browser").hover();
+      const catalog = page.getByTestId("model-catalog-sidecar");
+      const row = (label) =>
+        catalog
+          .locator("[data-model-catalog-item]")
+          .filter({ has: page.getByText(label, { exact: true }) });
+      await row("GPT-5.6 Terra").hover();
+      await row("GPT-5.6 Terra")
+        .getByRole("button", { name: "Edit settings for GPT-5.6 Terra" })
+        .click();
+      const editor = page.getByTestId("model-configuration-popover");
+      await expect(editor).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(editor).toHaveCount(0);
+      await expect(
+        row("GPT-5.6 Terra").getByRole("button", {
+          name: "Edit settings for GPT-5.6 Terra",
+        }),
+      ).toBeFocused();
+      await row("Opus 5").hover();
+      await row("Opus 5")
+        .getByRole("button", { name: "Set Opus 5 as default" })
+        .click();
+      // Visible/count alone accepts a closed popup retained for exit motion.
+      await expect(catalog).toHaveAttribute("data-state", "open");
+      await expect(page.getByPlaceholder("Search models…")).toBeFocused();
+      await expect(
+        row("Opus 5").getByRole("button", { name: "Opus 5 is the default model" }),
+      ).toHaveAttribute("aria-pressed", "true");
+      await expect(selectionLabel).toHaveText(originalSelection);
+      // A pointer action on the same search field is still an outside click
+      // for the sidecar. Only the metadata action's focus handoff is retained.
+      await expectCleanDismissal(
+        page,
+        () => page.getByPlaceholder("Search models…").click(),
+        catalog,
+      );
+      await expect(page.getByPlaceholder("Search models…")).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(page.locator(popupSelector)).toHaveCount(0);
+      check(name, true);
+    } catch (error) {
+      failures.push(name);
+      check(name, false, String(error));
+    }
+  }
   return failures;
 }
 
@@ -445,6 +512,38 @@ export async function runOverlayEarlyEscapeSmoke({ page, check, harnessBase }) {
         .click({ button: kind === "context" ? "right" : "left" });
       await expect(page.getByTestId("focus-escapes")).toHaveText("1");
       await expect(page.getByTestId("dismissal-content")).toHaveCount(0);
+      await expect(page.getByTestId("native-overlay-active")).toHaveText(
+        "false",
+      );
+      check(name, true);
+    } catch (error) {
+      failures.push(name);
+      check(name, false, String(error));
+    }
+  }
+  for (const kind of ["dropdown", "context", "popover"]) {
+    const name = `Nested ${kind} honors Escape at its first focused frame`;
+    try {
+      await page.goto(`${fixture}&kind=${kind}&escape-on-submenu-focus`);
+      await page
+        .getByTestId("dismissal-trigger")
+        .click({ button: kind === "context" ? "right" : "left" });
+      await expect(page.getByTestId("dismissal-content")).toBeVisible();
+      const trigger = page.getByText("Nested options", { exact: true });
+      await trigger.focus();
+      await trigger.press(kind === "popover" ? "Enter" : "ArrowRight");
+      await expect(page.getByTestId("focus-escapes")).toHaveText("1");
+      await expect(page.getByTestId("dismissal-submenu")).toHaveCount(0);
+      if (kind === "popover") {
+        await expect(page.getByTestId("dismissal-content")).toHaveAttribute(
+          "data-state",
+          "open",
+        );
+        await expect(trigger).toBeFocused();
+        await page.keyboard.press("Escape");
+      }
+      await expect(page.getByTestId("dismissal-content")).toHaveCount(0);
+      await expect(page.getByTestId("dismissal-trigger")).toBeFocused();
       await expect(page.getByTestId("native-overlay-active")).toHaveText(
         "false",
       );

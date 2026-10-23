@@ -21,6 +21,8 @@ Two related lifecycle gaps were reproduced while extending the audit:
   Escape listener. Dispatching Escape from that first focus event exposes the
   race without a delay. Share ContextMenu's content fallback, preserve consumer
   cancellation and portal boundaries, and call each guard only once per event.
+  Test submenu first focus separately: ContextMenu's parent fallback correctly
+  refuses events from a child portal, so that child needs its own fallback.
 - A controlled Select could close on owner replacement without releasing its
   native-surface overlay token. Observe open state as well as Radix callbacks;
   verify the aggregate returns to false and the next opening can announce true.
@@ -34,6 +36,14 @@ takes focus, then verifies late pointer-out cannot reclaim focus.
 Select themes through the appearance store and assert the resolved theme after
 opening: setting data-theme before a lazy store import silently reverts to the
 stored theme and can mislabel dark screenshots as light coverage.
+
+Removing the exit interval also exposed a model-catalog focus bug present on
+the base: after closing a row editor, favoriting another row restored search
+focus and dismissed the catalog as an outside interaction. Its old smoke read
+the still-mounted closing rows before their animation ended. Treat focus on
+the owning model search as inside the catalog while preserving pointer-outside
+dismissal. Assert data-state=open as well as visibility when an interaction is
+required to keep a popup open; retained exit DOM is not evidence of open state.
 
 Encoded in the shared anchored-overlay motion, all six popup primitives,
 `docs/ui-interaction-performance.md`, and `scripts/ui-smoke-overlay-dismissal.mjs`.
