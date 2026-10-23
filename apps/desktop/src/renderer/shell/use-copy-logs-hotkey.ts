@@ -12,11 +12,11 @@
 // `useInternalFeatureActive("copyLogs")`
 // holds — allowlisted account AND flag on. For everyone else the chord
 // is completely inert (no listener, no preventDefault, no trace), and
-// this shortcut is deliberately ABSENT from the ⌘/ shortcuts catalog
+// this shortcut is deliberately ABSENT from the ⌥⌘/ shortcuts catalog
 // and the Help menu, so it is undiscoverable. Do not add it there.
 //
 // ⇧⌘L is free app-wide (⌘L alone belongs to the browser-tab element
-// picker, a different chord). Like ⌘/ and ⌥⌘F this fires inside
+// picker, a different chord). Like ⌥⌘/ and ⌥⌘F this fires inside
 // editable surfaces too — the chord types nothing, and logs are most
 // often wanted mid-conversation with a composer focused. Matches on
 // `e.code === "KeyL"` (physical key, layout-agnostic).

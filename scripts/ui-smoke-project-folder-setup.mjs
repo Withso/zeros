@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runCommandPaletteSmoke } from "./ui-smoke-command-palette.mjs";
 
 async function expectDialogChrome(dialog, page, { footer = true } = {}) {
   await expect(dialog.locator('[data-slot="dialog-header"]')).toHaveCSS(
@@ -55,7 +56,6 @@ export async function runDialogChromeSmoke({ page, check }) {
       ["Open quick start", "Create project", true],
       ["Open confirmation", "Close active chat?", true],
       ["Open command picker", "Choose a folder", false],
-      ["Open shortcuts", "Keyboard shortcuts", false],
     ]) {
       await page.getByRole("button", { name: trigger, exact: true }).click();
       const dialog = page.getByRole("dialog", { name: heading, exact: true });
@@ -80,6 +80,66 @@ export async function runDialogChromeSmoke({ page, check }) {
       `${theme}: dialogs share 15px headings, top-right close, separated footers and 50% overlay`,
       true,
     );
+
+    const shortcutsTrigger = page.getByRole("button", { name: "Open shortcuts", exact: true });
+    const shortcuts = page.getByRole("dialog", { name: "Keyboard shortcuts", exact: true });
+    await shortcutsTrigger.focus();
+    await page.keyboard.press("Meta+Slash");
+    await expect(shortcuts).toHaveCount(0);
+    await page.keyboard.press("Meta+Alt+Slash");
+    await expect(shortcuts.locator('[data-slot="dialog-title-row"]')).toHaveCount(0);
+    await expect(shortcuts.getByRole("button", { name: "Close", exact: true })).toHaveCount(0);
+    await expect(shortcuts.locator('[data-slot="dialog-body"]')).toHaveCSS("padding", "0px");
+    const search = shortcuts.getByRole("combobox");
+    await expect(search).toBeFocused();
+    await expect(shortcuts.locator('[data-slot="command-item"]').filter({ hasText: "Show all shortcuts" }))
+      .toContainText("⌥⌘/");
+    await page.keyboard.press("Meta+Slash");
+    await expect(shortcuts).toBeVisible();
+    await page.keyboard.press("Meta+Alt+Slash");
+    await expect(shortcuts).toHaveCount(0);
+    await page.keyboard.press("Meta+Alt+Slash");
+    await expect(search).toBeFocused();
+    check(`${theme}: Command+Option+/ toggles shortcuts from the focused search; Command+/ does not`, true);
+    await expect(shortcuts.locator('[data-slot="command-input-wrapper"] svg')).toHaveCount(0);
+    await expect.poll(() => shortcuts.evaluate((element) => {
+      const panel = element.getBoundingClientRect();
+      const input = element.querySelector('[data-slot="command-input-wrapper"]').getBoundingClientRect();
+      return Math.abs(input.top - panel.top - 1) < 1 &&
+        Math.abs(input.left - panel.left - 1) < 1 &&
+        Math.abs(input.right - panel.right + 1) < 1;
+    })).toBe(true);
+    if (theme === "light") {
+      // Compare the divider with the composited glass, not the opaque page.
+      expect(await shortcuts.evaluate((element) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 2;
+        canvas.height = 1;
+        const context = canvas.getContext("2d");
+        for (const color of [
+          getComputedStyle(element).getPropertyValue("--bg1"),
+          getComputedStyle(document.querySelector('[data-slot="dialog-overlay"]')).backgroundColor,
+          getComputedStyle(element).backgroundColor,
+        ]) {
+          context.fillStyle = color;
+          context.fillRect(0, 0, 2, 1);
+        }
+        context.fillStyle = getComputedStyle(element.querySelector('[data-slot="command-input-wrapper"]')).borderBottomColor;
+        context.fillRect(1, 0, 1, 1);
+        const pixels = context.getImageData(0, 0, 2, 1).data;
+        return pixels[4] + pixels[5] + pixels[6] < pixels[0] + pixels[1] + pixels[2];
+      })).toBe(true);
+    }
+    await expect(shortcuts).toHaveCSS("border-radius", "14px");
+    await search.fill("feedback");
+    await expect(shortcuts.getByText("Send feedback", { exact: true })).toBeVisible();
+    await expect(shortcuts.locator('[data-slot="command-item"]')).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(shortcuts).toHaveCount(0);
+    check(
+      `${theme}: shortcuts start with full-width iconless search, retain an accessible name and dismiss with Escape`,
+      true,
+    );
   }
   const previousViewport = page.viewportSize();
   await page.setViewportSize({ width: 360, height: 740 });
@@ -98,4 +158,5 @@ export async function runDialogChromeSmoke({ page, check }) {
     "Dialog header and footer fit narrow windows and retain Escape dismissal",
     true,
   );
+  await runCommandPaletteSmoke({ page, check });
 }

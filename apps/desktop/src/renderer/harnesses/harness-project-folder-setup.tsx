@@ -2,12 +2,13 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Button } from "../shared/ui";
 import { QuickStartDialog } from "../shell/dialogs/quick-start";
 import { ChatCloseDialog } from "../shell/conversation/chat-close-dialog";
 import { ShortcutsPalette } from "../shell/shortcuts-palette";
+import { useShortcutsHotkey } from "../shell/use-shortcuts-hotkey";
 import {
   CommandDialog,
   CommandInput,
@@ -18,6 +19,10 @@ import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 
 function Harness() {
   const [example, setExample] = useState<string | null>(null);
+  const toggleShortcuts = useCallback(() => {
+    setExample((current) => (current === "shortcuts" ? null : "shortcuts"));
+  }, []);
+  useShortcutsHotkey(toggleShortcuts);
   return (
     <>
       <Button onClick={() => setExample("quick")}>Open quick start</Button>

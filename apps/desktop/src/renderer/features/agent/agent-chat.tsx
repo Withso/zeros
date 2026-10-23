@@ -3070,8 +3070,6 @@ function AgentChatBody({
     setScrollEl(node);
   }, []);
 
-  // ⌘K — focus the composer from anywhere in the app; scoped to avoid
-  // clobbering ⌘K inside native inputs.
   // ⌘↑ / ⌘↓ — jump-by-text-message: walks user prompts and final
   // assistant text, skipping tool-call + thinking chunks. Solves the
   // need to find the initiating prompt during long runs.
@@ -3087,8 +3085,8 @@ function AgentChatBody({
 
       // Split panes (2026-07-17): multiple AgentChat instances can be
       // mounted at once. Only the FOCUSED pane's chat (the global
-      // active chat) owns these app-wide bindings — otherwise ⌘K would
-      // focus every composer and ⌘↑/↓ would scroll every pane. Chats
+      // active chat) owns these app-wide bindings — otherwise ⌘↑/↓
+      // would scroll every pane. Chats
       // mounted without a chatId (picker/beta flows) keep them.
       if (chatId) {
         const workspaceState = useWorkspaceStore.getState();
@@ -3098,13 +3096,6 @@ function AgentChatBody({
         ) {
           return;
         }
-      }
-
-      // ⌘K is composer-focus; allowed even when in an input
-      if (!readOnly && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        composerFocusRef.current();
-        return;
       }
 
       // Skip jump-by-message bindings while typing — preserves
@@ -3148,7 +3139,7 @@ function AgentChatBody({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [chatId, surfaceActive, readOnly, jumpToBottom]);
+  }, [chatId, surfaceActive, jumpToBottom]);
 
   // File picker for the "+" → "Add attachment" menu (routes through the
   // editor's insertFiles, same as drag-drop / paste).

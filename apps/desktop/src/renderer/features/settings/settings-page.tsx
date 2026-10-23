@@ -1,3 +1,4 @@
+import { isSettingsSectionAvailable } from "./settings-section-availability";
 import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
 import { CloudGithubSection } from "./cloud-github-section";
 // ──────────────────────────────────────────────────────────
@@ -645,18 +646,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const simulatorsActive = useAgentControlFeatureActive("simulators");
   const availableSections = useMemo(
     () =>
-      SECTIONS.filter(
-        (s) =>
-          // Chrome setup is reachable for every owner. BrowserUsePanel,
-          // ComputerUsePanel and SimulatorsPanel select device controls or
-          // cloud guidance from the workspace placement.
-          (local ? s.id !== "cloud-computer" : ["providers", "integrations", "cloud-computer", "browser-use", "computer-use", "simulators"].includes(s.id)) &&
-          (cloudEnabled || s.id !== "cloud-computer") &&
-          (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
-          (s.id !== "computer-use" || computerUseActive) &&
-          (s.id !== "simulators" || simulatorsActive) &&
-          (s.id !== "internal" || internalUser),
-      ),
+      SECTIONS.filter((section) => isSettingsSectionAvailable(section.id, {
+        local, cloudEnabled, terminalAgentsEnabled, computerUseActive,
+        simulatorsActive, internalUser,
+      })),
     [terminalAgentsEnabled, internalUser, local, cloudEnabled, computerUseActive, simulatorsActive],
   );
   const activeSection: SectionDef | null =

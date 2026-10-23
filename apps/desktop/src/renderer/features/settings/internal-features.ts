@@ -32,7 +32,7 @@ import {
 //      flag alone. localStorage is user-editable; the staff check on top
 //      means a forged flag still does nothing for an ordinary account.
 //   2. No discoverability leaks: internal features never appear in the
-//      ⌘/ shortcuts catalog, menus, tooltips, or any surface a
+//      ⌥⌘/ shortcuts catalog, menus, tooltips, or any surface a
 //      non-internal user can see.
 //   3. The role is resolved SERVER-side from Postgres against the verified
 //      WorkOS token (apps/control-plane/src/auth.ts `ensureUser` runs per request) and

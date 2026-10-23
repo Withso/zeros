@@ -4,7 +4,7 @@
 //
 // Until now every shortcut was hand-rolled in its own component and its UI
 // hint string was duplicated inline. This file is the single source of truth
-// for the ⌘/ shortcuts palette: a flat, data-only list of the shortcuts we
+// for the ⌥⌘/ shortcuts palette: a flat, data-only list of the shortcuts we
 // ship today, grouped into the four review buckets — General, View, Chats,
 // Workspace. It intentionally describes shortcuts (label + chord + category)
 // rather than wiring their actions; the palette is a discovery / review
@@ -43,9 +43,15 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
     label: "General",
     shortcuts: [
       {
+        id: "command-palette",
+        label: "Open command palette",
+        keys: ["⌘K"],
+        keywords: ["search", "commands", "workspaces", "chats", "files", "actions", "settings"],
+      },
+      {
         id: "show-shortcuts",
         label: "Show all shortcuts",
-        keys: ["⌘/"],
+        keys: ["⌥⌘/"],
         keywords: ["keyboard", "keys", "cheatsheet", "help", "palette"],
       },
       {
@@ -135,12 +141,6 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
         label: "New terminal agent",
         keys: ["⇧⌘T"],
         keywords: ["tab", "shell"],
-      },
-      {
-        id: "focus-composer",
-        label: "Focus message box",
-        keys: ["⌘K"],
-        keywords: ["compose", "input", "prompt", "write"],
       },
       {
         id: "previous-message",

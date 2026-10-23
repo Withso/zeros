@@ -1979,7 +1979,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         target?.type === "files" &&
         typeof nextFilePath === "string" &&
         nextFilePath.trim().length > 0 &&
-        nextFilePath.trim() !== target.filePath;
+        nextFilePath !== target.filePath;
       const updated = action.updates
         ? reducer(state, {
             type: "UPDATE_WORKBENCH_TAB",
@@ -2137,7 +2137,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&
         typeof action.updates.filePath === "string"
       ) {
-        const path = action.updates.filePath.trim();
+        // File-tree and command-palette selections are literal filesystem
+        // identities. Typed paths are normalized by their input boundary.
+        const path = action.updates.filePath;
         const suppliedTitle = action.updates.title?.trim();
         updatedTarget = {
           ...updatedTarget,
