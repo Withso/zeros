@@ -2,7 +2,6 @@
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE cloud_v2_workspaces
-  ADD COLUMN stopped_at timestamptz,
   ADD COLUMN lease_renewed_at timestamptz,
   -- The base branch's remote head when the workspace was created. The worker
   -- branches from it when the Cloud Computer already has that commit.
@@ -45,8 +44,6 @@ ALTER TABLE cloud_v2_workspaces
     (checkpoint_object IS NULL) = (checkpoint_saved_at IS NULL)),
   ADD CONSTRAINT cloud_v2_restore_requires_checkpoint CHECK (NOT restore_pending OR
     (checkpoint_object IS NOT NULL AND restore_attempt IS NOT NULL AND restore_create IS NOT NULL));
-
-UPDATE cloud_v2_workspaces SET stopped_at = updated_at WHERE state = 'stopped';
 
 CREATE INDEX cloud_v2_lease_due ON cloud_v2_workspaces (lease_renewed_at)
   WHERE state = 'running' AND boat_sandbox_id IS NOT NULL;
