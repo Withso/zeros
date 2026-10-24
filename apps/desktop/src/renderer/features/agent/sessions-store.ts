@@ -57,6 +57,7 @@ import {
   applyUpdate,
   BLANK_USAGE,
   type AgentMessage,
+  type AgentTextMessage,
   type AgentSessionState,
   type AgentUsage,
   type PendingPermission,
@@ -578,11 +579,37 @@ function reduceTranscriptUpdate(state: SessionsStoreState, chatId: string, notif
       ...slot, transcriptDirty: true, hasTranscript: slot.hasTranscript || producesMessage,
     } } };
   }
+  const recordedId = notification.update.sessionUpdate === "user_message_recorded"
+    ? notification.update.message?.id : undefined;
+  const recordedSignatures = () => {
+    const signatures = slot.transcriptContentSignatures;
+    if (!recordedId || !signatures || !Object.hasOwn(signatures, recordedId)) return signatures;
+    // A cached signature proves only the old row's content. Retire it after
+    // a live summary replacement so a lagging mirror cannot restore that row.
+    const next = { ...signatures };
+    delete next[recordedId];
+    return next;
+  };
+  if (notification.update.sessionUpdate === "user_message_recorded" &&
+      slot.leadingPrompt && slot.leadingPrompt.id === recordedId &&
+      !slot.messages.some(message => message.id === recordedId)) {
+    // A completed cloud turn republishes its opening with the recorded diff.
+    // Long turns keep that opening beside the resident window. Folding it
+    // into the tail would manufacture a new, empty turn after the answer.
+    const [leadingPrompt] = applyUpdate([slot.leadingPrompt], notification);
+    if (leadingPrompt === slot.leadingPrompt) return state;
+    return { ...state, sessions: { ...state.sessions, [chatId]: {
+      ...slot, leadingPrompt: leadingPrompt as AgentTextMessage, transcriptPresentation: null,
+      transcriptContentSignatures: recordedSignatures(),
+      ...(parseCloudScopedId(chatId) ? { transcriptSource: "worker" as const } : {}),
+    } } };
+  }
   const updated = applyUpdate(slot.messages, notification);
   const messages = slot.historyExpanded ? updated : capMessages(updated);
   if (messages === slot.messages) return state;
   return { ...state, sessions: { ...state.sessions, [chatId]: settleSlotLeadingPrompt(chatId, slot, {
     ...slot, messages, transcriptPresentation: null,
+    transcriptContentSignatures: recordedSignatures(),
     ...(parseCloudScopedId(chatId) ? { transcriptSource: "worker" as const } : {}),
     hasTranscript: slot.hasTranscript || hasDurableMessages(messages),
   }, undefined) } };
@@ -1302,7 +1329,14 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           nextUsage.categories.every((category, index) =>
             category.name === previousCategories[index].name &&
             category.tokens === previousCategories[index].tokens &&
-            category.kind === previousCategories[index].kind)
+            category.kind === previousCategories[index].kind &&
+            category.id === previousCategories[index].id &&
+            (category.mcpServers === previousCategories[index].mcpServers ||
+              (category.mcpServers && previousCategories[index].mcpServers &&
+                category.mcpServers.length === previousCategories[index].mcpServers.length &&
+                category.mcpServers.every((server, serverIndex) =>
+                  server.serverName === previousCategories[index].mcpServers![serverIndex].serverName &&
+                  server.tokens === previousCategories[index].mcpServers![serverIndex].tokens))))
         ) nextUsage.categories = previousCategories;
         if (
           nextUsage.size === slot.usage.size && nextUsage.used === slot.usage.used &&

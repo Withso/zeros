@@ -8,6 +8,11 @@ import {
   Terminal,
 } from "lucide-react";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import {
+  CLOUD_RUNTIME_ACCESS_ERRORS,
+  CloudRuntimeAccessError,
+} from "../../platform/bridge/cloud-runtime-access-error";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
 import {
   describeConnectionRejection,
@@ -119,8 +124,9 @@ export interface WorkspaceAvailability {
   canWake?: boolean;
 }
 
-// Cloud gaps become pending at 10s. Local engine startup/reconnection stays
-// quiet; both placements expose actionable failure at 45s.
+// Cloud gaps affect shared availability at 10s; both placements reach failure
+// at 45s. Cloud frames use this only for quiet empty states. Local engine
+// startup/reconnection stays quiet until its error banner becomes actionable.
 export const WORKBENCH_RECONNECT_GRACE_MS = 10_000;
 export const WORKBENCH_RECONNECT_ERROR_MS = 45_000;
 export const WORKBENCH_SILENT_RETRY_MS = 1_500;
@@ -222,8 +228,8 @@ export function describeWorkspaceAvailability(
   };
 }
 
-/** Compact runtime status uses the same availability decision and calm clock
- * as the workbench banner. It never introduces another connection timer. */
+/** Compact runtime status and workbench fallbacks share one availability
+ * decision and calm clock, without another connection timer. */
 export function describeWorkspaceRuntimeStatus(input: WorkspaceAvailability, now: number): string {
   const status = describeWorkspaceAvailability(input, now);
   if (status?.tone === "error") return "Needs attention";
@@ -380,7 +386,42 @@ export function isCloudUnavailable(error: unknown): boolean {
   return CLOUD_UNAVAILABLE.test(message);
 }
 
+// Some read adapters retain only error.message. Match the connection boundary's
+// closed copy as well as its typed errors; a Git/network/read timeout by itself
+// is still a tab failure and must remain actionable.
+const CLOUD_CONNECTION_MESSAGES = new Set([
+  ...Object.values(CLOUD_RUNTIME_ACCESS_ERRORS).map(error => error.message),
+  "The cloud workspace did not start in time",
+  "Cloud connection cancelled",
+  "Cloud connection returned a different workspace",
+  "Cloud connection changed while the request was running",
+  "Cloud connection cancelled or changed while connecting",
+  "Cloud account changed while connecting",
+  "Cloud account changed before dispatch",
+  "Cloud account changed before the response arrived",
+  "Cloud workspace open cancelled",
+  "Cloud workspace did not confirm its checkout",
+  "Cloud workspace generation changed during admission",
+  "Cloud workspace transport is busy",
+  "Cloud workspace access has not been confirmed for this account",
+  "Runtime execution identity changed while connecting",
+  "Runtime connection rejected",
+  "Client disposed",
+  "Engine swapping — request aborted",
+  "Workspace connections are closed",
+  "Too many cloud workspace connections are open. Reopen Zeros to reconnect the workspaces you need.",
+]);
+function isCloudConnectionFailure(error: unknown): boolean {
+  if (error instanceof CloudRuntimeAccessError) return true;
+  const message = (error instanceof Error ? error.message : typeof error === "string" ? error : "")
+    .replace(/^Error:\s*/, "").trim();
+  return CLOUD_CONNECTION_MESSAGES.has(message) ||
+    /^(?:(?:This|The) )?cloud workspace (?:is )?(?:still )?(?:creating|provisioning|setting[_ ]up|starting|waking|restoring|stopping|stopped|sleeping|archived|failed|deleting|deleted|disconnected)\b/i.test(message) ||
+    /^Request timeout: (?:engine disconnected|[A-Z_]+ \((?:reconnecting|queue full)\))$/.test(message);
+}
+
 export class WorkbenchStatusSources {
+  constructor(private readonly cloud = false) {}
   private sources = new Map<string, StatusSource>();
   private listeners = new Set<() => void>();
   private flight: Promise<void> | null = null;
@@ -436,7 +477,8 @@ export class WorkbenchStatusSources {
       (source) => source.active !== false,
     );
     const failures = sources.filter(
-      (source) => source.failurePhase === "persistent",
+      (source) => source.failurePhase === "persistent" &&
+        (!this.cloud || !isCloudConnectionFailure(source.error)),
     );
     const failure =
       failures.find((source) => source.primary && source.error)?.error ??
@@ -592,10 +634,10 @@ export class WorkbenchStatusSources {
 
 const sourceStores = new Map<string, WorkbenchStatusSources>();
 /** Frames and portal-owned terminal sources share one bounded exact-key store. */
-export function workbenchSourcesFor(key: string): WorkbenchStatusSources {
+export function workbenchSourcesFor(key: string, folder: string): WorkbenchStatusSources {
   let source = sourceStores.get(key);
   if (!source) {
-    source = new WorkbenchStatusSources();
+    source = new WorkbenchStatusSources(isCloudWorkspace(folder));
     sourceStores.set(key, source);
   }
   for (const [oldKey, old] of sourceStores) {

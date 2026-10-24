@@ -343,6 +343,8 @@ import {
   setChatWorkspaceResolver,
   type ChatRow,
 } from "../db/chats";
+import { openZerosDb } from "../db";
+import { getConversationContext, resetConversationContext } from "../db/conversation-context";
 import { headRev, tombstonesSince } from "../db/sync";
 import {
   WINDOW_MAX_ROWS,
@@ -1272,6 +1274,17 @@ function preserveProviderIdentity(
   c: ChatRow,
   existing: ChatRow | null = getChat(c.id),
 ): ChatRow {
+  // A reset explicitly detached this chat's native history. A renderer that
+  // has not received the invalidation yet must not attach that old history
+  // again. New bindings for this generation come only from the engine.
+  if (existing?.agentId === c.agentId && getConversationContext(c.id)?.generation) {
+    return {
+      ...c,
+      sessionId: existing.sessionId,
+      providerBinding: existing.providerBinding ?? null,
+      providerMetadata: existing.providerMetadata ?? null,
+    };
+  }
   const incomingProviderBinding =
     c.providerBinding?.providerId === c.agentId ? c.providerBinding : null;
   const existingProviderBinding =
@@ -2493,6 +2506,12 @@ export class WorkspaceService {
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
       catalogAdmission?: DesignCatalogAdmission;
+      /** Serialize transcript resets with provider admission/close. The service
+       * decides whether history changes; the engine retires its live context. */
+      withConversationMutation?: <T>(
+        chatId: string,
+        apply: (retire: () => Promise<void>) => Promise<T>,
+      ) => Promise<T>;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
@@ -5389,138 +5408,163 @@ export class WorkspaceService {
           | "filesAndTranscript"
           | "filesOnly"
           | "transcriptOnly";
-        const turn = getTurn(chatId, turnId);
-        if (!turn) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `unknown turn ${turnId}`,
-          });
-        }
-        const folder = turn.folder ?? "";
-        // Authored union across THIS chat's turns from this one onward (confirmed
-        // reset scope: "this turn + all later turns of this chat").
-        const chatTurns = listTurnsForChat(chatId);
-        const span = chatTurns.filter((t) => t.ord >= turn.ord);
-        const authored = [
-          ...new Set(span.flatMap((t) => t.files.map((f) => f.path))),
-        ];
-        // Capture the rows the truncate is about to delete, BEFORE deleting, so
-        // undo can restore the full CONVERSATION (user messages, every tool call
-        // with its inputs/outputs, the final answer) + turn rows — not just the
-        // files. Skipped for filesOnly (no truncation happens).
-        const willTruncate = mode !== "filesOnly";
-        const captured = willTruncate
-          ? getChatMessagesFrom(chatId, turnId)
-          : null;
-        const capturedTurns = willTruncate
-          ? getRawTurnsFrom(chatId, turnId)
-          : [];
+        const apply = async (retire: () => Promise<void>) => {
+          const turn = getTurn(chatId, turnId);
+          if (!turn) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: `unknown turn ${turnId}`,
+            });
+          }
+          const willTruncate = mode !== "filesOnly";
+          if (willTruncate) await retire();
+          const folder = turn.folder ?? "";
+          // Authored union across THIS chat's turns from this one onward (confirmed
+          // reset scope: "this turn + all later turns of this chat").
+          const chatTurns = listTurnsForChat(chatId);
+          const span = chatTurns.filter((t) => t.ord >= turn.ord);
+          const authored = [
+            ...new Set(span.flatMap((t) => t.files.map((f) => f.path))),
+          ];
+          // Capture the rows the truncate is about to delete, BEFORE deleting, so
+          // undo can restore the full CONVERSATION (user messages, every tool call
+          // with its inputs/outputs, the final answer) + turn rows — not just the
+          // files. Skipped for filesOnly (no truncation happens).
+          const captured = willTruncate
+            ? getChatMessagesFrom(chatId, turnId)
+            : null;
+          const capturedTurns = willTruncate
+            ? getRawTurnsFrom(chatId, turnId)
+            : [];
 
-        let fileResult: Awaited<ReturnType<typeof applyTurnSpanReset>> = {
-          applied: [],
-          conflicts: [],
-          skipped: [],
-          preResetSnapshot: null,
-          postResetSnapshot: null,
+          let fileResult: Awaited<ReturnType<typeof applyTurnSpanReset>> = {
+            applied: [],
+            conflicts: [],
+            skipped: [],
+            preResetSnapshot: null,
+            postResetSnapshot: null,
+          };
+          if (mode !== "transcriptOnly" && folder) {
+            // Unwind only file-changing turns, newest-first inside the helper.
+            // Each path uses the pre/post pair of the turn that authored it, so a
+            // later conversational turn or another-file edit cannot become a
+            // false merge base and clobber concurrent work.
+            fileResult = await applyTurnSpanReset(
+              folder,
+              chatId,
+              span
+                .filter((item) => item.files.length > 0)
+                .map((item) => ({
+                  paths: item.files.map((file) => file.path),
+                  preSnapshot: item.preSnapshot,
+                  postSnapshot: item.postSnapshot,
+                })),
+            );
+          }
+          // Stash everything undo needs under a fresh id, then cap per chat.
+          const resetId = `reset-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`;
+          let truncated = 0;
+          let turnIds: string[] = [];
+          openZerosDb().transaction(() => {
+            if (willTruncate) {
+              truncated = truncateChatMessagesFrom(chatId, turnId);
+              turnIds = deleteTurnsFrom(chatId, turnId).turnIds;
+              resetConversationContext(chatId);
+            }
+            saveResetUndo({
+              resetId,
+              chatId,
+              folder: folder || null,
+              snapshot: fileResult.preResetSnapshot,
+              postSnapshot: fileResult.postResetSnapshot,
+              resetPaths: authored,
+              cutOrd: captured?.cutOrd ?? null,
+              messages: captured?.rows ?? [],
+              turns: capturedTurns,
+              createdAt: Date.now(),
+            });
+            pruneResetUndo(chatId, RESET_UNDO_KEEP);
+          })();
+          if (folder && turnIds.length) await deleteSnapshotRefs(folder, chatId, turnIds);
+          return {
+            applied: fileResult.applied,
+            conflicts: fileResult.conflicts,
+            skipped: fileResult.skipped,
+            preResetSnapshot: fileResult.preResetSnapshot,
+            resetPaths: authored,
+            truncated,
+            resetId,
+          };
         };
-        if (mode !== "transcriptOnly" && folder) {
-          // Unwind only file-changing turns, newest-first inside the helper.
-          // Each path uses the pre/post pair of the turn that authored it, so a
-          // later conversational turn or another-file edit cannot become a
-          // false merge base and clobber concurrent work.
-          fileResult = await applyTurnSpanReset(
-            folder,
-            chatId,
-            span
-              .filter((item) => item.files.length > 0)
-              .map((item) => ({
-                paths: item.files.map((file) => file.path),
-                preSnapshot: item.preSnapshot,
-                postSnapshot: item.postSnapshot,
-              })),
-          );
-        }
-        let truncated = 0;
-        if (willTruncate) {
-          truncated = truncateChatMessagesFrom(chatId, turnId);
-          const { turnIds } = deleteTurnsFrom(chatId, turnId);
-          if (folder) await deleteSnapshotRefs(folder, chatId, turnIds);
-        }
-        // Stash everything undo needs under a fresh id, then cap per chat.
-        const resetId = `reset-${Date.now()}-${Math.random()
-          .toString(36)
-          .slice(2, 8)}`;
-        saveResetUndo({
-          resetId,
-          chatId,
-          folder: folder || null,
-          snapshot: fileResult.preResetSnapshot,
-          postSnapshot: fileResult.postResetSnapshot,
-          resetPaths: authored,
-          cutOrd: captured?.cutOrd ?? null,
-          messages: captured?.rows ?? [],
-          turns: capturedTurns,
-          createdAt: Date.now(),
-        });
-        pruneResetUndo(chatId, RESET_UNDO_KEEP);
-        return {
-          applied: fileResult.applied,
-          conflicts: fileResult.conflicts,
-          skipped: fileResult.skipped,
-          preResetSnapshot: fileResult.preResetSnapshot,
-          resetPaths: authored,
-          truncated,
-          resetId,
-        };
+        return mode !== "filesOnly" && opts.withConversationMutation
+          ? opts.withConversationMutation(chatId, apply)
+          : apply(async () => {});
       }
       case "turns.undoReset": {
         const resetId = reqStr(params, "resetId");
-        const rec = getResetUndo(resetId);
-        if (!rec) {
+        const chatId = getResetUndo(resetId)?.chatId;
+        // Undo carries a reset id, not a caller-supplied chat id. Resolve and
+        // authorize its actual owner before touching either files or context.
+        if (remote && chatId && this.remoteChatRestricted(chatId)) {
+          throw new GitError({ code: "REMOTE_RESTRICTED", message: "This chat is in a workspace restricted from remote access." });
+        }
+        const apply = async (retire: () => Promise<void>) => {
+          const rec = getResetUndo(resetId);
+          if (!rec) {
+            return {
+              restored: [],
+              transcriptRestored: false,
+              messagesRestored: 0,
+            };
+          }
+          // 1) Files — restore the working tree from the pre-reset snapshot.
+          // rec.postSnapshot (the tree the reset left) is the 3-way merge base:
+          // edits made AFTER the reset are merged around, overlaps conflict and
+          // stay put. Legacy records (null) keep the original blind restore.
+          const restored =
+            rec.snapshot && rec.folder
+              ? await undoTurnReset(
+                  rec.folder,
+                  rec.snapshot,
+                  rec.resetPaths,
+                  rec.postSnapshot,
+                )
+              : [];
+          // 2) Transcript — re-insert the stashed messages + turns ONLY when the
+          // chat wasn't continued past the reset (the truncated ord range is still
+          // free), so they land at their exact original positions. Otherwise the
+          // files are undone but the conversation is left as-is (the caller warns).
+          let transcriptRestored = false;
+          let messagesRestored = 0;
+          if (
+            rec.cutOrd != null &&
+            rec.messages.length > 0 &&
+            maxChatMessageOrd(rec.chatId) < rec.cutOrd
+          ) {
+            await retire();
+            openZerosDb().transaction(() => {
+              reinsertChatMessages(rec.chatId, rec.messages);
+              reinsertTurns(rec.turns);
+              resetConversationContext(rec.chatId);
+            })();
+            transcriptRestored = true;
+            messagesRestored = rec.messages.length;
+          }
+          deleteResetUndo(resetId);
+          // `chatId` lets the engine target the cross-device transcript re-window
+          // nudge (params here carry only resetId); the renderer ignores it.
           return {
-            restored: [],
-            transcriptRestored: false,
-            messagesRestored: 0,
+            restored,
+            transcriptRestored,
+            messagesRestored,
+            chatId: rec.chatId,
           };
-        }
-        // 1) Files — restore the working tree from the pre-reset snapshot.
-        // rec.postSnapshot (the tree the reset left) is the 3-way merge base:
-        // edits made AFTER the reset are merged around, overlaps conflict and
-        // stay put. Legacy records (null) keep the original blind restore.
-        const restored =
-          rec.snapshot && rec.folder
-            ? await undoTurnReset(
-                rec.folder,
-                rec.snapshot,
-                rec.resetPaths,
-                rec.postSnapshot,
-              )
-            : [];
-        // 2) Transcript — re-insert the stashed messages + turns ONLY when the
-        // chat wasn't continued past the reset (the truncated ord range is still
-        // free), so they land at their exact original positions. Otherwise the
-        // files are undone but the conversation is left as-is (the caller warns).
-        let transcriptRestored = false;
-        let messagesRestored = 0;
-        if (
-          rec.cutOrd != null &&
-          rec.messages.length > 0 &&
-          maxChatMessageOrd(rec.chatId) < rec.cutOrd
-        ) {
-          reinsertChatMessages(rec.chatId, rec.messages);
-          reinsertTurns(rec.turns);
-          transcriptRestored = true;
-          messagesRestored = rec.messages.length;
-        }
-        deleteResetUndo(resetId);
-        // `chatId` lets the engine target the cross-device transcript re-window
-        // nudge (params here carry only resetId); the renderer ignores it.
-        return {
-          restored,
-          transcriptRestored,
-          messagesRestored,
-          chatId: rec.chatId,
         };
+        return chatId && opts.withConversationMutation
+          ? opts.withConversationMutation(chatId, apply)
+          : apply(async () => {});
       }
 
       default:

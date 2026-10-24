@@ -173,19 +173,22 @@ describe("design workspace agent isolation", () => {
       'useInternalFeatureActive("designWorkspaces")',
     );
     expect(sidebar).not.toContain("activeFolderBlockedDesign");
-    // The workspace-kind picker lives on the Create page; the sidebar's
-    // Create entries route to it and carry no Design gate of their own.
+    // Create remains Code-only. Public Design entry belongs to the existing
+    // workspace's Design tab and carries no rollout gate of its own.
     expect(sidebar).not.toContain("designWorkspaceCreationAvailable");
     const createPage = read(
       "apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx",
     );
     expect(createPage).not.toContain("isInternalFeatureActive");
-    expect(createPage).toMatch(
-      /designWorkspaceCreationAvailable\s*=\s*\n?\s*nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron/,
+    expect(createPage).not.toContain('kind: "design"');
+    expect(createPage).not.toContain("data-dispatcher-mode-switcher");
+    expect(createPage).not.toContain("WorkspaceModeToggleView");
+    const designWorkbench = read(
+      "apps/desktop/src/renderer/features/design-workspace/design-workbench-surface.tsx",
     );
-    expect(createPage).toContain('kind: "design"');
-    expect(createPage).toContain("data-dispatcher-mode-switcher");
-    expect(createPage).toContain("WorkspaceModeToggleView");
+    expect(designWorkbench).not.toContain("isInternalFeatureActive");
+    expect(designWorkbench).toContain('"Create design directory"');
+    expect(designWorkbench).toContain('workspaceOp(bridge, "design.initialize"');
 
     const settings = read(
       "apps/desktop/src/renderer/features/settings/settings-page.tsx",

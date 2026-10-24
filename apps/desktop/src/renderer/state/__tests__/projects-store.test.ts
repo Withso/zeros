@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadProjects, removeProject, upsertProject } from "../projects-store";
+import { createComposerDraftKey, createComposerDrafts } from "../create-composer-drafts";
 
 class MemStorage {
   private m = new Map<string, string>();
@@ -40,6 +41,8 @@ beforeEach(() => {
     new MemStorage() as unknown as Storage;
 });
 afterEach(() => {
+  createComposerDrafts.prune(() => true);
+  createComposerDrafts.dispose();
   vi.restoreAllMocks();
   delete (globalThis as { localStorage?: Storage }).localStorage;
 });
@@ -91,6 +94,19 @@ it("preserves saved project identities when loading and upserting", () => {
 });
 
 describe("removeProject — backup recovery", () => {
+  it("prunes normalized Create draft descendants without crossing nested projects or cloud placements", () => {
+    const parent = upsertProject({ repoRoot: "/tmp/project" });
+    upsertProject({ repoRoot: "/tmp/project/nested" });
+    const owned = createComposerDraftKey({ owner: "local", placement: "local", project: "/private/tmp/project/subdir" });
+    const nested = createComposerDraftKey({ owner: "local", placement: "local", project: "/tmp/project/nested/subdir" });
+    const cloud = createComposerDraftKey({ owner: "org", placement: "cloud", project: "example/project" });
+    for (const key of [owned, nested, cloud]) createComposerDrafts.set(key, { text: "unsent", attachments: [], json: null });
+    removeProject(parent.id);
+    expect(createComposerDrafts.get(owned)).toBeUndefined();
+    expect(createComposerDrafts.get(nested)?.draft.text).toBe("unsent");
+    expect(createComposerDrafts.get(cloud)?.draft.text).toBe("unsent");
+  });
+
   it("removing one of several repos leaves the rest (no resurrection)", () => {
     const a = upsertProject({ repoRoot: "/repo/a" });
     upsertProject({ repoRoot: "/repo/b" });

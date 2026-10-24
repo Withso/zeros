@@ -23,6 +23,7 @@ import { loadOrganizationPresentation, persistOrganizationPresentation } from ".
 import { pruneScopedSettingsSelections } from "../settings/settings-scope";
 import { pruneSidebarOwnerPreferences } from "../../state/sidebar-list-preferences";
 import { pruneOrganizationDestinations } from "../../state/organization-destination-cache";
+import { pruneCreateComposerOwners } from "../../state/create-composer-drafts";
 import {
   CONTROL_PLANE_URL,
   ControlPlaneError,
@@ -200,6 +201,7 @@ export function acceptOrganizationSnapshot(
     pruneScopedSettingsSelections(me.user.id, organizationIds);
     pruneSidebarOwnerPreferences(me.user.id, organizationIds);
     pruneOrganizationDestinations((_, id) => id !== PERSONAL_ORGANIZATION_ID && !organizationIds.includes(id));
+    pruneCreateComposerOwners(CONTROL_PLANE_URL, me.user.id, organizationIds);
   }
   // One-time flat-Team → hierarchy normalization. Legacy SQLite rows are
   // intentionally Personal/null-owned, so retaining a promoted collaborative

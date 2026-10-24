@@ -6,6 +6,8 @@ import { Button } from "../../shared/ui";
 import { useActiveOrganization, useTeams } from "../team/team-store";
 import { requestUserSettingsSection } from "./settings-navigation";
 import { isFeatureEnabled } from "../../config/release-channel";
+import { CONTROL_PLANE_URL } from "../team/control-plane";
+import { CloudComputerRepositorySnapshots } from "./cloud-computer-repository-snapshots";
 import {
   getCloudV2InstalledRepositories,
   type CloudV2InstalledRepository,
@@ -16,7 +18,19 @@ type Installed = readonly CloudComputerRepository[] | null;
 
 const MAX_AGE_MS = 30_000;
 /** Keyed by [userId, organizationId]; null means no live build yet. */
-export const cloudComputerRepositoriesCache = new KeyedAsyncCache<Installed>({ maxEntries: 16 });
+function browserStorage() {
+  try { return typeof localStorage === "undefined" ? undefined : localStorage; } catch { return undefined; }
+}
+const savedRepositories = new CloudComputerRepositorySnapshots(browserStorage(), CONTROL_PLANE_URL ?? "");
+export const cloudComputerRepositoriesCache = new KeyedAsyncCache<Installed>({
+  maxEntries: 16,
+  initialSnapshot: key => savedRepositories.get(key),
+});
+function persistRepositories(key: string) {
+  const snapshot = cloudComputerRepositoriesCache.peekSnapshot(key);
+  if (snapshot.data !== undefined && snapshot.updatedAt > 0)
+    savedRepositories.set(key, { data: snapshot.data, updatedAt: snapshot.updatedAt });
+}
 export function cloudComputerRepositoriesKey(userId: string, organizationId: string): string {
   return JSON.stringify([userId, organizationId]);
 }
@@ -27,7 +41,7 @@ function readInstalled(key: string): Promise<Installed> {
 export function prefetchCloudComputerRepositories(userId: string, organizationId: string): Promise<void> {
   const key = cloudComputerRepositoriesKey(userId, organizationId);
   return cloudComputerRepositoriesCache.load(key, () => readInstalled(key), { maxAgeMs: MAX_AGE_MS })
-    .then(() => undefined, () => undefined);
+    .then(() => persistRepositories(key), () => undefined);
 }
 
 const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
@@ -58,6 +72,9 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   const read = useCachedRead(cloudComputerRepositoriesCache, key, readInstalled,
     { enabled: enabled && active && shown, maxAgeMs: MAX_AGE_MS });
   const reason = enabled ? cloudComputerV2CreateReason(read.data, read.error) : null;
+  useEffect(() => {
+    if (key && enabled) persistRepositories(key);
+  }, [key, enabled, read.data, read.updatedAt]);
   const required = reason === cloudComputerV2BuildRequired;
   const refresh = read.refresh;
   useEffect(() => {
@@ -69,6 +86,7 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   }, [enabled, active, shown, required, refresh]);
   return {
     reason,
+    checking: enabled && read.data === undefined && !read.error,
     enabled,
     key,
     repositories: enabled ? read.data : undefined,

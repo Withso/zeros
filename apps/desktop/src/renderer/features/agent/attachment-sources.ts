@@ -69,9 +69,10 @@ async function sourceStore<T>(
     open.onerror = () => reject(open.error);
     open.onsuccess = () => {
       const db = open.result;
-      const transaction = db.transaction("sources", "readwrite");
+      let transaction: IDBTransaction;
       let request: IDBRequest<T>;
       try {
+        transaction = db.transaction("sources", "readwrite");
         request = run(transaction.objectStore("sources"));
       } catch (error) {
         db.close();
@@ -94,6 +95,7 @@ export function prepareAttachmentSource(
   attachment: ComposerAttachment,
   portable = false,
 ): Promise<Source> {
+  portable ||= attachment.sourcePortable === true;
   stopQuitPreparation ??= onNativeBeforeQuit(async () => {
     await Promise.allSettled(pending.values());
   });
@@ -103,6 +105,17 @@ export function prepareAttachmentSource(
   if (existing) return existing;
   preparing.add(pendingKey);
   const task = (async (): Promise<Source> => {
+    if (attachment.sourcePortable && typeof indexedDB === "undefined")
+      throw new Error("Attachment storage is unavailable on this device");
+    // A recovery id owns immutable bytes, even after an upload releases the
+    // memory entry. Another draft may still carry an original native File
+    // whose pathname has since been modified or removed.
+    const committed = portable ? sourceBlob(await sourceStore<unknown>(store => store.get(id))) : undefined;
+    if (committed) {
+      await sourceStore(store => store.put(storedSource(committed), id));
+      attachment.sourceFile = committed;
+      return { blob: committed };
+    }
     const blob = attachment.sourceFile;
     const local = !portable && getActiveBridge()?.executionIdentity?.kind !== "cloud";
     if (blob) {
@@ -111,7 +124,12 @@ export function prepareAttachmentSource(
         if (nativeSourceId) return { nativeSourceId };
       }
       await sourceStore((store) => store.put(storedSource(blob), id));
-      return { blob };
+      // The IDB Blob is a snapshot. A File from the picker may still depend on
+      // the original native pathname, even after its recovery copy committed.
+      const saved = portable ? sourceBlob(await sourceStore<unknown>((store) => store.get(id))) : undefined;
+      if (attachment.sourcePortable && !saved) throw new Error("Attachment storage is unavailable on this device");
+      if (saved) attachment.sourceFile = saved;
+      return { blob: saved ?? blob };
     }
     const recovered = sourceBlob(
       await sourceStore<unknown>((store) => store.get(id)),

@@ -40,6 +40,17 @@ Real errors, cancellations and unreported completions retain normal treatment.
   Derive saved image links only from result paths or explicit resource links;
   an input `filePath`/`file_path` is only a requested destination, even after
   the operation reaches a terminal status.
+- Codex keeps the image preview beneath its Generate row. Preserve legacy
+  inline results; otherwise the Local adapter or cloud worker reads the native
+  `savedPath` once at completion, asynchronously, and stores verified image
+  bytes in the canonical transcript. The app never reads a VM path directly.
+  Accept only bounded regular PNG, JPEG or WebP files, without following
+  symlinks. If no preview is available, including a failed browser decode, show
+  the plain status “Image saved by Codex” instead of a broken image.
+  Observed `inputImages` appear below the preview as “Edited from” file pills,
+  using the existing workspace-aware Files navigation and active-only warming.
+  Source paths stay literal; they do not change the generated target, title or
+  count. Hidden rows release media and keep source pills inert.
 - Keep supported tool content (text, images, audio, resource links and embedded
   resource text), plus bounded structured results. A text summary must not hide
   a sibling report link or MCP `structuredContent`. Preserve errors and native
@@ -600,8 +611,31 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   and usage accounting independently.
 - Keep the request's original elapsed-time anchor during background work. A
   later parent reply extends the footer beyond the first settled send; use its
-  last changed text time, excluding child/tool bookkeeping and identical replay.
+  last changed text time, excluding child/tool bookkeeping, wake-up status and identical replay.
   Older persisted text without `updatedAt` uses its existing creation time.
+- Automatic Claude wake-ups continue the existing user turn without a user
+  message. While pending, keep the settled output/footer followed by the
+  existing **Waiting for N background tasks · elapsed** line. When work resumes,
+  its first working-feed row is an alarm-clock status: **Woke up for “reason” ·
+  due time** for dynamic loops, or **Scheduled task “name” · due time** for
+  CronCreate/routines. Format the epoch due time in the reader's timezone, and
+  omit it when unknown (a recurring job's later runs) while keeping the name.
+  Without a known reason use **Woke up on schedule** or **Scheduled task
+  started**. A new ScheduleWakeup supersedes the pending dynamic wake, as the
+  CLI does. Never show this notice next to the waiting line; if the cloud
+  hook arrives before actual activity, retain it until that work begins.
+  Once settled, fold it into the chip of the work it started, without adding a
+  message or tool count. It is plain status, with no panel or pill. Exclude it
+  from titles, answer copying, concise/fork transcripts, live prose smoothing
+  and evidence of model recovery. Full activity exports label it **Status**;
+  ordinary history/search retain its readable fallback text and optional metadata.
+  Reset/truncation keeps the existing user-turn boundaries.
+  Match hook prompts exactly against tracked task prompts; ambiguous matches
+  stay generic. Deduplicate using the native prompt ID through replay/resume.
+  CronCreate/CronList `nextFireAt` includes the scheduler offset and outranks the
+  one-shot cron estimate; ScheduleWakeup keeps `scheduledFor`. The cloud worker
+  registers only the notice hook, preserving its background/idle policy. A
+  wake-up notice is never evidence that a different cloud outbox prompt was accepted.
 - Claude `system/init` is turn metadata, not process replacement. Only the
   adapter creating a new query resets process-owned tasks, wakeups, lifecycle
   joins and workflow narration. Resume can reuse the native session ID; it
@@ -983,13 +1017,20 @@ query replacement, host disposal, buffered input, and native cancellation receip
 
 ## Turn changes and usage in the output footer
 
-Keep duration, copy and the action menu in the settled turn's toolbar. Below
-it, recorded changes use one `bg1-highlight` card with a `border2` outline:
+Keep duration, copy and the action menu in the settled turn's toolbar. Only
+the actual last turn automatically shows its recorded changes; a last turn
+without changes never promotes an older card. Historical turns show aggregate
+green additions and blue deletions beside the menu, including zero-line
+metadata changes. Clicking or pressing Enter/Space toggles that turn's card;
+the control uses `bg1-hover` and exposes its expanded state. A new thread tail
+or a changed chat/workspace identity closes manually opened historical cards.
+
+Recorded changes use one `bg1-highlight` card with a `border2` outline:
 filename/icon on the left and additions/deletions on the right. Show four
 files initially, followed by **Show N more** when needed. Expanded files use
 a ten-row (280px) scroll area; the header and **Review** stay visible. Keyboard
-expansion moves focus to the first newly revealed file, and changing turns
-resets the disclosure.
+expansion moves focus to the first newly revealed file. Closing the card or
+changing its owner resets the file-list disclosure.
 
 Review publishes the Changes tab with the explicit selected turn range,
 including for the latest turn, so later work cannot retarget it. File rows
@@ -998,6 +1039,9 @@ and Cursor in Personal Local, organization-local and cloud workspaces. Local
 uses keyed turn records; cloud uses the worker's mirrored opening-message
 summary, without waking the VM for passive transcript reads or hover previews.
 No recorded changes means no card; raw tool proposals are never a fallback.
+When that opening sits beside a long resident window, its final summary
+updates the retained opening in place; it must never append another prompt
+after the answer or change the older-page cursor.
 
 The timer is the only usage-card trigger. Show Input, Output, Cache read and
 one Total cost with agent/start/end details. Keep unknown distinct from zero,

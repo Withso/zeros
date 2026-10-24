@@ -17,7 +17,8 @@ it("returns bounded title seeds for at most 50 native IDs, excluding notes and f
   const { store, service, chat } = await setup();
   await chat("first");
   await store.importMessages("first", [row("note", "user", "Local note", { localNote: {} }), row("prompt", "user", "Build the feature"),
-    row("fallback", "agent", "Using another model", { modelFallback: {} })]);
+    row("fallback", "agent", "Using another model", { modelFallback: {} }),
+    row("wake", "agent", "Woke up on schedule", { wakeupNotice: { source: "loop_wakeup" } })]);
   expect(await service.handle("chats.titleSeeds", { chatIds: ["first", "missing", "first"] })).toEqual({ seeds: [
     { chatId: "first", messageId: "prompt", prompt: "Build the feature", answered: false },
   ] });

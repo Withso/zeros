@@ -69,11 +69,14 @@ describe("login-shell PATH probe output", () => {
       async () => {
         configureLoginShellPathRunner({
           cacheKey: `real-shell:${shell}`,
-          // The real probe command, without -i/-l so no startup file runs.
+          // The real probe command with startup files disabled. Bash can treat
+          // Node's socket stdin as a remote invocation and read .bashrc otherwise.
           run: async (_shell, args) => {
+            const startupFlags = shell === "/bin/zsh" ? ["-f"]
+              : shell === "/bin/bash" ? ["--norc"] : [];
             const { stdout } = await execFileAsync(
               shell,
-              [...(shell === "/bin/zsh" ? ["-f"] : []), "-c", args.at(-1)!],
+              [...startupFlags, "-c", args.at(-1)!],
               { env: { PATH: inherited } },
             );
             return { stdout };

@@ -1,6 +1,7 @@
 // Real Chromium regression coverage for inline atoms, caret geometry, and
 // attachment controls. Called by the main UI smoke with its shared server.
 import { expect } from "@playwright/test";
+import { runComposerSuggestionsSmoke } from "./ui-smoke-composer-suggestions.mjs";
 
 export async function runComposerEditorSmoke({ page, check }) {
   const base = new URL(page.url());
@@ -443,6 +444,7 @@ export async function runComposerEditorSmoke({ page, check }) {
     }),
   );
   await runFilePillNavigationSmoke({ page, check, base });
+  await runComposerSuggestionsSmoke({ page, check, harnessBase: `${base.origin}/apps/desktop/src/renderer/harnesses` });
 }
 
 async function runFilePillNavigationSmoke({ page, check, base }) {

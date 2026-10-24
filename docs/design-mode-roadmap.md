@@ -2485,7 +2485,7 @@ the transcript or its replay.
    streamed edit text (`args_text_delta`, `stream_content`) but drops it when
    converting updates, so Cursor drafts show status only. Preview its content
    once a pinned SDK exposes it, through the same `AgentToolInputEvent` hook.
-2. **Codex streaming.** Codex (0.162.1) reports a patch only once complete
+2. **Codex streaming.** Codex (0.164.0) reports a patch only once complete
    (`item/started`); preview it while the model writes it if the app-server
    ever forwards the patch input's deltas.
 3. **New pages.** A canvas document that adds a page could show that page's

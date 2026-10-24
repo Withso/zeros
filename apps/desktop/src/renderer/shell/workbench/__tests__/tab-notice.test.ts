@@ -10,7 +10,7 @@ vi.mock("../../../state/workbench-availability", () => ({
   registerWorkbenchFrameVisibility: () => () => {}, reconnectWorkbenchWorkspace: vi.fn(),
 }));
 const tab = { id: "changes-notice", type: "changes" as const, title: "Changes" };
-const sources = () => workbenchSourcesFor(workbenchStatusKey("/notice", tab));
+const sources = () => workbenchSourcesFor(workbenchStatusKey("/notice", tab), "/notice");
 const render = () => renderToStaticMarkup(createElement(WorkbenchTabFrame,
   { tab, folder: "/notice", active: true, children: createElement("span", null, "Existing content") }));
 afterEach(() => {

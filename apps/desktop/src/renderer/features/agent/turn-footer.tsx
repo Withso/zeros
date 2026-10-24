@@ -5,8 +5,8 @@ import type { CloudTurnEnding } from "./cloud-turn-presentation";
 // TurnFooter — the footer below a settled turn's answer
 // ──────────────────────────────────────────────────────────
 //
-// Every completed turn keeps its duration, copy and actions toolbar above a
-// bounded card of recorded file changes. Four rows show initially; expanding
+// The last turn shows its recorded changes; historical turns disclose them
+// from aggregate counts beside the copy/actions toolbar. Four rows show initially; expanding
 // reveals the rest in a ten-row scroll surface. Review opens the exact turn
 // in Changes, and each row retains its historical file diff navigation.
 //
@@ -247,7 +247,7 @@ export function turnFooterDuration(
   startedAt: number,
 ): number {
   const parentOutput = events.filter(
-    (e) => e.kind === "text" && e.role === "agent" && !e.parentToolId,
+    (e) => e.kind === "text" && e.role === "agent" && !e.parentToolId && !e.wakeupNotice,
   );
   const end = Math.max(
     turn?.endedAt ?? 0,
@@ -356,9 +356,10 @@ export const TurnFileRow = memo(function TurnFileRow({
 });
 
 export const TurnChangesCard = memo(function TurnChangesCard({
-  files, chatId, turnId, workspaceId, onOpen, onReview, onReviewIntent,
+  id, files, chatId, turnId, workspaceId, onOpen, onReview, onReviewIntent,
   previewEnabled = true,
 }: {
+  id?: string;
   files: TurnInfo["files"];
   chatId: string;
   turnId: string;
@@ -380,7 +381,7 @@ export const TurnChangesCard = memo(function TurnChangesCard({
   if (!files.length) return null;
   const shown = expanded ? files : files.slice(0, COLLAPSED_FILE_COUNT);
   return (
-    <section data-turn-changes aria-label="Turn changes" className="border-border2 bg-bg1-highlight text-fg2 mt-2 min-w-0 rounded-lg border p-1.5 text-xs">
+    <section id={id} data-turn-changes aria-label="Turn changes" className="border-border2 bg-bg1-highlight text-fg2 mt-2 min-w-0 rounded-lg border p-1.5 text-xs">
       <div className="flex min-w-0 items-center justify-between gap-2 pl-2">
         <span>{`${files.length} ${files.length === 1 ? "File" : "Files"} Changed`}</span>
         <Button type="button" variant="ghost" onClick={onReview} onPointerEnter={onReviewIntent} onFocus={onReviewIntent} className="text-fg2 hover:bg-bg1-hover font-normal">
@@ -416,6 +417,9 @@ interface TurnFooterProps {
   chatId: string;
   /** Opening user-message id = the turn id. */
   turnId: string;
+  /** Identity of the thread's actual tail, including a new turn with no edits.
+   * A successor closes every manually disclosed historical card. */
+  threadTailKey: string | null;
   /** The turn's events (for the copy text + duration fallback). */
   events: AgentMessage[];
   /** Turn start (the user prompt's createdAt). */
@@ -455,6 +459,7 @@ export const TurnFooter = memo(function TurnFooter({
   surfaceActive = true,
   chatId,
   turnId,
+  threadTailKey,
   folder,
   recordedSummary,
   events,
@@ -485,6 +490,13 @@ export const TurnFooter = memo(function TurnFooter({
   const [resetting, setResetting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const forkSelectedRef = useRef(false);
+  const changesId = useId();
+  const changesKey = JSON.stringify([chatId, folder, turnId, threadTailKey]);
+  const [expandedChangesKey, setExpandedChangesKey] = useState<string | null>(null);
+  // Reset synchronously: no frame of stale disclosure on Send or owner/turn
+  // replacement, and returning to an earlier tail cannot revive an old click.
+  if (expandedChangesKey !== null && expandedChangesKey !== changesKey) setExpandedChangesKey(null);
+  const changesExpanded = !!isLastTurn || expandedChangesKey === changesKey;
 
   // The recorded turn (authoritative duration, status/stop reason, usage,
   // authored files) as keyed server state: a remount — every chat-tab switch,
@@ -657,13 +669,13 @@ export const TurnFooter = memo(function TurnFooter({
       } else {
         toast.success(
           restored > 0
-            ? `Reset to this point — ${restored} file${restored === 1 ? "" : "s"} restored`
-            : "Reset to this point",
+            ? `Reset changes — ${restored} file${restored === 1 ? "" : "s"} restored`
+            : "Reset changes",
           { action: undo },
         );
       }
     } catch (err) {
-      toast.error("Couldn’t reset to this point", {
+      toast.error("Couldn’t reset changes", {
         description: err instanceof Error ? err.message : String(err),
       });
     } finally {
@@ -684,10 +696,8 @@ export const TurnFooter = memo(function TurnFooter({
   // may fail, or an edit may be a no-op). Only the engine's persisted
   // pre/post-snapshot diff may produce a row. Missing records show no card.
   const files = readOnly ? [] : turnFooterFiles(turn);
-  // Whether this selected turn's own files have a retained checkpoint. Later
-  // turns are evaluated independently by the reset service; this only controls
-  // the selected-turn warning in the confirmation dialog.
-  const hasSnapshot = turn?.preSnapshot != null;
+  const additions = files.reduce((sum, file) => sum + file.additions, 0);
+  const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
   const cardFailure = turnFailureForCard({
     events,
     turnId,
@@ -798,16 +808,33 @@ export const TurnFooter = memo(function TurnFooter({
                   }}
                 >
                   <RotateCcw className="size-3.5" />
-                  Reset to this point
+                  Reset changes
                 </DropdownMenuItem>
               )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}
+        {!isLastTurn && files.length > 0 && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="compact"
+            data-turn-changes-toggle
+            aria-label={`${changesExpanded ? "Hide" : "Show"} turn changes, ${files.length} ${files.length === 1 ? "file" : "files"}, +${additions} −${deletions}`}
+            aria-expanded={changesExpanded}
+            aria-controls={changesId}
+            onClick={() => setExpandedChangesKey(changesExpanded ? null : changesKey)}
+            className="hover:bg-bg1-hover focus-visible:ring-highlighted-bright h-5 shrink-0 rounded-sm px-1 py-0 font-normal tabular-nums focus-visible:ring-2"
+          >
+            <span className="text-green-primary">+{additions}</span>
+            <span className="text-blue-primary">−{deletions}</span>
+          </Button>
+        )}
       </div>
-      {files.length > 0 && turn && (
+      {changesExpanded && files.length > 0 && turn && (
         <TurnChangesCard
-          key={JSON.stringify([chatId, turnId])}
+          key={changesKey}
+          id={changesId}
           files={files}
           chatId={chatId}
           turnId={turnId}
@@ -843,24 +870,14 @@ export const TurnFooter = memo(function TurnFooter({
         <Dialog open onOpenChange={(o) => !o && setConfirmOpen(false)}>
           <DialogContent className="max-w-md">
             <DialogHeader>
-              <DialogTitle>Reset to this point?</DialogTitle>
+              <DialogTitle>Reset changes?</DialogTitle>
             </DialogHeader>
             <DialogBody>
               <DialogDescription>
-                This rolls back this turn and every later turn in this chat —
-                the conversation is truncated here, and recorded file changes
-                from those turns are unwound from each turn’s own checkpoint.
+                Reset this chat and its changes to this point.
+                <br />
+                This turn and later turns will be removed. You can undo.
               </DialogDescription>
-              {files.length > 0 && !hasSnapshot && (
-                <p className="text-yellow-primary text-xs">
-                  This turn’s file checkpoint is no longer available, so its
-                  file changes will be left untouched.
-                </p>
-              )}
-              <p className="text-fg2 text-xs">
-                Concurrent edits are preserved when possible; overlapping edits
-                are left untouched. You can undo the reset afterward.
-              </p>
             </DialogBody>
             <DialogFooter>
               <Button
@@ -877,7 +894,7 @@ export const TurnFooter = memo(function TurnFooter({
                 onClick={runReset}
                 disabled={resetting}
               >
-                Reset
+                Reset changes
               </Button>
             </DialogFooter>
           </DialogContent>

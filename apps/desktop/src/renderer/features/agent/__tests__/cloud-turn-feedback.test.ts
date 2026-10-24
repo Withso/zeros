@@ -33,7 +33,8 @@ function render(index = 0) {
   const pending = state.pendingLocalTurns[chatId] === turn.userPrompt?.id;
   return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(ActionsCtx.Provider, { value: {} as never },
     createElement(TranscriptTurn, {
-      turn, shared, isVisualTail: index === turns.length - 1, isActiveProviderSegment: activity.active,
+      turn, shared, threadTailKey: turns.at(-1)?.userPrompt?.id ?? null,
+      isVisualTail: index === turns.length - 1, isActiveProviderSegment: activity.active,
       isActivityTail: activity.activityTail, durablePrompt: activity.durable, receiptState: activity.state,
       ...activity, ownsProviderFooter: true, turnIsPendingLocal: pending,
       turnInFlight: tailTurnInFlight({ sessionStreaming: agentActivity(slot, state.pendingLocalTurns[chatId]) === "running" && activity.active,
@@ -88,6 +89,39 @@ it("keeps a settled footer when later saved bubbles follow it", () => {
     rows: [...outbox.rows, { id: "two", kind: "text", role: "user", text: "Next task", createdAt: 30_000 }] } });
   expect(render()).toContain('aria-label="Turn usage, 20s"');
   expect(render(1)).not.toContain('aria-label="Copy output"');
+});
+
+it.each(["claude", "codex", "cursor"])("keeps recorded %s changes through native completion, receipts, and history reload", agentId => {
+  const opening = store().sessions[chatId]!.messages[0];
+  if (opening.kind !== "text") throw new Error("Expected opening prompt");
+  const recorded = { ...opening, turnSummary: {
+    agentId, ord: 1, summary: "Change files", startedAt: 10_000, endedAt: 30_000,
+    status: "completed" as const, stopReason: "end_turn",
+    files: [{ path: "cloud.ts", status: "modified" as const, additions: 7, deletions: 2 }],
+  } };
+  store().applyBridgeUpdate({ sessionId: route, update: { sessionUpdate: "user_message_recorded", message: recorded } });
+  expect(render()).not.toContain('data-turn-changes="true"');
+  terminal();
+  expect(render()).toContain('data-turn-changes="true"');
+  expect(render()).toContain("cloud.ts");
+  const settled = store().sessions[chatId]!;
+  // The durable journal has no diff metadata. Its matching bubble must not
+  // replace the worker's authoritative opening when the receipt settles.
+  store().patchSession(chatId, { cloudOutbox: { ...settled.cloudOutbox!, states: { one: "completed" }, activeId: undefined, pendingCount: 0 } });
+  expect(render()).toContain("cloud.ts");
+  const saved = structuredClone(store().sessions[chatId]!.messages);
+  store().clearAll();
+  store().setSession(chatId, { ...BLANK, cwd, agentId, status: "ready", transcriptState: "resident",
+    transcriptSource: "control-plane", messages: saved });
+  expect(render()).toContain("cloud.ts");
+  store().patchSession(chatId, { messages: [...saved,
+    { id: "two", kind: "text", role: "user", text: "Explain the changes", createdAt: 31_000 },
+    { id: "answer-two", kind: "text", role: "agent", text: "Explanation only", createdAt: 32_000 },
+  ] });
+  expect(render()).not.toContain('data-turn-changes="true"');
+  expect(render()).toContain("data-turn-changes-toggle");
+  expect(render()).toContain("+7");
+  expect(render(1)).not.toContain("data-turn-changes");
 });
 
 it("renders Stop and its frozen footer before any asynchronous work, then lets native completion win", () => {

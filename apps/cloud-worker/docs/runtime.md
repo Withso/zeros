@@ -97,10 +97,16 @@ the exact runtime pins, dependency versions and SHA-256 of every shipped file.
 
 The bundle contains the protocol, WebSocket and terminal-screen libraries.
 External runtime packages are node-pty (including its native addon), Codex
-0.162.1 and its platform binary, Claude Agent SDK 0.3.296 and its platform CLI,
+0.164.0 and its platform binary, Claude Agent SDK 0.3.309 and its platform CLI,
 and Cursor SDK 1.0.37 and its platform binaries. Their runtime dependencies and
 required peer dependencies are included; provider binaries do not download at
 agent startup.
+
+The complete Codex platform package includes `codex-resources/voice`, its native
+host, libraries and license notices. It ships unchanged in both the worker and
+desktop app; excluding the voice runtime is a deferred packaging decision and
+does not enable a Zeros voice feature. Upstream removed the patched zsh backend
+and bundled `codex-resources/zsh` in 0.163.0. Linux still ships `bwrap`.
 
 Boat's stock account is `user`. Run the service as `User=user`, with
 `WorkingDirectory=/home/user` and

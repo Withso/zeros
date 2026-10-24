@@ -270,6 +270,8 @@ import {
   type AgentTextMessage,
 } from "@zeros/protocol/agent-messages";
 import { LocalSessionUpdateBatcher } from "./agents/local-session-update-batcher";
+import { CONVERSATION_REPLAY_CAPABILITY, isConversationReplayPreamble, synthesizeReplayPrompt } from "@zeros/protocol/conversation-replay";
+import { acknowledgeConversationContext, getConversationContext } from "./db/conversation-context";
 import {
   PTY_AGENT_AUTH_CWD,
   type AgentPromptBubble,
@@ -287,6 +289,8 @@ import {
   flushStreamingChatMessages,
   queueStreamingChatMessages,
   upsertChatMessagesBulk,
+  windowChatMessages,
+  WINDOW_MAX_ROWS,
 } from "./db/messages";
 import { BootPhaseTimer } from "./boot-phase-timer";
 import {
@@ -1983,6 +1987,9 @@ export class ZerosEngine {
           const executionId =
             notification.executionId ?? notification.sessionId;
           const executionAgentId = this.sessionAgent.get(executionId);
+          // Admission registers the route before provider I/O. Once retired,
+          // late output (including native identity) has no conversation owner.
+          if (!executionAgentId) return;
           if (executionAgentId && executionAgentId !== agentId) {
             console.warn(
               `[agents] ${agentId} emitted an update for ${executionAgentId}'s execution; update dropped`,
@@ -3979,6 +3986,55 @@ export class ZerosEngine {
     }
   }
 
+  /** A transcript reset is one exact-chat lifecycle operation. Create/load
+   * waits on the same barrier as close; already-admitted prompts are settled
+   * before the service captures its undo record or truncates history. */
+  private async withConversationMutation<T>(
+    chatId: string,
+    apply: (retire: () => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    const previous = this.conversationCloseFlights.get(chatId);
+    let release!: () => void;
+    const flight = new Promise<void>((resolve) => { release = resolve; });
+    this.conversationCloseFlights.set(chatId, flight);
+    try {
+      if (previous) await previous.catch(() => {});
+      return await apply(async () => {
+        this.invalidateConversationBind(chatId);
+        const executions = new Map<string, string>();
+        for (const [executionId, owner] of this.sessionChat) {
+          const agentId = this.sessionAgent.get(executionId);
+          if (owner === chatId && agentId) executions.set(executionId, agentId);
+        }
+        // Prompt preparation is live work too, even before promptSessions is
+        // populated or if adapter exit has already removed part of its route.
+        for (const prompt of this.activePromptContexts.values()) {
+          if (prompt.chatId === chatId) executions.set(prompt.sessionId, prompt.agentId);
+        }
+        await this.cancelLiveAgentSessions(executions.keys());
+        for (const executionId of executions.keys()) {
+          const prompt = this.activePromptContexts.get(executionId);
+          if (prompt) {
+            // Its bookkeeping was settled above. A late provider completion
+            // must not rewrite a turn restored by Undo under the same id.
+            prompt.turnRowSettled = true;
+            prompt.terminalPublished = true;
+          }
+          this.activeTurnSnapshots.delete(executionId);
+          this.clearAgentExecutionRoute(executionId);
+        }
+        await Promise.all([...executions].map(([executionId, agentId]) =>
+          this.agents.endSession(agentId, executionId),
+        ));
+      });
+    } finally {
+      release();
+      if (this.conversationCloseFlights.get(chatId) === flight) {
+        this.conversationCloseFlights.delete(chatId);
+      }
+    }
+  }
+
   private staleConversationBindFailure(
     stage: "newSession" | "loadSession" | "forkSession",
   ): AgentFailureError {
@@ -4816,6 +4872,13 @@ export class ZerosEngine {
             return;
           }
           const promptChatId = this.sessionChat.get(msg.sessionId);
+          if (promptChatId && this.conversationCloseFlights.has(promptChatId)) {
+            throw new AgentFailureError({
+              kind: "lifecycle-superseded",
+              stage: "prompt",
+              message: "The conversation context is changing. Reconnect before sending.",
+            });
+          }
           if (promptChatId && this.conversationForkSources.has(promptChatId)) {
             client.send(
               createMessage({
@@ -4934,7 +4997,33 @@ export class ZerosEngine {
             }),
           );
           let turnCtx: TurnSnapshotContext | null = null;
+          let replayContext: ReturnType<typeof getConversationContext> = null;
+          const replayAtStart = this.sessionLoadResponses.get(msg.sessionId);
+          const firstBlock = msg.prompt[0];
+          // Legacy renderers put this generated prefix in its own block and
+          // carry the visible user text separately. Never accept stale replay
+          // as the authoritative history of a reset conversation. A legacy
+          // execution without a chat id still depends on the supplied replay.
+          const prompt = activePrompt.chatId && msg.bubble?.displayText !== undefined && msg.prompt.length > 1 &&
+            firstBlock?.type === "text" && isConversationReplayPreamble(firstBlock.text)
+            ? msg.prompt.slice(1) : msg.prompt;
+          let providerPrompt = prompt;
           try {
+            replayContext = activePrompt.chatId ? getConversationContext(activePrompt.chatId) : null;
+            // Local context is reconstructed from SQLite, never a renderer's
+            // possibly stale/scrolled transcript. Read before persisting the
+            // current user message, and send the preamble only to the provider.
+            if (activePrompt.chatId && (replayContext?.replayPending || replayAtStart?.resumedFresh)) {
+              const history = windowChatMessages(activePrompt.chatId, WINDOW_MAX_ROWS).flatMap((row) => {
+                try {
+                  const message = JSON.parse(row.payload) as AgentMessage;
+                  return message?.kind === "text" && typeof message.text === "string" && message.id !== msg.userMessageId
+                    ? [message] : [];
+                } catch { return []; }
+              });
+              const replay = synthesizeReplayPrompt(history);
+              if (replay.text) providerPrompt = [{ type: "text", text: replay.text }, ...prompt];
+            }
             // Persist the user's turn FIRST so the engine transcript is complete
             // (ordered user→agent) for every adapter — see persistUserPrompt.
             // `bubble` carries the composer's inline pills/chips so a reopened
@@ -5051,7 +5140,7 @@ export class ZerosEngine {
                   .prompt(
                     msg.agentId,
                     msg.sessionId,
-                    msg.prompt,
+                    providerPrompt,
                     activePrompt.turnId,
                   )
                   .finally(() => {
@@ -5060,9 +5149,16 @@ export class ZerosEngine {
             const loaded = this.sessionLoadResponses.get(msg.sessionId);
             // A tool read can replace an idle native thread while this older
             // prompt is still settling. Only acknowledge the history it sent.
-            if (activePrompt.adapterSettled && response.stopReason !== "cancelled" &&
-                replayAtDispatch?.resumedFresh && loaded?.resumedFresh &&
-                sameProviderBinding(replayAtDispatch.providerBinding, loaded.providerBinding)) {
+            const contextAccepted = activePrompt.adapterSettled && !activePrompt.cancelledByUser &&
+              response.stopReason !== "cancelled" &&
+              this.sessionAgent.get(msg.sessionId) === msg.agentId &&
+              (!activePrompt.chatId || this.sessionChat.get(msg.sessionId) === activePrompt.chatId) &&
+              // Claude learns its first native id during the first prompt.
+              (!replayAtDispatch?.providerBinding || sameProviderBinding(replayAtDispatch.providerBinding, loaded?.providerBinding));
+            if (contextAccepted && replayContext?.replayPending && activePrompt.chatId) {
+              acknowledgeConversationContext(activePrompt.chatId, replayContext.generation);
+            }
+            if (contextAccepted && replayAtDispatch?.resumedFresh && loaded?.resumedFresh) {
               this.sessionLoadResponses.set(msg.sessionId, {
                 ...loaded,
                 resumedFresh: false,
@@ -7367,6 +7463,12 @@ export class ZerosEngine {
       const pre = isGit
         ? await snapshotWorkingTree(root, snapshotRef(chatId, turnId, "pre"))
         : null;
+      // A reset/close can retire this execution while snapshotting is still in
+      // progress. Do not recreate a running turn after its timeline was cut.
+      if (this.sessionChat.get(sessionId) !== chatId) {
+        if (isGit) await deleteSnapshotRefs(root, chatId, [turnId]);
+        return null;
+      }
       startTurnRow({
         chatId,
         turnId,
@@ -7583,12 +7685,9 @@ export class ZerosEngine {
 
     const finishLoopObservation = this.slowWorkspaceOperations?.beginEventLoopObservation?.();
     try {
-      // A reset that truncates a chat's timeline must not race a turn still
-      // streaming INTO that timeline (its trailing chunks would re-persist as
-      // zombie rows past the cut). The renderer's footer cancels before it
-      // calls turns.reset, but a reset from another device — or any future
-      // caller — arrives here without that guard, so the engine enforces it.
-      if (op === "turns.reset" && typeof params.chatId === "string") {
+      // Files-only keeps its existing cancellation behavior. Transcript reset
+      // and Undo use the exact-chat lifecycle callback after service validation.
+      if (op === "turns.reset" && params.mode === "filesOnly" && typeof params.chatId === "string") {
         await this.cancelLivePromptForChat(params.chatId);
       }
       // Register checkout/ref mutations before yielding. Archive/delete drains
@@ -7622,6 +7721,9 @@ export class ZerosEngine {
         const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
           ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         return this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay,
+          ...(op === "turns.reset" || op === "turns.undoReset"
+            ? { withConversationMutation: this.withConversationMutation.bind(this) }
+            : {}),
           ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
             connectionId: client.id,
             authority: catalogAuthority,
@@ -7963,9 +8065,9 @@ export class ZerosEngine {
         }
       }
       // A transcript mutation (click-to-edit truncate/clear, or a turn
-      // reset/undo) leaves no live stream for the OTHER devices — nudge them to
-      // re-window the affected chat so it reflects everywhere. Excludes the
-      // originator, which already updated its own in-memory transcript. The
+      // reset/undo) leaves no live stream for other devices — nudge them to
+      // re-window the affected chat so it reflects everywhere. Context resets
+      // also invalidate the originator's provider route. The
       // ["workspaces"] kind above only refreshes git/changes state; a chat
       // re-window needs ["messages"] + chatIds (sessions-provider's DB_CHANGED
       // handler returns early otherwise), so turns.reset/undoReset must emit
@@ -7991,15 +8093,17 @@ export class ZerosEngine {
         }
       }
       if (transcriptChat) {
-        this.router.broadcastExcept(
-          client.id,
-          createMessage({
+        const contextReset = (op === "turns.reset" && params.mode !== "filesOnly") || op === "turns.undoReset";
+        const notification = createMessage({
             type: "DB_CHANGED",
             source: "engine",
-            kinds: ["messages"],
+            kinds: contextReset ? ["messages", "chats", "conversationContext"] : ["messages"],
             chatIds: [transcriptChat],
-          }),
-        );
+          });
+        // Every surface, including the caller, must discard its live route and
+        // reread the authoritative transcript after reset or transcript Undo.
+        if (contextReset) this.router.broadcast(notification);
+        else this.router.broadcastExcept(client.id, notification);
       }
     } catch (err) {
       const code = isGitError(err) || err instanceof CodeReviewError ? err.code : "WORKSPACE_OP_FAILED";
@@ -9235,7 +9339,7 @@ export class ZerosEngine {
         port: this.actualPort,
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
-        capabilities: [DESIGN_CATALOG_READ_CAPABILITY],
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY],
       }),
     );
   }

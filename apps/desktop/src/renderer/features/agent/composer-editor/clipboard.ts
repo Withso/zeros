@@ -68,6 +68,7 @@ function referenceMetadata(
     absolutePath: a.absolutePath,
     owner: a.owner ?? owner,
     sourceRecoveryId: a.sourceRecoveryId,
+    sourcePortable: a.sourcePortable,
     sourceKey: a.sourceKey,
     preview: a.preview,
     unavailable: a.unavailable,
@@ -110,6 +111,7 @@ export function clipboardPayload(
     }
     if (node.type === "mention")
       return node.attrs?.token || node.attrs?.label || "";
+    if (node.type === "skill") return `/${node.attrs?.name ?? ""}`;
     if (node.type === "localLink") return String(node.attrs?.href ?? "");
     if (node.type === "hardBreak") return "\n";
     return node.text ?? (node.content ? joinInline(node.content) : "");
@@ -213,6 +215,8 @@ export function prepareClipboardPaste(
         ? { type: "localLink", attrs: { href } }
         : { type: "text", text: href };
     }
+    if (node.type === "skill" && !sameAttachmentOwner(payload.owner, owner))
+      return { type: "text", text: `/${node.attrs?.name ?? ""}` };
     if (node.type === "attachment") {
       const a =
         refs.get(node.attrs?.attachmentId) ??

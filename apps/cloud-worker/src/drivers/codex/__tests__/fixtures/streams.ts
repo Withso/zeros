@@ -1,5 +1,6 @@
-// Synthetic recordings of the 0.162.1 native wire, based on the Local adapter
+// Synthetic recordings of the 0.164.0 native wire, extending the Local adapter
 // regressions at 4baf69ec. No private conversation or provider access is used.
+import type { ImageGenerationItem } from "../../native-types";
 export interface NativeFrame {
   method: string;
   params: Record<string, unknown>;
@@ -17,6 +18,30 @@ const completed = (status = "completed", extra: Record<string, unknown> = {}): N
   notice("turn/completed", { turn: { id: "native-turn", status, ...extra } });
 
 export const streams: Array<{ name: string; frames: NativeFrame[] }> = [
+  ...([
+    { id: "inline-image", status: "completed", revisedPrompt: "A landscape", failure: null, result: "aGVsbG8=", savedPath: "/repo/output.png" },
+    { id: "stored-image", status: "completed", revisedPrompt: "A landscape", failure: null, fileId: "file-generated-image", savedPath: "/repo/output.png" },
+  ] satisfies ImageGenerationItem[]).map((image) => ({
+    name: `image generation ${image.id} completion and replay`,
+    frames: [
+      item("started", { type: "imageGeneration", ...image }),
+      item("completed", { type: "imageGeneration", ...image }),
+      completed(),
+      item("completed", { type: "imageGeneration", ...image }),
+    ],
+  })),
+  {
+    name: "overlapping read calls keep their own status and start order",
+    frames: [
+      item("started", { type: "dynamicToolCall", id: "first", namespace: "skills", tool: "read", arguments: { name: "guide" }, status: "inProgress" }),
+      item("started", { type: "dynamicToolCall", id: "second", namespace: "skills", tool: "read", arguments: { name: "guide" }, status: "inProgress" }),
+      item("completed", { type: "dynamicToolCall", id: "second", namespace: "skills", tool: "read", status: "completed", success: true, contentItems: [{ type: "inputText", text: "Second result" }] }),
+      item("completed", { type: "dynamicToolCall", id: "first", namespace: "skills", tool: "read", status: "failed", success: false, contentItems: [{ type: "inputText", text: "First failed" }] }),
+      completed(),
+      item("started", { type: "dynamicToolCall", id: "first", namespace: "skills", tool: "read", status: "inProgress" }),
+      item("started", { type: "dynamicToolCall", id: "second", namespace: "skills", tool: "read", status: "inProgress" }),
+    ],
+  },
   {
     name: "prose, phases, correction, reasoning parts and completion replay",
     frames: [

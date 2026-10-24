@@ -105,19 +105,25 @@ const transcript = (rows: CloudV2MessageRow[]): AgentMessage[] => rows.flatMap((
   } catch { return []; }
 });
 
-function recordedPrompt(message: AgentTextMessage, turn?: TurnInfo): AgentTextMessage {
+function recordedPrompt(message: AgentTextMessage, turn?: TurnInfo, previous?: AgentMessage): AgentTextMessage {
   const prompt = { ...message };
   delete prompt.turnSummary;
   if (turn) {
     // Keep transport identities and Git object IDs out of mirrored payloads.
     const { ord, agentId, summary, startedAt, endedAt, stopReason, status, files, usage } = turn;
     prompt.turnSummary = { ord, agentId, summary, startedAt, endedAt, stopReason, status, files, usage };
+    // Replaying or importing a prompt cannot change the worker summary's
+    // freshness. Keep the stamp paired with the saved summary, even if absent
+    // on a legacy row, rather than accepting an imported clock value.
+    delete prompt.updatedAt;
+    if (previous?.kind === "text" && previous.updatedAt !== undefined) prompt.updatedAt = previous.updatedAt;
   }
   return prompt;
 }
 
 export function recordUser(draft: SessionData, input: PromptInput, steeredTurnId?: string): void {
-  const message = recordedPrompt(userMessage(input, steeredTurnId), draft.turns?.find(turn => turn.turnId === input.userMessageId));
+  const message = recordedPrompt(userMessage(input, steeredTurnId), draft.turns?.find(turn => turn.turnId === input.userMessageId),
+    draft.messages.find(message => message.id === input.userMessageId));
   draft.messages = applyUpdate(draft.messages, { sessionId: "", update: { sessionUpdate: "user_message_recorded", message } });
   upsertRows(draft.rows, [persisted(draft.messages.find((entry) => entry.id === message.id)!)]);
 }
@@ -225,7 +231,13 @@ export class SessionStore {
       if (index < 0) turns.push(turn); else turns[index] = turn;
       const opening = draft.messages.find(message => message.id === turn.turnId);
       if (opening?.kind !== "text" || opening.role !== "user") return;
-      prompt = recordedPrompt(opening, turn);
+      prompt = recordedPrompt(opening, turn, opening);
+      if (JSON.stringify(prompt.turnSummary) !== JSON.stringify(opening.turnSummary)) {
+        // The mirror uses this existing field to prove a newer summary after
+        // a lost live event. Background captures can share a millisecond or
+        // follow a clock correction, so every changed summary must advance.
+        prompt.updatedAt = Math.max(Date.now(), (opening.updatedAt ?? opening.createdAt) + 1);
+      }
       draft.messages = applyUpdate(draft.messages, { sessionId: "", update: { sessionUpdate: "user_message_recorded", message: prompt } });
       upsertRows(draft.rows, [persisted(prompt)]);
     });
@@ -275,7 +287,7 @@ export class SessionStore {
       const first = session.messages[index];
       if (first?.kind !== "text" || !first.text.trim()) return [];
       const answered = session.messages.slice(index + 1).some(message => message.kind === "tool" ||
-        (message.kind === "text" && message.role === "agent" && message.modelFallback == null && !!message.text.trim())) ||
+        (message.kind === "text" && message.role === "agent" && message.modelFallback == null && message.wakeupNotice == null && !!message.text.trim())) ||
         session.inbox.some(entry => entry.userMessageId === first.id && ["completed", "failed", "cancelled", "interrupted"].includes(entry.state));
       // The renderer's title request keeps the first 400 and last 100 Unicode
       // characters. Bound the wire payload to that same input, without secrets
@@ -374,16 +386,16 @@ export class SessionStore {
     });
     await this.update(chatId, (draft) => {
       const turns = new Map(draft.turns?.map(turn => [turn.turnId, turn]));
+      const current = new Map(draft.messages.map((message) => [message.id, message]));
       // Another device can import an older prompt. Reapply the worker's own
       // summary, and never accept a snapshot claim for an unrecorded turn.
       const canonicalRows = rows.map(row => {
         const message = JSON.parse(row.payload);
         return message?.kind === "text" && message.role === "user"
-          ? { ...row, payload: JSON.stringify(recordedPrompt(message, message.id === row.msgId ? turns.get(row.msgId) : undefined)) }
+          ? { ...row, payload: JSON.stringify(recordedPrompt(message, message.id === row.msgId ? turns.get(row.msgId) : undefined, current.get(row.msgId))) }
           : row;
       });
       upsertRows(draft.rows, canonicalRows);
-      const current = new Map(draft.messages.map((message) => [message.id, message]));
       const incoming = new Map(transcript(canonicalRows).map((message) => [message.id, message]));
       draft.messages = draft.rows.flatMap((row) => {
         const message = incoming.get(row.msgId) ?? current.get(row.msgId);

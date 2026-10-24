@@ -481,6 +481,7 @@ describe("cloud composer readiness queue", () => {
     class BridgeFixture { openWorkspace = vi.fn(async () => {}); }
     const bridge = new BridgeFixture(), wakeIntent = { id: "prepared-action" };
     const context = { ...h.provider, bridge, cloudComputerV2: true, WorkspaceRuntimeClient: BridgeFixture,
+      conversationResetFlightsRef: { current: new Map() },
       canReadCloudWorkspace: () => true, cloudSendPreparationRef: { current: new CloudSendPreparation() } };
     vm.runInNewContext(callbacks(providerAst, ["prepareForSend"]), context);
     for (let attempt = 0; attempt < 3; attempt++) await context.actions.prepareForSend("chat", wakeIntent);

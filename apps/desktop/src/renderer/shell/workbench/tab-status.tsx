@@ -180,7 +180,8 @@ export function WorkbenchTabFrame({
   children: React.ReactNode;
 }) {
   const key = workbenchStatusKey(folder, tab, statusTarget);
-  const sources = useMemo(() => workbenchSourcesFor(key), [key]);
+  const cloud = isCloudWorkspace(folder);
+  const sources = useMemo(() => workbenchSourcesFor(key, folder), [key, folder]);
   const snapshot = useSyncExternalStore(
     sources.subscribe,
     sources.snapshot,
@@ -192,8 +193,8 @@ export function WorkbenchTabFrame({
     visible,
   } = useWorkbenchAvailability(folder, active);
   useLayoutEffect(() => {
-    if (visible) return registerWorkbenchFrameVisibility(folder);
-  }, [folder, visible]);
+    if (visible && !cloud) return registerWorkbenchFrameVisibility(folder);
+  }, [cloud, folder, visible]);
   const [toolbar, setToolbar] = useState<HTMLDivElement | null>(null);
   const connected = availability.connection === "connected";
   const context = useMemo(
@@ -201,7 +202,7 @@ export function WorkbenchTabFrame({
     [sources, toolbar, visible, connected, tab.type],
   );
   const nextStatus =
-    availabilityStatus ??
+    (cloud ? null : availabilityStatus) ??
     (availability.connection === "connected" && snapshot.failure
       ? describeWorkbenchFailure(tab.type, snapshot.failure, !!tab.filePath)
       : null);
@@ -217,8 +218,12 @@ export function WorkbenchTabFrame({
       ? lastStatus.current.status
       : null);
   lastStatus.current = { key, status };
-  const notice = !status && availability.connection === "connected" ? snapshot.notice : null;
-  const blocked = status !== null && !snapshot.hasContent;
+  const notice = !status && !availabilityStatus && connected ? snapshot.notice : null;
+  // Cloud lifecycle/connection status belongs to workspace details and the
+  // existing connection toast. Keep a cold tab's quiet fallback, without
+  // directing users to a Retry button that this frame no longer displays.
+  const emptyStatus = status ?? (availabilityStatus && { ...availabilityStatus, action: undefined });
+  const blocked = emptyStatus !== null && !snapshot.hasContent;
   const retry = useCallback(() => {
     if (!visible) return;
     void sources.retry(
@@ -269,7 +274,7 @@ export function WorkbenchTabFrame({
                 type={tab.type}
                 message={describeWorkbenchEmptyState(
                   tab.type,
-                  status,
+                  emptyStatus,
                   !!tab.filePath,
                 )}
               />
@@ -333,7 +338,7 @@ export function WorkbenchTabStatusProvider({
   children: React.ReactNode;
 }) {
   const key = workbenchStatusKey(folder, tab);
-  const sources = useMemo(() => workbenchSourcesFor(key), [key]);
+  const sources = useMemo(() => workbenchSourcesFor(key, folder), [key, folder]);
   const { availability, visible } = useWorkbenchAvailability(folder, active);
   const connected = availability.connection === "connected";
   const value = useMemo(

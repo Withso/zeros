@@ -82,6 +82,64 @@ export async function runContextGaugeSmoke({ page, harnessBase }) {
   await expect(row("Used")).toHaveText("Used0.0%");
   await expect(panel.getByText("Messages", { exact: true })).toHaveCount(0);
 
+  await page.evaluate(() => {
+    globalThis.contextMcpFixture = {
+      size: 200_000, used: 80_000, categories: [
+        { id: "messages", name: "Messages", tokens: 55_000, kind: "used" },
+        { id: "free_space", name: "Available", tokens: 100_000, kind: "free" },
+        { id: "system_prompt", name: "System prompt", tokens: 4_000, kind: "used" },
+        { id: "system_tools", name: "System tools", tokens: 3_000, kind: "used" },
+        { id: "skills", name: "Skills", tokens: 5_000, kind: "used" },
+        { id: "mcp_tools", name: "Connected tools", tokens: 10_000, kind: "used", mcpServers: [
+          { serverName: "Team_Docs", tokens: 4_000 }, { serverName: "build_ops", tokens: 3_000 },
+          { serverName: "search", tokens: 1_500 }, { serverName: "alerts", tokens: 1_000 }, { serverName: "git", tokens: 500 },
+        ] },
+        { id: "mcp_instructions", name: "Server guidance", tokens: 3_000, kind: "used", mcpServers: [
+          { serverName: "Team Docs", tokens: 1_000 }, { serverName: "build.ops", tokens: 1_000 },
+          { serverName: "search", tokens: 500 }, { serverName: "alerts", tokens: 300 }, { serverName: "git", tokens: 200 },
+        ] },
+        { id: "autocompact_buffer", name: "Autocompact buffer", tokens: 20_000, kind: "buffer" },
+        { id: "mcp_tools_deferred", name: "Unloaded tools", tokens: 90_000, kind: "deferred" },
+      ],
+    };
+    globalThis.setContextFixture({ usage: globalThis.contextMcpFixture });
+  });
+  const servers = panel.getByRole("button", { name: "MCP servers", exact: true });
+  await expect(servers).toHaveAttribute("aria-expanded", "false");
+  await expect(servers).toContainText("6.5%");
+  await expect(row("Skills")).toHaveText("Skills2.5%");
+  await servers.focus(); await servers.press("Enter");
+  await expect(servers).toHaveAttribute("aria-expanded", "true");
+  await expect(row("Team Docs")).toHaveText("Team Docs2.5%");
+  await expect(row("build.ops")).toHaveText("build.ops2.0%");
+  await expect(row("search")).toHaveText("search1.0%");
+  const more = panel.getByRole("button", { name: "2 more MCP servers" });
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  await expect(more).toContainText("1.0%");
+  await expect(panel.getByText("alerts", { exact: true })).toHaveCount(0);
+  await more.focus(); await more.press("Space");
+  await expect(row("alerts")).toHaveText("alerts0.7%");
+  await expect(row("git")).toHaveText("git0.3%");
+  await expect(panel.getByText("Unloaded tools", { exact: true })).toHaveCount(0);
+  // Stable row IDs preserve disclosure state and keyboard focus when native
+  // labels/order change during a refresh. No owner-global selection is added.
+  const less = panel.getByRole("button", { name: "Show fewer MCP servers" });
+  await expect(less).toBeFocused();
+  await page.evaluate(() => globalThis.setContextFixture({ usage: {
+    ...globalThis.contextMcpFixture,
+    categories: globalThis.contextMcpFixture.categories.toReversed().map(category =>
+      category.id === "mcp_tools" ? { ...category, name: "Renamed connected tools" } : category),
+  } }));
+  await expect(servers).toHaveAttribute("aria-expanded", "true");
+  await expect(less).toBeFocused();
+  await expect(row("alerts")).toHaveText("alerts0.7%");
+  await less.press("Enter");
+  await expect(more).toBeFocused();
+  await expect(panel.getByText("alerts", { exact: true })).toHaveCount(0);
+  await servers.focus(); await servers.press("Space");
+  await expect(servers).toHaveAttribute("aria-expanded", "false");
+  await expect(panel.getByText("Team Docs", { exact: true })).toHaveCount(0);
+
   await page.evaluate(() =>
     window.setContextFixture({ usage: { size: 100, used: 120 } }),
   );
@@ -110,6 +168,6 @@ export async function runContextGaugeSmoke({ page, harnessBase }) {
   );
   expect(errors).toEqual([]);
   console.log(
-    "  [ok] context categories: native/legacy kinds, reserve, deferred hiding, live refresh, compaction and keyboard controls",
+    "  [ok] context categories: native/legacy IDs and kinds, MCP shares/disclosures, stable focus, reserve, deferred hiding, live refresh and compaction",
   );
 }

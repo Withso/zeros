@@ -165,7 +165,10 @@ export function canReplaceCloudTranscript(slot: AgentSessionState, page: AgentMe
     if (messageSnapshotsEqual([message], [next])) return true;
     const signature = slot.transcriptContentSignatures?.[message.id];
     if (signature && signature === transcriptMessageSignature(next)) return true;
-    return "updatedAt" in message && typeof message.updatedAt === "number" &&
-      "updatedAt" in next && typeof next.updatedAt === "number" && next.updatedAt > message.updatedAt;
+    // An opening published before Git capture (or by an older worker) has no
+    // update stamp yet. Its creation time is the baseline for the first saved
+    // summary; an unstamped or older mirror still cannot replace live content.
+    const updatedAt = "updatedAt" in message && typeof message.updatedAt === "number" ? message.updatedAt : message.createdAt;
+    return "updatedAt" in next && typeof next.updatedAt === "number" && next.updatedAt > updatedAt;
   });
 }

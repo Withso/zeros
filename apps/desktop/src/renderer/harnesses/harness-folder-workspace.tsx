@@ -119,6 +119,10 @@ Object.assign(window, {
         arch: "arm64",
       };
       if (op === "cloud_workspace_capability") return { enabled: cloudEnabled };
+      if (op === "skills_list") return new URLSearchParams(location.search).has("composer-suggestions") ? [{
+        id: "review-agent", name: "Review Agent", description: "Review the source", icon: "FileText",
+        body: "Review carefully.", path: `${folder}/skills/review-agent/SKILL.md`, content: "# Review source\nReview carefully.",
+      }] : [];
       if (cloudEnabled && op === "gh_cloud" && params?.action === "source") return {installationId:"33333333-3333-4333-8333-333333333333",repository:{id:"123",owner:"example",name:"project",defaultBranch:"main",private:true}};
       if (cloudEnabled && op === "auth_get_access_token") return { access_token: "fixture-only-access-token" };
       if (cloudEnabled && op === "auth_get_session_user") return { sub: "fixture-user", email: "fixture@example.test", name: "Fixture", provider: "workos" };
@@ -278,7 +282,7 @@ Object.assign(window, {
       return;
     }
     acceptOrganizationSnapshot({
-      user: { id: "fixture-user", email: "fixture@example.test", displayName: "Fixture", staffRole: null },
+      user: { id: "22222222-2222-4222-8222-222222222222", email: "fixture@example.test", displayName: "Fixture", staffRole: null },
       organizations: createOrganizations,
       teams: createOrganizations,
     });
