@@ -9,6 +9,9 @@ where it is encoded.
   durable provider intent, additive migration ladder checks and opt-in provider
   recovery, plus root protocol invocation, isolated frozen-patch verification
   and the node-pty rebuild after `--ignore-scripts` (`changes/`, `zstack-verify`).
+- Adds lock-holding concurrency sized to the role's pool, one test database
+  per concurrent run, and the advisory-lock purpose registry check
+  (`changes/`, `zstack-verify`).
 
 ## 0.1.6
 
