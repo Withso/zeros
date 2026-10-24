@@ -72,6 +72,11 @@
   `O_NOFOLLOW_ANY`; a real-entry regression exercises both validation windows.
   Preview reads use an AbortSignal across both asynchronous
   boundaries so retiring a preview cannot publish after Markdown loads.
+- Full-suite fixture isolation: Bash can treat Node's socket stdin as a remote
+  invocation and source `.bashrc` even without `-i` or `-l`. A PATH-preservation
+  fixture must pass `--norc` to Bash, just as it passes `-f` to zsh. Keep the
+  real shell command and the exact literal-backslash assertion; ambient startup
+  files must not supply the value under test.
 
 Evidence: `scripts/ui-smoke-composer-suggestions.mjs`,
 `scripts/ui-smoke-create-drafts.mjs`, `scripts/ui-smoke-mentions.mjs`, and the adjacent
