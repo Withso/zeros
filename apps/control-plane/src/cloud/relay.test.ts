@@ -140,6 +140,23 @@ describe("cloud v2 relay", () => {
     else expect(frames.find(frame => frame.t === "config")).not.toHaveProperty("mcpServers");
   });
 
+  it.each([false, true])("gates setup on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",workspace-setup-v1" : ""}`); });
+    const original = deps.config;
+    deps.config = async ws => { const value = await original(ws); return { ...value, workspace: { ...value.workspace, setup: "pnpm install" } }; };
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1";
+    await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (supported) expect(frame.workspace.setup).toBe("pnpm install");
+      else expect(frame.workspace).not.toHaveProperty("setup");
+    }
+  });
+
   it("settles only prompts forwarded to a lost worker and preserves prompts queued for its successor", async () => {
     const forwarded: any[][] = [];
     workerServer.on("connection", ws => { const frames: any[] = []; forwarded.push(frames); ws.on("message", raw => frames.push(JSON.parse(String(raw)))); });

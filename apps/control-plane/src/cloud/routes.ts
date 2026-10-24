@@ -30,7 +30,7 @@ const CreateSchema = z.object({
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow"> & Partial<Pick<CloudV2Store, "prompts">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow"> & Partial<Pick<CloudV2Store, "prompts">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "saveRecipe" | "discardRecipe" | "reactivate" | "log">;
@@ -73,9 +73,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       const previous = await deps.store.readCreateReceipt(c.get("user").id, key, hash);
       if (previous) return c.json(previous.response, previous.status);
     }
-    const installed = await deps.installedRepositories(input.organizationId);
-    if (!installed) throw new HttpError(409, "cloud_computer_build_required", "Build this organization's Cloud Computer first");
-    const repository = installed.find(repo => repo.repository.toLowerCase() === input.repository.toLowerCase());
+    const computer = await deps.store.activeComputer(input.organizationId);
+    if (!computer) throw new HttpError(409, "cloud_computer_build_required", "Build this organization's Cloud Computer first");
+    const repository = computer.repositories.find(repo => repo.repository.toLowerCase() === input.repository.toLowerCase());
     if (!repository)
       throw new HttpError(409, "repository_not_installed", "Add this repository to the Cloud Computer first");
     const baseBranch = input.baseBranch ?? repository.defaultBranch;
@@ -85,7 +85,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const create = {
       id, organizationId: input.organizationId, creatorUserId: c.get("user").id, name,
       repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
-      baseBranch, computerBuildId: null,
+      baseBranch, computerBuildId: computer.buildId,
     };
     if (key) {
       const receipt = await deps.store.createWorkspaceOnce(create, key, hash, workspace => ({ workspace: document(workspace) }));

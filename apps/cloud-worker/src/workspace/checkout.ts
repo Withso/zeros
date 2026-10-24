@@ -5,10 +5,11 @@ import { WorkspaceError, type WorkerConfig } from "./scope";
 import { measureStartup, type StartupTimingObserver } from "../startup-timings";
 
 const exec = promisify(execFile);
+export type CheckoutResult = { createdBranch: boolean };
 
 /** Run only for the first config in a worker process. Existing branches and
  * dirty files remain owned by the user; Git refuses an unsafe switch itself. */
-export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv = {}, timing?: StartupTimingObserver): Promise<void> {
+export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv = {}, timing?: StartupTimingObserver): Promise<CheckoutResult> {
   const run = (...args: string[]) => exec("git", args, { cwd: workspace.checkoutPath, env: workerChildEnvironment(undefined, gitEnvironment), timeout: 120_000, maxBuffer: 1024 * 1024 });
   for (const branch of [workspace.branch, workspace.baseBranch]) {
     if (branch.startsWith("-")) throw new WorkspaceError("VALIDATION_FAILED", "Invalid workspace branch.");
@@ -24,5 +25,6 @@ export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitE
     await measureStartup("worker_checkout_switch", () => exists
       ? run("switch", "--", workspace.branch)
       : run("switch", "--no-track", "-c", workspace.branch, `origin/${workspace.baseBranch}`), timing);
+    return { createdBranch: !exists };
   } catch { throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "Could not prepare the workspace branch. Existing work has been retained."); }
 }

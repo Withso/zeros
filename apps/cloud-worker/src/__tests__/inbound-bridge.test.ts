@@ -25,9 +25,11 @@ async function fixture(options: { failedAuthLimit?: number; pingIntervalMs?: num
     const ws = new WebSocket(url, protocol, { headers: { "X-Zeros-Worker-Auth": auth } });
     ws.on("error", () => {});
     const frames: Array<Record<string, unknown>> = [];
+    let features = "";
+    ws.on("upgrade", response => { features = String(response.headers["x-zeros-worker-features"] ?? ""); });
     ws.on("message", raw => frames.push(JSON.parse(raw.toString())));
     await once(ws, "open");
-    return { ws, frames };
+    return { ws, frames, features };
   }
   const refusal = (auth?: string, target = url) => new Promise<number>(resolve => {
     const ws = new WebSocket(target, protocol, { headers: auth ? { "X-Zeros-Worker-Auth": auth } : {} });
@@ -48,6 +50,7 @@ it("binds only loopback and authenticates before upgrading or accepting a frame"
   const auth = token(), connected = await f.connect(auth);
   expect(connected.ws.protocol).toBe(protocol);
   expect(connected.ws.extensions).toBe("");
+  expect(connected.features.split(",")).toContain("workspace-setup-v1");
   expect(await f.refusal(auth)).toBe(401);
 });
 

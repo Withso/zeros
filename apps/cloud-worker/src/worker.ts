@@ -14,7 +14,8 @@ import { SessionStore } from "./sessions/session-store";
 import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
-import { prepareCheckout } from "./workspace/checkout";
+import { prepareCheckout, type CheckoutResult } from "./workspace/checkout";
+import { WorkspaceSetup, type SetupRunner } from "./workspace/setup";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
@@ -30,7 +31,8 @@ interface WorkerOptions {
   workspaceId?: string;
   transport: Transport;
   drivers?: DriverFactories;
-  prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<void>;
+  prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<CheckoutResult | void>;
+  setupRunner?: SetupRunner;
   gitAskpassPath?: string;
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
@@ -54,6 +56,7 @@ export class CloudWorker {
   private promptInbox?: PromptInbox;
   private workspace?: WorkspaceService;
   private terminals?: Terminals;
+  private setup?: WorkspaceSetup;
   private readonly tokens: GithubTokens;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
@@ -76,7 +79,7 @@ export class CloudWorker {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    this.heartbeat = setInterval(() => { void this.reportIdle(Boolean(this.agents?.busy || this.terminals?.busy)); }, 55_000);
+    this.heartbeat = setInterval(() => { void this.reportIdle(Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy)); }, 55_000);
     this.heartbeat.unref?.();
     this.options.transport.start({
       open: async () => {
@@ -109,6 +112,7 @@ export class CloudWorker {
     if (this.disposed) return;
     this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect();
     await this.configuring.catch(() => {});
+    await this.setup?.dispose();
     await this.promptInbox?.dispose();
     await this.terminals?.dispose();
     await this.workspace?.dispose();
@@ -205,7 +209,7 @@ export class CloudWorker {
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
     if (!this.scope) {
       await this.github.start(); this.tokens.invalidate();
-      await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing);
+      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing);
       const store = await measureStartup("worker_session_store", () => SessionStore.open(join(this.options.directory, "sessions"), scope.key), timing);
       const servicesStarted = performance.now();
       // Earlier worker snapshots stored a cloud key in chat metadata. Native
@@ -235,6 +239,9 @@ export class CloudWorker {
         this.options.onError?.("storage"); void this.agents!.closeChat(chatId).catch(() => {});
       }));
       recordStartupTiming("worker_services", servicesStarted, timing);
+      this.setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment,
+        runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage") });
+      this.setup.start(checkout?.createdBranch === true);
     } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
     this.history!.connect();
     if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
@@ -250,6 +257,7 @@ export class CloudWorker {
   private async prepareStop(): Promise<void> {
     clearInterval(this.heartbeat);
     await this.configuring;
+    await this.setup?.dispose();
     await this.promptInbox?.dispose();
     await this.agents?.dispose();
     await this.terminals?.dispose();
@@ -262,13 +270,13 @@ export class CloudWorker {
   }
   private async reportIdle(force = false): Promise<void> {
     if (!this.online || !this.agents) return;
-    const idle = !this.agents.busy && !this.terminals?.busy;
+    const idle = !this.agents.busy && !this.terminals?.busy && !this.setup?.busy;
     if (force || this.idle !== idle) {
       if (idle) {
         try { await this.store?.flush(); await this.history?.flush(); }
         catch { this.options.onError?.("storage"); return; }
         // A new prompt may have arrived while persistence was draining.
-        if (!this.online || this.agents.busy || this.terminals?.busy) return;
+        if (!this.online || this.agents.busy || this.terminals?.busy || this.setup?.busy) return;
       }
       this.idle = idle; await this.send({ t: "idle", idle });
     }

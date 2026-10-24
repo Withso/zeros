@@ -113,6 +113,16 @@ it("delivers MCP only to feature-advertising workers over both HTTP config carri
   }
 });
 
+it("delivers setup only to supporting workers on hello and config refresh", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, workspace: { ...original.workspace, setup: "pnpm install" } });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "mcp-v1", "workspace-setup-v10"])
+      expect((await (await f.request(path, body, { "x-zeros-worker-features": features })).json()).config.workspace).not.toHaveProperty("setup");
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "mcp-v1, workspace-setup-v1" })).json()).config.workspace.setup).toBe("pnpm install");
+  }
+});
+
 it("fences refreshed MCP authorization by the exact worker boot and never returns provider errors", async () => {
   const f = fixture(), id = randomUUID();
   f.deps.mcpAuthorization = vi.fn(async () => ({ headers: { Authorization: "Bearer fixture-mcp" }, expiresAt: 5000 }));

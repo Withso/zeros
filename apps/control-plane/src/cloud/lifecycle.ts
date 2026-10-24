@@ -239,7 +239,7 @@ export class CloudV2Lifecycle {
         }
         let sandboxId = workspace.boatSandboxId;
         if (!sandboxId) {
-          const from = await store.computerSnapshot(workspace.organizationId);
+          const from = await store.computerSnapshot(workspace.organizationId, workspace.computerBuildId);
           if (!from) {
             await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_build_required" });
             return;

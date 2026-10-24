@@ -67,6 +67,13 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
 }
 
 describe("cloud v2 lifecycle", () => {
+  it("allocates from the workspace's pinned computer build", async () => {
+    const w = workspace("creating", { computerBuildId: "pinned-build" }), f = setup([w]);
+    await f.lifecycle.tick();
+    expect(f.store.computerSnapshot).toHaveBeenCalledWith(w.organizationId, "pinned-build");
+    expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ from: "cv2-alpha-org-1" }));
+  });
+
   it("persists retention intent before saving and admits unrelated creates while one save is blocked", async () => {
     const stopped = workspace("stopped", { boatSandboxId: "bx_stopped", stoppedAt: new Date(NOW - 12 * 86_400_000).toISOString() });
     const f = setup([]), stop = f.lifecycle.start();

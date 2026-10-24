@@ -91,10 +91,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const [codex, claude, cursor] = await Promise.all([
+    const [codex, claude, cursor, setup] = await Promise.all([
       logins(workspace.creatorUserId, workspace.organizationId, "codex"),
       logins(workspace.creatorUserId, workspace.organizationId, "claude"),
       logins(workspace.creatorUserId, workspace.organizationId, "cursor"),
+      store.workspaceSetup(workspace.id),
     ]);
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
     return {
@@ -104,6 +105,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
         checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
+        ...(setup !== null ? { setup } : {}),
       },
       agents,
       ...(mcp ? { mcpServers: await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, true) } : {}),

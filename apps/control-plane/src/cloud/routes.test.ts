@@ -14,6 +14,8 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
   const requireMember = vi.fn(async () => {});
   const requireAdmin = vi.fn(async () => { throw new HttpError(403, "forbidden", "Requires an owner or admin"); });
   const installedRepositories = vi.fn(async () => repositories);
+  const buildId = "44444444-4444-4444-8444-444444444444";
+  const activeComputer = vi.fn(async () => repositories ? { buildId, repositories } : null);
   const createWorkspace = vi.fn(async (input: Record<string, unknown>) => ({ ...input, state: "creating" }));
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
@@ -21,14 +23,14 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
     ? c.json({ error: { code: error.code } }, error.status)
     : c.json({ error: { code: "internal" } }, 500));
   app.route("/", createCloudV2Routes({
-    store: { createWorkspace }, computers: { requireMember, requireAdmin }, installedRepositories,
+    store: { createWorkspace, activeComputer }, computers: { requireMember, requireAdmin }, installedRepositories,
     bridgeBaseUrl: "wss://dev.example.test",
   } as unknown as CloudV2RouteDeps));
   const create = (body: Record<string, unknown> = {}) => app.request("/v1/cloud-v2/workspaces", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ organizationId: org, repository: "example/project", ...body }),
   });
-  return { app, create, requireMember, requireAdmin, installedRepositories, createWorkspace };
+  return { app, create, requireMember, requireAdmin, installedRepositories, activeComputer, buildId, createWorkspace };
 }
 
 describe("cloud v2 creation", () => {
@@ -56,6 +58,7 @@ describe("cloud v2 creation", () => {
       expect((await f.app.request(`${computerPath}/repositories`)).status).toBe(404);
       expect((await f.create()).status).toBe(404);
       expect(f.installedRepositories).not.toHaveBeenCalled();
+      expect(f.activeComputer).not.toHaveBeenCalled();
       expect(f.createWorkspace).not.toHaveBeenCalled();
     },
   );
@@ -69,8 +72,9 @@ describe("cloud v2 creation", () => {
     const f = fixture([{ repository: "Example/Project", defaultBranch }]);
     const response = await f.create(selected ? { baseBranch: selected } : {});
     expect(response.status).toBe(201);
-    expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ baseBranch: expected, creatorUserId: member, repository: "Example/Project" }));
-    expect(f.requireMember.mock.invocationCallOrder[0]).toBeLessThan(f.installedRepositories.mock.invocationCallOrder[0]!);
+    expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ baseBranch: expected, creatorUserId: member, repository: "Example/Project", computerBuildId: f.buildId }));
+    expect(f.requireMember.mock.invocationCallOrder[0]).toBeLessThan(f.activeComputer.mock.invocationCallOrder[0]!);
+    expect(f.installedRepositories).not.toHaveBeenCalled();
   });
 
   it("refuses an omitted base when the build recorded no usable branch", async () => {

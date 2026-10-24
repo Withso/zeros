@@ -27,7 +27,7 @@ it("fetches and creates the workspace branch from the current remote base", asyn
   await writeFile(join(source, "file.txt"), "new remote base\n");
   await git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-am", "advance");
   const timing = vi.fn();
-  await prepareCheckout(workspace, {}, timing);
+  expect(await prepareCheckout(workspace, {}, timing)).toEqual({ createdBranch: true });
   expect(timing.mock.calls.map(([record]) => record.phase)).toEqual(["worker_checkout_fetch", "worker_checkout_switch"]);
   expect(await git(checkout, "branch", "--show-current")).toBe(workspace.branch);
   expect(await git(checkout, "rev-parse", "HEAD")).toBe(await git(source, "rev-parse", "HEAD"));
@@ -35,10 +35,10 @@ it("fetches and creates the workspace branch from the current remote base", asyn
 
 it("never resets an existing workspace branch or its uncommitted work", async () => {
   const { checkout, git, workspace } = await fixture();
-  await prepareCheckout(workspace);
+  expect(await prepareCheckout(workspace)).toEqual({ createdBranch: true });
   await writeFile(join(checkout, "local.txt"), "uncommitted\n");
   const before = await git(checkout, "rev-parse", "HEAD");
-  await prepareCheckout(workspace);
+  expect(await prepareCheckout(workspace)).toEqual({ createdBranch: false });
   expect(await git(checkout, "rev-parse", "HEAD")).toBe(before);
   expect(await git(checkout, "status", "--porcelain")).toContain("?? local.txt");
 });

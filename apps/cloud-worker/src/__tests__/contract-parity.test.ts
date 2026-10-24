@@ -70,6 +70,15 @@ it("rejects stale protocol, malformed revisions and oversized or unordered histo
   }
 });
 
+it("keeps optional workspace setup and its bounds identical on both config schemas", () => {
+  for (const contract of [shared, control]) {
+    for (const setup of [undefined, "", "pnpm install", "x".repeat(8000)])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, setup } }).success).toBe(true);
+    for (const setup of ["x".repeat(8001), null, 1])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, setup } }).success).toBe(false);
+  }
+});
+
 it("keeps durable HTTP prompt bounds and strict schemas identical across Zod versions", () => {
   const payload = { chatId: "chat", userMessageId: CLIENT_A, agentId: "codex", model: "gpt-6-luna", effort: "low",
     prompt: [{ type: "text", text: "ok" }], startedAt: 1 };

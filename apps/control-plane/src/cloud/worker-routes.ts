@@ -21,7 +21,7 @@ export type CloudV2WorkerRouteDeps = {
   mcpAuthorization?(workspace: CloudV2Workspace, id: string, force: boolean): Promise<{ headers: Record<string, string>; expiresAt?: number }>;
 };
 const unauthorized = () => new HttpError(401, "worker_unauthorized", "Worker authorization is no longer current");
-const supportsMcp = (c: Context) => (c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("mcp-v1");
+const workerFeatures = (c: Context) => new Set((c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()));
 function bearer(c: Context): string {
   const header = c.req.header("authorization") ?? "";
   if (!header.startsWith("Bearer ")) throw unauthorized();
@@ -43,7 +43,7 @@ async function session(c: Context, deps: CloudV2WorkerRouteDeps): Promise<{ toke
   if (!workspace) throw unauthorized();
   return { token, bootId, workspace };
 }
-async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, supportsMcp = false): Promise<ConfigFrame> {
+async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, features: ReadonlySet<string>): Promise<ConfigFrame> {
   for (let attempt = 0; attempt < 8; attempt++) {
     const revision = await deps.store.loginRevision(workspace.id);
     if (revision === null || !await deps.store.workerSession(token, bootId)) throw unauthorized();
@@ -51,7 +51,9 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
     if (revision === await deps.store.loginRevision(workspace.id)) {
       const { mcpServers, ...legacy } = config;
-      return { ...legacy, loginRevision: revision, ...(supportsMcp && mcpServers ? { mcpServers } : {}),
+      const { setup, ...workspaceConfig } = config.workspace;
+      return { ...legacy, workspace: { ...workspaceConfig, ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}) },
+        loginRevision: revision, ...(features.has("mcp-v1") && mcpServers ? { mcpServers } : {}),
         ...(deps.promptOutbox ? { promptOutbox: 1 } : {}) };
     }
   }
@@ -75,7 +77,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     const workspace = await deps.store.acceptWorkerHello(bearer(c), input.bootId);
     if (!workspace) throw unauthorized();
     if (workspace.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: workspace.id.slice(0, 8), phase: "worker_hello", ...workspace.helloTiming });
-    return c.json({ config: await configuration(deps, workspace, bearer(c), input.bootId, supportsMcp(c)) });
+    return c.json({ config: await configuration(deps, workspace, bearer(c), input.bootId, workerFeatures(c)) });
   });
   app.post(`${CLOUD_V2_WORKER_API}/timing`, async c => {
     const auth = await session(c, deps), record = await body(c, CloudV2WorkerTimingSchema);
@@ -104,7 +106,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   });
   app.get(`${CLOUD_V2_WORKER_API}/config`, async c => {
     const auth = await session(c, deps);
-    return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, supportsMcp(c)) });
+    return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, workerFeatures(c)) });
   });
   app.post(`${CLOUD_V2_WORKER_API}/mcp/:id/authorization`, async c => {
     const auth = await session(c, deps), input = await body(c, z.object({ force: z.boolean().optional() }).strict());

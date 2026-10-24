@@ -140,6 +140,17 @@ export class CloudV2Store {
       [input.organizationId, input.creatorUserId],
     );
     if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
+    if (input.computerBuildId) {
+      // Activation waits for this lock, so cleanup observes the new workspace
+      // pin before it can retire an inactive source snapshot.
+      const selected = await tx.query(
+        `SELECT 1 FROM cloud_v2_computers c
+         JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+         WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
+           AND b.state='succeeded' AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+         FOR SHARE OF c,b`, [input.organizationId, input.computerBuildId]);
+      if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
+    }
     const row = (await tx.query<Row>(
       `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
@@ -573,28 +584,51 @@ export class CloudV2Store {
     return rows[0]?.revision ?? null;
   }
 
-  async computerSnapshot(organizationId: string): Promise<string | null> {
+  async computerSnapshot(organizationId: string, buildId: string | null = null): Promise<string | null> {
+    if (buildId) {
+      const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_id: string | null }>(
+        `SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1 AND org_id=$2 AND state='succeeded'
+         AND snapshot_deleted_at IS NULL AND cleanup_requested_at IS NULL`, [buildId, organizationId]));
+      return rows[0]?.snapshot_id ?? null;
+    }
+    // Pre-pin workspaces retain their original active-computer behavior.
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
       `SELECT snapshot_name FROM cloud_v2_computers WHERE org_id = $1`, [organizationId]));
     return rows[0]?.snapshot_name ?? null;
   }
 
-  /** Repositories installed on the organization's active Cloud Computer, or
-   * null when it has none yet. */
-  async installedRepositories(organizationId: string): Promise<CloudV2InstalledRepository[] | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ recipe: { repositories?: { repository?: unknown; ref?: unknown; branch?: unknown }[] } }>(
-      `SELECT build.recipe FROM cloud_v2_computers computer
+  /** One selection supplies the build pin and its installed repositories. */
+  async activeComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[] } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
+      `SELECT build.id, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
        WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded'`,
       [organizationId],
     ));
     if (!rows[0]) return null;
-    return (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
+    return { buildId: rows[0].id, repositories: (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
       repository: entry.repository,
       // A recipe ref can be a tag. Only the build's verified branch is a
       // supported source for the worker's origin/<baseBranch> checkout.
       defaultBranch: typeof entry.branch === "string" && entry.branch ? entry.branch : null,
-    }] : []);
+    }] : []) };
+  }
+
+  /** Keep the public repository listing unchanged. */
+  async installedRepositories(organizationId: string): Promise<CloudV2InstalledRepository[] | null> {
+    return (await this.activeComputer(organizationId))?.repositories ?? null;
+  }
+
+  /** Setup follows the build that supplied this workspace's disk, never the
+   * organization's currently configured or newly activated recipe. */
+  async workspaceSetup(id: string): Promise<string | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ repository: string; recipe: { repositories?: { repository?: unknown; setup?: unknown }[] } }>(
+      `SELECT w.repository,b.recipe FROM cloud_v2_workspaces w
+       JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id AND b.org_id=w.org_id
+       WHERE w.id=$1 AND w.state<>'deleted' AND b.state='succeeded' AND ${LIVE_ACCESS}`, [id]));
+    const row = rows[0];
+    const entry = row?.recipe.repositories?.find(repo => typeof repo.repository === "string" && repo.repository.toLowerCase() === row.repository.toLowerCase());
+    return typeof entry?.setup === "string" && entry.setup.length <= 8000 ? entry.setup : null;
   }
 
   /** Revokes a stopped or deleted workspace's tokens; deletion also drops its history. */

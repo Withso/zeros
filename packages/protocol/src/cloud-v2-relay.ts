@@ -120,6 +120,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       /** The workspace branch; created from `baseBranch` on first boot. */
       branch: z.string().min(1).max(255),
       baseBranch: z.string().min(1).max(255),
+      /** Delivered only with workspace-setup-v1; runs once after a new checkout. */
+      setup: z.string().max(8000).optional(),
     }).strict(),
     agents: z.object({
       codex: proxy.optional(),
