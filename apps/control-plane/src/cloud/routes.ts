@@ -7,7 +7,7 @@ import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { CloudV2Capabilities } from "./contract.js";
 import type { CloudV2InstalledRepository, CloudV2Store, CloudV2Workspace } from "./store.js";
-import { CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
+import { CloudV2DraftSchema, CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
 import { readCloudV2History } from "./history.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
 import { createCloudV2PromptRoutes } from "./prompt-routes.js";
@@ -33,7 +33,7 @@ export type CloudV2RouteDeps = {
   store: Pick<CloudV2Store, "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow"> & Partial<Pick<CloudV2Store, "prompts">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
-  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "reactivate" | "log">;
+  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "saveRecipe" | "discardRecipe" | "reactivate" | "log">;
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
@@ -155,7 +155,14 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     return c.json({ workspace: document(moved ?? workspace) }, 202);
   });
 
-  const BuildSchema = z.object({ repositories: CloudV2RecipeSchema.shape.repositories }).strict();
+  const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+  // Current apps build the configured recipe at the revision they show; older
+  // apps send the repositories, which also become the configured recipe.
+  const BuildSchema = z.union([
+    z.object({ revision }).strict(),
+    z.object({ repositories: CloudV2RecipeSchema.shape.repositories }).strict(),
+  ]);
+  const RecipeSchema = z.object({ repositories: CloudV2DraftSchema, revision }).strict();
   const org = (value: string | undefined) => {
     const parsed = uuid.safeParse(value);
     if (!parsed.success) throw new HttpError(404, "not_found", "Organization not found");
@@ -179,9 +186,28 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     const parsed = BuildSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer build");
-    const build = await deps.computers.enqueue(organizationId, c.get("user").id,
-      { repositories: parsed.data.repositories });
+    const build = "revision" in parsed.data
+      ? await deps.computers.buildConfigured(organizationId, c.get("user").id, parsed.data.revision)
+      : await deps.computers.enqueue(organizationId, c.get("user").id, { repositories: parsed.data.repositories }, { configure: true });
     return c.json({ build }, 202);
+  });
+
+  /** Saves the configured repositories; a build makes them live. */
+  app.put("/v1/cloud-v2/organizations/:org/computer/recipe", json, async c => {
+    const organizationId = org(c.req.param("org"));
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    const parsed = RecipeSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer repositories");
+    return c.json(await deps.computers.saveRecipe(organizationId, c.get("user").id, parsed.data.repositories, parsed.data.revision));
+  });
+
+  /** Discards unbuilt changes: the configured repositories return to the live build's. */
+  app.post("/v1/cloud-v2/organizations/:org/computer/recipe/discard", json, async c => {
+    const organizationId = org(c.req.param("org"));
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    const parsed = z.object({ revision }).strict().safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer request");
+    return c.json(await deps.computers.discardRecipe(organizationId, c.get("user").id, parsed.data.revision));
   });
 
   app.post("/v1/cloud-v2/organizations/:org/computer/builds/:build/activate", async c => {

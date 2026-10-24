@@ -14,7 +14,7 @@ import { createCloudV2AgentLogins, createCloudV2CodexRefresh, type CloudV2AgentL
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
-import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./github.js";
+import { createCloudV2GithubTokens, createCloudV2RemoteHeads, createCloudV2RepositoryTokens } from "./github.js";
 import { HISTORY_OPS, readCloudV2History } from "./history.js";
 import { CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
@@ -164,6 +164,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       if (!repositoryToken) throw new HttpError(409, "github_unavailable", "GitHub is not configured");
       return (await repositoryToken(organizationId, userId, repository)).token;
     },
+    ...(config.github ? { remoteHead: createCloudV2RemoteHeads(pool, config.github) } : {}),
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
