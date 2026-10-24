@@ -89,7 +89,7 @@ export function createZerosDevAuthRoutes(config: Config, dependencies: ZerosDevA
       if (!limiter.take(source)) return response(429, "zeros_dev_auth_rate_limited");
       const deadline = AbortSignal.timeout(dependencies.timeoutMs ?? 5_000);
       const signal = AbortSignal.any([deadline, c.req.raw.signal]);
-      let parsed: z.SafeParseReturnType<unknown, ZerosDevAuthRequest | z.infer<typeof RefreshRequest> | ZerosDevAuthAttempt>;
+      let parsed: z.ZodSafeParseResult<ZerosDevAuthRequest | z.infer<typeof RefreshRequest> | ZerosDevAuthAttempt>;
       try {
         if (c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")
           return response(400, "zeros_dev_auth_invalid_request");

@@ -640,7 +640,7 @@ function parseFeedbackMap(
 ): Readonly<Partial<Record<FeedbackType, string>>> {
   if (!raw?.trim()) return {};
   try {
-    const parsed = z.record(z.string().trim().min(1)).parse(JSON.parse(raw));
+    const parsed = z.record(z.string(), z.string().trim().min(1)).parse(JSON.parse(raw));
     const unknown = Object.keys(parsed).filter(
       (key) =>
         key !== "issue" &&

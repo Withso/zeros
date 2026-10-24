@@ -1,0 +1,9 @@
+{
+  "id": "zod4-enum-record-partial",
+  "kind": "replay",
+  "area": "control-plane-operations",
+  "fixedBy": "pr:709",
+  "symptom": "After the control-plane zod 4 upgrade typechecked, the enum-keyed worker polling record became exhaustive and rejected its empty default, which would have stopped startup.",
+  "rule": "changes/advisory-audit-main-red.md: use z.partialRecord for partial enum-keyed maps under zod 4, and run the database-backed control-plane files with TEST_DATABASE_URL.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/worker-polling-config.test.ts"
+}

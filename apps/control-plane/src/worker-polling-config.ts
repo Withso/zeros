@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const worker = z.enum(["workos", "security"]);
-const intervals = z.record(worker, z.number().int().min(100).max(300_000));
+const intervals = z.partialRecord(worker, z.number().int().min(100).max(300_000));
 export type WorkerPollIntervals = z.infer<typeof intervals>;
 
 /** An explicit interval is a per-worker fallback override. Deadlines and
