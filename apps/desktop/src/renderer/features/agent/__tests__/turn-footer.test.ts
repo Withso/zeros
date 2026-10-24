@@ -77,6 +77,14 @@ it("extends the footer through parent background replies, without child bookkeep
   expect(turnFooterDuration(record, events, 1000)).toBe(900000);
 });
 
+it("keeps the settled footer clock unchanged when only a wake-up notice has arrived", () => {
+  const record = { startedAt: 1000, endedAt: 124000 };
+  expect(turnFooterDuration(record, [{
+    id: "wake", kind: "text", role: "agent", phase: "commentary", text: "Woke up on schedule", createdAt: 950000,
+    wakeupNotice: { source: "loop_wakeup" },
+  }], 1000)).toBe(123000);
+});
+
 describe("TurnFileRow cache ownership", () => {
   beforeEach(() => useWorkspaceFileDiffSnapshot.mockClear());
 

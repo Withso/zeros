@@ -27,17 +27,19 @@
 // the message, no "Context" title and no footer.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useMemo } from "react";
+import { memo, useId, useMemo, useState } from "react";
+import { ChevronRight } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import {
+  Button,
   Popover,
   PopoverContent,
   PopoverTrigger,
   Tooltip,
 } from "@/renderer/shared/ui/primitives";
 import type { AgentUsage } from "./use-agent-session";
-import { contextGaugeData } from "./context-usage";
+import { contextGaugeData, type ContextGaugeRow, type ContextGaugeServer } from "./context-usage";
 
 const RADIUS = 6;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS; // ≈ 37.70
@@ -48,6 +50,70 @@ export function formatTokens(n: number): string {
   if (n >= 100_000) return `${Math.round(n / 1000)}k`;
   if (n >= 1_000) return `${(n / 1000).toFixed(1)}k`;
   return String(Math.max(0, Math.round(n)));
+}
+
+function ServerRow({ server }: { server: ContextGaugeServer }) {
+  return (
+    <div className="text-fg2 flex items-center justify-between gap-2 px-0.5 py-1 text-xs">
+      <span className="min-w-0 truncate" title={server.name}>{server.name}</span>
+      <span className="shrink-0 font-mono tabular-nums">
+        {(server.percentageTenths / 10).toFixed(1)}%
+      </span>
+    </div>
+  );
+}
+
+function McpServersRow({ row }: { row: ContextGaugeRow & { servers: ContextGaugeServer[] } }) {
+  const [expanded, setExpanded] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const serversId = useId(), moreId = useId();
+  const remaining = row.servers.slice(3);
+  const remainingPercentage = remaining.reduce((sum, server) => sum + server.percentageTenths, 0);
+  return (
+    <div>
+      <Button
+        variant="ghost"
+        size="compact"
+        className="hover:bg-bg3-hover text-fg2 w-full justify-between px-0.5 font-normal"
+        aria-label="MCP servers"
+        aria-expanded={expanded}
+        aria-controls={serversId}
+        onClick={() => setExpanded(value => !value)}
+      >
+        <span className="flex items-center gap-1">
+          <ChevronRight aria-hidden="true" className={cn("size-3", expanded && "rotate-90")} />
+          MCP servers
+        </span>
+        <span className="font-mono tabular-nums">{((row.percentageTenths ?? 0) / 10).toFixed(1)}%</span>
+      </Button>
+      {expanded && (
+        <div id={serversId} className="pl-4">
+          {row.servers.slice(0, 3).map(server => <ServerRow key={server.key} server={server} />)}
+          {remaining.length > 0 && (
+            <>
+              {showAll && (
+                <div id={moreId}>
+                  {remaining.map(server => <ServerRow key={server.key} server={server} />)}
+                </div>
+              )}
+              <Button
+                variant="ghost"
+                size="compact"
+                className="hover:bg-bg3-hover text-fg2 w-full justify-between px-0.5 font-normal"
+                aria-label={showAll ? "Show fewer MCP servers" : `${remaining.length} more MCP servers`}
+                aria-expanded={showAll}
+                aria-controls={moreId}
+                onClick={() => setShowAll(value => !value)}
+              >
+                <span>{showAll ? "Show fewer" : `${remaining.length} more`}</span>
+                {!showAll && <span className="font-mono tabular-nums">{(remainingPercentage / 10).toFixed(1)}%</span>}
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function Ring({
@@ -168,9 +234,11 @@ export const ContextGauge = memo(function ContextGauge({
               />
             </div>
             <div className="mt-2 flex flex-col">
-              {data.rows.map((r, index) => (
+              {data.rows.map(r => r.servers ? (
+                <McpServersRow key={r.id} row={{ ...r, servers: r.servers }} />
+              ) : (
                 <div
-                  key={`${r.kind}:${r.name}:${index}`}
+                  key={r.id ?? `${r.kind}:${r.name}`}
                   className="flex items-center justify-between px-0.5 py-1 text-[12.5px]"
                 >
                   <span className="text-fg2">{r.name}</span>

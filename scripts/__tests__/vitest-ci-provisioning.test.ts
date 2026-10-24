@@ -84,12 +84,15 @@ describe("Vitest CI provisioning", () => {
     ]);
   });
 
-  it("runs the artifact closure suite on Linux", () => {
+  it("runs the artifact closure suite on pinned Ubuntu", () => {
     // bubblewrap does not exist on macOS. A macOS Vitest job cannot pass the
     // archive namespace tests at any provisioning level, so pinning the runner is
-    // part of the contract rather than an incidental choice.
+    // part of the contract rather than an incidental choice. The workflow
+    // parity suite also checks the pinned release against Playwright's inventory.
     for (const { file, job, body } of jobs) {
-      expect(body, `${file}:${job}`).toContain("runs-on: ubuntu-latest");
+      expect(body, `${file}:${job}`).toMatch(
+        /^\s+runs-on: ubuntu-\d{2}\.\d{2}\s*$/m,
+      );
     }
   });
 

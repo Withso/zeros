@@ -1302,7 +1302,14 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           nextUsage.categories.every((category, index) =>
             category.name === previousCategories[index].name &&
             category.tokens === previousCategories[index].tokens &&
-            category.kind === previousCategories[index].kind)
+            category.kind === previousCategories[index].kind &&
+            category.id === previousCategories[index].id &&
+            (category.mcpServers === previousCategories[index].mcpServers ||
+              (category.mcpServers && previousCategories[index].mcpServers &&
+                category.mcpServers.length === previousCategories[index].mcpServers.length &&
+                category.mcpServers.every((server, serverIndex) =>
+                  server.serverName === previousCategories[index].mcpServers![serverIndex].serverName &&
+                  server.tokens === previousCategories[index].mcpServers![serverIndex].tokens))))
         ) nextUsage.categories = previousCategories;
         if (
           nextUsage.size === slot.usage.size && nextUsage.used === slot.usage.used &&
