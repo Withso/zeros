@@ -313,7 +313,7 @@ describe("workbench availability observers", () => {
   });
 
   it.each(["connect", "open"] as const)(
-    "hands a cloud %s failure between the toast and exact-workspace banner",
+    "keeps a cloud %s failure toast available even with visible workbench frames",
     (kind) => {
       const other = cloudWorkspaceKey({
         ...target,
@@ -335,7 +335,7 @@ describe("workbench availability observers", () => {
       });
       expect(workbenchAvailabilitySnapshot(other).rejected).not.toBe(true);
       const hide = registerWorkbenchFrameVisibility(`${folder}/src`);
-      expect(fixture.toasts.size).toBe(0);
+      expect(fixture.toasts.has(id)).toBe(true);
       expect(workbenchAvailabilitySnapshot(`${folder}/src`).rejected).toBe(
         true,
       );
@@ -347,7 +347,7 @@ describe("workbench availability observers", () => {
       ).toBe("error");
       const hideSecond = registerWorkbenchFrameVisibility(folder);
       hide();
-      expect(fixture.toasts.size).toBe(0);
+      expect(fixture.toasts.has(id)).toBe(true);
       hideSecond();
       expect(fixture.toasts.has(id)).toBe(true);
       connection("connected");

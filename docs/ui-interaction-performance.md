@@ -97,9 +97,11 @@ acknowledgement arrives late. Account replacement and owner deletion still
 prune that snapshot; another workspace and the Local connection stay independent.
 
 Cloud transport and compute lifecycle are separate facts. A ready or busy VM
-does not become Starting when its socket disconnects. Short gaps keep the
-existing quiet grace; longer gaps show Connecting or Reconnecting, and real
-rejections and prolonged failures still use the existing error escalation.
+does not become Starting when its socket disconnects. Workbench tabs keep
+confirmed content without connection/lifecycle banners at any gap duration.
+Cold tabs use the shared availability clock for neutral placeholders; tab-specific
+read failures still have their banner and Retry. Cloud lifecycle is shown in
+workspace details, and connect/open failures retain their existing app toast.
 Only lifecycle documents or an explicit Restart can report a compute transition.
 
 On bridge-based cloud paths, an explicit navigation, interaction or queued-send
