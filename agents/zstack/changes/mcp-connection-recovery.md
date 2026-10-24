@@ -1,0 +1,24 @@
+# MCP connection recovery follows the saved owner and attempt
+
+Symptom: servers could report that they needed sign-in without offering Connect,
+save an empty API key, retain an authentication-required result after sign-in,
+or become stuck after cancellation. Delayed cloud auth replies could survive
+an account A → B → A replacement.
+
+Cause: connection status and recovery actions were derived separately in each
+surface, save and authorization shared a lifetime, and asynchronous account
+checks happened only before requests.
+
+Rule: derive status and the next action together. Keep rejected API keys out of
+OAuth. Save before authorizing a changed draft and use the returned definition
+revision; a failed save must never open the browser. Retire a canceled attempt
+and release its UI controls before awaiting remote cleanup. Recheck ownership
+after each account-bound await, and let fresh authorization observations replace
+stale checks without dropping the exact configuration's tool inventory.
+
+Encoded in the MCP form-save, connection-view, connection-status and cloud-API
+regressions, plus the production Local and organization browser smoke. The
+browser cases hold old replies through cancellation/retry, failed writes,
+browserless authorization and owner replacement. Reuse Settings primitives for
+section surfaces and typography; keep diagnostic stages and advanced OAuth
+configuration behind disclosure rather than repeating connection actions.

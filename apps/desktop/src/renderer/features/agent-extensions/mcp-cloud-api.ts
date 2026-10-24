@@ -55,20 +55,26 @@ export async function removeCloudMcp(key: string, extension: CloudMcpExtension):
   assertMcpOwnerKey(key); cloudMcpCache.invalidate(key);
 }
 const probeSchema = z.object({ status: z.enum(["connected", "needs-auth", "failed"]), stages: z.array(z.object({ stage: z.enum(["validation", "transport", "initialize", "tools"]), status: z.enum(["passed", "failed", "needs-auth"]) })), toolCount: z.number().optional(), tools: z.array(z.string()).max(1024).optional(), message: z.string().optional() });
-export function probeCloudMcp(key: string, config: RawServer, secrets: McpSecretChanges, initial: CloudMcpExtension | null, signal: AbortSignal) {
+export async function probeCloudMcp(key: string, config: RawServer, secrets: McpSecretChanges, initial: CloudMcpExtension | null, signal: AbortSignal) {
   const organizationId = assertMcpOwnerKey(key);
-  return cloudAccountRequest(`${base(organizationId)}/mcp/probe`, probeSchema, { body: {
+  const result = await cloudAccountRequest(`${base(organizationId)}/mcp/probe`, probeSchema, { body: {
     config: cloudConfig(config), secrets, ...(initial ? { extensionId: initial.id, expectedRevision: initial.revision } : {}),
   }, idempotencyKey: crypto.randomUUID() }, { signal });
+  assertMcpOwnerKey(key);
+  return result;
 }
-export function startCloudMcpAuth(key: string, initial: CloudMcpExtension, signal: AbortSignal) {
+export async function startCloudMcpAuth(key: string, initial: CloudMcpExtension, signal: AbortSignal) {
   const organizationId = assertMcpOwnerKey(key);
-  return cloudAccountRequest(`${base(organizationId)}/mcp/oauth/start`, z.object({ attemptId: uuid, authorizationUrl: z.string().url(), expiresAt: z.number().int().positive() }), {
+  const result = await cloudAccountRequest(`${base(organizationId)}/mcp/oauth/start`, z.object({ attemptId: uuid, authorizationUrl: z.string().url(), expiresAt: z.number().int().positive() }), {
     body: { config: initial.config, extensionId: initial.id, expectedRevision: initial.revision }, idempotencyKey: crypto.randomUUID(),
   }, { signal });
+  assertMcpOwnerKey(key);
+  return result;
 }
-export function cloudMcpAuthStatus(key: string, attemptId: string, signal: AbortSignal) {
-  return cloudAccountRequest(`${base(assertMcpOwnerKey(key))}/mcp/oauth/${uuid.parse(attemptId)}`, z.object({ status: z.enum(["pending", "connected", "failed"]), message: z.string().optional() }), undefined, { signal });
+export async function cloudMcpAuthStatus(key: string, attemptId: string, signal: AbortSignal) {
+  const result = await cloudAccountRequest(`${base(assertMcpOwnerKey(key))}/mcp/oauth/${uuid.parse(attemptId)}`, z.object({ status: z.enum(["pending", "connected", "failed"]), message: z.string().optional() }), undefined, { signal });
+  assertMcpOwnerKey(key);
+  return result;
 }
 export async function cancelCloudMcpAuth(key: string, attemptId: string) {
   await cloudAccountRequest(`${base(assertMcpOwnerKey(key))}/mcp/oauth/${uuid.parse(attemptId)}`, z.object({ ok: z.literal(true) }), { method: "DELETE", body: {}, idempotencyKey: crypto.randomUUID() });

@@ -18,7 +18,8 @@ export async function runMcpToolsSmoke({ page: parent, check }) {
     await page.getByRole("combobox", { name: "Transport" }).click();
     await page.getByRole("option", { name: "Streamable HTTP", exact: true }).click();
     await page.getByLabel("URL", { exact: true }).fill("https://tools.example.test/mcp");
-    await page.getByRole("radio", { name: /^API key/ }).click();
+    await page.getByRole("combobox", { name: "Authentication", exact: true }).click();
+    await page.getByRole("option", { name: "API key", exact: true }).click();
     await button("Add header").click();
     await page.getByLabel("Header name 1").fill("Authorization");
     await page.getByLabel("Header value 1").fill("fixture-tools-key");
@@ -43,10 +44,10 @@ export async function runMcpToolsSmoke({ page: parent, check }) {
 
     await page.evaluate(() => { window.mcpFormFixture.failProbe = true; });
     await tools().getByRole("button", { name: "Refresh", exact: true }).click();
-    await expect(page.locator("[data-sonner-toast]").filter({ hasText: "Could not refresh tools" })).toBeVisible();
+    await expect(page.locator("[data-sonner-toast]").filter({ hasText: "Could not connect to this MCP server" })).toBeVisible();
     await expect(allow("delete_file")).not.toBeChecked();
     await page.evaluate(() => { window.mcpFormFixture.failProbe = false; window.mcpFormFixture.toolNames.push("new_tool"); });
-    await tools().getByRole("button", { name: "Test", exact: true }).click();
+    await button("Retry").click();
     await expect(allow("new_tool")).toBeVisible();
     await expect(allow("delete_file")).not.toBeChecked();
     await page.evaluate(() => { window.mcpFormFixture.holdProbe = true; window.mcpFormFixture.releaseProbe = undefined; });

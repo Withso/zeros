@@ -18,10 +18,26 @@ vi.mock("../../../platform/cloud-github", () => ({
   readCloudGithubRepositories: mocks.repositories,
 }));
 
-import { cloudMcpKey, probeCloudMcp, readCloudMcpRepositories } from "../mcp-cloud-api";
+import { cloudMcpKey, cloudMcpAuthStatus, probeCloudMcp, readCloudMcpRepositories, startCloudMcpAuth, type CloudMcpExtension } from "../mcp-cloud-api";
 
 const organization = "11111111-1111-4111-8111-111111111111";
 const installation = (id: string, connected = true, suspendedAt: string | null = null) => ({ id, connected, suspendedAt });
+
+describe("MCP connection response ownership", () => {
+  it.each(["probe", "authorize", "status"])("rejects a late %s reply after account A → B → A", async operation => {
+    mocks.account = "account-a"; mocks.generation = 1;
+    const key = cloudMcpKey(organization);
+    const signal = new AbortController().signal;
+    let settle!: (value: unknown) => void;
+    mocks.request.mockImplementation(() => new Promise(resolve => { settle = resolve; }));
+    const pending = operation === "probe" ? probeCloudMcp(key, {}, {}, null, signal)
+      : operation === "authorize" ? startCloudMcpAuth(key, { config: {}, id: organization, revision: 1 } as CloudMcpExtension, signal)
+        : cloudMcpAuthStatus(key, organization, signal);
+    mocks.generation += 2;
+    settle({ status: "connected", authorizationUrl: "https://identity.example.test/authorize" });
+    await expect(pending).rejects.toThrow("account changed");
+  });
+});
 
 describe("MCP probe inventory compatibility", () => {
   it.each([undefined, [], ["allowed", "disabled"]])("preserves unknown, empty and complete inventories: %j", async tools => {

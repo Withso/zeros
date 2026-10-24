@@ -70,7 +70,7 @@ import {
   type GatewayBackendStatusWire,
 } from "../../platform/bridge/workspace-bridge";
 import { primeSettingsLayer, useSettingsLayer } from "../settings/use-settings";
-import { SettingsSection } from "../settings/settings-ui";
+import { SettingsSection, SETTINGS_CARD_LIST_CLS, SETTINGS_GROUP_RADIUS } from "../settings/settings-ui";
 import {
   asString,
   disabledToolsOf,
@@ -82,17 +82,18 @@ import {
   withToolDisabled,
   type RawServer,
 } from "./mcp-server-model";
-import { mcpConnectionCache, mcpConnectionKey } from "./mcp-connection-status";
+import { mcpConnectionCache, mcpConnectionKey, rememberMcpConnection } from "./mcp-connection-status";
 import { McpImportDialog } from "./mcp-import-dialog";
 import type { ResolvedCustomizeScope } from "./customize-page";
 import { useCachedRead } from "../../state/use-cached-read";
 import { mcpGatewayStatusCache, mcpGatewayStatusKey } from "../../state/read-caches";
 import { shouldUseHeadlessMcpAuth } from "./mcp-auth-flow";
+import { mcpConnectionView } from "./mcp-connection-view";
 
 // The filled-card recipe the Models settings page uses — rows separated by
 // hairline dividers inside one rounded `--bg1-highlight` surface.
 export const MCP_CARD_CLS =
-  "bg-bg1-highlight divide-border1 flex flex-col divide-y rounded-lg px-4";
+  `${SETTINGS_CARD_LIST_CLS} ${SETTINGS_GROUP_RADIUS} flex flex-col divide-y`;
 
 /** Friendly label for a settings layer (the source badge). */
 const LAYER_LABEL: Record<string, string> = {
@@ -131,7 +132,7 @@ function rawFromComposed(c: ComposedMcpServerWire): RawServer {
 
 /** The no-browser paste-code sign-in: show the authorization URL to open
  *  elsewhere, then take the pasted code (or full redirect URL) to finish. */
-function HeadlessAuthModal({
+export function HeadlessAuthModal({
   state,
   busy,
   onCancel,
@@ -142,6 +143,7 @@ function HeadlessAuthModal({
   onCancel: () => void;
   onComplete: (code: string) => void;
 }) {
+  const id = React.useId();
   const [code, setCode] = useState("");
   useEffect(() => {
     if (state) setCode("");
@@ -157,32 +159,34 @@ function HeadlessAuthModal({
         <DialogHeader>
           <DialogTitle>Sign in to {state?.server}</DialogTitle>
           <DialogDescription>
-            No browser here? Open this URL on any device, authorize, then paste
-            the code (or the full redirect URL) it gives you.
+            Open the sign-in URL in a browser, authorize access, then paste
+            the code or redirect URL below.
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
-              <span className="text-fg1 text-sm font-medium">
+              <label htmlFor={`${id}-url`} className="text-fg1 text-xs font-medium">
                 Authorization URL
-              </span>
+              </label>
               <div className="flex gap-2">
                 <Input
+                  id={`${id}-url`}
                   readOnly
                   value={state?.url ?? ""}
-                  className="font-sans text-sm"
+                  className="font-sans text-xs"
                   onFocus={(e) => e.currentTarget.select()}
                 />
                 <Button
                   variant="secondary"
-                  size="lg"
                   className="shrink-0"
-                  onClick={() => {
-                    if (state?.url) {
-                      void navigator.clipboard?.writeText(state.url);
+                  onClick={async () => {
+                    if (!state?.url) return;
+                    try {
+                      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+                      await navigator.clipboard.writeText(state.url);
                       toast.success("URL copied");
-                    }
+                    } catch { toast.error("Could not copy the URL. Select it and copy it manually."); }
                   }}
                 >
                   Copy
@@ -190,14 +194,24 @@ function HeadlessAuthModal({
               </div>
             </div>
             <div className="flex flex-col gap-1.5">
-              <span className="text-fg1 text-sm font-medium">
+              <label htmlFor={`${id}-code`} className="text-fg1 text-xs font-medium">
                 Code or redirect URL
-              </span>
+              </label>
               <Input
+                id={`${id}-code`}
+                type="password"
+                autoComplete="new-password"
+                spellCheck={false}
+                disabled={busy}
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
+                onKeyDown={event => {
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing && !busy && code.trim()) {
+                    event.preventDefault(); onComplete(code.trim());
+                  }
+                }}
                 placeholder="code=… or the full …/callback?code=… URL"
-                className="font-sans text-sm"
+                className="font-sans text-xs"
                 autoFocus
               />
               <p className="text-fg2 text-xs">
@@ -234,6 +248,7 @@ function ServerRow({
   gateway,
   onToggle,
   onEdit,
+  onConnect,
   onRemove,
 }: {
   server: RawServer;
@@ -242,6 +257,7 @@ function ServerRow({
   /** Gateway controls for this exact user or repository configuration. */
   gateway?: {
     status?: GatewayBackendStatusWire;
+    observedAt: number;
     error?: string | null;
     signingIn: boolean;
     signInBlocked: boolean;
@@ -253,6 +269,7 @@ function ServerRow({
   };
   onToggle: (enabled: boolean) => void;
   onEdit: () => void;
+  onConnect: () => void;
   onRemove: () => void;
 }) {
   const name = asString(server.name) || "(unnamed)";
@@ -264,28 +281,26 @@ function ServerRow({
   const verification = useSyncExternalStore(useCallback(listener => mcpConnectionCache.subscribe(verificationKey, listener), [verificationKey]), useCallback(() => mcpConnectionCache.getSnapshot(verificationKey), [verificationKey]));
   const st = gateway?.status?.state ?? (verification.data?.status === "connected" ? "connected" : undefined);
   const gwDown = gatewayManaged && !!gateway?.error;
+  const checked = !gateway?.status || verification.updatedAt >= gateway.observedAt ? verification.data : undefined;
+  const view = mcpConnectionView(server, checked, gwDown ? "error" : gateway?.status?.state);
   const allTools = gateway?.status?.tools ?? [];
   const disabledSet = new Set(disabledToolsOf(server));
   const canExpand =
     st === "connected" && allTools.length > 0 && !!gateway?.onToolToggle;
   const [showTools, setShowTools] = useState(false);
   const chipCls = cn(
-    "inline-flex select-none items-center gap-1 rounded-sm border px-1.5 py-px text-xs font-medium",
-    gwDown || st === "error"
-      ? "border-red-primary/40 text-red-primary"
-      : st === "connected"
-        ? "border-border1 text-fg1"
-        : "border-border1 text-fg2",
+    "inline-flex select-none items-center gap-1 text-xs",
+    view.tone === "error" ? "text-red-primary" : view.tone === "success" ? "text-green-primary" : "text-fg2",
   );
-  const chipText = !enabled ? "Disabled" : st === "connected" ? "Connected" : "Needs connection";
+  const chipText = view.label;
   return (
-    <div className={cn("flex flex-col gap-2 py-3.5", !enabled && "opacity-60")}>
-      <div className="flex items-center justify-between gap-4">
-        <button
-          type="button"
+    <div className="flex flex-col gap-2 py-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Button
+          variant="ghost"
           onClick={onEdit}
           disabled={busy}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-left"
+          className="h-auto min-w-0 flex-1 justify-start gap-2.5 px-0 py-1 text-left"
           aria-label={`Edit ${name}`}
         >
           <span className="border-border1 text-fg2 shrink-0 rounded-sm border px-1.5 py-px text-xs font-medium select-none">
@@ -293,7 +308,7 @@ function ServerRow({
           </span>
           <span className="min-w-0">
             <span className="flex items-center gap-1.5">
-              <span className="text-fg1 truncate text-sm font-medium">
+              <span className="text-fg1 truncate text-xs font-medium">
                 {name}
               </span>
 
@@ -304,13 +319,13 @@ function ServerRow({
               )}
             </span>
           </span>
-        </button>
+        </Button>
         <div className="flex shrink-0 items-center gap-1.5">
           {
             (canExpand ? (
               <Tooltip label="Show tools">
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
                   onClick={() => setShowTools((v) => !v)}
                   className={cn(chipCls, "hover:text-fg1")}
                   aria-expanded={showTools}
@@ -323,7 +338,7 @@ function ServerRow({
                     )}
                     aria-hidden="true"
                   />
-                </button>
+                </Button>
               </Tooltip>
             ) : (
               <Tooltip
@@ -336,7 +351,7 @@ function ServerRow({
                 <span className={chipCls}>{chipText}</span>
               </Tooltip>
             ))}
-          {isOauth && gateway && !gwDown && st === "needs-auth" && (
+          {isOauth && gateway && view.action === "connect" && (
             <Button
               variant="secondary"
               size="sm"
@@ -348,11 +363,12 @@ function ServerRow({
               ) : (
                 <LogIn className="size-3.5" aria-hidden="true" />
               )}
-              Sign in
+              Connect
             </Button>
           )}
           {
             isOauth &&
+            enabled &&
             gateway?.onBeginHeadless &&
             !gwDown &&
             st === "needs-auth" && (
@@ -369,11 +385,15 @@ function ServerRow({
               </Tooltip>
             )}
           { gateway?.signingIn && <Button variant="ghost" size="sm" onClick={gateway.onCancel}>Cancel</Button>}
-          { gateway && st === "error" && <Button variant="ghost" size="sm" disabled={busy || gateway.signingIn} onClick={gateway.onReconnect}>Reconnect</Button>}
+          {view.action && view.label !== "Connected" && !(isOauth && gateway && view.action === "connect") && (
+            <Button variant="secondary" disabled={busy || gateway?.signInBlocked} onClick={gateway && view.tone === "error" ? gateway.onReconnect : onConnect}>
+              {view.tone === "error" ? "Retry" : "Connect"}
+            </Button>
+          )}
           <Switch
             checked={enabled}
             onCheckedChange={onToggle}
-            disabled={busy}
+            disabled={busy || gateway?.signInBlocked}
             aria-label={enabled ? "Disable server" : "Enable server"}
             className="mr-1"
           />
@@ -381,7 +401,7 @@ function ServerRow({
             variant="ghost"
             size="icon-sm"
             onClick={onEdit}
-            disabled={busy}
+            disabled={busy || gateway?.signInBlocked}
             aria-label="Edit server"
           >
             <Pencil className="size-3.5" aria-hidden="true" />
@@ -390,7 +410,7 @@ function ServerRow({
             variant="ghost"
             size="icon-sm"
             onClick={onRemove}
-            disabled={busy}
+            disabled={busy || gateway?.signInBlocked}
             className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
             aria-label="Remove server"
           >
@@ -512,7 +532,7 @@ export function CustomizeMcpSection({
    *  gateway status polling (active-only effects stay off hidden surfaces). */
   surfaceActive?: boolean;
   onNew: () => void;
-  onEdit: (server: RawServer) => void;
+  onEdit: (server: RawServer, connect?: boolean) => void;
   /** Repo scope's footnote link — jump to the User scope's list. */
   onSwitchToUser: () => void;
 }) {
@@ -569,14 +589,20 @@ export function CustomizeMcpSection({
   // The gateway owns one OAuth flight across all servers. Claim it before
   // rendering disabled controls and retain it while a paste-code dialog waits.
   const authPending = useRef(false);
+  const pendingServer = useRef<string | null>(null);
   useEffect(() => {
     const generation = authAttempt;
     authPending.current = false;
     setSigningIn(null);
     setHeadlessAuth(null);
     setHeadlessBusy(false);
-    return () => { generation.current++; };
-  }, [bridge, execution, repoRoot]);
+    return () => {
+      generation.current++;
+      if (pendingServer.current && bridge && runtimeExecutionKey(bridge.executionIdentity) === execution)
+        void bridgeMcpGatewayCancelAuth(bridge, pendingServer.current, repoRoot).catch(() => {});
+      pendingServer.current = null;
+    };
+  }, [bridge, execution, repoRoot, surfaceActive]);
   useEffect(() => {
     if (!surfaceActive) return;
     const refresh = () => { if (document.visibilityState !== "hidden") refreshGateway(); };
@@ -593,24 +619,29 @@ export function CustomizeMcpSection({
   const cancelSignIn = async (name: string) => {
     if (!bridge) return;
     const attempt = ++authAttempt.current;
-    await bridgeMcpGatewayCancelAuth(bridge, name, repoRoot);
-    if (attempt !== authAttempt.current) return;
+    // Retire the UI flight even if cleanup cannot reach the engine. A late
+    // authorization reply must not keep the controls locked or affect Retry.
     authPending.current = false;
+    pendingServer.current = null;
     setSigningIn(null);
     setHeadlessAuth(null);
     setHeadlessBusy(false);
-    refreshGateway();
+    try { await bridgeMcpGatewayCancelAuth(bridge, name, repoRoot); }
+    catch { if (attempt === authAttempt.current) toast.error("Could not confirm cancellation. Try connecting again."); }
+    if (attempt === authAttempt.current) refreshGateway();
   };
 
   const handleSignIn = async (name: string) => {
-    if (!bridge || authPending.current) return;
+    if (!bridge || !surfaceActive || authPending.current) return;
     authPending.current = true;
+    pendingServer.current = name;
     const attempt = ++authAttempt.current;
     let awaitingCode = false;
     setSigningIn(name);
     try {
       const st = await bridgeMcpGatewayAuthorize(bridge, name, repoRoot);
       if (attempt !== authAttempt.current) return;
+      rememberAuthorization(name, st);
       if (statusKey) mcpGatewayStatusCache.invalidate(statusKey);
       if (st.state === "connected")
         toast.success(`Signed in to ${name} — ${st.toolCount} tools`);
@@ -638,7 +669,7 @@ export function CustomizeMcpSection({
       );
     } finally {
       if (attempt === authAttempt.current) {
-        if (!awaitingCode) authPending.current = false;
+        if (!awaitingCode) { authPending.current = false; pendingServer.current = null; }
         setSigningIn(null);
         refreshGateway();
       }
@@ -652,8 +683,9 @@ export function CustomizeMcpSection({
   } | null>(null);
   const [headlessBusy, setHeadlessBusy] = useState(false);
   const handleBeginHeadless = async (name: string) => {
-    if (!bridge || authPending.current) return;
+    if (!bridge || !surfaceActive || authPending.current) return;
     authPending.current = true;
+    pendingServer.current = name;
     const attempt = ++authAttempt.current;
     let awaitingCode = false;
     setSigningIn(name);
@@ -669,7 +701,7 @@ export function CustomizeMcpSection({
       );
     } finally {
       if (attempt === authAttempt.current) {
-        if (!awaitingCode) authPending.current = false;
+        if (!awaitingCode) { authPending.current = false; pendingServer.current = null; }
         setSigningIn(null);
       }
     }
@@ -682,6 +714,7 @@ export function CustomizeMcpSection({
     try {
       const st = await bridgeMcpGatewayCompleteAuth(bridge, server, code, repoRoot);
       if (attempt !== authAttempt.current) return;
+      rememberAuthorization(server, st);
       if (statusKey) mcpGatewayStatusCache.invalidate(statusKey);
       if (st.state === "connected")
         toast.success(`Signed in to ${server} — ${st.toolCount} tools`);
@@ -696,10 +729,19 @@ export function CustomizeMcpSection({
     } finally {
       if (attempt === authAttempt.current) {
         authPending.current = false;
+        pendingServer.current = null;
         setHeadlessBusy(false);
         refreshGateway();
       }
     }
+  };
+
+  const rememberAuthorization = (name: string, result: GatewayBackendStatusWire) => {
+    const server = servers.find(row => row.name === name);
+    if (statusKey && server) rememberMcpConnection(statusKey, server, {
+      status: result.state === "error" ? "failed" : result.state, stages: [],
+      ...(result.state === "connected" ? { toolCount: result.tools?.length ?? result.toolCount, tools: result.tools } : {}),
+    });
   };
 
   const persist = async (previous: RawServer | null, server: RawServer | null, successMsg?: string): Promise<boolean> => {
@@ -774,7 +816,7 @@ export function CustomizeMcpSection({
     : `MCP servers for ${scope.kind === "repo" ? scope.project.name : "this repo"} and its local workspaces. Saved privately on this device; changes apply to new chats here.`;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4" {...(!surfaceActive ? { inert: "" } : {})}>
       <SettingsSection
         title="MCP servers"
         description={scopeBlurb}
@@ -831,6 +873,7 @@ export function CustomizeMcpSection({
                       (server.auth === "oauth" || server.auth === "header")
                         ? {
                             status: gwStatus.get(asString(server.name))?.url === server.url ? gwStatus.get(asString(server.name)) : undefined,
+                            observedAt: gatewayRead.updatedAt,
                             error: gwHealth.error,
                             signingIn: signingIn === asString(server.name),
                             signInBlocked: signingIn !== null || headlessAuth !== null,
@@ -847,6 +890,7 @@ export function CustomizeMcpSection({
                     }
                     onToggle={(enabled) => handleToggle(index, enabled)}
                     onEdit={() => onEdit(server)}
+                    onConnect={() => onEdit(server, true)}
                     onRemove={() => handleRemove(index)}
                   />
                 ))}

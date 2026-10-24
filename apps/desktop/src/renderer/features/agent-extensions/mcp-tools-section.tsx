@@ -1,15 +1,16 @@
 import { useId, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, RefreshCw, ShieldCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { Input } from "../../shared/ui/primitives/input";
 import { Button } from "../../shared/ui/primitives/button";
 import { Switch } from "../../shared/ui/primitives/switch";
 import { ZerosSpinner } from "../../shared/ui/loading";
+import { SETTINGS_CARD_LIST_CLS, SETTINGS_GROUP_RADIUS } from "../settings/settings-ui";
 
 const PAGE_SIZE = 50;
 
 /** Discovery is separate from the saved policy: unavailable tools keep their
  * restrictions, and refreshing never writes configuration. */
-export function McpToolsSection({ tools, disabledTools, controlled, editable, checking, actionsDisabled, emptyHint, onChange, onTest, onRefresh }: {
+export function McpToolsSection({ tools, disabledTools, controlled, editable, checking, actionsDisabled, emptyHint, onChange, onRefresh }: {
   tools?: readonly string[];
   disabledTools: readonly string[];
   controlled: boolean;
@@ -18,7 +19,6 @@ export function McpToolsSection({ tools, disabledTools, controlled, editable, ch
   actionsDisabled: boolean;
   emptyHint: string;
   onChange: (disabled: string[]) => void;
-  onTest: () => void;
   onRefresh: () => void;
 }) {
   const id = useId();
@@ -39,7 +39,7 @@ export function McpToolsSection({ tools, disabledTools, controlled, editable, ch
   return <section aria-label="Tools" className="flex min-w-0 flex-col gap-3">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex min-w-0 flex-col gap-1">
-        <div className="flex items-center gap-2"><h2 className="text-fg1 m-0 text-sm font-medium">Tools</h2>
+        <div className="flex items-center gap-2"><h2 className="text-fg2 m-0 text-3xxs font-medium">Tools</h2>
           <span className="text-fg3 flex items-center gap-1.5 text-xs" role="status" aria-live="polite">
             {checking && <ZerosSpinner className="size-3.5" />}
             {checking ? "Refreshing…" : names === undefined ? "Not listed yet" : `${names.length} listed`}
@@ -47,19 +47,18 @@ export function McpToolsSection({ tools, disabledTools, controlled, editable, ch
         </div>
         {names !== undefined && names.length > 0 && <p className="text-fg3 m-0 text-xs leading-relaxed">{hint}</p>}
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <Button variant="ghost" disabled={actionsDisabled || checking} onClick={onTest}><ShieldCheck aria-hidden="true" />Test</Button>
+      {names !== undefined && <div className="flex shrink-0 items-center gap-2">
         <Button variant="ghost" disabled={actionsDisabled || checking} onClick={onRefresh}><RefreshCw aria-hidden="true" />Refresh</Button>
-      </div>
+      </div>}
     </div>
     {names !== undefined && names.length > 0 && (names.length > PAGE_SIZE || search.length > 0) && <Input aria-label="Search tools" placeholder="Search tools…" value={search}
       onChange={event => { setSearch(event.target.value); setPage(0); }} className="text-fg1 font-sans" autoComplete="off" spellCheck={false} />}
-    <div className="border-border1 bg-bg1-highlight divide-border1 flex max-h-80 flex-col divide-y overflow-y-auto rounded-lg border px-4">
-      {names === undefined ? <p className="text-fg3 m-0 py-6 text-center text-sm">{emptyHint}</p>
-        : names.length === 0 ? <p className="text-fg3 m-0 py-6 text-center text-sm">This server has no tools.</p>
-          : filtered.length === 0 ? <p className="text-fg3 m-0 py-6 text-center text-sm">No tools match your search.</p>
+    <div className={`${SETTINGS_CARD_LIST_CLS} ${SETTINGS_GROUP_RADIUS} flex max-h-80 flex-col divide-y overflow-y-auto`}>
+      {names === undefined ? <p className="text-fg2 m-0 py-4 text-xs">{emptyHint}</p>
+        : names.length === 0 ? <p className="text-fg2 m-0 py-4 text-xs">This server has no tools.</p>
+          : filtered.length === 0 ? <p className="text-fg2 m-0 py-4 text-xs">No tools match your search.</p>
             : filtered.slice(start, start + PAGE_SIZE).map((name, index) => <div key={name} className="flex min-w-0 items-center justify-between gap-4 py-3">
-              <label htmlFor={`${id}-${index}`} title={name} className="text-fg1 min-w-0 flex-1 truncate text-sm font-normal">{name}</label>
+              <label htmlFor={`${id}-${index}`} title={name} className="text-fg1 min-w-0 flex-1 truncate text-xs font-normal">{name}</label>
               <Switch id={`${id}-${index}`} aria-label={`Allow ${name}`} checked={!controlled || !disabled.has(name)} disabled={!controlled || !editable}
                 onCheckedChange={allowed => {
                   const next = new Set(disabledTools);

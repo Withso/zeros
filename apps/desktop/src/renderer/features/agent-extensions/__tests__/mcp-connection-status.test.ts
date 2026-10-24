@@ -15,7 +15,7 @@ describe("saved MCP verification", () => {
     expect(mcpConnectionKey("owner", { ...server, url: "https://changed.test/mcp" })).not.toBe(key);
     rememberMcpConnection("owner", server, { status: "connected", stages: [] });
     rememberMcpConnection("owner", server);
-    expect(mcpConnectionCache.getSnapshot(key).data?.status).toBe("failed");
+    expect(mcpConnectionCache.getSnapshot(key).data).toBeUndefined();
   });
   it("does not reuse a cloud verification after a shared secret revision or definition changes", () => {
     const identity = { id: "first-definition", revision: 1 };

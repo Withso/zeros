@@ -26,6 +26,8 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
   let heldRead;
   let holdRead = false;
   let completeAuth = false;
+  let failWrite = false;
+  const authInputs = [];
   let lastWrite;
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -65,10 +67,14 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
         ...(!needsAuth ? { tools: ["org_read", "org_write"] } : {}),
         stages: [{ stage: "transport", status: "passed" }, { stage: "initialize", status: needsAuth ? "needs-auth" : "passed" }, { stage: "tools", status: needsAuth ? "needs-auth" : "passed" }] });
     }
-    if (url.pathname.endsWith("/mcp/oauth/start")) return json({ attemptId: attempt, authorizationUrl: "https://identity.example.test/authorize", expiresAt: Date.now() + 60_000 });
+    if (url.pathname.endsWith("/mcp/oauth/start")) {
+      authInputs.push(request.postDataJSON());
+      return json({ attemptId: attempt, authorizationUrl: "https://identity.example.test/authorize", expiresAt: Date.now() + 60_000 });
+    }
     if (url.pathname.endsWith("/mcp/oauth/" + attempt)) {
       if (request.method() === "DELETE") { cancellations++; return json({ ok: true }); }
       polls++;
+      if (completeAuth) for (const row of rows.get(org) ?? []) if (row.config.auth === "oauth") row.oauth = { status: "connected" };
       return json({ status: completeAuth ? "connected" : "pending" });
     }
     if (url.pathname.endsWith("/extensions") && request.method() === "GET") {
@@ -77,6 +83,7 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
       return json({ extensions });
     }
     if (request.method() === "PUT") {
+      if (failWrite) return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "mcp_fixture_conflict", message: "The server changed. Review it and try again." } }) });
       const input = request.postDataJSON();
       const existing = rows.get(org).find(row => row.id === url.pathname.split("/").at(-1));
       lastWrite = input;
@@ -112,30 +119,53 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     await page.getByRole("combobox", { name: "Transport" }).click();
     await page.getByRole("option", { name: "Streamable HTTP", exact: true }).click();
     await field("URL").fill("https://tools.example.test/mcp");
-    await page.getByRole("radio", { name: /^API key/ }).click();
+    await page.getByRole("combobox", { name: "Authentication", exact: true }).click();
+    await page.getByRole("option", { name: "API key", exact: true }).click();
     await button("Add header").click();
     await field("Header name 1").fill("Authorization");
+    await button("Add server").click();
+    await expect(page.locator("[data-sonner-toast]").filter({ hasText: "Enter a value for the Authorization header." })).toBeVisible();
+    expect(lastWrite).toBeUndefined();
     await field("Header value 1").fill("fixture-private-value");
-    await expect(section("Runtime")).toContainText("Connected · 2 tools available");
+    await expect(section("Connection")).toContainText("2 tools available.");
     await expect(section("Tools").getByRole("switch", { name: "Allow org_write", exact: true })).toBeEnabled();
     await section("Tools").getByRole("switch", { name: "Allow org_write", exact: true }).click();
     await button("Add server").click();
-    const savedRow = () => page.getByRole("button").filter({ hasText: "private-api" });
-    await expect(savedRow()).toContainText("Connected");
+    const savedRow = () => button("Edit private-api");
+    const savedStatus = () => savedRow().locator("..");
+    await expect(savedStatus()).toContainText("Connected");
     expect(lastWrite).toMatchObject({ owner: "user", repository: "team-a/project", config: { headers: { Authorization: "${zeros.secret}" }, disabled_tools: ["org_write"] }, secrets: { headers: { Authorization: "fixture-private-value" } } });
     check("Organisation projects use authorized owner/repo names and private credentials travel separately from config", true);
 
     holdProbe = true;
     await savedRow().click();
-    await expect(section("Runtime")).toContainText("Checking connection");
+    await expect(section("Connection")).toContainText("Checking connection");
     await expect(section("Connection")).toContainText("Connected");
     await expect(section("Tools").getByRole("switch", { name: "Allow org_write", exact: true })).not.toBeChecked();
     releaseProbe?.(); holdProbe = false;
-    await expect(section("Runtime")).toContainText("Connected · 2 tools available");
+    await expect(section("Connection")).toContainText("2 tools available.");
     rows.get(orgA)[0].revision++;
     await button("MCP").click();
-    await expect(savedRow()).toContainText("Needs connection");
+    await expect(savedStatus()).toContainText("Needs connection");
     check("Saved checks survive reopening while shared credential revisions invalidate them", true);
+
+    await savedRow().click();
+    await page.getByRole("combobox", { name: "Authentication", exact: true }).click();
+    await page.getByRole("option", { name: "Sign in", exact: true }).click();
+    await expect(section("Connection")).toContainText("Sign-in required");
+    failWrite = true;
+    await button("Save & connect").click();
+    await expect(page.locator("[data-sonner-toast]").filter({ hasText: "The server changed" })).toBeVisible();
+    expect(authInputs).toHaveLength(0);
+    failWrite = false; completeAuth = true;
+    await button("Save & connect").click();
+    await expect(section("Connection")).toContainText("Connected");
+    expect(authInputs).toHaveLength(1);
+    expect(authInputs[0]).toMatchObject({ extensionId: rows.get(orgA)[0].id, expectedRevision: rows.get(orgA)[0].revision, config: { auth: "oauth" } });
+    await button("MCP").click();
+    await expect(savedStatus()).toContainText("Connected");
+    check("Organization save-and-connect uses the saved revision and never authorizes a failed write", true);
+    completeAuth = false;
 
     holdRead = true;
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
@@ -150,7 +180,7 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     await expect(button("Connect")).toBeEnabled();
     await button("Connect").click();
     await expect.poll(() => polls).toBeGreaterThan(0);
-    await expect.poll(() => page.evaluate(() => window.organizationMcpFixture.opened)).toEqual(["https://identity.example.test/authorize"]);
+    await expect.poll(() => page.evaluate(() => window.organizationMcpFixture.opened)).toEqual(["https://identity.example.test/authorize", "https://identity.example.test/authorize"]);
     await page.evaluate(() => window.mcpFormFixture.setSurfaceActive(false));
     await expect.poll(() => cancellations).toBeGreaterThan(0);
     const stoppedPolls = polls;
@@ -166,7 +196,7 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     await expect(section("Tools").getByRole("switch", { name: "Allow org_write", exact: true })).toBeDisabled();
     check("Member editors remain read-only, allow personal sign-in, and cancel polling while hidden", true);
     await selectOwner(orgA, userA);
-    await expect(savedRow()).toContainText("Needs connection");
+    await expect(savedStatus()).toContainText("Connected");
     await expect(page.getByRole("button").filter({ hasText: "shared-sign-in" })).toHaveCount(0);
     expect(probes).toBeGreaterThan(0);
     expect(errors).toEqual([]);

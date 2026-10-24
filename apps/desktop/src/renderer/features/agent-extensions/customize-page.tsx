@@ -58,7 +58,7 @@ const SCOPE_SETTING_KEY = "customize:active-scope";
  *  a draft form must not survive a reload pointing at a stale index. */
 type CustomizeView =
   | { kind: "list" }
-  | { kind: "form"; server: RawServer | null; owner: string };
+  | { kind: "form"; server: RawServer | null; owner: string; connect?: boolean };
 
 /** The validated, render-ready scope: user, or a LIVE project. */
 export type ResolvedCustomizeScope =
@@ -262,6 +262,7 @@ function LocalCustomizePage({
               scope={scope}
               server={activeView.server}
               surfaceActive={surfaceActive}
+              connectOnOpen={activeView.connect}
               onBack={() => setView({ kind: "list" })}
               onSaved={(repoRoot) => {
                 const project = projects.find(row => row.repoRoot === repoRoot);
@@ -322,7 +323,7 @@ function LocalCustomizePage({
                     scope={scope}
                     surfaceActive={surfaceActive}
                     onNew={() => setView({ kind: "form", server: null, owner })}
-                    onEdit={(server) => setView({ kind: "form", server, owner })}
+                    onEdit={(server, connect) => setView({ kind: "form", server, owner, connect })}
                     onSwitchToUser={() => setScope({ kind: "user" })}
                   />
                 ) : (
