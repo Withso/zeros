@@ -167,6 +167,14 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     check("Organization save-and-connect uses the saved revision and never authorizes a failed write", true);
     completeAuth = false;
 
+    // Connected is retained during the Back action's refresh. Wait for that
+    // request to settle before holding the next read: focus correctly shares
+    // an in-flight request and must not be expected to start a second one.
+    await expect.poll(() => page.evaluate(async organizationId => {
+      const { cloudMcpCache, cloudMcpKey } = await import("/apps/desktop/src/renderer/features/agent-extensions/mcp-cloud-api.ts");
+      const snapshot = cloudMcpCache.getSnapshot(cloudMcpKey(organizationId));
+      return !snapshot.loading && !snapshot.refreshing;
+    }, orgA)).toBe(true);
     holdRead = true;
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
     await expect.poll(() => Boolean(heldRead)).toBe(true);

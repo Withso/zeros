@@ -24,3 +24,10 @@ browser cases hold old replies through cancellation/retry, failed writes,
 browserless authorization and owner replacement. Reuse Settings primitives for
 section surfaces and typography; keep diagnostic stages and advanced OAuth
 configuration behind disclosure rather than repeating connection actions.
+
+Browser fixture lesson: a retained Connected label does not prove the list's
+background refresh has settled. Before arming a held response and triggering
+focus, wait for that exact cache key to finish refreshing; otherwise focus
+correctly deduplicates against the earlier read and never reaches the new hold.
+The organization smoke retains its delayed owner-switch assertion and now
+observes this boundary instead of relying on runner speed.
