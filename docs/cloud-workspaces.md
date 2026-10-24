@@ -93,9 +93,14 @@ The builder also refreshes the snapshot without being asked. A new runtime pin
 refreshes the runtime only, without Git or setup, so creates and wakes stop
 downloading it; failures are retried after six hours, at most three times per
 pin. Once a day, an organization that used cloud workspaces in the last week is
-rebuilt at its configured refs when GitHub reports a moved branch. A rebuilt
-older build is never refreshed this way. Builds of different organizations run
-side by side, up to three at a time.
+rebuilt at its live build's refs when GitHub reports a moved branch; unbuilt
+edits are left for an admin to build. A checked, unchanged organization waits a
+day, and organizations are visited oldest-checked first. An automatic refresh
+is fenced to the live build it was scheduled from, so a build that became live
+meanwhile is never relabelled or rolled back, and a rebuilt older build is never
+refreshed this way. Scans run beside build admission, never ahead of it. Each
+lifecycle process runs one build at a time: a build holds a dedicated lock
+connection for its whole run.
 
 New workspaces fork the snapshot of the build they pinned at creation. The
 worker fetches origin and switches to the workspace branch, creating it from

@@ -68,41 +68,98 @@ describe("Cloud Computer model", () => {
 describe("Cloud Computer recipe saves", () => {
   it("saves in order, coalescing edits made during a save into the next one", async () => {
     const { RecipeSaveQueue } = await import("../cloud-computer-model");
-    const saved: string[][] = [];
+    const saved: { value: string[]; revision: number }[] = [];
     let release!: () => void;
     const onSaved = vi.fn(), onError = vi.fn();
     const queue = new RecipeSaveQueue<string[]>({
-      save: async value => { saved.push(value); if (saved.length === 1) await new Promise<void>(resolve => { release = resolve; }); },
-      onSaved, onError,
+      save: async (value, revision) => {
+        saved.push({ value, revision });
+        if (saved.length === 1) await new Promise<void>(resolve => { release = resolve; });
+        return revision + 1;
+      },
+      serverRevision: () => 3, onSaved, onError,
     });
     queue.push(["a"]);
-    await vi.waitFor(() => expect(saved).toEqual([["a"]]));
+    await vi.waitFor(() => expect(saved).toHaveLength(1));
     queue.push(["a", "b"]); queue.push(["a", "b", "c"]);
     release();
     await queue.settle();
-    expect(saved).toEqual([["a"], ["a", "b", "c"]]);
+    expect(saved).toEqual([{ value: ["a"], revision: 3 }, { value: ["a", "b", "c"], revision: 4 }]);
     expect(onSaved).toHaveBeenCalledOnce();
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps the revision an edit started from when a refresh brings another admin's revision", async () => {
+    const { RecipeSaveQueue } = await import("../cloud-computer-model");
+    let server = 3;
+    const save = vi.fn(async (_value: string, revision: number) => revision + 1);
+    const queue = new RecipeSaveQueue<string>({ save, serverRevision: () => server, onSaved: () => {}, onError: () => {} });
+    vi.useFakeTimers();
+    try {
+      queue.push("typed", 600);
+      server = 9; // a poll replaced the cached overview meanwhile
+      expect(queue.revision()).toBe(3);
+      await queue.settle();
+      expect(save).toHaveBeenCalledExactlyOnceWith("typed", 3);
+      // Idle again: the next edit starts from what the view now shows.
+      expect(queue.revision()).toBe(9);
+    } finally { vi.useRealTimers(); }
   });
 
   it("waits out a typing pause on settle and drops queued edits after a conflict", async () => {
     vi.useFakeTimers();
     try {
       const { RecipeSaveQueue } = await import("../cloud-computer-model");
-      const save = vi.fn(async (_value: string) => {}), onError = vi.fn();
-      const queue = new RecipeSaveQueue<string>({ save, onSaved: () => {}, onError });
+      const save = vi.fn(async (_value: string, revision: number) => revision + 1), onError = vi.fn();
+      const queue = new RecipeSaveQueue<string>({ save, serverRevision: () => 1, onSaved: () => {}, onError });
       queue.push("typed", 600);
       expect(queue.waiting).toBe(true);
       expect(save).not.toHaveBeenCalled();
       await queue.settle();
-      expect(save).toHaveBeenCalledExactlyOnceWith("typed");
+      expect(save).toHaveBeenCalledExactlyOnceWith("typed", 1);
       save.mockRejectedValueOnce(new Error("computer_recipe_changed"));
       queue.push("stale");
-      await queue.settle();
+      await expect(queue.settle()).rejects.toThrow("computer_recipe_changed");
       expect(onError).toHaveBeenCalledOnce();
       queue.push("later", 600); queue.cancel();
       await vi.advanceTimersByTimeAsync(1000);
       expect(save).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("reports a failed save to whoever waits to build, so an older configuration is never built", async () => {
+    const { RecipeSaveQueue } = await import("../cloud-computer-model");
+    const onError = vi.fn();
+    const queue = new RecipeSaveQueue<string>({ save: async () => { throw new Error("offline"); }, serverRevision: () => 1, onSaved: () => {}, onError });
+    queue.push("edited");
+    await expect(queue.settle()).rejects.toThrow("offline");
+    expect(onError).toHaveBeenCalledOnce();
+    // Reported once: the server's version is what is shown and may be built.
+    await expect(queue.settle()).resolves.toBeUndefined();
+  });
+
+  it("completes once when a typing pause's edit is saved by the save already running", async () => {
+    vi.useFakeTimers();
+    try {
+      const { RecipeSaveQueue } = await import("../cloud-computer-model");
+      let release!: () => void;
+      const save = vi.fn(async (_value: string, revision: number) => {
+        if (save.mock.calls.length === 1) await new Promise<void>(resolve => { release = resolve; });
+        return revision + 1;
+      });
+      const onSaved = vi.fn();
+      const queue = new RecipeSaveQueue<string>({ save, serverRevision: () => 1, onSaved, onError: () => {} });
+      queue.push("first");
+      await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+      queue.push("typed", 600);
+      release();
+      await queue.settle();
+      expect(save).toHaveBeenLastCalledWith("typed", 2);
+      expect(onSaved).toHaveBeenCalledOnce();
+      expect(queue.waiting).toBe(false);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(onSaved).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
   });
 });

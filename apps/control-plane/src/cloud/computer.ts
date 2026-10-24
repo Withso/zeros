@@ -23,12 +23,12 @@ const MAX_LOG_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 60_000;
 /** A build whose server stopped (a deploy, a crash) is failed after this. */
 const INTERRUPTED_AFTER = "5 minutes";
-/** Builds of different organizations run side by side, up to this many. */
-const BUILD_CONCURRENCY = 3;
+/** One build per process: each holds a dedicated advisory-lock connection for
+ * its whole run, and the worker pool has only two connections. A second
+ * concurrent build would starve the lifecycle and its own queries. */
+const BUILD_CONCURRENCY = 1;
 /** How often the builder looks for snapshots to refresh by themselves. */
 const REFRESH_SCAN_MS = 10 * 60_000;
-/** An unchanged organization is not checked again for this long. */
-const REFRESH_AFTER_MS = 24 * 60 * 60_000;
 
 const repository = z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
   // Each part names a directory under /home/user; "." and ".." would leave it.
@@ -37,8 +37,8 @@ const unique = (rows: readonly { repository: string }[]) =>
   new Set(rows.map(row => row.repository.toLowerCase())).size === rows.length;
 const editable = {
   repository,
-  /** Branch or tag to clone; a rebuild pins `commit` instead. */
-  ref: z.string().min(1).max(255).optional(),
+  /** Branch or tag to clone; a rebuild pins `commit` instead. Never an option. */
+  ref: z.string().min(1).max(255).refine(value => !value.startsWith("-"), "Invalid branch or tag").optional(),
   /** Non-interactive bash run in the checkout as the workspace user, e.g. "pnpm install". */
   setup: z.string().max(8_000).optional(),
 };
@@ -81,6 +81,8 @@ export type CloudV2ComputerOverview = {
 };
 export type CloudV2RefreshCandidate = {
   organizationId: string; createdBy: string; recipe: CloudV2Recipe;
+  /** The live build this candidate was read from; a newer one makes it stale. */
+  activeBuildId: string;
   /** The live snapshot caches a runtime other than the one workspaces need. */
   runtimeStale: boolean;
   /** A daily refresh is due: an older build, recent cloud use, nothing built today. */
@@ -214,8 +216,14 @@ export class CloudV2Computers {
     await this.lockOrganization(tx, organizationId);
     const busy = await tx.query(`SELECT 1 FROM cloud_v2_computer_builds WHERE org_id = $1 AND state IN ('queued','building')`, [organizationId]);
     if (busy.rowCount) throw new HttpError(409, "computer_build_in_progress", "A Cloud Computer build is already running");
-    const computer = (await tx.query<{ snapshot_name: string | null; recipe_revision: string }>(
-      `SELECT snapshot_name, recipe_revision::text FROM cloud_v2_computers WHERE org_id = $1 FOR UPDATE`, [organizationId])).rows[0];
+    const computer = (await tx.query<{ snapshot_name: string | null; recipe_revision: string; active_build_id: string | null }>(
+      `SELECT snapshot_name, recipe_revision::text, active_build_id FROM cloud_v2_computers WHERE org_id = $1 FOR UPDATE`, [organizationId])).rows[0];
+    return this.insertLocked(tx, organizationId, userId, recipe, computer, options);
+  }
+
+  private async insertLocked(tx: Tx, organizationId: string, userId: string, recipe: CloudV2Recipe,
+    computer: { snapshot_name: string | null; recipe_revision: string } | undefined,
+    options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string; revision?: number }): Promise<CloudV2Build> {
     const revision = Number(computer?.recipe_revision ?? 0);
     if (options.revision !== undefined && options.revision !== revision) throw recipeChanged();
     const { rows } = await tx.query<Row>(
@@ -249,26 +257,53 @@ export class CloudV2Computers {
     return this.enqueue(organizationId, userId, { ...source.recipe, rebuiltFrom: source.version }, { reason: "reactivate", configure: true });
   }
 
-  /** Queues a refresh nobody asked for; null when the organization is busy. */
-  async enqueueAutomatic(organizationId: string, userId: string, recipe: CloudV2Recipe, reason: "runtime" | "refresh", runtimeSha256?: string): Promise<CloudV2Build | null> {
+  /** Queues a refresh nobody asked for, of exactly the live build it was
+   * scheduled from: its recipe is read under the same lock as the base, so a
+   * build that became live meanwhile is never relabelled or rolled back. Null
+   * when the organization is busy, gone, or its live build changed. */
+  async enqueueAutomatic(organizationId: string, expectedActiveBuildId: string, reason: "runtime" | "refresh", runtimeSha256?: string): Promise<CloudV2Build | null> {
     try {
-      return await this.enqueue(organizationId, userId, recipe, { reason, ...(runtimeSha256 ? { runtimeSha256 } : {}) });
+      return await withSystemTx(this.pool, async tx => {
+        await this.lockOrganization(tx, organizationId);
+        const busy = await tx.query(`SELECT 1 FROM cloud_v2_computer_builds WHERE org_id = $1 AND state IN ('queued','building')`, [organizationId]);
+        if (busy.rowCount) return null;
+        const live = (await tx.query<{ snapshot_name: string | null; recipe_revision: string; recipe: CloudV2Recipe; created_by: string | null }>(
+          `SELECT c.snapshot_name, c.recipe_revision::text, b.recipe, b.created_by FROM cloud_v2_computers c
+           JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id AND b.state = 'succeeded'
+           WHERE c.org_id = $1 AND c.active_build_id = $2 AND c.snapshot_name IS NOT NULL
+           FOR UPDATE OF c`, [organizationId, expectedActiveBuildId])).rows[0];
+        if (!live?.created_by) return null;
+        // A runtime refresh keeps the live commits; a daily one moves to the refs' tips.
+        const recipe = CloudV2RecipeSchema.parse(reason === "runtime" ? live.recipe : unpinned(live.recipe));
+        return this.insertLocked(tx, organizationId, live.created_by, recipe, live, { reason, ...(runtimeSha256 ? { runtimeSha256 } : {}) });
+      });
     } catch (error) {
-      if (error instanceof HttpError && (error.code === "computer_build_in_progress" || error.status === 404)) return null;
+      if (error instanceof HttpError && error.status === 404) return null;
       throw error;
     }
   }
 
-  /** Live snapshots that may need refreshing by themselves. */
-  async refreshCandidates(runtimeSha256: string): Promise<CloudV2RefreshCandidate[]> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; created_by: string; recipe: CloudV2Recipe; runtime_stale: boolean; refresh_due: boolean }>(
-      `SELECT c.org_id, b.created_by, b.recipe,
+  /** The daily refresh found nothing new; check this organization again tomorrow. */
+  async markRefreshChecked(organizationId: string, activeBuildId: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_computers SET refresh_checked_at = clock_timestamp() WHERE org_id = $1 AND active_build_id = $2`,
+      [organizationId, activeBuildId]));
+  }
+
+  /** Live snapshots due a refresh by themselves, oldest first. Eligibility is
+   * decided before the limit, so computers with nothing due never crowd out
+   * one that is; a checked-unchanged computer waits a day. */
+  async refreshCandidates(runtimeSha256: string, limit = 25): Promise<CloudV2RefreshCandidate[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; active_build_id: string; created_by: string; recipe: CloudV2Recipe; runtime_stale: boolean; refresh_due: boolean }>(
+      `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.finished_at, c.refresh_checked_at,
          (b.runtime_sha256 IS NOT NULL AND b.runtime_sha256 <> $1
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled') AND f.created_at > clock_timestamp() - interval '6 hours')
            AND (SELECT count(*) FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled')) < 3) AS runtime_stale,
          (b.finished_at < clock_timestamp() - interval '24 hours'
+           AND (b.recipe->>'rebuiltFrom') IS NULL
+           AND coalesce(c.refresh_checked_at, '-infinity') < clock_timestamp() - interval '24 hours'
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds r WHERE r.org_id = c.org_id AND r.created_at > clock_timestamp() - interval '24 hours')
            AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.org_id = c.org_id AND w.state <> 'deleted'
              AND coalesce(w.active_at, w.created_at) > clock_timestamp() - interval '7 days')) AS refresh_due
@@ -278,8 +313,9 @@ export class CloudV2Computers {
          AND NOT o.is_personal AND o.cloud_workspaces_allowed
        WHERE c.snapshot_name IS NOT NULL AND b.created_by IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds q WHERE q.org_id = c.org_id AND q.state IN ('queued','building'))
-       ORDER BY c.org_id LIMIT 100`, [runtimeSha256]));
-    return rows.map(row => ({ organizationId: row.org_id, createdBy: row.created_by, recipe: row.recipe,
+       ) due WHERE runtime_stale OR refresh_due
+       ORDER BY runtime_stale DESC, coalesce(refresh_checked_at, finished_at) NULLS FIRST, org_id LIMIT $2`, [runtimeSha256, limit]));
+    return rows.map(row => ({ organizationId: row.org_id, activeBuildId: row.active_build_id, createdBy: row.created_by, recipe: row.recipe,
       runtimeStale: row.runtime_stale, refreshDue: row.refresh_due }));
   }
 
@@ -302,6 +338,14 @@ export class CloudV2Computers {
   async baseMissing(buildId: string, organizationId: string, snapshotName: string): Promise<void> {
     await withSystemTx(this.pool, async tx => {
       await tx.query(`UPDATE cloud_v2_computer_builds SET builder_create_pending = false, operation_until = NULL WHERE id = $1`, [buildId]);
+      // "As live" would become empty once the live pointer is gone: keep the
+      // configured repositories by writing them out first, same revision.
+      const computer = (await tx.query<{ recipe: unknown; active_build_id: string | null }>(
+        `SELECT recipe, active_build_id FROM cloud_v2_computers WHERE org_id = $1 AND snapshot_name = $2 FOR UPDATE`, [organizationId, snapshotName])).rows[0];
+      if (computer && computer.recipe === null && computer.active_build_id) {
+        const live = await this.configured(tx, organizationId, null, computer.active_build_id);
+        await tx.query(`UPDATE cloud_v2_computers SET recipe = $2 WHERE org_id = $1`, [organizationId, JSON.stringify({ repositories: live })]);
+      }
       await tx.query(`UPDATE cloud_v2_computers SET active_build_id = NULL, snapshot_name = NULL, updated_at = clock_timestamp()
         WHERE org_id = $1 AND snapshot_name = $2`, [organizationId, snapshotName]);
       await tx.query(`UPDATE cloud_v2_computer_builds SET snapshot_id = NULL, snapshot_deleted_at = clock_timestamp()
@@ -478,7 +522,13 @@ function asZeros(lines: readonly string[]): string {
 function checkoutScript(entry: RecipeEntry, dir: string, auth: string): string[] {
   const q = shellQuote, d = q(dir);
   const header = q(`http.extraHeader=Authorization: Basic ${auth}`);
-  const target = entry.ref ? [
+  // A pinned commit (activating an earlier build) is checked out directly: its
+  // branch or tag may have moved or been deleted since. Fetch it by id when
+  // the branches no longer reach it.
+  const pinned = entry.commit ? [
+    `if ! git -C ${d} cat-file -e ${q(`${entry.commit}^{commit}`)} 2>/dev/null; then git -C ${d} -c ${header} fetch --quiet origin ${q(entry.commit)} || true; fi`,
+  ] : [];
+  const target = entry.commit ? [] : entry.ref ? [
     `  if git -C ${d} rev-parse --verify --quiet ${q(`refs/remotes/origin/${entry.ref}^{commit}`)} >/dev/null; then`,
     `    git -C ${d} checkout --quiet --force -B ${q(entry.ref)} ${q(`refs/remotes/origin/${entry.ref}`)}`,
     "  else",
@@ -493,16 +543,21 @@ function checkoutScript(entry: RecipeEntry, dir: string, auth: string): string[]
   return [
     "set -e",
     `if [ -d ${q(`${dir}/.git`)} ]; then`,
-    ...(entry.commit ? [`  if ! git -C ${d} cat-file -e ${q(`${entry.commit}^{commit}`)} 2>/dev/null; then`] : ["  if true; then"]),
-    `    git -C ${d} -c ${header} fetch --quiet --prune --force --tags origin`,
-    `    git -C ${d} -c ${header} remote set-head origin --auto >/dev/null 2>&1 || true`,
-    "  fi",
+    // Always prune, so a deleted branch is never recorded as a workspace base.
+    `  git -C ${d} -c ${header} fetch --quiet --prune --force --tags origin`,
+    `  git -C ${d} -c ${header} remote set-head origin --auto >/dev/null 2>&1 || true`,
     ...target,
     "else",
     `  mkdir -p ${q(dir.slice(0, dir.lastIndexOf("/")))}`,
-    `  git -c ${header} clone ${entry.ref ? `--branch ${q(entry.ref)} ` : ""}${q(`https://github.com/${entry.repository}.git`)} ${d}`,
+    `  git -c ${header} clone ${entry.ref && !entry.commit ? `--branch ${q(entry.ref)} ` : ""}${q(`https://github.com/${entry.repository}.git`)} ${d}`,
     "fi",
-    `zeros_build_branch=$(git -C ${d} symbolic-ref --quiet --short HEAD || true)`,
+    ...pinned,
+    // A pinned build's branch hint: its ref while that branch still exists,
+    // else the default branch below. Otherwise HEAD's branch after checkout.
+    entry.commit
+      ? (entry.ref ? `zeros_build_branch=${q(entry.ref)}` : "zeros_build_branch=")
+      : `zeros_build_branch=$(git -C ${d} symbolic-ref --quiet --short HEAD || true)`,
+    `if [ -n "$zeros_build_branch" ] && ! git -C ${d} rev-parse --verify --quiet "refs/remotes/origin/$zeros_build_branch^{commit}" >/dev/null; then zeros_build_branch=; fi`,
     // A tag checkout detaches HEAD. origin/HEAD still names the repository's
     // default branch; verify its remote ref before recording that fallback.
     `if [ -z "$zeros_build_branch" ]; then`,
@@ -528,7 +583,7 @@ const REASON_LABEL: Record<CloudV2BuildReason, string> = {
 /** Runs queued builds on Boat, a few organizations at a time. */
 export class CloudV2ComputerBuilder {
   private lastRefreshScan = Number.NEGATIVE_INFINITY;
-  private readonly unchangedUntil = new Map<string, number>();
+  private refreshing: Promise<void> | null = null;
 
   constructor(private readonly deps: {
     computers: CloudV2Computers;
@@ -549,13 +604,17 @@ export class CloudV2ComputerBuilder {
   async tick(): Promise<void> {
     const { computers } = this.deps;
     await this.cleanup();
-    await this.scheduleRefreshes().catch(() => this.deps.logger?.warn("[cloud-v2] Computer refresh scan will retry"));
+    // GitHub reads can be slow; a scan runs beside admission, never before it.
+    this.refreshing ??= this.scheduleRefreshes()
+      .catch(() => this.deps.logger?.warn("[cloud-v2] Computer refresh scan will retry"))
+      .finally(() => { this.refreshing = null; });
     const jobs: CloudV2Build[] = [];
     for (let index = 0; index < BUILD_CONCURRENCY; index++) {
       const job = await computers.claim();
       if (!job) break;
       jobs.push(job);
     }
+    if (!jobs.length) return;
     await Promise.all(jobs.map(job => this.runLocked(job)));
     await this.cleanup();
   }
@@ -583,20 +642,15 @@ export class CloudV2ComputerBuilder {
     const { computers, runtime } = this.deps;
     for (const candidate of await computers.refreshCandidates(runtime.sha256)) {
       if (candidate.runtimeStale) {
-        await computers.enqueueAutomatic(candidate.organizationId, candidate.createdBy, candidate.recipe, "runtime", runtime.sha256);
+        await computers.enqueueAutomatic(candidate.organizationId, candidate.activeBuildId, "runtime", runtime.sha256);
         continue;
       }
       // A build an admin activated again stays at its commits until they build.
       if (!candidate.refreshDue || candidate.recipe.rebuiltFrom !== undefined) continue;
-      if ((this.unchangedUntil.get(candidate.organizationId) ?? 0) > now) continue;
       const moved = await this.repositoriesMoved(candidate);
       if (moved === null) continue;
-      if (!moved) {
-        if (this.unchangedUntil.size >= 1024) this.unchangedUntil.delete(this.unchangedUntil.keys().next().value!);
-        this.unchangedUntil.set(candidate.organizationId, now + REFRESH_AFTER_MS);
-        continue;
-      }
-      await computers.enqueueAutomatic(candidate.organizationId, candidate.createdBy, unpinned(candidate.recipe), "refresh");
+      if (!moved) { await computers.markRefreshChecked(candidate.organizationId, candidate.activeBuildId); continue; }
+      await computers.enqueueAutomatic(candidate.organizationId, candidate.activeBuildId, "refresh");
     }
   }
 
@@ -735,8 +789,9 @@ export class CloudV2ComputerBuilder {
     const log = (text: string) => computers.append(job.id, text);
     if (job.baseSnapshot) {
       const kept = new Set(job.recipe.repositories.map(entry => entry.repository.toLowerCase()));
+      // Only names that are safe directory parts; never a path that leaves /home/user.
       const removed = ((await computers.baseRecipe(job.id))?.repositories ?? [])
-        .map(entry => entry.repository).filter(name => !kept.has(name.toLowerCase()));
+        .map(entry => entry.repository).filter(name => !kept.has(name.toLowerCase()) && repository.safeParse(name).success);
       if (removed.length) {
         const lines = removed.flatMap(name => {
           const dir = `/home/user/${name}`;

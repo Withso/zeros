@@ -99,17 +99,32 @@ export function historyNote(build: CloudV2Build): string | null {
   return null;
 }
 
-/** Saves edits one at a time, in order, each with the revision the previous
- * save returned. Edits during a save are coalesced into the next one; an
+/** Saves edits one at a time, in order. The first edit after a quiet period
+ * takes the revision the view showed; each save then advances it, so a newer
+ * server revision fetched meanwhile (another admin's edit) is a conflict, not
+ * a silent overwrite. Edits during a save are coalesced into the next one; an
  * error drops what is queued, since the server's version now wins. */
 export class RecipeSaveQueue<T> {
   private queued: { value: T } | null = null;
   private flight: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /** The revision pending edits are based on; undefined while nothing is pending. */
+  private base: number | undefined;
+  /** Why the last drain stopped; settle() reports it once. */
+  private failure: { error: unknown } | null = null;
 
-  constructor(private readonly deps: { save(value: T): Promise<void>; onError(error: unknown): void; onSaved(): void }) {}
+  constructor(private readonly deps: {
+    /** Saves `value` at `revision` and returns the new revision. */
+    save(value: T, revision: number): Promise<number>;
+    /** The revision currently shown when no edit is pending. */
+    serverRevision(): number | undefined;
+    onError(error: unknown): void;
+    onSaved(): void;
+  }) {}
 
   push(value: T, delayMs = 0): void {
+    if (!this.pending) this.base = this.deps.serverRevision();
+    this.failure = null;
     this.queued = { value };
     clearTimeout(this.timer); this.timer = undefined;
     if (delayMs > 0) this.timer = setTimeout(() => { void this.flush(); }, delayMs);
@@ -122,24 +137,38 @@ export class RecipeSaveQueue<T> {
     return this.flight;
   }
 
-  /** Resolves once every pushed edit has been saved or rejected. */
+  /** Resolves once every pushed edit has been saved; rejects when one was not,
+   * so nothing acts on a configuration the server never received. */
   async settle(): Promise<void> {
     if (this.timer) void this.flush();
     while (this.flight) await this.flight;
+    const failure = this.failure;
+    this.failure = null;
+    if (failure) throw failure.error;
   }
 
-  cancel(): void { clearTimeout(this.timer); this.timer = undefined; this.queued = null; }
+  /** Drops edits that have not started saving. A save already sent completes. */
+  cancel(): void { clearTimeout(this.timer); this.timer = undefined; this.queued = null; if (!this.flight) this.base = undefined; }
 
   get waiting(): boolean { return this.timer !== undefined; }
+
+  /** The revision to act on: the pending edits' base, else the server's. */
+  revision(): number | undefined { return this.pending ? this.base : this.deps.serverRevision(); }
+
+  private get pending(): boolean { return this.queued !== null || this.flight !== null || this.timer !== undefined; }
 
   private async drain(): Promise<void> {
     let saved = false;
     while (this.queued) {
       const { value } = this.queued;
-      this.queued = null;
-      try { await this.deps.save(value); saved = true; }
-      catch (error) { this.queued = null; this.deps.onError(error); return; }
+      // This save takes the edit a typing pause was waiting for.
+      this.queued = null; clearTimeout(this.timer); this.timer = undefined;
+      const revision = this.base ?? this.deps.serverRevision();
+      if (revision === undefined) return;
+      try { this.base = await this.deps.save(value, revision); saved = true; }
+      catch (error) { this.queued = null; this.base = undefined; this.failure = { error }; this.deps.onError(error); return; }
     }
+    if (!this.timer) this.base = undefined;
     if (saved && !this.timer) this.deps.onSaved();
   }
 }

@@ -59,14 +59,19 @@ function useRecipeDraft(organizationId: string, key: string, data: CloudV2Comput
   const callbacks = useRef({ refresh, onError });
   callbacks.current = { refresh, onError };
   const [queue] = useState(() => new RecipeSaveQueue<CloudV2RepositoryDraft[]>({
-    save: async repositories => {
-      const current = latest.current;
-      if (!current.data || current.revision === undefined) return;
-      const saved = await saveCloudV2ComputerRecipe(organizationId, repositories, current.revision);
-      const next = { ...current.data, recipe: saved.recipe, recipeRevision: saved.recipeRevision };
-      latest.current = { data: next, revision: saved.recipeRevision };
-      computers.setData(key, next);
+    save: async (repositories, revision) => {
+      const saved = await saveCloudV2ComputerRecipe(organizationId, repositories, revision);
+      // Merge into the freshest overview, and never let a late reply replace
+      // a newer revision a refresh has already shown.
+      const fresh = computers.getSnapshot(key).data ?? latest.current.data;
+      if (fresh && (fresh.recipeRevision ?? -1) < saved.recipeRevision) {
+        const next = { ...fresh, recipe: saved.recipe, recipeRevision: saved.recipeRevision };
+        latest.current = { data: next, revision: saved.recipeRevision };
+        computers.setData(key, next);
+      }
+      return saved.recipeRevision;
     },
+    serverRevision: () => latest.current.revision,
     onSaved: () => setLocal(null),
     onError: error => {
       setLocal(null); callbacks.current.refresh();
@@ -82,7 +87,7 @@ function useRecipeDraft(organizationId: string, key: string, data: CloudV2Comput
     if (!legacy) queue.push(next, delayMs);
   }, [legacy, queue]);
   const reset = useCallback(() => { queue.cancel(); setLocal(null); }, [queue]);
-  return { local, legacy, edit, settle: () => queue.settle(), reset, latest };
+  return { local, legacy, edit, settle: () => queue.settle(), revision: () => queue.revision(), reset, latest };
 }
 
 function CloudComputerScope({ userId, organizationId, canManage, active }: {
@@ -122,16 +127,19 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
   };
   const build = () => run(async () => {
     await draft.settle();
-    const revision = draft.latest.current.revision;
+    const revision = draft.revision();
     if (draft.legacy || revision === undefined) await buildCloudV2Computer(organizationId, configured);
     else await buildConfiguredCloudV2Computer(organizationId, revision);
     draft.reset();
   });
   const discard = () => run(async () => {
+    // Unsent edits are dropped; a save already sent finishes first, so the
+    // discard names the revision it produced.
     draft.reset();
-    const current = draft.latest.current;
-    if (draft.legacy || current.revision === undefined || !current.data) return;
-    const saved = await discardCloudV2ComputerRecipe(organizationId, current.revision);
+    await draft.settle();
+    const current = draft.latest.current, revision = draft.revision();
+    if (draft.legacy || revision === undefined || !current.data) return;
+    const saved = await discardCloudV2ComputerRecipe(organizationId, revision);
     computers.setData(key, { ...current.data, recipe: saved.recipe, recipeRevision: saved.recipeRevision });
   });
   const activate = (buildId: string) => run(() => activateCloudV2Build(organizationId, buildId));

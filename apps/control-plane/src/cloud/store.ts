@@ -470,7 +470,7 @@ export class CloudV2Store {
    * provider I/O never holds a database lock or connection. */
   async beginRetention(candidate: CloudV2LifecycleWorkspace, name: string): Promise<boolean> {
     return withSystemTx(this.pool, async tx => {
-      const { rows } = await tx.query<{ acquired: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended('cloud-v2-retention-save',0)) AS acquired");
+      const { rows } = await tx.query<{ acquired: boolean }>("/* lock_purpose='cloud-v2-retention-save' */ SELECT pg_try_advisory_xact_lock(hashtextextended('cloud-v2-retention-save',0)) AS acquired");
       if (!rows[0]?.acquired) return false;
       const result = await tx.query(
         `UPDATE cloud_v2_workspaces w SET retention_snapshot=coalesce(retention_snapshot,$4),
