@@ -93,6 +93,7 @@ export interface TranscriptTurnTail {
 
 export interface TranscriptTurnProps {
   turn: Turn;
+  threadTailKey: string | null;
   isVisualTail: boolean;
   isActivityTail?: boolean;
   durablePrompt?: boolean;
@@ -117,6 +118,7 @@ export interface TranscriptTurnProps {
 
 export const TranscriptTurn = memo(function TranscriptTurn({
   turn,
+  threadTailKey,
   isVisualTail,
   isActivityTail = isVisualTail,
   durablePrompt = false,
@@ -282,6 +284,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
                     surfaceActive={shared.surfaceActive}
                     chatId={shared.chatId}
                     turnId={turn.recordedTurnId}
+                    threadTailKey={threadTailKey}
                     folder={shared.folder}
                     recordedSummary={turn.recordedSummary}
                     failure={tail?.failure ?? null}

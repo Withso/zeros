@@ -153,7 +153,11 @@ its snapshot refs; oversized aggregate patches return file metadata so Review
 can still list and select individual files.
 Turn records and snapshot IDs stay on the VM. An optional `turnSummary` on the
 opening user message mirrors the file counts and timing without native paths
-or snapshot IDs. Imports cannot replace that worker-owned summary.
+or snapshot IDs. Each changed summary advances the opening's existing
+`updatedAt` stamp, including same-millisecond background captures and clock
+corrections. Imports and prompt replay retain the worker-owned summary and its
+stamp. A newer mirror stamp can therefore recover a lost live summary update;
+an opening without a stamp uses its creation time as the freshness baseline.
 
 The footer renders the mirrored summary without connecting to the worker.
 Explicit Review opens Changes with that exact turn range; file clicks read

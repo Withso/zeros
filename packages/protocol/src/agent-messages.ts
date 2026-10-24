@@ -41,8 +41,9 @@ export interface AgentTextMessage {
   /** Optional so older persisted transcripts remain readable. */
   wakeupNotice?: WakeupNoticeInfo;
   createdAt: number;
-  /** Time of the last changed text chunk. Older stored messages omit it.
-   * Extends a parent reply's footer through native background continuations. */
+  /** Time of the last changed text chunk or worker-recorded turn summary.
+   * Older stored messages omit it. Extends a parent reply's footer through
+   * native background continuations. */
   updatedAt?: number;
   /** A prompt stopped by provider authentication. Its original expanded text
    * survives Settings navigation and reload as context for the next user send;

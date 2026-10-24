@@ -7,6 +7,8 @@ import {
   settleLeadingPrompt,
 } from "../transcript-leading-prompt";
 import { groupMessagesIntoTurns } from "../turn-grouping";
+import { canReplaceCloudTranscript } from "../local-transcript-presentation";
+import { transcriptMessageSignature } from "../../../state/local-transcript-cache";
 
 const user = (id: string, extra: Partial<AgentTextMessage> = {}): AgentTextMessage => ({
   id, kind: "text", role: "user", text: `ask ${id}`, createdAt: 1, ...extra,
@@ -66,6 +68,64 @@ describe("leading prompt beside a window that starts inside a turn", () => {
     store.setSession("cloud-chat", { ...BLANK, cwd, messages: tools("t", 2), leadingPrompt: user("u1") });
     store.patchSession("cloud-chat", { messages: tools("t", 2) });
     expect(useSessionsStore.getState().sessions["cloud-chat"].leadingPrompt).toBeNull();
+  });
+
+  it.each([undefined, { id: "opening", kind: "text", role: "agent" }])("ignores an invalid recorded-message payload before changing the retained opening (%j)", message => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat", { ...BLANK, cwd: "/repo", sessionId: "session", transcriptState: "resident",
+      messages: [agent("answer")], leadingPrompt: user("opening") });
+    const before = useSessionsStore.getState().sessions.chat;
+    expect(() => store.applyBridgeUpdate({ sessionId: "session", update: {
+      sessionUpdate: "user_message_recorded", message,
+    } } as never)).not.toThrow();
+    expect(useSessionsStore.getState().sessions.chat).toBe(before);
+  });
+
+  it.each([false, true])("rejects a stale mirrored opening after its cached provenance was replaced live (leading: %s)", leading => {
+    const chatId = "cloud:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:chat";
+    const cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const opening = user("opening"), answer = agent("answer");
+    const store = useSessionsStore.getState();
+    store.setSession(chatId, { ...BLANK, cwd, sessionId: "session", transcriptState: "resident", transcriptSource: "worker",
+      messages: leading ? [answer] : [opening, answer], leadingPrompt: leading ? opening : null, transcriptContentSignatures: {
+        opening: transcriptMessageSignature(opening)!, answer: transcriptMessageSignature(answer)!,
+      } });
+    store.applyBridgeUpdate({ sessionId: "session", update: {
+      sessionUpdate: "user_message_recorded", message: { ...opening, updatedAt: 2, turnSummary: {
+        agentId: "claude", ord: 1, summary: "Edit", startedAt: 1, endedAt: 2, status: "completed", stopReason: "end_turn",
+        files: [{ path: "file.ts", status: "modified", additions: 2, deletions: 1 }],
+      } },
+    } });
+    const after = useSessionsStore.getState().sessions[chatId];
+    expect(canReplaceCloudTranscript(after, { messages: leading ? [answer] : [opening, answer],
+      ...(leading ? { leadingPrompt: opening } : {}), source: "control-plane" })).toBe(false);
+    expect(after.transcriptContentSignatures?.answer).toBe(transcriptMessageSignature(answer));
+  });
+
+  it.each([
+    { chatId: "personal-chat", cwd: "/personal/repo" },
+    { chatId: "organization-chat", cwd: "/organization/repo" },
+    { chatId: "cloud:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:chat", cwd: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222" },
+  ])("updates $cwd recorded changes beside a long tail without appending its opening again", ({ chatId, cwd }) => {
+    const opening = user("opening", { messageId: "native-opening" });
+    const messages = [...tools("t", 200), agent("answer")];
+    const store = useSessionsStore.getState();
+    store.setSession(chatId, { ...BLANK, cwd, agentId: "claude", sessionId: "session", status: "ready",
+      transcriptState: "resident", messages, leadingPrompt: opening });
+    const turnSummary: NonNullable<AgentTextMessage["turnSummary"]> = {
+      agentId: "claude", ord: 1, summary: "Change files", startedAt: 1, endedAt: 2,
+      status: "completed", stopReason: "end_turn", files: [{ path: "file.ts", status: "added", additions: 3, deletions: 0 }],
+    };
+    store.applyBridgeUpdate({ sessionId: "session", update: {
+      sessionUpdate: "user_message_recorded", message: user("opening", { turnSummary }),
+    } });
+    const after = useSessionsStore.getState().sessions[chatId];
+    expect(after.messages).toBe(messages);
+    expect(after.leadingPrompt).toMatchObject({ id: "opening", messageId: "native-opening", turnSummary });
+    const turns = groupMessagesIntoTurns(presentLeadingPrompt(after.messages, after.leadingPrompt));
+    expect(turns).toHaveLength(1);
+    expect(turns[0].recordedSummary).toBe(turnSummary);
+    expect(turns[0].events.at(-1)?.id).toBe("answer");
   });
 
   it("renders the opening prompt above a headless first turn", () => {

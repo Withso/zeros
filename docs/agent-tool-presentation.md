@@ -1006,13 +1006,20 @@ query replacement, host disposal, buffered input, and native cancellation receip
 
 ## Turn changes and usage in the output footer
 
-Keep duration, copy and the action menu in the settled turn's toolbar. Below
-it, recorded changes use one `bg1-highlight` card with a `border2` outline:
+Keep duration, copy and the action menu in the settled turn's toolbar. Only
+the actual last turn automatically shows its recorded changes; a last turn
+without changes never promotes an older card. Historical turns show aggregate
+green additions and blue deletions beside the menu, including zero-line
+metadata changes. Clicking or pressing Enter/Space toggles that turn's card;
+the control uses `bg1-hover` and exposes its expanded state. A new thread tail
+or a changed chat/workspace identity closes manually opened historical cards.
+
+Recorded changes use one `bg1-highlight` card with a `border2` outline:
 filename/icon on the left and additions/deletions on the right. Show four
 files initially, followed by **Show N more** when needed. Expanded files use
 a ten-row (280px) scroll area; the header and **Review** stay visible. Keyboard
-expansion moves focus to the first newly revealed file, and changing turns
-resets the disclosure.
+expansion moves focus to the first newly revealed file. Closing the card or
+changing its owner resets the file-list disclosure.
 
 Review publishes the Changes tab with the explicit selected turn range,
 including for the latest turn, so later work cannot retarget it. File rows
@@ -1021,6 +1028,9 @@ and Cursor in Personal Local, organization-local and cloud workspaces. Local
 uses keyed turn records; cloud uses the worker's mirrored opening-message
 summary, without waking the VM for passive transcript reads or hover previews.
 No recorded changes means no card; raw tool proposals are never a fallback.
+When that opening sits beside a long resident window, its final summary
+updates the retained opening in place; it must never append another prompt
+after the answer or change the older-page cursor.
 
 The timer is the only usage-card trigger. Show Input, Output, Cache read and
 one Total cost with agent/start/end details. Keep unknown distinct from zero,
