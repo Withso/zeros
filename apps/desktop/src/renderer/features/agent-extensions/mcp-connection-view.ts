@@ -1,5 +1,5 @@
 import type { McpProbeResult } from "./mcp-server-editor";
-import { transportOf, type RawServer } from "./mcp-server-model";
+import { secureDraftFromServer, transportOf, type RawServer } from "./mcp-server-model";
 
 export interface McpConnectionView {
   label: string;
@@ -17,7 +17,10 @@ export function mcpConnectionView(server: RawServer, result?: McpProbeResult, st
     label: "Connected", tone: "success", action: "check",
     hint: result?.toolCount !== undefined ? `${result.toolCount} ${result.toolCount === 1 ? "tool" : "tools"} available.` : "The last connection succeeded.",
   };
-  if (result?.status === "needs-auth" || (!result && status === "needs-auth")) return server.auth === "header"
+  // Legacy definitions can omit auth while supplying API-key headers. Use the
+  // editor's inference, but keep an explicit draft method (including none).
+  const auth = server.auth ?? secureDraftFromServer(server).auth;
+  if (result?.status === "needs-auth" || (!result && status === "needs-auth")) return auth === "header"
     ? { label: "Check API key", hint: "The server rejected the credentials. Check your API key headers and try again.", tone: "error", action: "check" }
     : { label: "Sign-in required", hint: "Connect your account to use this server. You can also choose API key in Authentication.", tone: "warning", action: "connect" };
   if (result?.status === "failed" || (!result && status === "error")) {

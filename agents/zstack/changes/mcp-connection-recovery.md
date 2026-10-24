@@ -30,6 +30,12 @@ browserless authorization and owner replacement. Reuse Settings primitives for
 section surfaces and typography; keep diagnostic stages and advanced OAuth
 configuration behind disclosure rather than repeating connection actions.
 
+Review caught a legacy-shape mismatch: a saved configuration can supply API-key
+headers without an explicit auth field. The list must apply the editor's
+existing inference before selecting recovery, while an explicit draft method
+still takes precedence. HTTP/SSE connection-view regressions cover both cached
+probe and gateway challenges, plus switching away from saved headers.
+
 Browser fixture lesson: a retained Connected label does not prove the list's
 background refresh has settled. Before arming a held response and triggering
 focus, wait for that exact cache key to finish refreshing; otherwise focus
