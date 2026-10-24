@@ -23,13 +23,14 @@ import { Terminals } from "./terminals/service";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
 import { PromptInbox } from "./prompt-inbox";
 import { McpGateway } from "./mcp/gateway";
+import { measureStartup, recordStartupTiming, type StartupTimingObserver } from "./startup-timings";
 
 interface WorkerOptions {
   directory: string;
   workspaceId?: string;
   transport: Transport;
   drivers?: DriverFactories;
-  prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv) => Promise<void>;
+  prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<void>;
   gitAskpassPath?: string;
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
@@ -195,6 +196,8 @@ export class CloudWorker {
   }
 
   private async configure(config: WorkerConfig): Promise<void> {
+    const started = performance.now(), initial = !this.scope;
+    const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
     if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
@@ -202,8 +205,9 @@ export class CloudWorker {
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
     if (!this.scope) {
       await this.github.start(); this.tokens.invalidate();
-      await (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment);
-      const store = await SessionStore.open(join(this.options.directory, "sessions"), scope.key);
+      await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing);
+      const store = await measureStartup("worker_session_store", () => SessionStore.open(join(this.options.directory, "sessions"), scope.key), timing);
+      const servicesStarted = performance.now();
       // Earlier worker snapshots stored a cloud key in chat metadata. Native
       // bridge rows must round-trip through the renderer's existing mapper.
       for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
@@ -230,6 +234,7 @@ export class CloudWorker {
       }), store.onError((chatId) => {
         this.options.onError?.("storage"); void this.agents!.closeChat(chatId).catch(() => {});
       }));
+      recordStartupTiming("worker_services", servicesStarted, timing);
     } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
     this.history!.connect();
     if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
@@ -238,6 +243,7 @@ export class CloudWorker {
     } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
     await this.reportIdle(true);
+    if (initial) recordStartupTiming("worker_configure", started, timing);
   }
 
   private broadcast(frame: BridgeMessage): Promise<void> { return this.send({ t: "frame", clientId: "*", frame }).then(() => {}); }

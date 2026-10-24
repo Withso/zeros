@@ -24,7 +24,11 @@ type HistoryInput = {
   chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
   messages?: { chatId: string; rows: readonly CloudV2MessageRow[] } | undefined;
 };
-export type CloudV2WorkerSession = CloudV2Workspace & { accessEpoch: string; loginRevision: string };
+export type CloudV2WorkerSession = CloudV2Workspace & {
+  accessEpoch: string; loginRevision: string;
+  /** Present only on the hello that actually changes a booting state to running. */
+  helloTiming?: { state: "creating" | "starting"; durationMs: number };
+};
 export type CloudV2AppGrant = { userId: string; accessEpoch: string; wake: boolean; sessionId: string | null };
 
 export type CloudV2Workspace = {
@@ -258,17 +262,22 @@ export class CloudV2Store {
   }
 
   async acceptWorkerHello(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
-      `UPDATE cloud_v2_workspaces w SET
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
+      `WITH prior AS MATERIALIZED (
+         SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at FROM cloud_v2_workspaces w
+         WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS} FOR UPDATE)
+       UPDATE cloud_v2_workspaces w SET
          worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
          worker_boot_id=$2, state='running', attempts=0, next_attempt_at=NULL,
          active_at=CASE WHEN state='running' THEN active_at ELSE clock_timestamp() END,
          updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END
-       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
-       RETURNING ${COLUMNS}, access_epoch::text, login_revision::text`, [hashCloudV2Token(token), bootId]));
+       FROM prior WHERE w.id=prior.prior_id
+       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,
+         greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`, [hashCloudV2Token(token), bootId]));
     const row = rows[0];
-    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision,
+      ...(row.prior_state === "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
   }
 
   async workerSession(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {

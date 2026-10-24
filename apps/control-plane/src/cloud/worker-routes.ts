@@ -2,7 +2,8 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingSchema, type CloudV2ControlFrame } from "./contract.js";
+import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
 import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema } from "./prompt-contract.js";
@@ -13,6 +14,7 @@ export type CloudV2WorkerRouteDeps = {
   store: Pick<CloudV2Store, "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory"> & Partial<Pick<CloudV2Store, "prompts">>;
   runtimeSha256: string;
   promptOutbox?: boolean;
+  timing?: (record: CloudV2TimingRecord) => void;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
   config(workspace: CloudV2Workspace): Promise<ConfigFrame>;
   githubToken(workspace: CloudV2Workspace): Promise<{ token: string; expiresAt: number }>;
@@ -69,7 +71,13 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     const workspace = await deps.store.acceptWorkerHello(bearer(c), input.bootId);
     if (!workspace) throw unauthorized();
+    if (workspace.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: workspace.id.slice(0, 8), phase: "worker_hello", ...workspace.helloTiming });
     return c.json({ config: await configuration(deps, workspace, bearer(c), input.bootId, supportsMcp(c)) });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/timing`, async c => {
+    const auth = await session(c, deps), record = await body(c, CloudV2WorkerTimingSchema);
+    emitCloudV2Timing(deps.timing, { workspaceId: auth.workspace.id.slice(0, 8), ...record });
+    return c.json({ ok: true });
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {
     const auth = await session(c, deps), input = await body(c, CloudV2WorkerHistorySchema);

@@ -16,7 +16,7 @@ import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
 import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./github.js";
 import { HISTORY_OPS, readCloudV2History } from "./history.js";
-import { CloudV2Lifecycle } from "./lifecycle.js";
+import { CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
 import { cloudV2Runtime } from "./runtime.js";
@@ -84,6 +84,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const computers = new CloudV2Computers(pool);
   const repositoryToken = config.github ? createCloudV2RepositoryTokens(pool, config.github) : null;
   const mcp = createMcpServices(pool, config);
+  const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
 
   const workerConfig = async (workspace: CloudV2Workspace): Promise<ConfigFrame> => {
     const proxy = async () => {
@@ -118,7 +119,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   };
   const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
-    store, ...(securityEvents ? { securityEvents } : {}),
+    store, timing, ...(securityEvents ? { securityEvents } : {}),
     config: workerConfig,
     workerRoute: async id => {
       const route = await store.workerRoute(id);
@@ -131,7 +132,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+  const workers: CloudV2WorkerRouteDeps = { store, timing, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
     ...(mcp ? { mcpAuthorization: (workspace, id, force) =>
       mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force, true) } : {}),
     promptOutbox: v2.promptOutbox === true, waitForPrompts: (id, ms, signal) => promptSignals.wait(id, ms, signal) };
@@ -168,6 +169,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
     ...(builder ? { builds: builder } : {}),
     store,
+    timing,
     compute,
     runtime,
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),

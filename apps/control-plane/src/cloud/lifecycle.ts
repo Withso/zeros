@@ -8,7 +8,7 @@ import { BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
-import { CLOUD_V2_WORKER_PORT } from "./contract.js";
+import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming } from "./contract.js";
 
 const CONCURRENCY = 4;
 const LEASE_MS = 2 * 60_000;
@@ -23,6 +23,18 @@ export const CLOUD_V2_IDLE_STOP_MS = 10 * 60_000;
 export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token";
 /** Non-secret boot settings for the worker's systemd unit (EnvironmentFile). */
 export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
+
+type LifecyclePhase = "boat_create" | "boat_resume" | "runtime_install" | "protected_route" | "token_delivery" | "total";
+export type CloudV2TimingRecord = {
+  workspaceId: string;
+  phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
+  durationMs: number;
+  state?: CloudV2Workspace["state"];
+  runtimeChanged?: boolean;
+};
+export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => void) | undefined, record: CloudV2TimingRecord): void {
+  try { observer?.(record); } catch { /* Optional diagnostics cannot change lifecycle authority. */ }
+}
 
 export type CloudV2LifecycleDeps = {
   store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute">;
@@ -43,6 +55,7 @@ export type CloudV2LifecycleDeps = {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: Pick<Console, "warn">;
+  timing?: (record: CloudV2TimingRecord) => void;
 };
 
 /** Boat no longer has the VM, or deleted the disk of one stopped 14 days. */
@@ -137,7 +150,9 @@ export class CloudV2Lifecycle {
 
   private async runStep(workspace: CloudV2Workspace & { attempts: number }, now: number): Promise<void> {
     try {
-      await this.step(workspace, now);
+      if (workspace.state === "creating" || workspace.state === "starting")
+        await this.measure(workspace, "total", () => this.step(workspace, now));
+      else await this.step(workspace, now);
     } catch (error) {
       const code = errorCode(error);
       this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code})`);
@@ -165,14 +180,14 @@ export class CloudV2Lifecycle {
             await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_build_required" });
             return;
           }
-          ({ sandboxId } = await compute.create({
+          ({ sandboxId } = await this.measure(workspace, "boat_create", () => compute.create({
             key: workspace.id, from, name: this.deps.sandboxName(workspace), env: this.deps.bootEnv(workspace),
-          }));
+          })));
           await store.defer(workspace.id, "creating", 0, { boatSandboxId: sandboxId });
         }
-        await this.ensureRuntime(sandboxId);
-        if (!await this.host(workspace, sandboxId)) return;
-        await this.deliverToken(workspace, sandboxId);
+        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
+        if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
+        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId));
         await store.defer(workspace.id, "creating", HELLO_POLL_MS);
         return;
       }
@@ -188,11 +203,11 @@ export class CloudV2Lifecycle {
         }
         // Resume and protected hosting are idempotent. Rotate the HTTP token
         // and restart every wake to register a new process boot identity.
-        await compute.resume(workspace.boatSandboxId);
+        await this.measure(workspace, "boat_resume", () => compute.resume(workspace.boatSandboxId!));
         // A runtime shipped while the VM slept is installed now.
-        await this.ensureRuntime(workspace.boatSandboxId);
-        if (!await this.host(workspace, workspace.boatSandboxId)) return;
-        await this.deliverToken(workspace, workspace.boatSandboxId);
+        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(workspace.boatSandboxId!), runtimeChanged => ({ runtimeChanged }));
+        if (!await this.measure(workspace, "protected_route", () => this.host(workspace, workspace.boatSandboxId!))) return;
+        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, workspace.boatSandboxId!));
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
       }
@@ -226,10 +241,19 @@ export class CloudV2Lifecycle {
   }
 
   /** Quick when the VM already has the runtime; otherwise downloads it. */
-  private async ensureRuntime(sandboxId: string): Promise<void> {
+  private async ensureRuntime(sandboxId: string): Promise<boolean> {
     const { runtime } = this.deps;
     const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url(), publicKeys: this.deps.publicKeys }), 300);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
+    return result.stdout.split(/\r?\n/).includes("runtime-changed");
+  }
+
+  private async measure<T>(workspace: CloudV2Workspace, phase: LifecyclePhase, run: () => Promise<T>, detail?: (value: T) => { runtimeChanged: boolean }): Promise<T> {
+    const start = this.deps.now?.() ?? Date.now();
+    const value = await run();
+    emitCloudV2Timing(this.deps.timing, { workspaceId: workspace.id.slice(0, 8), state: workspace.state, phase,
+      durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - start)), ...detail?.(value) });
+    return value;
   }
 
   /** A VM that has just started or resumed can refuse commands for a few seconds. */

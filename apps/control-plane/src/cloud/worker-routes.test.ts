@@ -49,6 +49,21 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
 });
+it("reports the first hello from its prior lifecycle state and accepts bounded optional timings without activity", async () => {
+  const f = fixture(), original = await f.deps.store.acceptWorkerHello(f.token, f.bootId);
+  f.deps.timing = vi.fn();
+  vi.mocked(f.deps.store.acceptWorkerHello).mockResolvedValueOnce({ ...original!, helloTiming: { state: "starting", durationMs: 1250 } });
+  expect((await f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) })).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledWith({ workspaceId: original!.id.slice(0, 8), phase: "worker_hello", state: "starting", durationMs: 1250 });
+  expect((await f.request("timing", { phase: "worker_services", durationMs: 23 })).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenLastCalledWith({ workspaceId: original!.id.slice(0, 8), phase: "worker_services", durationMs: 23 });
+  for (const input of [{ phase: "private-command", durationMs: 1 }, { phase: "worker_services", durationMs: -1 }, { phase: "worker_services", durationMs: 1, token: "do-not-log" }])
+    expect((await f.request("timing", input)).status).toBe(400);
+  expect((await f.request("timing", { phase: "worker_services", durationMs: 23 }, { "x-zeros-worker-boot": randomUUID() })).status).toBe(401);
+  expect(f.deps.store.markActive).not.toHaveBeenCalled();
+  f.deps.timing = () => { throw new Error("diagnostics unavailable"); };
+  expect((await f.request("timing", { phase: "worker_services", durationMs: 23 })).status).toBe(200);
+});
 it("authenticates each HTTP carrier and fences obsolete boots before credentials or rows", async () => {
   const f = fixture();
   for (const [path, body] of [["activity", { idle: false }], ["history", { t: "history", bootId: f.bootId, sequence: 1, chats: [] }], ["github-token", {}], ["config", undefined]] as const) {

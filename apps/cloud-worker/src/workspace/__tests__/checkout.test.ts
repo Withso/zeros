@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { prepareCheckout } from "../checkout";
 import { config } from "../../__tests__/worker-fixtures";
 
@@ -26,7 +26,9 @@ it("fetches and creates the workspace branch from the current remote base", asyn
   const { source, checkout, git, workspace } = await fixture();
   await writeFile(join(source, "file.txt"), "new remote base\n");
   await git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-am", "advance");
-  await prepareCheckout(workspace);
+  const timing = vi.fn();
+  await prepareCheckout(workspace, {}, timing);
+  expect(timing.mock.calls.map(([record]) => record.phase)).toEqual(["worker_checkout_fetch", "worker_checkout_switch"]);
   expect(await git(checkout, "branch", "--show-current")).toBe(workspace.branch);
   expect(await git(checkout, "rev-parse", "HEAD")).toBe(await git(source, "rev-parse", "HEAD"));
 });

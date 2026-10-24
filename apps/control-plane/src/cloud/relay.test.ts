@@ -115,6 +115,18 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  it("times the first dial through readiness, including retry and configuration", async () => {
+    const timing = vi.fn(); deps.timing = timing;
+    let now = 1000; deps.now = () => now;
+    vi.mocked(deps.workerRoute).mockResolvedValueOnce({ workspace: workspace("starting"), accessEpoch, url: null, token: null, bootId: null });
+    const original = deps.config;
+    deps.config = async ws => { now += 75; return original(ws); };
+    await app();
+    await vi.waitFor(() => expect(timing).toHaveBeenCalledTimes(1));
+    expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75 });
+    expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+  });
+
   it.each([false, true])("delivers optional MCP config only after WebSocket upgrade support=%s", async supported => {
     if (supported) workerServer.on("headers", headers => { headers.push("X-Zeros-Worker-Features: mcp-v1"); });
     const mcpServers = [{ id: workspaceId, name: "fixture", transport: "http" as const, url: "https://mcp.example.test" }];

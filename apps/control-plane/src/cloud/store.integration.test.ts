@@ -46,6 +46,16 @@ d("cloud v2 store", () => {
     expect((await store.claimPending(1, 0)).map(row => row.id)).toEqual([first.id]);
   });
 
+  it("returns hello latency from the state entry exactly once, retaining the first boot deadline", async () => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), bootId = randomUUID();
+    await pool.query("UPDATE cloud_v2_workspaces SET updated_at=clock_timestamp()-interval '5 seconds' WHERE id=$1", [w.id]);
+    const hello = await store.acceptWorkerHello(token, bootId);
+    expect(hello?.helloTiming?.state).toBe("creating");
+    expect(hello?.helloTiming?.durationMs).toBeGreaterThanOrEqual(5000);
+    expect(hello?.helloTiming?.durationMs).toBeLessThan(10_000);
+    expect((await store.acceptWorkerHello(token, bootId))?.helloTiming).toBeUndefined();
+  });
+
   it.each(["creator", "relay"] as const)("fences the suspended process before a %s wake can race runtime installation", async source => {
     const w = await create(), oldToken = await store.rotateWorkerToken(w.id), oldBoot = randomUUID();
     await store.acceptWorkerHello(oldToken, oldBoot);

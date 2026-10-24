@@ -49,6 +49,22 @@ async function setup(driverSetup?: (driver: FakeDriver) => void) {
 }
 
 describe("worker bridge routing through a fake relay", () => {
+  it("reports value-free initial configuration phases without delaying readiness or requiring telemetry support", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "zeros-worker-timing-"));
+    const reportTiming = vi.fn(), relay = Object.assign(new FakeRelay(), { reportTiming });
+    const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {} });
+    cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
+    worker.start(); await relay.receive(config); await relay.receive({ t: "open", clientId: CLIENT_A });
+    expect(reportTiming.mock.calls.map(([record]) => record.phase)).toEqual(["worker_checkout", "worker_session_store", "worker_services", "worker_configure"]);
+    for (const [record] of reportTiming.mock.calls) {
+      expect(Object.keys(record).sort()).toEqual(["durationMs", "phase"]);
+      expect(record.durationMs).toBeGreaterThanOrEqual(0);
+    }
+    expect(relay.bridge("ENGINE_READY")).toHaveLength(1);
+    await relay.receive(config);
+    expect(reportTiming).toHaveBeenCalledTimes(4);
+  });
+
   it.each(["configuration", "sign-in"])("delivers scoped MCP capabilities and replaces drivers between turns on %s change", async change => {
     const { relay, drivers, worker, chat, prompt } = await setup();
     const id = randomUUID(), mcp = { id, name: "fixture", transport: "http", url: "https://mcp.example.test", headers: { "X-Api-Key": "upstream-fixture-secret" } };

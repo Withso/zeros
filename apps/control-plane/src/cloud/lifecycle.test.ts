@@ -17,7 +17,7 @@ function workspace(state: CloudV2Workspace["state"], extra: Partial<CloudV2Works
   };
 }
 
-function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"] } = {}) {
+function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number } = {}) {
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
     resume: vi.fn(async () => {}),
@@ -41,7 +41,8 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
   };
   const stopWorker = vi.fn(async () => true);
   const lifecycle = new CloudV2Lifecycle({
-    store, compute, now: () => NOW, sleep: async () => {},
+    store, compute, now: options.now ?? (() => NOW), sleep: async () => {},
+    ...(options.timing ? { timing: options.timing } : {}),
     ...(options.stopIdle ? { stopIdle: options.stopIdle } : {}),
     publicKeys, sealPortToken: () => ({ encrypted: true }), stopWorker,
     runtime: { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" },
@@ -52,6 +53,31 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
 }
 
 describe("cloud v2 lifecycle", () => {
+  it.each(["creating", "starting"] as const)("reports value-free %s phase durations and runtime replacement", async state => {
+    let now = NOW;
+    const timing = vi.fn();
+    const f = setup([workspace(state, { boatSandboxId: state === "starting" ? "bx_test" : null })], { timing, now: () => now });
+    vi.mocked(f.compute.create).mockImplementationOnce(async () => { now += 10; return { sandboxId: "bx_test" }; });
+    vi.mocked(f.compute.resume).mockImplementationOnce(async () => { now += 10; });
+    vi.mocked(f.compute.exec).mockImplementationOnce(async () => { now += 20; return { exitCode: 0, stdout: "runtime-changed\n", timedOut: false }; })
+      .mockImplementationOnce(async () => { now += 40; return { exitCode: 0, stdout: "credential never logged", timedOut: false }; });
+    vi.mocked(f.compute.hostPort).mockImplementationOnce(async () => { now += 30; return { url: "https://private.example.test", token: "never-log" }; });
+    await f.lifecycle.tick();
+    expect(timing.mock.calls.map(([record]) => record)).toEqual([
+      { workspaceId: "6f2b7c1e", state, phase: state === "creating" ? "boat_create" : "boat_resume", durationMs: 10 },
+      { workspaceId: "6f2b7c1e", state, phase: "runtime_install", durationMs: 20, runtimeChanged: true },
+      { workspaceId: "6f2b7c1e", state, phase: "protected_route", durationMs: 30 },
+      { workspaceId: "6f2b7c1e", state, phase: "token_delivery", durationMs: 40 },
+      { workspaceId: "6f2b7c1e", state, phase: "total", durationMs: 100 },
+    ]);
+  });
+
+  it("never lets a timing observer prevent a workspace from starting", async () => {
+    const f = setup([workspace("creating")], { timing: () => { throw new Error("diagnostic sink unavailable"); } });
+    await f.lifecycle.tick();
+    expect(f.store.defer).toHaveBeenLastCalledWith(expect.any(String), "creating", 30_000);
+  });
+
   it("admits a create while an earlier stop is waiting for its worker", async () => {
     const stopping = workspace("stopping", { boatSandboxId: "bx_stop1" });
     const creating = workspace("creating", { id: "7f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11" });
