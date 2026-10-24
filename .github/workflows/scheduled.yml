@@ -103,6 +103,10 @@ jobs:
           cache: pnpm
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # Bun compiles the shipped engine sidecar. Pinned so a new release is a
+          # reviewed change; the monthly github actions PR bumps it.
+          bun-version: 1.4.4
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
       - name: Build sidecar + main + renderer
