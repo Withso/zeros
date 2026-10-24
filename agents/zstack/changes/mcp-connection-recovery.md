@@ -15,6 +15,8 @@ revision; a failed save must never open the browser. Retire a canceled attempt
 and release its UI controls before awaiting remote cleanup. Recheck ownership
 after each account-bound await, and let fresh authorization observations replace
 stale checks without dropping the exact configuration's tool inventory.
+An unavailable gateway overrides cached successful backend checks in the list;
+its Retry must reconnect the service before advertising a usable connection.
 
 Encoded in the MCP form-save, connection-view, connection-status and cloud-API
 regressions, plus the production Local and organization browser smoke. The

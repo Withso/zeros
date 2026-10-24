@@ -4,6 +4,8 @@ import { expect } from "@playwright/test";
 export async function runMcpConnectionSmoke({ page: parent, check }) {
   const context = await parent.context().browser().newContext({ viewport: { width: 1100, height: 1000 } });
   const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
   const button = name => page.getByRole("button", { name, exact: true });
   const connection = () => page.getByRole("region", { name: "Connection", exact: true });
   const chooseAuth = async name => {
@@ -90,6 +92,29 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     await expect(row).toContainText("Connected");
     await expect(row.getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
     check("Connecting a saved list row replaces its earlier authentication-required check", true);
+
+    await page.evaluate(async () => {
+      const { RuntimeClient } = await import("/apps/desktop/src/renderer/platform/bridge/ws-client.ts");
+      const request = RuntimeClient.prototype.request;
+      window.mcpGatewayHealthFixture = { unavailable: true, reconnects: 0 };
+      RuntimeClient.prototype.request = function (message, ...args) {
+        const response = result => ({ type: "WORKSPACE_RESPONSE", requestId: message.requestId, result });
+        if (message.op === "mcp.gateway.status" && window.mcpGatewayHealthFixture.unavailable)
+          return Promise.resolve(response({ running: false, error: "Fixture gateway unavailable", servers: [] }));
+        if (message.op === "mcp.gateway.reconnect") {
+          window.mcpGatewayHealthFixture.unavailable = false;
+          window.mcpGatewayHealthFixture.reconnects++;
+          return Promise.resolve(response({ ok: true }));
+        }
+        return request.call(this, message, ...args);
+      };
+      window.dispatchEvent(new Event("focus"));
+    });
+    await expect(row).toContainText("Connection failed");
+    await row.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(row).toContainText("Connected");
+    expect(await page.evaluate(() => window.mcpGatewayHealthFixture.reconnects)).toBe(1);
+    check("A failed gateway supersedes a saved successful check and Retry restores the connection", true);
 
     await page.getByRole("button", { name: /New MCP server/ }).click();
     await page.getByLabel("Name", { exact: true }).fill("detected-sign-in");
@@ -188,6 +213,7 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     await dialog.getByLabel("Code or redirect URL", { exact: true }).press("Enter");
     await expect(dialog).toHaveCount(0);
     expect(await page.evaluate(() => window.mcpHeadlessFixture.completed)).toBe(1);
+    expect(errors).toEqual([]);
     check("An engine without a browser offers the same paste-code sign-in from the editor", true);
   } finally { await context.close(); }
 }

@@ -281,7 +281,7 @@ function ServerRow({
   const verification = useSyncExternalStore(useCallback(listener => mcpConnectionCache.subscribe(verificationKey, listener), [verificationKey]), useCallback(() => mcpConnectionCache.getSnapshot(verificationKey), [verificationKey]));
   const st = gateway?.status?.state ?? (verification.data?.status === "connected" ? "connected" : undefined);
   const gwDown = gatewayManaged && !!gateway?.error;
-  const checked = !gateway?.status || verification.updatedAt >= gateway.observedAt ? verification.data : undefined;
+  const checked = !gwDown && (!gateway?.status || verification.updatedAt >= gateway.observedAt) ? verification.data : undefined;
   const view = mcpConnectionView(server, checked, gwDown ? "error" : gateway?.status?.state);
   const allTools = gateway?.status?.tools ?? [];
   const disabledSet = new Set(disabledToolsOf(server));
