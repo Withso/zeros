@@ -65,6 +65,9 @@ export interface ComposerAttachment {
   sourceFile?: Blob;
   /** Durable recovery key for an unfinished native/clipboard import. */
   sourceRecoveryId?: string;
+  /** Pre-workspace drafts own an app-storage copy, independent of the original
+   * native file and the runtime that is eventually chosen. */
+  sourcePortable?: boolean;
   /** Source workspace identity; clipboard references never change owners. */
   owner?: { runtime: string; cwd: string };
   /** Confirmed full path for plain-text clipboard fallbacks. */

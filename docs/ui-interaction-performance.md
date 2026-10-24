@@ -28,7 +28,8 @@ round trip to restore it. Key it by the smallest semantic owner that can vary:
 | Selected workspace                                               | repository root                      |
 | Active chat, workbench tabs, Changes/Review choices, terminal tab | workspace folder                    |
 | Open file and explicit viewer mode                                | workbench tab id inside the workspace |
-| Dialog step or unsaved “new item” draft                          | ephemeral; do not persist            |
+| Create composer draft                                          | owner, project and placement        |
+| Dialog step or other transient “new item” UI                    | ephemeral; do not persist            |
 
 Restore durable selections synchronously from the destination's first store
 snapshot. Do not seed a repository/workspace-scoped tab from component-local
@@ -458,13 +459,34 @@ Two rules that pattern enforces:
 
 ### Create workspace source selection
 
-Create's project, source and Code/Design controls share one row above the prompt,
-with mode aligned right and long labels truncated in narrow windows. The project
+Create's project and source controls share one row above its Code prompt,
+with long labels truncated in narrow windows. Design retains its workspace
+entry points; Create has no Code/Design toggle. The project
 picker also owns Open project, Open GitHub project and Start from scratch. These
 actions register and select their project while keeping Create and its draft open.
 Workspace creation waits for submission, as does Git preparation for opened
 folders. Opening a linked worktree here selects its primary repository without
 adopting a workspace.
+Drafts survive reload by owner, project and placement; attachment bytes stay in
+device storage until workspace creation. Picking the first project adopts an
+unselected-project draft only into an empty destination. Later project switches
+restore each project's draft. While Create is inactive, its sidebar pencil
+aggregates nonempty drafts for the selected owner across projects and placements.
+The existing store restores presence synchronously and only publishes owner
+empty/nonempty transitions; typing and attachment progress do not notify sidebar
+subscribers. See [composer-attachments.md](composer-attachments.md).
+
+For cloud Create, organization identity selects the cloud picker even before
+its catalog resolves. The installed repository list is cached for the exact
+backend/account/organization (at most 16 owners and 1 MB) and restored synchronously,
+then refreshed in the background. The recently selected repository remains
+selected; an explicit Create route from a workspace can supply that repository
+as its initial context. A newer picker selection supersedes that route hint,
+including after reload. Revalidation never paints the Local project picker or
+a “Checking Cloud Computer…” row. Confirmed missing builds, empty catalogs and
+actual failures still provide recovery actions; cached rows never authorize a
+creation on their own.
+
 Welcome, sidebar and native-menu opens retain their immediate workspace flow.
 The source picker separates local branches from the configured remote's branches,
 shows the actual default branch, and retains each tab's confirmed rows independently

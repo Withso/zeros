@@ -23,7 +23,10 @@ import {
   nativeListen,
 } from "./runtime";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
-import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
+import { cloudWorkspaceKey, isCloudWorkspace, parseCloudWorkspaceKey } from "./bridge/cloud-workspace-key";
+import { getActiveBridge } from "./bridge/active-bridge";
+import { workspaceOp } from "./bridge/workspace-bridge";
+import { canBackgroundSyncCloudWorkspace } from "../state/cloud-workspace-catalog";
 
 // Re-export the runtime predicates so call sites can pull them
 // from either module.
@@ -91,24 +94,44 @@ export type Skill = {
   icon: string;
   body: string;
   path: string;
+  /** Full source, including frontmatter. Absent on older desktop runtimes. */
+  content?: string;
 };
 
 export async function listSkills(
   cwd?: string,
   agentId?: string,
 ): Promise<Skill[]> {
-  if (!isNativeRuntime()) return [];
-  try {
+  let result: unknown;
+  if (cwd && isCloudWorkspace(cwd)) {
+    const target = parseCloudWorkspaceKey(cwd);
+    if (!target) throw new Error("Invalid cloud workspace identity.");
+    // Discovery also runs when a composer mounts. A stopped VM's retained
+    // relay can treat a non-history request as work, so do not send it there.
+    if (!canBackgroundSyncCloudWorkspace(target))
+      throw new Error("Skill sources are available when the cloud workspace is running.");
+    const bridge = getActiveBridge();
+    if (!bridge) throw new Error("The workspace connection is unavailable.");
+    const root = cloudWorkspaceKey(target);
+    const response = await workspaceOp(bridge, "skills.list", { workspaceId: root, cwd: root, agentId });
+    result = (response as { skills?: unknown } | null)?.skills;
+  } else {
+    if (!isNativeRuntime()) return [];
     const args: { cwd?: string; agentId?: string } = {};
     if (cwd) args.cwd = cwd;
     if (agentId) args.agentId = agentId;
-    return await nativeInvoke<Skill[]>(
+    result = await nativeInvoke<unknown>(
       "skills_list",
       Object.keys(args).length ? args : undefined,
     );
-  } catch {
-    return [];
   }
+  // An invalid/old runtime response is a failed read, not an empty library.
+  // The exact-key cache retains its last confirmed catalog on failure.
+  if (!Array.isArray(result) || result.some(skill => !skill ||
+    ["id", "name", "description", "icon", "body", "path"].some(key => typeof skill[key] !== "string") ||
+    (skill.content !== undefined && typeof skill.content !== "string")))
+    throw new Error("Invalid skill catalog response.");
+  return result as Skill[];
 }
 
 /** Open an external http(s) URL in the user's default browser. */

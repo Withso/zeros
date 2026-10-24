@@ -43,6 +43,7 @@
 
 /* Inline pills shouldn't inherit the caret/selection text color quirks. */
 .composer-pm [data-mention-pill],
+.composer-pm [data-skill-pill],
 .composer-pm [data-attachment-pill] {
   white-space: nowrap;
 }
@@ -53,6 +54,8 @@
    history, and serialized prompt; real zero-width text would pollute them. */
 .composer-pm .node-attachment::before,
 .composer-pm .node-attachment::after,
+.composer-pm .node-skill::before,
+.composer-pm .node-skill::after,
 .composer-pm .node-mention::before,
 .composer-pm .node-mention::after {
   content: "\200B";

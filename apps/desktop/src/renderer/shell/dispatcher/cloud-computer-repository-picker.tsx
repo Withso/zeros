@@ -20,6 +20,7 @@ export function CloudComputerRepositoryPicker({
   disabled,
   onSelect,
   warm,
+  rememberedId,
 }: {
   repositories: readonly CloudComputerRepository[];
   selected: CloudComputerRepository | null;
@@ -29,6 +30,7 @@ export function CloudComputerRepositoryPicker({
   disabled: boolean;
   onSelect: (id: string) => void;
   warm: (repository: CloudComputerRepository) => void;
+  rememberedId?: string | null;
 }) {
   const dispatch = useWorkspaceDispatch();
   return (
@@ -54,7 +56,7 @@ export function CloudComputerRepositoryPicker({
           <span className="max-w-[180px] truncate">
             {selected
               ? `${selected.owner}/${selected.name}`
-              : "Add repository"}
+              : rememberedId ?? "Choose repository"}
           </span>
           <ChevronDown size={12} className="text-fg2 opacity-70" />
         </Button>

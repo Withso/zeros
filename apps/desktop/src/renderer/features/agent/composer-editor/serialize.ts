@@ -127,6 +127,12 @@ export function serializeComposer(
       return false;
     }
     const name = node.type.name;
+    if (name === "skill") {
+      if (afterLink) pushText(segments, " ");
+      pushText(segments, `/${node.attrs.name}`);
+      afterLink = false;
+      return false;
+    }
     if (name === "localLink") {
       if (linkNeedsSpaceBefore(lastDisplayChar(segments))) pushText(segments, " ");
       pushText(segments, String(node.attrs.href ?? ""));

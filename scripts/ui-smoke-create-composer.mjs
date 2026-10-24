@@ -1,4 +1,6 @@
 import { expect } from "@playwright/test";
+import { runCreateDraftsSmoke, runCreateDraftIndicatorSmoke, runCreateLinkedDirectoriesSmoke } from "./ui-smoke-create-drafts.mjs";
+import { runCreateReferenceSafetySmoke } from "./ui-smoke-composer-suggestions.mjs";
 
 const unbuiltComputer = () => ({ repositories: null });
 const workspaceFixture = (overrides = {}) => ({
@@ -15,15 +17,14 @@ const workspaceFixture = (overrides = {}) => ({
 });
 
 async function expectContextControlsInOneRow(page) {
-  const [context, project, source, mode] = await Promise.all([
+  const [context, project, source] = await Promise.all([
     page.locator("[data-dispatcher-context]").boundingBox(),
     page
       .getByRole("button", { name: "Choose project", exact: true })
       .boundingBox(),
     page.locator("[data-create-source-trigger]").boundingBox(),
-    page.locator("[data-dispatcher-mode-switcher]").boundingBox(),
   ]);
-  for (const control of [project, source, mode]) {
+  for (const control of [project, source]) {
     expect(control).not.toBeNull();
     expect(
       Math.abs(
@@ -36,10 +37,7 @@ async function expectContextControlsInOneRow(page) {
     );
   }
   expect(project.x + project.width).toBeLessThanOrEqual(source.x);
-  expect(source.x + source.width).toBeLessThanOrEqual(mode.x);
-  expect(context.x + context.width - (mode.x + mode.width)).toBeLessThanOrEqual(
-    8,
-  );
+  await expect(page.locator("[data-dispatcher-mode-switcher]")).toHaveCount(0);
 }
 
 /** Real Create page, menus, editor and create requests; only transport is fake. */
@@ -308,10 +306,14 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
     true,
   );
   check(
-    "project, branch/PR and Code/Design controls share one row at normal and narrow window widths",
+    "project and branch/PR share one row at normal and narrow window widths without a Code/Design toggle",
     true,
   );
   await runCloudCreateOwnerSmoke({ page, check, harnessBase });
+  await runCreateDraftsSmoke({ page, check, harnessBase });
+  await runCreateReferenceSafetySmoke({ page, check, harnessBase });
+  await runCreateDraftIndicatorSmoke({ page, check, harnessBase });
+  await runCreateLinkedDirectoriesSmoke({ page, check, harnessBase });
 }
 
 /** A delayed real create response must not retarget the newly selected owner. */
@@ -375,9 +377,11 @@ export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
     releaseCreate();
     await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
     await expect(location).toHaveCount(0);
-    await expect(editor).toHaveText("Preserve this prompt while creation finishes");
+    await expect(editor).toBeEmpty();
     await expect(page.getByText("Cloud workspace created in Organization 1", { exact: true })).toBeVisible();
-    check("A late Cloud creation stays in its original organization while Personal and the draft stay selected", true);
+    await page.evaluate(() => window.setCreateOrganization("organization"));
+    await expect(editor).toHaveText("Preserve this prompt while creation finishes");
+    check("A late Cloud creation stays in its original organization and preserves that organization's Create draft", true);
   } finally {
     releaseCreate();
     await page.unrouteAll({ behavior: "wait" });

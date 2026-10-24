@@ -7,8 +7,8 @@
 // would ever show). Instead of tippy/floating-ui, every plugin's render()
 // pushes its live state into a small per-editor store; a sibling React popup
 // (suggestion-popup.tsx) subscribes and renders the EXISTING pickers
-// (MentionPicker / SlashCommandPicker / PrPicker), self-positioned above the
-// composer card. onKeyDown forwards arrow/enter/escape and returns a boolean
+// (MentionPicker / SlashCommandPicker / PrPicker). File/command suggestions
+// use the active trigger's coordinates. onKeyDown forwards keys and returns a boolean
 // so ProseMirror knows whether the key was consumed.
 //
 // items() + command() are passed in by the hook as stable closures that read
@@ -19,6 +19,7 @@
 import { Extension } from "@tiptap/core";
 import type { Editor, Range } from "@tiptap/core";
 import Suggestion, {
+  exitSuggestion,
   type SuggestionKeyDownProps,
   type SuggestionProps,
 } from "@tiptap/suggestion";
@@ -56,6 +57,12 @@ export function matchesSlashTab(item: AvailableCommand, tab: SlashTab): boolean 
  *  synchronous, so it is always "ready". */
 export type SuggestionStatus = "loading" | "ready" | "error";
 
+export interface SuggestionAnchor {
+  element: HTMLElement;
+  getBoundingClientRect: () => DOMRect;
+  dismiss: () => void;
+}
+
 export interface SuggestionState {
   open: boolean;
   trigger: SuggestionTrigger;
@@ -66,6 +73,7 @@ export interface SuggestionState {
   command: ((item: SuggestionItem) => void) | null;
   /** Active "/" category tab. Ignored for the @ / # triggers. */
   slashTab: SlashTab;
+  anchor: SuggestionAnchor | null;
 }
 
 const EMPTY_STATE: SuggestionState = {
@@ -77,6 +85,7 @@ const EMPTY_STATE: SuggestionState = {
   selectedIndex: 0,
   command: null,
   slashTab: "all",
+  anchor: null,
 };
 
 /** Per-editor external store the popup subscribes to via useSyncExternalStore. */
@@ -105,6 +114,7 @@ export class SuggestionStore {
       items: SuggestionItem[];
       status: SuggestionStatus;
       command: (item: SuggestionItem) => void;
+      anchor?: SuggestionAnchor;
     },
   ): void {
     this.set({
@@ -114,6 +124,7 @@ export class SuggestionStore {
       items: props.items,
       status: props.status,
       command: props.command,
+      anchor: props.anchor ?? null,
       selectedIndex: 0,
       // A freshly-opened "/" menu always starts on All.
       slashTab: "all",
@@ -125,12 +136,14 @@ export class SuggestionStore {
     items: SuggestionItem[];
     status: SuggestionStatus;
     command: (item: SuggestionItem) => void;
+    anchor?: SuggestionAnchor;
   }): void {
     this.set({
       query: props.query,
       items: props.items,
       status: props.status,
       command: props.command,
+      ...(props.anchor ? { anchor: props.anchor } : {}),
       // Reset highlight to the top whenever the list changes, like the
       // legacy pickers' clamp-to-0 effect.
       selectedIndex: 0,
@@ -214,16 +227,37 @@ export class SuggestionStore {
   }
 
   close(): void {
-    if (this.state.open) this.set({ open: false, command: null, items: [] });
+    if (this.state.open) this.set({ open: false, command: null, items: [], anchor: null });
+  }
+
+  dismiss(): void {
+    // Close the ProseMirror trigger as well as its React surface. Otherwise
+    // Escape leaves the plugin active and a later query can never reopen it.
+    this.state.anchor?.dismiss();
+    this.close();
   }
 }
 
 function makeRender(
   store: SuggestionStore,
   trigger: SuggestionTrigger,
+  pluginKey: PluginKey,
   getStatus: (trigger: SuggestionTrigger) => SuggestionStatus,
   onOpen?: () => void,
 ) {
+  const anchor = (props: SuggestionProps<SuggestionItem, SuggestionItem>): SuggestionAnchor => ({
+    element: props.editor.view.dom,
+    dismiss: () => { if (!props.editor.isDestroyed) exitSuggestion(props.editor.view, pluginKey); },
+    getBoundingClientRect: () => {
+      if (props.editor.isDestroyed) return new DOMRect();
+      const from = props.editor.view.coordsAtPos(props.range.from);
+      const to = props.editor.view.coordsAtPos(props.range.to);
+      // A query may wrap. Keep its menu beside the line being edited rather
+      // than above an earlier line or at the edge of the entire composer.
+      const left = Math.abs(from.top - to.top) < 2 ? from.left : to.left;
+      return new DOMRect(left, to.top, 0, to.bottom - to.top);
+    },
+  });
   return () => ({
     onStart: (props: SuggestionProps<SuggestionItem, SuggestionItem>) => {
       // Fire BEFORE store.open so a data-source that flips to "loading" (e.g.
@@ -234,6 +268,7 @@ function makeRender(
         items: props.items,
         status: getStatus(trigger),
         command: props.command,
+        anchor: anchor(props),
       });
     },
     onUpdate: (props: SuggestionProps<SuggestionItem, SuggestionItem>) => {
@@ -242,6 +277,7 @@ function makeRender(
         items: props.items,
         status: getStatus(trigger),
         command: props.command,
+        anchor: anchor(props),
       });
     },
     onKeyDown: ({ event }: SuggestionKeyDownProps): boolean => {
@@ -259,8 +295,7 @@ function makeRender(
           return true;
         case "ArrowLeft":
           // Left/Right switch the "/" category tab (All/Commands/Skills). The
-          // menu opens at start-of-line with a short query, so repurposing the
-          // horizontal arrows for tab nav beats caret movement here.
+          // category tabs remain reachable without moving focus out of the editor.
           if (trigger === "/") {
             store.cycleSlashTab(-1);
             return true;
@@ -273,7 +308,7 @@ function makeRender(
           }
           return false;
         case "Escape":
-          store.close();
+          store.dismiss();
           return true;
         default:
           return false;
@@ -328,35 +363,40 @@ export const ComposerSuggestions = Extension.create<ComposerSuggestionsOptions>(
 
   addProseMirrorPlugins() {
     const o = this.options;
+    const mentionKey = new PluginKey("composerMention");
+    const slashKey = new PluginKey("composerSlash");
+    const prKey = new PluginKey("composerPr");
     return [
       Suggestion<MentionItem, MentionItem>({
         editor: this.editor,
         char: "@",
-        pluginKey: new PluginKey("composerMention"),
+        pluginKey: mentionKey,
         items: ({ query }) => o.getMentionItems(query),
         command: ({ editor, range, props }) =>
           o.onPickMention(editor, range, props),
-        render: makeRender(o.store, "@", o.getStatus, o.onMentionOpen) as never,
+        render: makeRender(o.store, "@", mentionKey, o.getStatus, o.onMentionOpen) as never,
       }),
       Suggestion<AvailableCommand, AvailableCommand>({
         editor: this.editor,
         char: "/",
-        pluginKey: new PluginKey("composerSlash"),
-        startOfLine: true,
+        pluginKey: slashKey,
+        startOfLine: false,
+        allowedPrefixes: [" ", "\t", "\n"],
+        allow: ({ state, range }) => !state.doc.textBetween(range.from + 1, range.to).includes("/"),
         items: ({ query }) => o.getSlashItems(query),
         command: ({ editor, range, props }) =>
           o.onPickSlash(editor, range, props),
-        render: makeRender(o.store, "/", o.getStatus, o.onSlashOpen) as never,
+        render: makeRender(o.store, "/", slashKey, o.getStatus, o.onSlashOpen) as never,
       }),
       Suggestion<PrPickerItem, PrPickerItem>({
         editor: this.editor,
         char: "#",
-        pluginKey: new PluginKey("composerPr"),
+        pluginKey: prKey,
         allow: () => o.prEnabled(),
         items: ({ query }) => o.getPrItems(query),
         command: ({ editor, range, props }) =>
           o.onPickPr(editor, range, props),
-        render: makeRender(o.store, "#", o.getStatus) as never,
+        render: makeRender(o.store, "#", prKey, o.getStatus) as never,
       }),
     ];
   },

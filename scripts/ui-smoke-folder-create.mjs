@@ -49,7 +49,7 @@ export async function runCreateProjectSelectionSmoke({ page, check }) {
   const projectPicker = page.getByRole("button", { name: "Choose project", exact: true });
   const editor = page.locator('[contenteditable="true"]');
   const prompt = "Keep this draft while I add my first project";
-  await expect(projectPicker).toHaveText("Add project");
+  await expect(projectPicker).toHaveText("Choose project");
   await editor.fill(prompt);
   await projectPicker.click();
   await page.getByRole("menuitem", { name: "Open project", exact: true }).click();
@@ -86,7 +86,13 @@ export async function runCreateProjectSelectionSmoke({ page, check }) {
   await projectPicker.click();
   await page.getByRole("menuitem", { name: "Open project", exact: true }).click();
   await expect(projectPicker).toHaveText("To-do app");
+  await expect(editor).toBeEmpty();
+  await projectPicker.click();
+  await page.getByRole("menuitem", { name: "Another project", exact: true }).click();
   await expect(editor).toHaveText(prompt);
+  await projectPicker.click();
+  await page.getByRole("menuitem", { name: "To-do app", exact: true }).click();
+  await editor.fill(prompt);
   expect((await snapshot(page)).page).toBe("create");
   expect((await snapshot(page)).chats).toEqual(created.chats);
   check("Reopening a project selects it even when Create originally targeted it, without opening its existing workspace", true);
@@ -228,7 +234,7 @@ export async function runFolderCreateSmoke({ page, check }) {
 
   await page.getByRole("button", { name: "Show Create", exact: true }).click();
   await expect(page.getByRole("button", { name: /Create from/ })).toBeVisible();
-  await expect(page.locator("[data-dispatcher-mode-switcher]")).toBeVisible();
+  await expect(page.locator("[data-dispatcher-mode-switcher]")).toHaveCount(0);
   await expect(page.locator("[data-model-pill-label]")).toHaveText(model);
   await page
     .locator('[contenteditable="true"]')
