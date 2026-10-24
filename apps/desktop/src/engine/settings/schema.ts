@@ -226,6 +226,7 @@ const promptsSchema = z
 // here; raw tokens in a *committed* repo file would leak (same caution as the
 // repo `[env]` table) — keychain-backed secret refs land with the panel UI.
 const mcpStdioServerSchema = z.object({
+  credential_id: z.uuid().optional(),
   name: z.string().min(1).describe("Unique server name (the tool namespace)."),
   transport: z.literal("stdio"),
   command: z
@@ -234,6 +235,10 @@ const mcpStdioServerSchema = z.object({
     .describe("Executable to spawn for the stdio server."),
   cwd: z.string().trim().min(1).max(4096).refine((v) => !v.includes("\0"), "Invalid working directory").optional()
     .describe("Folder for this local MCP process. Relative paths resolve against the chat workspace; ~/ uses the engine user's home. Omit to preserve the provider default."),
+  listen_url: z.string().url().max(4096).refine(value => {
+    const url = new URL(value);
+    return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && !url.username && !url.password && !url.hash;
+  }, "Use an HTTP loopback endpoint").optional(),
   args: z
     .array(z.string())
     .optional()
@@ -250,9 +255,11 @@ const mcpStdioServerSchema = z.object({
     .describe("Set false to keep the entry but skip loading it."),
 });
 const mcpHttpServerSchema = z.object({
+  credential_id: z.uuid().optional(),
   name: z.string().min(1).describe("Unique server name (the tool namespace)."),
   transport: z.literal("http"),
   url: z.string().min(1).describe("Streamable-HTTP endpoint URL."),
+  env: z.record(z.string(), z.string()).optional().describe("Secure variables available to configured header references."),
   headers: z
     .record(z.string(), z.string())
     .optional()
@@ -271,6 +278,8 @@ const mcpHttpServerSchema = z.object({
     .describe(
       'For auth="header": the header NAME the gateway sets (e.g. Authorization). The value is stored in the engine secret vault, not this file.',
     ),
+  header_names: z.array(z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/)).max(128).optional(),
+  oauth_client_mode: z.enum(["auto", "metadata", "dynamic", "custom"]).optional(),
   oauth_client_id: z
     .string()
     .optional()

@@ -160,8 +160,13 @@ conversation state, separate from either settings selection or workbench tabs.
 
 ## Customize
 
-Customize currently shows only **Zeros-managed MCP servers and skills**, at
-user and repository scopes. Provider tabs and Apps/Plugins inventory views are
+Customize shows **Zeros-managed MCP servers and skills** at Local user and
+repository scopes. Selecting an organization opens its shared and private MCP
+definitions, scoped to authorized GitHub repositories and usable in its Local
+and cloud workspaces. Local filesystem repositories never appear in an
+organization's project picker. See [MCP configuration](extension-discovery.md)
+for encrypted values, OAuth, import and connection status.
+Provider tabs and Apps/Plugins inventory views are
 deferred. Stored provider selections are bounded to a supported Zeros category
 before rendering, so they cannot trigger hidden native discovery.
 

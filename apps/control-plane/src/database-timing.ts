@@ -9,6 +9,7 @@ export const ADVISORY_LOCK_PURPOSES = [
   "computer-version", "computer-gc", "workspace-fork", "codex-auth-renewal", "customization",
   "release-canary", "runtime-image-retirement", "device-key-rotation", "replica-command", "replica-receipt",
   "capability-key", "actor-session-capacity", "cloud-v2-computer-build", "cloud-v2-workspace-create",
+  "mcp-configuration", "mcp-authorization-start", "mcp-repository-admission",
 ] as const;
 export type AdvisoryLockPurpose = typeof ADVISORY_LOCK_PURPOSES[number];
 const purposes = new Set<string>(ADVISORY_LOCK_PURPOSES);

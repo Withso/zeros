@@ -661,7 +661,7 @@ enabled = false
     expect(r.sources).toEqual(["repo-local"]);
   });
 
-  it("repo-local gateway-auth entries are SKIPPED with a warning (gateway is user-level), without reserving the name", async () => {
+  it("repo-local authenticated entries override user entries and bind credentials to the project", async () => {
     writeUser(
       `[[mcp.servers]]\nname = "fabric"\ntransport = "http"\nurl = "https://fabric/mcp"\nauth = "oauth"\n`,
     );
@@ -673,19 +673,13 @@ enabled = false
     );
     const r = await resolveMcpServersForRepo(repoDir);
     expect(r.servers).toEqual([]);
-    // Only the USER-layer oauth backend mounts; the repo-local pair warns.
-    expect(r.gatewayBackends).toEqual([
-      {
-        name: "fabric",
-        url: "https://fabric/mcp",
-        auth: "oauth",
-        source: "user",
-      },
+    expect(r.gatewayBackends).toMatchObject([
+      { name: "fabric", url: "https://other/mcp", auth: "oauth", source: "repo-local" },
+      { name: "keyed", url: "https://keyed/mcp", auth: "header", source: "repo-local" },
     ]);
-    expect(r.warnings).toHaveLength(2);
-    expect(r.warnings[0]).toContain("fabric");
-    expect(r.warnings[0]).toContain("user-level only");
-    expect(r.warnings[1]).toContain("keyed");
+    expect(r.gatewayBackends.every(row => row.credentialKey?.includes(repoDir))).toBe(true);
+    expect(resolveMcpServers().gatewayBackends).toMatchObject([{ name: "fabric", url: "https://fabric/mcp", source: "user" }]);
+    expect(r.warnings).toEqual([]);
   });
 
   it("repo-local sentinel env values are stripped like every layer's", async () => {

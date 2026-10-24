@@ -96,6 +96,33 @@ needed, while active turns keep their spawn-time credentials. Git and `gh`
 request short-lived GitHub installation tokens through the worker's broker.
 Credentials must never be written to transcripts, command arguments or logs.
 
+Customize stores organization MCP definitions separately from provider logins.
+Definitions can be organization-shared or private to one member and can target
+all repositories or one admitted GitHub `owner/repo`. The control plane
+encrypts variable/header/client-secret values, OAuth attempts and per-user
+grants; edits use definition revisions and recheck membership, role and
+repository admission. Each member authorizes their own account for a shared
+OAuth definition. A denied provider callback settles the attempt immediately.
+OAuth discovery honors the resource's advertised protected-resource metadata.
+
+Cloud configuration includes optional MCP definitions only for workers
+advertising `mcp: 1`. Older workers refuse MCP-enabled admission instead of
+silently omitting the tools. The worker launches STDIO on demand and fronts
+HTTP/SSE with an SDK-backed loopback gateway. Claude, Codex and Cursor receive
+gateway capabilities rather than upstream authorization headers. Credential
+refresh is demand-driven, bounded and shared by the definition; cancelling one
+client stops that client's wait without cancelling another live client.
+Definition/login revisions invalidate cached authorization and provider reuse.
+Runtime removal or shutdown closes the gateway and its owned processes.
+
+Organization-owned Local workspaces resolve the same definitions through
+Electron's private account-bound broker. Native GitHub admission refreshes on
+demand; generation and exact-child checks reject late credentials after account
+or engine replacement. Personal Local workspaces remain independent of these
+cloud APIs and keep their device settings and encrypted native vault.
+See [MCP configuration](extension-discovery.md) for the editor and Local
+compatibility contracts. The VM remains the cloud credential trust boundary.
+
 For an OpenAI API key, the control plane reads that key's `/v1/models` list
 through the existing vault selection and workspace proxy authorization. It
 caches complete model IDs per credential for five minutes (unknown results for

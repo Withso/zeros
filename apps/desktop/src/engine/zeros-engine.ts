@@ -1,3 +1,12 @@
+import { LaunchedMcpServers } from "./agents/gateway/launched-servers";
+import { McpVaultConfirmation } from "./agents/gateway/vault-confirmation";
+import { McpHostControl } from "./agents/gateway/host-control";
+import { OrganizationMcpRuntime } from "./agents/gateway/organization-runtime";
+import { runFile } from "./git/git-exec";
+import { McpOAuthCallback } from "./agents/gateway/oauth-callback";
+import { ScopedMcpGateways } from "./agents/gateway/scoped-gateways";
+import { commitMcpCredentials, mcpSaveInputSchema } from "./settings/mcp-configuration";
+import { probeMcpServer } from "./agents/gateway/probe";
 import { claudeOrganizationStartupCode } from "@zeros/protocol/claude-startup-notice";
 import { conversationModePort } from "./design/conversation-mode";
 import { setDesignCaptureConfig } from "./design/capture-client";
@@ -180,7 +189,7 @@ import {
   runActionOneShot,
   runSessionId,
 } from "@zeros/protocol/run-actions";
-import { getAuthStatus, setTokenStore } from "./git/github";
+import { getAuthStatus, setTokenStore, parseGitHubRemote } from "./git/github";
 import { seedProviderCredentials } from "./agents/provider-credentials";
 import {
   closeGitCredentialBroker,
@@ -207,7 +216,7 @@ import { RoutingExecutionBoundary } from "./agents/containment/routing-boundary"
 import { createRepoTaskBoundaryFactory } from "./agents/containment/repo-task-boundary";
 import type { ExecutionBoundary } from "./agents/containment/types";
 import { buildPtyEnv } from "./pty/shell-setup";
-import { resolveMcpServers } from "./agents/mcp-registry";
+import { resolveMcpServers, resolveMcpServersForRepo, type GatewayBackend } from "./agents/mcp-registry";
 import {
   CONFIG_ROOT_ENV_VARS,
   stripEngineAuthorityEnv,
@@ -807,6 +816,50 @@ export class ZerosEngine {
   /** The local MCP gateway (auth:"oauth" backends fronted on localhost). Lazily
    *  started when the user-level settings declare a gateway-managed server. */
   private mcpGateway: McpGateway | null = null;
+  private readonly scopedMcpGateways = new ScopedMcpGateways(() => this.ensureMcpVault(), () => this.mcpClientOrigin(), () => this.ensureMcpCallback());
+  private mcpCallback?: McpOAuthCallback;
+  private ensureMcpCallback(): McpOAuthCallback { return this.mcpCallback ??= new McpOAuthCallback(this.port + ENGINE_PORT_SPAN + 1); }
+  private readonly mcpHost = new McpHostControl(line => {
+    const fd = Number(process.env.ZEROS_CONTROL_FD);
+    if (!Number.isInteger(fd) || fd <= 2) throw new Error("MCP host is unavailable.");
+    fs.writeSync(fd, line);
+  });
+  private readonly organizationMcp = new OrganizationMcpRuntime({
+    host: this.mcpHost,
+    workspace: id => {
+      const row = getWorkspaceById(id);
+      return row ? { organizationId: row.organizationId, placement: row.placement, repoRoot: row.repoRoot, path: row.path } : undefined;
+    },
+    repository: async repoRoot => {
+      const { stdout } = await runFile("git", ["-C", repoRoot, "remote", "get-url", "origin"], { maxBufferBytes: 4096 });
+      const { owner, repo } = parseGitHubRemote(stdout.trim());
+      return `${owner}/${repo}`;
+    },
+    gateway: async (key, backends) => {
+      const gateway = await this.scopedMcpGateways.get(key, backends);
+      this.agents.registerGatewayCatalog(gateway.url, () => gateway.catalogRevision);
+      return gateway.url;
+    },
+    removeGateway: key => this.scopedMcpGateways.remove(key),
+  });
+  private readonly vaultConfirmation = new McpVaultConfirmation(line => {
+    const fd = Number(process.env.ZEROS_CONTROL_FD);
+    if (!Number.isInteger(fd) || fd <= 2) throw new Error("Secure storage is unavailable.");
+    fs.writeSync(fd, line);
+  });
+  private vaultTransactionCount = 0;
+  private readonly launchedMcp: LaunchedMcpServers;
+  private readonly mcpProbes = new Map<string, AbortController>();
+  private mcpClientOrigin(): string | undefined {
+    return process.env.ZEROS_CONTROL_PLANE_URL || process.env.VITE_CONTROL_PLANE_URL || process.env.ZEROS_ACCOUNT_JWT_AUD;
+  }
+  private async projectMcpGateway(root: string, backends?: readonly GatewayBackend[]): Promise<McpGateway | null> {
+    const resolved = backends ?? (await resolveMcpServersForRepo(root)).gatewayBackends;
+    if (!resolved.length && !this.scopedMcpGateways.roots().includes(root)) return null;
+    const gateway = await this.scopedMcpGateways.get(root, resolved);
+    this.agents?.registerGatewayCatalog(gateway.url, () => gateway.catalogRevision);
+    return gateway;
+  }
   /** Why the gateway isn't running when it should be (start/reload failure, e.g.
    *  the port is taken) — surfaced via mcp.gateway.status so the UI shows
    *  "Gateway unavailable" instead of an OAuth server silently vanishing.
@@ -1073,6 +1126,7 @@ export class ZerosEngine {
     const repoTaskBoundaryFactory = createRepoTaskBoundaryFactory(
       this.executionBoundary,
     );
+    this.launchedMcp = new LaunchedMcpServers(repoTaskBoundaryFactory);
     configureLoginShellPathRunner({
       cacheKey: `execution:${this.executionBoundary.backend}:${this.root}`,
       run: async (command, args, { timeoutMs }) => {
@@ -1197,7 +1251,30 @@ export class ZerosEngine {
     this.workspace = new WorkspaceService(this.root);
     this.workspace.setRepoTaskBoundaryFactory(repoTaskBoundaryFactory);
     // Let the mcp.gateway.* ops reach the (lazily-created) gateway instance.
-    this.workspace.setGatewayAccessor(() => this.mcpGateway);
+    this.workspace.setGatewayAccessor(async root => {
+      if (root) return this.projectMcpGateway(root);
+      await this.gatewayReloadChain;
+      return this.mcpGateway;
+    });
+    this.workspace.setMcpCommit(async (server, changes, root, write, previous) => {
+      this.vaultTransactionCount++;
+      if (this.vaultPersistTimer) { clearTimeout(this.vaultPersistTimer); this.vaultPersistTimer = null; }
+      try {
+        const result = await commitMcpCredentials(this.ensureMcpVault(), server, changes, root, write, previous, snapshot => this.vaultConfirmation.persist(snapshot));
+        this.reloadGateway();
+        return result;
+      } finally { this.vaultTransactionCount--; this.scheduleVaultPersist(); }
+    });
+    this.workspace.setMcpProbe(async (server, changes, root, id, cancel) => {
+      if (!id || id.length > 128) throw new Error("Invalid connection check.");
+      this.mcpProbes.get(id)?.abort();
+      if (cancel) { this.mcpProbes.delete(id); return { ok: true }; }
+      if (this.mcpProbes.size >= 4) throw new Error("Wait for the current connection checks to finish.");
+      const secrets = mcpSaveInputSchema.shape.secrets.parse(changes) ?? {};
+      const abort = new AbortController(); this.mcpProbes.set(id, abort);
+      try { return await probeMcpServer(server, secrets, this.ensureMcpVault(), root, abort.signal); }
+      finally { if (this.mcpProbes.get(id) === abort) this.mcpProbes.delete(id); }
+    });
     this.workspace.setSessionToolAccess({
       inventory: (agentId, sessionId, cwd) =>
         this.agents.readSessionToolInventory(agentId, sessionId, cwd),
@@ -1375,6 +1452,8 @@ export class ZerosEngine {
     this.workspace.setWorkspaceProcessReaper(
       async (workspaceId, worktreePath) => {
         await revokeDesignVerification(workspaceId);
+        await this.organizationMcp.remove(workspaceId);
+        await this.launchedMcp.removeWhere(entry => entry.owner === workspaceId);
         const root = path.resolve(worktreePath);
         const isUnderRoot = (candidate: string): boolean => {
           const relative = path.relative(root, path.resolve(candidate));
@@ -2250,6 +2329,27 @@ export class ZerosEngine {
     };
 
     this.agents = new AgentGateway(backendOpts);
+    this.agents.setMcpLauncher((servers, cwd, env, workspaceId, signal) => {
+      const row = workspaceId ? getWorkspaceById(workspaceId) : undefined;
+      return this.launchedMcp.resolve(servers, cwd, env, workspaceId ?? cwd, row?.repoRoot ?? cwd, Boolean(row?.organizationId), signal);
+    });
+    this.agents.setOrganizationMcpResolver((id, env, signal) => this.organizationMcp.resolve(id, env, signal));
+    this.agents.setScopedMcpGateway(async (root, backends) => {
+      const gateway = await this.projectMcpGateway(root, backends);
+      return gateway?.url ?? null;
+    });
+    this.agents.setMcpSecretResolver((servers, env) => {
+      const vault = this.ensureMcpVault();
+      for (const server of servers) {
+        if (server.transport !== "stdio" || !server.credentialKey) continue;
+        const saved = vault.readEntry(server.credentialKey)?.env;
+        for (const [name, alias] of Object.entries(server.envFromEnv ?? {})) {
+          const value = saved?.[name];
+          if (value === undefined) throw new Error(`The saved variable ${name} for MCP server ${server.name} is unavailable. Edit the server to restore it.`);
+          env[alias] = value;
+        }
+      }
+    });
     this.loadMcpRegistry(); // boot-load; re-run by the settings watcher on edit
 
     const engineStartTime = Date.now();
@@ -2303,7 +2403,9 @@ export class ZerosEngine {
       const gw = new McpGateway({
         port: this.port + ENGINE_PORT_SPAN,
         callbackPort: this.port + ENGINE_PORT_SPAN + 1,
+        callback: this.ensureMcpCallback(),
         vault: this.ensureMcpVault(),
+        clientMetadataOrigin: this.mcpClientOrigin(),
       });
       await gw.start(gatewayBackends);
       this.mcpGateway = gw;
@@ -2354,7 +2456,14 @@ export class ZerosEngine {
         console.warn("[Zeros] MCP gateway reload failed:", this.gatewayError);
       }
     };
-    this.gatewayReloadChain = this.gatewayReloadChain.then(run, run);
+    const refresh = async () => {
+      await run();
+      for (const root of this.scopedMcpGateways.roots().filter(root => !root.startsWith("organization:"))) {
+        try { await this.scopedMcpGateways.get(root, (await resolveMcpServersForRepo(root)).gatewayBackends, true); }
+        catch { /* A scoped failure is reported by that project’s next operation. */ }
+      }
+    };
+    this.gatewayReloadChain = this.gatewayReloadChain.then(refresh, refresh);
   }
 
   /** The engine-level OAuth token vault, created on first use and seeded from the
@@ -2377,7 +2486,7 @@ export class ZerosEngine {
   /** Coalesce a burst of vault writes (e.g. a refresh that rotates several
    *  tokens) into one control-fd message. */
   private scheduleVaultPersist(): void {
-    if (this.vaultPersistTimer) return;
+    if (this.vaultPersistTimer || this.vaultTransactionCount) return;
     this.vaultPersistTimer = setTimeout(() => {
       this.vaultPersistTimer = null;
       this.flushVaultPersist();
@@ -2390,7 +2499,7 @@ export class ZerosEngine {
    *  stdout/main.log AND off the renderer. No-op when there's no control fd (a
    *  standalone / CLI engine has no safeStorage host to persist to). */
   private flushVaultPersist(): void {
-    if (!this.mcpVault) return;
+    if (!this.mcpVault || this.vaultTransactionCount) return;
     const fd = Number(process.env.ZEROS_CONTROL_FD);
     if (!Number.isInteger(fd) || fd <= 2) return;
     try {
@@ -3018,6 +3127,14 @@ export class ZerosEngine {
       this.vaultPersistTimer = null;
       await settle(() => this.flushVaultPersist());
     }
+    await settle(() => this.scopedMcpGateways.stop());
+    await settle(() => this.mcpCallback?.stop());
+    this.mcpHost.close();
+    this.vaultConfirmation.close();
+    await settle(() => this.launchedMcp.stop());
+    await settle(() => this.organizationMcp.reset());
+    for (const abort of this.mcpProbes.values()) abort.abort();
+    this.mcpProbes.clear();
     const mcpGateway = this.mcpGateway;
     this.mcpGateway = null;
     if (mcpGateway) {
@@ -9287,7 +9404,7 @@ export class ZerosEngine {
     stdin.on("data", (chunk: string) => {
       buf += chunk;
       // Defensive cap: control lines are tiny; drop a runaway no-newline blob.
-      if (buf.length > 1_000_000) buf = "";
+      if (buf.length > 2 * 1024 * 1024) buf = "";
       let nl = buf.indexOf("\n");
       while (nl !== -1) {
         const line = buf.slice(0, nl).trim();
@@ -9322,6 +9439,21 @@ export class ZerosEngine {
     });
   }
 
+  private async retireOrganizationMcp(): Promise<void> {
+    const retire = this.organizationMcp.reset();
+    const stopProcesses = this.launchedMcp.removeWhere(entry => entry.organization);
+    const sessions = new Set<string>();
+    for (const [sessionId, workspaceId] of this.sessionWorkspace) {
+      if (getWorkspaceById(workspaceId)?.organizationId) sessions.add(sessionId);
+    }
+    await this.cancelLiveAgentSessions(sessions);
+    await Promise.allSettled([...sessions].map(async sessionId => {
+      const agentId = this.sessionAgent.get(sessionId) ?? this.agents.sessionAgentId(sessionId);
+      if (agentId) await this.agents.endSession(agentId, sessionId, { failClosed: true });
+    }));
+    await Promise.all([retire, stopProcesses]);
+  }
+
   private handleHostControlLine(line: string): void {
     let msg: {
       type?: string;
@@ -9336,6 +9468,12 @@ export class ZerosEngine {
     try {
       msg = JSON.parse(line);
     } catch {
+      return;
+    }
+    if (this.mcpHost.accept(msg) || this.vaultConfirmation.accept(msg)) return;
+    if (msg.type === "host.mcp.accountChanged") {
+      this.mcpHost.reset();
+      void this.retireOrganizationMcp().catch(() => {});
       return;
     }
     if (msg.type === "host.githubToken") {

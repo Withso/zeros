@@ -10,6 +10,7 @@
 // ──────────────────────────────────────────────────────────
 
 export type Transport = "stdio" | "http" | "sse";
+export type OAuthClientMode = "auto" | "metadata" | "dynamic" | "custom";
 
 /** The sentinel an env VALUE carries when its real value lives in the OS
  *  Keychain, not the settings file. The engine strips it from the registry and
@@ -31,6 +32,9 @@ export interface KV {
    *  Its settings value is the sentinel; `value` holds a freshly-typed secret to
    *  store, or "" when editing an already-stored one (masked, leave as-is). */
   secret?: boolean;
+  /** An empty masked value retains this exact saved key; a new empty value is literal. */
+  stored?: boolean;
+  originalKey?: string;
 }
 
 export interface Draft {
@@ -42,6 +46,9 @@ export interface Draft {
   command: string;
   cwd: string;
   argsText: string; // one arg per line (handles spaces; no shell-splitting)
+  /** Form rows preserve literal arguments, including empty values and newlines. */
+  args?: string[];
+  listenUrl?: string;
   url: string;
   env: KV[];
   headers: KV[];
@@ -60,6 +67,9 @@ export interface Draft {
   oauthScopes: string;
   oauthClientSecret: string;
   clearOAuthClientSecret: boolean;
+  oauthMode?: OAuthClientMode;
+  /** Absent on older callers; an explicit empty list allows every tool. */
+  disabledTools?: string[];
 }
 
 export function asString(v: unknown): string {
@@ -108,12 +118,7 @@ export function mapToKV(m: unknown): KV[] {
 }
 
 export function kvToMap(rows: KV[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const { key, value } of rows) {
-    const k = key.trim();
-    if (k) out[k] = value;
-  }
-  return out;
+  return Object.fromEntries(rows.filter(row => row.key.trim()).map(row => [row.key.trim(), row.value]));
 }
 
 export function draftFromServer(s: RawServer | null): Draft {
@@ -126,14 +131,17 @@ export function draftFromServer(s: RawServer | null): Draft {
     command: s ? asString(s.command) : "",
     cwd: asString(s?.cwd),
     argsText: (args as string[]).join("\n"),
+    args,
+    listenUrl: asString(s?.listen_url),
     url: s ? asString(s.url) : "",
     // A sentinel'd env value is a Keychain secret: mark the row secret and clear
     // the (masked) value — the real value stays in the Keychain, untouched
     // unless the user types a new one.
     env: mapToKV(s?.env).map((kv) =>
-      kv.value === MCP_SECRET_SENTINEL ? { ...kv, secret: true, value: "" } : kv,
+      kv.value === MCP_SECRET_SENTINEL ? { ...kv, secret: true, stored: true, originalKey: kv.key, value: "" } : kv,
     ),
-    headers: mapToKV(s?.headers),
+    headers: mapToKV(s?.headers).map(kv => kv.value === MCP_SECRET_SENTINEL
+      ? { ...kv, secret: true, stored: true, originalKey: kv.key, value: "" } : kv),
     auth:
       transport !== "stdio" && (s?.auth === "oauth" || s?.auth === "header")
         ? (s.auth as "oauth" | "header")
@@ -144,27 +152,24 @@ export function draftFromServer(s: RawServer | null): Draft {
     oauthScopes: Array.isArray(s?.oauth_scopes) ? s.oauth_scopes.filter((v): v is string => typeof v === "string").join(" ") : "",
     oauthClientSecret: "",
     clearOAuthClientSecret: false,
+    disabledTools: s ? disabledToolsOf(s) : [],
+    ...(s?.oauth_client_mode === "auto" || s?.oauth_client_mode === "metadata" || s?.oauth_client_mode === "dynamic" || s?.oauth_client_mode === "custom"
+      ? { oauthMode: s.oauth_client_mode }
+      : {}),
   };
 }
 
 /** Build the env table from rows, writing the Keychain SENTINEL for any row
  *  marked secret (its real value is stored separately by the dialog). */
 function envFromRows(rows: KV[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const { key, value, secret } of rows) {
-    const k = key.trim();
-    if (!k) continue;
-    out[k] = secret ? MCP_SECRET_SENTINEL : value;
-  }
-  return out;
+  return Object.fromEntries(rows.filter(row => row.key.trim()).map(row => [row.key.trim(), row.secret ? MCP_SECRET_SENTINEL : row.value]));
 }
 
 /** The env var NAMES marked secret in a draft whose value was freshly typed (so
  *  the dialog knows which Keychain entries to write on save). */
 export function newSecretsFromDraft(d: Draft): Array<{ name: string; value: string }> {
-  if (d.transport !== "stdio") return [];
   return d.env
-    .filter((kv) => kv.secret && kv.key.trim() && kv.value.length > 0)
+    .filter((kv) => kv.secret && kv.key.trim() && (kv.value.length > 0 || kv.stored === false))
     .map((kv) => ({ name: kv.key.trim(), value: kv.value }));
 }
 
@@ -178,23 +183,26 @@ const DRAFT_OWNED_KEYS = new Set([
   "command",
   "cwd",
   "args",
+  "listen_url",
   "env",
   "url",
   "headers",
   "auth",
   "header_name",
+  "header_names",
   "oauth_client_id",
   "oauth_scopes",
   "oauth_client_secret",
+  "oauth_client_mode",
   "enabled",
   "disabled_tools",
 ]);
 
 /** Build the clean server object a Save persists, carrying forward from the
  *  entry being edited what the form doesn't own: `enabled: false` (the on/off
- *  toggle lives on the list row), `disabled_tools` (the list row's per-tool
- *  allowlist — editing a description must not reset a curated set), and any
- *  unknown keys. Empty optionals are omitted so the TOML stays tidy. */
+ *  toggle lives on the list row), remote `disabled_tools` when an older caller
+ *  does not edit tool policy, and any unknown keys. Empty optionals are omitted
+ *  so the TOML stays tidy. */
 export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
   const carried: RawServer = {};
   if (prior) {
@@ -203,17 +211,13 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
     }
   }
   const enabled = prior && prior.enabled === false ? { enabled: false } : {};
-  const disabledTools =
-    prior &&
-    Array.isArray(prior.disabled_tools) &&
-    prior.disabled_tools.length > 0
-      ? { disabled_tools: prior.disabled_tools }
-      : {};
+  const toolPolicy = d.disabledTools ?? (prior ? disabledToolsOf(prior) : []);
+  const disabledTools = toolPolicy.length ? { disabled_tools: toolPolicy } : {};
   const description = d.description.trim()
     ? { description: d.description.trim() }
     : {};
   if (d.transport === "stdio") {
-    const args = d.argsText.split("\n").map((a) => a.trim()).filter(Boolean);
+    const args = d.args ?? d.argsText.split("\n").map((a) => a.trim()).filter(Boolean);
     const env = envFromRows(d.env);
     return {
       ...carried,
@@ -222,12 +226,13 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
       transport: "stdio",
       command: d.command.trim(),
       ...(d.cwd.trim() ? { cwd: d.cwd.trim() } : {}),
+      ...(d.listenUrl?.trim() ? { listen_url: d.listenUrl.trim() } : {}),
       ...(args.length ? { args } : {}),
       ...(Object.keys(env).length ? { env } : {}),
-      ...disabledTools,
       ...enabled,
     };
   }
+  const remoteEnv = envFromRows(d.env);
   // auth:"header" — the gateway brokers a static header; its NAME is written here,
   // its VALUE goes to the engine vault (never settings), and the plain headers
   // editor is replaced by the brokered header (so no secret can sit in the file).
@@ -239,23 +244,28 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
       transport: d.transport,
       url: d.url.trim(),
       auth: "header",
-      header_name: d.headerName.trim() || "Authorization",
+      ...(Object.keys(remoteEnv).length ? { env: remoteEnv } : {}),      ...(d.headers.length ? {
+        header_names: d.headers.filter(row => row.key.trim()).map(row => row.key.trim()),
+        headers: envFromRows(d.headers),
+      } : { header_name: d.headerName.trim() || "Authorization" }),
       ...disabledTools,
       ...enabled,
     };
   }
-  const headers = kvToMap(d.headers);
+  const headers = envFromRows(d.headers);
   return {
     ...carried,
     name: d.name.trim(),
     ...description,
     transport: d.transport,
     url: d.url.trim(),
+    ...(Object.keys(remoteEnv).length ? { env: remoteEnv } : {}),
     ...(Object.keys(headers).length ? { headers } : {}),
     ...(d.auth === "oauth"
       ? {
           auth: "oauth",
-          ...(d.oauthClientId.trim() ? { oauth_client_id: d.oauthClientId.trim() } : {}),
+          ...(d.oauthMode ? { oauth_client_mode: d.oauthMode } : {}),
+          ...((!d.oauthMode || d.oauthMode === "custom") && d.oauthClientId.trim() ? { oauth_client_id: d.oauthClientId.trim() } : {}),
           ...(d.oauthScopes.trim() ? { oauth_scopes: [...new Set(d.oauthScopes.trim().split(/\s+/))] } : {}),
         }
       : {}),
@@ -279,14 +289,37 @@ export function newHeaderSecretFromDraft(
   };
 }
 
+function containsControlCharacter(value: string, includeSpace = false): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= (includeSpace ? 32 : 31) || code === 127) return true;
+  }
+  return false;
+}
+
 /** Validation message for a draft, or null when it's good to save. */
 export function draftError(d: Draft, takenNames: Set<string>): string | null {
   const name = d.name.trim();
   if (!name) return "Name is required.";
+  if (name.length > 128 || containsControlCharacter(name)) return "Use a server name of up to 128 characters without control characters.";
+  if (name === "zeros-gateway") return "That server name is reserved. Choose another name.";
   if (takenNames.has(name)) return `Another server is already named “${name}”.`;
   if (d.transport === "stdio" && !d.command.trim()) return "Command is required for a stdio server.";
   if (d.transport === "stdio" && (d.cwd.includes("\0") || d.cwd.length > 4096)) return "Working directory is invalid.";
+  const variables = keyValueError(d.env, "variable");
+  if (variables) return variables;
+  if (d.transport === "stdio") {
+    if (d.command.length > 4096 || d.command.includes("\0")) return "Command is invalid.";
+    if (d.args && (d.args.length > 128 || d.args.some(arg => arg.length > 8192 || arg.includes("\0")))) return "Use up to 128 arguments, each under 8,192 characters.";
+    if (d.listenUrl?.trim()) {
+      const invalid = mcpUrlError(d.listenUrl);
+      if (invalid) return invalid;
+      const url = new URL(d.listenUrl.trim());
+      if (url.protocol !== "http:" || !["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)) return "The process endpoint must use HTTP on localhost, 127.0.0.1 or [::1].";
+    }
+  }
   if (d.auth === "oauth" && d.transport !== "stdio") {
+    if (d.oauthMode === "custom" && !d.oauthClientId.trim()) return "Client ID is required for your own OAuth client.";
     if (d.oauthClientSecret && !d.oauthClientId.trim()) return "Client ID is required with a client secret.";
     const scopes = d.oauthScopes.trim().split(/\s+/).filter(Boolean);
     if (scopes.length > 64 || scopes.some((s) => !/^[\x21\x23-\x5b\x5d-\x7e]+$/.test(s))) return "Enter valid OAuth scopes separated by spaces.";
@@ -294,9 +327,60 @@ export function draftError(d: Draft, takenNames: Set<string>): string | null {
   if (d.transport !== "stdio") {
     const url = d.url.trim();
     if (!url) return `URL is required for an ${d.transport === "sse" ? "SSE" : "HTTP"} server.`;
-    if (!/^https?:\/\//i.test(url)) return "URL must start with http:// or https://.";
+    const invalid = mcpUrlError(url);
+    if (invalid) return invalid;
+    const headers = keyValueError(d.headers, "header");
+    if (headers) return headers;
   }
   return null;
+}
+
+export function mcpUrlError(raw: string): string | null {
+  try {
+    const url = new URL(raw.trim());
+    if (!/^https?:$/.test(url.protocol)) return "URL must start with http:// or https://.";
+    if (url.username || url.password) return "Use authentication fields instead of credentials in the URL.";
+    if (url.hash || raw.length > 4096 || containsControlCharacter(raw.trim(), true)) return "Enter a valid server URL without spaces or a fragment.";
+    return null;
+  } catch { return "Enter a valid HTTP or HTTPS server URL."; }
+}
+
+function keyValueError(rows: KV[], kind: "variable" | "header"): string | null {
+  if (rows.length > 128) return `Use up to 128 ${kind}s.`;
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const key = row.key.trim();
+    if (!key && !row.value) continue;
+    const valid = kind === "variable" ? /^[A-Za-z_][A-Za-z0-9_]*$/ : /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+    if (!valid.test(key) || key.length > 128) return `Enter a valid ${kind} name.`;
+    if (kind === "header" && /^(host|connection|content-length|transfer-encoding|cookie|set-cookie|proxy-authorization)$/i.test(key)) return "This header is managed by the connection. Use an API key header instead.";
+    const identity = kind === "header" ? key.toLowerCase() : key;
+    if (seen.has(identity)) return `Duplicate ${kind} names are not allowed.`;
+    seen.add(identity);
+    if (row.value.includes("\0") || row.value.length > 16384 || (kind === "header" && /[\r\n]/.test(row.value))) return `Enter a valid ${kind} value.`;
+    if (row.stored && !row.value && row.originalKey && key !== row.originalKey) return `Enter a new value when renaming a saved ${kind}.`;
+  }
+  return null;
+}
+
+/** Form-only upgrade: every newly saved variable/header is sealed. Legacy raw
+ * readers and imports keep their round-trip contract until the user saves. */
+export function secureDraftFromServer(server: RawServer | null): Draft {
+  const draft = draftFromServer(server);
+  const headers = draft.headers.map(row => ({ ...row, secret: true, stored: row.stored ?? false }));
+  const names = Array.isArray(server?.header_names) ? server.header_names.filter((name): name is string => typeof name === "string")
+    : server?.auth === "header" ? [draft.headerName] : [];
+  for (const name of names) {
+    if (!headers.some(row => row.key.toLowerCase() === name.toLowerCase())) headers.push({ id: nextKvId(), key: name, value: "", secret: true, stored: true, originalKey: name });
+  }
+  return {
+    ...draft,
+    env: draft.env.map(row => ({ ...row, secret: true, stored: row.stored ?? false })),
+    headers,
+    auth: draft.auth === "none" && headers.length ? "header" : draft.auth,
+    oauthMode: draft.oauthMode ?? (draft.oauthClientId ? "custom" : "auto"),
+    oauthClientSecret: asString(server?.oauth_client_secret),
+  };
 }
 
 /** Toggle a server's enabled flag in place within a fresh array: enabling

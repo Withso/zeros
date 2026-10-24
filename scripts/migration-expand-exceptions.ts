@@ -179,6 +179,13 @@ END $$;`],
     "privilege-tightening": ["fence_cloud_v2_prompts()", "erase_cloud_v2_chat_prompts()"]
       .map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
   },
+  "0203_organization_mcp_extensions.sql": {
+    // Only withdraws default PUBLIC EXECUTE from new trigger-only functions.
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION organization_mcp_changed() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION organization_mcp_sign_in_changed() FROM PUBLIC;",
+    ],
+  },
   "0180_cloud_initial_delete_periodic_checkpoint.sql": {},
   "0178_cloud_owner_existing_delete.sql": {},
   "0177_cloud_owner_discard_delete.sql": {

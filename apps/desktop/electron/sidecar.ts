@@ -48,8 +48,12 @@ import {
   zerosStateRoot,
 } from "../src/engine/db/paths";
 import { secretsFilePath, getSecret, setSecret } from "./secret-store";
-import { githubCredentialStore } from "./github-auth-runtime";
-import { getProductAccountIdForMain } from "./ipc/commands/auth-session";
+import { githubCredentialStore, hostedDevGithubReferencesEnabled } from "./github-auth-runtime";
+import { requestCloudGithub } from "./cloud-github-client";
+import { getProductAccountIdForMain, getValidSessionForMain, onMainAuthSessionChanged } from "./ipc/commands/auth-session";
+import { controlPlaneBaseUrl } from "./workos-desktop-account";
+import { controlPlaneFetch } from "./control-plane-fetch";
+import { McpControlClient, MCP_CONTROL_MAX_BYTES, persistMcpVaultControl } from "./mcp-control-client";
 import { githubCredentialForEngine } from "./github-engine-credential";
 import {
   EngineAppliedSync,
@@ -60,7 +64,6 @@ import { readProviderCredentialsForEngine } from "./provider-credentials";
 import {
   MCP_VAULT_ACCOUNT,
   parseVaultBlob,
-  parseVaultControl,
   parseEngineLocalAuthorityControl,
   vaultSeedLine,
 } from "../src/engine/agents/gateway/vault-persist";
@@ -130,6 +133,7 @@ const state: SidecarStateShape = {
   healthActivity: null,
   watchdogTimer: null,
 };
+let mcpControlClient: McpControlClient | null = null;
 
 /** Current engine child identity for read-only diagnostics. Null while the
  * sidecar is stopped or between crash-recovery generations. */
@@ -768,6 +772,7 @@ function signalEngineTree(
  *  and the supposedly-dead one keeps listening on the old port). */
 async function killCurrentChild(): Promise<void> {
   const current = state.child;
+  mcpControlClient?.dispose(); mcpControlClient = null;
   state.child = null;
   state.port = null;
   state.instance = null;
@@ -1424,6 +1429,7 @@ async function doSpawnEngine(
   // (unlike stdout) and the relay never sees. Absent this flag (a standalone /
   // CLI engine), the engine does not touch a stray fd 3.
   extraEnv.ZEROS_CONTROL_FD = "3";
+  extraEnv.ZEROS_CONTROL_PLANE_URL = controlPlaneBaseUrl();
 
   const child = spawn(
     cmd,
@@ -1470,6 +1476,34 @@ async function doSpawnEngine(
   state.localToken = null;
   // Wrapping add; JS numbers are safe up to 2^53.
   state.spawnGeneration = (state.spawnGeneration + 1) & 0xffffffff;
+  const generation = state.spawnGeneration;
+  mcpControlClient?.dispose();
+  const currentMcpChild = () => state.child === child && state.spawnGeneration === generation && !state.shuttingDown &&
+    !child.killed && child.exitCode === null && child.signalCode === null && !!child.stdin?.writable;
+  const writeMcpControl = (line: string) => {
+    if (!currentMcpChild() || !child.stdin) return false;
+    // Bound queued credential responses; a tiny revocation signal may still
+    // follow them so account changes always reach a draining private pipe.
+    if (Buffer.byteLength(line) > MCP_CONTROL_MAX_BYTES || (line.length > 256 && child.stdin.writableLength + Buffer.byteLength(line) > 2 * MCP_CONTROL_MAX_BYTES)) return false;
+    child.stdin.write(line);
+    return true;
+  };
+  const mcpControl = new McpControlClient({
+    session: getValidSessionForMain, baseUrl: controlPlaneBaseUrl, fetch: controlPlaneFetch,
+    onSessionChanged: onMainAuthSessionChanged,
+    admitRepository: async ({ organizationId, repository }) => {
+      const { refreshGithubAppCredential, restoreDevGithubBinding } = await import("./github-app-flow");
+      const [owner, name] = repository.split("/");
+      await requestCloudGithub({ action: "source", organizationId, owner, repository: name }, {
+        session: getValidSessionForMain, credential: refreshGithubAppCredential, baseUrl: controlPlaneBaseUrl, fetch: controlPlaneFetch,
+        ...(hostedDevGithubReferencesEnabled() ? { reference: restoreDevGithubBinding } : {}),
+      });
+    },
+    current: currentMcpChild,
+    write: writeMcpControl,
+  });
+  mcpControlClient = mcpControl;
+  child.once("close", () => { mcpControl.dispose(); if (mcpControlClient === mcpControl) mcpControlClient = null; });
   const healthActivity = createEngineHealthActivityTracker();
   state.healthActivity = healthActivity;
 
@@ -1483,12 +1517,13 @@ async function doSpawnEngine(
     stream: NodeJS.ReadableStream | null,
     write: (s: string) => void,
     observeOutput = true,
+    maxChars?: number,
   ) => {
     if (!stream) return;
     // Bound both the partial-line buffer AND downstream log volume. A child
     // that never emits a newline gets one fixed diagnostic for that logical
     // line; the remaining bytes are discarded until its newline arrives.
-    const forwarder = createBoundedLineForwarder(write);
+    const forwarder = createBoundedLineForwarder(write, maxChars);
     stream.setEncoding?.("utf-8");
     stream.on("data", (chunk: string | Buffer) => {
       if (observeOutput && chunk.length > 0 && state.child === child) {
@@ -1527,6 +1562,7 @@ async function doSpawnEngine(
   forwardLines(
     (child.stdio[3] as unknown as NodeJS.ReadableStream | null) ?? null,
     (line) => {
+      if (state.child !== child) return;
       const authority = parseEngineLocalAuthorityControl(line);
       if (authority) {
         // Bind the secret to the exact child generation whose pipe delivered
@@ -1539,6 +1575,10 @@ async function doSpawnEngine(
         controlValue = JSON.parse(line) as unknown;
       } catch {
         controlValue = null;
+      }
+      if (controlValue && typeof controlValue === "object" && "type" in controlValue && controlValue.type === "mcp.request") {
+        void mcpControl.receive(controlValue);
+        return;
       }
       if (
         state.child === child &&
@@ -1554,18 +1594,13 @@ async function doSpawnEngine(
       ) {
         return;
       }
-      const snapshot = parseVaultControl(line);
-      if (!snapshot) return;
-      try {
-        setSecret(MCP_VAULT_ACCOUNT, JSON.stringify(snapshot));
-      } catch (err) {
-        console.warn(
-          "[Zeros] MCP vault persist failed:",
-          err instanceof Error ? err.message : String(err),
-        );
-      }
+      persistMcpVaultControl(controlValue, {
+        current: currentMcpChild, write: writeMcpControl,
+        persist: snapshot => setSecret(MCP_VAULT_ACCOUNT, JSON.stringify(snapshot)),
+      });
     },
     false,
+    MCP_CONTROL_MAX_BYTES,
   );
 
   if (isPackaged) {
@@ -1664,6 +1699,7 @@ async function doSpawnEngine(
   pushMcpVaultToEngine();
 
   child.once("exit", (code, signal) => {
+    mcpControl.dispose();
     // Only clear the child reference if this is still the active one
     // (a newer spawn may have already replaced it). CRITICAL: do NOT
     // clear `state.port` OR `state.instance` here — the watchdog needs the
@@ -1764,6 +1800,7 @@ async function doSpawnEngine(
  *  watchdog stops respawning. Called from app.on("before-quit"). */
 export function shutdown(): void {
   state.shuttingDown = true;
+  mcpControlClient?.dispose(); mcpControlClient = null;
   if (state.watchdogTimer) {
     clearInterval(state.watchdogTimer);
     state.watchdogTimer = null;

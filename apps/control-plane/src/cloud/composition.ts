@@ -27,6 +27,7 @@ import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
 import { cloudV2SandboxName } from "./resource-names.js";
 import { CloudV2PromptSignals } from "./prompt-signals.js";
+import { createMcpServices } from "../mcp/composition.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 /** Boat stock image home; repositories live at <home>/<owner>/<name>. */
@@ -82,6 +83,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
   const computers = new CloudV2Computers(pool);
   const repositoryToken = config.github ? createCloudV2RepositoryTokens(pool, config.github) : null;
+  const mcp = createMcpServices(pool, config);
 
   const workerConfig = async (workspace: CloudV2Workspace): Promise<ConfigFrame> => {
     const proxy = async () => {
@@ -103,6 +105,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
       },
       agents,
+      ...(mcp ? { mcpServers: await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, true) } : {}),
     };
   };
 
@@ -129,6 +132,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
   const workers: CloudV2WorkerRouteDeps = { store, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    ...(mcp ? { mcpAuthorization: (workspace, id, force) =>
+      mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force, true) } : {}),
     promptOutbox: v2.promptOutbox === true, waitForPrompts: (id, ms, signal) => promptSignals.wait(id, ms, signal) };
   const promptChanges = v2.promptOutbox ? postgresNotificationSubscription(listenerPool, {
     channels: ["zeros_cloud_v2_prompts"],
@@ -145,8 +150,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     onNotification: notice => {
       try {
         const scope = JSON.parse(notice.payload ?? "");
-        if (typeof scope?.ownerUserId === "string" && (scope.organizationId === null || typeof scope.organizationId === "string"))
-          void relay.refreshLogins({ ownerUserId: scope.ownerUserId, ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) });
+        if ((typeof scope?.ownerUserId === "string" || scope?.ownerUserId === null) && (scope.organizationId === null || typeof scope.organizationId === "string"))
+          void relay.refreshLogins({ ...(typeof scope.ownerUserId === "string" ? { ownerUserId: scope.ownerUserId } : {}), ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) });
       } catch { /* Invalid wake hints carry no authority. */ }
     },
   }) : null;

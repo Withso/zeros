@@ -41,6 +41,10 @@ function fixture() {
     local, transports: [local], setup: { reconcileStaleRuns: vi.fn() },
     activityHeartbeat: { start: vi.fn(), stop: vi.fn() },
     startGateway: vi.fn(), writePortFile: vi.fn(),
+    scopedMcpGateways: { stop: vi.fn() }, mcpCallback: { stop: vi.fn() },
+    mcpHost: { close: vi.fn() }, vaultConfirmation: { close: vi.fn() },
+    launchedMcp: { stop: vi.fn() }, organizationMcp: { reset: vi.fn() },
+    mcpProbes: new Map<string, AbortController>(),
     agents: { revokeSessionTools: vi.fn(), dispose: vi.fn() },
     pty: { killAll: vi.fn() }, terminals: { clear: vi.fn() }, watcher: { stop: vi.fn() },
     removePortFile: vi.fn(), clearBusy: vi.fn(),
@@ -108,5 +112,12 @@ describe("engine startup readiness", () => {
     expect(engine.local.start).toHaveBeenCalledOnce();
     expect(engine.running).toBe(true);
     await engine.stop();
+    expect(engine.scopedMcpGateways.stop).toHaveBeenCalledOnce();
+    expect(engine.mcpCallback.stop).toHaveBeenCalledOnce();
+    expect(engine.mcpHost.close).toHaveBeenCalledOnce();
+    expect(engine.vaultConfirmation.close).toHaveBeenCalledOnce();
+    expect(engine.launchedMcp.stop).toHaveBeenCalledOnce();
+    expect(engine.organizationMcp.reset).toHaveBeenCalledOnce();
+    expect(engine.running).toBe(false);
   });
 });

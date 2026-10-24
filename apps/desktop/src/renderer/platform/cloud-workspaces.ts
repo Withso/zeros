@@ -40,7 +40,7 @@ export async function cloudAccountRequest<T>(
   path: string,
   schema: z.ZodType<T>,
   input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
-  options?: { promptRecovery?: true },
+  options?: { promptRecovery?: true; signal?: AbortSignal },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
@@ -57,7 +57,7 @@ export async function cloudAccountRequest<T>(
     method: input?.method ?? (input ? "POST" : "GET"),
     redirect: "error",
     cache: "no-store",
-    signal: AbortSignal.timeout(20_000),
+    signal: options?.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
     headers: {
       authorization: `Bearer ${session.access_token}`,
       ...(input

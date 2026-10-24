@@ -5,7 +5,7 @@ import { query, type Options, type Query, type Settings, type SDKUserMessage } f
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { providerBindingForResume } from "@zeros/protocol/identities";
-import type { Driver, DriverOpen } from "../driver";
+import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
 import { agentEnvironment } from "../shared/agent-environment";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
@@ -135,6 +135,7 @@ export class ClaudeDriver implements Driver {
     const session = this.input!, input = new InputQueue<SDKUserMessage>();
     const options: Options = {
       cwd: session.cwd, ...(this.model ? { model: this.model } : {}),
+      ...(session.mcpServers ? { mcpServers: session.mcpServers } : {}),
       ...claudeEffort(this.effort),
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
       env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, this.options.gitEnvironment),
@@ -267,8 +268,7 @@ export class ClaudeDriver implements Driver {
       severity: recovered ? "warning" : "error", recoverable: recovered, code, message, ...(failureKind ? { failureKind } : {}) } });
   }
   private redact(message: string): string {
-    const token = this.input?.oauthToken ?? this.input?.apiKey;
-    return token ? message.split(token).join("[redacted]").split(JSON.stringify(token).slice(1, -1)).join("[redacted]") : message;
+    return redactDriverMessage(message, this.input);
   }
   private error(error: unknown): Error { return new Error(this.redact(error instanceof Error ? error.message : typeof error === "string" ? error : "Claude request failed.")); }
 }

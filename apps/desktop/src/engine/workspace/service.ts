@@ -1,3 +1,4 @@
+import { mcpSaveInputSchema, mcpDeleteInputSchema, opMcpDeleteServer, opMcpSaveServer, type McpSettingsCommit } from "../settings/mcp-configuration";
 import { designDirectoryEntry } from "../design/metadata";
 import { isCodeReviewOperation } from "@zeros/protocol/code-review";
 import { handleCodeReviewRoute } from "../code-review/routes";
@@ -535,6 +536,8 @@ function assertRemoteRepoRootAllowed(repoRoot: string, remote: boolean): void {
 }
 
 const WRITE_OPS = new Set<string>([
+  "mcp.saveServer",
+  "mcp.deleteServer",
   "git.reviewHunk",
   "git.resolveConflict",
   "codeReview.create",
@@ -1383,7 +1386,11 @@ export class WorkspaceService {
 
   /** Live accessor for the engine's MCP gateway (created lazily after this
    *  service), wired by the engine so the mcp.gateway.* ops can reach it. */
-  private gatewayAccessor: (() => McpGateway | null) | null = null;
+  private gatewayAccessor: ((repoRoot?: string) => McpGateway | null | Promise<McpGateway | null>) | null = null;
+  private mcpCommit?: McpSettingsCommit;
+  setMcpCommit(commit: McpSettingsCommit): void { this.mcpCommit = commit; }
+  private mcpProbe?: (input: unknown, secrets: Record<string, unknown>, repoRoot?: string, requestId?: string, cancel?: boolean) => Promise<unknown>;
+  setMcpProbe(probe: NonNullable<WorkspaceService["mcpProbe"]>): void { this.mcpProbe = probe; }
   private nativeExtensionReader:
     | ((query: ExtensionQuery) => Promise<ExtensionInventory | null>)
     | null = null;
@@ -1415,7 +1422,7 @@ export class WorkspaceService {
   ): void {
     this.sessionToolAccess = access;
   }
-  setGatewayAccessor(fn: () => McpGateway | null): void {
+  setGatewayAccessor(fn: NonNullable<WorkspaceService["gatewayAccessor"]>): void {
     this.gatewayAccessor = fn;
   }
   /** Per-launch capability used only by the local Electron custom protocol.
@@ -1774,11 +1781,10 @@ export class WorkspaceService {
     });
     return true;
   }
-  /** The gateway every gateway op targets — the user-global one. (Per-repo
-   *  gateways were retired with the 2026-07-17 repo-file slimming: MCP is
-   *  user-level only, so there is exactly one gateway instance.) */
-  private gatewayForScope(): McpGateway | null {
-    return this.gatewayAccessor?.() ?? null;
+  private async gatewayForScope(params: Params = {}, remote = false): Promise<McpGateway | null> {
+    const root = optStr(params, "repoRoot");
+    if (root) this.assertSettingsRepoRoot(root, remote);
+    return this.gatewayAccessor?.(root ? personalRepoRoot(root) : undefined) ?? null;
   }
 
   isWriteOp(op: string): boolean {
@@ -3732,8 +3738,27 @@ export class WorkspaceService {
           query.toolId,
         );
       }
+      case "mcp.saveServer":
+      case "mcp.deleteServer": {
+        if (remote || !hostLocalResources) throw new Error("Local MCP configuration must be saved on this device.");
+        const input = op === "mcp.deleteServer" ? mcpDeleteInputSchema.parse(params) : mcpSaveInputSchema.parse(params);
+        if (input.layer === "repo-local" && !input.repoRoot) throw new Error("Choose a project before saving.");
+        if (input.repoRoot) {
+          this.assertSettingsRepoRoot(input.repoRoot, false);
+          input.repoRoot = personalRepoRoot(input.repoRoot);
+          this.assertSettingsRepoRoot(input.repoRoot, false);
+        }
+        return "server" in input ? opMcpSaveServer(input, this.mcpCommit) : opMcpDeleteServer(input, this.mcpCommit);
+      }
+      case "mcp.probe":
+      case "mcp.cancelProbe": {
+        if (remote || !hostLocalResources || !this.mcpProbe) throw new Error("Connection checks are unavailable on this device.");
+        const root = optStr(params, "repoRoot");
+        if (root) this.assertSettingsRepoRoot(root, false);
+        return this.mcpProbe(params.server, (params.secrets ?? {}) as Record<string, unknown>, root ? personalRepoRoot(root) : undefined, reqStr(params, "requestId"), op === "mcp.cancelProbe");
+      }
       case "mcp.gateway.status": {
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         return {
           running: gw?.running ?? false,
           error: this.gatewayErrorAccessor?.() ?? null,
@@ -3751,11 +3776,11 @@ export class WorkspaceService {
         return { ok: true };
       }
       case "mcp.gateway.cancelAuth": {
-        await this.gatewayForScope()?.cancelAuthorization(reqStr(params, "server"));
+        await (await this.gatewayForScope(params, remote))?.cancelAuthorization(reqStr(params, "server"));
         return { ok: true };
       }
       case "mcp.gateway.reconnect": {
-        await this.gatewayForScope()?.reconnect();
+        await (await this.gatewayForScope(params, remote))?.reconnect();
         return { ok: true };
       }
       case "mcp.gateway.setOAuthSecret": {
@@ -3765,7 +3790,7 @@ export class WorkspaceService {
         const parsed = new URL(url);
         if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || clientId.length > 4096 || value.length > 16384) throw new Error("Invalid MCP OAuth client configuration.");
         if (!this.gatewayOAuthSecretSetter) throw new Error("OAuth credential storage is unavailable.");
-        await this.gatewayForScope()?.cancelAuthorization();
+        await (await this.gatewayForScope(params, remote))?.cancelAuthorization();
         this.gatewayOAuthSecretSetter(url, clientId, value);
         return { ok: true };
       }
@@ -3776,7 +3801,7 @@ export class WorkspaceService {
             message: "MCP sign-in is desktop-only.",
           });
         }
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         if (!gw) {
           throw new GitError({
             code: "MCP_GATEWAY_DOWN",
@@ -3787,14 +3812,14 @@ export class WorkspaceService {
         return { status: await gw.authorize(reqStr(params, "server")) };
       }
       case "mcp.gateway.disconnect": {
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         if (gw) await gw.disconnect(reqStr(params, "server"));
         return { ok: true };
       }
       case "mcp.gateway.beginAuth": {
         // Headless sign-in step 1 — return the authorization URL (no browser).
         // This is the cloud path: the renderer opens it on the user's device.
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         if (!gw) {
           throw new GitError({
             code: "MCP_GATEWAY_DOWN",
@@ -3805,7 +3830,7 @@ export class WorkspaceService {
       }
       case "mcp.gateway.completeAuth": {
         // Headless sign-in step 2 — finish with the pasted code/URL.
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         if (!gw) {
           throw new GitError({
             code: "MCP_GATEWAY_DOWN",

@@ -16,8 +16,10 @@ export type CloudV2WorkerRouteDeps = {
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
   config(workspace: CloudV2Workspace): Promise<ConfigFrame>;
   githubToken(workspace: CloudV2Workspace): Promise<{ token: string; expiresAt: number }>;
+  mcpAuthorization?(workspace: CloudV2Workspace, id: string, force: boolean): Promise<{ headers: Record<string, string>; expiresAt?: number }>;
 };
 const unauthorized = () => new HttpError(401, "worker_unauthorized", "Worker authorization is no longer current");
+const supportsMcp = (c: Context) => (c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("mcp-v1");
 function bearer(c: Context): string {
   const header = c.req.header("authorization") ?? "";
   if (!header.startsWith("Bearer ")) throw unauthorized();
@@ -39,14 +41,17 @@ async function session(c: Context, deps: CloudV2WorkerRouteDeps): Promise<{ toke
   if (!workspace) throw unauthorized();
   return { token, bootId, workspace };
 }
-async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string): Promise<ConfigFrame> {
+async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, supportsMcp = false): Promise<ConfigFrame> {
   for (let attempt = 0; attempt < 8; attempt++) {
     const revision = await deps.store.loginRevision(workspace.id);
     if (revision === null || !await deps.store.workerSession(token, bootId)) throw unauthorized();
     const config = await deps.config(workspace);
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
-    if (revision === await deps.store.loginRevision(workspace.id)) return { ...config, loginRevision: revision,
-      ...(deps.promptOutbox ? { promptOutbox: 1 } : {}) };
+    if (revision === await deps.store.loginRevision(workspace.id)) {
+      const { mcpServers, ...legacy } = config;
+      return { ...legacy, loginRevision: revision, ...(supportsMcp && mcpServers ? { mcpServers } : {}),
+        ...(deps.promptOutbox ? { promptOutbox: 1 } : {}) };
+    }
   }
   throw new HttpError(503, "configuration_changing", "Worker configuration is changing");
 }
@@ -64,7 +69,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     const workspace = await deps.store.acceptWorkerHello(bearer(c), input.bootId);
     if (!workspace) throw unauthorized();
-    return c.json({ config: await configuration(deps, workspace, bearer(c), input.bootId) });
+    return c.json({ config: await configuration(deps, workspace, bearer(c), input.bootId, supportsMcp(c)) });
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {
     const auth = await session(c, deps), input = await body(c, CloudV2WorkerHistorySchema);
@@ -80,7 +85,15 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   });
   app.get(`${CLOUD_V2_WORKER_API}/config`, async c => {
     const auth = await session(c, deps);
-    return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId) });
+    return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, supportsMcp(c)) });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/mcp/:id/authorization`, async c => {
+    const auth = await session(c, deps), input = await body(c, z.object({ force: z.boolean().optional() }).strict());
+    const id = z.string().uuid().safeParse(c.req.param("id"));
+    if (!id.success || !deps.mcpAuthorization) throw new HttpError(404, "not_found", "MCP server not found");
+    const result = await deps.mcpAuthorization(auth.workspace, id.data, input.force ?? false);
+    if (!await deps.store.workerSession(auth.token, auth.bootId)) throw unauthorized();
+    return c.json(result);
   });
   app.post(`${CLOUD_V2_WORKER_API}/github-token`, async c => {
     const auth = await session(c, deps);

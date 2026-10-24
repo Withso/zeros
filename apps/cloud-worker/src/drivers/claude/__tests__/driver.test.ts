@@ -14,6 +14,18 @@ function setup() {
   drivers.push(driver); return { driver, ...h };
 }
 
+it("delivers worker MCP to the native query and redacts its capability from events", async () => {
+  const { driver, queries } = setup(), events: SessionNotification[] = [];
+  driver.onEvent(event => events.push(event));
+  const mcpServers = { tools: { type: "http" as const, url: "http://127.0.0.1:3222/mcp/fixture", headers: { Authorization: "Bearer fixture-mcp-secret" } } };
+  await driver.open({ ...input, mcpServers });
+  const turn = driver.prompt(text("hello")), query = queries[0], sent = await query.read();
+  expect(query.args.options.mcpServers).toEqual(mcpServers);
+  query.push({ type: "assistant", message: { content: [{ type: "text", text: "fixture-mcp-secret" }] }, session_id: nativeId });
+  query.push(result(sent.uuid)); await turn;
+  expect(JSON.stringify(events)).not.toContain("fixture-mcp-secret");
+});
+
 it("distinguishes lightweight open from first-turn process readiness and reuse", async () => {
   const { driver, queries } = setup(), stages: string[] = [];
   await driver.open({ ...input, onTiming: stage => { stages.push(stage); } });

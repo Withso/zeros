@@ -45,7 +45,9 @@ import {
 import { OAuthVault, ZerosOAuthProvider } from "./oauth-provider";
 import { canonicalResourceUri, parseAuthorizationCode } from "./oauth-url";
 import { safeAuthFetch } from "./safe-fetch";
-import { CatalogClient } from "./list-tools";
+import { CatalogClient, ToolDiscoveryError } from "./list-tools";
+import { mcpResourceHeaders } from "./resource-headers";
+import { McpOAuthCallback } from "./oauth-callback";
 import { openExternalUrl } from "./open-url";
 import type { GatewayBackend } from "../mcp-registry";
 
@@ -64,6 +66,8 @@ interface BackendCatalog {
 
 const GATEWAY_NAME = "zeros-gateway";
 const GATEWAY_VERSION = "0.1.0";
+
+class ConnectionTimeoutError extends Error {}
 
 /** OAuth discovery/token fetches share the SDK's fetch callback. Resource
  * headers belong only on the MCP endpoint or its same-origin SSE RPC POSTs. */
@@ -104,15 +108,16 @@ export class McpGateway {
   // Mutable: when constructed with port 0 (ephemeral), the OS-assigned port is
   // written back after listen() so `url`/`callbackUrl` report the real address.
   private port: number;
-  private callbackPort: number;
+  private readonly callback: McpOAuthCallback;
+  private readonly ownsCallback: boolean;
+  private removeCallback?: () => void;
   private readonly openBrowser: (url: string) => void;
   private readonly vault: OAuthVault;
   /** Permit loopback/private backend URLs (off by default — the SSRF guard blocks
    *  them). On only for a local-dev MCP backend or the gateway's own tests. */
   private readonly allowLoopback: boolean;
+  private readonly clientMetadataOrigin?: string;
   private httpServer: http.Server | null = null;
-  /** The loopback OAuth-redirect server (RFC 8252), bound on `callbackPort`. */
-  private callbackServer: http.Server | null = null;
   private authFlight: {
     backend: GatewayBackend;
     provider: ZerosOAuthProvider;
@@ -124,6 +129,7 @@ export class McpGateway {
     resolve: (query: URLSearchParams) => void;
     reject: (error: Error) => void;
     headless: boolean;
+    callbackAccepted: boolean;
   } | null = null;
   private connectionRevision = 0;
   private operationRevision = 0;
@@ -156,15 +162,19 @@ export class McpGateway {
     port: number;
     /** Loopback port for the OAuth redirect (RFC 8252) — fixed + registered. */
     callbackPort: number;
+    callback?: McpOAuthCallback;
     /** Open a URL in the system browser (defaults to the OS opener). */
     openBrowser?: (url: string) => void;
     /** Token vault (pass a persisted one; defaults to in-memory). */
     vault?: OAuthVault;
     /** Allow loopback/private backend URLs (local-dev backends + tests). */
     allowLoopback?: boolean;
+    clientMetadataOrigin?: string;
   }) {
+    this.clientMetadataOrigin = opts.clientMetadataOrigin;
     this.port = opts.port;
-    this.callbackPort = opts.callbackPort;
+    this.ownsCallback = !opts.callback;
+    this.callback = opts.callback ?? new McpOAuthCallback(opts.callbackPort);
     this.openBrowser = opts.openBrowser ?? openExternalUrl;
     this.vault = opts.vault ?? new OAuthVault();
     this.allowLoopback = opts.allowLoopback ?? false;
@@ -172,7 +182,7 @@ export class McpGateway {
 
   /** The loopback callback URL the AS redirects to (the registered redirect_uri). */
   private get callbackUrl(): string {
-    return `http://127.0.0.1:${this.callbackPort}/callback`;
+    return this.callback.url;
   }
 
   /** SSRF guard for every fetch the SDK makes during a backend's OAuth flow — a
@@ -206,8 +216,13 @@ export class McpGateway {
     options: Pick<StreamableHTTPClientTransportOptions, "requestInit" | "authProvider">,
     signal?: AbortSignal,
   ): BackendTransport {
-    const resourceHeaders = new Headers(backend.headers);
-    new Headers(options.requestInit?.headers).forEach((value, name) => resourceHeaders.set(name, value));
+    const credentialKey = backend.credentialKey ?? canonicalResourceUri(backend.url);
+    const rawHeaders = new Headers(backend.headers);
+    const credentialHeaders = backend.auth === "header" ? backend.headerNames ?? [backend.headerName ?? "Authorization"] : [];
+    // Stored credentials win case-insensitively, then resolve configured
+    // variables once. Overlaying raw vault strings afterwards loses expansion.
+    for (const name of [...(backend.sealedHeaders ?? []), ...credentialHeaders]) rawHeaders.set(name, "${zeros.secret}");
+    const resourceHeaders = new Headers(backend.authorization ? {} : mcpResourceHeaders({ env: backend.variables, headers: Object.fromEntries(rawHeaders) }, this.vault.readEntry(credentialKey)));
     // The selected OAuth credential owns Authorization, including before login.
     if (options.authProvider) resourceHeaders.delete("authorization");
     const sensitiveHeaders = [...resourceHeaders.keys()];
@@ -216,14 +231,28 @@ export class McpGateway {
       // requestInit is also inherited by the SDK's OAuth fetch wrapper. Inject
       // resource headers at the final MCP request boundary instead.
       requestInit: { ...options.requestInit, headers: undefined },
-      fetch: (input: string | URL | Request, init?: RequestInit) => {
-        if (isBackendMcpRequest(backend, input, init)) {
+      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+        const resourceRequest = isBackendMcpRequest(backend, input, init);
+        const requestSignal = signal && init?.signal ? AbortSignal.any([signal, init.signal]) : signal ?? init?.signal ?? undefined;
+        let originalHeaders: Headers | undefined;
+        if (resourceRequest) {
           const headers = new Headers(resourceHeaders);
           const nativeHeaders = init?.headers ?? (typeof input === "object" && !(input instanceof URL) ? input.headers : undefined);
           new Headers(nativeHeaders).forEach((value, name) => headers.set(name, value));
+          originalHeaders = new Headers(headers);
+          if (backend.authorization) {
+            const authorization = await backend.authorization(false, requestSignal);
+            new Headers(authorization).forEach((value, name) => headers.set(name, value));
+          }
           init = { ...init, headers };
         }
-        return this.guardedFetch(input, signal ? { ...init, signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal } : init, sensitiveHeaders);
+        const protectedHeaders = [...new Set([...sensitiveHeaders, ...new Headers(init?.headers).keys()])];
+        const response = await this.guardedFetch(input, { ...init, signal: requestSignal }, protectedHeaders);
+        if (response.status !== 401 || !resourceRequest || !backend.authorization) return response;
+        await response.body?.cancel();
+        const headers = new Headers(originalHeaders);
+        new Headers(await backend.authorization(true, requestSignal)).forEach((value, name) => headers.set(name, value));
+        return this.guardedFetch(input, { ...init, headers, signal: requestSignal }, [...headers.keys()]);
       },
     };
     return backend.transport === "sse"
@@ -239,7 +268,7 @@ export class McpGateway {
       await Promise.race([
         client.connect(transport),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error(`${transport instanceof SSEClientTransport ? "SSE" : "HTTP"} MCP connection timed out`)), 15_000);
+          timer = setTimeout(() => reject(new ConnectionTimeoutError(`${transport instanceof SSEClientTransport ? "SSE" : "HTTP"} MCP connection timed out`)), 15_000);
         }),
       ]);
     } catch (error) {
@@ -255,6 +284,9 @@ export class McpGateway {
     return new ZerosOAuthProvider({
       vault: this.vault,
       resourceUri: canonicalResourceUri(backend.url),
+      credentialKey: backend.credentialKey,
+      clientMode: backend.clientMode,
+      clientMetadataOrigin: this.clientMetadataOrigin,
       redirectUrl: this.callbackUrl,
       clientName: "Zeros",
       openBrowser: this.openBrowser,
@@ -286,7 +318,14 @@ export class McpGateway {
   async start(backends: readonly GatewayBackend[]): Promise<void> {
     if (this.httpServer) return this.reload(backends);
     const operation = ++this.operationRevision;
-    if (!this.callbackServer) await this.bindCallback();
+    if (!this.removeCallback) this.removeCallback = this.callback.register(query => {
+      const flight = this.authFlight;
+      if (!flight || flight.headless || flight.callbackAccepted || !flight.provider.expectedState || query.get("state") !== flight.provider.expectedState) return false;
+      flight.callbackAccepted = true;
+      flight.resolve(query);
+      return true;
+    });
+    await this.callback.start();
     if (operation !== this.operationRevision) return;
     await this.connectBackends(backends);
     if (operation !== this.operationRevision) return;
@@ -321,11 +360,14 @@ export class McpGateway {
     this.aggregated = [];
     this.route = new Map();
     this.statuses = [];
-    for (const srv of [this.httpServer, this.callbackServer]) {
-      if (srv) await new Promise<void>((resolve) => srv.close(() => resolve()));
+    if (this.httpServer) {
+      this.httpServer.closeAllConnections();
+      await new Promise<void>(resolve => this.httpServer!.close(() => resolve()));
+      this.httpServer = null;
     }
-    this.httpServer = null;
-    this.callbackServer = null;
+    this.removeCallback?.();
+    this.removeCallback = undefined;
+    if (this.ownsCallback) await this.callback.stop();
   }
 
   // ── backends (the gateway as client) ─────────────────────
@@ -353,13 +395,16 @@ export class McpGateway {
         void this.refreshBackendCatalog(catalog);
       });
       try {
-        if (b.auth === "header") {
+        if (b.authorization) {
+          transport = this.backendTransport(b, {}, abort.signal);
+        } else if (b.auth === "header") {
           // Static-header backend: the gateway adds the secret header (held in the
           // vault, engine-only) so the agent connects to localhost with no secret.
           // No OAuth/browser; a missing header is just "error" (set it via Edit) —
           // there's no interactive sign-in to fall back to.
-          const header = this.vault.getHeader(canonicalResourceUri(b.url));
-          if (!header) {
+          const headers = this.vault.getHeaders(b.credentialKey ?? canonicalResourceUri(b.url));
+          const required = b.headerNames ?? [b.headerName ?? "Authorization"];
+          if (required.some(name => !Object.keys(headers).some(key => key.toLowerCase() === name.toLowerCase()))) {
             statuses.push({
               name: b.name,
               url: b.url,
@@ -369,12 +414,7 @@ export class McpGateway {
             });
             continue;
           }
-          transport = this.backendTransport(b, {
-            // non-secret plain headers (if any), with the brokered secret on top
-            requestInit: {
-              headers: { [header.name]: header.value },
-            },
-          }, abort.signal);
+          transport = this.backendTransport(b, {}, abort.signal);
         } else {
           // PASSIVE OAuth connect: the provider is non-interactive, so a missing/
           // expired token yields UnauthorizedError (no browser) → "needs-auth". A
@@ -386,8 +426,12 @@ export class McpGateway {
           }, abort.signal);
         }
         this.connectingClients.add(client);
-        await this.connectBackend(client, transport);
-        const { tools } = await client.listTools(undefined, { signal: abort.signal });
+        const activeTransport = transport;
+        const { tools } = await this.runOnBackend(b.name, async () => {
+          abort.signal.throwIfAborted();
+          await this.connectBackend(client, activeTransport);
+          return client.getServerCapabilities()?.tools ? client.listTools(undefined, { signal: abort.signal, timeout: 12_000 }) : { tools: [] };
+        });
         if (revision !== this.connectionRevision) {
           this.connectingClients.delete(client);
           await client.close();
@@ -408,7 +452,8 @@ export class McpGateway {
         });
       } catch (err) {
         this.connectingClients.delete(client);
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = err instanceof ConnectionTimeoutError || err instanceof ToolDiscoveryError
+          ? err.message : "Could not connect. Check the server URL and authentication.";
         // No "needs-auth" for header backends — there's no interactive sign-in.
         const needsAuth =
           b.auth !== "header" &&
@@ -520,7 +565,7 @@ export class McpGateway {
   private startAuthorization(backendName: string, headless: boolean) {
     if (this.authFlight) throw new Error("Another MCP sign-in is already in progress.");
     const backend = this.backendList.find((b) => b.name === backendName);
-    if (!backend || backend.auth !== "oauth") throw new Error("This server is not configured for OAuth.");
+    if (!backend || backend.auth !== "oauth" || backend.authorization) throw new Error("Connect this server from its MCP settings page.");
     const provider = this.providerFor(backend);
     provider.setInteractive(!headless);
     const abort = new AbortController();
@@ -531,7 +576,7 @@ export class McpGateway {
     const callback = new Promise<URLSearchParams>((yes, no) => { resolve = yes; reject = no; });
     // Cancellation can arrive during discovery, before the callback is awaited.
     void callback.catch(() => {});
-    const flight = { backend, provider, transport, client, abort, callback, resolve, reject, headless,
+    const flight = { backend, provider, transport, client, abort, callback, resolve, reject, headless, callbackAccepted: false,
       timer: setTimeout(() => { if (this.authFlight === flight) void this.cancelAuthorization(backendName); }, 5 * 60_000) };
     this.authFlight = flight;
     return flight;
@@ -577,7 +622,7 @@ export class McpGateway {
   async authorize(backendName: string): Promise<GatewayBackendStatus> {
     const flight = this.startAuthorization(backendName, false);
     try {
-      try { await this.connectBackend(flight.client, flight.transport); }
+      try { await this.runOnBackend(flight.backend.name, () => this.connectBackend(flight.client, flight.transport)); }
       catch (error) {
         if (!(error instanceof UnauthorizedError)) throw error;
         const query = await flight.callback;
@@ -585,7 +630,7 @@ export class McpGateway {
         if (query.get("error")) throw new Error("MCP authorization was denied.");
         const code = query.get("code");
         if (!code || query.get("state") !== flight.provider.expectedState) throw new Error("Invalid MCP authorization callback.");
-        await flight.transport.finishAuth(code);
+        await this.runOnBackend(flight.backend.name, async () => { this.assertFlight(flight); await flight.transport.finishAuth(code); });
       }
       return await this.finishAuthorization(flight);
     } catch (error) {
@@ -599,7 +644,7 @@ export class McpGateway {
     await this.cancelAuthorization(backendName);
     if (operation !== this.operationRevision) return;
     const backend = this.backendList.find((b) => b.name === backendName);
-    if (backend) this.vault.clear(canonicalResourceUri(backend.url));
+    if (backend) this.vault.clear(backend.credentialKey ?? canonicalResourceUri(backend.url));
     await this.disconnectBackends();
     if (operation !== this.operationRevision) return;
     await this.connectBackends(this.backendList);
@@ -609,7 +654,7 @@ export class McpGateway {
     const flight = this.startAuthorization(backendName, true);
     try {
       try {
-        await this.connectBackend(flight.client, flight.transport);
+        await this.runOnBackend(flight.backend.name, () => this.connectBackend(flight.client, flight.transport));
         throw new Error("This server is already authorized.");
       } catch (error) { if (!(error instanceof UnauthorizedError)) throw error; }
       this.assertFlight(flight);
@@ -630,65 +675,11 @@ export class McpGateway {
     try {
       const { code, state } = parseAuthorizationCode(pasted);
       if (state && state !== flight.provider.expectedState) throw new Error("Authorization state mismatch — start sign-in again.");
-      await flight.transport.finishAuth(code);
+      await this.runOnBackend(flight.backend.name, async () => { this.assertFlight(flight); await flight.transport.finishAuth(code); });
       return await this.finishAuthorization(flight);
     } catch (error) {
       if (this.authFlight === flight) await this.cancelAuthorization(backendName);
       throw error;
-    }
-  }
-
-  // ── OAuth loopback redirect (RFC 8252) ───────────────────
-
-  private async bindCallback(): Promise<void> {
-    const server = http.createServer((req, res) =>
-      this.handleCallback(req, res),
-    );
-    await new Promise<void>((resolve, reject) => {
-      const onError = (err: unknown) => reject(err);
-      server.once("error", onError);
-      server.listen(this.callbackPort, "127.0.0.1", () => {
-        server.removeListener("error", onError);
-        resolve();
-      });
-    });
-    this.callbackPort = (server.address() as AddressInfo).port; // resolve an ephemeral (0) port
-    this.callbackServer = server;
-  }
-
-  private handleCallback(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): void {
-    try {
-      const u = new URL(
-        req.url ?? "/",
-        `http://127.0.0.1:${this.callbackPort}`,
-      );
-      if (u.pathname !== "/callback") {
-        res.statusCode = 404;
-        res.end();
-        return;
-      }
-      const flight = this.authFlight;
-      if (!flight || flight.headless || !flight.provider.expectedState || u.searchParams.get("state") !== flight.provider.expectedState) {
-        res.writeHead(400).end("No matching sign-in. Return to Zeros and start again.");
-        return;
-      }
-      flight.resolve(u.searchParams);
-      res.statusCode = 200;
-      res.setHeader("content-type", "text/html; charset=utf-8");
-      res.end(
-        '<!doctype html><meta charset=utf-8><body style="font-family:system-ui;padding:3rem;text-align:center">' +
-          "<h2>Return to Zeros</h2><p>Zeros will show the connection result. You can close this tab.</p></body>",
-      );
-    } catch {
-      try {
-        res.statusCode = 500;
-        res.end();
-      } catch {
-        /* response already gone */
-      }
     }
   }
 
@@ -720,6 +711,8 @@ export class McpGateway {
    *  single-flight lock chain swallows results so one failure never poisons
    *  the queue; the caller still gets `fn`'s real result/rejection. */
   private runOnBackend<T>(server: string, fn: () => Promise<T>): Promise<T> {
+    const backend = this.backendList.find(row => row.name === server);
+    if (backend?.auth === "oauth" && !backend.authorization) return this.vault.exclusive(backend.credentialKey ?? canonicalResourceUri(backend.url), fn);
     const prev = this.backendLocks.get(server) ?? Promise.resolve();
     const next = prev.then(fn, fn); // run fn whether the previous call resolved or threw
     this.backendLocks.set(

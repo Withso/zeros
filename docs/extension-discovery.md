@@ -12,6 +12,42 @@ inventory endpoints remain available to engine callers for future UI work;
 browsing Customize does not start native account discovery. Legacy selections
 for provider inventories restore synchronously to a Zeros category.
 
+MCP creation uses one segmented editor for Local and organization owners:
+Server (name, owner and project), Runtime, Variables, and HTTP authentication.
+Variables, headers and custom OAuth client secrets are write-only values;
+reopening a server never retrieves them into the renderer. Importing JSON,
+Codex TOML, a URL or a literal command fills a draft for review and does not
+save it. Validation runs on Save and reports action failures through a toast.
+
+Local definitions belong to **You** and target all local projects or one local
+repository. Organization definitions belong to **Organisation** or **You**
+within that organization. Organization owners and admins edit shared
+definitions; members may connect their own OAuth account to them. Projects
+use authorized GitHub `owner/repo` names, with no local-path fallback or Cloud
+Computer prerequisite. The picker first refreshes the native human/App
+repository intersection, then reads the actor-bound expiring admission catalog.
+Account/organization generations fence all late reads and writes.
+
+Saved connection status is a last confirmed check, not a consequence of saving.
+HTTP checks run only while the editor is active, are debounced and cancellable,
+and never launch a process or open a browser. Changing secret values invalidates
+the draft check; cloud verification also includes the definition ID and revision.
+STDIO processes start only when an agent admits the configuration. OAuth
+**Connect** opens the provider login; polling exists only during an active
+organization sign-in and stops on cancellation, navigation or owner replacement.
+
+The editor's Tools section shows the complete discovered inventory, including
+disabled names. Test and Refresh share the bounded connection check; a failed
+refresh retains the last confirmed inventory for that exact configuration.
+An empty catalog differs from one not yet listed. Search and 50-row pages bound
+rendering for large catalogs. Tool choices stay in the draft until Save,
+preserve restrictions on names absent from the latest catalog, and do not
+restart discovery. Switches are editable only for gateway-controlled remote
+servers and an authorized editor: Local OAuth/API-key connections and all
+organization HTTP/SSE connections. Direct Local connections, STDIO, and
+read-only shared definitions show disabled switches. STDIO processes are never
+started merely to list their tools in this editor.
+
 ## Provider contracts
 
 Audited against the repository pins on 2026-09-10: Codex protocol 0.153.4,
@@ -44,11 +80,12 @@ Primary research references:
 
 ## Explicit MCP transport
 
-The shared registry supports `stdio`, `http` (Streamable HTTP), and `sse`
-(the separate SSE event-stream and POST endpoints). Choose the transport in
-Customize → MCP → Add/Edit. Remote transports share the existing URL, headers,
-and authentication controls. Imports preserve an explicit native `type: "sse"`;
-an untyped URL retains the existing HTTP default. Neither a `/sse` URL suffix
+Creation offers **STDIO** and **Streamable HTTP**. The shared registry still
+reads persisted `sse` configurations (separate event-stream and POST endpoints),
+and editing one preserves its transport until explicitly changed. The new
+configuration parser refuses explicit legacy SSE imports; the existing native
+inventory scanner retains the transport of previously configured servers.
+An untyped URL defaults to HTTP. Neither a `/sse` URL suffix
 nor an HTTP response using SSE framing determines the configured transport.
 Unknown explicit transport types are not converted to HTTP.
 
@@ -62,7 +99,7 @@ are materialized only in the admitted SDK options.
 - Cursor SDK 1.0.31 and Claude SDK 0.3.266 receive the declared remote `type`.
   Cursor prewarm, create, resume, missing-session recovery, and mode recreation
   use the same admitted registry. Claude query recreation also retains it.
-- OAuth and stored-header servers use the existing user/managed gateway. Its
+- OAuth and stored-header servers use the user/managed or exact-project gateway. Its
   backend transport preserves HTTP or SSE through passive connection, browser
   authorization, paste-code authorization, and reload. The agent-facing gateway
   stays Streamable HTTP, so those SSE tools remain available to all providers.
@@ -119,18 +156,30 @@ schema IDs. Stop/reload aborts pending
 reads and late results cannot restore retired tools. These updates use the
 existing MCP settings status and inventory surfaces, without transcript notices.
 
-Remote OAuth servers use the shared user/managed gateway for Claude, Codex and
-Cursor. `oauth_client_id` selects a registered client; `oauth_scopes` requests
+Remote OAuth servers use a native gateway for Claude, Codex and Cursor.
+`oauth_client_mode` selects automatic discovery, Zeros' published client
+metadata, dynamic registration, or a custom client. Automatic uses the
+active service's HTTPS metadata URL when supported and falls back to dynamic
+registration. Explicit published identity refuses unsupported services.
+`oauth_client_id` selects a registered client; `oauth_scopes` requests
 explicit permissions. The optional client secret is entered in Customize → MCP
 and sent only to the engine vault, persisted through the existing encrypted
 credential store. It never enters settings, provider arguments, or the reopened
-form. Desktop persistence uses the private host pipe and Electron safeStorage;
-a standalone engine without that host retains credentials in memory only.
-Clear it explicitly with **Remove saved secret on save**. Native/JSON
-imports retain client IDs and scopes; an imported client secret is omitted with
-a warning and must be entered in the OAuth form. Inherited overrides retain
-public client/scopes configuration. Repo-scoped OAuth remains
-unsupported because the gateway has no repository-specific authorization owner.
+form. Desktop saves stage encrypted credentials through the private host pipe,
+wait for Electron's durable acknowledgement, then atomically replace settings.
+A failed save retains the prior configuration and the editable draft. The
+transaction shares the exact credential lock with token refresh. It refuses
+to report durable success without the native host. Clear an existing client
+secret with **Remove saved client secret**.
+
+Local credentials bind the opaque `credential_id`, repository owner and
+canonical resource URI. Released URI-only credentials remain readable and are
+upgraded when edited. Exact-project gateways isolate inherited and project
+registries while sharing the same OAuth callback listener. Removal and
+shutdown retire pending initialization and queued reloads before they can
+publish a replacement. Native inventory imports retain their existing
+client-ID/scopes behavior; the new parser can fill an imported secret into the
+write-only draft. No import saves until the user submits it.
 
 Changing client ID, secret or scopes invalidates the prior authorization.
 Equivalent scope order does not. Legacy default registrations remain readable.
@@ -139,12 +188,13 @@ Renewal persists rotated refresh tokens; revoked grants clear tokens and expose
 flows and reject late token writes. The authorization timeout also bounds
 paste-code flights. Passive reconnect never opens a browser. Connection failures
 offer **Reconnect**; authentication failures offer **Sign in**. Status reads are
-shared by exact engine connection, retain their confirmed snapshot and poll only
-on the active, visible settings surface. Concurrent reconnects publish only the
+shared by exact engine/project connection and retain their confirmed snapshot.
+There is no idle credential polling. Concurrent reconnects publish only the
 latest configuration; a retired connection cannot clear newer clients. A rejected
 static API key stays a configuration error and never offers OAuth recovery.
 
-STDIO entries accept optional `cwd`, shown as **Working directory**. Absolute
+STDIO entries accept literal argument rows, including empty arguments, and
+optional `cwd`, shown as **Working directory**. Absolute
 paths and `~/` refer to the machine running the engine; relative paths resolve
 against the chat workspace. Save validates resolvable paths; session admission
 validates and canonicalizes all configured folders. An invalid folder must not
@@ -156,6 +206,12 @@ POSIX `cd`/`exec` launcher passes literal arguments and inherits the existing
 process boundary. It does not evaluate configuration as shell source. HTTP/SSE
 have no process folder. Cursor's hosted cloud SDK rejects per-server cwd;
 Zeros' engine-owned local SDK execution is the supported path.
+
+An optional `listen_url` launches that same command lazily and connects to its
+loopback HTTP endpoint. Startup refuses an already occupied endpoint, bounds
+readiness and cancellation, and terminates the owned process group on removal
+or shutdown. Configuration changes retire the previous process; a hidden
+editor never starts one.
 
 Regression coverage includes actual subprocess cwd/argv, paths containing shell
 syntax, invalid folders/symlinks, configuration imports and save round trips,

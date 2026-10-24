@@ -1,6 +1,7 @@
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import type { DriverTimingStage } from "../agent-timings";
+import type { DriverMcpServers } from "../mcp/gateway";
 
 interface DriverSession {
   sessionId: string;
@@ -10,6 +11,7 @@ interface DriverSession {
   effort?: string;
   nativeSessionId?: string;
   onTiming?: (stage: DriverTimingStage) => void;
+  mcpServers?: DriverMcpServers;
 }
 
 export type DriverOpen = DriverSession & (
@@ -17,6 +19,14 @@ export type DriverOpen = DriverSession & (
   | { apiKey: string; proxy?: never; oauthToken?: never }
   | { oauthToken: string; proxy?: never; apiKey?: never }
 );
+
+export function redactDriverMessage(message: string, input?: DriverOpen): string {
+  const secrets = [input?.proxy?.token, input?.oauthToken, input?.apiKey,
+    ...Object.values(input?.mcpServers ?? {}).flatMap(server => Object.values(server.headers))]
+    .filter((value): value is string => !!value).flatMap(value => /^Bearer /i.test(value) ? [value, value.slice(7)] : [value])
+    .sort((a,b) => b.length - a.length);
+  return secrets.reduce((text, secret) => text.split(secret).join("[redacted]").split(JSON.stringify(secret).slice(1,-1)).join("[redacted]"), message);
+}
 
 /** One driver owns one native conversation. Relay/inbox/history are worker-owned. */
 export interface Driver {

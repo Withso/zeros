@@ -1568,10 +1568,17 @@ export function buildMcpServerOverrides(
         args.push("-c", `${base}.default_tools_approval_mode="approve"`);
       }
     } else {
-      args.push("-c", `${base}.command="${escapeTomlString(s.command)}"`);
-      if (s.args && s.args.length > 0) {
-        args.push("-c", `${base}.args=${tomlStringArray(s.args)}`);
+      const refs = Object.entries(s.envFromEnv ?? {});
+      if (refs.some(([name, reference]) => !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(name) || !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(reference))) throw new Error("Invalid MCP credential reference.");
+      const command = refs.length ? "/bin/sh" : s.command;
+      // The shell only copies validated variable references, then execs the
+      // original argv unchanged. Credential values never enter command arguments.
+      const commandArgs = refs.length ? ["-c", `${refs.map(([name, reference]) => `${name}="$${reference}"; export ${name}; unset ${reference};`).join(" ")} exec "$@"`, "zeros-mcp", s.command, ...(s.args ?? [])] : s.args;
+      args.push("-c", `${base}.command="${escapeTomlString(command)}"`);
+      if (commandArgs && commandArgs.length > 0) {
+        args.push("-c", `${base}.args=${tomlStringArray(commandArgs)}`);
       }
+      if (refs.length) args.push("-c", `${base}.env_vars=${tomlStringArray(refs.map(([, reference]) => reference))}`);
       if (s.env && Object.keys(s.env).length > 0) {
         args.push("-c", `${base}.env=${tomlInlineTable(s.env)}`);
       }

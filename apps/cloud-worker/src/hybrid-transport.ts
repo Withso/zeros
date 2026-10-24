@@ -4,6 +4,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameS
 import { InboundBridge } from "./inbound-bridge";
 import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
 import type { PromptOperation, Transport, TransportHandlers } from "./transport";
+import type { McpAuthorization } from "./mcp/gateway";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type HybridStatus = "connected" | "disconnected" | "credential-unavailable" | "unauthorized" | "stopped" | "protocol-error";
@@ -110,6 +111,16 @@ export class HybridTransport implements Transport {
   async promptRequest(operation: PromptOperation, body: unknown, signal?: AbortSignal): Promise<unknown> {
     try { return await this.request(`prompts/${operation}`, body, signal, operation === "pull" ? 35_000 : 10_000); }
     catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
+  }
+  async mcpAuthorization(id: string, force = false, signal?: AbortSignal): Promise<McpAuthorization> {
+    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)) throw new Error("Invalid MCP server identity.");
+    const reply = await this.request(`mcp/${id}/authorization`, { force }, signal, 35_000);
+    if (!reply.headers || typeof reply.headers !== "object" || Array.isArray(reply.headers) ||
+      Object.keys(reply.headers).length > 128 || Object.entries(reply.headers).some(([key, value]) =>
+        !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) || typeof value !== "string" || value.length > 16384 || /[\r\n\0]/.test(value)) ||
+      (reply.expiresAt !== undefined && (typeof reply.expiresAt !== "number" || !Number.isSafeInteger(reply.expiresAt) || reply.expiresAt <= 0)))
+      throw new Error("Invalid MCP authorization response.");
+    return { headers: reply.headers as Record<string, string>, ...(reply.expiresAt === undefined ? {} : { expiresAt: reply.expiresAt as number }) };
   }
   private recover(): void {
     if (this.stopped) return;
@@ -218,7 +229,7 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          ...(path === "hello" ? { "X-Zeros-Worker-Features": "prompt-outbox-v1" } : {}) },
+          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1" },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) { await response.body?.cancel(); throw new HttpFailure(response.status); }
