@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readWorkspaceFile } from "@/renderer/platform/files";
 import { gitDiff } from "@/renderer/platform/git";
 import { turnDiff } from "@/renderer/platform/turns";
+import { readSkillSource } from "@/renderer/platform/skill-source";
 import {
   invalidateWorkspaceFileData,
   loadWorkspaceFileDiff,
@@ -18,6 +19,7 @@ import {
 vi.mock("@/renderer/platform/files", () => ({ readWorkspaceFile: vi.fn() }));
 vi.mock("@/renderer/platform/git", () => ({ gitDiff: vi.fn() }));
 vi.mock("@/renderer/platform/turns", () => ({ turnDiff: vi.fn() }));
+vi.mock("@/renderer/platform/skill-source", () => ({ readSkillSource: vi.fn() }));
 
 const readFile = vi.mocked(readWorkspaceFile);
 const diffFile = vi.mocked(gitDiff);
@@ -36,6 +38,18 @@ function deferred<T>() {
 }
 
 describe("workspace file data cache", () => {
+  it("isolates library source reads from normal files, other providers and other workspaces", async () => {
+    const source = { agentId: "claude" as const, path: "/library/review/SKILL.md", name: "review" };
+    const query = { cwd: "/repo", path: source.path, skillSource: source };
+    vi.mocked(readSkillSource).mockResolvedValueOnce(textResult(source.path, "source"));
+    await loadWorkspaceFileRead(query);
+    expect(readSkillSource).toHaveBeenCalledWith(query.cwd, source);
+    expect(readFile).not.toHaveBeenCalled();
+    expect(peekWorkspaceFileRead(query)?.content).toBe("source");
+    expect(peekWorkspaceFileRead({ cwd: query.cwd, path: query.path })).toBeUndefined();
+    expect(peekWorkspaceFileRead({ ...query, cwd: "/other" })).toBeUndefined();
+    expect(peekWorkspaceFileRead({ ...query, skillSource: { ...source, agentId: "codex" } })).toBeUndefined();
+  });
   it("keeps one oversized Local patch warm without evicting ordinary primed patches", async () => {
     const query = { workspaceId: "workspace", path: "generated.txt", fullContext: true };
     const small = { ...query, path: "normal.txt" };

@@ -33,6 +33,7 @@ interface SkillPayload {
   icon: string;
   body: string;
   path: string;
+  content: string;
 }
 
 /** Split `--- <yaml> ---\n<body>` into a flat key→value map and the
@@ -72,77 +73,82 @@ function splitFrontmatter(raw: string): { fm: Map<string, string>; body: string 
  *  Claude `~/.claude/skills`, Codex `$CODEX_HOME/skills`, Cursor
  *  `~/.cursor/skills`. A project-level `<cwd>/skills` is always included as a
  *  cross-agent convention. Missing dirs are simply skipped by the scanner. */
-function resolveSkillRoots(agentId: string | null, cwd: string | null): string[] {
+interface SkillRoot { owner: string; path: string }
+function resolveSkillRoots(agentId: string | null, cwd: string | null): SkillRoot[] {
   const home = os.homedir();
-  const roots: string[] = [];
-  switch (agentId) {
-    case "claude":
-      if (cwd) roots.push(path.join(cwd, ".claude", "skills"));
-      roots.push(path.join(home, ".claude", "skills"));
-      break;
-    case "codex": {
-      const codexHome = process.env.CODEX_HOME?.trim() || path.join(home, ".codex");
-      if (cwd) roots.push(path.join(cwd, ".codex", "skills"));
-      roots.push(path.join(codexHome, "skills"));
-      break;
-    }
-    case "cursor":
-      if (cwd) roots.push(path.join(cwd, ".cursor", "skills"));
-      roots.push(path.join(home, ".cursor", "skills"));
-      break;
-    default:
-      // Unknown/no agent → the home Claude library is the most complete default.
-      roots.push(path.join(home, ".claude", "skills"));
-      break;
-  }
-  // Project-level `<cwd>/skills` (the original convention) for every agent.
-  if (cwd) roots.push(path.join(cwd, "skills"));
-  return roots;
+  const provider = ["claude", "codex", "cursor"].includes(agentId ?? "") ? agentId! : "claude";
+  const providerHome = provider === "codex"
+    ? process.env.CODEX_HOME?.trim() || path.join(home, ".codex")
+    : path.join(home, `.${provider}`);
+  return [
+    ...(cwd ? [
+      { owner: cwd, path: path.join(cwd, `.${provider}`, "skills") },
+      { owner: cwd, path: path.join(cwd, ".agents", "skills") },
+      { owner: cwd, path: path.join(cwd, "skills") },
+    ] : []),
+    { owner: providerHome, path: path.join(providerHome, "skills") },
+    ...(provider === "codex" ? [{ owner: providerHome, path: path.join(providerHome, "skills", ".system") }] : []),
+    { owner: home, path: path.join(home, ".agents", "skills") },
+  ];
 }
 
-/** Scan ONE skill root into `byName`. Accepts both the `<name>/SKILL.md`
- *  subdirectory convention (Claude/Codex/Cursor) and a flat `<name>.md` file.
- *  Earlier roots win — a name already present is left untouched (workspace
- *  overrides user-home). Missing/unreadable dirs are skipped. */
-function scanSkillRoot(dir: string, byName: Map<string, SkillPayload>): void {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return; // dir absent / unreadable → no skills from here
-  }
-  for (const entry of entries) {
-    let file: string | null = null;
-    let id = "";
-    if (entry.isDirectory()) {
-      const candidate = path.join(dir, entry.name, "SKILL.md");
-      if (fs.existsSync(candidate)) {
-        file = candidate;
-        id = entry.name;
-      }
-    } else if (entry.isFile() && path.extname(entry.name) === ".md") {
-      file = path.join(dir, entry.name);
-      id = path.basename(entry.name, ".md");
-    }
-    if (!file) continue;
+const MAX_SKILL_BYTES = 256 * 1024;
+const MAX_CATALOG_BYTES = 2 * 1024 * 1024;
+function contained(root: string, file: string): boolean {
+  const rel = path.relative(root, file);
+  return rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) && !rel.split(path.sep).includes(".git");
+}
 
-    let raw: string;
-    try {
-      raw = fs.readFileSync(file, "utf-8");
-    } catch {
-      continue;
-    }
+/** The held descriptor and identity checks bound reads even if a repository
+ * changes during discovery. A source preview cannot widen the library root. */
+function readSkill(file: string, root: string): string | null {
+  let fd: number | undefined;
+  try {
+    const resolved = fs.realpathSync(file);
+    if (!contained(root, resolved)) return null;
+    const before = fs.lstatSync(resolved);
+    if (!before.isFile() || before.size > MAX_SKILL_BYTES) return null;
+    fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const held = fs.fstatSync(fd);
+    if (!held.isFile() || held.dev !== before.dev || held.ino !== before.ino || held.size > MAX_SKILL_BYTES) return null;
+    const bytes = Buffer.alloc(MAX_SKILL_BYTES + 1);
+    const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+    const finalPath = fs.realpathSync(file), after = fs.statSync(finalPath);
+    if (length > MAX_SKILL_BYTES || !contained(root, finalPath) || after.dev !== held.dev || after.ino !== held.ino) return null;
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length));
+  } catch { return null; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
+/** Earlier roots win; all project conventions precede home libraries. */
+function scanSkillRoot(root: SkillRoot, byName: Map<string, SkillPayload>, budget: { bytes: number }): void {
+  let directory: string, entries: fs.Dirent[];
+  try {
+    directory = fs.realpathSync(root.path);
+    if (!contained(fs.realpathSync(root.owner), directory)) return;
+    entries = fs.readdirSync(directory, { withFileTypes: true });
+  } catch { return; }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries.slice(0, 512)) {
+    if (byName.size >= 256) break;
+    const id = entry.isDirectory() ? entry.name : entry.name.replace(/\.md$/i, "");
+    const file = entry.isDirectory() ? path.join(directory, entry.name, "SKILL.md")
+      : entry.isFile() && /\.md$/i.test(entry.name) ? path.join(directory, entry.name) : null;
+    if (!file) continue;
+    const raw = readSkill(file, directory);
+    if (raw === null) continue;
     const { fm, body } = splitFrontmatter(raw);
-    const name = fm.get("name") || id;
-    if (byName.has(name)) continue; // earlier (workspace) root wins
-    byName.set(name, {
-      id,
-      name,
-      description: fm.get("description") ?? "",
-      icon: fm.get("icon") ?? "Sparkles",
-      body,
-      path: file,
-    });
+    const unquote = (value: string | undefined) => value?.replace(/^(['"])(.*)\1$/, "$2");
+    const name = unquote(fm.get("name")) || id;
+    if (byName.has(name)) continue;
+    const skill: SkillPayload = {
+      id, name, description: unquote(fm.get("description")) ?? "",
+      icon: unquote(fm.get("icon")) ?? "Sparkles", body, path: file, content: raw,
+    };
+    const size = Buffer.byteLength(JSON.stringify(skill)) + 1;
+    if (budget.bytes + size > MAX_CATALOG_BYTES) continue;
+    budget.bytes += size;
+    byName.set(name, skill);
   }
 }
 
@@ -156,7 +162,8 @@ export const skillsList: CommandHandler = (args) => {
   const agentId = typeof a.agentId === "string" ? a.agentId : null;
 
   const byName = new Map<string, SkillPayload>();
-  for (const root of resolveSkillRoots(agentId, cwd)) scanSkillRoot(root, byName);
+  const budget = { bytes: 2 };
+  for (const root of resolveSkillRoots(agentId, cwd)) scanSkillRoot(root, byName, budget);
 
   // Stable lower-case sort so the picker doesn't shuffle between calls.
   return Array.from(byName.values()).sort((x, y) =>

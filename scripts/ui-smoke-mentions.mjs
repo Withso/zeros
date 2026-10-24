@@ -57,21 +57,41 @@ export async function runMentionsSmoke({ page, check }) {
 
   await typeQuery("new-attachment");
   await expect(page.getByText("No matches.", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Create attachment" }).click();
+  // A filesystem update must refresh the open query without moving focus.
+  // Clicking a harness control is an outside interaction and dismisses the
+  // shared nonmodal popover; exercise that separately below.
+  await page.evaluate(() =>
+    window.mentionHarness.addPath(".context/attachments/new-attachment.txt"),
+  );
   await expect(
     page.getByRole("button", { name: /new-attachment.txt/ }),
   ).toBeVisible();
   check("new attachments refresh an already-open @ query", true);
 
+  const popup = page.locator('[data-composer-suggestions="@"]');
+  await page.getByRole("button", { name: "Inspect requests" }).click();
+  await expect(popup).toHaveCount(0);
+  await expect(input).toHaveText("@new-attachment");
+  await typeQuery("new-attachment");
+  await expect(
+    page.getByRole("button", { name: /new-attachment.txt/ }),
+  ).toBeVisible();
+  check("outside clicks dismiss @ without losing the draft or preventing reopening", true);
+
   await page.getByRole("button", { name: "Switch workspace" }).click();
+  await expect(popup).toHaveCount(0);
+  await typeQuery("new-attachment");
+  await expect(page.getByText("No matches.", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", { name: /new-attachment.txt/ }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "Switch workspace" }).click();
+  await expect(popup).toHaveCount(0);
+  await typeQuery("new-attachment");
   await expect(
     page.getByRole("button", { name: /new-attachment.txt/ }),
   ).toBeVisible();
-  check("@ results follow A → B → A workspace changes", true);
+  check("reopened @ results follow A → B → A workspace changes", true);
 
   // Hold the bridge response: a new query must show matching confirmed paths
   // without waiting for I/O. An unknown query must still be honestly loading.
@@ -98,16 +118,16 @@ export async function runMentionsSmoke({ page, check }) {
   const rollout = page.getByRole("button", { name: /rollout.jsonl/ });
   await expect(rollout).toBeVisible();
   await input.press("ArrowDown");
-  await expect(rollout).toHaveClass(/!bg-bg1-hover/);
+  await expect(rollout).toHaveAttribute("data-selected", "true");
   await page.evaluate(() => {
     window.mentionHarness.pause();
     window.mentionHarness.addPath("a.ts");
   });
   await page.waitForFunction(() => window.mentionHarness.pending() > 0);
-  await expect(rollout).toHaveClass(/!bg-bg1-hover/);
+  await expect(rollout).toHaveAttribute("data-selected", "true");
   await page.evaluate(() => window.mentionHarness.resume());
   await expect(page.getByRole("button", { name: /^a.ts/ })).toBeVisible();
-  await expect(rollout).toHaveClass(/!bg-bg1-hover/);
+  await expect(rollout).toHaveAttribute("data-selected", "true");
   await input.press("Enter");
   await expect(input.locator("[data-mention-pill]")).toHaveText(
     "rollout.jsonl",

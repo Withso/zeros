@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 
 export const computerRepositoryStorageKey =
@@ -83,7 +83,12 @@ export function useComputerRepositorySelection(
   owner: string | null,
   repositories: readonly CloudComputerRepository[] | null | undefined,
   active: boolean,
+  preferredId: string | null = null,
+  selectionIntent?: string | null,
 ) {
+  const [picked, setPicked] = useState<{ context: string; id: string } | null>(null);
+  const context = JSON.stringify([owner, selectionIntent]);
+  useEffect(() => { if (!active) setPicked(null); }, [active]);
   const remembered = useSyncExternalStore(
     active && owner ? subscribe : inactiveSubscribe,
     () => (owner ? (selections.get(owner) ?? null) : null),
@@ -92,6 +97,7 @@ export function useComputerRepositorySelection(
   // The exact owner's authoritative list determines the first paint. A cold
   // read cannot invalidate a remembered repository or select another owner.
   const repository =
+    repositories?.find((row) => row.id === (picked?.context === context ? picked.id : preferredId)) ??
     repositories?.find((row) => row.id === remembered) ??
     repositories?.[0] ??
     null;
@@ -101,9 +107,12 @@ export function useComputerRepositorySelection(
   }, [active, owner, repositories, repository?.id]);
   return {
     repository,
+    rememberedId: preferredId ?? remembered,
     select: (id: string) => {
-      if (active && owner && repositories?.some((row) => row.id === id))
+      if (active && owner && repositories?.some((row) => row.id === id)) {
+        setPicked({ context, id });
         rememberComputerRepository(owner, id);
+      }
     },
   };
 }

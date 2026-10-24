@@ -6,7 +6,7 @@ import { ControlPlaneError } from "../../../features/team/control-plane";
 import { computerOrg, computerRepository, computerUser, otherComputerOrg } from "./cloud-computer-fixtures";
 
 const state = vi.hoisted(() => ({
-  repositories: [] as CloudComputerRepository[] | null,
+  repositories: [] as CloudComputerRepository[] | null | undefined,
   enabled: true,
   personal: false,
   org: "",
@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   refresh: vi.fn(),
 }));
 vi.mock("../../../features/team/team-store", () => ({
+  getActiveOrganizationIdSnapshot: () => state.personal ? null : state.org,
   useActiveOrganization: () => ({
     id: state.org,
     isPersonal: state.personal,
@@ -65,6 +66,13 @@ beforeEach(() => {
   rememberComputerRepository(JSON.stringify([computerUser, computerOrg]), null);
 });
 describe("Create from the active Cloud Computer", () => {
+  it("keeps the cloud picker selected while the exact owner's repository list is cold", () => {
+    state.repositories = undefined;
+    const result = create();
+    expect(result.computerMode).toBe(true);
+    expect(result.computerRepository).toBeNull();
+    expect(cloudCreateRequest(result)).toBeNull();
+  });
   it("creates without a local project from the installed repositories and leaves the default branch to the server", () => {
     const result = create();
     expect(result).toMatchObject({

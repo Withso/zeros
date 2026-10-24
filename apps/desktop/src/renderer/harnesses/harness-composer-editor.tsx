@@ -4,7 +4,7 @@ import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 
-import { useLayoutEffect, useState } from "react";
+import { lazy, Suspense, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   useComposerEditor,
@@ -20,6 +20,32 @@ import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 
 const query = new URLSearchParams(location.search);
 const cwd = query.get("workspace") ?? "/composer-editor-harness";
+const suggestionsFixture = query.has("suggestions");
+let releaseSkills = () => {};
+const skillsReady = query.has("late-skills") ? new Promise<void>(resolve => { releaseSkills = resolve; }) : Promise.resolve();
+window.__releaseComposerSkills = () => releaseSkills();
+const composerActionCalls: string[] = [];
+const sourceContent = "---\nname: review-agent\n---\n# Review source\n\nReview carefully.";
+const sourceCatalog = () => [
+  { id: "review-agent", name: "Review Agent", description: "Review the source", icon: "FileText", body: "Review carefully.", path: `${cwd}/skills/review-agent/SKILL.md`, content: sourceContent },
+  { id: "library-review", name: "Library Review", description: "Review from the provider library", icon: "FileText", body: "Library review.", path: "/home/fixture/.claude/skills/library-review/SKILL.md", content: "# Library source\n\nLibrary review." },
+];
+const SourceViewer = lazy(() => import("../shell/workbench/tabs/file-viewer").then(module => ({ default: module.FileViewer })));
+if (suggestionsFixture) {
+  window.__ZEROS_NATIVE__ = {
+    on: () => () => {},
+    invoke: async <T,>(op: string, args?: Record<string, unknown>) => {
+      if (op === "skills_list") {
+        composerActionCalls.push(op);
+        await skillsReady;
+        return sourceCatalog() as T;
+      }
+      if (op === "read_file") return readFixtureFile(String(args?.path)) as T;
+      if (op === "git_list_files") return { files: ["src/App.tsx"] } as T;
+      return null as T;
+    },
+  };
+}
 const cloudTarget = parseCloudWorkspaceKey(cwd);
 if (cloudTarget) {
   acceptCloudWorkspaceDocument({
@@ -29,7 +55,7 @@ if (cloudTarget) {
     createdBy: cloudTarget.organizationId,
     name: "Composer fixture",
     placement: "cloud",
-    status: "ready",
+    status: query.has("stopped") ? "stopped" : "ready",
     version: 1,
     error: null,
     createdAt: "2026-10-15T00:00:00Z",
@@ -41,7 +67,7 @@ if (cloudTarget) {
       number: 1,
       architecture: "x86_64",
       resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
-      observedState: "running",
+      observedState: query.has("stopped") ? "stopped" : "running",
       lastObservedAt: null,
     },
   });
@@ -65,12 +91,30 @@ window.__composerAttachmentTransport = {
   },
 };
 
+function readFixtureFile(path: string) {
+  const record = [...records.values()].find(value => value.relativePath === path);
+  return record ? {
+    path, bytes: record.bytes.length,
+    ...(record.mimeType.startsWith("image/")
+      ? { kind: "image", dataUrl: `data:${record.mimeType};base64,${btoa(Array.from(record.bytes, byte => String.fromCharCode(byte)).join(""))}` }
+      : { kind: "text", content: new TextDecoder().decode(record.bytes) }),
+  } : path === "skills/review-agent/SKILL.md"
+    ? { kind: "text", path, bytes: sourceContent.length, content: sourceContent }
+    : { kind: "error", path, bytes: 0, error: "File not found" };
+}
+
 setActiveBridge({
   executionIdentity: { kind: "local", sidecar: "active" },
   request: async (message: { op: string; params: Record<string, unknown> }) => {
     const p = message.params;
     let result: unknown = {};
+    if (message.op === "skills.list") {
+      composerActionCalls.push(message.op);
+      await skillsReady;
+      result = { skills: sourceCatalog() };
+    }
     if (message.op === "workspace.list") result = { workspaces: [] };
+    if (message.op === "file.tree") result = { files: ["src/App.tsx"] };
     if (message.op === "attachment.write") {
       if (query.has("hold-uploads") && !p.resolve && !p.abort) {
         await new Promise<void>((resolve, reject) => {
@@ -132,30 +176,7 @@ setActiveBridge({
         skipped: p.resolve === true,
       };
     }
-    if (message.op === "file.read") {
-      const record = [...records.values()].find(
-        (value) => value.relativePath === p.path,
-      );
-      result = record
-        ? {
-            path: p.path,
-            bytes: record.bytes.length,
-            ...(record.mimeType.startsWith("image/")
-              ? {
-                  kind: "image",
-                  dataUrl: `data:${record.mimeType};base64,${btoa(
-                    Array.from(record.bytes, (byte) =>
-                      String.fromCharCode(byte),
-                    ).join(""),
-                  )}`,
-                }
-              : {
-                  kind: "text",
-                  content: new TextDecoder().decode(record.bytes),
-                }),
-          }
-        : { kind: "error", path: p.path, bytes: 0, error: "File not found" };
-    }
+    if (message.op === "file.read") result = readFixtureFile(String(p.path));
     return { type: "WORKSPACE_RESPONSE", result };
   },
   onStatusChange: () => () => {},
@@ -167,6 +188,9 @@ declare global {
     __composerHarness?: ComposerEditorApi;
     __composerWorkbench: () => ReturnType<typeof useWorkspaceStore.getState>["workbenchByScope"];
     __setComposerActive: (active: boolean) => void;
+    __setComposerAgent: (agentId: "claude" | "codex" | "cursor") => void;
+    __composerActionCalls: string[];
+    __releaseComposerSkills: () => void;
     __composerAttachmentTransport: {
       pending: () => string[];
       releaseNext: (filename: string, error?: string) => void;
@@ -214,23 +238,33 @@ const initialContent: ComposerInitialContent | undefined = new URLSearchParams(
 
 function Harness() {
   const [active, setActive] = useState(true);
+  const [agentId, setAgentId] = useState<"claude" | "codex" | "cursor" | null>(suggestionsFixture ? "claude" : null);
+  const workbench = useWorkspaceStore(state => state.workbenchByScope[cwd]);
+  const tab = workbench?.tabs.find(tab => tab.id === workbench.activeId);
   const composer = useComposerEditor({
-    agentId: null,
+    agentId,
     agentName: null,
     agentSupportsImage: true,
     modelId: null,
     cwd,
     attachmentImagesActive: active,
     originUrl: null,
-    availableCommands: [],
+    availableCommands: suggestionsFixture ? [{ name: "review-agent", description: "Review the source", kind: "skill" }, { name: "model", description: "A skill sharing a built-in name", kind: "skill" }] : [],
     placeholder: "Message",
-    onSubmit: () => {},
+    onSubmit: () => { composerActionCalls.push("submit"); },
+    onSlashCommand: name => {
+      if (name !== "model") return false;
+      composerActionCalls.push("model-action");
+      return true;
+    },
     initialContent,
   });
   useLayoutEffect(() => {
     window.__composerHarness = composer;
     window.__composerWorkbench = () => useWorkspaceStore.getState().workbenchByScope;
     window.__setComposerActive = setActive;
+    window.__setComposerAgent = setAgentId;
+    window.__composerActionCalls = composerActionCalls;
     return () => {
       delete window.__composerHarness;
     };
@@ -247,6 +281,14 @@ function Harness() {
         {composer.suggestionPopup}
       </div>
       {composer.imagePreviewOverlay}
+      {suggestionsFixture && tab?.filePath && <Suspense fallback={null}>
+        <div data-testid="composer-source-viewer" className="border-border1 mt-4 h-96 overflow-hidden rounded-md border">
+          <SourceViewer tabId={tab.id} cwd={cwd} path={tab.filePath} active={active}
+            workspaceId={null} refreshKey={0} skillSource={tab.skillSource} readOnly={!!tab.skillSource}
+            viewerMode={tab.viewerMode} onOpenPath={() => {}}
+            onViewerModeChange={viewerMode => useWorkspaceStore.getState().dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope: cwd, updates: { viewerMode } })} />
+        </div>
+      </Suspense>}
     </div>
   );
 }

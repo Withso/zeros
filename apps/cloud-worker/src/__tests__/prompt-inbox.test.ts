@@ -315,6 +315,9 @@ it("re-adopts the persisted execution after wake and confirms Stop on the origin
   const execution = first.driver.opened!.sessionId;
   first.driver.complete();
   await until(() => first.relay.calls.some(call => call.op === "outcome" && call.body.state === "completed")).toBe(true);
+  // The outcome call precedes its durable report. Finish those writes before
+  // cp enumerates a temporary file that an atomic rename can remove mid-copy.
+  await first.worker.flush();
   const copy = await mkdtemp(join(tmpdir(), "zeros-outbox-wake-")); directories.push(copy);
   await cp(join(first.directory, "sessions"), join(copy, "sessions"), { recursive: true });
   const next = delivery(randomUUID(), "chat", "0", "2"), relay = new PullRelay();

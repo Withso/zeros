@@ -11,6 +11,7 @@
 
 import { createContext, useContext } from "react";
 import type { ComposerAttachment } from "../composer-attachments";
+import type { Skill } from "../../../platform/app";
 
 export interface ComposerEditorContextValue {
   /** Resolve an inline attachment pill's bytes by its node id. */
@@ -21,6 +22,11 @@ export interface ComposerEditorContextValue {
   attachmentImagesActive: boolean;
   /** Mirrors TipTap's editable state for pill actions outside contenteditable. */
   editable: boolean;
+  /** Create has no workspace in which to open repository or skill sources. */
+  sourceFilesOpen?: boolean;
+  onOpenAttachment?: (attachment: ComposerAttachment) => void;
+  agentId?: string | null;
+  skills?: readonly Skill[];
 }
 
 const ComposerEditorContext = createContext<ComposerEditorContextValue>({

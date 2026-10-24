@@ -56,6 +56,7 @@ import {
 import { useWorkspaceReviewStatus } from "@/renderer/features/code-review/use-workspace-review-status";
 import { MergeConflictActions } from "@/renderer/features/code-review/merge-conflict-actions";
 import { SourceEditor } from "./code-editor/source-editor";
+import { parseContextAttachmentPath } from "@zeros/protocol/attachment-policy";
 import { useScrollMemory, useScrollMemoryRef } from "../../scroll-memory";
 import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { CodeBlockCopyButton } from "@/renderer/shared/ui/primitives/elements/code-block";
@@ -97,6 +98,7 @@ import {
 } from "../../workspace-file-data-cache";
 import { setDiffStyle, useDiffStyle } from "./diff-style-store";
 import { statusForGeneration } from "./changes-tab";
+import type { SkillSource } from "../../../platform/skill-source";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 interface FileViewerProps {
@@ -156,6 +158,7 @@ interface FileViewerProps {
   refreshKey: number;
   /** Read-only target → hide the Discard action regardless. */
   readOnly?: boolean;
+  skillSource?: SkillSource;
   /** Rendered at the START of the header row, before the path breadcrumbs. The
    *  workbench Changes tab keeps its scope and turn filters here. */
   headerLeading?: React.ReactNode;
@@ -246,6 +249,7 @@ export function FileViewer({
   showModeToggle = true,
   refreshKey,
   readOnly,
+  skillSource,
   headerLeading,
   headerTrailing,
   headerContainer,
@@ -258,14 +262,14 @@ export function FileViewer({
   const review = useCodeReview({
     cwd,
     workspaceId,
-    active,
+    active: active && !skillSource,
     refreshKey,
     external: reviewExternal,
   });
   const gitStatus = useWorkspaceReviewStatus({
     cwd,
     workspaceId,
-    active,
+    active: active && !skillSource,
     refreshKey,
     read: statusForGeneration,
   });
@@ -297,8 +301,9 @@ export function FileViewer({
       cwd: cwd ?? "",
       path,
       contentRevision: contentRevision ?? 0,
+      ...(skillSource ? { skillSource } : {}),
     }),
-    [cwd, path, contentRevision],
+    [cwd, path, contentRevision, skillSource],
   );
   const diffQuery = useMemo<WorkspaceFileDiffQuery>(
     () => ({
@@ -765,7 +770,7 @@ export function FileViewer({
                     : "text-fg2 hover:text-fg1",
                 )}
               >
-                {v}
+                {v === "edit" && (skillSource || parseContextAttachmentPath(path)) ? "Code" : v}
               </button>
             ))}
           </div>

@@ -37,6 +37,7 @@ import {
   type AsyncCacheSnapshot,
 } from "@/renderer/shared/lib/keyed-async-cache";
 import { prewarmFileSyntax } from "./workbench/tabs/code-editor/prewarm-file-syntax";
+import { readSkillSource, type SkillSource } from "../platform/skill-source";
 
 export interface WorkspaceFileReadQuery {
   cwd: string;
@@ -44,6 +45,7 @@ export interface WorkspaceFileReadQuery {
   /** Destructive resets get their own snapshot so an old editor value can
    * never seed the replacement editor before the authoritative read lands. */
   contentRevision?: number;
+  skillSource?: SkillSource;
 }
 
 export interface WorkspaceFileDiffQuery {
@@ -120,6 +122,7 @@ export function workspaceFileReadKey(query: WorkspaceFileReadQuery): string {
     normalizeCwd(query.cwd),
     query.path,
     query.contentRevision ?? 0,
+    ...(query.skillSource ? [query.skillSource.agentId, query.skillSource.path] : []),
   ]);
 }
 
@@ -141,7 +144,9 @@ export function workspaceFileDiffKey(query: WorkspaceFileDiffQuery): string {
 async function fetchWorkspaceFileRead(
   query: WorkspaceFileReadQuery,
 ): Promise<ReadFileResult> {
-  const result = await readWorkspaceFile(query.cwd, query.path);
+  const result = query.skillSource
+    ? await readSkillSource(query.cwd, query.skillSource)
+    : await readWorkspaceFile(query.cwd, query.path);
   if (!result) throw new Error("Workspace file reader unavailable");
   // A transport/read failure is not a new file snapshot. Keep confirmed
   // exact-key content; a confirmed deletion remains an authoritative result.

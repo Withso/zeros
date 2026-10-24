@@ -7,6 +7,7 @@ import { FileService } from "./files";
 import { GitService } from "./git";
 import { unsupported, WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./scope";
 import { CheckoutWatch } from "./watch";
+import { listWorkspaceSkills } from "./skills";
 
 export interface PrSummary { prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null }
 const EMPTY_PR: PrSummary = { prNumber: null, prState: null, prUrl: null };
@@ -70,6 +71,7 @@ export class WorkspaceService {
     if (op.startsWith("git.")) return this.git.handle(op, params);
     if (op.startsWith("file.") || op.startsWith("fs.")) return this.files.handle(op, params);
     switch (op) {
+      case "skills.list": return listWorkspaceSkills(this.scope, params.agentId);
       case "workspace.list": {
         if (params.archived === true || (params.status !== undefined && params.status !== "in-progress") || (params.repoSlug !== undefined && params.repoSlug !== this.scope.workspace.repository)) return { workspaces: [] };
         return { workspaces: [await this.row(params.withChanges === true)] };

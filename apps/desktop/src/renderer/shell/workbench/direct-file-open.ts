@@ -54,14 +54,14 @@ export function buildDirectFileOpenAction(
   const preferredExisting = options?.preferredExistingTabId
     ? tabs.find(
         (tab) =>
-          tab.id === options.preferredExistingTabId && tab.type === "files",
+          tab.id === options.preferredExistingTabId && tab.type === "files" && !tab.skillSource,
       )
     : undefined;
 
   const existing =
     preferredExisting?.filePath === path
       ? preferredExisting
-      : tabs.find((tab) => tab.type === "files" && tab.filePath === path);
+      : tabs.find((tab) => tab.type === "files" && !tab.skillSource && tab.filePath === path);
   if (existing) {
     // Activation alone preserves every tab-owned choice: expanded/collapsed
     // tree, viewer mode, diff intent, and editor state.
@@ -73,6 +73,7 @@ export function buildDirectFileOpenAction(
         (tab) =>
           tab.id === options.preferredBlankId &&
           tab.type === "files" &&
+          !tab.skillSource &&
           !tab.filePath,
       )
     : undefined;
