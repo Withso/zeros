@@ -24,6 +24,7 @@ where it is encoded.
   - fencing operations by their own generation rather than by state;
   - passing shell path lists NUL-terminated, keeping trailing newlines, and
     checking the lister's status;
+  - guarding every name on a pointer's route, not only where it resolves;
   - running `test:git` under umask 022
   (`changes/`, `zstack-verify`, `integrate-pr`).
 

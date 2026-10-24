@@ -561,7 +561,7 @@ describe("cloud v2 checkpoints", () => {
     expect(w.git(w.newRepo, "rev-parse", "--is-inside-work-tree")).toBe("true");
   });
 
-  const ownNames = [".repository [*]", "meta/.repository with spaces", ".git\nmetadata"];
+  const ownNames = [".repository [*]", "meta/.repository with spaces", ".git\nmetadata", "-", "-P"];
 
   it.each(ownNames)("never saves the old checkout's own Git directory named %j", name => {
     const w = workspaces();
@@ -608,6 +608,68 @@ describe("cloud v2 checkpoints", () => {
     expect(readFileSync(join(w.newRepo, "draft.txt"), "utf8")).toBe("saved draft\n");
     expect(existsSync(join(w.newRepo, "real\n"))).toBe(false);
     expect(() => lstatSync(join(w.newRepo, ".repository"))).toThrow();
+  });
+
+  it.each(["metadata-link/repository", "./tools/../metadata-link//repository/"])("never saves a link inside the old checkout that its .git file reaches its Git directory through (%j)", route => {
+    const w = workspaces();
+    const external = join(w.root, "external"); mkdirSync(external); mkdirSync(join(w.oldRepo, "tools"));
+    w.git(w.oldRepo, "init", "-q", "--separate-git-dir", join(external, "repository"));
+    symlinkSync(external, join(w.oldRepo, "metadata-link")); writeFileSync(join(w.oldRepo, ".git"), `gitdir: ${route}\n`);
+    expect(w.git(w.oldRepo, "rev-parse", "--is-inside-work-tree")).toBe("true");
+    w.write(join(w.oldRepo, "draft.txt"), "saved draft\n");
+    const key = randomBytes(32), archive = join(w.root, "route.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "draft.txt"), "utf8")).toBe("saved draft\n");
+    expect(() => lstatSync(join(w.newRepo, "metadata-link"))).toThrow();
+  });
+
+  it.each([
+    { route: "metadata-link/repository", refused: true },
+    { route: "./tools/../metadata-link//repository/", refused: true },
+    { route: "../app-metadata/repository", refused: false },
+  ])("restores a new checkout whose .git file reaches its Git directory by $route only if nothing on the way is inside it", ({ route, refused }) => {
+    const w = workspaces();
+    w.write(join(w.oldRepo, "metadata-link"), "an ordinary project file\n"); w.write(join(w.oldRepo, "tools"), "another\n");
+    w.write(join(w.oldRepo, "draft.txt"), "saved draft\n");
+    const key = randomBytes(32), archive = join(w.root, "route.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    // The Git directory lives beside the checkout, reached through a link inside it or directly.
+    const external = join(w.newHome, "acme", "app-metadata"); mkdirSync(external); mkdirSync(join(w.newRepo, "tools"));
+    w.git(w.newRepo, "init", "-q", "--separate-git-dir", join(external, "repository"));
+    symlinkSync(external, join(w.newRepo, "metadata-link")); writeFileSync(join(w.newRepo, ".git"), `gitdir: ${route}\n`);
+    expect(w.git(w.newRepo, "rev-parse", "--is-inside-work-tree")).toBe("true");
+    const head = w.git(w.newRepo, "rev-parse", "HEAD");
+    const result = restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed;
+    if (!refused) {
+      expect(result).toEqual({ ok: true });
+      expect(readFileSync(join(w.newRepo, "draft.txt"), "utf8")).toBe("saved draft\n");
+      return;
+    }
+    expect(result).toEqual({ ok: false, code: "checkpoint_restore_failed" });
+    expect(lstatSync(join(w.newRepo, "metadata-link")).isSymbolicLink()).toBe(true);
+    expect(w.git(w.newRepo, "rev-parse", "HEAD")).toBe(head);
+    expect(existsSync(join(w.newRepo, "draft.txt"))).toBe(false);
+  });
+
+  it("refuses a linked worktree whose common Git directory is reached through a link inside it", () => {
+    const w = workspaces();
+    w.write(join(w.oldRepo, "common-link"), "an ordinary project file\n"); w.write(join(w.oldRepo, "draft.txt"), "saved draft\n");
+    const key = randomBytes(32), archive = join(w.root, "common.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    const main = join(w.root, "main-clone"); w.git(w.root, "clone", "-q", w.origin, main);
+    w.git(main, "worktree", "add", "-q", "--detach", w.newRepo);
+    const gitdir = w.git(w.newRepo, "rev-parse", "--absolute-git-dir");
+    symlinkSync(join(main, ".git"), join(w.newRepo, "common-link")); writeFileSync(join(gitdir, "commondir"), `${join(w.newRepo, "common-link")}\n`);
+    expect(w.git(w.newRepo, "rev-parse", "--git-common-dir")).toBe(join(main, ".git"));
+    const head = w.git(w.newRepo, "rev-parse", "HEAD");
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed)
+      .toEqual({ ok: false, code: "checkpoint_restore_failed" });
+    expect(lstatSync(join(w.newRepo, "common-link")).isSymbolicLink()).toBe(true);
+    expect(w.git(w.newRepo, "rev-parse", "HEAD")).toBe(head);
+    expect(existsSync(join(w.newRepo, "draft.txt"))).toBe(false);
   });
 
   it("fails instead of guessing when it cannot list the checkout's own Git directories", () => {
