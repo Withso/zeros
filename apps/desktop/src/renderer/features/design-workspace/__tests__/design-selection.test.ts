@@ -202,14 +202,13 @@ describe("design selection workflows", () => {
     expect(mocks.selectionLimit).toHaveBeenCalledWith("Selection limited to 32 targets", expect.anything());
   });
 
-  it("removes only corresponding targets and preserves source-view focus state", async () => {
+  it("removes only corresponding targets and preserves the remaining selection", async () => {
     const store = useDesignWorkspaceUiStore.getState();
     store.setSelection("workspace-a", FRAME.file, "parent");
     store.setSelection("workspace-a", "other.html", null, [], { additive: true, frameSelected: true });
-    store.setCodeView("workspace-a", true);
     store.setSelection("workspace-b", FRAME.file, "unrelated");
     clearDesignCanvasSelection("workspace-a", captureDesignPageOwner("workspace-a"), [{ frame: "other.html" }]);
-    expect(designWorkspaceView("workspace-a")).toMatchObject({ selectedTargets: [{ frame: FRAME.file, nodeId: "parent" }], codeView: true });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({ selectedTargets: [{ frame: FRAME.file, nodeId: "parent" }], selectedFrame: FRAME.file, selectedNodeId: "parent" });
     expect(designWorkspaceView("workspace-b").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "unrelated" }]);
   });
 

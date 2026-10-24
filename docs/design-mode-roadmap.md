@@ -146,8 +146,8 @@ the canvas is full bleed and its chrome floats over it, 8px from its edges
 - **Directory pill** (top left): the Design directory switcher and a toggle
   that puts the Layers + Inspector panel away and brings it back (also
   ⌘\ / Ctrl+\ while focus is in the Design surface or nowhere).
-- **Tool rail** (left, vertically centred): Move, Frame, Text, Source, Themes
-  and Motion in one vertical toolbar. It centres in the space between the pill
+- **Tool rail** (left, vertically centred): Move, Frame, Text, Themes and
+  Motion in one vertical toolbar. It centres in the space between the pill
   and an open Motion timeline, never overlapping either.
 - **Layers + Inspector panel** (right, full height): Layers on top at a
   draggable height (`Resize Layers panel`: pointer, arrows, Home/End,
@@ -176,8 +176,6 @@ pointer cancellation, window blur, hiding the panel or leaving Design restores
 the starting size without saving; a drag back to its starting position is also
 a no-op. Width and Layers-height preferences update retained workspaces and
 other windows before their separators measure the visible size.
-Source view keeps its filename and scroll viewport clear of the pill, tool
-rail, visible panel and open Motion timeline, following their live sizes.
 An inactive Design surface hides and inerts its portaled Theme window (it
 returns in place with its drafts) and stops Motion playback. Selecting a tab
 changes no agent mode.
@@ -189,10 +187,12 @@ Design again. These fields do not authorize human Design editing. The implemente
 composer modes and provider tool gating use separate conversation-owned state.
 
 Each workspace binds one Design directory. `activePageId` and a bounded `byPage`
-map retain 32 recent page views: camera, frame/node selection, source view and
+map retain 32 recent page views: camera, frame/node selection and
 canvas background. The existing flat fields remain the active projection under
-`zeros:design-workspace-ui-v1`. A switch saves/restores that projection in one
-synchronous store update, with no bridge read or await on the click path. Legacy
+`zeros:design-workspace-ui-v1`. Legacy `codeView` flags are ignored on load and
+omitted from subsequent saves; the Source toggle and overlay have been removed.
+A switch saves/restores that projection in one synchronous store update, with
+no bridge read or await on the click path. Legacy
 flat fields lift into the first confirmed page once; reload restores the active
 page and its views. Only a settled matching catalog can prune remembered pages
 or selections; a removed page falls back to the first page. Panel visibility
@@ -611,8 +611,8 @@ bounded element-query result shows a limit notice; only highlighted membership
 appears in the chip and submitted payload. Clearing selection removes the live
 chip. Removing the chip retires pending selection reads even when a restored
 pin has no linked current targets, without clearing unrelated targets or
-publishing a new explicit-selection event. Source view and editor focus remain
-intact, and a subsequent explicit click can attach the same target again.
+publishing a new explicit-selection event. Editor focus remains intact, and a
+subsequent explicit click can attach the same target again.
 Deleting one frame retains surviving references and their primary inspector;
 fallback activation is used only when no references survive. Background
 refreshes and pruning are not explicit selection events.
@@ -662,7 +662,12 @@ The existing engine CLI now implements:
 ```
 
 Prompt/frame context supplies the actual executable command and local URL. The
-Node dev bundle and compiled sidecar use the same CLI entrypoint. Optional
+Node and Bun source engines retain their entry file and runtime loader arguments;
+the compiled sidecar runs directly. Both Design verification and the Local CLI
+use the shared runtime invocation resolver, with loader paths resolved against
+the engine installation so commands work from a task's checkout. Command tests
+execute the emitted shell prefix, including paths with spaces and quotes.
+Optional
 `--revision` requires an exact render revision; omit it after an edit to validate
 and capture current source. Validation reports existing file/line diagnostics
 without healing source and exits nonzero for errors. Capture writes an ordinary
@@ -1804,8 +1809,31 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   A cold read is shared with the inspector, keeps the captured edit targets,
   and cannot be overtaken by later writes or Undo. Document read failures and
   transaction conflicts retain their normal error and recovery handling.
-- **Motion:** node-local keyframe tracks, preview, playback, and paths exist only
-  in explicit Motion mode. Draft identity is workspace + directory + frame +
+- **Frame Play:** each artboard has one Play toggle above its top-right corner,
+  at a constant screen size. Its Play glyph stays visible on the blue pressed
+  control. One frame at a time plays its authored CSS animations (including
+  root and pseudo-element motion, delays and infinite loops), SVG timelines,
+  hover transitions and supported native HTML controls. Authored paused and
+  reduced-motion styles retain browser behavior. Clicking again or pressing
+  Escape restores the saved, still editing document; temporary form, scroll,
+  details and contenteditable state never changes source. Starting Play closes
+  the Motion timeline and clears editing selection while retaining its drafts.
+  Source or engine-capability replacement, editing intent, hidden surfaces, offscreen frames, page,
+  directory and workspace changes retire playback. Session tokens and exact
+  source versions fence late replies. The playing frame stays in bounded live
+  admission, with screenshot tiles, captures and editing overlays disabled.
+  The private runtime method is opt-in for v2 compatibility; an older engine
+  reports that a restart is needed. Authored scripts, external navigation,
+  form submission and network capabilities remain blocked by the existing
+  sanitizer, CSP and opaque iframe sandbox. Local Personal and organization
+  workspaces share this behavior; cloud still has no Design capability.
+- **Motion:** node-local keyframe tracks, timeline playback, and paths exist only
+  in explicit Motion mode. Selecting an outer frame targets its authored frame
+  root or document body, matching the inspector, for opening, previewing, saving
+  and deleting motion. Foundation reads keyframes from CSS files and authored
+  HTML `<style>` blocks. Editing an inline animation replaces its existing
+  named block in place, preserves surrounding HTML/CSS, and keeps byte-exact
+  Undo/Redo; ambiguous names fail without changing source. Draft identity is workspace + directory + frame +
   node, not source revision. Unrelated keyframe refreshes preserve unsaved
   drafts, and a save acknowledges only the draft it wrote. Pending saves and
   deletions retain that exact owner through selection round trips; their late

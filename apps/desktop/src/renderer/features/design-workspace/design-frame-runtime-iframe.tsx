@@ -56,6 +56,8 @@ interface DesignFrameRuntimeIframeProps {
   frame: DesignCanvasFrameWire;
   /** Hidden retained canvases must not capture or revalidate active readback. */
   active: boolean;
+  playbackSessionId?: string | null;
+  onPlaybackStopped?: (sessionId: string, error?: Error) => void;
   /** Selected frames receive priority screenshot refreshes. */
   selected: boolean;
   /** Semantic selection retained while a new document generation readies. */
@@ -103,6 +105,8 @@ interface DesignFrameDocumentBufferProps {
   buffer: DesignDocumentBuffer;
   ready: boolean;
   runtimeActive: boolean;
+  playbackSessionId: string | null;
+  onPlaybackStopped?: (sessionId: string, error?: Error) => void;
   selected: boolean;
   selectedNodeIds: readonly string[];
   autoCapture: boolean;
@@ -135,6 +139,8 @@ function DesignFrameDocumentBuffer({
   buffer,
   ready,
   runtimeActive,
+  playbackSessionId,
+  onPlaybackStopped,
   selected,
   selectedNodeIds,
   autoCapture,
@@ -149,6 +155,7 @@ function DesignFrameDocumentBuffer({
   const { session: savedEditingSession, state: savedEditingState } = useDesignSavedEditing();
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
   const [connectedRuntime, setConnectedRuntime] = useState<DesignFrameRuntimeConnection | null>(null);
+  const [playingSessionId, setPlayingSessionId] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
   const handshakeTimerRef = useRef<number | null>(null);
@@ -159,6 +166,8 @@ function DesignFrameDocumentBuffer({
     folder,
     frame,
     runtimeActive,
+    playbackSessionId,
+    onPlaybackStopped,
     selected,
     selectedNodeIds,
     autoCapture,
@@ -170,6 +179,8 @@ function DesignFrameDocumentBuffer({
     folder,
     frame,
     runtimeActive,
+    playbackSessionId,
+    onPlaybackStopped,
     selected,
     selectedNodeIds,
     autoCapture,
@@ -302,22 +313,28 @@ function DesignFrameDocumentBuffer({
         await syncStylesheetPreviews(connection);
         assertCurrent();
         if (appliedSheetsRef.current.sheets.size) throw new Error("The advisory stylesheet could not be restored.");
-        const snapshot = await connection.getSnapshot();
-        assertCurrent();
-        onSnapshot(snapshot);
-        await settleDesignSelectionDetails(workspaceId, frame.file, sourceVersion);
-        assertCurrent();
         const selectedIds = () => designWorkspaceView(workspaceId).selectedTargets
           .filter((target) => target.frame === frame.file && target.nodeId)
           .map((target) => target.nodeId!);
-        const nodeIds = selectedIds();
-        const details = await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId)));
-        const confirmed = await connection.getSnapshot();
-        assertCurrent();
-        if (confirmed.revision !== snapshot.revision || JSON.stringify(selectedIds()) !== JSON.stringify(nodeIds))
-          throw new Error("The selected geometry changed while restoring saved pixels.");
-        for (const detail of details)
-          useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, latestRef.current.folder, frame.file, detail, sourceVersion);
+        // A late theme/stylesheet acknowledgement can advance the same
+        // document while geometry is being read. Revalidate that generation
+        // instead of permanently refusing editing; never publish mixed reads.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const snapshot = await connection.getSnapshot();
+          assertCurrent();
+          onSnapshot(snapshot);
+          await settleDesignSelectionDetails(workspaceId, frame.file, sourceVersion);
+          assertCurrent();
+          const nodeIds = selectedIds();
+          const details = await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId)));
+          const confirmed = await connection.getSnapshot();
+          assertCurrent();
+          if (confirmed.revision !== snapshot.revision || JSON.stringify(selectedIds()) !== JSON.stringify(nodeIds)) continue;
+          for (const detail of details)
+            useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, latestRef.current.folder, frame.file, detail, sourceVersion);
+          return;
+        }
+        throw new Error("The selected geometry changed while restoring saved pixels.");
       })();
       const preparation = { connection, sourceVersion, theme: preparedTheme, session: savedEditingSession, promise };
       savedPreparationRef.current = preparation;
@@ -416,8 +433,9 @@ function DesignFrameDocumentBuffer({
       documentSourceVersion,
       node,
       {
-        isActive: () => latestRef.current.runtimeActive,
+        isActive: () => latestRef.current.runtimeActive && !latestRef.current.playbackSessionId,
         onReady: clearHandshakeTimer,
+        onPlaybackStopped: ({ sessionId }) => latestRef.current.onPlaybackStopped?.(sessionId),
         onSnapshot: (snapshot, event) => {
           if (event !== "ready") {
             onSnapshot(snapshot);
@@ -443,11 +461,13 @@ function DesignFrameDocumentBuffer({
               // An agent's in-flight stylesheet shows before this generation
               // is revealed, so a reload never flashes the saved styles.
               await syncStylesheetPreviews(connection);
-              await settleDesignSelectionDetails(
-                workspaceId,
-                frame.file,
-                themedSnapshot.sourceVersion,
-              );
+              if (!latestRef.current.playbackSessionId) {
+                await settleDesignSelectionDetails(
+                  workspaceId,
+                  frame.file,
+                  themedSnapshot.sourceVersion,
+                );
+              }
               finishReady();
             })
             .catch(() => {
@@ -500,7 +520,7 @@ function DesignFrameDocumentBuffer({
   }, [clearHandshakeTimer, runtimeActive, watchHandshake]);
 
   useEffect(() => {
-    if (!runtimeActive || (!selected && !autoCapture)) return;
+    if (!runtimeActive || playbackSessionId || (!selected && !autoCapture)) return;
     const connection = connectionRef.current;
     if (!connection) return;
     void connection
@@ -509,7 +529,25 @@ function DesignFrameDocumentBuffer({
       .catch(() => {
         // A replacement buffer publishes its own exact ready snapshot.
       });
-  }, [autoCapture, onSnapshot, runtimeActive, selected]);
+  }, [autoCapture, onSnapshot, playbackSessionId, runtimeActive, selected]);
+
+  useEffect(() => {
+    if (!ready || !runtimeActive || buffer !== "displayed" || !playbackSessionId || !connectedRuntime) return;
+    const controller = new AbortController();
+    void connectedRuntime.setPlayback(playbackSessionId, true, controller.signal).then(() => {
+      if (!controller.signal.aborted) setPlayingSessionId(playbackSessionId);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) latestRef.current.onPlaybackStopped?.(
+        playbackSessionId, error instanceof Error ? error : new Error("Couldn't play this frame."),
+      );
+    });
+    return () => {
+      controller.abort();
+      if (connectedRuntime.supports("setPlayback")) {
+        void connectedRuntime.setPlayback(playbackSessionId, false).catch(() => {});
+      }
+    };
+  }, [buffer, connectedRuntime, playbackSessionId, ready, runtimeActive]);
 
   useEffect(() => {
     if (!runtimeActive) return;
@@ -551,6 +589,8 @@ function DesignFrameDocumentBuffer({
   const fallbackSrcDoc =
     fallback.data?.srcDoc ??
     '<!doctype html><html><body style="margin:0"></body></html>';
+  const interactive = ready && runtimeActive && buffer === "displayed" &&
+    playbackSessionId !== null && playingSessionId === playbackSessionId;
 
   return (
     <iframe
@@ -561,14 +601,18 @@ function DesignFrameDocumentBuffer({
       data-design-source-version={frame.sourceVersion}
       data-design-document-buffer={buffer}
       data-design-document-ready={ready ? "" : undefined}
-      tabIndex={-1}
+      data-design-frame-live={interactive ? "" : undefined}
+      tabIndex={interactive ? 0 : -1}
+      {...(!interactive ? { inert: "" } : {})}
       className={
         buffer === "displayed"
-          ? "bg-bg1 pointer-events-none relative z-[1] block size-full border-0"
+          ? interactive
+            ? "bg-bg1 pointer-events-auto relative z-[1] block size-full border-0"
+            : "bg-bg1 pointer-events-none relative z-[1] block size-full border-0"
           : "bg-bg1 pointer-events-none absolute inset-0 z-0 block size-full border-0"
       }
       aria-label={`${frame.title} design frame`}
-      aria-hidden={buffer === "incoming" ? true : undefined}
+      aria-hidden={buffer === "incoming" || !runtimeActive ? true : undefined}
       onLoad={() => {
         if (!useProtocol && !fallback.data) return;
         loadedKeyRef.current = loadKey;
@@ -582,9 +626,13 @@ export function DesignFrameRuntimeIframe(props: DesignFrameRuntimeIframeProps) {
   // A new engine capability is a new document session even when the authored
   // generation is unchanged. An adopted live buffer may still have an older
   // immutable URL; reload the current generation and negotiate readiness anew.
+  // A fresh document on each side of Play discards native form, details,
+  // scroll and contenteditable state without ever writing authored source.
+  // A changed workspace folder also retires pending saved-pixel preparation;
+  // even identical frame bytes belong to a new document owner.
   return (
     <DesignFrameRuntimeSession
-      key={`${props.workspaceId}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}`}
+      key={`${props.workspaceId}\u0000${props.folder}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}\u0000${props.playbackSessionId ?? "editing"}`}
       {...props}
     />
   );
@@ -596,6 +644,8 @@ function DesignFrameRuntimeSession({
   folder,
   frame,
   active,
+  playbackSessionId = null,
+  onPlaybackStopped,
   selected,
   selectedNodeIds,
   autoCapture,
@@ -621,6 +671,10 @@ function DesignFrameRuntimeSession({
     null,
   );
   const [retryAttempt, setRetryAttempt] = useState(0);
+  const handleLoadFailure = useCallback((sourceVersion: string) => {
+    setFailedSourceVersion(sourceVersion);
+    if (playbackSessionId) onPlaybackStopped?.(playbackSessionId, new Error("Couldn't load this frame for playback."));
+  }, [onPlaybackStopped, playbackSessionId]);
   const connectionsByDocumentRef = useRef(
     new Map<string, DesignFrameRuntimeConnection>(),
   );
@@ -632,6 +686,7 @@ function DesignFrameRuntimeSession({
     folder,
     frame,
     active,
+    playbackSessionId,
     selected,
     selectedNodeIds,
     autoCapture,
@@ -644,6 +699,7 @@ function DesignFrameRuntimeSession({
     folder,
     frame,
     active,
+    playbackSessionId,
     selected,
     selectedNodeIds,
     autoCapture,
@@ -666,7 +722,7 @@ function DesignFrameRuntimeSession({
       folder: ownerFolder,
       frame: currentFrame,
     } = latest;
-    if (!latest.active) return;
+    if (!latest.active || latest.playbackSessionId) return;
     if (snapshot.sourceVersion !== currentFrame.sourceVersion) return;
     reconcileDesignRuntimeSnapshot({
       workspaceId: ownerId,
@@ -852,6 +908,8 @@ function DesignFrameRuntimeSession({
             active &&
             (entry.buffer === "incoming" || incomingSourceVersion === null)
           }
+          playbackSessionId={playbackSessionId}
+          onPlaybackStopped={onPlaybackStopped}
           selected={selected}
           selectedNodeIds={selectedNodeIds}
           autoCapture={autoCapture}
@@ -860,7 +918,7 @@ function DesignFrameRuntimeSession({
           onSnapshot={handleSnapshot}
           onConnection={handleConnection}
           onReady={handleDocumentReady}
-          onLoadFailure={setFailedSourceVersion}
+          onLoadFailure={handleLoadFailure}
         />
       ))}
       {!documentReady ? (

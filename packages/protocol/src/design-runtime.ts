@@ -471,12 +471,19 @@ export type DesignRuntimeMethod =
   | "clearPreviewStyles"
   | "captureScreenshot"
   /** Opt-in: advertised only to a host whose handshake requests it. */
-  | "previewStylesheet";
+  | "previewStylesheet"
+  | "setPlayback";
 
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback"] as const;
+
+export interface DesignRuntimePlaybackStopped {
+  sourceVersion: string;
+  sessionId: string;
+  reason: "escape" | "hidden";
+}
 
 /** Largest in-flight stylesheet text `previewStylesheet` applies. */
 export const MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS = 4 * 1024 * 1024;
@@ -534,6 +541,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "clearPreviewStyles",
   "captureScreenshot",
   "previewStylesheet",
+  "setPlayback",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -605,6 +613,14 @@ export type DesignRuntimeFrameMessage =
       type: "event";
       event: "mutation";
       payload: DesignRuntimeSnapshot;
+    }
+  | {
+      protocol: typeof DESIGN_RUNTIME_PROTOCOL;
+      version: typeof DESIGN_RUNTIME_VERSION;
+      type: "event";
+      /** Sent only after an opted-in host starts a playback session. */
+      event: "playbackStopped";
+      payload: DesignRuntimePlaybackStopped;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -896,13 +912,18 @@ export function isDesignRuntimeFrameMessage(
   }
   if (
     message.type !== "event" ||
-    (message.event !== "ready" && message.event !== "mutation") ||
+    (message.event !== "ready" && message.event !== "mutation" && message.event !== "playbackStopped") ||
     !isRecord(message.payload)
   ) {
     return false;
   }
   if (message.event === "mutation") return isRuntimeSnapshot(message.payload);
   const payload = message.payload;
+  if (message.event === "playbackStopped") {
+    return isSourceVersion(payload.sourceVersion) &&
+      typeof payload.sessionId === "string" && payload.sessionId.length > 0 && payload.sessionId.length <= 128 &&
+      (payload.reason === "escape" || payload.reason === "hidden");
+  }
   return (
     isSourceVersion(payload.sourceVersion) &&
     isRuntimeCapabilities(payload.capabilities) &&
@@ -987,7 +1008,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -1014,6 +1035,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var previewStyleOverridesByOid = new Map();
   var previewTextOverridesByOid = new Map();
   var previewAnimationsByOid = new Map();
+  var playbackSessionId = null;
   var committedKeyframesByName = new Map();
   var committedTokensByKey = new Map();
   var committedGenerationStyle = null;
@@ -1044,11 +1066,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     trustedParentOrigin = null;
   }
 
-  /** The design surface is an editor, not a prototype player. Authored CSS
-   * animations and transitions must not continuously repaint or flash during
-   * selection/style commits; the explicit previewMotion path owns the only
-   * animations allowed to run in Motion mode. */
+  /** Passive frames stay still. Whole-frame Play and the Motion editor's
+   * explicit preview are the only owners allowed to run authored motion. */
   function suspendAuthoredMotion() {
+    if (playbackSessionId !== null) return;
     stillAuthoredTimelines();
     if (typeof document.getAnimations !== "function") return;
     var previews = new Set();
@@ -1070,6 +1091,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * first write has cleared the document there is no reason to re-walk it sixty
    * times a second. */
   function suspendElementMotion(element) {
+    if (playbackSessionId !== null) return;
     if (typeof element.getAnimations !== "function") {
       suspendAuthoredMotion();
       return;
@@ -1082,6 +1104,64 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       if (previews.has(animation)) return;
       try { animation.cancel(); } catch (_error) {}
     });
+  }
+
+  function stopPlayback(reason) {
+    var sessionId = playbackSessionId;
+    playbackSessionId = null;
+    suspendAuthoredMotion();
+    if (sessionId !== null && reason) {
+      event("playbackStopped", { sourceVersion: SOURCE_VERSION, sessionId: sessionId, reason: reason });
+    }
+  }
+
+  function setPlayback(sessionId, playing) {
+    if (typeof sessionId !== "string" || !sessionId.length || sessionId.length > 128 || typeof playing !== "boolean") {
+      throw typedError("BAD_REQUEST", "Invalid frame playback session.", false);
+    }
+    if (playing && document.hidden) throw typedError("BAD_REQUEST", "A hidden frame cannot play.", false);
+    if (playing && playbackSessionId !== sessionId) {
+      playbackSessionId = sessionId;
+      previewAnimationsByOid.forEach(function (animation) { animation.cancel(); });
+      previewAnimationsByOid.clear();
+      // Cancelling CSSAnimation objects for editing does not make them start
+      // again on its own. A synchronous display reset creates fresh authored
+      // timelines, including pseudo-elements and inline !important rules,
+      // without changing the source, timing, cascade or any painted frame.
+      withoutObservedMutations(function () {
+        var root = document.documentElement;
+        var style = root.getAttribute("style");
+        try {
+          // A discrete display transition must not postpone this reset.
+          root.style.setProperty("transition-property", "none", "important");
+          root.style.setProperty("display", "none", "important");
+          root.getBoundingClientRect();
+          // Flush Chromium's lazy CSSOM attribute before restoring absence;
+          // otherwise removeAttribute can leave an empty style attribute.
+          root.getAttribute("style");
+        } finally {
+          if (style === null) root.removeAttribute("style");
+          else root.setAttribute("style", style);
+        }
+        root.getBoundingClientRect();
+      });
+      document.querySelectorAll("svg").forEach(function (svg) {
+        if (svg.ownerSVGElement || typeof svg.unpauseAnimations !== "function") return;
+        try { svg.setCurrentTime(0); svg.unpauseAnimations(); } catch (_error) {}
+      });
+      document.querySelectorAll("marquee").forEach(function (marquee) {
+        try { if (typeof marquee.start === "function") marquee.start(); } catch (_error) {}
+      });
+      document.querySelectorAll("video[autoplay], audio[autoplay]").forEach(function (media) {
+        try {
+          var started = media.play();
+          if (started && typeof started.catch === "function") started.catch(function () {});
+        } catch (_error) {}
+      });
+    } else if (!playing && playbackSessionId === sessionId) {
+      stopPlayback();
+    }
+    return { playing: playbackSessionId !== null, sessionId: playbackSessionId };
   }
 
   function post(message) {
@@ -4202,6 +4282,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return clearPreviewStyles(args.nodeId);
       case "captureScreenshot":
         return captureScreenshot(args);
+      case "setPlayback":
+        if (enabledOptInMethods.indexOf("setPlayback") < 0) {
+          throw new Error("Unknown design runtime method: setPlayback");
+        }
+        return setPlayback(args.sessionId, args.playing);
       case "previewStylesheet":
         if (enabledOptInMethods.indexOf("previewStylesheet") < 0) {
           throw new Error("Unknown design runtime method: previewStylesheet");
@@ -4214,6 +4299,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function teardown() {
     if (disposed) return;
+    stopPlayback();
     disposed = true;
     if (mutationTimer !== null) {
       window.clearTimeout(mutationTimer);
@@ -4381,9 +4467,44 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }, true);
   document.addEventListener("play", function (playEvent) {
     var target = playEvent.target;
-    if (disposed || !target || typeof target.pause !== "function") return;
+    if (playbackSessionId !== null || !target || typeof target.pause !== "function") return;
     try { target.pause(); } catch (_error) {}
   }, true);
+  document.addEventListener("transitionrun", function (startEvent) {
+    var target = startEvent.target;
+    if (target && typeof target.getAnimations === "function") suspendElementMotion(target);
+  }, true);
+  document.addEventListener("keydown", function (keyEvent) {
+    if (playbackSessionId === null || keyEvent.key !== "Escape") return;
+    keyEvent.preventDefault();
+    stopPlayback("escape");
+  }, true);
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stopPlayback("hidden");
+  });
+  // Native controls and same-document anchors work in Play. The sandbox's
+  // navigation/network policy remains intact even for an iframe's own URL.
+  function containNavigation(clickEvent) {
+    var target = clickEvent.target;
+    var link = target && typeof target.closest === "function" ? target.closest("a, area") : null;
+    if (!link) return;
+    clickEvent.preventDefault();
+    if (playbackSessionId === null || clickEvent.type !== "click") return;
+    var href = link.getAttribute("href") || "";
+    if (href.charAt(0) !== "#") return;
+    try {
+      var destination = document.getElementById(decodeURIComponent(href.slice(1)));
+      if (destination) destination.scrollIntoView();
+    } catch (_error) {}
+  }
+  document.addEventListener("click", containNavigation, true);
+  document.addEventListener("auxclick", containNavigation, true);
+  document.addEventListener("contextmenu", containNavigation, true);
+  document.addEventListener("submit", function (submitEvent) { submitEvent.preventDefault(); }, true);
+  // Dropping a file or URL onto a browsing document can navigate that iframe
+  // without clicking a link. Playback never turns it into a navigation target.
+  document.addEventListener("dragover", function (dragEvent) { dragEvent.preventDefault(); }, true);
+  document.addEventListener("drop", function (dropEvent) { dropEvent.preventDefault(); }, true);
 
   function publishMutation() {
     mutationTimer = null;
@@ -4409,6 +4530,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         break;
       }
     }
+    // Native controls in a playback document are ephemeral; the host restores
+    // the saved editing document on exit instead of publishing these changes.
+    if (playbackSessionId !== null) return;
     if (mutationTimer !== null) window.clearTimeout(mutationTimer);
     mutationTimer = window.setTimeout(publishMutation, MUTATION_DEBOUNCE_MS);
   });

@@ -23,6 +23,46 @@ describe("design workspace UI memory", () => {
     vi.restoreAllMocks();
   });
 
+  it("drops retired source-view flags without resetting saved navigation", () => {
+    const savedView = {
+      selectedFrame: "alpha/home.html",
+      selectedNodeId: "heading",
+      zoom: 0.8,
+      panX: 120,
+      panY: 240,
+    };
+    const legacy = normalizeDesignWorkspaceView({
+      ...savedView,
+      codeView: true,
+    });
+    expect(legacy).toMatchObject(savedView);
+    expect(legacy).not.toHaveProperty("codeView");
+
+    const paged = normalizeDesignWorkspaceView({
+      ...savedView,
+      codeView: true,
+      directoryId: "design_pages",
+      activePageId: "page_a",
+      byPage: {
+        page_a: { ...savedView, codeView: true },
+        page_b: { selectedFrame: "beta/home.html", zoom: 1.5, codeView: true },
+      },
+    });
+    expect(paged).toMatchObject({
+      ...savedView,
+      directoryId: "design_pages",
+      activePageId: "page_a",
+      byPage: {
+        page_a: savedView,
+        page_b: { selectedFrame: "beta/home.html", zoom: 1.5 },
+      },
+    });
+    expect(paged).not.toHaveProperty("codeView");
+    for (const page of Object.values(paged.byPage!)) {
+      expect(page).not.toHaveProperty("codeView");
+    }
+  });
+
   it("normalizes corrupt persisted values and clamps zoom", () => {
     expect(clampDesignZoom(Number.NaN)).toBe(0.25);
     expect(clampDesignZoom(0)).toBe(0.01);
@@ -37,7 +77,6 @@ describe("design workspace UI memory", () => {
         panel: "unknown",
         activeTheme: "Not valid!",
         canvasBackground: "not a color",
-        codeView: "yes",
         zoom: Number.POSITIVE_INFINITY,
         panX: Number.NaN,
         panY: 18,
@@ -54,7 +93,6 @@ describe("design workspace UI memory", () => {
       panel: "layers",
       activeTheme: null,
       canvasBackground: null,
-      codeView: false,
       zoom: 0.25,
       panX: 64,
       panY: 18,

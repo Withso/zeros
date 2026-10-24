@@ -2,7 +2,7 @@
 // Design workspace UI memory — workspace-owned canvas navigation
 // ──────────────────────────────────────────────────────────
 //
-// Selection, viewport, code view, and the lower-panel tab belong to the design
+// Selection, viewport, and the lower-panel tab belong to the design
 // workspace. They survive A → B → A and reload without leaking one design's
 // state into another. The persisted map is validated, bounded, and LRU-pruned.
 
@@ -43,7 +43,6 @@ export interface DesignWorkspaceViewState {
   selectionEvent?: number;
   ownerRevision?: number;
   panel: DesignBottomPanel;
-  codeView: boolean;
   activeTheme: string | null;
   /** Null follows the active theme's --bg2; a concrete color is an explicit
    * workspace-owned override, including its alpha channel. */
@@ -56,7 +55,7 @@ export interface DesignWorkspaceViewState {
 
 export type DesignPageViewState = Pick<DesignWorkspaceViewState,
   "selectedFrame" | "frameSelected" | "selectedNodeId" | "selectedNodeIds" | "selectedTargets" |
-  "codeView" | "canvasBackground" | "zoom" | "panX" | "panY" | "updatedAt"
+  "canvasBackground" | "zoom" | "panX" | "panY" | "updatedAt"
 >;
 
 export interface DesignPageOwner {
@@ -68,9 +67,9 @@ export interface DesignPageOwner {
 
 function pageView(view: DesignWorkspaceViewState): DesignPageViewState {
   const { selectedFrame, frameSelected, selectedNodeId, selectedNodeIds, selectedTargets,
-    codeView, canvasBackground, zoom, panX, panY, updatedAt } = view;
+    canvasBackground, zoom, panX, panY, updatedAt } = view;
   return { selectedFrame, frameSelected, selectedNodeId, selectedNodeIds, selectedTargets,
-    codeView, canvasBackground, zoom, panX, panY, updatedAt };
+    canvasBackground, zoom, panX, panY, updatedAt };
 }
 
 function savedPage(views: Record<string, DesignPageViewState> | undefined, id: string) {
@@ -88,7 +87,7 @@ function samePageView(left: DesignPageViewState, right: DesignPageViewState) {
     left.selectedNodeId === right.selectedNodeId && left.selectedNodeIds.length === right.selectedNodeIds.length &&
     left.selectedNodeIds.every((id, index) => id === right.selectedNodeIds[index]) &&
     JSON.stringify(left.selectedTargets) === JSON.stringify(right.selectedTargets) &&
-    left.codeView === right.codeView && left.canvasBackground === right.canvasBackground &&
+    left.canvasBackground === right.canvasBackground &&
     left.zoom === right.zoom && left.panX === right.panX && left.panY === right.panY;
 }
 
@@ -96,7 +95,7 @@ function validatePageSelection(view: DesignPageViewState, page: DesignPageSummar
   const targets = view.selectedTargets.filter(target => page.frameFiles.includes(target.frame));
   if (view.selectedFrame && page.frameFiles.includes(view.selectedFrame) && targets.length === view.selectedTargets.length) return view;
   const selectedFrame = view.selectedFrame && page.frameFiles.includes(view.selectedFrame) ? view.selectedFrame : page.frameFiles[0] ?? null;
-  return { ...view, ...designSelectionPatch(targets, selectedFrame), ...(selectedFrame === view.selectedFrame ? {} : { codeView: false }) };
+  return { ...view, ...designSelectionPatch(targets, selectedFrame) };
 }
 
 export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
@@ -109,7 +108,6 @@ export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
     selectedNodeIds: [],
     selectedTargets: [],
     panel: "layers",
-    codeView: false,
     activeTheme: null,
     canvasBackground: null,
     zoom: 0.25,
@@ -194,6 +192,8 @@ export function normalizeDesignWorkspaceView(
         ]),
       ].slice(0, DESIGN_SELECTION_NODE_LIMIT)
     : [];
+  // Legacy codeView flags are ignored in both flat and per-page records;
+  // the remaining navigation stays under the existing storage key.
   const normalized: DesignWorkspaceViewState = {
     ...(typeof record.directoryId === "string" && record.directoryId.length <= 128 ? { directoryId: record.directoryId } : {}),
     layersVisible: record.layersVisible !== false,
@@ -209,7 +209,6 @@ export function normalizeDesignWorkspaceView(
     selectedNodeIds,
     selectedTargets: [],
     panel: record.panel === "assets" ? "assets" : "layers",
-    codeView: record.codeView === true,
     activeTheme:
       typeof record.activeTheme === "string" &&
       /^[a-z][a-z0-9_-]{0,63}$/.test(record.activeTheme)
@@ -345,7 +344,6 @@ interface DesignWorkspaceUiStore {
   setSelectedTargets(workspaceId: string, targets: readonly DesignSelectionTarget[], options?: { owner?: DesignPageOwner; activeFrame?: string | null; explicit?: boolean }): void;
   setPanels(workspaceId: string, panels: Partial<Pick<DesignWorkspaceViewState, "layersVisible" | "inspectorVisible">>): void;
   setPanel(workspaceId: string, panel: DesignBottomPanel): void;
-  setCodeView(workspaceId: string, codeView: boolean): void;
   setActiveTheme(workspaceId: string, activeTheme: string | null): void;
   setCanvasBackground(workspaceId: string, canvasBackground: string, owner?: DesignPageOwner): void;
   setViewport(
@@ -453,9 +451,6 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
             state.byWorkspace[workspaceId]?.selectedFrame === selectedFrame
               ? state.byWorkspace[workspaceId]?.selectedNodeIds
               : [],
-          // Source belongs to the selected frame. Closing it when selection is
-          // cleared prevents a blank code surface from becoming durable.
-          ...(selectedFrame ? {} : { codeView: false }),
         }),
       }));
     },
@@ -496,14 +491,6 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           panel,
-        }),
-      }));
-    },
-
-    setCodeView(workspaceId, codeView) {
-      set((state) => ({
-        byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
-          codeView,
         }),
       }));
     },

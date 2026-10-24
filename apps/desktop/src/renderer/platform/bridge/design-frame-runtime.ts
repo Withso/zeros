@@ -29,6 +29,7 @@ import {
   type DesignRuntimeHitMode,
   type DesignRuntimeGenerationPatch,
   type DesignRuntimeMotionPreview,
+  type DesignRuntimePlaybackStopped,
   type DesignRuntimeNodeDetails,
   type DesignRuntimeNodeGeometry,
   type DesignRuntimeRect,
@@ -63,6 +64,7 @@ export interface DesignFrameRuntimeCallbacks {
     event: "ready" | "mutation",
   ) => void;
   onReady?: (capabilities: DesignRuntimeCapabilities) => void;
+  onPlaybackStopped?: (event: DesignRuntimePlaybackStopped) => void;
 }
 
 export interface DesignFrameRuntimeConnection {
@@ -116,6 +118,9 @@ export interface DesignFrameRuntimeConnection {
     css: string | null,
     signal?: AbortSignal,
   ): Promise<{ applied: number; snapshot: DesignRuntimeSnapshot }>;
+  /** Whole-frame browser playback. The session fences a late Stop from a
+   * retired playback attempt; older engines do not advertise this method. */
+  setPlayback(sessionId: string, playing: boolean, signal?: AbortSignal): Promise<void>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -422,6 +427,10 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         this.methods = new Set(message.payload.capabilities.methods);
         this.callbacks.onReady?.(message.payload.capabilities);
         this.callbacks.onSnapshot?.(message.payload.snapshot, "ready");
+      } else if (message.event === "playbackStopped") {
+        if (this.supports("setPlayback") && message.payload.sourceVersion === this.expectedSourceVersion) {
+          this.callbacks.onPlaybackStopped?.(message.payload);
+        }
       } else if (
         isRuntimeSnapshot(message.payload) &&
         message.payload.sourceVersion === this.expectedSourceVersion
@@ -712,6 +721,19 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       throw runtimeError("previewStylesheet returned malformed data");
     }
     return result as { applied: number; snapshot: DesignRuntimeSnapshot };
+  }
+
+  async setPlayback(sessionId: string, playing: boolean, signal?: AbortSignal): Promise<void> {
+    if (!this.supports("setPlayback")) {
+      throw runtimeError("Frame playback needs an updated Design runtime. Restart Zeros to load it.", "METHOD_NOT_SUPPORTED");
+    }
+    const result = await this.request("setPlayback", { sessionId, playing }, signal) as
+      { playing?: unknown; sessionId?: unknown } | null;
+    if (!result || typeof result.playing !== "boolean" ||
+        (result.playing ? typeof result.sessionId !== "string" || !result.sessionId.length || result.sessionId.length > 128 : result.sessionId !== null) ||
+        (playing && (!result.playing || result.sessionId !== sessionId))) {
+      throw runtimeError("setPlayback returned malformed data");
+    }
   }
 
   async previewStyles(

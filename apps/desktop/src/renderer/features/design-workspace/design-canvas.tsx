@@ -19,12 +19,12 @@ import {
 // --- IMPORTS ---
 
 import {
-  Code2,
   Diamond,
   Frame,
   Image as ImageIcon,
   MousePointer2,
   Palette,
+  Play,
   Type,
 } from "lucide-react";
 import React, {
@@ -65,9 +65,7 @@ import {
   ContextMenuSeparator,
 } from "../../shared/ui/primitives/context-menu";
 import {
-  CodeBlock,
   Input,
-  ScrollArea,
   Toolbar,
   toast,
 } from "../../shared/ui/primitives";
@@ -250,7 +248,6 @@ import {
   updateDesignFrameGeometryCached,
   moveDesignFramesCached,
   updateDesignNodeStylesCached,
-  warmDesignFrameDocument,
 } from "./state/design-workspace-cache";
 import {
   designWorkspaceView,
@@ -260,7 +257,6 @@ import {
   useDesignWorkspaceView,
 } from "./state/design-workspace-ui";
 import { useDesignFoundation } from "./state/use-design-foundation";
-import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
 import { useDesignSavedEditing } from "./design-saved-editing";
@@ -455,7 +451,7 @@ function useDelayedColdBusy(loading: boolean): boolean {
 
 // ============================================
 // COMPONENT: DesignCanvas
-// PURPOSE: Pan, zoom, select, create, move, resize, rename, and inspect source
+// PURPOSE: Pan, zoom, select, create, move, resize, and rename
 // USED IN: DesignWorkspaceColumn
 // ============================================
 
@@ -481,7 +477,6 @@ export function DesignCanvas({
   const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}\0${view.activePageId ?? ""}`;
   const canvasDocumentOwnerRef = useRef(canvasDocumentOwner);
   canvasDocumentOwnerRef.current = canvasDocumentOwner;
-  const setCodeView = useDesignWorkspaceUiStore((state) => state.setCodeView);
   const setActiveTheme = useDesignWorkspaceUiStore(
     (state) => state.setActiveTheme,
   );
@@ -503,20 +498,6 @@ export function DesignCanvas({
     selectedFrame?.sourceVersion,
     active && Boolean(selectedFrame),
   );
-  const selectedFrameDocument = useDesignFrameDocument(
-    workspaceId ?? "",
-    selectedFrame?.file ?? "",
-    selectedFrame?.sourceVersion ?? "",
-    active && Boolean(workspaceId && selectedFrame),
-  );
-  const warmSelectedFrameDocument = useCallback(() => {
-    if (!active || !workspaceId || !selectedFrame) return;
-    warmDesignFrameDocument(
-      workspaceId,
-      selectedFrame.file,
-      selectedFrame.sourceVersion,
-    );
-  }, [active, selectedFrame, workspaceId]);
   const selectedNodeDetails = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame || !view.selectedNodeId) return null;
     return (
@@ -538,6 +519,10 @@ export function DesignCanvas({
     view.frameSelected && !view.selectedNodeId
       ? selectedFrameRootDetails
       : null;
+  // Motion uses the inspector's style target, including the outer frame root.
+  // Selection, rather than runtime readback readiness, keeps the timeline open.
+  const motionNodeDetails = selectedNodeDetails ?? frameLayoutOwnerDetails;
+  const motionTargetSelected = view.frameSelected || Boolean(view.selectedNodeId);
   /** The one auto-layout owner whose padding and gaps the canvas edits: a
    * single selected layer, or the selected frame's root. A multi-selection
    * has none — editing its primary alone would surprise. */
@@ -823,10 +808,10 @@ export function DesignCanvas({
   ]);
 
   useEffect(() => {
-    if (motionTimelineOpen && !view.selectedNodeId) {
+    if (motionTimelineOpen && !motionTargetSelected) {
       onMotionTimelineOpenChange(false);
     }
-  }, [motionTimelineOpen, onMotionTimelineOpenChange, view.selectedNodeId]);
+  }, [motionTimelineOpen, motionTargetSelected, onMotionTimelineOpenChange]);
 
   // DOM owner for viewport bounds, focus scoping, and pointer-relative zoom.
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -866,18 +851,28 @@ export function DesignCanvas({
   const [renamingFrame, setRenamingFrame] = useState<string | null>(null);
   // Keeps the draft isolated from the authoritative frame title.
   const [renameDraft, setRenameDraft] = useState("");
+  // One explicit playback session; it never survives an owner, source or
+  // editing-intent change. A token also fences late iframe stop/error replies.
+  const [playbackSession, setPlaybackSession] = useState<{
+    id: string;
+    owner: string;
+    file: string;
+    sourceVersion: string;
+    selectionEvent: number | undefined;
+  } | null>(null);
   // Tool choice is interaction-local; only semantic frame/node selection is durable.
   const [activeTool, setActiveTool] = useState<DesignCanvasTool>("select");
   const activeToolRef = useRef<DesignCanvasTool>("select");
   activeToolRef.current = activeTool;
   const activateTool = useCallback((tool: DesignCanvasTool) => {
+    setPlaybackSession(null);
     activeToolRef.current = tool;
     setActiveTool(tool);
   }, []);
   // The theme matrix is a persistent non-modal tool window launched from the
   // canvas toolbar, so it may coexist with canvas and inspector work.
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
-  const motionOverlayOwner = `${workspaceId ?? ""}\u0000${snapshot?.directoryId ?? view.directoryId ?? ""}\u0000${selectedFrame?.file ?? ""}\u0000${selectedNodeDetails?.oid ?? ""}`;
+  const motionOverlayOwner = `${workspaceId ?? ""}\u0000${snapshot?.directoryId ?? view.directoryId ?? ""}\u0000${selectedFrame?.file ?? ""}\u0000${motionNodeDetails?.oid ?? ""}`;
   const [motionOverlayState, setMotionOverlayState] =
     useState<DesignMotionOverlayState>({
       owner: "",
@@ -1106,6 +1101,39 @@ export function DesignCanvas({
       false,
     );
   }, [view.panX, view.panY, view.zoom]);
+  const playbackOwner = `${canvasDocumentOwner}\0${folder ?? ""}\0${view.ownerRevision ?? 0}\0${snapshot?.protocolCapability ?? "bridge"}`;
+  const playbackFrame = playbackSession && snapshot?.frames.find((frame) =>
+    frame.file === playbackSession.file && frame.sourceVersion === playbackSession.sourceVersion);
+  const currentPlayback =
+    active && playbackSession?.owner === playbackOwner && playbackFrame &&
+    activeTool === "select" && !inlineTextEdit && !renamingFrame && !motionTimelineOpen &&
+    view.selectionEvent === playbackSession.selectionEvent && view.selectedTargets.length === 0 &&
+    designViewportShowsAnyRect(view, viewportSize, [playbackFrame])
+      ? playbackSession
+      : null;
+  const currentPlaybackRef = useRef(currentPlayback);
+  currentPlaybackRef.current = currentPlayback;
+  useLayoutEffect(() => {
+    if (playbackSession && !currentPlayback) setPlaybackSession(null);
+  }, [currentPlayback, playbackSession]);
+  const stopFramePlayback = useCallback((sessionId: string, error?: Error) => {
+    const current = currentPlaybackRef.current;
+    if (current?.id !== sessionId) return;
+    currentPlaybackRef.current = null;
+    setPlaybackSession(null);
+    if (!document.hidden) viewportRef.current?.querySelector<HTMLButtonElement>(
+      `[data-design-frame-play="${CSS.escape(current.file)}"]`,
+    )?.focus({ preventScroll: true });
+    if (error) toast.error("Couldn't play this frame", { description: errorMessage(error) });
+  }, []);
+  useEffect(() => {
+    if (!currentPlayback) return;
+    const hide = () => {
+      if (document.hidden) stopFramePlayback(currentPlayback.id);
+    };
+    document.addEventListener("visibilitychange", hide);
+    return () => document.removeEventListener("visibilitychange", hide);
+  }, [currentPlayback, stopFramePlayback]);
   const liveFrameFilesRef = useRef<{
     owner: string;
     files: ReadonlySet<string>;
@@ -1142,13 +1170,14 @@ export function DesignCanvas({
   }, [paintNestTarget]);
   const layersOpenFiles = useMemo(
     () => [
+      ...(currentPlayback ? [currentPlayback.file] : []),
       ...Object.entries(layerDisclosures)
         .filter(([, disclosure]) => disclosure.treeExpanded)
         .map(([file]) => file),
       ...agentDraftFiles,
       ...(nestLiveFile ? [nestLiveFile] : []),
     ],
-    [agentDraftFiles, layerDisclosures, nestLiveFile],
+    [agentDraftFiles, currentPlayback, layerDisclosures, nestLiveFile],
   );
   // Saved pictures of this directory's frames. A frame painted no larger
   // than its picture shows the picture instead of running its document.
@@ -1227,17 +1256,16 @@ export function DesignCanvas({
   }, [previewItems]);
   const previewDemand = useMemo(
     () =>
-      active && previewOwner && !view.codeView && previewItems.length
+      active && previewOwner && previewItems.length
         ? { owner: previewOwner, theme: frameTheme, items: previewItems }
         : null,
-    [active, frameTheme, previewItems, previewOwner, view.codeView],
+    [active, frameTheme, previewItems, previewOwner],
   );
   useDesignFramePreviewDemand(previewDemand);
   const highResolutionTiles = useMemo(() => {
     const result = new Map<string, DesignHighResolutionViewportTile>();
     if (
       !active ||
-      view.codeView ||
       view.zoom < HIGH_RESOLUTION_ZOOM_THRESHOLD ||
       viewportSize.width <= 0 ||
       viewportSize.height <= 0
@@ -1285,7 +1313,6 @@ export function DesignCanvas({
     active,
     selectedFrame?.file,
     snapshot?.frames,
-    view.codeView,
     view.panX,
     view.panY,
     view.zoom,
@@ -2319,7 +2346,7 @@ export function DesignCanvas({
         !motionTimelineOpen ||
         !workspaceId ||
         !selectedFrame ||
-        !selectedNodeDetails
+        !motionNodeDetails
       ) {
         return;
       }
@@ -2327,22 +2354,22 @@ export function DesignCanvas({
         workspaceId,
         frame: selectedFrame.file,
         sourceVersion: selectedFrame.sourceVersion,
-        nodeId: selectedNodeDetails.oid,
+        nodeId: motionNodeDetails.oid,
         motion: designMotionPreviewInput(draft, currentTime, playing),
       });
     },
-    [motionTimelineOpen, selectedFrame, selectedNodeDetails, workspaceId],
+    [motionTimelineOpen, selectedFrame, motionNodeDetails, workspaceId],
   );
 
   const clearMotionPreview = useCallback(async () => {
-    if (!workspaceId || !selectedFrame || !selectedNodeDetails) return;
+    if (!workspaceId || !selectedFrame || !motionNodeDetails) return;
     await clearDesignNodeStylePreviewTransient({
       workspaceId,
       frame: selectedFrame.file,
       sourceVersion: selectedFrame.sourceVersion,
-      nodeId: selectedNodeDetails.oid,
+      nodeId: motionNodeDetails.oid,
     });
-  }, [selectedFrame, selectedNodeDetails, workspaceId]);
+  }, [selectedFrame, motionNodeDetails, workspaceId]);
 
   const saveMotion = useCallback(
     async (draft: DesignMotionTimelineDraft) => {
@@ -2350,7 +2377,7 @@ export function DesignCanvas({
       if (
         !workspaceId ||
         !selectedFrame ||
-        !selectedNodeDetails ||
+        !motionNodeDetails ||
         !foundation
       ) {
         throw new Error(
@@ -2379,7 +2406,7 @@ export function DesignCanvas({
           {
             operationId: `animation:${crypto.randomUUID()}`,
             type: "node.set-styles",
-            nodeId: selectedNodeDetails.oid,
+            nodeId: motionNodeDetails.oid,
             styles: {
               "animation-name": draft.name,
               "animation-duration": draft.duration,
@@ -2396,12 +2423,12 @@ export function DesignCanvas({
         ],
       });
     },
-    [canvasFoundation.data, selectedFrame, selectedNodeDetails, workspaceId],
+    [canvasFoundation.data, selectedFrame, motionNodeDetails, workspaceId],
   );
 
   const deleteMotion = useCallback(async () => {
     const foundation = canvasFoundation.data;
-    if (!workspaceId || !selectedFrame || !selectedNodeDetails || !foundation) {
+    if (!workspaceId || !selectedFrame || !motionNodeDetails || !foundation) {
       throw new Error("The selected element is not ready for motion editing.");
     }
     await applyDesignTransactionCached(workspaceId, selectedFrame.file, {
@@ -2410,13 +2437,13 @@ export function DesignCanvas({
       documentId: foundation.summary.documentId,
       baseRevision: foundation.summary.revision,
       actor: { kind: "human", id: "desktop" },
-      intent: `Remove motion from ${selectedNodeDetails.name}`,
+      intent: `Remove motion from ${motionNodeDetails.name}`,
       createdAt: Date.now(),
       operations: [
         {
           operationId: `animation:${crypto.randomUUID()}`,
           type: "node.set-styles",
-          nodeId: selectedNodeDetails.oid,
+          nodeId: motionNodeDetails.oid,
           styles: {
             animation: null,
             "animation-name": "none",
@@ -2434,7 +2461,7 @@ export function DesignCanvas({
         },
       ],
     });
-  }, [canvasFoundation.data, selectedFrame, selectedNodeDetails, workspaceId]);
+  }, [canvasFoundation.data, selectedFrame, motionNodeDetails, workspaceId]);
 
   // Arrow keys on several selected frames move them together, in the nudge
   // lifecycle of one frame: presses while the key is held land as one canvas
@@ -5769,6 +5796,14 @@ export function DesignCanvas({
             "[data-design-motion-timeline], [data-design-motion-settings]",
           ))
       ) return;
+      if (event.key === "Escape" && currentPlaybackRef.current) {
+        event.preventDefault();
+        stopFramePlayback(currentPlaybackRef.current.id);
+        return;
+      }
+      // The toggle owns native Space/Enter activation, even though it sits
+      // inside the canvas that normally uses Space to pan.
+      if (event.target instanceof Element && event.target.closest("[data-design-frame-play]")) return;
       const editableTarget = isEditableHotkeyTarget(event.target);
       // Option measures; it never types, moves, or deletes anything. Reading it
       // outside the canvas's own focus scope is what makes the overlay appear
@@ -5999,7 +6034,7 @@ export function DesignCanvas({
         !event.ctrlKey &&
         !event.altKey &&
         event.key.toLowerCase() === "a" &&
-        view.selectedNodeId
+        motionTargetSelected
       ) {
         event.preventDefault();
         onMotionTimelineOpenChange(!motionTimelineOpen);
@@ -6066,8 +6101,10 @@ export function DesignCanvas({
     finishNodeNudge,
     fitFrames,
     hitStackMenu,
+    stopFramePlayback,
     nudgeSelectedNode,
     motionTimelineOpen,
+    motionTargetSelected,
     navigateToNode,
     onMotionTimelineOpenChange,
     onDeleteFrame,
@@ -7116,11 +7153,11 @@ export function DesignCanvas({
     (event: React.WheelEvent<HTMLDivElement>) => {
       if (!active || !workspaceId) return;
       // Chrome inside the viewport owns its wheel: the tool rail never pans
-      // the canvas, and the Motion timeline and source view scroll themselves.
+      // the canvas, and the Motion timeline scrolls itself.
       if (
         event.target instanceof Element &&
         event.target.closest(
-          "[data-design-canvas-tools-rail], [data-design-motion-timeline], [data-design-source-view]",
+          "[data-design-canvas-tools-rail], [data-design-motion-timeline]",
         )
       ) {
         return;
@@ -7213,6 +7250,7 @@ export function DesignCanvas({
           style={designCanvasCameraStyle(view)}
         >
           {snapshot?.frames.map((frame) => {
+            const framePlaying = currentPlayback?.file === frame.file;
             const paintedFrame = frameGeometryPreviewsRef.current.get(
               `${canvasDocumentOwner}\0${frame.file}`,
             )?.geometry;
@@ -7283,6 +7321,7 @@ export function DesignCanvas({
                 key={`${workspaceId ?? "pending"}:${frame.file}`}
                 data-design-frame={frame.file}
                 data-design-frame-kind={frame.kind ?? "frame"}
+                data-design-frame-playing={framePlaying ? "" : undefined}
                 className={cn(
                   "pointer-events-auto absolute outline",
                   frame.kind === "text" ? "bg-transparent" : "bg-bg1",
@@ -7307,6 +7346,7 @@ export function DesignCanvas({
                 onPointerDown={(event) => {
                   if (
                     !active ||
+                    framePlaying ||
                     !event.isPrimary ||
                     event.button !== 0 ||
                     spacePressedRef.current
@@ -7393,6 +7433,7 @@ export function DesignCanvas({
                 }}
                 onDoubleClick={(event) => {
                   if (
+                    framePlaying ||
                     event.shiftKey ||
                     event.metaKey ||
                     event.ctrlKey ||
@@ -7408,9 +7449,9 @@ export function DesignCanvas({
                     event.clientY,
                   );
                 }}
-                onPointerMove={(event) => scheduleCanvasHover(event, frame)}
+                onPointerMove={(event) => { if (!framePlaying) scheduleCanvasHover(event, frame); }}
                 onPointerLeave={() => clearCanvasHover(frame)}
-                onContextMenu={(event) => openHitStack(event, frame)}
+                onContextMenu={(event) => { if (!framePlaying) openHitStack(event, frame); }}
                 onDragOver={(event) => {
                   if (!hasDesignAssetDrag(event.dataTransfer)) return;
                   event.preventDefault();
@@ -7433,67 +7474,110 @@ export function DesignCanvas({
                 }}
               >
                 {frame.kind !== "text" ? (
-                  <div
-                    data-design-controls
-                    className="absolute bottom-full left-0 flex origin-bottom-left items-center"
-                    style={
-                      {
-                        "--design-frame-label-max-width": `calc(${frame.width}px * var(--design-canvas-zoom))`,
-                        maxWidth: "var(--design-frame-label-max-width)",
-                        transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
-                      } as React.CSSProperties
-                    }
-                  >
-                    {renamingFrame === frame.file ? (
-                      <Input
-                        autoFocus
-                        value={renameDraft}
-                        className="h-6 w-48"
-                        aria-label={`Rename ${frame.title}`}
-                        onChange={(event) => setRenameDraft(event.target.value)}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onBlur={() => void commitRename(frame)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            void commitRename(frame);
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            renameSettledRef.current = true;
-                            setRenamingFrame(null);
+                  <>
+                    <div
+                      data-design-controls
+                      className="absolute bottom-full left-0 flex h-7 origin-bottom-left items-center"
+                      style={
+                        {
+                          // Reserve the 28px Play control and its 12px gap in screen space.
+                          "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 40px))`,
+                          maxWidth: "var(--design-frame-label-max-width)",
+                          transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+                        } as React.CSSProperties
+                      }
+                    >
+                      {renamingFrame === frame.file ? (
+                        <Input
+                          autoFocus
+                          value={renameDraft}
+                          className="h-6 w-48 min-w-0 max-w-full"
+                          aria-label={`Rename ${frame.title}`}
+                          onChange={(event) => setRenameDraft(event.target.value)}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onBlur={() => void commitRename(frame)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void commitRename(frame);
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              renameSettledRef.current = true;
+                              setRenamingFrame(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          data-design-frame-label=""
+                          title={frame.title}
+                          className={cn(
+                            "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
+                            frameSelectedOnly
+                              ? "text-[var(--design-selection-stroke)]"
+                              : "text-muted-fg hover:text-fg2",
+                          )}
+                          onPointerDown={(event) =>
+                            startFrameGesture(event, frame, "move")
                           }
-                        }}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        data-design-frame-label=""
-                        title={frame.title}
-                        className={cn(
-                          "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
-                          frameSelectedOnly
-                            ? "text-[var(--design-selection-stroke)]"
-                            : "text-muted-fg hover:text-fg2",
-                        )}
-                        onPointerDown={(event) =>
-                          startFrameGesture(event, frame, "move")
-                        }
-                        onDoubleClick={(event) => {
+                          onDoubleClick={(event) => {
+                            event.stopPropagation();
+                            renameSettledRef.current = false;
+                            setRenameDraft(frame.title);
+                            setRenamingFrame(frame.file);
+                          }}
+                        >
+                          <span
+                            data-design-frame-name=""
+                            className="block max-w-full overflow-hidden text-ellipsis"
+                          >
+                            {frame.title}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                    <div
+                      data-design-controls
+                      className="absolute right-0 bottom-full origin-bottom-right"
+                      style={{ transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
+                    >
+                      <DesignToolbarButton
+                        data-design-frame-play={frame.file}
+                        label={`Play ${frame.title}`}
+                        tooltip={framePlaying ? "Stop playback (Esc)" : "Play frame"}
+                        className="zd-frame-play"
+                        tool
+                        pressed={framePlaying}
+                        disabled={!active || !workspaceId || !folder || Boolean(inlineTextEdit || renamingFrame)}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onDoubleClick={(event) => event.stopPropagation()}
+                        onClick={(event) => {
                           event.stopPropagation();
-                          renameSettledRef.current = false;
-                          setRenameDraft(frame.title);
-                          setRenamingFrame(frame.file);
+                          if (currentPlayback?.file === frame.file) {
+                            stopFramePlayback(currentPlayback.id);
+                            return;
+                          }
+                          if (!workspaceId || !canvasPageOwner) return;
+                          gestureCancelRef.current?.();
+                          activateTool("select");
+                          onMotionTimelineOpenChange(false);
+                          setHitStackMenu(null);
+                          clearCanvasHover(frame);
+                          // Selection is published synchronously before its
+                          // durable bridge write; Play never waits on that I/O.
+                          void selectDesignFrame(workspaceId, frame, { selected: false, owner: canvasPageOwner }).catch(() => {});
+                          const session = { id: crypto.randomUUID(), owner: playbackOwner,
+                            file: frame.file, sourceVersion: frame.sourceVersion,
+                            selectionEvent: designWorkspaceView(workspaceId).selectionEvent };
+                          currentPlaybackRef.current = session;
+                          setPlaybackSession(session);
                         }}
                       >
-                        <span
-                          data-design-frame-name=""
-                          className="block max-w-full overflow-hidden text-ellipsis"
-                        >
-                          {frame.title}
-                        </span>
-                      </button>
-                    )}
-                  </div>
+                        <Play />
+                      </DesignToolbarButton>
+                    </div>
+                  </>
                 ) : null}
 
                 {workspaceId && folder ? (
@@ -7503,7 +7587,9 @@ export function DesignCanvas({
                     folder={folder}
                     frame={frame}
                     active={active}
-                    selected={selected}
+                    playbackSessionId={framePlaying ? currentPlayback.id : null}
+                    onPlaybackStopped={stopFramePlayback}
+                    selected={selected && !framePlaying}
                     selectedNodeIds={
                       selected ? view.selectedNodeIds : EMPTY_NODE_IDS
                     }
@@ -7513,7 +7599,7 @@ export function DesignCanvas({
                       highResolutionTiles.get(frame.file) ?? null
                     }
                     highResolutionDisabled={
-                      inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
+                      framePlaying || inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
                     }
                     designDirectory={snapshot.directory}
                     previewOwner={previewOwner}
@@ -7525,7 +7611,7 @@ export function DesignCanvas({
                   </div>
                 )}
 
-                {workspaceId && frame.kind !== "text" ? (
+                {workspaceId && !framePlaying && frame.kind !== "text" ? (
                   <DesignAgentDraftFrameOverlay
                     workspaceId={workspaceId}
                     directory={snapshot.directory}
@@ -7588,7 +7674,7 @@ export function DesignCanvas({
                   </div>
                 ) : null}
 
-                {workspaceId ? (
+                {workspaceId && !framePlaying ? (
                   <DesignLayerHoverOverlay
                     workspaceId={workspaceId}
                     frame={frame.file}
@@ -8065,29 +8151,6 @@ export function DesignCanvas({
           aria-hidden="true"
         />
 
-        {view.codeView &&
-        selectedFrame &&
-        (selectedFrameDocument.data || selectedFrameDocument.error) ? (
-          <div
-            data-design-controls
-            data-design-source-view=""
-            data-motion-open={motionTimelineOpen ? "" : undefined}
-            className="zd-design-source-view bg-bg1 absolute inset-0 overflow-hidden"
-          >
-            <ScrollArea className="h-full">
-              <CodeBlock
-                language="html"
-                filename={`Zeros Design/${selectedFrame.file}`}
-              >
-                <pre>
-                  {selectedFrameDocument.data?.source ??
-                    "The frame source could not be loaded."}
-                </pre>
-              </CodeBlock>
-            </ScrollArea>
-          </div>
-        ) : null}
-
         {!snapshot && showColdBusy ? (
           <div className="text-muted-fg pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
             Loading design…
@@ -8191,7 +8254,7 @@ export function DesignCanvas({
           open={motionTimelineOpen}
           ownerKey={selectedFrame?.file ?? "frame"}
           sessionOwnerKey={motionOverlayOwner}
-          details={selectedNodeDetails}
+          details={motionNodeDetails}
           definitions={
             canvasFoundation.data?.foundation.keyframes ??
             EMPTY_DESIGN_KEYFRAME_DEFINITIONS
@@ -8269,20 +8332,6 @@ export function DesignCanvas({
             </DesignToolbarButton>
             <span className="zd-canvas-toolbar-divider" aria-hidden="true" />
             <DesignToolbarButton
-              label="Toggle frame source"
-              tooltip="Source"
-              tooltipSide="right"
-              pressed={view.codeView}
-              disabled={!workspaceId || !selectedFrame}
-              onPointerEnter={warmSelectedFrameDocument}
-              onFocus={warmSelectedFrameDocument}
-              onClick={() => {
-                if (workspaceId) setCodeView(workspaceId, !view.codeView);
-              }}
-            >
-              <Code2 />
-            </DesignToolbarButton>
-            <DesignToolbarButton
               ref={themeEditorTriggerRef}
               data-design-theme-trigger
               label="Open theme editor"
@@ -8303,7 +8352,7 @@ export function DesignCanvas({
               shortcut="⇧A"
               tooltipSide="right"
               pressed={motionTimelineOpen}
-              disabled={!workspaceId || !selectedFrame || !view.selectedNodeId}
+              disabled={!workspaceId || !selectedFrame || !motionTargetSelected}
               aria-keyshortcuts="Shift+A"
               onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
             >
