@@ -1,7 +1,7 @@
 # Claude SDK event coverage
 
-Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.296** and its
-bundled CLI **2.1.296**. The installed `sdk.d.ts` and wrapper are the contract;
+Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.309** and its
+bundled CLI **2.1.309**. The installed `sdk.d.ts` and wrapper are the contract;
 online documentation can describe a different version.
 
 The public `SDKMessage` union has 39 member aliases and 42 distinct type/subtype
@@ -63,6 +63,25 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/informational` | handled | Plain bounded content as an inbetween message, tool-scoped where identified. `prevent_continuation` explains runtime behavior but is not itself a terminal result. |
 | `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding follows init plus confirmed root work/success. |
 
+## 0.3.309 surface review
+
+Local Personal, organization-local and standalone cloud workers pin the same
+0.3.309 Node SDK. The public message inventory remains at 39 aliases and 42
+discriminators. The launch smoke checks the real wrapper and bundled 2.1.309
+process without inference.
+
+The 20 declaration changes from 0.3.296 have fingerprinted dispositions in
+[`scripts/agent-runtime/reviews.json`](../scripts/agent-runtime/reviews.json).
+The Browser SDK dialog/SSE additions do not apply to these Node integrations.
+The experimental usage API remains deferred. Native MCP policy/settings fields
+stay SDK-owned; Zeros does not enable `allowNestedUserNamespaces` or interpret
+Artifact `owned` as workspace authority.
+
+Tool-name contract checks, elicitation field order, context category IDs and
+per-server MCP shares, cron `nextFireAt`/lifecycle wake-ups, and plugin additions
+are reserved for the subsequent integration packages. This pin and review update
+does not claim those features are implemented.
+
 ## 0.3.296 field dispositions
 
 The public message inventory remains at 39 aliases and 42 discriminators.
@@ -86,9 +105,9 @@ subagent shutdown, MCP recovery and native token/cost corrections arrive with
 the runtime. Existing permission, restart, replay, subagent, hook-feedback and
 usage suites run against the replacement wrapper. Those native-contract
 simulations do not claim a live account reproduced every upstream fix.
-The launch smoke additionally exercises the real 0.3.296 wrapper and bundled
-2.1.296 process without inference. See the prior-version dispositions below
-for behavior that remains part of the integration.
+The 0.3.296 upgrade added the launch-handshake version check retained by the
+current smoke. See the prior-version dispositions below for behavior that
+remains part of the integration.
 
 ## 0.3.293 field dispositions
 

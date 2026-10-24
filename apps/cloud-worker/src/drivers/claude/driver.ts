@@ -15,7 +15,7 @@ import { isClaudeParentProgress } from "./event-feedback";
 import { hasClaudeModelContent } from "./first-content";
 import { normalizeProviderError } from "../shared/provider-error";
 
-export const CLAUDE_VERSION = "0.3.296";
+export const CLAUDE_VERSION = "0.3.309";
 interface NativeQuery extends AsyncIterable<unknown> {
   interrupt(): Promise<unknown>; setModel(model: string): Promise<void>; close(): void;
   applyFlagSettings: Query["applyFlagSettings"];

@@ -18,7 +18,7 @@ const source = ts.transpileModule(
 ).outputText;
 const normalize = runInNewContext(`${source}\nnormalizePackagedPlatformRecords`, {
   exports: {}, process: { argv: [] }, require: createRequire(fileURLToPath(scriptUrl)),
-}) as (records: LicenseRecord[], options: { macosOnly: []; lockfile: string }) => LicenseRecord[];
+}) as (records: LicenseRecord[], options: { macosOnly: []; lockfile: string; parentVersions?: Record<string, string> }) => LicenseRecord[];
 
 interface LicenseRecord {
   name: string;
@@ -57,6 +57,37 @@ function fixture() {
 }
 
 describe("release license platform normalization", () => {
+  it("uses the desktop wrapper when a cloud workspace still installs an older runtime", () => {
+    const { records, lockfile } = fixture();
+    const desktop = records.find(record => record.name === "@anthropic-ai/claude-agent-sdk")!;
+    const packagePath = mkdtempSync(join(tmpdir(), "zeros-license-cloud-runtime-"));
+    directories.push(packagePath);
+    writeFileSync(join(packagePath, "package.json"), JSON.stringify({
+      name: desktop.name,
+      optionalDependencies: { "@anthropic-ai/claude-agent-sdk-darwin-arm64": "1.2.2" },
+    }));
+    const cloud = { ...desktop, version: "1.2.2", packagePath };
+    const options = {
+      macosOnly: [] as [],
+      lockfile: `${lockfile}\n  '@anthropic-ai/claude-agent-sdk-darwin-arm64@1.2.2':\n    resolution: {integrity: fixture}`,
+      parentVersions: { [desktop.name]: desktop.version },
+    };
+    const inventory = normalize([cloud, ...records], options);
+    const native = (items: LicenseRecord[]) => items.filter(record => record.name === "@anthropic-ai/claude-agent-sdk-darwin-arm64");
+    expect(native(inventory)).toEqual(native(normalize([...records, cloud], options)));
+    expect(native(inventory))
+      .toEqual([expect.objectContaining({ version: desktop.version, packagePath: desktop.packagePath })]);
+    expect(inventory).toContainEqual(cloud);
+  });
+
+  it("refuses to substitute another workspace's runtime when the desktop wrapper is absent", () => {
+    const { records, lockfile } = fixture();
+    expect(() => normalize(records, {
+      macosOnly: [], lockfile,
+      parentVersions: { "@anthropic-ai/claude-agent-sdk": "1.2.4" },
+    })).toThrow(/@anthropic-ai\/claude-agent-sdk.*production inventory/);
+  });
+
   it("produces the same shipped watcher inventory on Linux, macOS and hosts without an optional binary", () => {
     const { records, host, watcher, lockfile } = fixture();
     const inventory = (variants: string[]) => normalize([...records, ...variants.map(host)], { macosOnly: [], lockfile });
