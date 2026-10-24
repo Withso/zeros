@@ -213,7 +213,61 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     await dialog.getByLabel("Code or redirect URL", { exact: true }).press("Enter");
     await expect(dialog).toHaveCount(0);
     expect(await page.evaluate(() => window.mcpHeadlessFixture.completed)).toBe(1);
-    expect(errors).toEqual([]);
     check("An engine without a browser offers the same paste-code sign-in from the editor", true);
+    await runMcpAuthorizationRefreshRaceSmoke({ page, check });
+    expect(errors).toEqual([]);
   } finally { await context.close(); }
+}
+
+export async function runMcpAuthorizationRefreshRaceSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-customize.html?gatewayState=needs-auth`);
+  await page.getByRole("tab", { name: "MCP", exact: true }).click();
+  await page.getByRole("button", { name: "Edit gateway-error", exact: true }).click();
+  const connection = page.getByRole("region", { name: "Connection", exact: true });
+  await expect(connection).toContainText("Sign-in required");
+  await expect.poll(() => page.evaluate(() => window.mcpFormFixture.probeCount)).toBeGreaterThan(0);
+  await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
+  await page.evaluate(async () => {
+    const { RuntimeClient } = await import("/apps/desktop/src/renderer/platform/bridge/ws-client.ts");
+    const { mcpGatewayStatusCache } = await import("/apps/desktop/src/renderer/state/read-caches.ts");
+    const request = RuntimeClient.prototype.request;
+    window.mcpAuthRefreshFixture = { statusReads: 0, release: null };
+    RuntimeClient.prototype.request = function (message, ...args) {
+      if (message.op === "mcp.gateway.status") {
+        window.mcpAuthRefreshFixture.statusReads++;
+        const response = request.call(this, message, ...args);
+        if (window.mcpAuthRefreshFixture.statusReads === 1) {
+          return Promise.resolve(response).then(stale => new Promise(resolve => {
+            window.mcpAuthRefreshFixture.release = () => resolve(stale);
+          }));
+        }
+        return response;
+      }
+      return request.call(this, message, ...args);
+    };
+    // Hold automatic probes so they cannot repair a stale gateway response
+    // before the successful authorization's own status refresh is observed.
+    window.mcpFormFixture.holdProbe = true;
+    mcpGatewayStatusCache.invalidateAll();
+  });
+  await expect.poll(() => page.evaluate(() => Boolean(window.mcpAuthRefreshFixture.release))).toBe(true);
+  try {
+    await page.getByRole("button", { name: "Connect", exact: true }).click();
+    await expect(connection).toContainText("Connected");
+    await page.evaluate(() => window.mcpAuthRefreshFixture.release());
+    await expect.poll(() => page.evaluate(async () => {
+      const { mcpGatewayStatusCache } = await import("/apps/desktop/src/renderer/state/read-caches.ts");
+      return mcpGatewayStatusCache.keys().every(key => !mcpGatewayStatusCache.getSnapshot(key).refreshing);
+    })).toBe(true);
+    await expect(connection).toContainText("Connected");
+    expect(await page.evaluate(() => window.mcpAuthRefreshFixture.statusReads)).toBe(2);
+    check("A gateway read begun before authorization cannot restore Sign-in required after Connect succeeds", true);
+  } finally {
+    await page.evaluate(() => {
+      window.mcpAuthRefreshFixture.release?.();
+      window.mcpFormFixture.holdProbe = false;
+      window.mcpFormFixture.releaseProbe?.();
+    });
+  }
 }

@@ -72,7 +72,11 @@ function LocalMcpEditor({ initial: source, initialProject, onBack, onSaved, surf
     return cancelAuth;
   }, [surfaceActive, cancelAuth]);
   const connected = (server: RawServer, toolCount: number, tools?: string[]) => {
-    if (statusKey) rememberMcpConnection(statusKey, server, { status: "connected", stages: [], toolCount, ...(tools ? { tools } : {}) });
+    if (statusKey) {
+      rememberMcpConnection(statusKey, server, { status: "connected", stages: [], toolCount, ...(tools ? { tools } : {}) });
+      // A read begun before sign-in must not replace the authorization result.
+      mcpGatewayStatusCache.invalidate(statusKey);
+    }
     status.refresh(); toast.success("MCP server connected");
   };
   const connect = async (server: RawServer) => {

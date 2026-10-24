@@ -17,6 +17,11 @@ after each account-bound await, and let fresh authorization observations replace
 stale checks without dropping the exact configuration's tool inventory.
 An unavailable gateway overrides cached successful backend checks in the list;
 its Retry must reconnect the service before advertising a usable connection.
+Authorization also invalidates gateway reads begun before it succeeded. A
+forced refresh alone shares an in-flight read; its late authentication-required
+snapshot can otherwise undo the successful connection in the editor. The
+browser regression holds that older reply and blocks automatic probes so they
+cannot conceal the status regression.
 
 Encoded in the MCP form-save, connection-view, connection-status and cloud-API
 regressions, plus the production Local and organization browser smoke. The
@@ -31,3 +36,5 @@ focus, wait for that exact cache key to finish refreshing; otherwise focus
 correctly deduplicates against the earlier read and never reaches the new hold.
 The organization smoke retains its delayed owner-switch assertion and now
 observes this boundary instead of relying on runner speed.
+Remove any temporary continuation runner copied beside scripts before running
+repository-wide UI policy checks; untracked copies are scanned as source too.
