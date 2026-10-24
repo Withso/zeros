@@ -32,7 +32,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.296: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.37: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (682 resolved package/version records)
+PACKAGE INVENTORY (680 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.296
@@ -2202,7 +2202,7 @@ electron-updater@6.8.9
   Source: https://github.com/electron-userland/electron-builder
   License documents: 3f13dd7700ec
 
-electron@43.7.7
+electron@43.8.3
   License: MIT
   Surfaces: desktop runtime
   Author: Electron Community
@@ -2381,16 +2381,9 @@ fast-sha256@1.3.0
   Source: https://github.com/dchest/fast-sha256-js
   License documents: 88d9b4eb6057
 
-fast-uri@3.1.8
-  License: BSD-3-Clause
-  Surfaces: root pnpm workspace
-  Author: Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)
-  Source: https://github.com/fastify/fast-uri
-  License documents: df7464922225
-
 fast-uri@3.1.9
   License: BSD-3-Clause
-  Surfaces: control plane
+  Surfaces: control plane, root pnpm workspace
   Author: Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)
   Source: https://github.com/fastify/fast-uri
   License documents: df7464922225
@@ -2690,16 +2683,9 @@ inline-style-parser@0.2.7
   Source: https://github.com/remarkablemark/inline-style-parser
   License documents: 395c95f20598
 
-ip-address@10.7.1
-  License: MIT
-  Surfaces: root pnpm workspace
-  Author: Beau Gunderson <beau@beaugunderson.com> (https://beaugunderson.com/)
-  Source: https://github.com/beaugunderson/ip-address
-  License documents: f8d791359a50
-
 ip-address@10.7.4
   License: MIT
-  Surfaces: control plane
+  Surfaces: control plane, root pnpm workspace
   Author: Beau Gunderson <beau@beaugunderson.com> (https://beaugunderson.com/)
   Source: https://github.com/beaugunderson/ip-address
   License documents: f8d791359a50
@@ -11338,8 +11324,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 5154e165bd6c
 SHA-256: 5154e165bd6c2cc0cfbcd8916498c7abab0497923bafcd5cb07673fe8480087d
-Applies to: electron@43.7.7
-Source labels: electron@43.7.7 — LICENSE
+Applies to: electron@43.8.3
+Source labels: electron@43.8.3 — LICENSE
 ================================================================================
 
 Copyright (c) Electron contributors
@@ -20955,8 +20941,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT df7464922225
 SHA-256: df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
-Applies to: fast-uri@3.1.8, fast-uri@3.1.9
-Source labels: fast-uri@3.1.8 — LICENSE; fast-uri@3.1.9 — LICENSE
+Applies to: fast-uri@3.1.9
+Source labels: fast-uri@3.1.9 — LICENSE
 ================================================================================
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -24121,8 +24107,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT f8d791359a50
 SHA-256: f8d791359a50cbcac82c29cb7b0b1b889b28be76fdd35b8ee33f0f7c8704702a
-Applies to: ip-address@10.7.1, ip-address@10.7.4
-Source labels: ip-address@10.7.1 — LICENSE; ip-address@10.7.4 — LICENSE
+Applies to: ip-address@10.7.4
+Source labels: ip-address@10.7.4 — LICENSE
 ================================================================================
 
 Copyright (C) 2011 by Beau Gunderson
