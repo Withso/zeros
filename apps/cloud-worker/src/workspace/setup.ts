@@ -6,13 +6,14 @@ import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import type { WorkerConfig } from "./scope";
 
 const MAX_LOG_BYTES = 256 * 1024;
+const SETUP_TIMEOUT_MS = 3_600_000;
 export type SetupRunner = (file: string, args: readonly string[], options: {
   cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; output(chunk: Buffer): void;
 }) => Promise<number | null>;
 
 const runSetup: SetupRunner = (file, args, options) => new Promise((resolve, reject) => {
   if (options.signal.aborted) { resolve(null); return; }
-  // A separate process group lets Stop cancel shell descendants as well.
+  // A separate process group lets Stop or the deadline cancel descendants too.
   const child = spawn(file, [...args], { cwd: options.cwd, env: options.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
   let escalation: ReturnType<typeof setTimeout> | undefined;
   const kill = (signal: NodeJS.Signals) => {
@@ -32,7 +33,7 @@ const runSetup: SetupRunner = (file, args, options) => new Promise((resolve, rej
 
 type SetupStatus = {
   workspaceId: string; state: "running" | "succeeded" | "failed" | "interrupted";
-  startedAt: string; finishedAt?: string; exitCode?: number | null;
+  startedAt: string; finishedAt?: string; exitCode?: number | null; reason?: "timed_out";
 };
 interface SetupOptions {
   directory: string; workspace: WorkerConfig["workspace"]; gitEnvironment: NodeJS.ProcessEnv;
@@ -71,8 +72,13 @@ export class WorkspaceSetup {
       // Keep descriptors throughout execution: a checkout cannot redirect an
       // already admitted status/log write by replacing its pathname.
       log = await open(join(directory, `${workspace.id}.log`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      let code: number | null = null, failed = false;
+      let code: number | null = null, failed = false, timedOut = false;
       if (!this.controller.signal.aborted) {
+        const deadline = setTimeout(() => {
+          if (this.controller.signal.aborted) return;
+          timedOut = true; this.controller.abort();
+        }, SETUP_TIMEOUT_MS);
+        deadline.unref();
         try {
           code = await (this.options.runner ?? runSetup)("bash", ["-lc", workspace.setup!], {
             cwd: workspace.checkoutPath, env: workerChildEnvironment(undefined, this.options.gitEnvironment), signal: this.controller.signal,
@@ -83,10 +89,12 @@ export class WorkspaceSetup {
             },
           });
         } catch { failed = true; }
+        finally { clearTimeout(deadline); }
       }
       await writes;
-      status.state = this.controller.signal.aborted ? "interrupted" : !failed && code === 0 ? "succeeded" : "failed";
-      status.finishedAt = new Date().toISOString(); status.exitCode = code;
+      status.state = timedOut ? "failed" : this.controller.signal.aborted ? "interrupted" : !failed && code === 0 ? "succeeded" : "failed";
+      status.finishedAt = new Date().toISOString(); status.exitCode = timedOut ? null : code;
+      if (timedOut) status.reason = "timed_out";
       await this.persist(statusFile, status);
     } catch { this.options.onStorageError?.(); }
     finally { await writes; await log?.close().catch(() => {}); await statusFile?.close().catch(() => {}); }
