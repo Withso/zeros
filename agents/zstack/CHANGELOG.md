@@ -22,6 +22,8 @@ where it is encoded.
   - running VM scripts once on the real image;
   - testing a case that only a script's primary path passes;
   - fencing operations by their own generation rather than by state;
+  - passing shell path lists NUL-terminated, keeping trailing newlines, and
+    checking the lister's status;
   - running `test:git` under umask 022
   (`changes/`, `zstack-verify`, `integrate-pr`).
 

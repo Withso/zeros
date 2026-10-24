@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -115,12 +115,14 @@ describe("cloud v2 checkpoints", () => {
 
     const key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
     const saved = checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env);
-    expect(saved.parsed).toEqual({ ok: true, bytes: lstatSync(archive).size, sha256: sha(archive) });
+    // Read once: the reported size and digest describe exactly these bytes.
+    const written = readFileSync(archive);
+    expect(saved.parsed).toEqual({ ok: true, bytes: written.length, sha256: createHash("sha256").update(written).digest("hex") });
     // The old repository is left exactly as it was; no temporary refs remain.
     expect(git(w.oldRepo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(before.status);
     expect(git(w.oldRepo, "for-each-ref", "refs/zeros-checkpoint")).toBe("");
     // The base branch's history stays out; only local objects travel.
-    expect(readFileSync(archive).includes(Buffer.from("TOKEN=from-old-vm"))).toBe(false);
+    expect(written.includes(Buffer.from("TOKEN=from-old-vm"))).toBe(false);
 
     const restored = restore({ home: w.newHome, repo: w.newRepo, key, sha256: saved.parsed.ok ? saved.parsed.sha256 : "", from: archive }, w.env);
     expect(restored.parsed).toEqual({ ok: true });
@@ -557,6 +559,77 @@ describe("cloud v2 checkpoints", () => {
     expect(lstatSync(join(w.newRepo, ".repository")).isDirectory()).toBe(true);
     expect(w.git(w.newRepo, "rev-parse", "HEAD")).toBe(head);
     expect(w.git(w.newRepo, "rev-parse", "--is-inside-work-tree")).toBe("true");
+  });
+
+  const ownNames = [".repository [*]", "meta/.repository with spaces", ".git\nmetadata"];
+
+  it.each(ownNames)("never saves the old checkout's own Git directory named %j", name => {
+    const w = workspaces();
+    const own = join(w.oldRepo, name); mkdirSync(dirname(own), { recursive: true });
+    w.git(w.oldRepo, "init", "-q", "--separate-git-dir", own);
+    expect(w.git(w.oldRepo, "rev-parse", "--is-inside-work-tree")).toBe("true");
+    w.write(join(w.oldRepo, "draft.txt"), "saved draft\n");
+    const key = randomBytes(32), archive = join(w.root, "named.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "draft.txt"), "utf8")).toBe("saved draft\n");
+    expect(existsSync(join(w.newRepo, name, "config"))).toBe(false);
+  });
+
+  it.each(ownNames)("refuses a new checkout whose own Git directory is named %j before writing anything", name => {
+    const w = workspaces();
+    w.write(join(w.oldRepo, name), "an ordinary project file\n"); w.write(join(w.oldRepo, "draft.txt"), "saved draft\n");
+    const key = randomBytes(32), archive = join(w.root, "named.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    const own = join(w.newRepo, name); mkdirSync(dirname(own), { recursive: true });
+    w.git(w.newRepo, "init", "-q", "--separate-git-dir", own);
+    expect(w.git(w.newRepo, "rev-parse", "--is-inside-work-tree")).toBe("true");
+    const head = w.git(w.newRepo, "rev-parse", "HEAD");
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed)
+      .toEqual({ ok: false, code: "checkpoint_restore_failed" });
+    expect(lstatSync(own).isDirectory()).toBe(true);
+    expect(w.git(w.newRepo, "rev-parse", "HEAD")).toBe(head);
+    expect(existsSync(join(w.newRepo, "draft.txt"))).toBe(false);
+  });
+
+  it("reads the old checkout's .git file as Git does, line ends and trailing newlines included", () => {
+    const w = workspaces();
+    // A CRLF .git file names a link whose target is a Git directory ending in a newline.
+    renameSync(join(w.oldRepo, ".git"), join(w.oldRepo, "real\n")); symlinkSync("real\n", join(w.oldRepo, ".repository"));
+    writeFileSync(join(w.oldRepo, ".git"), "gitdir: .repository/\r\n");
+    expect(w.git(w.oldRepo, "rev-parse", "--is-inside-work-tree")).toBe("true");
+    w.write(join(w.oldRepo, "draft.txt"), "saved draft\n");
+    const key = randomBytes(32), archive = join(w.root, "crlf.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "draft.txt"), "utf8")).toBe("saved draft\n");
+    expect(existsSync(join(w.newRepo, "real\n"))).toBe(false);
+    expect(() => lstatSync(join(w.newRepo, ".repository"))).toThrow();
+  });
+
+  it("fails instead of guessing when it cannot list the checkout's own Git directories", () => {
+    const w = workspaces();
+    const source = join(w.oldHome, "acme", "own");
+    w.git(w.root, "clone", "-q", "--separate-git-dir", join(source, ".repository"), w.origin, source);
+    w.write(join(source, "draft.txt"), "saved draft\n");
+    const key = randomBytes(32), archive = join(w.root, "listed.zck");
+    expect(checkpoint({ home: w.oldHome, repo: source, key, out: archive }, w.env).parsed.ok).toBe(true);
+    // A git that cannot say where the common directory is, once the checkpoint exists.
+    const real = execFileSync("bash", ["-c", "command -v git"], { env: w.env, encoding: "utf8" }).trim();
+    const fakeHome = join(w.root, "fake-home"), stub = join(fakeHome, ".local", "bin"); mkdirSync(stub, { recursive: true });
+    writeFileSync(join(stub, "git"), `#!/bin/sh\ncase " $* " in *" --git-common-dir "*) exit 1 ;; esac\nexec ${real} "$@"\n`); chmodSync(join(stub, "git"), 0o755);
+    const env = { ...w.env, HOME: fakeHome, PATH: `${stub}:${w.env.PATH}` };
+    expect(checkpoint({ home: w.oldHome, repo: source, key, out: join(w.root, "never.zck") }, env).parsed).toMatchObject({ ok: false, code: "checkpoint_failed" });
+    expect(w.git(source, "for-each-ref", "refs/zeros-checkpoint")).toBe("");
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    const head = w.git(w.newRepo, "rev-parse", "HEAD");
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, env).parsed)
+      .toEqual({ ok: false, code: "checkpoint_restore_failed" });
+    expect(w.git(w.newRepo, "rev-parse", "HEAD")).toBe(head);
+    expect(existsSync(join(w.newRepo, "draft.txt"))).toBe(false);
   });
 
   it("saves where a remote pushes when a pushInsteadOf rule sends pushes elsewhere", () => {

@@ -127,17 +127,34 @@ function https(value: string): string {
   return url.href;
 }
 
-/** Prints the checkout's own Git directories that live inside it, relative to
- * it: the resolved Git and common directories, and the `.git` file's target,
- * which may be a link inside the checkout. Runs in the checkout. */
+/** Writes the checkout's own Git directories that live inside it, relative to
+ * it and NUL-terminated (any name is possible, newlines included): the
+ * resolved Git and common directories, and the `.git` file's target, which may
+ * be a link inside the checkout. Runs in the checkout; fails rather than
+ * leave out a directory it could not resolve. */
 const OWN_GIT_DIRS = [
   "own_git_dirs() {",
-  "  local here dir link; here=$(pwd -P)",
-  "  { for dir in \"$(git rev-parse --absolute-git-dir)\" \"$(git rev-parse --git-common-dir)\"; do (cd \"$dir\" && pwd -P); done",
-  "    if [ -f .git ]; then link=$(sed -n 's/^gitdir: //p' .git | head -n 1)",
-  "      if [ -n \"$link\" ]; then case \"$link\" in /*) ;; *) link=\"$here/$link\" ;; esac; printf '%s/%s\\n' \"$(cd \"$(dirname \"$link\")\" && pwd -P)\" \"$(basename \"$link\")\"; fi",
+  "  local here gitdir common link name cand",
+  // $(...) drops trailing newlines, which a name can end with; the x keeps them.
+  "  here=$(pwd -P && printf x) && gitdir=$(git rev-parse --absolute-git-dir && printf x) && common=$(git rev-parse --git-common-dir && printf x) || return 1",
+  "  here=${here%$'\\nx'} gitdir=${gitdir%$'\\nx'} common=${common%$'\\nx'}",
+  "  gitdir=$(cd \"$gitdir\" && pwd -P && printf x) && common=$(cd \"$common\" && pwd -P && printf x) || return 1",
+  "  gitdir=${gitdir%$'\\nx'} common=${common%$'\\nx'} link=''",
+  // Git reads everything after \"gitdir: \", less trailing line ends.
+  "  if [ -f .git ]; then",
+  "    link=$(cat .git && printf x) || return 1; link=${link%x}",
+  "    case \"$link\" in 'gitdir: '*) link=${link#gitdir: } ;; *) link='' ;; esac",
+  "    while case \"$link\" in *$'\\n' | *$'\\r') true ;; *) false ;; esac; do link=${link%?}; done",
+  "    while case \"$link\" in ?*/) true ;; *) false ;; esac; do link=${link%/}; done",
+  "    if [ -n \"$link\" ]; then",
+  "      case \"$link\" in /*) ;; *) link=\"$here/$link\" ;; esac",
+  "      name=${link##*/}; link=$(cd \"${link%/*}/\" && pwd -P && printf x) || return 1; link=${link%$'\\nx'}/$name",
   "    fi",
-  "  } | while IFS= read -r dir; do case \"$dir/\" in \"$here/\"*) printf '%s\\n' \"${dir#\"$here/\"}\" ;; esac; done | sort -u",
+  "  fi",
+  "  for cand in \"$gitdir\" \"$common\" \"$link\"; do",
+  "    [ \"$cand\" != \"$here\" ] || return 1",
+  "    case \"$cand\" in \"$here/\"*) printf '%s\\0' \"${cand#\"$here/\"}\" || return 1 ;; esac",
+  "  done",
   "}",
 ];
 
@@ -203,7 +220,8 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     // checkout under another name; it is never part of the checkpoint, even if
     // something already staged it. --sparse: edits outside a sparse cone count.
     ...OWN_GIT_DIRS,
-    "  own=(); keep=(); while IFS= read -r rel; do own+=(\":(top,literal)$rel\"); keep+=(\":(exclude,top,literal)$rel\"); done < <(own_git_dirs)",
+    "  own_git_dirs > \"$work/own\" || fail checkpoint_failed",
+    "  own=(); keep=(); while IFS= read -r -d '' rel; do own+=(\":(top,literal)$rel\"); keep+=(\":(exclude,top,literal)$rel\"); done < \"$work/own\"",
     "  addall() { scratch add -A --sparse -- . ${keep[@]+\"${keep[@]}\"}; }",
     "  forget() { if [ ${#own[@]} -gt 0 ]; then GIT_INDEX_FILE=\"$1\" git rm -r -q -f --cached --sparse --ignore-unmatch -- \"${own[@]}\"; fi; }",
     // A conflicted index has no tree; the restore then shows every change as unstaged.
@@ -353,7 +371,8 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     // A checkout that keeps its own Git directory inside itself, under any
     // name but .git, could have it overwritten by saved files or history.
     // Cloud Computer checkouts never do; refuse before changing anything.
-    "  step=gitdir; while IFS= read -r rel; do [ \"$rel\" = .git ] || fail checkpoint_restore_failed; done < <(own_git_dirs)",
+    "  step=gitdir; own_git_dirs > \"$work/own\" || fail checkpoint_restore_failed",
+    "  while IFS= read -r -d '' rel; do [ \"$rel\" = .git ] || fail checkpoint_restore_failed; done < \"$work/own\"",
     "  step=objects",
     "  if [ -f \"$c/repo.bundle\" ]; then",
     "    while read -r sha; do need \"$sha\"; done < <(sed '/^$/q' \"$c/repo.bundle\" | grep -a '^-' | cut -c2- | cut -d' ' -f1)",
