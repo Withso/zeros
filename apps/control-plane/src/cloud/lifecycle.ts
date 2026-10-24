@@ -3,31 +3,44 @@
 // repeats it: creation uses the workspace id as Boat's idempotency key, and
 // the worker credential is delivered by command after boot, never in the
 // sandbox definition, so it can be rotated on any retry.
+import { randomBytes, randomUUID } from "node:crypto";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult } from "./boat.js";
 import { BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import type { CloudV2Store, CloudV2Workspace, CloudV2LifecycleWorkspace } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming } from "./contract.js";
+import { CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, checkpointCommand, cloudV2CheckpointObject, parseCheckpointResult, parseRestoreResult,
+  restoreCommand, type CloudV2CheckpointError, type CloudV2CheckpointStorage } from "./checkpoint.js";
 
 const CONCURRENCY = 4;
+/** A stop can spend minutes saving its checkpoint; creates and wakes, which
+ * someone is waiting for, always keep the remaining slots. */
+const STOPPING_SLOTS = 2;
 const LEASE_MS = 2 * 60_000;
 /** The worker's hello moves the workspace to running at once; this poll only
  * re-delivers a credential to a worker that has not connected. */
 const HELLO_POLL_MS = 30_000;
 const BOOT_DEADLINE_MS = 10 * 60_000;
+/** A restore also creates a VM and applies a checkpoint of up to 4 GiB. */
+const RESTORE_DEADLINE_MS = 25 * 60_000;
+/** Holds the step's claim while the VM runs a checkpoint command. */
+const CHECKPOINT_LEASE_MS = (CLOUD_V2_CHECKPOINT_SECONDS + 120) * 1000;
+/** GitHub answers while Boat boots the VM; never longer than this. */
+const BASE_COMMIT_MS = 3_000;
 const MAX_ATTEMPTS = 8;
 const LEASE_RENEW_MS = 12 * 60 * 60_000;
 const MAINTENANCE_SCAN_MS = 60_000;
-const RETENTION_AGE_MS = 12 * 24 * 60 * 60_000;
 export const CLOUD_V2_IDLE_STOP_MS = 10 * 60_000;
+/** Boat's stock image home; repositories live at <home>/<owner>/<name>. */
+export const CLOUD_V2_HOME = "/home/user";
 /** Boat's stock image runs commands as its one user, `user`. The worker and
  * agents run as that user too, so its credential lives in its config dir. */
 export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token";
 /** Non-secret boot settings for the worker's systemd unit (EnvironmentFile). */
 export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
-type LifecyclePhase = "boat_create" | "boat_resume" | "runtime_install" | "protected_route" | "token_delivery" | "total";
+type LifecyclePhase = "boat_create" | "boat_resume" | "runtime_install" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
 export type CloudV2TimingRecord = {
   workspaceId: string;
   phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
@@ -41,7 +54,7 @@ export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => vo
 
 export type CloudV2LifecycleDeps = {
   store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed"
-    | "retentionDue" | "beginRetention" | "finishRetention" | "deferRetention" | "retentionCleanupDue" | "beginRetentionCleanup" | "finishRetentionCleanup" | "beginRestore" | "finishRestore">;
+    | "setBaseCommit" | "saveCheckpoint" | "checkpointFailed" | "beginRestore" | "replaceSandbox" | "finishRestore">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   stopIdle?: (id: string, before: Date) => Promise<void>;
@@ -54,7 +67,17 @@ export type CloudV2LifecycleDeps = {
   /** Non-secret boot settings, e.g. the relay URL and workspace id. */
   bootEnv(workspace: CloudV2Workspace): Record<string, string>;
   sandboxName(workspace: CloudV2Workspace): string;
-  retentionName(workspace: CloudV2LifecycleWorkspace): string;
+  /** Checkpoints in object storage. Without them a stopped workspace has only
+   * Boat's disk, which Boat deletes after 14 days. */
+  checkpoints?: {
+    storage: CloudV2CheckpointStorage;
+    seal(key: Buffer, workspaceId: string, object: string): unknown;
+    open(sealed: unknown, workspaceId: string, object: string): Buffer;
+  };
+  /** The base branch's GitHub head, recorded at creation; null when unknown. */
+  remoteHead?(workspace: CloudV2Workspace): Promise<string | null>;
+  /** A repository token, for a restore that must fetch or clone from GitHub. */
+  githubToken?(workspace: CloudV2Workspace): Promise<{ token: string }>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void> };
   now?: () => number;
@@ -67,6 +90,8 @@ export type CloudV2LifecycleDeps = {
 function sandboxLost(error: unknown): boolean {
   return error instanceof BoatSnapshotExpiredError || (error instanceof CloudProviderError && error.code === "provider_not_found");
 }
+
+const checkpointError = (code: CloudV2CheckpointError) => Object.assign(new Error("checkpoint failed"), { code });
 
 function errorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code;
@@ -95,6 +120,7 @@ export class CloudV2Lifecycle {
   /** Only admission is serialized; provider calls run in separate slots. */
   private running: Promise<void> | null = null;
   private readonly inFlight = new Map<string, Promise<void>>();
+  private readonly stopping = new Set<string>();
 
   constructor(private readonly deps: CloudV2LifecycleDeps, private readonly intervalMs = 2_000) {}
 
@@ -109,7 +135,6 @@ export class CloudV2Lifecycle {
       await this.running;
       await Promise.all(this.inFlight.values());
       await this.renewing;
-      await this.retaining;
       await this.building;
       await this.cleaning;
     };
@@ -120,8 +145,6 @@ export class CloudV2Lifecycle {
   private lastPromptPrune = 0;
   private renewing: Promise<void> | null = null;
   private lastLeaseScan = -Infinity;
-  private retaining: Promise<void> | null = null;
-  private lastRetentionScan = -Infinity;
 
   async tick(): Promise<void> {
     await this.poll();
@@ -153,20 +176,25 @@ export class CloudV2Lifecycle {
         .catch(error => this.deps.logger?.warn(`[cloud-v2] lease scan failed (${errorCode(error)})`))
         .finally(() => { this.renewing = null; });
     }
-    if (!this.retaining && now - this.lastRetentionScan >= MAINTENANCE_SCAN_MS) {
-      this.lastRetentionScan = now;
-      this.retaining = this.maintainRetention(now)
-        .catch(error => this.deps.logger?.warn(`[cloud-v2] retention scan failed (${errorCode(error)})`))
-        .finally(() => { this.retaining = null; });
-    }
     const slots = CONCURRENCY - this.inFlight.size;
     if (slots <= 0) return;
-    for (const workspace of await this.deps.store.claimPending(slots, LEASE_MS, [...this.inFlight.keys()])) {
+    // Creates, wakes and deletions first; stops then take at most their own slots.
+    this.admitClaimed(await this.deps.store.claimPending(slots, LEASE_MS, [...this.inFlight.keys()], ["creating", "starting", "deleting"]), now);
+    const stopSlots = Math.min(CONCURRENCY - this.inFlight.size, STOPPING_SLOTS - this.stopping.size);
+    if (stopSlots > 0) this.admitClaimed(await this.deps.store.claimPending(stopSlots, LEASE_MS, [...this.inFlight.keys()], ["stopping"]), now);
+  }
+
+  private admitClaimed(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], now: number): void {
+    for (const workspace of claimed) {
       if (this.inFlight.has(workspace.id) || this.inFlight.size >= CONCURRENCY) continue;
+      if (workspace.state === "stopping") {
+        if (this.stopping.size >= STOPPING_SLOTS) continue;
+        this.stopping.add(workspace.id);
+      }
       const step = this.runStep(workspace, now)
         // A failed retry write must not escape an unobserved background promise.
         .catch(error => this.deps.logger?.warn(`[cloud-v2] lifecycle retry failed (${errorCode(error)})`))
-        .finally(() => { this.inFlight.delete(workspace.id); });
+        .finally(() => { this.inFlight.delete(workspace.id); this.stopping.delete(workspace.id); });
       this.inFlight.set(workspace.id, step);
     }
   }
@@ -182,34 +210,6 @@ export class CloudV2Lifecycle {
         await store.markLeaseRenewed(workspace.id, workspace.boatSandboxId, renewedAt);
       } catch (error) { this.deps.logger?.warn(`[cloud-v2] lease renewal failed (${errorCode(error)})`); }
     }));
-  }
-
-  private async maintainRetention(now: number): Promise<void> {
-    const { store, compute } = this.deps;
-    // Running means an authenticated hello has registered the new worker. A
-    // later stop also retires the previous stop's now-stale backup.
-    for (const workspace of await store.retentionCleanupDue(CONCURRENCY)) {
-      const name = workspace.retentionSnapshot;
-      if (!name || !await store.beginRetentionCleanup(workspace.id, name)) continue;
-      try {
-        await compute.deleteSnapshot(name);
-        await store.finishRetentionCleanup(workspace.id, name);
-      } catch (error) {
-        await store.deferRetention(workspace.id, name);
-        this.deps.logger?.warn(`[cloud-v2] retention cleanup failed (${errorCode(error)})`);
-      }
-    }
-    const workspace = (await store.retentionDue(new Date(now - RETENTION_AGE_MS), 1))[0];
-    if (!workspace?.boatSandboxId || !workspace.stoppedAt) return;
-    const name = workspace.retentionSnapshot ?? this.deps.retentionName(workspace);
-    if (!await store.beginRetention(workspace, name)) return;
-    try {
-      await compute.saveSnapshot(workspace.boatSandboxId, name, { resume: true });
-      await store.finishRetention(workspace.id, workspace.boatSandboxId, name);
-    } catch (error) {
-      await store.deferRetention(workspace.id, name);
-      this.deps.logger?.warn(`[cloud-v2] retention save failed (${errorCode(error)})`);
-    }
   }
 
   private async runStep(workspace: CloudV2LifecycleWorkspace & { attempts: number }, now: number): Promise<void> {
@@ -237,6 +237,7 @@ export class CloudV2Lifecycle {
           await store.transition(workspace.id, ["creating"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
+        const baseCommit = workspace.baseCommit || !this.deps.remoteHead ? null : this.lookupBaseCommit(workspace);
         let sandboxId = workspace.boatSandboxId;
         if (!sandboxId) {
           const from = await store.computerSnapshot(workspace.organizationId, workspace.computerBuildId);
@@ -253,53 +254,50 @@ export class CloudV2Lifecycle {
         }
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
         if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
+        // The worker reads it with its configuration, after the token arrives.
+        const commit = await baseCommit;
+        if (commit) await store.setBaseCommit(workspace.id, commit);
         await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId));
         await store.defer(workspace.id, "creating", HELLO_POLL_MS);
         return;
       }
       case "starting": {
-        let sandboxId = workspace.boatSandboxId;
-        if (!sandboxId && !workspace.retentionSavedAt) {
-          await store.transition(workspace.id, ["starting"], "failed", { errorCode: "sandbox_missing" });
-          return;
-        }
-        // A wake requested during a save waits for that operation. Its boot
-        // budget starts once the dependency permits it to touch the VM.
-        const waking = now - Math.max(Date.parse(workspace.updatedAt), Date.parse(workspace.retentionOperationUntil ?? "") || 0);
-        if (waking > BOOT_DEADLINE_MS) {
+        let sandboxId = workspace.boatSandboxId, restoring = workspace.restorePending;
+        const deadline = restoring || (!sandboxId && workspace.checkpoint) ? RESTORE_DEADLINE_MS : BOOT_DEADLINE_MS;
+        if (now - Date.parse(workspace.updatedAt) > deadline) {
           await store.transition(workspace.id, ["starting"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
-        // Resume and protected hosting are idempotent. Rotate the HTTP token
-        // and restart every wake to register a new process boot identity.
-        if (workspace.restorePending || !sandboxId) {
-          const restored = await this.restore(workspace);
-          if (!restored || restored.state !== "starting") return;
-          sandboxId = restored.sandboxId;
+        if (!sandboxId) {
+          if (!restoring && !workspace.checkpoint) {
+            await store.transition(workspace.id, ["starting"], "failed", { errorCode: "sandbox_missing" });
+            return;
+          }
+          sandboxId = await this.replacement(workspace, restoring ? undefined : null);
+          if (!sandboxId) return;
+          restoring = true;
         } else {
+          // Resume and protected hosting are idempotent. Rotate the HTTP token
+          // and restart every wake to register a new process boot identity.
           const renewedAt = new Date(this.deps.now?.() ?? Date.now());
           try {
             await this.measure(workspace, "boat_resume", () => compute.resume(sandboxId!));
             await store.markLeaseRenewed(workspace.id, sandboxId, renewedAt);
           } catch (error) {
-            if (!sandboxLost(error) || !workspace.retentionSnapshot) throw error;
-            let retained = workspace;
-            if (!workspace.retentionSavedAt) {
-              // The save may have committed before its HTTP/DB acknowledgement
-              // was lost. saveSnapshot observes the named result first; a lost
-              // source cannot start another real save alongside the background job.
-              if (!await store.beginRetention(workspace, workspace.retentionSnapshot)) return;
-              await compute.saveSnapshot(sandboxId, workspace.retentionSnapshot, { resume: true });
-              await store.finishRetention(workspace.id, sandboxId, workspace.retentionSnapshot);
-              retained = { ...workspace, retentionSavedAt: new Date(this.deps.now?.() ?? Date.now()).toISOString() };
-            }
-            const restored = await this.restore(retained);
-            if (!restored || restored.state !== "starting") return;
-            sandboxId = restored.sandboxId;
+            // Boat deleted the disk of a VM stopped for 14 days: a new VM
+            // from the Cloud Computer gets the last checkpoint.
+            if (!sandboxLost(error) || !workspace.checkpoint) throw error;
+            sandboxId = await this.replacement(workspace, sandboxId);
+            if (!sandboxId) return;
+            restoring = true;
           }
         }
         // A runtime shipped while the VM slept is installed now.
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
+        if (restoring) {
+          await this.measure(workspace, "checkpoint_restore", () => this.applyCheckpoint(workspace, sandboxId));
+          if (!await store.finishRestore(workspace.id, sandboxId)) return;
+        }
         if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
         await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId));
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
@@ -307,13 +305,11 @@ export class CloudV2Lifecycle {
       }
       case "stopping": {
         let sandboxId = workspace.boatSandboxId;
-        if (workspace.restorePending) {
-          const restored = await this.restore(workspace);
-          if (!restored) return;
-          sandboxId = restored.sandboxId;
-        }
+        if (workspace.restorePending && !sandboxId) sandboxId = await this.replacement(workspace, undefined, { find: true });
         if (sandboxId) {
           await this.deps.stopWorker({ ...workspace, boatSandboxId: sandboxId });
+          // A replacement without its checkpoint holds nothing of the user's yet.
+          if (!workspace.restorePending) await this.checkpoint(workspace, sandboxId);
           await compute.stop(sandboxId);
         }
         await store.revoke(workspace.id, false);
@@ -322,16 +318,10 @@ export class CloudV2Lifecycle {
       }
       case "deleting": {
         let sandboxId = workspace.boatSandboxId;
-        if (workspace.restorePending) {
-          const restored = await this.restore(workspace);
-          if (!restored) return;
-          sandboxId = restored.sandboxId;
-        }
+        if (workspace.restorePending && !sandboxId) sandboxId = await this.replacement(workspace, undefined, { find: true });
         if (sandboxId) await compute.delete(sandboxId);
-        if (workspace.retentionSnapshot) {
-          await compute.deleteSnapshot(workspace.retentionSnapshot);
-          await store.finishRetentionCleanup(workspace.id, workspace.retentionSnapshot);
-        }
+        // Every checkpoint object, including any a crashed upload left behind.
+        await this.deps.checkpoints?.storage.prune(workspace.id);
         await store.revoke(workspace.id, true);
         await store.transition(workspace.id, ["deleting"], "deleted");
         return;
@@ -341,19 +331,97 @@ export class CloudV2Lifecycle {
     }
   }
 
-  private async restore(workspace: CloudV2LifecycleWorkspace): Promise<{ sandboxId: string; state: CloudV2Workspace["state"] } | null> {
+  /** The VM a restore applies the checkpoint to. `lost` starts a restore
+   * (null when the workspace has no VM); undefined continues one, creating the
+   * replacement again under the same key after a lost reply. With `find`, a
+   * stop or deletion only looks for one and never fails the workspace. */
+  private async replacement(workspace: CloudV2LifecycleWorkspace, lost: string | null | undefined, options: { find?: boolean } = {}): Promise<string | null> {
     const { store, compute } = this.deps;
-    const name = workspace.retentionSnapshot;
-    if (!name || !workspace.retentionSavedAt || !await store.beginRestore(workspace.id, workspace.boatSandboxId, name)) return null;
+    const checkpoint = workspace.checkpoint;
+    if (!checkpoint) return null;
+    let from: string | null;
+    if (lost !== undefined) {
+      const begun = await store.beginRestore(workspace.id, lost);
+      if (begun === "no_computer") {
+        await store.transition(workspace.id, ["starting"], "failed", { errorCode: "cloud_computer_build_required" });
+        return null;
+      }
+      if (!begun) return null;
+      from = begun.snapshot;
+      // Boat may keep a record of the expired VM.
+      if (lost) await compute.delete(lost).catch(() => {});
+    } else {
+      from = await store.computerSnapshot(workspace.organizationId, workspace.computerBuildId);
+      if (!from) {
+        if (!options.find) await store.transition(workspace.id, ["starting"], "failed", { errorCode: "cloud_computer_build_required" });
+        return null;
+      }
+    }
     const renewedAt = new Date(this.deps.now?.() ?? Date.now());
-    const create = () => compute.create({ key: `restore:${workspace.id}:${name}`, from: name,
+    const create = () => compute.create({ key: `restore:${workspace.id}:${checkpoint.object}`, from: from!,
       name: this.deps.sandboxName(workspace), env: this.deps.bootEnv(workspace) });
     const { sandboxId } = workspace.state === "starting" ? await this.measure(workspace, "boat_create", create) : await create();
-    // The expired sandbox may still have a Boat record. Keep its id until
-    // deletion succeeds; a lost reply replays the same new allocation key.
-    if (workspace.boatSandboxId && workspace.boatSandboxId !== sandboxId) await compute.delete(workspace.boatSandboxId);
-    const state = await store.finishRestore(workspace.id, workspace.boatSandboxId, name, sandboxId, renewedAt);
-    return state ? { sandboxId, state } : null;
+    // A stop or deletion that won the race finds this VM in the row.
+    const state = await store.replaceSandbox(workspace.id, sandboxId, renewedAt);
+    return state && (options.find || state === "starting") ? sandboxId : null;
+  }
+
+  /** Saves the stopped worker's checkpoint. Never blocks the stop: a failure
+   * keeps the previous checkpoint and records why. */
+  private async checkpoint(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
+    const checkpoints = this.deps.checkpoints;
+    if (!checkpoints) return;
+    // A retried stop already saved this one.
+    if (workspace.checkpoint && Date.parse(workspace.checkpoint.savedAt) >= Date.parse(workspace.updatedAt)) return;
+    const object = cloudV2CheckpointObject(workspace.id, randomUUID()), key = randomBytes(32);
+    try {
+      await this.deps.store.defer(workspace.id, "stopping", CHECKPOINT_LEASE_MS, { failure: true });
+      const command = checkpointCommand({ checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, home: CLOUD_V2_HOME,
+        baseBranch: workspace.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(workspace.id, object) });
+      const result = await this.measure(workspace, "checkpoint", () => this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS));
+      const saved = parseCheckpointResult(result.stdout);
+      if (!saved.ok) throw checkpointError(saved.code);
+      if (result.exitCode !== 0 || result.timedOut) throw checkpointError("checkpoint_failed");
+      if (await checkpoints.storage.size(workspace.id, object) !== saved.bytes) throw checkpointError("checkpoint_upload_failed");
+      const recorded = await this.deps.store.saveCheckpoint(workspace.id, sandboxId,
+        { object, key: checkpoints.seal(key, workspace.id, object), sha256: saved.sha256, bytes: saved.bytes });
+      // Older checkpoints, and anything a crashed upload left, are no longer needed.
+      if (recorded) await checkpoints.storage.prune(workspace.id, object).catch(error => this.deps.logger?.warn(`[cloud-v2] checkpoint prune failed (${errorCode(error)})`));
+      else await checkpoints.storage.delete(workspace.id, object).catch(() => {});
+    } catch (error) {
+      const code = (CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(errorCode(error)) ? errorCode(error) : "checkpoint_failed";
+      this.deps.logger?.warn(`[cloud-v2] checkpoint failed (${code})`);
+      await this.deps.store.checkpointFailed(workspace.id, sandboxId, code).catch(() => {});
+      await checkpoints.storage.delete(workspace.id, object).catch(() => {});
+    } finally { key.fill(0); }
+  }
+
+  /** Applies the last checkpoint before the worker starts. Idempotent, so a
+   * failed attempt is simply retried. */
+  private async applyCheckpoint(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
+    const checkpoints = this.deps.checkpoints, checkpoint = workspace.checkpoint;
+    if (!checkpoints || !checkpoint) throw checkpointError("checkpoint_restore_failed");
+    const github = await this.deps.githubToken?.(workspace).catch(() => null) ?? null;
+    const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
+    try {
+      const command = restoreCommand({ checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, home: CLOUD_V2_HOME, key,
+        sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
+        repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}) });
+      await this.deps.store.defer(workspace.id, "starting", CHECKPOINT_LEASE_MS, { failure: true });
+      const result = await this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS);
+      const restored = parseRestoreResult(result.stdout);
+      if (!restored.ok) throw checkpointError(restored.code);
+      if (result.exitCode !== 0 || result.timedOut) throw checkpointError("checkpoint_restore_failed");
+    } finally { key.fill(0); }
+  }
+
+  private async lookupBaseCommit(workspace: CloudV2Workspace): Promise<string | null> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const head = await Promise.race([this.deps.remoteHead!(workspace),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), BASE_COMMIT_MS); timer.unref(); })]);
+      return head && /^[0-9a-f]{40}$/.test(head) ? head : null;
+    } catch { return null; } finally { clearTimeout(timer); }
   }
 
   private async deliverToken(workspace: CloudV2Workspace, sandboxId: string): Promise<void> {

@@ -178,9 +178,9 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   `src/migrations.test.ts`. Whole-row ladder comparisons must project the
   original columns to check preservation and verify new defaults separately.
 - A recovery change to a shared provider method must be opt-in for callers
-  with durable retry identity. Test other callers too: retention can resume a
-  named snapshot, while a new Computer build must not reuse an old `-v1` name
-  after a development database reset.
+  with durable retry identity. Test other callers too: a retried save may
+  resume its own named result, while a new Computer build must not reuse an
+  old `-v1` name after a development database reset.
 - CI's PostgreSQL runs in a service container in another PID namespace, so a
   test cannot signal or inspect the server's processes. Reproduce connection
   races at the protocol layer, for example an in-test TCP relay that holds

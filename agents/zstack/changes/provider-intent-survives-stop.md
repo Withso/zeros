@@ -9,7 +9,9 @@
   provider I/O. Preserve them across Stop and deletion, reconcile ambiguous
   replies with the same idempotency key, and record the recovered resource
   before retiring it. Do not hold a database transaction across provider I/O.
-- **Encoded in.** Retention operation deadlines and `restore_pending`, with
-  lost-reply/Stop/deletion cases in `apps/control-plane/src/cloud/lifecycle.test.ts`
-  and `store.integration.test.ts`. Guidance is in
-  `skills/zstack-verify/SKILL.md`.
+- **Encoded in.** Checkpoint restores: `restore_pending` is recorded before the
+  replacement VM is created under a checkpoint-derived key, and
+  `CloudV2Store.replaceSandbox` records it in any live state. Covered by the
+  lost-reply, Stop and deletion cases in
+  `apps/control-plane/src/cloud/lifecycle.test.ts` and
+  `store.integration.test.ts`. Guidance is in `skills/zstack-verify/SKILL.md`.

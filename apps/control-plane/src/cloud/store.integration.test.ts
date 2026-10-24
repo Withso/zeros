@@ -71,97 +71,95 @@ d("cloud v2 store", () => {
     expect(await store.get(a.id, creator)).not.toHaveProperty("leaseRenewedAt");
   });
 
-  async function retainedCandidate(days = 12) {
+  const checkpoint = (workspaceId: string, bytes = 4096) =>
+    ({ object: `cloud-v2/checkpoints/${workspaceId}/${randomUUID()}.zck`, key: { version: 1, sealed: true }, sha256: "a".repeat(64), bytes });
+
+  async function stopping(sandboxId: string) {
     const w = await create();
-    await store.transition(w.id, ["creating"], "stopped", { boatSandboxId: `bx_${w.id.slice(0, 8)}` });
-    await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp()-make_interval(days=>$2) WHERE id=$1", [w.id, days]);
-    const rows = await store.retentionDue(new Date(Date.now() - 12 * 86_400_000), 10);
-    return rows.find(row => row.id === w.id)!;
+    await store.transition(w.id, ["creating"], "running", { boatSandboxId: sandboxId });
+    await store.transition(w.id, ["running"], "stopping");
+    return w;
   }
 
-  it("starts retention age only on a completed stop and preserves it through archive metadata changes", async () => {
-    const w = await create();
-    const stoppedAt = async () => (await pool.query("SELECT stopped_at FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].stopped_at;
-    expect(await stoppedAt()).toBeNull();
-    await store.transition(w.id, ["creating"], "running");
-    await store.transition(w.id, ["running"], "stopping");
-    expect(await stoppedAt()).toBeNull();
+  async function activeComputer(snapshot = `zeros-alpha-${org.replace(/-/g, "").slice(0, 12)}-v1`) {
+    const buildId = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,builder_sandbox_id,snapshot_id,created_by)
+      VALUES($1,$2,1,'{}','succeeded','bx_33333333',$3,$4)`, [buildId, org, snapshot, creator]);
+    await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name) VALUES($1,$2,$3)", [org, buildId, snapshot]);
+    return { buildId, snapshot };
+  }
+
+  it("records a checkpoint only for the stop still stopping that VM, and returns the one it replaced", async () => {
+    const w = await stopping("bx_first"), first = checkpoint(w.id), second = checkpoint(w.id, 8192);
+    expect(await store.saveCheckpoint(w.id, "bx_other", first)).toBe(false);
+    expect(await store.saveCheckpoint(w.id, "bx_first", first)).toEqual({ replaced: null });
+    expect(await store.saveCheckpoint(w.id, "bx_first", second)).toEqual({ replaced: first.object });
+    await store.checkpointFailed(w.id, "bx_first", "checkpoint_too_large");
+    const claimed = (await store.claimPending(4, 0)).find(row => row.id === w.id)!;
+    expect(claimed.checkpoint).toEqual({ ...second, savedAt: expect.any(String) });
+    expect((await pool.query("SELECT checkpoint_error FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].checkpoint_error).toBe("checkpoint_too_large");
+    // Internal metadata never reaches the public document.
+    const document = await store.get(w.id, creator);
+    for (const field of ["checkpoint", "restorePending", "baseCommit"]) expect(document).not.toHaveProperty(field);
     await store.transition(w.id, ["stopping"], "stopped");
-    const first = await stoppedAt();
-    expect(first).toBeInstanceOf(Date);
-    await store.requestLifecycle(w.id, creator, "archive");
-    expect(await stoppedAt()).toEqual(first);
-    expect(await store.retentionDue(new Date(Date.now() - 12 * 86_400_000), 10)).toEqual([]);
+    expect(await store.saveCheckpoint(w.id, "bx_first", checkpoint(w.id))).toBe(false);
+    // A stored key and digest only ever describe a complete checkpoint.
+    await expect(pool.query("UPDATE cloud_v2_workspaces SET checkpoint_key=NULL WHERE id=$1", [w.id])).rejects.toThrow(/cloud_v2_checkpoint_complete/);
+    await expect(pool.query("UPDATE cloud_v2_workspaces SET checkpoint_object='cloud-v2/checkpoints/../x.zck' WHERE id=$1", [w.id])).rejects.toThrow();
   });
 
-  it("claims one retention save durably across lifecycle replicas and fences wake until it finishes", async () => {
-    const a = await retainedCandidate(13), b = await retainedCandidate(13);
-    const claimed = await Promise.all([store.beginRetention(a, "zeros-alpha-ret-a"), store.beginRetention(b, "zeros-alpha-ret-b")]);
-    expect(claimed.filter(Boolean)).toHaveLength(1);
-    const w = claimed[0] ? a : b, name = claimed[0] ? "zeros-alpha-ret-a" : "zeros-alpha-ret-b";
-    await store.requestLifecycle(w.id, creator, "start");
-    expect((await store.claimPending(4, 0)).some(row => row.id === w.id)).toBe(false);
-    const intent = (await pool.query("SELECT retention_snapshot,retention_saved_at,retention_operation_until FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0];
-    expect(intent.retention_snapshot).toBe(name); expect(intent.retention_saved_at).toBeNull();
-    expect(intent.retention_operation_until.getTime()).toBeGreaterThan(Date.now());
-    await store.finishRetention(w.id, w.boatSandboxId!, name);
-    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)).toMatchObject({ retentionSnapshot: name, retentionSavedAt: expect.any(String), state: "starting" });
-    expect(await store.get(w.id, creator)).not.toHaveProperty("retentionSnapshot");
-  });
-
-  it("keeps failed retention intent through its remote deadline and rejects stale save receipts", async () => {
-    const w = await retainedCandidate(13);
-    expect(await store.beginRetention(w, "zeros-alpha-ret-keep")).toBe(true);
-    await store.deferRetention(w.id, "zeros-alpha-ret-keep");
-    expect(await store.retentionDue(new Date(), 10)).toEqual([]);
-    await store.finishRetention(w.id, "bx_obsolete", "zeros-alpha-ret-keep");
-    expect((await pool.query("SELECT retention_saved_at FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].retention_saved_at).toBeNull();
-    await pool.query("UPDATE cloud_v2_workspaces SET retention_operation_until=clock_timestamp()-interval '1 second',next_attempt_at=NULL WHERE id=$1", [w.id]);
-    expect((await store.retentionDue(new Date(), 10))[0]).toMatchObject({ retentionSnapshot: "zeros-alpha-ret-keep", retentionSavedAt: null });
+  it("restores only a starting workspace with a checkpoint, pinning the active Cloud Computer against cleanup", async () => {
+    const w = await stopping("bx_lost");
+    await store.saveCheckpoint(w.id, "bx_lost", checkpoint(w.id));
+    await store.transition(w.id, ["stopping"], "stopped");
+    expect(await store.beginRestore(w.id, "bx_lost")).toBeNull();
     await store.transition(w.id, ["stopped"], "starting");
-    expect(await store.beginRetention(w, "zeros-alpha-ret-other")).toBe(false);
+    expect(await store.beginRestore(w.id, "bx_lost")).toBe("no_computer");
+    const computer = await activeComputer();
+    expect(await store.beginRestore(w.id, "bx_other")).toBeNull();
+    expect(await store.beginRestore(w.id, "bx_lost")).toEqual({ snapshot: computer.snapshot });
+    const pending = (await store.claimPending(4, 0)).find(row => row.id === w.id)!;
+    expect(pending).toMatchObject({ restorePending: true, boatSandboxId: null, computerBuildId: computer.buildId });
+    // Cleanup sees the pin until the replacement exists.
+    const { CloudV2Computers } = await import("./computer.js");
+    const computers = new CloudV2Computers(pool);
+    await pool.query("UPDATE cloud_v2_computers SET active_build_id=NULL WHERE org_id=$1", [org]);
+    expect((await computers.resources(computer.buildId))?.pinned).toBe(true);
+    expect(await store.replaceSandbox(w.id, "bx_new1", new Date())).toBe("starting");
+    expect((await computers.resources(computer.buildId))?.pinned).toBe(false);
+    expect(await store.replaceSandbox(w.id, "bx_new2", new Date())).toBeNull();
+    expect(await store.finishRestore(w.id, "bx_other")).toBe(false);
+    expect(await store.finishRestore(w.id, "bx_new1")).toBe(true);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)).toMatchObject({ restorePending: false, boatSandboxId: "bx_new1" });
   });
 
-  it("can recover a named save from a claimed wake after the original save's acknowledgement was lost", async () => {
-    const w = await retainedCandidate(15), name = "zeros-alpha-ret-unacknowledged";
-    await store.beginRetention(w, name);
-    await pool.query("UPDATE cloud_v2_workspaces SET retention_operation_until=clock_timestamp()-interval '1 second' WHERE id=$1", [w.id]);
-    await store.requestLifecycle(w.id, creator, "start");
-    const claimed = (await store.claimPending(4, 120_000))[0]!;
-    expect(await store.beginRetention(claimed, name)).toBe(true);
-    await store.finishRetention(w.id, w.boatSandboxId!, name);
-    expect(await store.beginRestore(w.id, w.boatSandboxId, name)).toBe(true);
-  });
-
-  it("cleans retention after hello or a later stop, while preserving a sleeping workspace's current snapshot", async () => {
-    const w = await retainedCandidate(13), name = "zeros-alpha-ret-clean";
-    await store.beginRetention(w, name); await store.finishRetention(w.id, w.boatSandboxId!, name);
-    expect(await store.retentionCleanupDue()).toEqual([]);
+  it("keeps a replacement findable when a stop or deletion wins the race, and forgets the checkpoint once deleted", async () => {
+    await activeComputer();
+    const w = await stopping("bx_lost");
+    await store.saveCheckpoint(w.id, "bx_lost", checkpoint(w.id));
+    await store.transition(w.id, ["stopping"], "stopped");
     await store.transition(w.id, ["stopped"], "starting");
-    expect(await store.retentionCleanupDue()).toEqual([]);
-    const token = await store.rotateWorkerToken(w.id); await store.acceptWorkerHello(token, randomUUID());
-    expect((await store.retentionCleanupDue()).map(row => row.id)).toEqual([w.id]);
-    // A rapid second stop before cleanup cannot keep using the previous stop's image.
-    await store.transition(w.id, ["running"], "stopping"); await store.transition(w.id, ["stopping"], "stopped");
-    expect((await store.retentionCleanupDue()).map(row => row.id)).toEqual([w.id]);
-    expect(await store.beginRetentionCleanup(w.id, name)).toBe(true);
-    await store.requestLifecycle(w.id, creator, "start");
-    expect(await store.claimPending(4, 0)).toEqual([]);
-    await store.finishRetentionCleanup(w.id, name);
-    expect((await store.claimPending(4, 0))[0]).toMatchObject({ retentionSnapshot: null, retentionSavedAt: null });
-  });
-
-  it("retains a pending restore allocation through a deletion race and records its new sandbox for erasure", async () => {
-    const w = await retainedCandidate(13), name = "zeros-alpha-ret-restore";
-    await store.beginRetention(w, name); await store.finishRetention(w.id, w.boatSandboxId!, name);
-    await store.transition(w.id, ["stopped"], "starting");
-    expect(await store.beginRestore(w.id, w.boatSandboxId, name)).toBe(true);
-    expect(await store.claimPending(4, 0)).toEqual([]);
+    expect(await store.beginRestore(w.id, "bx_lost")).toMatchObject({ snapshot: expect.any(String) });
     await store.transition(w.id, ["starting"], "deleting");
-    expect(await store.claimPending(4, 0)).toEqual([]);
-    expect(await store.finishRestore(w.id, w.boatSandboxId, name, "bx_restored", new Date())).toBe("deleting");
-    expect((await store.claimPending(4, 0))[0]).toMatchObject({ state: "deleting", boatSandboxId: "bx_restored", restorePending: false, retentionSnapshot: name });
-    expect(await store.finishRestore(w.id, w.boatSandboxId, name, "bx_wrong", new Date())).toBeNull();
+    expect(await store.replaceSandbox(w.id, "bx_new1", new Date())).toBe("deleting");
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)).toMatchObject({ state: "deleting", boatSandboxId: "bx_new1", restorePending: true });
+    // A replacement that never received the checkpoint can never replace it.
+    expect(await store.saveCheckpoint(w.id, "bx_new1", checkpoint(w.id))).toBe(false);
+    await store.transition(w.id, ["deleting"], "deleted");
+    const row = (await pool.query("SELECT checkpoint_object, checkpoint_key, restore_pending FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0];
+    expect(row).toEqual({ checkpoint_object: null, checkpoint_key: null, restore_pending: false });
+  });
+
+  it("records the base commit once, only while creating, and serves it to the first configuration", async () => {
+    const w = await create(), head = "c".repeat(40);
+    await store.setBaseCommit(w.id, "not-a-commit");
+    expect(await store.baseCommit(w.id)).toBeNull();
+    await store.setBaseCommit(w.id, head);
+    await store.setBaseCommit(w.id, "d".repeat(40));
+    expect(await store.baseCommit(w.id)).toBe(head);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)?.baseCommit).toBe(head);
+    await store.transition(w.id, ["creating"], "running", { boatSandboxId: "bx_base" });
+    expect(await store.baseCommit(w.id)).toBeNull();
   });
 
   it.each(["creator", "relay"] as const)("fences the suspended process before a %s wake can race runtime installation", async source => {

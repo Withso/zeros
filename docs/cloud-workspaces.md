@@ -197,8 +197,10 @@ which the renderer treats as unavailable history. Reset/undo remain Local-only.
 ## Lifecycle
 
 Each lifecycle replica admits up to four workspace steps concurrently and
-excludes its in-flight workspaces from further claims. A slow stop does not
-hold up another workspace's creation. Running VMs receive a 24-hour Boat
+excludes its in-flight workspaces from further claims. Creates, wakes and
+deletions are claimed first. Stops can spend minutes saving a checkpoint, so
+they use at most two of the slots, and a slow stop never holds up another
+workspace's creation. Running VMs receive a 24-hour Boat
 lease; a bounded background scan renews it after about 12 hours.
 
 The lifecycle loop stops a running VM after ten minutes without activity
@@ -209,8 +211,21 @@ the single-use ticket carries that intent through bridge admission. The app
 asks to wake only for an explicit open; a missing value still wakes, for older
 callers. Explicit work over the bridge, or Start, wakes it and reconnects the
 worker. Stop
-retains the VM disk; Delete removes the VM and revokes its access. Account
+retains the VM disk and saves a checkpoint; Delete removes the VM, its
+checkpoints and its access. Account
 and organization deletion also enqueue their workspaces for cleanup.
+
+A new workspace branch starts from the Cloud Computer checkout already on
+disk, so the worker becomes ready without waiting for GitHub. At creation the
+control plane records GitHub's head of the base branch. Workers advertising
+`checkout-v2` receive it as `baseCommit` and start the branch there when the
+VM has that commit; otherwise the branch starts from the cached
+`origin/<baseBranch>`. The worker then fetches `origin` in the background, and
+a fetch failure leaves the workspace usable. A branch started from the cached
+base fast-forwards once, but only while it still points at its first commit,
+its tracked files are clean, and no agent, terminal, file edit, Git mutation or
+setup has started. Existing branches and branches started at `baseCommit`
+never move automatically.
 
 Creation pins the active Cloud Computer build. The worker receives that
 build's repository setup script, at most 8,000 characters, only when it
@@ -218,21 +233,67 @@ advertises `workspace-setup-v1` on both HTTPS and WebSocket configuration
 carriers. When checkout creates a new workspace branch, setup runs in the
 background with `bash -lc` as `user`, in the checkout, with the same child
 environment and GitHub broker as terminals. It does not delay `ENGINE_READY`.
+While the branch can still fast-forward, setup waits for the background fetch.
+After a checkpoint restore, setup runs once even though the branch exists.
 Admission and status are saved before execution under
 `/home/user/.local/share/zeros/cloud-worker/workspace-setup/<workspace-id>.json`;
 the sibling `.log` keeps the first 256 KiB of output, privately on the VM.
 Refresh, wake and restart never rerun an admitted script. A failed script
 leaves the workspace available; Stop cancels and joins setup before its ack.
 
-Boat expires stopped disks after 14 days. After 12 stopped days, one background
-retention operation saves a named snapshot, recording its identity before
-calling Boat. Failed or uncertain saves retry against that same name. A wake
-with an expired or missing disk restores from the saved snapshot, then installs
-the runtime and delivers a new worker credential normally. Without a saved
-snapshot, an expired disk remains `failed/sandbox_missing`. The backup is
-removed after the restored worker says hello; Delete also removes it before
-workspace, account or organization erasure can finish. A fresh stop starts a
-new retention age and backup generation.
+Boat deletes a stopped VM's disk after 14 days, so every stop also saves a
+checkpoint in our own object storage. It is kept until the workspace is
+deleted. After the worker acknowledges Stop, the control plane runs one
+command on the VM, bounded to 540 seconds. The command stops the worker
+service, collects the checkpoint, encrypts it and uploads it through a
+presigned URL that expires in 15 minutes. Boat stops the VM only after that.
+
+A checkpoint holds:
+
+- the workspace repository's Git state: branches with their local commits,
+  stashes, upstream settings, the index, and every tracked or untracked file
+  that is not ignored;
+- ignored files of up to 1 MiB outside ignored directories, such as
+  `.env.local`, 32 MiB in total;
+- the worker's state directory and the agents' session files (`.claude/projects`,
+  `.codex/sessions`, `.cursor/chats` and `.cursor/projects`).
+
+It never holds credential files, the worker token, setup status, or ignored
+directories such as dependencies and build outputs. Those come back from the
+Cloud Computer, the setup script and credential delivery. Git objects that the
+base branch already has stay out, so a checkpoint normally holds only the
+user's own work.
+
+The object is `cloud-v2/checkpoints/<workspace>/<checkpoint>.zck` in the
+runtime bucket. It is AES-256-GCM in authenticated 1 MiB chunks, so tampering,
+truncation and appended data all fail. Each checkpoint has its own random
+data key, sealed in the database with the credential keyring and bound to the
+workspace and object. The VM returns only one result line with the size and
+SHA-256, never file names or contents. The control plane confirms the stored
+size before it records the checkpoint, and only then removes older objects.
+A failed or oversized checkpoint (over 4 GiB) never blocks the stop: the
+previous checkpoint stays, and the workspace records `checkpoint_error`.
+
+A wake whose VM Boat deleted restores the last checkpoint:
+
+1. Pin the organization's active Cloud Computer and record the restore, before
+   anything is created.
+2. Create a replacement VM under a key derived from the checkpoint, so a lost
+   reply finds the same VM.
+3. Install the runtime.
+4. Download the checkpoint, verify its digest and apply it, before the worker
+   starts.
+5. Deliver the route and a fresh worker credential as usual.
+
+The restore fetches from GitHub, with a repository token, only when the
+Cloud Computer lacks a base commit the checkpoint needs. If the Cloud Computer
+no longer has the repository, the restore clones it. The worker then runs the
+setup once more, because the replacement VM comes from a newer Cloud Computer.
+A stop or deletion during a restore still finds the replacement. A replacement
+that has not received the checkpoint is never checkpointed itself, so it cannot
+replace the real one. Without a checkpoint, a lost VM remains
+`failed/sandbox_missing`. Delete removes every checkpoint object of the
+workspace before workspace, account or organization erasure can finish.
 
 Create and wake emit value-free `[cloud-v2] timing` records for allocation or
 resume, runtime installation (including whether it changed), protected route,
@@ -448,8 +509,8 @@ The control plane reads these names in
 | `CLOUD_V2_API_URL`, `CLOUD_V2_REALTIME_URL` | Public HTTPS API (also the worker's outbound origin) and the app's WSS bridge origin. |
 | `CLOUD_V2_WORKER_SIGNING_KEY`, optional `CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS` | Ed25519 PKCS#8 private key (base64 DER) that signs worker grants. VMs trust both public keys after their next create or wake, so a rotation keeps the previous key until every running VM has woken with the new trust file. |
 | `CLOUD_V2_RUNTIME_SHA256` | Published runtime archive digest. |
-| `CLOUD_V2_RUNTIME_STORE_ENDPOINT`, `CLOUD_V2_RUNTIME_STORE_BUCKET` | Runtime object storage. |
-| `CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID`, `CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY` | Server-side storage credentials. |
+| `CLOUD_V2_RUNTIME_STORE_ENDPOINT`, `CLOUD_V2_RUNTIME_STORE_BUCKET` | Runtime and checkpoint object storage. |
+| `CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID`, `CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY` | Server-side storage credentials. They read runtimes, and read, write, list and delete under `cloud-v2/checkpoints/`. |
 
 The existing database, authentication and GitHub App configuration is also
 required. Agent vault keys retain their persisted deployment names:

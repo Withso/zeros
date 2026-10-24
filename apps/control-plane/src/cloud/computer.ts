@@ -444,12 +444,13 @@ export class CloudV2Computers {
   }
 
   async resources(id: string): Promise<Resources | null> {
-    // A workspace created while this build was live may not have its VM yet;
-    // it creates that VM from this snapshot. New pins need an active build.
+    // A workspace created, or being restored from its checkpoint, while this
+    // build was live may not have its VM yet; it creates that VM from this
+    // snapshot. New pins need an active build.
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Resources>(`SELECT b.*,
       EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id) AS active,
-      EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id
-        AND w.state='creating' AND w.boat_sandbox_id IS NULL) AS pinned
+      EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.boat_sandbox_id IS NULL
+        AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted'))) AS pinned
       FROM cloud_v2_computer_builds b WHERE b.id=$1`, [id]));
     return rows[0] ?? null;
   }

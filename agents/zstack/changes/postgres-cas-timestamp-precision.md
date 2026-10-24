@@ -10,6 +10,6 @@
   an exact database revision when finer distinctions matter. For the existing
   millisecond stop token, compare `date_trunc('milliseconds', stopped_at)`;
   keep the state, sandbox and snapshot predicates that reject stale work.
-- **Encoded in.** `CloudV2Store.beginRetention` and the retention claim/stale
-  receipt cases in `apps/control-plane/src/cloud/store.integration.test.ts`.
-  Guidance is in `skills/zstack-verify/SKILL.md`.
+- **Encoded in.** Guidance in `skills/zstack-verify/SKILL.md`. The retention
+  claim that first hit it was replaced by object-storage checkpoints in the
+  same change; their fences compare sandbox and lifecycle state, not timestamps.
