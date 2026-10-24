@@ -49,6 +49,12 @@
   navigation. Keep the Local directory picker unavailable in cloud Create.
   Encoded in the draft-store regressions and the browser project/owner/reload
   sequence, including directory-only drafts and removal of the final pill.
+- CI finding: removing Create's mode toggle left an engine Design contract
+  requiring that retired renderer control. Trace removed identifiers across
+  package boundaries and run `check:design-containment` for changes to Design
+  entry points. The updated `agent-isolation.test.ts` asserts the Code-only
+  Create page and public workspace Design initialization while retaining its
+  native-runtime and agent-authority checks.
 - Symptom: a sandboxed PDF frame stayed blank in Chromium. Cause: its built-in
   PDF plugin cannot run in that sandbox. Rule: verify the real browser renderer
   before advertising a format and keep a download fallback when no safe viewer

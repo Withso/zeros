@@ -62,6 +62,13 @@
 - Review cleanup: picker rows inherit hover and selection fills from the shared
   floating Surface. This keeps surface ownership in its existing primitive and
   avoids adding feature-file exceptions to the global UI checker.
+- CI review: Local skill discovery checked a path's metadata before opening it.
+  Open once with no-follow/non-blocking flags, validate the held descriptor,
+  and match its identity to the contained path before reading and publishing.
+  The IPC regressions cover an atomic in-library update and a parent-directory
+  swap outside the library, including restoration before validation and file
+  descriptor cleanup. Preview reads use an AbortSignal across both asynchronous
+  boundaries so retiring a preview cannot publish after Markdown loads.
 
 Evidence: `scripts/ui-smoke-composer-suggestions.mjs`,
 `scripts/ui-smoke-create-drafts.mjs`, `scripts/ui-smoke-mentions.mjs`, and the adjacent

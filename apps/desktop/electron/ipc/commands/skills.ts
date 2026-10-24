@@ -106,15 +106,21 @@ function readSkill(file: string, root: string): string | null {
   try {
     const resolved = fs.realpathSync(file);
     if (!contained(root, resolved)) return null;
-    const before = fs.lstatSync(resolved);
-    if (!before.isFile() || before.size > MAX_SKILL_BYTES) return null;
     fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     const held = fs.fstatSync(fd);
-    if (!held.isFile() || held.dev !== before.dev || held.ino !== before.ino || held.size > MAX_SKILL_BYTES) return null;
+    if (!held.isFile() || held.size > MAX_SKILL_BYTES) return null;
+    // Validate the opened file, including a parent replaced at open. Looking
+    // up its type/size before opening can describe a different directory entry.
+    const openedPath = fs.realpathSync(file);
+    if (!contained(root, openedPath)) return null;
+    const current = fs.statSync(openedPath);
+    if (current.dev !== held.dev || current.ino !== held.ino) return null;
     const bytes = Buffer.alloc(MAX_SKILL_BYTES + 1);
     const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
-    const finalPath = fs.realpathSync(file), after = fs.statSync(finalPath);
-    if (length > MAX_SKILL_BYTES || !contained(root, finalPath) || after.dev !== held.dev || after.ino !== held.ino) return null;
+    const finalPath = fs.realpathSync(file);
+    if (length > MAX_SKILL_BYTES || !contained(root, finalPath)) return null;
+    const after = fs.statSync(finalPath);
+    if (after.dev !== held.dev || after.ino !== held.ino) return null;
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length));
   } catch { return null; }
   finally { if (fd !== undefined) fs.closeSync(fd); }

@@ -20,18 +20,18 @@ export function CreateAttachmentPreviewPanel({ attachment, onClose }: {
   const closeButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { closeButton.current?.focus({ preventScroll: true }); }, []);
   useEffect(() => {
-    let disposed = false;
+    const readController = new AbortController();
     let url: string | undefined;
     setError(null);
     setLoaded(null);
     void readCreateAttachmentPreview(attachment).then(async preview => {
-      if (disposed) return;
+      readController.signal.throwIfAborted();
       let markdown = "";
       if (preview.kind === "markdown") {
         // Only the active preview needs the browser Markdown renderer. Cold
         // and paused Create routes do not initialize its DOM hooks.
         const { renderMarkdown } = await import("../../features/agent/markdown");
-        if (disposed) return;
+        readController.signal.throwIfAborted();
         markdown = DOMPurify.sanitize(renderMarkdown(preview.text ?? ""), {
           // Drafts have no asset root. Documents must not load trackers,
           // embed executable content or style controls outside the preview.
@@ -42,10 +42,10 @@ export function CreateAttachmentPreviewPanel({ attachment, onClose }: {
       url = URL.createObjectURL(preview.blob);
       setLoaded({ preview, url, markdown });
     }).catch(() => {
-      if (!disposed) setError("This attachment couldn't be opened. Retry, or attach the file again.");
+      if (!readController.signal.aborted) setError("This attachment couldn't be opened. Retry, or attach the file again.");
     });
     return () => {
-      disposed = true;
+      readController.abort();
       if (url) URL.revokeObjectURL(url);
     };
   }, [attachment, attempt]);

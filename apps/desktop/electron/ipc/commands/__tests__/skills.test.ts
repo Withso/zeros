@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import fs, { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -48,6 +48,7 @@ describe("skills_list", () => {
     homeMock.dir = home;
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
@@ -123,6 +124,55 @@ describe("skills_list", () => {
     mkdirSync(path.join(cwd, ".claude"));
     symlinkSync(path.join(home, "outside"), path.join(cwd, ".claude", "skills"));
     expect(call({ agentId: "claude", cwd })).toEqual([]);
+  });
+
+  it("reads the opened regular file after an atomic replacement within the library", () => {
+    writeSkill(path.join(cwd, "skills"), "review", "ORIGINAL");
+    const file = fs.realpathSync(path.join(cwd, "skills", "review", "SKILL.md"));
+    const open = fs.openSync.bind(fs);
+    let replaced = false;
+    vi.spyOn(fs, "openSync").mockImplementation((target, flags, mode) => {
+      if (target === file && !replaced) {
+        replaced = true;
+        fs.renameSync(file, `${file}.previous`);
+        writeFileSync(file, "---\nname: review\ndescription: REPLACEMENT\n---\nNew source\n");
+      }
+      return open(target, flags, mode);
+    });
+    expect(call({ agentId: "claude", cwd })).toMatchObject([
+      { name: "review", description: "REPLACEMENT", content: expect.stringContaining("New source") },
+    ]);
+    expect(replaced).toBe(true);
+  });
+
+  it.each([false, true])("rejects a parent swapped outside the library at open, restored=%s", restore => {
+    writeSkill(path.join(cwd, "skills"), "review", "ORIGINAL");
+    writeSkill(path.join(home, "outside"), "review", "OUTSIDE");
+    const directory = fs.realpathSync(path.join(cwd, "skills", "review"));
+    const file = path.join(directory, "SKILL.md");
+    const outside = fs.realpathSync(path.join(home, "outside", "review"));
+    const open = fs.openSync.bind(fs);
+    const read = vi.spyOn(fs, "readSync");
+    const close = vi.spyOn(fs, "closeSync");
+    let swapped = false;
+    let opened: number | undefined;
+    vi.spyOn(fs, "openSync").mockImplementation((target, flags, mode) => {
+      if (target !== file || swapped) return open(target, flags, mode);
+      swapped = true;
+      fs.renameSync(directory, `${directory}.previous`);
+      symlinkSync(outside, directory);
+      opened = open(target, flags, mode);
+      if (restore) {
+        fs.unlinkSync(directory);
+        fs.renameSync(`${directory}.previous`, directory);
+      }
+      return opened;
+    });
+    expect(call({ agentId: "claude", cwd })).toEqual([]);
+    expect(swapped).toBe(true);
+    expect(opened).toBeTypeOf("number");
+    expect(read.mock.calls.some(([fd]) => fd === opened)).toBe(false);
+    expect(close).toHaveBeenCalledWith(opened);
   });
 
   it("bounds full-source responses and skips symlinks and oversized files", () => {
