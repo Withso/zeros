@@ -333,7 +333,8 @@ jobs:
     name: tests-vitest (${{ matrix.part }}/4)
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-vitest == 'true') }}
-    runs-on: ubuntu-latest
+    # Keep the browser host compatible with the lockfile-pinned Playwright.
+    runs-on: ubuntu-24.04
     strategy:
       # Every part reports, so one failure never hides another.
       fail-fast: false
@@ -1068,7 +1069,8 @@ jobs:
     name: tests-ui-smoke (${{ matrix.shard }}/3)
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-ui-smoke == 'true') }}
-    runs-on: ubuntu-latest
+    # Keep the browser host compatible with the lockfile-pinned Playwright.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

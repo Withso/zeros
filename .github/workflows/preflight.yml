@@ -161,7 +161,8 @@ jobs:
   test-shard:
     name: tests-vitest (${{ matrix.part }}/4)
     if: (github.event_name != 'pull_request' || !inputs.pr_selected_vitest)
-    runs-on: ubuntu-latest
+    # Keep the browser host compatible with the lockfile-pinned Playwright.
+    runs-on: ubuntu-24.04
     strategy:
       # Every part reports, so one failure never hides another.
       fail-fast: false
@@ -769,7 +770,8 @@ jobs:
   ui-smoke-shard:
     name: tests-ui-smoke (${{ matrix.shard }}/3)
     if: (github.event_name != 'pull_request' || !inputs.pr_selected_ui_smoke)
-    runs-on: ubuntu-latest
+    # Keep the browser host compatible with the lockfile-pinned Playwright.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
