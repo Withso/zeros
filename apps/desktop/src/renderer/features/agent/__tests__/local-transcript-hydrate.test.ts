@@ -9,11 +9,11 @@ import { cloudScopedId, isCloudWorkspace, parseCloudScopedId } from "../../../pl
 import { BLANK, mergeWindowedTail, useSessionsStore } from "../sessions-store";
 import { reconcileHistoryMessages } from "../history-message-identity";
 import { messageSnapshotsEqual, retainMessageReferences } from "../message-persistence-tracker";
-import { canApplyTranscriptRead, isCurrentTranscriptRequest, releaseTranscriptRequest, hasTranscriptPresentation } from "../transcript-retention";
+import { canApplyTranscriptRead, invalidateTranscriptRequest, isCurrentTranscriptRequest, releaseTranscriptRequest, hasTranscriptPresentation } from "../transcript-retention";
 import type { AgentMessage, AgentTextMessage } from "../use-agent-session";
-import { isLocalTranscriptChat, localTranscriptCache } from "../../../state/local-transcript-cache";
+import { isLocalTranscriptChat, localTranscriptCache, transcriptCacheFor } from "../../../state/local-transcript-cache";
 import { consumeFreshCloudChat } from "../fresh-cloud-chats";
-import { markFreshLocalChat, paintLocalTranscriptFromMemory, presentCachedLocalTranscript, presentKnownEmptyLocalTranscript, rememberLocalTranscript, takeFreshLocalChat } from "../local-transcript-presentation";
+import { markFreshLocalChat, paintLocalTranscriptFromMemory, presentCachedLocalTranscript, presentCachedTranscript, presentKnownEmptyLocalTranscript, rememberLocalTranscript, rememberTranscript, takeFreshLocalChat, canReplaceCloudTranscript } from "../local-transcript-presentation";
 import { forgetEmptyLocalChat, isKnownEmptyLocalChat, rememberEmptyLocalChat } from "../fresh-local-chats";
 import { groupMessagesIntoTurns } from "../turn-grouping";
 import { presentLeadingPrompt } from "../transcript-leading-prompt";
@@ -26,7 +26,7 @@ let hydrateSource = "", reconcileSource = "", cacheSubscriptionSource = "";
     if (node.name.getText(ast) === "reconcileChatMessages") reconcileSource = node.initializer.arguments[0]!.getText(ast);
   }
   if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" &&
-      node.arguments[0]?.getText(ast).includes("rememberLocalTranscript(")) {
+      node.arguments[0]?.getText(ast).includes("rememberTranscript(")) {
     cacheSubscriptionSource = node.arguments[0].getText(ast);
   }
   ts.forEachChild(node, collect);
@@ -48,16 +48,16 @@ function harness(connected = true) {
   const context: Record<string, unknown> = {
     console: { warn: vi.fn() }, BLANK, parseCloudScopedId, isCloudWorkspace, cloudComputerV2: false, HYDRATE_WINDOW: 200,
     reconcileHistoryMessages, messageSnapshotsEqual, retainMessageReferences, isCurrentTranscriptRequest, releaseTranscriptRequest,
-    canApplyTranscriptRead, mergeWindowedTail, canBackgroundSyncCloudWorkspace: () => true, reconcileInFlightRef: { current: new Map() },
+    canApplyTranscriptRead, invalidateTranscriptRequest, mergeWindowedTail, canBackgroundSyncCloudWorkspace: () => true, reconcileInFlightRef: { current: new Map() },
     getStore: useSessionsStore.getState, bridge: { status: connected ? "connected" : "connecting" }, reconcileChatMessages: vi.fn(async () => {}),
     persistMessageWindow: read, hydrateCloudSendRef: { current: vi.fn() }, reconcileChatMessagesRef: { current: vi.fn() },
     hydrateInFlightRef: { current: requests },
     pendingHydratesRef: { current: pendingHydrates }, localTranscriptCache, presentCachedLocalTranscript, takeFreshLocalChat,
-    presentKnownEmptyLocalTranscript, consumeFreshCloudChat,
+    presentKnownEmptyLocalTranscript, consumeFreshCloudChat, transcriptCacheFor, presentCachedTranscript, canReplaceCloudTranscript,
   };
   vm.runInNewContext(code, context);
   Object.assign(context, {
-    useSessionsStore, rememberLocalTranscript, isLocalTranscriptChat, rememberEmptyLocalChat, forgetEmptyLocalChat,
+    useSessionsStore, rememberLocalTranscript, rememberTranscript, isLocalTranscriptChat, rememberEmptyLocalChat, forgetEmptyLocalChat,
     noteLocalChatPrompt: vi.fn(), forgetLocalChatPrompt: vi.fn(),
     useWorkspaceStore: { getState: () => ({ chats: [] }) },
     window: { setTimeout, clearTimeout },

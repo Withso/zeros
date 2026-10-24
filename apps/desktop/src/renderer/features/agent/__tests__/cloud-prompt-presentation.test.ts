@@ -16,7 +16,8 @@ it("shows instant ordinary bubbles while running even with no bridge or driver, 
     const view = cloudPromptView(record, vmState), patch = cloudPromptSessionPatch(slot, view);
     const visible = projectCloudPromptSession({ ...slot, ...patch });
     expect(visible.messages.map(row => row.kind === "text" && !!row.queued)).toEqual(Array(2).fill(!["ready", "busy"].includes(vmState)));
-    expect(visible.status).not.toBe("streaming");
+    expect(visible.status === "streaming").toBe(["ready", "busy"].includes(vmState));
+    expect(view.states.one).toBe("queued");
     expect(visible.cloudPromptPending).toBeFalsy();
   }
 });

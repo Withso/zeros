@@ -826,8 +826,10 @@ export async function bridgeMessageWindow(
 
 export type MessageWindowSnapshot = {
   messages: PersistedMessageWire[];
-  source: "local" | "unknown";
-  /** Local engines only: the opening prompt of the turn `messages[0]` belongs
+  source: "local" | "unknown" | "worker" | "control-plane";
+  /** Renderer-derived: an unfiltered tail shorter than the requested window. */
+  complete?: boolean;
+  /** The opening prompt of the turn `messages[0]` belongs
    *  to, when that turn is longer than the contiguous window. */
   turnOpening?: PersistedMessageWire;
 };
@@ -843,11 +845,11 @@ function persistedMessageWire(value: unknown): PersistedMessageWire | undefined 
 }
 
 
-function messageWindowSnapshot(_bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
+function messageWindowSnapshot(bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
   const target = parseCloudScopedId(chatId);
-  // Only a Local window may carry a turn opening.
-  const turnOpening = target ? undefined : persistedMessageWire(r?.turnOpening);
-  return { messages: r?.messages ?? [], source: target ? "unknown" : "local", ...(turnOpening ? { turnOpening } : {}) };
+  const turnOpening = persistedMessageWire(r?.turnOpening);
+  const source = target ? r && bridge instanceof WorkspaceRuntimeClient ? bridge.historySource(r) ?? "unknown" : "unknown" : "local";
+  return { messages: r?.messages ?? [], source, ...(turnOpening ? { turnOpening } : {}) };
 }
 
 export async function bridgeMessageWindowSnapshot(
@@ -867,7 +869,10 @@ export async function bridgeMessageWindowSnapshot(
     },
     timeoutMs,
   )) as MessageWindowResponse;
-  return messageWindowSnapshot(bridge, chatId, r);
+  const snapshot = messageWindowSnapshot(bridge, chatId, r);
+  if (snapshot.source === "worker" || snapshot.source === "control-plane")
+    snapshot.complete = before === undefined && !snapshot.turnOpening && Array.isArray(r?.messages) && r.messages.length < Math.min(1000, Math.max(1, limit));
+  return snapshot;
 }
 
 export async function bridgeMessageWindowOlder(

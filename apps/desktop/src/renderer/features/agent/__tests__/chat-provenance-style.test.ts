@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { chatTranscriptSummariesKey } from "../chat-transcript-summaries-cache";
 
 // Source-string pins for the empty-chat provenance block, in the same idiom as
 // shell/__tests__/run-stream-placement.test.ts. These are all EXPLICIT founder
@@ -63,7 +64,7 @@ describe("chat provenance block styling", () => {
     // that all three rows sit INSIDE the conditional, not that some class is
     // absent.
     const src = provenance();
-    const gate = src.indexOf('{shape === "workspace" && (');
+    const gate = src.indexOf('{shape === "workspace" && workspace && (');
     expect(gate).toBeGreaterThan(-1);
     const close = src.indexOf("</>", gate);
     const gated = src.slice(gate, close);
@@ -87,6 +88,7 @@ describe("the transcript summaries read the block waits on", () => {
     source(
       "apps/desktop/src/renderer/features/agent/use-chat-transcript-summaries.ts",
     );
+  const cache = () => source("apps/desktop/src/renderer/features/agent/chat-transcript-summaries-cache.ts");
 
   it("settles on FAILURE too, so a dead read can't blank the empty state", () => {
     // `loaded` used to track only the local success path. The shared async
@@ -94,9 +96,9 @@ describe("the transcript summaries read the block waits on", () => {
     // confirmed snapshot, so the provenance block can still fall back after a
     // dead cold read without sacrificing stale-while-revalidate behavior.
     const src = hook();
-    expect(src).toContain("KeyedAsyncCache");
+    expect(cache()).toContain("KeyedAsyncCache");
     expect(src).toContain("useCachedRead(");
-    expect(src).toContain("loaded: key !== null && (!read.loading ||");
+    expect(src).toContain("read.data !== undefined : !read.loading");
   });
 
   it("never leaves an empty chat blank while its list is slow", () => {
@@ -112,7 +114,11 @@ describe("the transcript summaries read the block waits on", () => {
     // it from every diff, review and content grep in the repo. JSON tuple
     // encoding also avoids every separator-collision case by construction.
     expect(hook()).not.toContain("\u0000"); // a real NUL, via the escape
-    expect(hook()).toContain("JSON.stringify([folder, excludeChatId ?? null])");
+    expect(cache()).not.toContain("\u0000");
+    expect(JSON.parse(chatTranscriptSummariesKey("/local", "one"))).toEqual(["/local"]);
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    expect(chatTranscriptSummariesKey(folder, "one")).toBe(chatTranscriptSummariesKey(folder, "two"));
+    expect(JSON.parse(chatTranscriptSummariesKey(folder, "one"))[0]).toBe(folder);
   });
 });
 

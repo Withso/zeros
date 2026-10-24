@@ -94,7 +94,7 @@ export function useChatSession(
     // with the chat's id baked in.
     startSession: (agentId, options) =>
       ctx.ensureSession(chatId, agentId, options),
-    sendPrompt: (text, displayText, attachments, bubbleAttachments, segments, onAccepted, cloudQueue, wakeIntent, followUpBehavior) => {
+    sendPrompt: (text, displayText, attachments, bubbleAttachments, segments, onAccepted, cloudQueue, wakeIntent, followUpBehavior, onCommitted) => {
       const sendArgs: Parameters<typeof ctx.sendPrompt> = [
         chatId,
         text,
@@ -108,6 +108,7 @@ export function useChatSession(
       if (cloudQueue) sendArgs[8] = cloudQueue;
       if (wakeIntent) sendArgs[9] = wakeIntent;
       if (followUpBehavior) sendArgs[10] = followUpBehavior;
+      if (onCommitted) sendArgs[11] = onCommitted;
       return ctx.sendPrompt(...sendArgs);
     },
     cancel: () => ctx.cancel(chatId),

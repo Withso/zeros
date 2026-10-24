@@ -1,6 +1,5 @@
 import { useEffect } from "react";
 import { isFeatureEnabled } from "../config/release-channel";
-import { clearCloudGithub } from "../platform/cloud-github";
 import { isLocalDevelopment } from "../platform/runtime";
 import { cloudWorkspaceCapability } from "../platform/cloud-capability";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
@@ -8,9 +7,10 @@ import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-cli
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import { subscribeCloudWorkspaceOpens } from "./cloud-workspace-open-intent";
-import { getSession, onAuthStateChange, type AuthSessionInfo } from "../features/auth/auth-store";
+import { getSession, getStoredAuthUser, onAuthStateChange, onStoredIdentityChange, type AuthSessionInfo } from "../features/auth/auth-store";
+import { getTeamStoreState, subscribeOrganizationSnapshots } from "../features/team/team-store";
 import {
-  clearCloudWorkspaceCatalog,
+  cloudWorkspaceCatalogConfirmed,
   canReadCloudWorkspace,
   cloudCatalogNeedsFastRefresh,
   cloudWorkspaceDocument,
@@ -22,7 +22,6 @@ import { notifyProjectsChanged, notifyWorkspacesChanged, pruneCloudWorkspaceColl
 import { clearWorkspaceSettling } from "./pending-workspaces";
 import { selectActiveFolder, useWorkspaceStore } from "./store";
 import { useSessionsStore } from "../features/agent/sessions-store";
-import { clearCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
 import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
 import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
 
@@ -50,24 +49,32 @@ function ActiveCloudWorkspaceLifecycle() {
 
   useEffect(() => {
     if (isLocalDevelopment()) return;
-    let alive = true, enabled = false, installed = false;
-    let account: string | null = null;
+    let alive = true, enabled = false;
+    const storedAccount = () => getStoredAuthUser()?.accountId ?? getStoredAuthUser()?.sub ?? null;
+    let account = storedAccount();
     let authVersion = 0, lastRefresh: number | undefined, refreshing = false;
     let timer: number | undefined;
-    const pruneChats = (all: boolean) => {
+    const pruneChats = (confirmedRemovals: readonly string[] = []) => {
       const state = useWorkspaceStore.getState();
-      const candidates = new Set(state.chats.map(chat => chat.folder));
+      const removed = new Set(confirmedRemovals);
+      const candidates = new Set([
+        ...state.chats.map(chat => chat.folder), ...confirmedRemovals,
+        ...Object.keys(state.activeChatByFolder), ...Object.keys(state.workbenchByScope),
+        ...Object.keys(state.workspaceActivityByFolder), ...Object.values(state.lastWorkspaceByRepoRoot),
+      ]);
       const active = selectActiveFolder(state);
       if (active) candidates.add(active);
       const folders = [...candidates].filter(value => {
         const target = parseCloudWorkspaceKey(value);
-        return target && (all || !canReadCloudWorkspace(cloudWorkspaceDocument(target)));
+        if (!target) return false;
+        const doc = cloudWorkspaceDocument(target);
+        return removed.has(value) || (doc ? !canReadCloudWorkspace(doc) : cloudWorkspaceCatalogConfirmed());
       });
       if (!folders.length) return;
       for (const chat of state.chats) if (folders.includes(chat.folder)) useSessionsStore.getState().removeSession(chat.id);
       state.dispatch({ type: "PRUNE_CLOUD_WORKSPACES", folders });
     };
-    const canRefresh = () => alive && enabled && !!account && document.visibilityState !== "hidden";
+    const canRefresh = () => alive && enabled && !!account && !!getTeamStoreState().me && document.visibilityState !== "hidden";
     // Transitional workspaces (creating, starting, stopping) poll quickly.
     const schedule = () => {
       if (timer !== undefined) window.clearTimeout(timer);
@@ -85,31 +92,37 @@ function ActiveCloudWorkspaceLifecycle() {
       void refreshCloudWorkspaceCatalog().then(() => {
         if (!alive || version !== authVersion) return;
         runtime()?.pruneCloudConnections();
-        pruneChats(false);
+        pruneChats();
       }).catch(() => {}).finally(() => { refreshing = false; schedule(); });
     };
     const offSchedule = subscribeCloudWorkspaces(schedule);
     const offRows = subscribeCloudWorkspaceRows(change => {
       runtime()?.pruneCloudConnections();
-      if (change.removedWorkspaceIds.length) pruneCloudWorkspaceCollections(change.removedWorkspaceIds);
+      if (change.removedWorkspaceIds.length) {
+        pruneCloudWorkspaceCollections(change.removedWorkspaceIds);
+        pruneChats(change.removedWorkspaceIds);
+      }
       if (change.projectsChanged) notifyProjectsChanged();
       for (const slug of change.repoSlugs) notifyWorkspacesChanged(slug, change.workspaceIds);
     });
     const install = (session: AuthSessionInfo | null) => {
       if (!alive) return;
-      const next = session?.user.accountId ?? session?.user.sub ?? null;
-      if (installed && next === account) return;
-      installed = true;
-      account = next;
+      account = session?.user.accountId ?? session?.user.sub ?? storedAccount();
       lastRefresh = undefined;
-      pruneChats(true);
-      runtime()?.clearCloudConnections();
-      clearCloudWorkspaceCatalog();
-      clearCloudAgentRegistry();
-      clearCloudGithub();
       refresh();
+      schedule();
     };
     const offAuth = onAuthStateChange(session => { authVersion++; install(session); });
+    const offIdentity = onStoredIdentityChange(() => { authVersion++; install(null); });
+    let memberships = getTeamStoreState().me;
+    const offOrganizations = subscribeOrganizationSnapshots(() => {
+      const next = getTeamStoreState().me;
+      if (next === memberships) return;
+      memberships = next;
+      lastRefresh = undefined;
+      refresh();
+      schedule();
+    });
     const visibility = () => {
       if (document.visibilityState === "hidden") runtime()?.cancelSpeculativeWarmups();
       refresh();
@@ -126,7 +139,7 @@ function ActiveCloudWorkspaceLifecycle() {
     return () => {
       alive = false;
       if (timer !== undefined) window.clearTimeout(timer);
-      offSchedule(); offRows(); offAuth();
+      offSchedule(); offRows(); offAuth(); offIdentity(); offOrganizations();
       document.removeEventListener("visibilitychange", visibility);
       window.removeEventListener("focus", refresh);
     };

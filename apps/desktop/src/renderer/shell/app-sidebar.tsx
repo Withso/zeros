@@ -83,6 +83,7 @@ import {
 import { useFolderWorkspaces } from "../state/use-folder-workspaces";
 import { useActiveWorkspace } from "../state/use-active-workspace";
 import { useOpenWorkspace } from "../state/use-open-workspace";
+import { useOrganizationDestination } from "../state/organization-navigation";
 import {
   setSidebarRepositoryIds, setSidebarStatusCollapsed, setSidebarWorkspaceSort,
   sidebarRepositoryFilterOwner, sidebarRepositoryIds, useSidebarListPreferences,
@@ -258,6 +259,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const activeRepoId = useActiveRepoId();
   const createWorkspaceProjectId = useCreateWorkspaceProjectId();
   const activeOrganization = useActiveOrganization();
+  const restoreOrganizationDestination = useOrganizationDestination(activeOrganization);
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   // True while the active folder is a freshly-announced worktree whose create
   // is still landing — the list-validation effect below must not bounce it.
@@ -733,9 +735,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
 
         <div className="flex shrink-0 flex-col gap-1 px-2">
           <OrganizationSwitcher
-            onOrganizationChanged={() =>
-              dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" })
-            }
+            onOrganizationChanged={restoreOrganizationDestination}
             onOpenSettings={() =>
               dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" })
             }

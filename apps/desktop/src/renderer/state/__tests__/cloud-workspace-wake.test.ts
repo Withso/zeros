@@ -22,7 +22,7 @@ vi.mock("../../platform/cloud-workspaces", async original => ({
   ...await original<typeof import("../../platform/cloud-workspaces")>(),
   getCloudWorkspaceDocument: api.read,
   changeCloudWorkspaceLifecycle: api.wake,
-  listCloudWorkspaceDocuments: api.list,
+  listCloudWorkspaceCatalogSnapshot: async (...args: unknown[]) => ({ workspaces: await api.list(...args), catalogVersion: null, complete: true }),
 }));
 import { wakeCloudWorkspace } from "../cloud-workspace-wake";
 import {

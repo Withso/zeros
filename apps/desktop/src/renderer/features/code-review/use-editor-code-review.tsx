@@ -201,6 +201,7 @@ export function useEditorCodeReview({
   content: string;
   active: boolean;
 }) {
+  const commentsAvailable = review.commentsAvailable !== false;
   const inline = useInlineReview(review, active, path);
   const [view, setView] = useState<EditorView | null>(null);
   const snapshot = useMemo<Extract<ReviewCodeSnapshot, { kind: "file" }>>(
@@ -234,7 +235,7 @@ export function useEditorCodeReview({
       mode: "selection" | "composer",
     ) => {
       const current = latest.current;
-      if (!current.active) return;
+      if (!current.active || current.review.commentsAvailable === false) return;
       const text = editor.state.doc.toString();
       // Selection comes from the current editor transaction, including text typed
       // in the same event before the controlled React value has rendered.
@@ -257,7 +258,7 @@ export function useEditorCodeReview({
       mode: "selection" | "composer" = "composer",
     ) => {
       const pointer = event as PointerEvent;
-      if (!latest.current.active || pointer.button !== 0) return false;
+      if (!latest.current.active || latest.current.review.commentsAvailable === false || pointer.button !== 0) return false;
       event.preventDefault();
       stopDrag.current?.();
       const owner = latest.current.review.ownerKey;
@@ -281,6 +282,7 @@ export function useEditorCodeReview({
       const move = (next: PointerEvent) => {
         if (
           !latest.current.active ||
+          latest.current.review.commentsAvailable === false ||
           latest.current.review.ownerKey !== owner ||
           latest.current.path !== selectedPath
         ) {
@@ -326,7 +328,7 @@ export function useEditorCodeReview({
   );
 
   const extensions = useMemo(
-    () => [
+    () => commentsAvailable ? [
       reviewWidgets,
       reviewEditorTheme,
       reviewGutterAccessibility,
@@ -439,8 +441,8 @@ export function useEditorCodeReview({
           },
         ]),
       ),
-    ],
-    [beginGutterSelection, select],
+    ] : [],
+    [beginGutterSelection, select, commentsAvailable],
   );
 
   const getHost = (id: string) => {
@@ -498,7 +500,7 @@ export function useEditorCodeReview({
     .map((slot) => `${slot.id}:${slot.line}`)
     .join("|");
   useLayoutEffect(() => {
-    if (!active || !view) return;
+    if (!active || !commentsAvailable || !view) return;
     view.dispatch({ effects: setReviewSlots.of(slots) });
     view.requestMeasure();
     const observer = new ResizeObserver(() => {
@@ -510,11 +512,11 @@ export function useEditorCodeReview({
     return () => observer.disconnect();
     // Payload changes are React portal updates; resize observation owns height.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- slot positions, content and owner are the native layout identity
-  }, [active, view, hosts, slotSignature, content]);
+  }, [active, commentsAvailable, view, hosts, slotSignature, content]);
   useEffect(() => {
-    if (!active) stopDrag.current?.();
+    if (!active || !commentsAvailable) stopDrag.current?.();
     return () => stopDrag.current?.();
-  }, [active]);
+  }, [active, commentsAvailable]);
   const onCreateView = useCallback((editor: EditorView) => setView(editor), []);
   return { extensions, onCreateView, portals };
 }

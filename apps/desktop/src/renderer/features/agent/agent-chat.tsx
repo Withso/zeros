@@ -279,6 +279,7 @@ import {
 import { shareMap, shareMessageBuckets, shareSet } from "./transcript-stability";
 import { useLatestCallback } from "@/renderer/shared/lib/use-latest-callback";
 import { tailTurnInFlight } from "./tail-indicators";
+import { cloudPresentationRunning } from "./cloud-turn-presentation";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { turnFailureForCard } from "./turn-failure";
@@ -3367,11 +3368,11 @@ function AgentChatBody({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = Boolean(isCloudWorkspace(session.cwd) && (session.cloudStop || session.cloudOutbox?.pendingCount && !session.cloudOutbox.waiting)) || !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
+  const composerStreaming = cloudPresentationRunning(session, pendingLocalTurnId) ?? (Boolean(isCloudWorkspace(session.cwd) && (session.cloudStop || session.cloudOutbox?.pendingCount && !session.cloudOutbox.waiting)) || !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
     status: backgroundContinuationActive ? "streaming" : session.status,
     hasPendingLocalTurn: pendingLocalTurnId !== null,
     planReview: Boolean(planReview),
-  });
+  }));
 
   // Mid-turn steering (queued-card "Send now" while running): advertised by
   // the adapter at session creation. Claude, Codex and Cursor support it; an unavailable
@@ -3885,13 +3886,22 @@ function AgentChatBody({
           if (!capabilitiesBridge) throw new Error("The frame context connection is unavailable.");
           return prepareDesignFrameAttachments(capabilitiesBridge, submittedDesignFrame);
         } : undefined });
-      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent, extras?.followUpBehavior ?? getFollowUpBehavior());
-      const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
-      if (unchanged) {
-        clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
-      }
-      if (override !== undefined || unchanged)
-        dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
+      let composerReleased = false;
+      const releaseSubmittedComposer = () => {
+        if (composerReleased) return;
+        composerReleased = true;
+        const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
+        if (unchanged) {
+          clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
+        }
+        if (override !== undefined || unchanged)
+          dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
+      };
+      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent,
+        extras?.followUpBehavior ?? getFollowUpBehavior(), releaseSubmittedComposer);
+      // Legacy cloud senders release on return; durable sends release at their
+      // private commit and must not clear a newer draft when HTTPS settles.
+      releaseSubmittedComposer();
       pendingSendScrollCountRef.current += 1;
       return true;
     }
@@ -5015,6 +5025,8 @@ function AgentChatBody({
                   isActivityTail={receipt.activityTail}
                   durablePrompt={receipt.durable}
                   receiptState={receipt.state}
+                  presentation={receipt.presentation}
+                  startedAt={receipt.startedAt}
                   ownsProviderFooter={isProviderTurnTail(turns, i)}
                   turnIsPendingLocal={turnIsPendingLocal}
                   turnInFlight={tailTurnInFlight({
@@ -5046,10 +5058,10 @@ function AgentChatBody({
                 />
               );
             })}
-            {!readOnly && isCloudWorkspace(session.cwd) && session.cloudStop?.state === "unconfirmed" && (
+            {!readOnly && isCloudWorkspace(session.cwd) && (session.cloudStop?.state === "unconfirmed" || session.cloudStop?.state === "failed") && (
               <AgentNotice
                 data-cloud-stop-notice
-                message="Stop could not be confirmed. Reconnect to check this turn."
+                message={session.cloudStop.state === "failed" ? "Stop was refused. Try Stop again." : "Stop could not be confirmed. Reconnect to check this turn."}
               >
                 <div className="mt-1">
                   <Button type="button" variant="ghost" size="sm" className={AGENT_NOTICE_ACTION}

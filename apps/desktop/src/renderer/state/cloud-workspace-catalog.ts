@@ -3,7 +3,6 @@ import {
   CloudWorkspaceDocumentSchema,
   changeCloudWorkspaceLifecycle,
   getCloudWorkspaceDocument,
-  listCloudWorkspaceDocuments,
   listCloudWorkspaceCatalogSnapshot,
   type CloudWorkspaceCatalogSnapshot,
   type CloudWorkspaceDocument,
@@ -112,6 +111,15 @@ export const notifyCloudWorkspaceRefresh = (organizations?: ReadonlySet<string>)
 export const getCloudWorkspaceRows = () => rows;
 export const getCloudWorkspaceDocuments = () => documents;
 export const getCloudProjects = () => projects;
+const documentKey = (doc: CloudWorkspaceDocument) => cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id });
+
+/** Provisional rows reconstruct projects synchronously, without confirming the
+ * catalog or authorizing deletion from an incomplete disk snapshot. */
+export function restoreCloudWorkspaceCatalog(cached: readonly CloudWorkspaceDocument[]): void {
+  documents = cached.map(doc => CloudWorkspaceDocumentSchema.parse(doc));
+  catalogConfirmed = false;
+  rebuild(true);
+}
 /** Logical deletion revokes reads immediately, even while the provider is
  * still removing its physical snapshot. Stopped/archived history stays readable. */
 export function canReadCloudWorkspace(doc: CloudWorkspaceDocument | undefined): boolean {
@@ -269,7 +277,7 @@ export function acceptCloudWorkspaceDocument(
   detailReadGeneration?: number,
 ): void {
   const doc = CloudWorkspaceDocumentSchema.parse(document);
-  const prior = documents.find((row) => row.id === doc.id);
+  const prior = documents.find((row) => documentKey(row) === documentKey(doc));
   if (
     prior &&
     (prior.version > doc.version ||
@@ -327,25 +335,25 @@ async function readCatalog(fetchSnapshot: () => Promise<CloudWorkspaceCatalogSna
       const next = snapshot.workspaces;
       // A create or detail refresh may win while the aggregate list is in flight.
       const changed = documents.filter(
-        (row) => before.find((old) => old.id === row.id) !== row,
+        (row) => before.find((old) => documentKey(old) === documentKey(row)) !== row,
       );
       const refreshed = next.map(raw => {
         const row = CloudWorkspaceDocumentSchema.parse(raw);
-        const prior = documents.find(old => old.id === row.id);
+        const prior = documents.find(old => documentKey(old) === documentKey(row));
         return prior && (prior.version > row.version || JSON.stringify(prior) === JSON.stringify(row)) ? prior : row;
       });
-      if (organizations) {
-        const remaining = new Map(refreshed.map(row => [row.id, row]));
+      if (organizations || snapshot.complete === false) {
+        const remaining = new Map(refreshed.map(row => [documentKey(row), row]));
         // Preserve the aggregate order and references of every untouched owner.
         documents = documents.flatMap(row => {
-          if (!organizations.has(row.organizationId)) return [row];
-          const replacement = remaining.get(row.id); remaining.delete(row.id);
-          return replacement ? [replacement] : [];
+          if (organizations && !organizations.has(row.organizationId)) return [row];
+          const replacement = remaining.get(documentKey(row)); remaining.delete(documentKey(row));
+          return replacement ? [replacement] : snapshot.complete === false ? [row] : [];
         }).concat([...remaining.values()]);
       } else documents = refreshed;
       for (const row of changed) {
         if (organizations && !organizations.has(row.organizationId)) continue;
-        const listed = documents.find((item) => item.id === row.id);
+        const listed = documents.find((item) => documentKey(item) === documentKey(row));
         // A pre-list detail is not a concurrent create receipt. The newer
         // catalog omission wins regardless of which response completes first.
         if (!listed && (detailCatalogGenerations.get(row) ?? readGeneration) < readGeneration)
@@ -357,8 +365,8 @@ async function readCatalog(fetchSnapshot: () => Promise<CloudWorkspaceCatalogSna
             Date.parse(row.updatedAt) >= Date.parse(listed.updatedAt))
         )
           documents = organizations && listed
-            ? documents.map(item => item.id === row.id ? row : item)
-            : [...documents.filter((item) => item.id !== row.id), row];
+            ? documents.map(item => documentKey(item) === documentKey(row) ? row : item)
+            : [...documents.filter((item) => documentKey(item) !== documentKey(row)), row];
       }
       const documentsChanged = JSON.stringify(before) !== JSON.stringify(documents);
       const currentOwners = new Set(documents.filter(canReadCloudWorkspace).map(row => cloudWorkspaceKey({
@@ -374,10 +382,10 @@ async function readCatalog(fetchSnapshot: () => Promise<CloudWorkspaceCatalogSna
         settleLifecycleIntents(row);
         publishDocument(row);
       }
-      if (!organizations) catalogConfirmed = true;
+      if (!organizations || snapshot.complete === false) catalogConfirmed = snapshot.complete !== false;
       rebuild(documentsChanged);
       notifyCloudWorkspaceRefresh(organizations);
-      return { workspaces: [...documents], catalogVersion: snapshot.catalogVersion };
+      return { workspaces: [...documents], catalogVersion: snapshot.catalogVersion, complete: snapshot.complete };
     })
     .finally(() => {
       if (inflight === flight) { inflight = null; inflightScope = undefined; }
@@ -389,20 +397,22 @@ async function readCatalog(fetchSnapshot: () => Promise<CloudWorkspaceCatalogSna
 
 export async function refreshCloudWorkspaceCatalog(organizationIds?: readonly string[]): Promise<void> {
   if (organizationIds === undefined) {
-    await readCatalog(async () => ({ workspaces: await listCloudWorkspaceDocuments(), catalogVersion: null }));
+    await readCatalog(listCloudWorkspaceCatalogSnapshot);
     return;
   }
   const organizations = new Set(organizationIds), account = epoch;
   if (!organizations.size) return;
-  if (organizations.size > 16) throw new Error("Cloud catalog exceeded its organization read limit");
   try {
     await readCatalog(async () => {
       const workspaces: CloudWorkspaceDocument[] = [];
+      let complete = true;
       for (const organizationId of organizations) {
         if (account !== epoch) throw new Error("Cloud account changed");
-        workspaces.push(...await listCloudWorkspaceDocuments(organizationId));
+        const snapshot = await listCloudWorkspaceCatalogSnapshot(organizationId);
+        workspaces.push(...snapshot.workspaces);
+        if (snapshot.complete === false) complete = false;
       }
-      return { workspaces, catalogVersion: null };
+      return { workspaces, catalogVersion: null, complete };
     }, organizations);
   } catch (error) {
     // Membership can end before the cached account snapshot changes. The

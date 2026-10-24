@@ -43,20 +43,23 @@ and `resolve` variants. Omitting `kind` preserves its existing PR conversation
 comment behavior. Shared input schemas live in
 `packages/protocol/src/github-review.ts`.
 
-Cloud writes use the existing actor-bound, repository-bound GitHub capability.
-The capability binds the exact body, path, side, line range, revision or thread
-and intended action. The proxy verifies reply/thread ownership against the
-admitted PR independently of worker assertions. Resolve/Reopen admit only fixed
-GraphQL operations and their one bound node identifier. GitHub credentials stay
-upstream of the worker. Imported authors are display metadata, never authority
-to act as that author; writes use the authenticated viewer's GitHub identity.
+Inline review is available for Local Personal and organization-local workspaces.
+Cloud v2 does not serve these reads or writes; the renderer uses the same
+placement capability as workspace comments and exposes no cloud comment
+controls. Imported authors are display metadata, never authority to act as that
+author; Local writes use the authenticated viewer's GitHub identity.
 
 ## Reads, limits and verification
 
 The renderer deduplicates exact-key reads, structurally shares unchanged rows,
 retains confirmed data through refresh failures and bounds retained cache
-entries/weight. Only active, visible surfaces poll; resume and reconnect
-revalidate the same owner. Workspace deletion forgets its cached PR discussions.
+entries/weight. Active consumers share one next-due observer per workspace/PR.
+It owns no timer during a read or while hidden/blurred, and backs off unchanged
+or failed reads from 30 to 60 to 120 seconds. Explicit refresh, confirmed revision
+changes, writes, focus/visibility return and reconnect reset observation;
+changed content resets the next delay to 30 seconds. The last consumer leaving
+fences held replies while retaining confirmed data. Workspace deletion retires
+observation and forgets its cached PR discussions.
 A successful write remains successful if its follow-up refresh fails, so a sent
 draft is not presented for accidental retry.
 

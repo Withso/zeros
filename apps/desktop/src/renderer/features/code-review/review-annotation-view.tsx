@@ -29,7 +29,9 @@ export function ReviewAnnotationView({
   onCancel: (target: ReviewSelectionTarget) => void;
   postComment?: (target: ReviewSelectionTarget, body: string) => Promise<void>;
 }) {
-  const selection = payload.selection;
+  const commentsAvailable = review.commentsAvailable !== false;
+  const selection = commentsAvailable ? payload.selection : undefined;
+  if (!commentsAvailable && !payload.hunks?.length) return null;
   return (
     <div
       data-review-annotation
@@ -45,7 +47,7 @@ export function ReviewAnnotationView({
           }}
         />
       ))}
-      {payload.threads.map(({ thread, state }) => (
+      {commentsAvailable && payload.threads.map(({ thread, state }) => (
         <InlineReviewThread
           key={reviewThreadKey(thread)}
           thread={thread}
@@ -142,7 +144,7 @@ export function ReviewUnplacedThreads({
   showPath?: boolean;
 }) {
   const [page, setPage] = useState(0);
-  if (!entries.length) return null;
+  if (!entries.length || review.commentsAvailable === false) return null;
   const pageSize = 20;
   const lastPage = Math.max(0, Math.ceil(entries.length / pageSize) - 1);
   const currentPage = Math.min(page, lastPage);

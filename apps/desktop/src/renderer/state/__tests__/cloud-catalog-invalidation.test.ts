@@ -28,7 +28,9 @@ vi.mock("@/renderer/state/use-projects", () => ({
 }));
 vi.mock("@/renderer/features/auth/auth-store", () => ({
   getSession: () => new Promise(() => {}),
+  getStoredAuthUser: () => null,
   onAuthStateChange: () => () => {},
+  onStoredIdentityChange: () => () => {},
 }));
 vi.mock("@/renderer/platform/cloud-workspace-access", () => ({
   cloudWorkspaceCapability: () => new Promise(() => {}),
@@ -108,7 +110,7 @@ it("a cloud catalog change does not invalidate every Local repository", () => {
     removeEventListener: vi.fn(),
   });
   renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
-  const cleanup = state.effects.find(effect => effect.toString().includes("clearCloudWorkspaceCatalog"))!();
+  const cleanup = state.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceRows"))!();
   if (cleanup) cleanups.push(cleanup);
   acceptCloudWorkspaceDocument(doc);
   expect(

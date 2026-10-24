@@ -1,5 +1,6 @@
 import { chromium, expect } from "@playwright/test";
 import { pathToFileURL } from "node:url";
+import { mkdir } from "node:fs/promises";
 import { runReviewComparisonSmoke } from "./ui-smoke-review-comparison.mjs";
 
 /** Drive the retained gutter anchor through real document input, including a
@@ -464,6 +465,52 @@ export async function runCodeReviewSmoke({
     true,
   );
   await runReviewComparisonSmoke({ page, check, harnessBase: base });
+  await checkReviewAvailability({ page, check, harnessBase: base });
+}
+
+async function checkReviewAvailability({ page, check, harnessBase }) {
+  const screenshotDir = process.env.ZEROS_UI_SMOKE_SCREENSHOT_DIR;
+  if (screenshotDir) await mkdir(screenshotDir, { recursive: true });
+  await page.goto(`${harnessBase}/harness-code-review.html?loading`);
+  await expect(page.getByTestId("code-review-harness")).toBeVisible();
+  await page.getByTestId("review-mode-diff").click();
+  await expect(page.locator("[data-gutter]").first()).toBeVisible();
+  await expect(page.getByText("Loading comments…", { exact: true })).toHaveCount(0);
+  await expect(page.locator("[data-review-feedback]")).toHaveCount(0);
+  check("A pending Changes comment read adds no text or padded feedback wrapper", true);
+
+  await page.goto(`${harnessBase}/harness-code-review.html?cloud`);
+  await expect(page.getByTestId("code-review-harness")).toBeVisible();
+  for (const mode of ["preview", "diff", "edit"]) {
+    await page.getByTestId(`review-mode-${mode}`).click();
+    const editor = page.locator(".cm-content[contenteditable=true]");
+    if (mode === "edit") {
+      await expect(editor).toBeVisible();
+      await expect(page.locator(".zeros-review-gutter")).toHaveCount(0);
+      await editor.focus();
+    } else {
+      const line = page.locator('[data-gutter] [data-column-number]').first();
+      await expect(line).toBeVisible();
+      await line.click();
+      await expect(page.locator('[data-gutter-utility]')).toHaveCount(0);
+    }
+    await page.keyboard.press("ControlOrMeta+Shift+m");
+    await expect(page.locator("[data-review-composer]")).toHaveCount(0);
+    await expect(page.locator("[data-review-selection-toolbar]")).toHaveCount(0);
+  }
+  await page.getByTestId("review-mode-diff").click();
+  await page.getByTestId("review-toggle-hunks").click();
+  await page.getByRole("button", { name: "Accept", exact: true }).click();
+  await expect(page.getByTestId("review-last-action")).toHaveText("accepted hunk");
+  check("Cloud Files, editor and Changes expose no comment creation while Git hunk controls still work", true);
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate(async theme => {
+      const { setPrefs } = await import("/apps/desktop/src/renderer/shared/theme/store.ts");
+      setPrefs({ mode: theme });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }, theme);
+    if (screenshotDir) await page.screenshot({ path: `${screenshotDir}/cloud-changes-comments-${theme}.png`, animations: "disabled" });
+  }
 }
 
 if (

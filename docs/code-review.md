@@ -10,6 +10,14 @@ reopen or engine restart. Cloud v2 does not implement `codeReview.*`; it returns
 `CLOUD_V2_UNSUPPORTED`. The retired cloud record-capture and restore mechanism
 has been removed.
 
+The renderer's shared `codeReviewAvailable` predicate disables comments when
+either the cwd or workspace ID names cloud, including malformed cloud IDs.
+The hook starts no reads, reconnect observers or timers, and the bridge rejects
+all `codeReview.*` calls before workspace resolution or dispatch. Files preview,
+the editor and Changes omit comment selection, gutters, shortcuts and composers;
+Git hunk actions remain available. Local Personal and organization-local
+comments use the existing event-driven `DB_CHANGED` refresh, with no polling.
+
 `@zeros/protocol/code-review` defines the public schemas. An anchor contains a
 normalized workspace-relative `path`, `side` (`old`, `new`, or `file`), inclusive
 1-based `startLine`/`endLine`, and an opaque viewed-content `revision`, with
@@ -66,6 +74,19 @@ membership. Pages cannot clear a pending invalidation or publish over an active
 root refresh; a failed refresh leaves a still-valid confirmed listing loadable.
 Loaded history for surviving
 threads remains available without restoring membership from an older pass.
+Pending reads contribute to workbench tab status but render no inline loading
+text or padded loading-only wrapper. Errors, notices and pagination remain
+available through their existing controls.
+
+Local GitHub PR comments have one shared foreground observer per exact workspace
+and PR key. It schedules the next read only after the current read settles,
+backs off unchanged or failed reads from 30 to 60 to 120 seconds, and resets on
+changed content, explicit refresh, a write, focus/visibility return, reconnect
+or a confirmed PR revision change. Hidden or blurred windows cancel the timer;
+the last consumer's departure also releases the connection observer and fences
+held replies. Confirmed threads remain visible throughout revalidation. Workspace
+deletion retires observation and its cache; returning to the same key starts a
+new observation without accepting the previous visit's held reply.
 
 Thread previews expose `commentCount`, `commentsComplete` and, when necessary,
 `commentsCursor` with its `commentsCursorAfter` sequence position. Mutation
@@ -98,7 +119,7 @@ authoring permission.
 Successful human and agent writes publish `DB_CHANGED` with
 `kinds: ["codeReview"]` and exact `workspaceIds`, including the originator. The
 renderer bridge validates response ownership and rejects a connection change
-during dispatch. It uses the existing bridge resolver/cloud identity mapping;
+during dispatch. It uses the existing Local bridge workspace resolver;
 no native/preload fallback is added. UI caches must retain the last confirmed
 exact-owner snapshot on refresh or failure and expose remaining history.
 

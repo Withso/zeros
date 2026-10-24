@@ -35,7 +35,7 @@ vi.mock("../store", async (original) => {
 vi.mock("../../platform/cloud-workspaces", () => ({
   CloudWorkspaceDocumentSchema: { parse: (value: unknown) => value },
   CloudWorkspaceRecoveryInputSchema: { parse: (value: unknown) => value },
-  listCloudWorkspaceDocuments: harness.list,
+  listCloudWorkspaceCatalogSnapshot: async (...args: unknown[]) => ({ workspaces: await harness.list(...args), catalogVersion: null, complete: true }),
   getCloudWorkspaceDocument: vi.fn(),
   changeCloudWorkspaceLifecycle: vi.fn(),
   recoverCloudWorkspace: vi.fn(),
@@ -57,6 +57,9 @@ import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-
 import { setActiveBridge } from "../../platform/bridge/active-bridge";
 import type { Workspace } from "../../platform/git";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { cloudScopedId, cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { sanitizeCachedChat } from "../chat-boot-cache";
+import { selectActiveFolder, useWorkspaceStore } from "../store";
 const doc = {
   id: "22222222-2222-4222-8222-222222222222",
   organizationId: "11111111-1111-4111-8111-111111111111",
@@ -85,13 +88,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
   harness.effects.length = 0;
 });
-it("catalog removal prunes unmounted live/archive collections and preserves Local rows without a Local reload", async () => {
+it.each(["global", "scoped"])("%s catalog removal prunes chats and unmounted collections without a Local reload", async scope => {
   vi.stubGlobal("document", {
     visibilityState: "visible",
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   });
   vi.stubGlobal("window", {
+    setTimeout: vi.fn(() => 1),
+    clearTimeout: vi.fn(),
     setInterval: vi.fn(() => 1),
     clearInterval: vi.fn(),
     addEventListener: vi.fn(),
@@ -99,7 +104,14 @@ it("catalog removal prunes unmounted live/archive collections and preserves Loca
   });
   clearCloudWorkspaceCatalog();
   harness.list.mockResolvedValue([doc]);
-  await refreshCloudWorkspaceCatalog();
+  const organizations = scope === "scoped" ? [doc.organizationId] : undefined;
+  await refreshCloudWorkspaceCatalog(organizations);
+  const target = { organizationId: doc.organizationId, workspaceId: doc.id };
+  const chat = sanitizeCachedChat({ id: cloudScopedId(target, "chat"), folder: cloudWorkspaceKey(target) })!;
+  const localChat = sanitizeCachedChat({ id: "local-chat", folder: "/local" })!;
+  const dispatch = useWorkspaceStore.getState().dispatch;
+  dispatch({ type: "HYDRATE_CHATS", chats: [localChat, chat], activeChatId: chat.id });
+  dispatch({ type: "OPEN_WORKSPACE", folder: chat.folder, repoRoot: chat.folder, chatId: chat.id });
   const cloud = getCloudWorkspaceRows()[0];
   const local = {
     id: "v1-local-archived",
@@ -127,24 +139,28 @@ it("catalog removal prunes unmounted live/archive collections and preserves Loca
   ArchiveConsumer();
   const archiveCleanups = harness.effects.splice(0).map((effect) => effect());
   await flush();
-  expect(ArchiveConsumer().workspaces.map((row) => row.id)).toEqual(
+  if (scope === "global") expect(ArchiveConsumer().workspaces.map((row) => row.id)).toEqual(
     expect.arrayContaining([local.id, cloud.id]),
   );
+  expect(cloudWorkspaceCatalogConfirmed()).toBe(scope === "global");
+  expect(useWorkspaceStore.getState().chats).toContainEqual(chat);
   for (const off of archiveCleanups) off?.(); // Retained, now hidden collection.
   (bridge as unknown as { setStatus: (status: string) => void }).setStatus(
     "disconnected",
   );
   harness.effects.length = 0;
   renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
-  const off = harness.effects.find(effect => effect.toString().includes("clearCloudWorkspaceCatalog"))!(); // Real catalog -> consumer publication path.
+  const off = harness.effects.find(effect => effect.toString().includes("pruneChats"))!(); // Real catalog -> consumer publication path.
   try {
     request.mockClear();
     harness.list.mockResolvedValue([]);
-    await refreshCloudWorkspaceCatalog();
+    await refreshCloudWorkspaceCatalog(organizations);
     await flush();
     expect(getCloudWorkspaceRows()).toEqual([]);
     expect(peekWorkspacesFor(cloud.repoSlug)).toEqual([]);
     expect(ArchiveConsumer().workspaces).toEqual([local]);
+    expect(useWorkspaceStore.getState().chats).toEqual([localChat]);
+    expect(selectActiveFolder(useWorkspaceStore.getState())).toBeNull();
     expect(request).not.toHaveBeenCalled();
   } finally {
     off?.();

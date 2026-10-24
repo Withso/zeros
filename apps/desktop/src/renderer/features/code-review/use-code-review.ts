@@ -15,6 +15,7 @@ import {
   replyCodeReviewThread,
   setCodeReviewThreadResolved,
 } from "@/renderer/platform/bridge/code-review-bridge";
+import { codeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import {
   getActiveBridge,
   onActiveBridgeChange,
@@ -128,6 +129,8 @@ export async function loadCodeReview(
   force = false,
 ): Promise<CodeReviewCollection> {
   const { cwd, workspaceId } = codeReviewTargetFromKey(key);
+  if (!codeReviewAvailable({ cwd, workspaceId }))
+    throw new Error("Review comments are unavailable for cloud workspaces.");
   const request = beginReviewCacheRequest(cwd);
   let listingId: number | undefined;
   try {
@@ -140,6 +143,7 @@ export async function loadCodeReview(
         const listingInvalidationVersion =
           codeReviewCache.peekSnapshot(key).invalidationVersion;
         const result = await listCodeReviewThreads({
+          cwd,
           workspaceId,
           includeResolved: true,
         });
@@ -171,6 +175,7 @@ export async function loadCodeReviewPage(
   request: { cursor?: string; threadId?: string },
 ): Promise<void> {
   const { cwd, workspaceId } = codeReviewTargetFromKey(key);
+  if (!codeReviewAvailable({ cwd, workspaceId })) return;
   const lifetime = beginReviewCacheRequest(cwd);
   const listingId = codeReviewCache.peekSnapshot(key).data?.listingId;
   const isCurrentListing = () => {
@@ -198,6 +203,7 @@ export async function loadCodeReviewPage(
       () => {
         lifetime.assertCurrent();
         return listCodeReviewThreads({
+          cwd,
           workspaceId,
           includeResolved: true,
           ...request,
@@ -218,6 +224,8 @@ export async function loadCodeReviewPage(
 
 export interface CodeReviewController {
   ownerKey: string;
+  /** Shared placement capability, also applied at the bridge boundary. */
+  commentsAvailable?: boolean;
   threads: readonly CodeReviewThreadItem[];
   operations: CodeReviewOperations;
   drafts: ReviewDraftStore;
@@ -245,9 +253,12 @@ export function useCodeReview({
   external?: CodeReviewExternalSource;
 }): CodeReviewController {
   const inheritedExternal = useCodeReviewExternal();
-  const external = suppliedExternal ?? inheritedExternal;
+  const commentsAvailable = codeReviewAvailable({ cwd, workspaceId });
+  const external = commentsAvailable
+    ? suppliedExternal ?? inheritedExternal
+    : undefined;
   const target = workspaceId || cwd || "";
-  const key = cwd && target ? codeReviewCacheKey(cwd, target) : null;
+  const key = commentsAvailable && cwd && target ? codeReviewCacheKey(cwd, target) : null;
   const subscribe = useCallback(
     (listener: () => void) =>
       key ? codeReviewCache.subscribe(key, listener) : () => {},
@@ -268,8 +279,8 @@ export function useCodeReview({
     [key],
   );
   useEffect(() => {
-    startReviewEvents();
     if (!active || !key) return;
+    startReviewEvents();
     void loadCodeReview(key).catch(() => {});
   }, [active, key, refreshKey, snapshot.invalidationVersion]);
   useEffect(() => {
@@ -311,6 +322,7 @@ export function useCodeReview({
         );
         try {
           const thread = await createCodeReviewThread({
+            cwd,
             workspaceId: target,
             anchor,
             body,
@@ -337,6 +349,7 @@ export function useCodeReview({
         );
         try {
           const result = await replyCodeReviewThread({
+            cwd,
             workspaceId: target,
             threadId: thread.id,
             body,
@@ -364,6 +377,7 @@ export function useCodeReview({
         );
         try {
           const result = await setCodeReviewThreadResolved({
+            cwd,
             workspaceId: target,
             threadId: thread.id,
             resolved,
@@ -392,7 +406,7 @@ export function useCodeReview({
         });
       },
     }),
-    [key, target],
+    [key, target, cwd],
   );
   const refresh = useCallback(() => {
     if (key && active) {
@@ -410,6 +424,7 @@ export function useCodeReview({
   }, [key]);
   return {
     ownerKey: key ?? "",
+    commentsAvailable,
     threads,
     operations,
     drafts,

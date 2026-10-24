@@ -146,11 +146,18 @@ const DropdownMenuContent = React.forwardRef<
   });
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const initializedNodesRef = React.useRef(new WeakSet<HTMLDivElement>());
+  const initialScrollRef = React.useRef<ResizeObserver | null>(null);
+  React.useEffect(() => () => {
+    initialScrollRef.current?.disconnect();
+    initialScrollRef.current = null;
+  }, []);
   const composedRef = React.useCallback(
     (node: HTMLDivElement | null) => {
       contentRef.current = node;
       setForwardedRef(ref, node);
       if (node && !initializedNodesRef.current.has(node)) {
+        initialScrollRef.current?.disconnect();
+        initialScrollRef.current = null;
         initializedNodesRef.current.add(node);
         // Radix DropdownMenu intentionally keeps Menu's open-autofocus hook
         // private. Run after its mount focus pass, then make the current
@@ -164,10 +171,24 @@ const DropdownMenuContent = React.forwardRef<
           );
           if (!selectedItem) return;
           selectedItem.focus({ preventScroll: true });
-          selectedItem.scrollIntoView({
-            block: "nearest",
-            inline: "nearest",
-          });
+          // Popper constrains height after mounting. Its placement hook is
+          // private to Menu, so wait for the measured available height before
+          // scrolling; an earlier scroll can leave the focused row clipped.
+          const scrollWhenSized = () => {
+            if (contentRef.current !== node || node.dataset.state !== "open") {
+              initialScrollRef.current?.disconnect();
+              initialScrollRef.current = null;
+              return;
+            }
+            const height = Number.parseFloat(getComputedStyle(node).getPropertyValue("--radix-dropdown-menu-content-available-height"));
+            if (!(height > 0)) return;
+            selectedItem.scrollIntoView({ block: "nearest", inline: "nearest" });
+            initialScrollRef.current?.disconnect();
+            initialScrollRef.current = null;
+          };
+          initialScrollRef.current = new ResizeObserver(scrollWhenSized);
+          initialScrollRef.current.observe(node);
+          scrollWhenSized();
         });
       }
     },

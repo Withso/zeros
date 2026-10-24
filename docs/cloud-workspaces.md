@@ -180,6 +180,98 @@ unset. Start restores the workspace by clearing the flag, as does a connect
 request that wakes a stopped workspace. Archive is refused during creation or
 deletion.
 
+## Restart presentation
+
+The desktop reads main's stored account identity through `auth_get_session_user`
+before waiting for a live access token. That identity releases same-account
+presentation while refresh is pending or offline; it never supplies a bearer,
+staff access, settings authority or membership reconciliation. The selected
+organization, workspace, chat and panels remain in place during revalidation.
+Confirmed sign-out or account/backend replacement retires the old bearer and
+presentation before the next account opens. Late reads and writes are fenced by
+the account generation, including A → B → A.
+
+Versioned metadata envelopes in the Chromium profile are scoped by backend URL
+and account ID. The organization snapshot keeps the complete membership list,
+including cloud-disabled organizations, and the selected organization (up to
+1,024 memberships and 1 MiB, without inline logos). The catalog keeps up to 512
+documents and 2 MiB and reconstructs repository/workspace rows; cloud chat
+metadata keeps up to 512 chats and 1 MiB. Both bounds prioritize the selected
+destination. Invalid or oversized envelopes are ignored; an oversized replacement
+write removes the older envelope so it cannot resurrect removed rows. Quota failures
+are best-effort, and the unwired `cloud-chats:v1` cache is discarded rather than
+promoted across accounts. Sign-out and account/backend replacement purge these
+snapshots; confirmed workspace deletion removes its durable metadata and scoped
+navigation. Local Personal and organization-local data retain their own storage.
+
+Switching organizations also restores that organization's last known workspace
+and chat atomically. Its bounded device map keeps Local destinations separately
+from account/backend-fenced cloud entries; unreadable or unknown targets fall
+back to Dashboard. Cached catalog presentation is sufficient to restore, and
+switching never creates a VM wake intent. Deletion, confirmed membership loss
+and account retirement prune the corresponding memories.
+
+The organization switcher restores its cached rows without publishing a fake
+`/v1/me` response or running ownership repair. Refresh-on-open keeps those rows
+and the active check; long lists scroll within the shared menu. A global cloud
+catalog read waits for authoritative membership and reads every eligible
+organization. Membership arrival triggers validation immediately. The current
+per-organization endpoint caps lists at 200 rows without a continuation cursor:
+such a result is incomplete and may update known rows, but cannot prove an
+omitted workspace was deleted. Only complete observations or exact deletion
+evidence prune missing destinations. Restoring metadata never wakes a VM.
+
+Cloud transcripts have a separate, disposable presentation cache in
+`zeros:cloud-transcripts:v1` IndexedDB. Keys contain the backend/account owner,
+a durable retirement lifetime, and the exact organization/workspace/native-chat
+scoped ID. The shared implementation gives cloud an additive 8 windows / about
+8 MiB in memory and 48 windows / 20 MiB on disk. Local keeps its original
+16 windows / 16 MiB memory and 96 windows / 40 MiB disk budgets; the combined
+budgets are 24 windows / 24 MiB memory and 144 windows / 60 MiB disk. Sizes use
+Local's original character accounting, including serialized character length
+for the disk index's `bytes` field. Each cloud disk window keeps up to 200 rows
+and 768 KiB in those units, preserving its leading prompt and checking the final
+encoded length. LRU eviction bounds both cloud tiers; cloud pending captures
+share its memory budget. Local retains its lazy index load, lenient decoder,
+record format and pending writes through memory eviction/release. Writes coalesce
+after settlement or view eviction, never per streamed chunk. Malformed or
+oversized cloud records are misses; unavailable disk and quota failures leave
+the authoritative history untouched.
+
+Stored identity starts the boot transcript read before token or VM waits.
+Memory hits paint in the first visible frame and disk hits paint upon arrival,
+as provisional `transcriptPresentation`. Cached rows authorize no send,
+queue-drain, edit, retry, fork or completion; the composer stays editable. The
+private prompt retry journal is unchanged and unconfirmed prompts are excluded
+from the transcript cache. Revalidation reads the existing history window and
+merges by stable message ID: unchanged rows retain references, edits replace
+rows, and complete windows remove missing rows, including a confirmed empty
+window. Partial windows retain the known prefix. Router-owned worker/mirror
+provenance prevents a lagging mirror from replacing a known worker tail; it must
+include that tail ID with matching content or newer native update stamps on
+changed overlapping rows. Without a revision cursor, mirror-only tail deletion
+cannot prove catch-up, so the worker presentation remains provisional until a
+qualifying read. No cache read wakes a VM or activates a hidden view.
+Shortened worker rows retain a bounded signature of their original content for
+this comparison; a matching displayed prefix alone never proves catch-up. The
+existing cloud `turnOpening` field supplies long turns' opening prompts, including
+when revalidation edits only that prompt.
+
+Sign-out and account/backend replacement rotate the durable lifetime before
+purging the cloud namespace, even if IndexedDB deletion fails. Generation
+fences discard pending reads/index loads and old writes; serialized mutations
+order purge after already-started writes and before the next lifetime's writes.
+Confirmed workspace/chat deletion prunes exact entries without crossing owners.
+An empty cold/loading session cannot erase a confirmed cached window. Local
+Personal and organization-local history retain their device-owned authority and
+startup behavior.
+
+A transactional change feed remains a follow-up: catalog/history writes and
+deletion tombstones would advance a sequence in the same database transaction,
+with scoped cursors and a bounded snapshot fallback after cursor expiry. This
+change introduces no sync endpoint or worker protocol; revalidation uses the
+existing catalog and history window/older-page reads.
+
 ## Durable prompt delivery
 
 Workspaces advertising `capabilities.promptOutbox: 1` accept sends over
@@ -235,11 +327,33 @@ and saved earlier. Idle Stop adds no access revocation before history flush.
 
 Saved future bubbles are a presentation projection, separate from native
 transcript rows. Their IDs reconcile with worker history; an earlier turn's
-output cannot attach to a later queued bubble. Receipts settle interrupted or
-refused sends visibly, preserve Retry and release later messages. Only actual
-provider activity drives working indicators. Hidden chat views own no polling;
-one application coordinator resumes pending deliveries, with at most 64 active
-conversations and four concurrent requests. Idle conversations have no timer.
+output cannot attach to a later queued bubble. On a running VM, the head
+prompt's bubble and pending-turn working indicator publish together after the
+private journal commits, with elapsed time anchored at renderer Send. That
+commit also clears the submitted composer and saved draft before HTTPS replies,
+only if the editor still contains the submitted document. Failed private writes
+and newer edits retain their draft. Follow-ups start their own clock only when
+they become the head or are dispatched; an
+unavailable VM keeps the queue and Starting workspace presentation. These
+client clocks survive reload and never grant delivery or execution authority.
+Receipts settle interrupted or refused sends visibly, preserve Retry and release
+later messages. An uncertain send retains its original repairable attempt.
+
+An exact native terminal fact mounts the footer immediately, even while its
+receipt remains accepted. Stop also ends presentation synchronously: Send
+returns, the stopped pill and footer appear, and duration freezes at the click.
+Cancellation operations, delivery epochs and queue fences remain in force until
+confirmed independently. Native completion or failure can correct an optimistic
+Stop without extending its clock; final text, foreign-turn events and later
+metadata cannot. A definitive Stop refusal restores only its exact turn;
+timeout or disconnection keeps the stopped presentation with the unconfirmed
+notice and Retry Stop. Optional journal presentation metadata never changes the
+immutable retry payload; malformed metadata is discarded without losing it.
+The resident clock/ending map retains at most 256 turns per chat.
+
+Hidden chat views own no polling; one application coordinator resumes pending
+deliveries, with at most 64 active conversations and four concurrent requests.
+Idle conversations have no timer.
 
 The CP accepts at most 8 MiB per prompt, 128 pending messages and 32 MiB of
 pending bodies per workspace, with 10,000 retained receipts. Terminal bodies

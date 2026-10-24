@@ -1,5 +1,6 @@
 import { TurnUsageCard } from "./turn-usage-card";
 import type { CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
+import type { CloudTurnEnding } from "./cloud-turn-presentation";
 // ──────────────────────────────────────────────────────────
 // TurnFooter — the footer below a settled turn's answer
 // ──────────────────────────────────────────────────────────
@@ -429,6 +430,7 @@ interface TurnFooterProps {
   recoveryFailure?: { kind: string; message: string };
   durablePrompt?: boolean;
   receiptState?: CloudV2PromptState;
+  presentation?: CloudTurnEnding;
   onRetry?: () => Promise<void>;
   onRetryNewChat?: () => Promise<void>;
   onRetryNewChatIntent?: () => void;
@@ -464,6 +466,7 @@ export const TurnFooter = memo(function TurnFooter({
   recoveryFailure,
   durablePrompt = false,
   receiptState,
+  presentation,
   onRetry,
   onRetryNewChat,
   onRetryNewChatIntent,
@@ -674,7 +677,8 @@ export const TurnFooter = memo(function TurnFooter({
   // blue directly under the grey shimmer.
   // The footer appears once the turn settles.
   if (live) return null;
-  const durationMs = turnFooterDuration(turn, events, startedAt);
+  const durationStart = presentation?.startedAt ?? turn?.startedAt ?? startedAt;
+  const durationMs = presentation ? Math.max(0, presentation.endedAt - durationStart) : turnFooterDuration(turn, events, startedAt);
   // File changes are deliberately disk-authoritative. A rendered tool call is a
   // proposal, not proof that anything landed (permission may be denied, a tool
   // may fail, or an edit may be a no-op). Only the engine's persisted
@@ -691,13 +695,13 @@ export const TurnFooter = memo(function TurnFooter({
     recoveryFailure,
     live,
     retrying,
-    status: receiptState ?? turn?.status,
+    status: presentation?.status ?? receiptState ?? turn?.status,
     stopReason: fallbackStopReason ?? turn?.stopReason,
   });
   // A failure card belongs to the latest turn; older turns keep one line.
   const settledFailure = settledTurnFailurePresentation(cardFailure, !!isLastTurn || durablePrompt);
   const statusLabel = turnFooterStatusLabel(
-    turn,
+    presentation ? { status: presentation.status, stopReason: presentation.stopReason ?? null } : turn,
     fallbackStopReason,
     fallbackStatusLabel ?? settledFailure.label,
     retrying,
@@ -727,7 +731,7 @@ export const TurnFooter = memo(function TurnFooter({
           </div>
         )}
         <TurnUsageCard agentId={turn?.agentId} usage={turn?.usage}
-          startedAt={turn?.startedAt ?? startedAt} endedAt={(turn?.startedAt ?? startedAt) + durationMs}
+          startedAt={durationStart} endedAt={durationStart + durationMs}
           durationMs={durationMs} enabled={surfaceActive} />
         <Tooltip label={copied ? "Copied" : "Copy output"}>
           <IconButton

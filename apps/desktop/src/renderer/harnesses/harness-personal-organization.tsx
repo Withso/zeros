@@ -16,6 +16,7 @@ import {
   clearTeamStore,
   getActiveOrganizationIdSnapshot,
   getActiveOrganizationSnapshot,
+  restoreOrganizationPresentation,
   useActiveOrganization,
 } from "../features/team/team-store";
 import {
@@ -30,6 +31,13 @@ import {
 } from "../features/team/control-plane";
 import { Button } from "../shared/ui/primitives/button";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
+import { accountPresentationOwner, bindAccountPresentationOwner } from "../platform/account-presentation-cache";
+import multiOrganizationFixture from "../../../../../scripts/__tests__/fixtures/organization-list.json";
+
+const ACCOUNT_KEY = "zeros-test-personal-account";
+const restoredAccount = localStorage.getItem(ACCOUNT_KEY);
+bindAccountPresentationOwner(restoredAccount ? accountPresentationOwner("https://api.example.test", restoredAccount) : null);
+if (restoredAccount) restoreOrganizationPresentation();
 
 type LocalRow = {
   id: string;
@@ -58,7 +66,7 @@ function account(id: string): Me {
     workspaceCapabilities: { local: true, cloud: !personal },
     teamCapabilities: { multiple: false, canCreate: false },
   });
-  const organizations = [summary(true), summary(false)];
+  const organizations = id === "many" ? multiOrganizationFixture as OrganizationSummary[] : [summary(true), summary(false)];
   return {
     user: { id, email: `${id}@example.test`, displayName: id, staffRole: null },
     organizations,
@@ -124,15 +132,21 @@ function Workspaces() {
 }
 
 function Harness() {
-  const [user, setUser] = useState<string | null>(null);
+  const [user, setUser] = useState<string | null>(restoredAccount);
+  const [authenticated, setAuthenticated] = useState(false);
   const selectAccount = (id: string | null) => {
+    bindAccountPresentationOwner(id ? accountPresentationOwner("https://api.example.test", id) : null);
     clearTeamStore({ resetSelection: true });
     if (id) acceptOrganizationSnapshot(account(id));
+    if (id) localStorage.setItem(ACCOUNT_KEY, id);
+    else localStorage.removeItem(ACCOUNT_KEY);
+    setAuthenticated(!!id);
     setUser(id);
   };
   const auth: AuthContextValue = {
-    status: user ? "authenticated" : "unauthenticated",
+    status: authenticated ? "authenticated" : "unauthenticated",
     session: null,
+    storedUser: user ? { sub: user, email: `${user}@example.test`, name: null, provider: "workos" } : null,
     userId: user,
     email: user ? `${user}@example.test` : null,
     startBrowserSignIn: async () => ({ ok: false }),
@@ -149,6 +163,7 @@ function Harness() {
           <div className="flex gap-2">
             <Button onClick={() => selectAccount("a")}>Use account A</Button>
             <Button onClick={() => selectAccount("b")}>Use account B</Button>
+            <Button onClick={() => selectAccount("many")}>Use many organizations</Button>
           </div>
           <div className="w-64">
             <OrganizationSwitcher />

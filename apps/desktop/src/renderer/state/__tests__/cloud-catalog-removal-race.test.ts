@@ -3,7 +3,7 @@ const api = vi.hoisted(() => ({ detail: vi.fn(), list: vi.fn() }));
 vi.mock("@/renderer/platform/cloud-workspaces", () => ({
   CloudWorkspaceDocumentSchema: { parse: (x: unknown) => x },
   CloudWorkspaceRecoveryInputSchema: { parse: (x: unknown) => x },
-  listCloudWorkspaceDocuments: api.list,
+  listCloudWorkspaceCatalogSnapshot: async (...args: unknown[]) => ({ workspaces: await api.list(...args), catalogVersion: null, complete: true }),
   getCloudWorkspaceDocument: api.detail,
   changeCloudWorkspaceLifecycle: vi.fn(), recoverCloudWorkspace: vi.fn(),
 }));

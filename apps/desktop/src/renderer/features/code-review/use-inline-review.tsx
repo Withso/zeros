@@ -22,6 +22,7 @@ import {
 import { ReviewAnnotationView } from "./review-annotation-view";
 import type { CodeReviewController } from "./use-code-review";
 import type { ReviewLiveHunkSource } from "./review-hunk-model";
+import { EMPTY_REVIEW_THREADS } from "./review-thread-model";
 import {
   canPostReviewSelection,
   postCapturedReview,
@@ -32,6 +33,8 @@ export function useInlineReview(
   active: boolean,
   itemIds: string | readonly string[],
 ) {
+  const commentsAvailable = review.commentsAvailable !== false;
+  const threads = commentsAvailable ? review.threads : EMPTY_REVIEW_THREADS;
   const [record, setRecord] = useState<{
     owner: string;
     target: ReviewSelectionTarget | null;
@@ -42,6 +45,7 @@ export function useInlineReview(
     [itemIds],
   );
   const selection =
+    commentsAvailable &&
     record.owner === review.ownerKey &&
     record.target &&
     visibleItems.has(record.target.itemId)
@@ -71,7 +75,7 @@ export function useInlineReview(
       mode: ReviewSelectionTarget["mode"] = "selection",
     ) => {
       const current = latest.current;
-      if (!current.active || !current.visibleItems.has(itemId)) return;
+      if (!current.active || current.review.commentsAvailable === false || !current.visibleItems.has(itemId)) return;
       if (!range) {
         native.current = { owner: current.review.ownerKey, value: null };
         setRecord((old) =>
@@ -122,7 +126,7 @@ export function useInlineReview(
     [],
   );
   const setSelection = useCallback((target: ReviewSelectionTarget) => {
-    if (!latest.current.visibleItems.has(target.itemId)) return;
+    if (latest.current.review.commentsAvailable === false || !latest.current.visibleItems.has(target.itemId)) return;
     setRecord({ owner: latest.current.review.ownerKey, target });
   }, []);
   const cancel = useCallback((target: ReviewSelectionTarget) => {
@@ -143,13 +147,13 @@ export function useInlineReview(
       if (visibleItems.has(itemId)) snapshots.set(itemId, snapshot);
       return cache.forDiff(
         snapshot,
-        review.threads,
+        threads,
         selection?.itemId === itemId ? selection : undefined,
         hunkSource,
         active,
       );
     },
-    [snapshots, visibleItems, cache, review.threads, selection, active],
+    [snapshots, visibleItems, cache, threads, selection, active],
   );
   const annotationsForFile = useCallback(
     (
@@ -159,12 +163,12 @@ export function useInlineReview(
       if (visibleItems.has(itemId)) snapshots.set(itemId, snapshot);
       return cache.forFile(
         snapshot,
-        review.threads,
+        threads,
         selection?.itemId === itemId ? selection : undefined,
         active,
       );
     },
-    [snapshots, visibleItems, cache, review.threads, selection, active],
+    [snapshots, visibleItems, cache, threads, selection, active],
   );
 
   const renderAnnotation = useCallback(
@@ -178,6 +182,7 @@ export function useInlineReview(
       const snapshot = target && current.snapshots.get(target.itemId);
       const adapter = current.review.external;
       const canPost =
+        current.review.commentsAvailable !== false &&
         target && canPostReviewSelection(target, snapshot, adapter);
       return (
         <ReviewAnnotationView
@@ -228,13 +233,13 @@ export function useInlineReview(
   );
   const options = useMemo(
     () => ({
-      enableLineSelection: active,
-      enableGutterUtility: active,
+      enableLineSelection: active && commentsAvailable,
+      enableGutterUtility: active && commentsAvailable,
       lineHoverHighlight: "both" as const,
       onLineSelected,
       onGutterUtilityClick,
     }),
-    [active, onLineSelected, onGutterUtilityClick],
+    [active, commentsAvailable, onLineSelected, onGutterUtilityClick],
   );
 
   const onKeyDown = useCallback(
@@ -246,6 +251,7 @@ export function useInlineReview(
       const current = latest.current;
       if (
         !current.active ||
+        current.review.commentsAvailable === false ||
         event.nativeEvent.isComposing ||
         (event.target as HTMLElement).closest(
           "textarea,input,button,[contenteditable=true]",

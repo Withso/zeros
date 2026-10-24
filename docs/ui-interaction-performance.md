@@ -24,6 +24,7 @@ round trip to restore it. Key it by the smallest semantic owner that can vary:
 | ---------------------------------------------------------------- | ------------------------------------ |
 | Home destination or app-wide presentation preference             | app                                  |
 | Repository hub selected tab                                     | project id                           |
+| Last workspace and chat when switching organizations            | organization id; account/backend for cloud |
 | Selected workspace                                               | repository root                      |
 | Active chat, workbench tabs, Changes/Review choices, terminal tab | workspace folder                    |
 | Open file and explicit viewer mode                                | workbench tab id inside the workspace |
@@ -46,13 +47,29 @@ snapshot settles and proves it missing. `undefined`/cold is not an empty list;
 keep the remembered identity while revalidating, then apply an authoritative
 fallback as a new atomic navigation if necessary.
 
-Cloud reload restores the saved workspace/chat identity before authentication
-releases cached content. Only a confirmed chat snapshot for that exact cloud
-workspace can invalidate its saved chat; the Local engine's list cannot. Do not
-persist an early Local-only list over the cloud cache before its authorized
-restore completes. Sign-out, account replacement and authoritative workspace
-deletion prune the destination and its descendants atomically. A cold cloud
-selection must not fall back to an unrelated Local chat.
+Organization switching restores the owner's last known workspace and chat in
+one `OPEN_WORKSPACE` navigation, or Dashboard when no valid destination is
+known. The versioned device map retains at most 128 organizations and 512 KiB;
+cloud entries additionally carry the account/backend fence. Known Local rows
+and registered folders, and readable cloud catalog presentation, can restore
+without a network read or VM wake. Workspace/repository deletion and confirmed
+membership loss prune the corresponding entries; account replacement and
+sign-out retire cloud entries while retaining device-owned Local navigation.
+
+Cloud reload restores the saved organization/workspace/chat identity and panels
+when main confirms the stored account, before waiting for live-token refresh.
+Bounded, versioned membership, catalog and chat metadata snapshots are fenced by
+backend and account; they release presentation only, never bearer authority or
+membership ownership side effects. Cold membership and capped catalog reads
+cannot confirm an empty catalog. Only a complete catalog or exact deletion
+evidence can prune a missing workspace, and only a confirmed chat snapshot for
+that exact workspace can invalidate its saved chat; the Local engine's list
+cannot. Do not persist an early Local-only list over the cloud cache before its
+same-account restore completes. Sign-out, account/backend replacement and
+authoritative workspace deletion prune the destination and its descendants,
+including separately persisted cloud repository selections. Preserve a visible
+Local destination while retiring remembered cloud state. A cold cloud selection
+must not fall back to an unrelated Local chat.
 
 Workspace existence and chat-history readiness are separate facts. Both Local
 and Cloud wait for the selected workspace's first authoritative chat list before
@@ -139,13 +156,29 @@ If it shared a read that retired after that cleanup, it retries once after the
 read releases its identity. This recovery must not start an agent, wake a VM,
 poll on ordinary failures, or reactivate a hidden surface.
 
-Cloud v2 workspaces keep no renderer cache of native transcript pages. A running
-workspace's worker and a stopped workspace's control-plane history mirror both
-answer with authoritative pages. The durable prompt retry journal is separate:
-its saved user bubbles project beside those pages until exact message IDs
-reconcile. It never substitutes locally cached provider output for native history.
-The v1 native cloud cache, its immutable-head provenance rules and its paint
-smoke were retired with the v1 runtime.
+Cloud v2 chats keep their last confirmed window in a separate instance of the
+shared transcript presentation cache. Its versioned IndexedDB namespace is keyed
+by backend/account presentation owner, a durable retirement lifetime, and the
+exact organization/workspace/native-chat scoped ID. Identity bootstrap begins
+the selected chat's disk read before token refresh or VM admission. Memory hits
+paint synchronously; disk hits paint as soon as they arrive. Provisional
+`transcriptPresentation` grants no send, queue-drain, edit, retry, fork or
+completion authority, and the composer remains editable. The durable prompt
+retry journal stays separate; unconfirmed/queued prompts never enter this cache.
+
+Revalidation uses existing worker/control-plane history windows, preserving
+unchanged message references and replacing edited rows by stable ID. Only a
+complete window can discard its missing prefix or confirm an empty transcript;
+partial tails retain the known prefix. Router-owned provenance prevents a
+lagging mirror from replacing a known worker tail: it must contain that tail ID
+and match overlapping rows or prove newer native update stamps. Shortened rows
+keep bounded original-content signatures; a displayed prefix alone cannot prove
+catch-up. Without a server revision cursor, a mirror-only deletion of that tail cannot prove
+catch-up; keep the worker presentation until a qualifying read. Account/backend
+replacement and sign-out rotate the durable lifetime before serializing a purge
+after pending writes; async reads/writes are generation-fenced. Confirmed chat
+and workspace deletions prune exact entries. Passive reads never wake a VM,
+hidden views start no reads, and retries use existing connection/data edges.
 
 Local presentation readiness: Local Personal and organization-local chats keep
 their last confirmed window in a bounded Local transcript cache: the exact
@@ -165,14 +198,22 @@ provisionally (`transcriptPresentation.empty`) instead of "Loading
 conversation…" while the engine starts. Any message or history hint removes
 the id synchronously, and the engine read still confirms the paint. Copies are written once
 a turn settles or a window leaves memory, never per streamed chunk; reset,
-delete and the authoritative chat snapshot prune them. Cloud chats never enter
-this cache. A confirmed empty resident window invalidates both cache tiers
+delete and the authoritative chat snapshot prune them. Cloud has its own additive
+allowance: 8 chats / 8 MiB memory and 48 chats / 20 MiB disk. The combined budgets
+are 24 chats / 24 MiB memory and 144 chats / 60 MiB disk. Both use Local's original
+character accounting: estimated characters in memory and serialized character
+length in the disk index's `bytes` field. Each disk window targets 200 rows /
+768 KiB, keeping its leading prompt; cloud additionally checks the final encoded
+character length. Cloud pending captures share its bounded memory entries.
+Local pending writes still survive memory eviction/release, and its lazy index
+load, lenient decoder, database name and record format remain unchanged.
+A confirmed empty resident window invalidates both cache tiers
 immediately, before eviction or app shutdown can bypass a delayed capture.
 An empty cold or loading slot is not confirmation and cannot erase the cache.
 
-A Local window can begin inside one long turn: the engine snaps a tail window
+A history window can begin inside one long turn: the engine snaps a tail window
 back to its opening prompt only within its 1000-row budget. Beyond that, the
-Local engine reports the opening beside the contiguous rows (`turnOpening`),
+Local engine and cloud history sources report the opening beside the contiguous rows (`turnOpening`),
 and the slot keeps it as `leadingPrompt`, outside `messages`, so paging
 cursors, caps and equality keep their meaning. Every front trim, older-page
 prepend and window replacement re-derives it, editing it cuts every resident
@@ -183,7 +224,7 @@ must revalidate it after each await; a newer inline prompt takes precedence.
 
 An empty chat's provenance block (workspace rows, or "Add chat transcripts"
 when another chat in the folder has a prompt) never waits blank on the
-transcript list. Local folders share one list per folder: every empty chat
+transcript list. Both placements share one list per folder: every empty chat
 reads the same snapshot and drops itself locally, so a new or returning tab
 paints a list another tab already confirmed, and only the visible empty chat
 reads. The last list per folder is persisted (24 folders, 32 rows, 120-character
@@ -192,8 +233,21 @@ engine once. A prompt sent from this renderer appears as a pending row at once
 and yields when the engine reports that many prompts or later activity for the
 chat; an unconfirmed row expires after two minutes. With nothing known, the
 workspace rows stand in after a 400 ms grace and the transcript row replaces
-them when the list lands. Cloud folders keep their exact (folder, excluded
-chat) read.
+them when the list lands. Cloud lists additionally belong to the exact
+account/backend lifetime and use the account presentation envelope with the
+same 24-folder, 32-row, 120-character bounds. Sign-out or account/backend
+replacement purges them; confirmed chat/workspace deletion prunes them and
+fences pending reads and disk writes. Same-folder resident or cached user
+prompts seed pills synchronously; an Untitled tab or a title alone is not
+evidence of history. Private cloud prompt commits publish the pending overlay
+before HTTPS acceptance. Known nonempty cloud pills render on the first frame,
+without a grace timer or a dependency on workspace details. Errors retain the
+confirmed list; only confirmed empty or nothing known after grace shows
+workspace rows. Cloud pending overlays have their own 24-folder / 32-row limit
+and retain at most 128 prompt identities per row; Local retention is unchanged.
+Hidden tabs start no reads/timers, including queued invalidation reads after
+the last visible consumer leaves, and passive reads never wake
+a VM.
 
 Sending immediately after Stop may race the cancelled command's durable
 retirement. Resume can retry only when the entire revision advance is accounted
@@ -657,7 +711,7 @@ Escape, native overlay intent cleanup and reduced motion.
 - Settings/repository retention: bounded visited-section decks in `apps/desktop/src/renderer/features/settings/settings-page.tsx` and `apps/desktop/src/renderer/features/repositories/repo-page.tsx`.
 - One-paint transition suppression: `apps/desktop/src/renderer/shared/ui/use-instant-view-switch.ts`.
 - Chat structural sharing: `apps/desktop/src/renderer/features/agent/stable-turns.ts`.
-- Local transcript cache: policy in `apps/desktop/src/renderer/state/local-transcript-cache.ts`, IndexedDB records in `apps/desktop/src/renderer/platform/local-transcript-store.ts`, provisional paint and fresh chats in `apps/desktop/src/renderer/features/agent/local-transcript-presentation.ts`.
+- Local/cloud transcript caches: shared policy in `apps/desktop/src/renderer/state/local-transcript-cache.ts`, separate IndexedDB namespaces in `apps/desktop/src/renderer/platform/local-transcript-store.ts`, provisional paint and Local fresh chats in `apps/desktop/src/renderer/features/agent/local-transcript-presentation.ts`.
 - Empty-chat transcript row: shared Local folder list, persisted paint and pending prompts in `apps/desktop/src/renderer/features/agent/use-chat-transcript-summaries.ts`; the grace in `agent-chat.tsx`.
 - Long-turn opening prompt: `windowChatMessagesPage` in `apps/desktop/src/engine/db/messages.ts` and `apps/desktop/src/renderer/features/agent/transcript-leading-prompt.ts`.
 - Engine start attribution: `apps/desktop/src/engine/boot-phase-timer.ts` names slow phases on the "Engine ready" line.

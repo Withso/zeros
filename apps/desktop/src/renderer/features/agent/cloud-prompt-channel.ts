@@ -1,5 +1,6 @@
 import { CLOUD_V2_MAX_PROMPT_BYTES, CloudV2PromptSchema, type CloudV2Prompt, type CloudV2PromptReceipt,
   type CloudV2PromptState, type CloudV2PromptStatus } from "@zeros/protocol/cloud-v2-prompts";
+import { withCloudTurnPresentation, type CloudTurnPresentation } from "./cloud-turn-presentation";
 
 export interface CloudPromptOwner {
   backend: string; accountId: string; organizationId: string; workspaceId: string; chatId: string;
@@ -16,13 +17,15 @@ export interface PromptJournalEntry {
   state?: CloudV2PromptState;
   failure?: string;
   cancelRequested?: boolean;
+  /** Client-only feedback; never used to admit, retry or retire delivery. */
+  presentation?: CloudTurnPresentation;
   updatedAt: number;
 }
 export interface PromptJournalRecord {
   version: 1; owner: CloudPromptOwner; entries: PromptJournalEntry[];
   nextOrder: number; epoch: string; cursor: string;
   /** Saved before the first Stop POST; a lost reply retries this exact epoch. */
-  stop?: { id: string; before: number; throughEpoch?: string };
+  stop?: { id: string; before: number; throughEpoch?: string; turnId?: string | null; requestedAt?: number; state?: "pending" | "unconfirmed" | "failed" };
 }
 export const emptyPromptJournal = (owner: CloudPromptOwner): PromptJournalRecord => ({ version: 1, owner, entries: [], nextOrder: 0, epoch: "0", cursor: "0" });
 export interface CloudPromptJournal {
@@ -93,17 +96,37 @@ export class CloudPromptChannel {
       return payload.userMessageId;
     });
   }
-  stop(): Promise<void> {
+  stop(intent?: { id: string; turnId: string | null; requestedAt: number; startedAt: number }): Promise<void> {
     this.stopsPreparing++;
     return this.ordered(async () => {
       await this.load();
-      await this.edit(record => record.stop ? record : { ...record,
-        stop: { id: crypto.randomUUID(), before: record.nextOrder },
-        entries: record.entries.map(entry => entry.phase === "pending" && !entry.receipt ? {
-          ...entry, phase: "saved", state: "cancelled", updatedAt: Date.now(),
-        } : entry),
-      });
+      await this.edit(record => {
+        // A confirmed epoch fence may still await native retirement. Retrying
+        // its observation cannot advance the epoch across a successor Send.
+        if (!record.stop && intent && record.entries.some(entry => entry.cancelRequested && entry.payload.userMessageId === intent.turnId)) return record;
+        return { ...record,
+        stop: record.stop ? { ...record.stop, state: "pending" } : { id: intent?.id ?? crypto.randomUUID(), before: record.nextOrder,
+          ...(intent ? { turnId: intent.turnId, requestedAt: intent.requestedAt } : {}) },
+        entries: record.entries.map(entry => ({ ...entry,
+          ...(!record.stop && entry.phase === "pending" && !entry.receipt ? { phase: "saved" as const, state: "cancelled" as const, updatedAt: Date.now() } : {}),
+          ...(intent && entry.payload.userMessageId === intent.turnId ? { presentation: withCloudTurnPresentation(
+            entry.presentation ? { [intent.turnId]: entry.presentation } : undefined, intent.turnId, {
+              source: "stop", status: "cancelled", stopReason: "cancelled", operationId: intent.id,
+              startedAt: intent.startedAt, endedAt: intent.requestedAt,
+            })[intent.turnId] } : {}),
+        })),
+      }; });
     }).finally(() => { this.stopsPreparing--; });
+  }
+  rememberPresentation(turnId: string, presentation: CloudTurnPresentation): Promise<void> {
+    const entry = this.snapshot.entries.find(entry => entry.payload.userMessageId === turnId);
+    if (!entry || same(entry.presentation, presentation)) return Promise.resolve();
+    return this.edit(record => ({ ...record, entries: record.entries.map(entry => entry.payload.userMessageId === turnId ? {
+      ...entry, presentation: withCloudTurnPresentation(entry.presentation ? { [turnId]: entry.presentation } : undefined, turnId, presentation)[turnId],
+    } : entry) }));
+  }
+  unconfirmedStop(id: string): Promise<void> {
+    return this.edit(record => record.stop?.id === id ? { ...record, stop: { ...record.stop, state: "unconfirmed" } } : record);
   }
   get needsDelivery(): boolean {
     return !!this.snapshot.stop || this.snapshot.entries.some(entry => entry.phase === "pending" || entry.phase === "uncertain");
@@ -159,7 +182,15 @@ export class CloudPromptChannel {
         await this.edit(record => ({ ...record, epoch: reply.epoch, stop: record.stop?.id === stop.id ? undefined : record.stop,
           entries: record.entries.map(value => value.receipt && BigInt(value.receipt.epoch) < BigInt(reply.epoch) && !promptTerminal(value.state)
             ? { ...value, cancelRequested: true, ...(value.state === "queued" || value.state === "inboxed" ? { state: "cancelled" as const } : {}), updatedAt: Date.now() } : value) }));
-      } catch { return; } // The persisted fence retries before any future send.
+      } catch (error) {
+        if (!this.current()) return;
+        await this.edit(record => record.stop?.id === fence.id ? { ...record,
+          stop: { ...record.stop, state: definitive(error) ? "failed" : "unconfirmed" },
+          entries: definitive(error) ? record.entries.map(entry => entry.presentation?.source === "stop" && entry.presentation.operationId === fence.id
+            ? { ...entry, presentation: { startedAt: entry.presentation.startedAt, status: "running", source: "send" } } : entry) : record.entries,
+        } : record);
+        return; // The persisted fence still precedes every future send.
+      }
     }
   }
   refresh(includePayload = false): Promise<void> {

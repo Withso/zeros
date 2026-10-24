@@ -112,7 +112,8 @@ function harness(cloud = true, status = "stopped", resident = true) {
     hasPromptAttachmentReferences: () => false, refreshPromptAttachments: vi.fn(), toast: toasts, drainOrDropQueue: vi.fn(), persistAuthPrompt: vi.fn(),
     HYDRATE_WINDOW: 100, hydrateInFlightRef: { current: new Map() }, pendingHydratesRef: { current: new Set() },
     takeFreshLocalChat: () => false, consumeFreshCloudChat: () => false, localTranscriptCache: { peek: () => null, read: async () => null },
-    presentCachedLocalTranscript: vi.fn(), presentKnownEmptyLocalTranscript: () => false, retainMessageReferences: (_current: unknown[], next: unknown[]) => next,
+    presentCachedTranscript: vi.fn(), transcriptCacheFor: () => null, canReplaceCloudTranscript: () => true,
+    presentKnownEmptyLocalTranscript: () => false, retainMessageReferences: (_current: unknown[], next: unknown[]) => next,
     persistMessageWindow: vi.fn(async () => ({ source: "control-plane", messages: [{ id: "past", kind: "text", role: "user", text: "History" }] })),
     reconcileHistoryMessages: (messages: unknown[]) => messages, messageSnapshotsEqual: (a: unknown[], b: unknown[]) => JSON.stringify(a) === JSON.stringify(b),
     reconcileChatMessages: vi.fn(),
@@ -128,7 +129,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
   const dispatch = vi.fn(), localSend = vi.fn(async () => {}), cloudError = vi.fn();
   const composer: any = { ...lifecycle, getFollowUpBehavior, hasDesignFrameAttachmentSelection, chatId: "chat", readOnly: false, cloudComputerV2: cloud, chatThread: workspace.chats[0], workspaceProvisioning: false,
     session: { transcriptState: resident ? "resident" : "loading", status: "reconnecting", agentId: "codex", startSession: vi.fn(async () => {}),
-      sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6], args[7], args[8]) : localSend },
+      sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6], args[7], args[8], args[9]) : localSend },
     agentSessions: { getSendGeneration: () => cancellation }, cloudWorkspaceDocument: () => doc, parseCloudWorkspaceKey, isCloudWorkspace,
     cloudQueuedPrompt, redactLogSecrets: (s: string) => s, setCloudSendError: cloudError,
     notifyAgentSendFailure: failureNotice, crypto: provider.crypto,
@@ -167,7 +168,43 @@ describe("cloud composer readiness queue", () => {
     const h = harness(true, "ready"); h.provider.cloudPrompts.available = () => true;
     h.provider.cloudPrompts.send.mockRejectedValue(new Error("Private message storage is unavailable"));
     await h.send(); expect(h.clear).not.toHaveBeenCalled(); expect(h.queue.size).toBe(0);
+    expect(h.dispatch).not.toHaveBeenCalledWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
+    expect(h.composer.serializeComposerState()).toBe(h.draft);
     expect(h.failureNotice).toHaveBeenCalledOnce(); expect(h.prepare).not.toHaveBeenCalled();
+  });
+  it.each([false, true])("releases only the committed cloud draft while HTTPS is held (edited during commit=%s)", async edited => {
+    const h = harness(true, "ready"), commit = deferred(), https = deferred();
+    h.provider.cloudPrompts.available = () => true;
+    h.provider.cloudPrompts.send.mockImplementation(async (_chat: string, _input: unknown, options: { committed?(): void; accepted?(): void }) => {
+      await commit.promise;
+      const row = { id: "saved", kind: "text", role: "user", text: h.draft.displayText };
+      h.store.patchSession("chat", { cloudOutbox: { rows: [row], states: {} } });
+      options.committed?.();
+      await https.promise;
+      options.accepted?.();
+    });
+    let finished = false;
+    const sending = h.send().then(() => { finished = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.clear).not.toHaveBeenCalled();
+    if (edited) h.type("New text while saving");
+    commit.resolve(); await vi.advanceTimersByTimeAsync(0);
+    try {
+      expect(h.store.sessions.chat.cloudOutbox).toMatchObject({ rows: [{ id: "saved" }], states: {} });
+      expect(finished).toBe(false);
+      if (edited) {
+        expect(h.clear).not.toHaveBeenCalled();
+        expect(h.dispatch).not.toHaveBeenCalledWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
+        expect(h.composer.serializeComposerState().displayText).toBe("New text while saving");
+      } else {
+        expect(h.clear).toHaveBeenCalledOnce();
+        expect(h.composer.serializeComposerState().displayText).toBe("");
+        expect(h.dispatch).toHaveBeenCalledExactlyOnceWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
+        h.type("Next prompt while HTTPS is pending");
+      }
+    } finally { https.resolve(); await sending; }
+    expect(h.clear).toHaveBeenCalledTimes(edited ? 0 : 1);
+    expect(h.composer.serializeComposerState().displayText).toBe(edited ? "New text while saving" : "Next prompt while HTTPS is pending");
   });
   it("keeps a send queued through a 25-second drop, re-adopts its session and delivers once on reconnect", async () => {
     const h = harness(true, "ready");

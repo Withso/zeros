@@ -14,14 +14,14 @@ describe("prior chat summaries placement", () => {
     await expect(listChatSummariesForFolder({ folder: "/Users/me/project" })).resolves.toHaveLength(1);
     expect(bridge.summaries).toHaveBeenCalledOnce();
   });
-  it("reads a running cloud workspace's prior chats from its worker", async () => {
+  it("reads a cloud workspace's prior chats through the shared history route", async () => {
     const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     await expect(listChatSummariesForFolder({ folder })).resolves.toHaveLength(1);
     expect(bridge.summaries).toHaveBeenCalledWith(expect.anything(), folder, undefined);
   });
-  it("offers none, without an error, while a cloud workspace is stopped", async () => {
+  it("keeps a stopped cloud read distinct from a confirmed empty list", async () => {
     bridge.summaries.mockRejectedValueOnce(new Error("The cloud workspace is stopped"));
-    await expect(listChatSummariesForFolder({ folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222" })).resolves.toEqual([]);
+    await expect(listChatSummariesForFolder({ folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222" })).rejects.toThrow("The cloud workspace is stopped");
   });
   it("keeps Local summary failures visible", async () => {
     bridge.summaries.mockRejectedValueOnce(new Error("Local engine unavailable"));

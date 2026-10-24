@@ -44,7 +44,7 @@ import {
   loadLegacyActiveChatId,
 } from "./chat-boot-cache";
 import { cloudFolderForChatId, resolveBootActiveChatId } from "./boot-active-chat";
-import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "../platform/bridge/cloud-workspace-key";
 import { setSetting } from "../platform/settings";
 import { ACTIVE_CHAT_KEY } from "./chats-local-cache";
 import {
@@ -76,8 +76,10 @@ import { onNativeBeforeQuit } from "../platform/runtime";
 import { startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
 import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
-import { localTranscriptCache } from "./local-transcript-cache";
+import { localTranscriptCache, cloudTranscriptCache } from "./local-transcript-cache";
+import { retainCloudTranscriptSummaries } from "../features/agent/chat-transcript-summaries-cache";
 import { loadProjects } from "./projects-store";
+import { pruneOrganizationDestinations } from "./organization-destination-cache";
 import {
   findProjectForFolder,
   folderIsOwnedByProject,
@@ -1103,6 +1105,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           projects,
           removedFolders,
         );
+      pruneOrganizationDestinations(destination => folderWasRemoved(destination.folder));
       const removedActiveRepo = state.activeRepoId === action.projectId;
       const removedWorkspaceFilter =
         workspaceListFilterProjectId(state.workspaceListFilter) ===
@@ -1181,6 +1184,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           folderIsOwnedByProject(folder, project.id, projects, [
             action.folder,
           ]));
+      pruneOrganizationDestinations(destination => folderWasRemoved(destination.folder));
       const activeChatRemoved = state.activeChatId
         ? state.chats.some(
             (chat) =>
@@ -1324,8 +1328,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pendingChatHydrationFolder: next.pendingChatHydrationFolder && removed(next.pendingChatHydrationFolder) ? null : next.pendingChatHydrationFolder,
         lastWorkspaceByRepoRoot: removeRecordKeysMatching(next.lastWorkspaceByRepoRoot, removed),
         ...(activeRemoved ? {
-          activePage: "dashboard",
-          lastHomePage: "dashboard",
+          activePage: state.activePage === "workspace" ? "dashboard" : state.activePage,
+          lastHomePage: state.activePage === "workspace" ? "dashboard" : state.lastHomePage,
           activeChatId: null,
           newAgentFolder: null,
           lastWorkspaceFolder: null,
@@ -2307,6 +2311,17 @@ function noteChatTranscriptLifecycle(state: WorkspaceState, action: Action): voi
     forgetFreshLocalChat(action.id);
     forgetFreshCloudChat(action.id);
     localTranscriptCache.forget(action.id);
+    cloudTranscriptCache.forget(action.id);
+    const cloud = parseCloudScopedId(action.id);
+    if (cloud) retainCloudTranscriptSummaries(chatId => chatId !== action.id, folder => folder === cloudWorkspaceKey(cloud));
+  } else if (action.type === "HYDRATE_CHATS" && action.confirmedCloudWorkspaces?.length) {
+    const confirmed = new Set(action.confirmedCloudWorkspaces);
+    const known = new Set(action.chats.map(chat => chat.id));
+    cloudTranscriptCache.retain((chatId, folder) => !confirmed.has(folder) || known.has(chatId));
+    retainCloudTranscriptSummaries(chatId => known.has(chatId), folder => confirmed.has(folder));
+  } else if (action.type === "PRUNE_CLOUD_WORKSPACES") {
+    cloudTranscriptCache.retain((_chatId, folder) => !action.folders.includes(folder));
+    retainCloudTranscriptSummaries(() => false, folder => action.folders.includes(folder), true);
   }
 }
 

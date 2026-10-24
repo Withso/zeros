@@ -8,9 +8,9 @@
 // browser persistence fallback.
 //
 // Lifecycle notes:
-//   • getSession() on mount restores instantly from main's cache — no network
-//     call unless the cached access token is near expiry, in which case main
-//     refreshes transparently before answering.
+//   • resync() releases main's stored identity before waiting for token refresh.
+//     That identity permits cached presentation; only a live session supplies
+//     authenticated status and the synchronous access-token mirror.
 //   • onAuthStateChange keeps React state in sync with auth-store's notify().
 //   • Offline tolerance: a transient refresh network failure returns the STALE
 //     access token from main's cache attempt only if still valid; a genuinely
@@ -26,12 +26,14 @@ import React, {
   useState,
 } from "react";
 import {
-  getSession,
+  getStoredAuthUser,
+  onStoredIdentityChange,
   onAuthStateChange,
   resync,
   markSignedIn,
   signOut as storeSignOut,
   type AuthSessionInfo,
+  type AuthUser,
 } from "./auth-store";
 import { setAuthAccessToken } from "./auth-token";
 import {
@@ -65,9 +67,11 @@ export interface AuthResult {
 }
 
 export interface AuthContextValue {
-  /** "loading" until the first getSession() resolves. */
+  /** "loading" until the first session check or explicit session change. */
   status: AuthStatus;
   session: AuthSessionInfo | null;
+  /** Main-owned presentation identity; it never authorizes account requests. */
+  storedUser?: AuthUser | null;
   userId: string | null;
   email: string | null;
   /** Open the system browser. WorkOS PKCE/callback state lives entirely in
@@ -94,7 +98,10 @@ export interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-export function AuthProvider({ children }: { children: React.ReactNode }) {
+export function AuthProvider({ children, onStoredIdentity }: {
+  children: React.ReactNode;
+  onStoredIdentity?: (user: AuthUser | null) => void;
+}) {
   if (!isElectron()) return <AuthConfigErrorScreen />;
   if (isLocalDevelopment()) {
     return (
@@ -103,7 +110,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       </AuthContext.Provider>
     );
   }
-  return <AuthProviderInner>{children}</AuthProviderInner>;
+  return <AuthProviderInner onStoredIdentity={onStoredIdentity}>{children}</AuthProviderInner>;
 }
 
 // No account, token, auth subscriptions or browser ceremony in Local. Retain
@@ -111,6 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 const localDevelopmentAuth: AuthContextValue = {
   status: "unauthenticated",
   session: null,
+  storedUser: null,
   userId: null,
   email: null,
   startBrowserSignIn: async () => ({
@@ -126,9 +134,13 @@ const localDevelopmentAuth: AuthContextValue = {
 
 /** Reconcile main-owned session updates and expose sign-in state, including
  * actionable Dev setup errors, without moving credential storage into React. */
-function AuthProviderInner({ children }: { children: React.ReactNode }) {
+function AuthProviderInner({ children, onStoredIdentity }: {
+  children: React.ReactNode;
+  onStoredIdentity?: (user: AuthUser | null) => void;
+}) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [session, setSession] = useState<AuthSessionInfo | null>(null);
+  const [storedUser, setStoredUser] = useState<AuthUser | null>(null);
   // A LATER, asynchronous failure of the browser→desktop handoff: the browser
   // round-trip finished but the returning deep-link ticket couldn't be redeemed
   // (our nonce expired, or the redeem call failed). Surfaced to the LoginScreen so
@@ -160,14 +172,20 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       setAuthAccessToken(next?.access_token ?? null);
     };
 
-    getSession()
-      .then(apply)
+    const applyIdentity = (user: AuthUser | null) => {
+      if (!active) return;
+      // Bind/restore caches before releasing the shell for this identity.
+      onStoredIdentity?.(user);
+      setStoredUser(user);
+    };
+    const offIdentity = onStoredIdentityChange(applyIdentity);
+    const known = getStoredAuthUser();
+    if (known !== undefined) applyIdentity(known);
+    const offStateChange = onAuthStateChange(apply);
+    void resync()
       .catch((err) => {
-        console.warn("[auth] getSession failed:", (err as Error)?.message);
-        if (active) setStatus("unauthenticated");
+        console.warn("[auth] session restore failed:", (err as Error)?.message);
       });
-
-    const offStateChange = onAuthStateChange((next) => apply(next));
 
     // Desktop OAuth handoff: main forwards the result of the browser sign-in
     // from the zeros://auth/callback deep link → redeem the ticket for our own
@@ -359,12 +377,14 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
 
     const onOnline = () => {
       void nativeInvoke("auth_security_revalidate").catch(() => undefined);
+      void resync().catch(() => undefined);
     };
     window.addEventListener("online", onOnline);
 
     return () => {
       active = false;
       offStateChange();
+      offIdentity();
       offHandoff?.();
       offStoreChanged?.();
       offWorkOSComplete?.();
@@ -372,7 +392,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       offSecurityRevoked?.();
       window.removeEventListener("online", onOnline);
     };
-  }, []);
+  }, [onStoredIdentity]);
 
   const startBrowserSignIn = useCallback(async (): Promise<AuthResult> => {
     // Clear any stale handoff error from a prior attempt before starting fresh.
@@ -478,6 +498,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       /* bridge already gone — nothing bound to clear */
     }
     setSession(null);
+    setStoredUser(null);
     setStatus("unauthenticated");
     setAuthAccessToken(null);
     setOAuthError(null);
@@ -513,8 +534,9 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
   const value: AuthContextValue = {
     status,
     session,
-    userId: session?.user.accountId ?? session?.user.sub ?? null,
-    email: session?.user.email ?? null,
+    storedUser,
+    userId: storedUser?.accountId ?? storedUser?.sub ?? null,
+    email: storedUser?.email ?? null,
     startBrowserSignIn,
     oauthError,
     clearOAuthError: () => setOAuthError(null),
