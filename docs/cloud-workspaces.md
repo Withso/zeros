@@ -291,8 +291,10 @@ no longer has the repository, the restore clones it. The worker then runs the
 setup once more, because the replacement VM comes from a newer Cloud Computer.
 A stop or deletion during a restore still finds the replacement. A replacement
 that has not received the checkpoint is never checkpointed itself, so it cannot
-replace the real one. Without a checkpoint, a lost VM remains
-`failed/sandbox_missing`. Delete removes every checkpoint object of the
+replace the real one. A restore that still fails after its retries leaves the
+workspace `failed` with a `checkpoint_*` code. The checkpoint stays, and Start
+tries the restore again; a damaged checkpoint (`checkpoint_corrupt`) cannot be
+restored. Without a checkpoint, a lost VM remains `failed/sandbox_missing`. Delete removes every checkpoint object of the
 workspace before workspace, account or organization erasure can finish.
 
 Create and wake emit value-free `[cloud-v2] timing` records for allocation or

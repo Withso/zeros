@@ -45,7 +45,14 @@ const ERRORS: Record<string, string> = {
   cloud_computer_changed: "The Cloud Computer was just rebuilt. Create the workspace again.",
   worker_boot_timeout: "The workspace computer did not start in time. Delete it and create a new one.",
   sandbox_missing: "This workspace's computer no longer exists. Delete it and create a new one.",
+  checkpoint_restore_failed: "This workspace could not be restored from its last checkpoint. Start it to try again.",
+  checkpoint_download_failed: "This workspace's last checkpoint could not be downloaded. Start it to try again.",
+  checkpoint_prerequisites_missing: "This workspace's last checkpoint needs commits that GitHub could not provide. Start it to try again.",
+  checkpoint_repository_missing: "This workspace's repository could not be cloned for its restore. Start it to try again.",
+  checkpoint_corrupt: "This workspace's last checkpoint is damaged and cannot be restored.",
 };
+/** A failed restore keeps its checkpoint; Start tries it again. */
+const RETRYABLE = new Set(["checkpoint_restore_failed", "checkpoint_download_failed", "checkpoint_prerequisites_missing", "checkpoint_repository_missing"]);
 
 export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocument {
   const [owner, name] = workspace.repository.split("/") as [string, string];
@@ -64,8 +71,8 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     capabilities: {
       ...(workspace.capabilities.promptOutbox === 1 ? { promptOutbox: 1 as const } : {}),
       canWrite: true, canEdit: true, canManage: true,
-      canStart: workspace.state === "stopped",
-      startUnavailableReason: workspace.state === "failed" ? "This workspace failed. Create a new one." : null,
+      canStart: workspace.state === "stopped" || (workspace.state === "failed" && RETRYABLE.has(workspace.errorCode ?? "")),
+      startUnavailableReason: workspace.state === "failed" && !RETRYABLE.has(workspace.errorCode ?? "") ? "This workspace failed. Create a new one." : null,
     },
     repository: { forge: "github.com", owner, name, revision: workspace.baseBranch },
     generation: {
