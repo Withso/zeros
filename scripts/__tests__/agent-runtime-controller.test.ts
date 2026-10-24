@@ -6,6 +6,7 @@ import {
   preparedEnvelope,
   reconcileProposals,
   recoverBaseline,
+  refreshPrReports,
   validatePrepared,
   workflowContext,
 } from "../agent-runtime/controller.mjs";
@@ -43,14 +44,22 @@ const manifest = (codex: string) =>
       "@cursor/sdk": "1.0.0",
     },
   });
+// The shape GitHub returned for the App's first hosted commit (#714): GitHub
+// signs API commits as web-flow, and the App is the author.
 const commit = (sha = bot, verified = true) => ({
   sha,
   parents: [{ sha: main }],
-  committer: { type: "Bot", login: "runtime-updater[bot]" },
+  author: { type: "Bot", login: "runtime-updater[bot]" },
+  committer: { type: "User", login: "web-flow" },
   commit: {
     message: `Zeros-Runtime-Task: ${"d".repeat(64)}\nZeros-Runtime-Provider: codex`,
-    verification: { verified },
-    committer: { date: now },
+    verification: { verified, reason: verified ? "valid" : "unsigned" },
+    author: {
+      name: "runtime-updater[bot]",
+      email: "1+runtime-updater[bot]@users.noreply.github.com",
+      date: now,
+    },
+    committer: { name: "GitHub", email: "noreply@github.com", date: now },
   },
 });
 function fixture() {
@@ -69,6 +78,7 @@ function fixture() {
     {
       sha: human,
       commit: { message: "maintainer implementation" },
+      author: { type: "User", login: "maintainer" },
       committer: { type: "User", login: "maintainer" },
     },
   ];
@@ -413,7 +423,10 @@ describe("same-PR orchestration", () => {
     acknowledgment.parents = [{ sha: task.head }];
     acknowledgment.commit.message = `Zeros-Runtime-Task: ${task.id}\nZeros-Runtime-Provider: codex`;
     for (const untrusted of [
+      // Pushed with a copied App author identity.
       { ...acknowledgment, committer: { type: "User", login: "maintainer" } },
+      // Edited in GitHub's web UI: signed by web-flow, authored by a human.
+      { ...acknowledgment, author: { type: "User", login: "maintainer" } },
       {
         ...acknowledgment,
         commit: { ...acknowledgment.commit, verification: { verified: false } },
@@ -497,5 +510,96 @@ describe("same-PR orchestration", () => {
       { GITHUB_REPOSITORY: "fork/zeros" },
     ])
       expect(() => workflowContext({ ...env, ...patch })).toThrow();
+  });
+});
+
+describe("GitHub-signed App commit identity", () => {
+  it("confirms the write, recovers the baseline and keeps the review clock at creation", async () => {
+    const f = fixture();
+    delete f.input.proposals.codex.lastBotCommit;
+    // The unsaved baseline must be recovered from the hosted App commit.
+    const planned = await f.run();
+    expect(planned.state.proposals.codex.status).not.toBe(
+      "baseline-unavailable",
+    );
+    expect(planned.tasks).toHaveLength(1);
+    const task = planned.tasks[0];
+    const hosted = commit("e".repeat(40));
+    hosted.parents = [{ sha: task.head }];
+    hosted.commit.message = `Update Codex runtime to ${task.version}\n\nZeros-Runtime-Task: ${task.id}\nZeros-Runtime-Provider: codex`;
+    f.setCommits([hosted]);
+    f.setVersion(task.version);
+    f.pr.head.sha = hosted.sha;
+    const [confirmed] = await confirmWrittenResults(
+      f.github,
+      [task],
+      [],
+      "runtime-updater",
+    );
+    expect(confirmed).toMatchObject({
+      status: "written",
+      pr: 42,
+      head: hosted.sha,
+    });
+    expect(
+      recoverBaseline([hosted], "codex", "runtime-updater", {}).lastBotCommit,
+    ).toBe(hosted.sha);
+    const reconciled = await f.run({ createTasks: false });
+    expect(reconciled.state.proposals.codex.reviewProgress).toBe("42:creation");
+  });
+  it("never treats another author or GitHub App as the runtime updater", () => {
+    for (const author of [
+      { type: "User", login: "maintainer" },
+      { type: "Bot", login: "other-app[bot]" },
+      undefined,
+    ])
+      expect(
+        recoverBaseline(
+          [{ ...commit(), author }],
+          "codex",
+          "runtime-updater",
+          {},
+        ).lastBotCommit,
+      ).toBeNull();
+  });
+});
+
+describe("PR report refresh diagnostics", () => {
+  it("keeps GitHub's numeric status when a report comment is refused", async () => {
+    const pr = {
+      number: 42,
+      state: "open",
+      head: { sha: human, repo: { full_name: "Withso/zeros" } },
+    };
+    const github = {
+      async get() {
+        return pr;
+      },
+      async pages() {
+        return [];
+      },
+      async post() {
+        const error: any = new Error("GitHub POST failed (HTTP 403).");
+        error.status = 403;
+        throw error;
+      },
+    };
+    const state = {
+      ...initialState(now),
+      proposals: {
+        codex: {
+          pr: 42,
+          head: human,
+          version: "1.1.0",
+          status: "awaiting-integration",
+        },
+      },
+    };
+    await expect(
+      refreshPrReports(github, state, { trackingIssue: 7 }),
+    ).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringContaining("could not be refreshed"),
+    });
   });
 });

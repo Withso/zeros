@@ -122,9 +122,9 @@ including fields named `description`, `title`, or `examples`.
 
 | Job             | Authority                                                                                                                                                                                                                 |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Scan/controller | Trusted immutable main, public reads, repository/Actions reads, issue state/report writes. No provider or App secrets.                                                                                                    |
+| Scan/controller | Trusted immutable main, public reads, repository/Actions reads, issue state writes and PR report comments (`pull-requests: write`). No provider or App secrets.                                                           |
 | Preparation     | Isolated candidate checkout and native generators; read-only repository token, no branch/issue writer or provider secrets. Lifecycle scripts are disabled for package installation. No cache is shared with trusted jobs. |
-| Branch writer   | Verified bundle built from trusted main before preparation; no dependency installation or candidate execution. A short-lived, repository-restricted App token grants contents/PR writes.                                  |
+| Branch writer   | Verified bundle built from trusted main before preparation; no dependency installation or candidate execution. A short-lived, repository-restricted App token grants contents/PR writes. Writers run one at a time.       |
 | PR publisher    | Default-branch `workflow_run` code, bounded JSON artifact reads and issue/PR comments; no candidate checkout, package installation or content writes.                                                                     |
 | Model discovery | Default-branch listing code, dedicated test credentials only for the listing step. A separate job publishes sanitized observations.                                                                                       |
 | Watchdog        | Independent hourly state/heartbeat reads and health transition comments. No dependency install, App credentials or branch writes.                                                                                         |
@@ -143,8 +143,12 @@ Qualification verifies repository, workflow, run attempt, PR association and
 merge parents against GitHub. Stale/fork results cannot update another head's
 report. Scanner runs recover missed `workflow_run` deliveries. A writer receipt
 alone cannot establish a successful update: finalization verifies the signed
-App-authored task commit and the owned PR independently. Interrupted initial PR
-creation can recover only that exact signed App commit, never an arbitrary branch.
+App-authored task commit and the owned PR independently. GitHub signs commits an
+App creates through the API with the App as author and `web-flow` as committer;
+a push keeps its own committer and a web-UI edit its human author, so neither
+counts as an App commit. Interrupted initial PR creation can recover only that
+exact signed App commit, never an arbitrary branch. Failures print GitHub's
+numeric HTTP status, never a response body.
 
 One bot-owned issue comment contains versioned state. Bot-owned markers delimit
 the dashboard while preserving human notes. Stable event IDs, posted digest
