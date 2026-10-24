@@ -415,6 +415,21 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview).toMatchObject({ activeBuildId: third.id, snapshotName: cloudV2SnapshotName("alpha", org, 3) });
   });
 
+  it("keeps a replaced snapshot while a workspace pinned to it is still creating its VM", async () => {
+    const boat = compute(), store = new CloudV2Store(pool);
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
+    const first = await computers.enqueue(org, admin, recipe); await builder.tick();
+    const workspace = await store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: admin, name: "w",
+      repository: "withso/zeros", branch: "zeros/w", baseBranch: "master", computerBuildId: first.id });
+    vi.mocked(boat.create).mockResolvedValueOnce({ sandboxId: "bx_build2" });
+    await computers.enqueue(org, admin, recipe); await builder.tick();
+    expect((await computers.overview(org)).snapshotName).toBe(cloudV2SnapshotName("alpha", org, 2));
+    expect(boat.deleteSnapshot).not.toHaveBeenCalled();
+    await store.defer(workspace.id, "creating", 0, { boatSandboxId: "bx_ws1" });
+    await builder.cleanup();
+    expect(boat.deleteSnapshot).toHaveBeenCalledExactlyOnceWith(cloudV2SnapshotName("alpha", org, 1));
+  });
+
   it("refuses repository names that would leave the home directory", async () => {
     await expect(computers.saveRecipe(org, admin, [{ repository: "../.." }], 0)).rejects.toThrow();
     await expect(computers.enqueue(org, admin, { repositories: [{ repository: "withso/.." }] })).rejects.toThrow();
