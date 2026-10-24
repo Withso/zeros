@@ -28,6 +28,7 @@ const agentId = params.get("agent") ?? "claude";
 const count = Number(params.get("count") ?? 20);
 const target = parseCloudWorkspaceKey(root);
 const chatId = target ? cloudScopedId(target, "chat") : "chat";
+const timeline = params.has("timeline");
 const names = ["tokyo.md", "paris.md", "cairo.md", "rio-de-janeiro.md", "mumbai.md", "nairobi.md", "sydney.md", "mexico-city.md", "istanbul.md", "kyoto.md", "cape-town.md", "buenos-aires.md", "seoul.md", "marrakech.md", "lisbon.md", "vancouver.md", "singapore.md", "reykjavik.md", "new-orleans.md", "prague-with-a-very-long-filename-that-still-leaves-the-counts-readable.md"];
 const turn: TurnInfo = { chatId, turnId: "opening", folder: root, workspaceId: root, agentId,
   ord: 1, summary: "Write the city notes", startedAt: 1_000, endedAt: 1_850_000, status: "completed", stopReason: "end_turn",
@@ -80,7 +81,32 @@ Object.assign(window, { __turnChanges: {
 
 function Fixture() {
   const [switched, setSwitched] = useState(false);
+  const [thread, setThread] = useState<TurnInfo[]>([turn]);
+  const [live, setLive] = useState<string | null>(null);
+  const [foreign, setForeign] = useState(false);
   const record = switched ? nextTurn : turn;
+  const otherRoot = target ? "/organization/other-project" : "cloud://33333333-3333-4333-8333-333333333333/44444444-4444-4444-8444-444444444444";
+  const displayedRoot = foreign ? otherRoot : root;
+  const displayedTarget = parseCloudWorkspaceKey(displayedRoot);
+  const displayedChat = displayedTarget ? cloudScopedId(displayedTarget, "chat") : "chat";
+  const records = timeline ? thread : [record];
+  const appendTurn = (edits: boolean) => {
+    const next = { ...turn, turnId: `opening-${thread.length + 1}`, ord: thread.length + 1,
+      startedAt: turn.endedAt! + thread.length, files: edits ? turn.files : [] };
+    turnRowCache.setData(turnRowKey(chatId, next.turnId), next);
+    setThread(current => [...current, next]);
+    setLive(next.turnId);
+  };
+  const switchWorkspace = () => {
+    const nextRoot = foreign ? root : otherRoot;
+    const nextTarget = parseCloudWorkspaceKey(nextRoot);
+    const nextChat = nextTarget ? cloudScopedId(nextTarget, "chat") : "chat";
+    for (const item of records) turnRowCache.setData(turnRowKey(nextChat, item.turnId), { ...item,
+      chatId: nextChat, folder: nextRoot, workspaceId: nextRoot,
+      files: foreign ? item.files : [{ path: "other.txt", status: "modified", additions: 3, deletions: 1 }],
+    });
+    setForeign(value => !value);
+  };
   const state = useWorkspaceStore(value => value.workbenchByScope[root]);
   const changes = state.tabs.find(tab => tab.type === "changes")!;
   const reviewing = state.activeId === changes.id;
@@ -88,14 +114,24 @@ function Fixture() {
     <div data-zeros-root className="bg-bg1 text-fg1 flex h-screen min-w-0 flex-col">
       <div className="border-border1 flex gap-2 border-b p-2">
         <Button variant="ghost" onClick={() => setSwitched(value => !value)}>Switch turn</Button>
+        {timeline && <>
+          <Button variant="ghost" onClick={() => appendTurn(false)}>Next turn without edits</Button>
+          <Button variant="ghost" onClick={() => appendTurn(true)}>Next turn with edits</Button>
+          <Button variant="ghost" onClick={() => setLive(null)}>Finish turn</Button>
+          <Button variant="ghost" onClick={switchWorkspace}>Switch workspace</Button>
+        </>}
         <span className="text-fg3 self-center text-xs">{owner} · {agentId}</span>
       </div>
       <div className="flex min-h-0 min-w-0 flex-1">
         <div data-footer-fixture className="w-full max-w-[720px] min-w-0 shrink-0 self-start p-6">
-          <p className="mb-4 text-sm">The city notes are ready to review.</p>
-          <TurnFooter chatId={chatId} turnId={record.turnId} folder={root} recordedSummary={target ? record : undefined}
-            events={[{ id: "answer", kind: "text", role: "agent", text: "The city notes are ready to review.", createdAt: record.endedAt! }]}
-            startedAt={record.startedAt} live={false} onFork={noop} />
+          {records.map((item, index) => <div key={item.turnId} data-fixture-turn={item.turnId} className="mb-5">
+            <p className="mb-4 text-sm">{item.files.length ? "The city notes are ready to review." : "No files changed in this turn."}</p>
+            <TurnFooter chatId={displayedChat} turnId={item.turnId} folder={displayedRoot}
+              recordedSummary={displayedTarget ? { ...item, files: foreign ? [{ path: "other.txt", status: "modified", additions: 3, deletions: 1 }] : item.files } : undefined}
+              threadTailKey={records.at(-1)!.turnId} isLastTurn={index === records.length - 1}
+              events={[{ id: "answer", kind: "text", role: "agent", text: "The city notes are ready to review.", createdAt: item.endedAt! }]}
+              startedAt={item.startedAt} live={live === item.turnId} onFork={noop} />
+          </div>)}
         </div>
         {reviewing && <div data-review-fixture className="border-border1 min-w-0 flex-1 border-l">
           <ChangesSurface tab={changes} active scope={root} cwd={root} workspaceId={root} folder={root} baseBranch="main" refreshKey={0} onChanged={noop} retryReview={async () => {}} />

@@ -1,6 +1,9 @@
 // Run the production callbacks against the real stores. Every network and
 // disk boundary is controlled independently; no timer can make a read pass.
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +16,10 @@ import type { AgentMessage, AgentTextMessage } from "../use-agent-session";
 import * as caches from "../../../state/local-transcript-cache";
 import * as presentation from "../local-transcript-presentation";
 import { consumeFreshCloudChat } from "../fresh-cloud-chats";
+import { SessionStore } from "../../../../../../cloud-worker/src/sessions/session-store";
+import type { TurnInfo } from "@zeros/protocol/turns";
+import { groupMessagesIntoTurns } from "../turn-grouping";
+import { presentLeadingPrompt } from "../transcript-leading-prompt";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const folder = cloudWorkspaceKey(target), id = cloudScopedId(target, "chat");
@@ -63,6 +70,48 @@ beforeEach(() => {
 afterEach(() => { caches.cloudTranscriptCache.resetForTesting(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("cloud cached transcript hydration", () => {
+  it.each([
+    { leading: false, runningSummary: false }, { leading: true, runningSummary: false },
+    { leading: false, runningSummary: true }, { leading: true, runningSummary: true },
+  ])("accepts the worker's final diff through the mirror after its live update was lost (leading: $leading, running summary: $runningSummary)", async ({ leading, runningSummary }) => {
+    const directory = await mkdtemp(join(tmpdir(), "turn-summary-mirror-"));
+    const worker = await SessionStore.open(directory, folder);
+    try {
+      await worker.upsert({ id: "chat", folder: "/workspace", agentId: "claude", createdAt: 1 });
+      await worker.enqueue("chat", { requestId: "send", userMessageId: "opening", prompt: [{ type: "text", text: "Edit file" }], startedAt: 1 });
+      await worker.claim("chat");
+      const initialOpening = worker.snapshot("chat")!.messages[0];
+      const turn: TurnInfo = { chatId: "chat", turnId: "opening", folder: "/workspace", workspaceId: target.workspaceId,
+        agentId: "claude", ord: 1, summary: "Edit file", startedAt: 1, endedAt: null, status: "running",
+        stopReason: null, preSnapshot: "before", postSnapshot: null, files: [] };
+      await worker.saveTurn(turn);
+      await worker.fold("chat", { sessionId: "native", update: { sessionUpdate: "agent_message_chunk",
+        messageId: "answer", content: { type: "text", text: "File changed" } } });
+      const before = worker.snapshot("chat")!.messages;
+      // The live prompt is published before Git capture saves its running summary.
+      if (!runningSummary) before[0] = initialOpening;
+      storeSlot(before);
+      function storeSlot(messages: AgentMessage[]) {
+        useSessionsStore.getState().setSession(id, { ...BLANK, cwd: folder, status: "ready", transcriptState: "resident",
+          transcriptSource: "worker", messages: leading ? messages.slice(1) : messages,
+          leadingPrompt: leading ? messages[0] as AgentTextMessage : null });
+      }
+      await worker.finish("chat", "send", { stopReason: "end_turn" });
+      const finalized = await worker.saveTurn({ ...turn, endedAt: 2, status: "completed", stopReason: "end_turn", postSnapshot: "after",
+        files: [{ path: "file.ts", status: "modified", additions: 3, deletions: 1 }] });
+      // Use the producer's serialized snapshots. A hand-built timestamp would
+      // conceal the missing freshness stamp on mutable opening summaries.
+      const next = worker.snapshot("chat")!.messages;
+      const h = harness(), pending = h.reconcile(id);
+      h.resolve({ source: "control-plane", complete: !leading, messages: leading ? next.slice(1) : next,
+        ...(leading ? { leadingPrompt: finalized } : {}) });
+      await pending;
+      const turns = groupMessagesIntoTurns(presentLeadingPrompt(slot().messages, slot().leadingPrompt));
+      expect(turns).toHaveLength(1);
+      expect(turns[0].recordedSummary?.files).toEqual([{ path: "file.ts", status: "modified", additions: 3, deletions: 1 }]);
+    } finally { await worker.flush(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("captures once after settlement, never per stream chunk, and preserves a confirmed cache through cold/loading slots", () => {
     vi.useFakeTimers();
     const remember = vi.spyOn(caches.cloudTranscriptCache, "remember");
@@ -180,6 +229,15 @@ describe("cloud cached transcript hydration", () => {
     expect(slot()?.messages).toBe(messages);
     expect(slot()).toMatchObject({ transcriptState: "loading", transcriptPresentation: { source: "cache" } });
     expect(hasTranscriptPresentation(slot())).toBe(true);
+  });
+
+  it.each([undefined, 0, 1])("refuses a changed mirror row without a stamp newer than the live opening's creation (%s)", async updatedAt => {
+    const messages = [user("prompt"), agent("answer")];
+    useSessionsStore.getState().setSession(id, { ...BLANK, cwd: folder, messages, transcriptState: "resident", transcriptSource: "worker" });
+    const h = harness(), pending = h.reconcile(id);
+    h.resolve({ source: "control-plane", complete: true, messages: [{ ...user("prompt"), text: "Different content", updatedAt }, messages[1]] });
+    await pending;
+    expect(slot().messages).toBe(messages);
   });
 
   it("confirms a worker cache when the mirror catches up without replacing unchanged rows", async () => {

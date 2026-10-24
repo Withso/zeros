@@ -5020,6 +5020,7 @@ function AgentChatBody({
                 <TranscriptTurn
                   key={turnKey(turn)}
                   turn={turn}
+                  threadTailKey={turns.length ? turnKey(turns[turns.length - 1]) : null}
                   isVisualTail={isVisualTail}
                   isActiveProviderSegment={receipt.active}
                   isActivityTail={receipt.activityTail}
