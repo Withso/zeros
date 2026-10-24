@@ -19,7 +19,7 @@ import {
   activateCloudV2Build, buildCloudV2Computer, buildConfiguredCloudV2Computer, discardCloudV2ComputerRecipe,
   getCloudV2Computer, saveCloudV2ComputerRecipe, type CloudV2Build, type CloudV2Computer, type CloudV2RepositoryDraft,
 } from "../../platform/cloud-v2";
-import { computerChanges, computerStatus, editableRepositories, historyNote, RecipeSaveQueue, relativeAge, type ComputerStatus } from "./cloud-computer-model";
+import { computerChanges, computerStatus, editableRepositories, historyNote, newerRecipe, RecipeSaveQueue, relativeAge, type ComputerStatus } from "./cloud-computer-model";
 
 const computers = new KeyedAsyncCache<CloudV2Computer>({ maxEntries: 16 });
 const MAX_REPOSITORIES = 10;
@@ -48,6 +48,16 @@ export function CloudComputerPanel({ surfaceActive = true }: { surfaceActive?: b
     organizationId={organization.id} canManage={canManage} active={surfaceActive} />;
 }
 
+/** Merges a recipe reply into the freshest cached overview. A late reply
+ * never replaces a newer revision a refresh has already shown. */
+function publishRecipe(key: string, latest: { current: { data: CloudV2Computer | undefined; revision: number | undefined } },
+  saved: { recipe: NonNullable<CloudV2Computer["recipe"]>; recipeRevision: number }): void {
+  const next = newerRecipe(computers.getSnapshot(key).data ?? latest.current.data, saved);
+  if (!next) return;
+  latest.current = { data: next, revision: saved.recipeRevision };
+  computers.setData(key, next);
+}
+
 /** Local edits over the configured repositories, saved in order at the
  * revision they started from. A newer revision from elsewhere wins. */
 function useRecipeDraft(organizationId: string, key: string, data: CloudV2Computer | undefined,
@@ -61,14 +71,7 @@ function useRecipeDraft(organizationId: string, key: string, data: CloudV2Comput
   const [queue] = useState(() => new RecipeSaveQueue<CloudV2RepositoryDraft[]>({
     save: async (repositories, revision) => {
       const saved = await saveCloudV2ComputerRecipe(organizationId, repositories, revision);
-      // Merge into the freshest overview, and never let a late reply replace
-      // a newer revision a refresh has already shown.
-      const fresh = computers.getSnapshot(key).data ?? latest.current.data;
-      if (fresh && (fresh.recipeRevision ?? -1) < saved.recipeRevision) {
-        const next = { ...fresh, recipe: saved.recipe, recipeRevision: saved.recipeRevision };
-        latest.current = { data: next, revision: saved.recipeRevision };
-        computers.setData(key, next);
-      }
+      publishRecipe(key, latest, saved);
       return saved.recipeRevision;
     },
     serverRevision: () => latest.current.revision,
@@ -139,8 +142,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
     await draft.settle();
     const current = draft.latest.current, revision = draft.revision();
     if (draft.legacy || revision === undefined || !current.data) return;
-    const saved = await discardCloudV2ComputerRecipe(organizationId, revision);
-    computers.setData(key, { ...current.data, recipe: saved.recipe, recipeRevision: saved.recipeRevision });
+    publishRecipe(key, draft.latest, await discardCloudV2ComputerRecipe(organizationId, revision));
   });
   const activate = (buildId: string) => run(() => activateCloudV2Build(organizationId, buildId));
 

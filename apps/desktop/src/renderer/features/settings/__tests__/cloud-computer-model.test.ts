@@ -162,4 +162,38 @@ describe("Cloud Computer recipe saves", () => {
       expect(onSaved).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
   });
+
+  it("lets the next edit take the shown revision after a failed save dropped a typing pause", async () => {
+    vi.useFakeTimers();
+    try {
+      const { RecipeSaveQueue } = await import("../cloud-computer-model");
+      let server = 1, fail!: (error: Error) => void;
+      const save = vi.fn((_value: string, revision: number) => save.mock.calls.length === 1
+        ? new Promise<number>((_, reject) => { fail = reject; }) : Promise.resolve(revision + 1));
+      const queue = new RecipeSaveQueue<string>({ save, serverRevision: () => server, onSaved: () => {}, onError: () => {} });
+      queue.push("A");
+      await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+      queue.push("B", 600);
+      fail(new Error("offline"));
+      await expect(queue.settle()).rejects.toThrow("offline");
+      expect(queue.waiting).toBe(false);
+      server = 2; // the refreshed view after the failure
+      queue.push("C", 600);
+      server = 3; // another admin saves before C is sent
+      await queue.settle();
+      expect(save).toHaveBeenLastCalledWith("C", 2);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("Cloud Computer recipe replies", () => {
+  it("never let a late reply replace a newer revision, and merge into the freshest overview", async () => {
+    const { newerRecipe } = await import("../cloud-computer-model");
+    const fresh = { activeBuildId: "build-3", recipeRevision: 3, recipe: { repositories: [{ repository: "a/a" }] } };
+    expect(newerRecipe(fresh, { recipe: { repositories: [] }, recipeRevision: 2 })).toBeNull();
+    expect(newerRecipe(fresh, { recipe: { repositories: [] }, recipeRevision: 3 })).toBeNull();
+    expect(newerRecipe(fresh, { recipe: { repositories: [{ repository: "b/b" }] }, recipeRevision: 4 }))
+      .toEqual({ activeBuildId: "build-3", recipeRevision: 4, recipe: { repositories: [{ repository: "b/b" }] } });
+    expect(newerRecipe(undefined, { recipe: { repositories: [] }, recipeRevision: 1 })).toBeNull();
+  });
 });

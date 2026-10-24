@@ -94,8 +94,9 @@ refreshes the runtime only, without Git or setup, so creates and wakes stop
 downloading it; failures are retried after six hours, at most three times per
 pin. Once a day, an organization that used cloud workspaces in the last week is
 rebuilt at its live build's refs when GitHub reports a moved branch; unbuilt
-edits are left for an admin to build. A checked, unchanged organization waits a
-day, and organizations are visited oldest-checked first. An automatic refresh
+edits are left for an admin to build. An organization with no new commits is
+not checked again for a day, one GitHub cannot answer for an hour, and
+organizations are visited earliest-due first. An automatic refresh
 is fenced to the live build it was scheduled from, so a build that became live
 meanwhile is never relabelled or rolled back, and a rebuilt older build is never
 refreshed this way. Scans run beside build admission, never ahead of it. Each

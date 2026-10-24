@@ -10,9 +10,10 @@ ALTER TABLE cloud_v2_computers
   ADD COLUMN recipe_revision bigint NOT NULL DEFAULT 0 CHECK (recipe_revision >= 0),
   ADD COLUMN recipe_updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
   ADD COLUMN recipe_updated_at timestamptz,
-  -- When the daily refresh last found no new commits; it rotates through
-  -- organizations oldest-checked first.
-  ADD COLUMN refresh_checked_at timestamptz;
+  -- The daily refresh does not look at this organization again before this:
+  -- a day after it found no new commits, an hour after GitHub could not say.
+  -- Organizations rotate earliest-due first.
+  ADD COLUMN refresh_next_at timestamptz;
 
 -- Why a build ran and what it started from. A NULL base snapshot is a clean
 -- build from Boat's stock image; otherwise the build refreshed the

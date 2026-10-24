@@ -283,19 +283,20 @@ export class CloudV2Computers {
     }
   }
 
-  /** The daily refresh found nothing new; check this organization again tomorrow. */
-  async markRefreshChecked(organizationId: string, activeBuildId: string): Promise<void> {
+  /** Defers the daily refresh check: a day when nothing moved, an hour when
+   * GitHub could not answer, so unreadable organizations rotate too. */
+  async deferRefresh(organizationId: string, activeBuildId: string, outcome: "unchanged" | "unknown"): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_computers SET refresh_checked_at = clock_timestamp() WHERE org_id = $1 AND active_build_id = $2`,
-      [organizationId, activeBuildId]));
+      `UPDATE cloud_v2_computers SET refresh_next_at = clock_timestamp() + CASE WHEN $3 = 'unchanged' THEN interval '24 hours' ELSE interval '1 hour' END
+       WHERE org_id = $1 AND active_build_id = $2`, [organizationId, activeBuildId, outcome]));
   }
 
   /** Live snapshots due a refresh by themselves, oldest first. Eligibility is
    * decided before the limit, so computers with nothing due never crowd out
-   * one that is; a checked-unchanged computer waits a day. */
+   * one that is; a deferred computer waits until its next check. */
   async refreshCandidates(runtimeSha256: string, limit = 25): Promise<CloudV2RefreshCandidate[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; active_build_id: string; created_by: string; recipe: CloudV2Recipe; runtime_stale: boolean; refresh_due: boolean }>(
-      `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.finished_at, c.refresh_checked_at,
+      `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.finished_at, c.refresh_next_at,
          (b.runtime_sha256 IS NOT NULL AND b.runtime_sha256 <> $1
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled') AND f.created_at > clock_timestamp() - interval '6 hours')
@@ -303,7 +304,7 @@ export class CloudV2Computers {
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled')) < 3) AS runtime_stale,
          (b.finished_at < clock_timestamp() - interval '24 hours'
            AND (b.recipe->>'rebuiltFrom') IS NULL
-           AND coalesce(c.refresh_checked_at, '-infinity') < clock_timestamp() - interval '24 hours'
+           AND coalesce(c.refresh_next_at, '-infinity') <= clock_timestamp()
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds r WHERE r.org_id = c.org_id AND r.created_at > clock_timestamp() - interval '24 hours')
            AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.org_id = c.org_id AND w.state <> 'deleted'
              AND coalesce(w.active_at, w.created_at) > clock_timestamp() - interval '7 days')) AS refresh_due
@@ -314,7 +315,7 @@ export class CloudV2Computers {
        WHERE c.snapshot_name IS NOT NULL AND b.created_by IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds q WHERE q.org_id = c.org_id AND q.state IN ('queued','building'))
        ) due WHERE runtime_stale OR refresh_due
-       ORDER BY runtime_stale DESC, coalesce(refresh_checked_at, finished_at) NULLS FIRST, org_id LIMIT $2`, [runtimeSha256, limit]));
+       ORDER BY runtime_stale DESC, coalesce(refresh_next_at, finished_at) NULLS FIRST, org_id LIMIT $2`, [runtimeSha256, limit]));
     return rows.map(row => ({ organizationId: row.org_id, activeBuildId: row.active_build_id, createdBy: row.created_by, recipe: row.recipe,
       runtimeStale: row.runtime_stale, refreshDue: row.refresh_due }));
   }
@@ -597,6 +598,8 @@ export class CloudV2ComputerBuilder {
     /** The commit at the tip of a remote branch, or null when it cannot be read
      * now. Without it every daily refresh is assumed to have new commits. */
     remoteHead?(organizationId: string, userId: string, repository: string, branch: string): Promise<string | null>;
+    /** Candidates visited per refresh scan. */
+    refreshPage?: number;
     now?: () => number;
     logger?: Pick<Console, "warn">;
   }) {}
@@ -640,7 +643,7 @@ export class CloudV2ComputerBuilder {
     if (now - this.lastRefreshScan < REFRESH_SCAN_MS) return;
     this.lastRefreshScan = now;
     const { computers, runtime } = this.deps;
-    for (const candidate of await computers.refreshCandidates(runtime.sha256)) {
+    for (const candidate of await computers.refreshCandidates(runtime.sha256, this.deps.refreshPage)) {
       if (candidate.runtimeStale) {
         await computers.enqueueAutomatic(candidate.organizationId, candidate.activeBuildId, "runtime", runtime.sha256);
         continue;
@@ -648,8 +651,7 @@ export class CloudV2ComputerBuilder {
       // A build an admin activated again stays at its commits until they build.
       if (!candidate.refreshDue || candidate.recipe.rebuiltFrom !== undefined) continue;
       const moved = await this.repositoriesMoved(candidate);
-      if (moved === null) continue;
-      if (!moved) { await computers.markRefreshChecked(candidate.organizationId, candidate.activeBuildId); continue; }
+      if (moved !== true) { await computers.deferRefresh(candidate.organizationId, candidate.activeBuildId, moved === null ? "unknown" : "unchanged"); continue; }
       await computers.enqueueAutomatic(candidate.organizationId, candidate.activeBuildId, "refresh");
     }
   }

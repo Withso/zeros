@@ -375,12 +375,15 @@ d("cloud v2 Cloud Computer builds", () => {
     // Checked and unchanged: not asked again until tomorrow, by any process.
     now += 11 * 60_000; await builder().scheduleRefreshes();
     expect(remoteHead).toHaveBeenCalledTimes(1);
-    await pool.query(`UPDATE cloud_v2_computers SET refresh_checked_at = now() - interval '25 hours' WHERE org_id = $1`, [org]);
-    // GitHub not answering is not "unchanged": the next scan asks again.
+    await pool.query(`UPDATE cloud_v2_computers SET refresh_next_at = now() - interval '1 minute' WHERE org_id = $1`, [org]);
+    // GitHub not answering is not "unchanged": it is asked again after an hour, not a day.
     head = null; now += 11 * 60_000;
     const unknown = builder();
     await unknown.scheduleRefreshes(); now += 11 * 60_000; await unknown.scheduleRefreshes();
-    expect(remoteHead).toHaveBeenCalledTimes(3);
+    expect(remoteHead).toHaveBeenCalledTimes(2);
+    const next = (await pool.query(`SELECT refresh_next_at - now() AS wait FROM cloud_v2_computers WHERE org_id = $1`, [org])).rows[0].wait;
+    expect(next.hours ?? 0).toBe(0);
+    await pool.query(`UPDATE cloud_v2_computers SET refresh_next_at = now() - interval '1 minute' WHERE org_id = $1`, [org]);
     head = "c".repeat(40); now += 11 * 60_000;
     await unknown.scheduleRefreshes();
     const queued = (await computers.overview(org)).builds[0]!;
@@ -565,6 +568,43 @@ d("cloud v2 Cloud Computer builds", () => {
       expect((await run("git", ["-C", join(root, "checkouts/example/project"), "rev-parse", "HEAD"])).stdout.trim()).toBe(pinned);
     } finally { await rm(root, { recursive: true, force: true }); }
   }, 60_000);
+
+  it("rotates organizations GitHub cannot answer for, so they never starve readable ones", async () => {
+    const boat = compute();
+    const orgs = [org];
+    for (let index = 0; index < 2; index++) {
+      const id = randomUUID(); orgs.push(id);
+      await pool.query(`INSERT INTO organizations (id, slug, name, created_by, is_personal, cloud_workspaces_allowed) VALUES ($1, $2, 'O', $3, false, true)`, [id, `org-${id}`, admin]);
+      await pool.query(`INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'owner')`, [id, admin]);
+    }
+    for (const id of orgs) {
+      await computers.enqueue(id, admin, recipe);
+      await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" }).tick();
+      await new CloudV2Store(pool).createWorkspace({ id: randomUUID(), organizationId: id, creatorUserId: admin, name: "w",
+        repository: "withso/zeros", branch: `zeros/${id.slice(0, 8)}`, baseBranch: "master", computerBuildId: null });
+    }
+    await pool.query(`UPDATE cloud_v2_computer_builds SET created_at = now() - interval '25 hours', finished_at = now() - interval '25 hours'`);
+    // The two oldest are unreadable; the newest has new commits.
+    await pool.query(`UPDATE cloud_v2_computer_builds SET finished_at = now() - interval '30 hours' WHERE org_id = ANY($1::uuid[])`, [orgs.slice(0, 2)]);
+    const readable = orgs[2]!;
+    const remoteHead = vi.fn(async (organizationId: string) => organizationId === readable ? "c".repeat(40) : null);
+    let now = Date.now();
+    const scan = async () => {
+      now += 11 * 60_000;
+      const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token",
+        remoteHead, refreshPage: 2, now: () => now });
+      await builder.scheduleRefreshes();
+    };
+    // A page holds only the two unreadable ones; they are deferred an hour, not left in place.
+    const asked = () => remoteHead.mock.calls.map(([id]) => id);
+    await scan();
+    expect(asked().sort()).toEqual(orgs.slice(0, 2).sort());
+    expect((await computers.overview(readable)).builds[0]!.reason).toBe("manual");
+    await scan();
+    expect(asked()).toHaveLength(3);
+    expect(asked()[2]).toBe(readable);
+    expect((await computers.overview(readable)).builds[0]).toMatchObject({ reason: "refresh", state: "queued" });
+  });
 
   it("refuses repository names that would leave the home directory", async () => {
     await expect(computers.saveRecipe(org, admin, [{ repository: "../.." }], 0)).rejects.toThrow();

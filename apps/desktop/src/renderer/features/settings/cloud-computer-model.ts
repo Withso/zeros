@@ -166,9 +166,23 @@ export class RecipeSaveQueue<T> {
       const revision = this.base ?? this.deps.serverRevision();
       if (revision === undefined) return;
       try { this.base = await this.deps.save(value, revision); saved = true; }
-      catch (error) { this.queued = null; this.base = undefined; this.failure = { error }; this.deps.onError(error); return; }
+      catch (error) {
+        // Drop everything that was waiting, typing pause included, so the
+        // next edit takes the revision shown then.
+        this.queued = null; clearTimeout(this.timer); this.timer = undefined; this.base = undefined;
+        this.failure = { error }; this.deps.onError(error); return;
+      }
     }
     if (!this.timer) this.base = undefined;
     if (saved && !this.timer) this.deps.onSaved();
   }
+}
+
+/** A recipe reply merged into the freshest overview; null when that already
+ * shows the same or a newer revision, which a late reply must never undo. */
+export function newerRecipe<T extends { recipeRevision?: number | undefined; recipe?: unknown }>(
+  fresh: T | undefined, saved: { recipe: NonNullable<T["recipe"]>; recipeRevision: number },
+): T | null {
+  if (!fresh || (fresh.recipeRevision ?? -1) >= saved.recipeRevision) return null;
+  return { ...fresh, recipe: saved.recipe, recipeRevision: saved.recipeRevision };
 }
