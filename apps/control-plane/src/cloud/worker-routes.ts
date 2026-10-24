@@ -51,8 +51,10 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
     if (revision === await deps.store.loginRevision(workspace.id)) {
       const { mcpServers, ...legacy } = config;
-      const { setup, ...workspaceConfig } = config.workspace;
-      return { ...legacy, workspace: { ...workspaceConfig, ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}) },
+      const { setup, baseCommit, ...workspaceConfig } = config.workspace;
+      return { ...legacy, workspace: { ...workspaceConfig,
+        ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
+        ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
         loginRevision: revision, ...(features.has("mcp-v1") && mcpServers ? { mcpServers } : {}),
         ...(deps.promptOutbox ? { promptOutbox: 1 } : {}) };
     }

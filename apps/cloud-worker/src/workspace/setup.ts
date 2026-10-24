@@ -38,6 +38,8 @@ type SetupStatus = {
 interface SetupOptions {
   directory: string; workspace: WorkerConfig["workspace"]; gitEnvironment: NodeJS.ProcessEnv;
   runner?: SetupRunner; activity(): void; onStorageError?(): void;
+  beforeRun?(): Promise<void>;
+  onAdmitted?(): Promise<void>;
 }
 
 /** Admission is durable before execution. An interrupted or failed script is
@@ -66,13 +68,24 @@ export class WorkspaceSetup {
     try {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       try { statusFile = await open(join(directory, `${workspace.id}.json`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return; throw error; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") { await this.options.onAdmitted?.(); return; }
+        throw error;
+      }
       const status: SetupStatus = { workspaceId: workspace.id, state: "running", startedAt: new Date().toISOString() };
       await this.persist(statusFile, status);
+      // The restore marker can be removed only after both the admission file
+      // and its directory entries are durable.
+      for (const path of [directory, this.options.directory]) {
+        const parent = await open(path, "r");
+        try { await parent.sync(); } finally { await parent.close(); }
+      }
+      await this.options.onAdmitted?.();
       // Keep descriptors throughout execution: a checkout cannot redirect an
       // already admitted status/log write by replacing its pathname.
       log = await open(join(directory, `${workspace.id}.log`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       let code: number | null = null, failed = false, timedOut = false;
+      if (!this.controller.signal.aborted) await this.options.beforeRun?.();
       if (!this.controller.signal.aborted) {
         const deadline = setTimeout(() => {
           if (this.controller.signal.aborted) return;

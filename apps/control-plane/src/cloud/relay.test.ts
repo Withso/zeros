@@ -157,6 +157,25 @@ describe("cloud v2 relay", () => {
     }
   });
 
+  it.each(["", "workspace-setup-v1", "checkout-v20", "checkout-v2", "checkout-v2, workspace-setup-v1"])(
+    "independently gates baseCommit on WebSocket initial and refreshed config: %s", async features => {
+      workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+      const original = deps.config, baseCommit = "a".repeat(40);
+      deps.config = async ws => { const value = await original(ws); return { ...value, workspace: { ...value.workspace, baseCommit, setup: "pnpm install" } }; };
+      const frames: any[] = [];
+      workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+      loginRevision = "1"; await relay.refreshLogins();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+      for (const frame of frames.filter(frame => frame.t === "config")) {
+        if (features.split(",").some(value => value.trim() === "checkout-v2")) expect(frame.workspace.baseCommit).toBe(baseCommit);
+        else expect(frame.workspace).not.toHaveProperty("baseCommit");
+        if (features.includes("workspace-setup-v1")) expect(frame.workspace.setup).toBe("pnpm install");
+        else expect(frame.workspace).not.toHaveProperty("setup");
+      }
+    });
+
   it("settles only prompts forwarded to a lost worker and preserves prompts queued for its successor", async () => {
     const forwarded: any[][] = [];
     workerServer.on("connection", ws => { const frames: any[] = []; forwarded.push(frames); ws.on("message", raw => frames.push(JSON.parse(String(raw)))); });

@@ -11,7 +11,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsMcp, workerSupportsSetup, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
@@ -317,8 +317,10 @@ export class CloudV2Relay {
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
       const { mcpServers, ...legacy } = config;
-      const { setup, ...workspaceConfig } = config.workspace;
-      send(ws, { ...legacy, workspace: { ...workspaceConfig, ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}) },
+      const { setup, baseCommit, ...workspaceConfig } = config.workspace;
+      send(ws, { ...legacy, workspace: { ...workspaceConfig,
+        ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}),
+        ...(workerSupportsCheckout(ws) && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
     } while (flight.requested);
     return true;

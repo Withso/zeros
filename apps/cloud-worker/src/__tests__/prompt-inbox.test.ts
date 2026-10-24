@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import type { SessionUpdate } from "@zeros/protocol/agent-events";
 import { CloudWorker } from "../worker";
+import type { CheckoutRefresh } from "../workspace/checkout";
 import { SessionStore, type SessionData } from "../sessions/session-store";
 import { CLIENT_A, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
 
@@ -54,12 +55,12 @@ class PullRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { relay?: PullRelay; driver?: FakeDriver; createDriver?: () => FakeDriver; directory?: string; enabled?: boolean; agent?: "codex" | "claude" } = {}) {
+async function setup(options: { relay?: PullRelay; driver?: FakeDriver; createDriver?: () => FakeDriver; directory?: string; enabled?: boolean; agent?: "codex" | "claude"; refresh?: CheckoutRefresh } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), "zeros-outbox-"));
   if (!options.directory) directories.push(directory);
   const relay = options.relay ?? new PullRelay(), driver = options.driver ?? new FakeDriver();
   const worker = new CloudWorker({ directory, transport: relay, workspaceId: WORKSPACE_ID,
-    prepareCheckout: async () => {}, drivers: { [options.agent ?? "codex"]: options.createDriver ?? (() => driver) } });
+    prepareCheckout: async () => ({ createdBranch: true, refresh: options.refresh }), drivers: { [options.agent ?? "codex"]: options.createDriver ?? (() => driver) } });
   workers.push(worker); worker.start();
   await relay.receive({ ...config,
     ...(options.agent === "claude" ? { agents: { claude: { apiKey: "fixture-claude-token" } } } : {}),
@@ -74,6 +75,22 @@ const until = (read: () => unknown) => expect.poll(read, { timeout: 1500, interv
 afterEach(async () => {
   await Promise.all(workers.splice(0).map(worker => worker.dispose()));
   await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+});
+
+it("fences outbox delivery before driver startup without treating empty polls as activity", async () => {
+  const gate = defer(), touch = vi.fn(() => gate.promise);
+  const f = await setup({ refresh: { mayFastForward: true, start: async () => {}, touch, dispose: async () => { gate.resolve(); } } });
+  try {
+    await until(() => !!f.relay.waiting).toBe(true);
+    expect(touch).not.toHaveBeenCalled();
+    f.relay.enqueue({ prompts: [delivery()], stops: [] });
+    await until(() => touch.mock.calls.length).toBe(1);
+    expect(f.driver.opened).toBeUndefined();
+    expect(f.driver.prompts).toHaveLength(0);
+    gate.resolve();
+    await until(() => f.driver.prompts.length).toBe(1);
+    f.driver.complete();
+  } finally { gate.resolve(); }
 });
 
 it("pulls without an app socket and fsyncs the VM inbox before ACK or driver startup", async () => {

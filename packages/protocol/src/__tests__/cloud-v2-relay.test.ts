@@ -82,6 +82,16 @@ describe("cloud v2 relay contract", () => {
       expect(CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, ...patch } }).success).toBe(false);
   });
 
+  it("accepts an optional exact lowercase base commit without weakening workspace strictness", () => {
+    const config = { t: "config", loginRevision: "0", agents: {}, workspace: {
+      id, organizationId: id, checkoutPath: "/home/user/example/repo", repository: "example/repo", branch: "zeros/new", baseBranch: "main",
+    } };
+    for (const baseCommit of [undefined, "a".repeat(40), "0123456789abcdef".repeat(2) + "01234567"])
+      expect(CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, baseCommit } }).success).toBe(true);
+    for (const baseCommit of ["", "a".repeat(39), "a".repeat(41), "A".repeat(40), "g".repeat(40), "main", null, 1])
+      expect(CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, baseCommit } }).success).toBe(false);
+  });
+
   it.each(["oauthToken", "apiKey"])("accepts only one bounded Claude %s credential", (field) => {
     const config = {
       t: "config", loginRevision: "0",

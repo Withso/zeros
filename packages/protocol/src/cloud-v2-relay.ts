@@ -117,9 +117,11 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       organizationId: z.uuid(),
       checkoutPath: z.string().min(1).max(1024),
       repository: z.string().min(1).max(512),
-      /** The workspace branch; created from `baseBranch` on first boot. */
+      /** Created from the locally available baseCommit, else the on-disk baseBranch. */
       branch: z.string().min(1).max(255),
       baseBranch: z.string().min(1).max(255),
+      /** Delivered only with checkout-v2; the base head recorded at creation. */
+      baseCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
       /** Delivered only with workspace-setup-v1; runs once after a new checkout. */
       setup: z.string().max(8000).optional(),
     }).strict(),

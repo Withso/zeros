@@ -79,6 +79,15 @@ it("keeps optional workspace setup and its bounds identical on both config schem
   }
 });
 
+it("keeps the optional checkout-v2 base commit identical on both config schemas", () => {
+  for (const contract of [shared, control]) {
+    for (const baseCommit of [undefined, "a".repeat(40)])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, baseCommit } }).success).toBe(true);
+    for (const baseCommit of ["", "a".repeat(39), "a".repeat(41), "A".repeat(40), "g".repeat(40), "main", null, 1])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, baseCommit } }).success).toBe(false);
+  }
+});
+
 it("keeps durable HTTP prompt bounds and strict schemas identical across Zod versions", () => {
   const payload = { chatId: "chat", userMessageId: CLIENT_A, agentId: "codex", model: "gpt-6-luna", effort: "low",
     prompt: [{ type: "text", text: "ok" }], startedAt: 1 };

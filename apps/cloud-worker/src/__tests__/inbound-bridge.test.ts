@@ -51,6 +51,7 @@ it("binds only loopback and authenticates before upgrading or accepting a frame"
   expect(connected.ws.protocol).toBe(protocol);
   expect(connected.ws.extensions).toBe("");
   expect(connected.features.split(",")).toContain("workspace-setup-v1");
+  expect(connected.features.split(",")).toContain("checkout-v2");
   expect(await f.refusal(auth)).toBe(401);
 });
 
