@@ -2,7 +2,7 @@ import { expect } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-const types = ["files", "changes", "review", "design", "browser", "terminal"];
+const types = ["files", "changes", "review", "design", "browser", "terminal", "simulator"];
 const copy = {
   files: ["Files", "files", "Retry to load files."],
   changes: ["Changes", "changes", "Choose another comparison or retry."],
@@ -14,6 +14,7 @@ const copy = {
     "the terminal",
     "Retry to reconnect the terminal.",
   ],
+  simulator: ["The simulator", "the simulator", "Retry to load the simulator."],
 };
 const pendingCopy = {
   files: "Files appear when the workspace is ready.",
@@ -22,6 +23,7 @@ const pendingCopy = {
   design: "Design appears when the workspace is ready.",
   browser: "The preview appears when the workspace is ready.",
   terminal: "The terminal opens when the workspace is ready.",
+  simulator: "The simulator opens when the workspace is ready.",
 };
 const unavailableCopy = {
   files: "Files aren't available.",
@@ -30,6 +32,7 @@ const unavailableCopy = {
   design: "Design isn't available.",
   browser: "The preview isn't available.",
   terminal: "The terminal isn't available.",
+  simulator: "The simulator isn't available.",
 };
 
 export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
@@ -65,10 +68,10 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await expect(banner()).toHaveCount(0);
     await expect(empty()).toHaveCount(0);
     await noToast();
-    // An actual remote connection still gets its own status. Switching back
-    // cannot copy that cloud banner into either Local owner.
+    // Neither placement paints a pending connection banner. Switching back
+    // still restores the Local owner's confirmed content independently.
     await page.evaluate(() => window.workbenchStatusFixture.render("files", { workspace: "a" }));
-    await expect(banner()).toContainText("Connecting…");
+    await expect(banner()).toHaveCount(0);
     await page.evaluate(workspace => window.workbenchStatusFixture.render("files", { workspace }), workspace);
     await expect(banner()).toHaveCount(0);
     await page.evaluate(() => window.workbenchStatusFixture.connection("connected"));
@@ -93,6 +96,25 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await screenshot("files", `${workspace}-engine-restart`, theme);
     await page.evaluate(() => window.workbenchStatusFixture.theme("dark"));
     check(`${theme} ${workspace}: startup and reconnect stay banner-free across all tabs, retain content and isolate cloud status`, true);
+  }
+  for (const theme of ["dark", "light"]) {
+    await page.goto(`${harnessBase}/harness-workbench-status.html`);
+    await page.waitForFunction(() => !!window.workbenchStatusFixture);
+    await page.evaluate(theme => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.theme(theme);
+      fixture.render("files", { surface: "feature", target: "fixture.txt" });
+    }, theme);
+    const content = page.getByText("Confirmed file content", { exact: false }).first();
+    await expect(content).toBeVisible();
+    for (const state of ["setting_up", "starting", "stopping", "stopped", "failed", "archived"]) {
+      await page.evaluate(state => window.workbenchStatusFixture.state(state), state);
+      await expect(banner()).toHaveCount(0);
+      await expect(content).toBeVisible();
+      await expect(empty()).toHaveCount(0);
+      if (state === "stopped") await screenshot("files", "cloud-sleeping", theme);
+    }
+    check(`${theme}: real cloud file content stays visible without lifecycle banners`, true);
   }
   // Every tab retains its exact-key pixels through short and prolonged gaps.
   // Observe the DOM during the interval too: a banner/icon that flashes and
@@ -162,7 +184,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await expect(banner()).toHaveCount(0);
     await page.evaluate(() => window.workbenchStatusFixture.connection("disconnected"));
     await page.clock.fastForward(15_000);
-    await expect(banner()).toContainText("Reconnecting to the workspace…");
+    await expect(banner()).toHaveCount(0);
     await expect(content).toHaveCount(1);
     await expect(empty()).toHaveCount(0);
     await screenshot(type, "15s-gap");
@@ -170,8 +192,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await expect(banner()).toHaveCount(0);
     await page.evaluate(() => window.workbenchStatusFixture.connection("disconnected"));
     await page.clock.fastForward(60_000);
-    await expect(banner()).toContainText("Can't reach the workspace.");
-    await expect(banner().getByRole("button")).toHaveText("Retry");
+    await expect(banner()).toHaveCount(0);
     await expect(content).toHaveCount(1);
     await expect(empty()).toHaveCount(0);
     await screenshot(type, "60s-gap");
@@ -209,7 +230,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     expect(iconBox.y + iconBox.height).toBeLessThan(frameBox.y + frameBox.height - 40);
     await screenshot(type, "read-fails-twice");
     await noToast();
-    check(`${type}: 3s quiet blip, 15s pending, 60s Retry, retained content, one silent read retry`, true);
+    check(`${type}: no connection banners at 3s, 15s or 60s; retained content and one silent read retry`, true);
   }
   for (const type of types) {
     await page.goto(`${harnessBase}/harness-workbench-status.html?cold=1`);
@@ -224,30 +245,20 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
         active: true,
       });
     }, type);
-    await expect(banner()).toHaveCount(1);
-    await expect(banner()).toContainText(
-      "This cloud workspace is still setting up.",
-    );
-    await expect(banner().getByRole("button")).toHaveCount(0);
+    await expect(banner()).toHaveCount(0);
     await expect(empty()).toHaveCount(1);
     await expect(empty()).toHaveText(pendingCopy[type]);
     await noToast();
     await screenshot(type, "setting-up");
 
-    for (const [state, message] of [
-      ["starting", "Starting the cloud workspace…"],
-      ["stopping", "Stopping the cloud workspace…"],
-      ["stopped", "Sleeping — resumes when you continue"],
-      ["archived", "This cloud workspace is archived."],
-    ]) {
+    for (const state of ["starting", "stopping", "stopped", "archived", "failed"]) {
       await page.evaluate(
         (state) => window.workbenchStatusFixture.state(state),
         state,
       );
-      await expect(banner()).toContainText(message);
-      await expect(banner().getByRole("button")).toHaveCount(0);
+      await expect(banner()).toHaveCount(0);
       await expect(empty()).toHaveText(
-        state === "archived" ? unavailableCopy[type] : pendingCopy[type],
+        ["archived", "failed"].includes(state) ? unavailableCopy[type] : pendingCopy[type],
       );
       await noToast();
       await screenshot(type, state);
@@ -260,7 +271,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await page.clock.fastForward(9_900);
     await expect(banner()).toHaveCount(0);
     await page.clock.fastForward(200);
-    await expect(banner()).toContainText("Connecting…");
+    await expect(banner()).toHaveCount(0);
     await expect(empty()).toHaveText(pendingCopy[type]);
     await noToast();
     await screenshot(type, "connecting");
@@ -285,8 +296,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await page.clock.fastForward(9_900);
     await expect(banner()).toHaveCount(0);
     await page.clock.fastForward(200);
-    await expect(banner()).toHaveCount(1);
-    await expect(banner()).toContainText("Reconnecting to the workspace…");
+    await expect(banner()).toHaveCount(0);
     await expect(empty()).toHaveCount(1);
     await expect(empty()).toHaveText(
       type === "terminal"
@@ -296,11 +306,21 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await screenshot(type, "reconnecting");
     await page.clock.resume();
     await page.clock.fastForward(35_000);
-    await expect(banner()).toContainText("Can't reach the workspace.");
-    await expect(empty()).toHaveText(copy[type][2]);
+    await expect(banner()).toHaveCount(0);
+    await expect(empty()).toHaveText(unavailableCopy[type]);
     await noToast();
     await screenshot(type, "unreachable");
 
+    // A real tab read failure still owns a stable, actionable banner. Keep
+    // its retry coverage independent of the suppressed connection status.
+    await page.evaluate(type => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.fail("Content read timed out");
+      fixture.connection("connected");
+      fixture.render(type, { target: `retry-${type}` });
+    }, type);
+    await page.clock.runFor(1_600);
+    await expect(banner()).toHaveCount(1);
     const before = await banner().boundingBox();
     await banner().evaluate((element) => {
       window.fixtureBannerElement = element;
@@ -314,7 +334,13 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       });
       window.fixtureBannerObserver = observer;
     });
-    await page.evaluate(() => window.workbenchStatusFixture.hold(true));
+    const retryReads = await page.evaluate(() => {
+      const fixture = window.workbenchStatusFixture;
+      const reads = fixture.reads.length;
+      fixture.hold(true);
+      fixture.fail(null);
+      return reads;
+    });
     const retry = banner().getByRole("button", {
       name: `Retry loading ${copy[type][1]}`,
       exact: true,
@@ -329,7 +355,8 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       await page.evaluate(
         () => window.workbenchStatusFixture.bridge.reconnects,
       ),
-    ).toBe(1);
+    ).toBe(0);
+    expect(await page.evaluate(() => window.workbenchStatusFixture.reads.length)).toBe(retryReads + 1);
     expect(
       await banner().evaluate(
         (element) => element === window.fixtureBannerElement,
@@ -363,7 +390,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
 
     await page.evaluate((type) => {
       const fixture = window.workbenchStatusFixture;
-      fixture.fail("Error: Request timeout: engine disconnected");
+      fixture.fail("Error: Content read timed out");
       fixture.render(type, { target: `failure-${type}` });
     }, type);
     await page.clock.runFor(1_600);
@@ -435,9 +462,9 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       (type) => window.workbenchStatusFixture.render(type, { active: true }),
       type,
     );
-    await expect(banner()).toContainText("Can't reach the workspace.");
+    await expect(banner()).toHaveCount(0);
     check(
-      `${type}: one banner, quiet centre, grace/escalation, single-flight stable Retry, automatic recovery and hidden inertness`,
+      `${type}: quiet cloud availability, one content-error banner, stable Retry, automatic recovery and hidden inertness`,
       true,
     );
   }
@@ -551,21 +578,16 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       (kind) => window.workbenchStatusFixture.connectFailure(kind),
       kind,
     );
-    await expect(banner()).toContainText("Can't reach the workspace.");
-    await banner().getByRole("button").click();
     await expect(banner()).toHaveCount(0);
-    expect(
-      await page.evaluate(
-        () => window.workbenchStatusFixture.bridge.reconnects,
-      ),
-    ).toBe(1);
+    await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);
+    await expect(page.locator("[data-confirmed-content]:visible")).toHaveCount(1);
     await page.evaluate((kind) => {
       const fixture = window.workbenchStatusFixture;
       fixture.connection("disconnected");
       fixture.connectFailure(kind);
     }, kind);
-    await expect(banner()).toContainText("Can't reach the workspace.");
-    await noToast();
+    await expect(banner()).toHaveCount(0);
+    await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);
     await page.evaluate(() =>
       window.workbenchStatusFixture.render("files", { active: false }),
     );
@@ -579,8 +601,8 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       window.workbenchStatusFixture.render("files", { active: true }),
     );
     await page.clock.fastForward(1_000);
-    await expect(banner()).toContainText("Can't reach the workspace.");
-    await noToast();
+    await expect(banner()).toHaveCount(0);
+    await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);
     await page.evaluate(() =>
       window.workbenchStatusFixture.connection("connected"),
     );
@@ -591,7 +613,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await noToast();
   }
   check(
-    "Cloud connect/open failures hand off between the banner and original toast without doubling",
+    "Cloud connect/open failures keep their original toast across visible and hidden tabs, without a banner",
     true,
   );
 
@@ -621,8 +643,12 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     "2",
   );
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.evaluate(() => window.workbenchStatusFixture.state("setting_up"));
-  await expect(banner().locator("svg")).toHaveCSS("animation-name", "none");
+  await page.evaluate(() => {
+    window.workbenchStatusFixture.fail(null);
+    window.workbenchStatusFixture.state("setting_up");
+  });
+  await expect(banner()).toHaveCount(0);
+  await expect(page.locator("[data-workbench-banner] svg")).toHaveCSS("animation-name", "none");
   await screenshot("files", "setting-up-narrow", "light");
   await page.emulateMedia({ reducedMotion: "no-preference" });
   check(
@@ -637,7 +663,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await page.waitForFunction(() => !!window.workbenchStatusFixture);
     await page.evaluate((type) => {
       const fixture = window.workbenchStatusFixture;
-      fixture.fail("Request timeout: engine disconnected");
+      fixture.fail("Content read timed out");
       fixture.render(type, { target: `real-${type}`, surface: "feature" });
     }, type);
     await page.clock.runFor(1_600);
@@ -680,7 +706,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     // Confirmed feature content is preserved on subsequent exact-key failure.
     {
       await page.evaluate(async () => {
-        window.workbenchStatusFixture.fail("engine disconnected");
+        window.workbenchStatusFixture.fail("Content read permission denied");
         await window.workbenchStatusFixture.refreshFeature();
       });
       await page.clock.runFor(1_600);
