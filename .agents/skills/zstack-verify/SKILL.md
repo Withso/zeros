@@ -82,6 +82,11 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   server-side state: control-plane logs and the workspace row through the API.
 - Provider keys stay in `.env.agent` (Alpha and test only) or Actions; never
   copy them into the checkout or into output.
+- Run a control-plane-generated VM script (runtime install, checkpoint,
+  restore) on the real Boat image once: one throwaway VM from the Alpha Cloud
+  Computer, with no storage writes, deleted afterwards. Local tests run this
+  host's Git, tar and coreutils, not the image's. Ad-hoc probes that reuse
+  `createGithubAppJwt` must pass `clientId`; the App ID works as the issuer.
 
 ## Evidence rules
 
@@ -114,7 +119,17 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - In a shared working tree, qualify a frozen patch on its stated base in a
   separate worktree or disposable projection, with workspace dependency links
   bound to that tree. Record its SHA-256 and test evidence; never replace
-  concurrent source edits in place to reconstruct the patch.
+  concurrent source edits in place to reconstruct the patch. The control plane
+  installs separately: run `pnpm --dir apps/control-plane install` in that
+  worktree too, or worker suites that import its source fail to load.
+- Make a slow step class (a stop that saves a checkpoint) take at most part
+  of a shared slot pool, and claim the steps someone is waiting for first.
+- A fixture for a missing Git object must start from a source that never had
+  it; assert `git cat-file -e` fails before relying on it.
+- Background workspace mutations need one admission fence that every
+  work entry point passes, the durable HTTP prompt inbox and metadata-only
+  actions included. Stop aborts deferred work before cancelling what it waits
+  for.
 - An install with `--ignore-scripts` leaves `node-pty` without its native
   binding. Run `pnpm --dir apps/cloud-worker rebuild node-pty` before rerunning
   worker PTY tests; keep the prerequisite failure in the evidence.

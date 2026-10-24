@@ -12,6 +12,15 @@ where it is encoded.
 - Adds lock-holding concurrency sized to the role's pool, one test database
   per concurrent run, and the advisory-lock purpose registry check
   (`changes/`, `zstack-verify`).
+- Adds the checkpoint round's lessons:
+  - capping slow step classes in a shared slot pool;
+  - missing-object Git fixtures;
+  - comparing the staged diff with a frozen patch before committing;
+  - one admission fence for background checkout moves;
+  - aborting deferred work before Stop cancels its dependency;
+  - injecting fixture PATH through the runtime channel;
+  - running VM scripts once on the real image
+  (`changes/`, `zstack-verify`, `integrate-pr`).
 
 ## 0.1.6
 
