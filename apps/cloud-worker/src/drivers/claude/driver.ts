@@ -139,6 +139,7 @@ export class ClaudeDriver implements Driver {
   private ensureQuery(): Process {
     if (this.process) return this.process;
     const session = this.input!, input = new InputQueue<SDKUserMessage>();
+    let process: Process | undefined;
     const options: Options = {
       cwd: session.cwd, ...(this.model ? { model: this.model } : {}),
       ...(session.mcpServers ? { mcpServers: session.mcpServers } : {}),
@@ -150,9 +151,21 @@ export class ClaudeDriver implements Driver {
       systemPrompt: { type: "preset", preset: "claude_code" },
       onUserDialog: async () => ({ behavior: "cancelled" }), onElicitation: async () => ({ action: "cancel" }),
       supportedDialogKinds: [],
+      hooks: {
+        UserPromptSubmit: [{ hooks: [async (hook) => {
+          if (process && this.process === process && !this.disposed &&
+              hook.hook_event_name === "UserPromptSubmit" && !hook.agent_id &&
+              (hook.source === "loop_wakeup" || hook.source === "schedule_wakeup")) {
+            // Status only: the hook neither owns a queued user prompt nor
+            // changes the worker's background membership or idle policy.
+            this.mapper!.announceWakeup({ source: hook.source, prompt: hook.prompt, promptId: hook.prompt_id });
+          }
+          return {};
+        }] }],
+      },
       pathToClaudeCodeExecutable: this.options.executable ?? pinnedExecutable(),
     };
-    const process = { query: (this.options.query ?? query)({ prompt: input, options }), input };
+    process = { query: (this.options.query ?? query)({ prompt: input, options }), input };
     this.mapper!.beginProcess(); this.process = process;
     void this.consume(process);
     return process;

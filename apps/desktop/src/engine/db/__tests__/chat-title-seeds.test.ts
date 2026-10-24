@@ -57,6 +57,7 @@ describe("chat title seeds", () => {
       { id: "note", kind: "text", role: "user", text: 'Chat "W" finished its turn: completed.', localNote: { chatId: "w", event: "done" } },
       { id: "brief", kind: "text", role: "user", text: "Audit the components", localFrom: { chatId: "lead" } },
       { id: "fb", kind: "text", role: "agent", text: "Using Composer 2", modelFallback: { provider: "cursor" } },
+      { id: "wake", kind: "text", role: "agent", text: "Woke up on schedule", wakeupNotice: { source: "loop_wakeup" } },
     ]);
     expect(chatTitleSeeds(["b"])).toEqual([{ chatId: "b", messageId: "brief", prompt: "Audit the components", answered: false }]);
     rows("b", [{ id: "t1", kind: "tool", toolCallId: "t1", title: "Read" }]);

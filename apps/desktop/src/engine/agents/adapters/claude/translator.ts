@@ -37,6 +37,7 @@ import { LEGACY_TOOL_NAME_ALIASES, type BUILTIN_TOOL_NAMES } from "@anthropic-ai
 
 import type {
   BackgroundTask,
+  WakeupNoticeInfo,
   WorkflowPhaseProgress,
   WorkflowProgress,
 } from "@zeros/protocol/agent-events";
@@ -121,6 +122,15 @@ interface RetainedToolInput {
     reason: string | null;
     promptFingerprint: string | null;
   };
+  cron?: { promptFingerprint: string; reason: string | null; schedule: string; recurring: boolean };
+  cronId?: string;
+}
+
+interface TrackedWakeup extends WakeupNoticeInfo {
+  promptFingerprint: string;
+  recurring?: boolean;
+  /** Only a native nextFireAt can refresh a previously tracked due time. */
+  hasNativeDue?: true;
 }
 
 interface PendingScheduledWakeupReason {
@@ -436,6 +446,10 @@ export class ClaudeStreamTranslator {
    * native task membership frame cannot accidentally clear them. Recurring
    * cron jobs are deliberately excluded (open task 008). */
   private readonly scheduledWakeups = new Map<string, BackgroundTask>();
+  // Notice metadata does not participate in process retention or waiting counts.
+  private readonly wakeupDetails = new Map<string, TrackedWakeup>();
+  private readonly wakeupNoticeIds = new Set<string>();
+  private readonly wakeupToolResults = new Set<string>();
   private pendingScheduledWakeupReason: PendingScheduledWakeupReason | null =
     null;
   /** Separate edge/level evidence lets a missed task_started still settle
@@ -809,6 +823,9 @@ export class ClaudeStreamTranslator {
     for (const cron of eligible) {
       const taskId = `${SCHEDULED_WAKEUP_TASK_PREFIX}${cron.id}`;
       const previous = this.scheduledWakeups.get(taskId);
+      const promptFingerprint = fingerprintText(cron.prompt);
+      const known = this.wakeupDetails.get(`cron:${cron.id}`);
+      const nativeDue = known?.hasNativeDue && known.promptFingerprint === promptFingerprint ? known.scheduledFor : undefined;
       // A successful ScheduleWakeup tool result describes the newly-created
       // entry only. Do not repaint every older cron in the next Stop snapshot
       // with that latest reason. An unchanged entry can be reused verbatim,
@@ -816,7 +833,8 @@ export class ClaudeStreamTranslator {
       if (
         previous &&
         previous.summary === cron.schedule &&
-        taskId !== pendingTargetId
+        taskId !== pendingTargetId &&
+        (nativeDue === undefined || nativeDue === previous.scheduledFor)
       ) {
         next.set(taskId, previous);
         continue;
@@ -828,7 +846,7 @@ export class ClaudeStreamTranslator {
       const scheduledFor =
         taskId === pendingTargetId && pending?.scheduledFor != null
           ? pending.scheduledFor
-          : scheduledWakeupTimestamp(cron.schedule, now);
+          : nativeDue ?? scheduledWakeupTimestamp(cron.schedule, now);
       if (taskId === pendingTargetId) pendingApplied = true;
       const name = scheduledWakeupName(cron.schedule, reason);
       next.set(taskId, {
@@ -841,6 +859,16 @@ export class ClaudeStreamTranslator {
         summary: cron.schedule,
         ...(scheduledFor != null ? { scheduledFor } : {}),
       });
+      // The legacy waiting label can borrow a pending loop's reason when
+      // Stop reports just one new job. A notice must match its own prompt.
+      if (known?.promptFingerprint !== promptFingerprint) {
+        const noticeReason = scheduledWakeupReason(cron.prompt);
+        const noticeDue = scheduledWakeupTimestamp(cron.schedule, now);
+        setBoundedMap(this.wakeupDetails, `cron:${cron.id}`, {
+          source: "schedule_wakeup", promptFingerprint,
+          ...(noticeReason ? { reason: noticeReason } : {}), ...(noticeDue !== undefined ? { scheduledFor: noticeDue } : {}),
+        }, MAX_BACKGROUND_TASK_LIFECYCLE);
+      }
     }
     this.scheduledWakeups.clear();
     for (const [taskId, task] of next) this.scheduledWakeups.set(taskId, task);
@@ -856,6 +884,72 @@ export class ClaudeStreamTranslator {
     this.pendingScheduledWakeupReason = null;
     this.scheduledWakeups.clear();
     this.emitBackgroundTasks();
+  }
+
+  /** Called only by the owning root UserPromptSubmit hook, before model work.
+   * Native prompt identity survives replay/resume. Older hooks dedupe within
+   * the accepted result generation; identical prompt text is never a job ID. */
+  announceWakeup(input: { source: WakeupNoticeInfo["source"]; prompt?: string; promptId?: string }): void {
+    if (this.activityStopped) return;
+    const promptFingerprint = typeof input.prompt === "string" ? fingerprintText(input.prompt) : undefined;
+    const noticeId = fingerprintText(input.promptId
+      ? `prompt:${input.promptId}`
+      : JSON.stringify(["legacy", this.fallbackGeneration, input.source, promptFingerprint]));
+    if (this.wakeupNoticeIds.has(noticeId)) return;
+    addBoundedSet(this.wakeupNoticeIds, noticeId, 2_000);
+    const candidates = promptFingerprint ? [...this.wakeupDetails.entries()].filter(([, detail]) =>
+      detail.source === input.source && detail.promptFingerprint === promptFingerprint) : [];
+    const matched = candidates.length === 1 ? candidates[0] : undefined;
+    const info: WakeupNoticeInfo = { source: input.source };
+    if (matched) {
+      const [key, detail] = matched;
+      if (detail.reason) info.reason = detail.reason;
+      if (detail.scheduledFor !== undefined) info.scheduledFor = detail.scheduledFor;
+      // A recurring job needs a new native due time for its next occurrence.
+      if (detail.recurring) this.wakeupDetails.set(key, { ...detail, scheduledFor: undefined });
+      else this.wakeupDetails.delete(key);
+    }
+    this.emit({ sessionId: this.sessionId, update: { sessionUpdate: "wakeup_notice", noticeId, ...info } });
+  }
+
+  private recordWakeupResult(toolId: string, nativeTool: RetainedToolInput, result: unknown): void {
+    if (!/^(ScheduleWakeup|CronCreate|CronList|CronDelete)$/.test(nativeTool.name) || !isObj(result) || this.wakeupToolResults.has(toolId)) return;
+    addBoundedSet(this.wakeupToolResults, toolId, MAX_BACKGROUND_TASK_LIFECYCLE);
+    const rememberCron = (id: string, cron: NonNullable<RetainedToolInput["cron"]>, nextFireAt: unknown) => {
+      const nativeDue = wakeupTimestamp(nextFireAt);
+      const scheduledFor = nativeDue ?? (!cron.recurring ? scheduledWakeupTimestamp(cron.schedule, Date.now()) : undefined);
+      setBoundedMap(this.wakeupDetails, `cron:${id}`, {
+        source: "schedule_wakeup", promptFingerprint: cron.promptFingerprint, recurring: cron.recurring,
+        ...(nativeDue !== undefined ? { hasNativeDue: true as const } : {}),
+        ...(cron.reason ? { reason: cron.reason } : {}), ...(scheduledFor !== undefined ? { scheduledFor } : {}),
+      }, MAX_BACKGROUND_TASK_LIFECYCLE);
+    };
+    if (nativeTool.name === "ScheduleWakeup") {
+      const wakeup = nativeTool.scheduledWakeup;
+      if (wakeup?.stop) {
+        for (const [key, detail] of this.wakeupDetails) if (detail.source === "loop_wakeup") this.wakeupDetails.delete(key);
+      } else if (wakeup?.promptFingerprint) {
+        // The CLI keeps one pending dynamic wake; a new one supersedes it.
+        for (const [key, detail] of this.wakeupDetails) if (detail.source === "loop_wakeup") this.wakeupDetails.delete(key);
+        const scheduledFor = wakeupTimestamp(result.scheduledFor);
+        setBoundedMap(this.wakeupDetails, `loop:${toolId}`, {
+          source: "loop_wakeup", promptFingerprint: wakeup.promptFingerprint,
+          ...(wakeup.reason ? { reason: wakeup.reason } : {}), ...(scheduledFor !== undefined ? { scheduledFor } : {}),
+        }, MAX_BACKGROUND_TASK_LIFECYCLE);
+      }
+    } else if (nativeTool.name === "CronCreate" && nativeTool.cron && typeof result.id === "string" && result.id) {
+      rememberCron(result.id, { ...nativeTool.cron,
+        recurring: typeof result.recurring === "boolean" ? result.recurring : nativeTool.cron.recurring,
+      }, result.nextFireAt);
+    } else if (nativeTool.name === "CronDelete" && nativeTool.cronId && result.id === nativeTool.cronId) {
+      this.wakeupDetails.delete(`cron:${nativeTool.cronId}`);
+    } else if (nativeTool.name === "CronList" && Array.isArray(result.jobs)) {
+      for (const [key, detail] of this.wakeupDetails) if (detail.source === "schedule_wakeup") this.wakeupDetails.delete(key);
+      for (const job of result.jobs.slice(0, MAX_BACKGROUND_TASK_LIFECYCLE)) {
+        if (!isObj(job) || typeof job.id !== "string" || !job.id || typeof job.prompt !== "string" || typeof job.cron !== "string") continue;
+        rememberCron(job.id, { promptFingerprint: fingerprintText(job.prompt), reason: scheduledWakeupReason(job.prompt), schedule: job.cron, recurring: job.recurring !== false }, job.nextFireAt);
+      }
+    }
   }
 
   /** The local prompt boundary is authoritative evidence that the parent is
@@ -914,6 +1008,7 @@ export class ClaudeStreamTranslator {
     this.backgroundTaskOverflow = false;
     this.scheduledWakeups.clear();
     this.pendingScheduledWakeupReason = null;
+    this.wakeupDetails.clear();
     this.workflows.clear();
     this.emitBackgroundTasks();
     this.emitWorkflows();
@@ -2650,6 +2745,8 @@ export class ClaudeStreamTranslator {
       const tool = b as unknown as ClaudeToolResultBlock;
       if (typeof tool.tool_use_id !== "string" || !tool.tool_use_id) continue;
       const nativeTool = this.toolInputs.get(tool.tool_use_id);
+      if (nativeTool && !event.parent_tool_use_id && !tool.is_error && resultCount === 1)
+        this.recordWakeupResult(tool.tool_use_id, nativeTool, event.tool_use_result);
       const structuredTaskOutput =
         resultCount === 1 &&
         nativeTool &&
@@ -3128,6 +3225,11 @@ function retainToolInput(
       },
     };
   }
+  if (name === "CronCreate" && typeof record.prompt === "string" && typeof record.cron === "string") return {
+    name, cron: { promptFingerprint: fingerprintText(record.prompt), reason: scheduledWakeupReason(record.prompt), schedule: record.cron, recurring: record.recurring !== false },
+  };
+  if (name === "CronList") return { name };
+  if (name === "CronDelete" && typeof record.id === "string") return { name, cronId: record.id };
   const command = pickFirstString(record.command, record.cmd, record.script);
   const description = pickFirstString(record.description);
   if (/^(TaskCreate|TaskUpdate)$/i.test(name)) {
@@ -3315,6 +3417,10 @@ function readScheduledWakeupResultTimestamp(
   return typeof scheduledFor === "number" && Number.isFinite(scheduledFor)
     ? scheduledFor
     : undefined;
+}
+
+function wakeupTimestamp(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 8.64e15 ? value : undefined;
 }
 
 /** Resolve the fixed five-field cron emitted for a one-shot wake-up. The

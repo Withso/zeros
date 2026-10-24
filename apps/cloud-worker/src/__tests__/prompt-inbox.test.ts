@@ -3,6 +3,7 @@ import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import type { SessionUpdate } from "@zeros/protocol/agent-events";
 import { CloudWorker } from "../worker";
 import { SessionStore, type SessionData } from "../sessions/session-store";
 import { CLIENT_A, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
@@ -230,7 +231,10 @@ it("keeps provider acceptance separate from the inbox ACK and publishes it once"
   await until(() => relay.calls.filter(call => call.op === "outcome" && call.body.state === "completed").length).toBe(1);
 });
 
-it("does not treat a delayed Claude context snapshot as acceptance of the next prompt", async () => {
+it.each<[string, SessionUpdate]>([
+  ["context snapshot", { sessionUpdate: "usage_update", size: 100, used: 20, categories: [] }],
+  ["wake-up notice", { sessionUpdate: "wakeup_notice", noticeId: "wakeup", source: "loop_wakeup" }],
+])("does not treat a delayed Claude %s as acceptance of the next prompt", async (_kind, update) => {
   const f = await setup({ agent: "claude" });
   const first = delivery(randomUUID(), "chat", "0", "1", "claude"), second = delivery(randomUUID(), "chat", "0", "2", "claude");
   f.relay.enqueue({ prompts: [first, second], stops: [] });
@@ -239,7 +243,7 @@ it("does not treat a delayed Claude context snapshot as acceptance of the next p
   await until(() => f.driver.prompts.length).toBe(2);
   const accept = vi.spyOn(SessionStore.prototype, "acceptOutbox");
   try {
-    f.driver.emit({ sessionUpdate: "usage_update", size: 100, used: 20, categories: [] });
+    f.driver.emit(update);
     // Driver event admission is synchronous; observing the spy needs no sleep or
     // race with the async journal writer. This reply belongs to the prior result.
     expect(accept).not.toHaveBeenCalled();

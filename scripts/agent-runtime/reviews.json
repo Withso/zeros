@@ -55,23 +55,37 @@
     {
       "provider": "claude",
       "fingerprint": "34bee0cd7bd181759605db1efff576e431e481406c1dd196a2ac44cb72efd6ef",
-      "disposition": "intentionally-deferred",
-      "rationale": "CronCreateOutput adds nextFireAt?: number. The native next-fire timestamp is not yet consumed together with the lifecycle wake-up source; existing cron/tool handling makes no next-fire scheduling or idle-retention claim for this field.",
+      "disposition": "implemented",
+      "rationale": "CronCreateOutput nextFireAt is consumed by both Node translators as the authoritative due time, including the scheduler offset. Local one-shot waiting snapshots and matched lifecycle wake-up notices prefer it to the existing cron estimate; ScheduleWakeup keeps scheduledFor. Root UserPromptSubmit sources distinguish dynamic loops from scheduled tasks. The cloud hook emits status only, without Stop-hook tracking or idle-policy changes.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
         "apps/cloud-worker/src/drivers/claude/translator.ts",
-        "docs/claude-event-coverage.md"
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "scripts/__tests__/claude-wakeup-contract.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/scheduled-wakeups.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/scheduled-wakeups.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/wakeup-hook.test.ts",
+        "scripts/ui-smoke-wakeup.mjs",
+        "docs/agent-tool-presentation.md"
       ]
     },
     {
       "provider": "claude",
       "fingerprint": "c6d6d68ea0d456818e035a2bb39e4742038f732d0be0532d61b322a357daf413",
-      "disposition": "intentionally-deferred",
-      "rationale": "CronListOutput.jobs entries add nextFireAt?: number. The native next-fire timestamp is not yet consumed together with the lifecycle wake-up source; existing cron/tool handling makes no next-fire scheduling or idle-retention claim for this field.",
+      "disposition": "implemented",
+      "rationale": "CronListOutput.jobs nextFireAt is consumed by both Node translators as the authoritative due time, including the scheduler offset. Local one-shot waiting snapshots and matched lifecycle wake-up notices prefer it to the existing cron estimate; ScheduleWakeup keeps scheduledFor. Root UserPromptSubmit sources distinguish dynamic loops from scheduled tasks. The cloud hook emits status only, without Stop-hook tracking or idle-policy changes.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
         "apps/cloud-worker/src/drivers/claude/translator.ts",
-        "docs/claude-event-coverage.md"
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "scripts/__tests__/claude-wakeup-contract.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/scheduled-wakeups.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/scheduled-wakeups.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/wakeup-hook.test.ts",
+        "scripts/ui-smoke-wakeup.mjs",
+        "docs/agent-tool-presentation.md"
       ]
     },
     {

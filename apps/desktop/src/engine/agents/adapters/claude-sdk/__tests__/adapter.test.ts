@@ -7526,3 +7526,44 @@ describe("Claude background acknowledgement terminal races", () => {
     } finally { await adapter.dispose(); }
   });
 });
+
+
+describe("Claude lifecycle wake-up notices", () => {
+  it.each(["loop_wakeup", "schedule_wakeup"] as const)("announces %s once, before its continuation, with matched due time", async source => {
+    const live = makePushableQuery();
+    const emitted: SessionNotification[] = [];
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
+    const due = 1_800_000_017_000;
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const initial = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Watch the deployment")] });
+      await flushMicrotasks();
+      const loop = source === "loop_wakeup";
+      live.push(initMsg("wake-session"), {
+        type: "assistant", uuid: "schedule-frame", message: { id: "schedule-message", role: "assistant", content: [
+          { type: "tool_use", id: "schedule-tool", name: loop ? "ScheduleWakeup" : "CronCreate",
+            input: loop ? { prompt: "Check deployment", reason: "Deployment still provisioning" } : { cron: "0 12 5 8 *", prompt: "Check deployment", recurring: false } },
+        ] },
+      }, {
+        type: "user", tool_use_result: loop ? { scheduledFor: due } : { id: "job", recurring: false, nextFireAt: due },
+        message: { content: [{ type: "tool_result", tool_use_id: "schedule-tool", content: "Scheduled" }] },
+      }, resultOk("wake-session"));
+      await initial;
+      const hooks = live.captured[0].hooks as Record<string, Array<{ hooks: Array<(input: Msg) => Promise<unknown>> }>>;
+      await hooks.Stop[0].hooks[0]({ hook_event_name: "Stop", session_crons: [{ id: "job", recurring: false, schedule: "0 12 5 8 *", prompt: "Check deployment" }] });
+      const before = emitted.length;
+      const input = { hook_event_name: "UserPromptSubmit", source, prompt: "Check deployment", prompt_id: "native-wakeup" };
+      await hooks.UserPromptSubmit[0].hooks[0]({ ...input, agent_id: "child" });
+      expect(emitted.slice(before).some(event => event.update.sessionUpdate === "wakeup_notice")).toBe(false);
+      await hooks.UserPromptSubmit[0].hooks[0](input);
+      await hooks.UserPromptSubmit[0].hooks[0](input);
+      const wakeups = emitted.slice(before).filter(event => event.update.sessionUpdate === "wakeup_notice");
+      expect(wakeups).toHaveLength(1);
+      expect(wakeups[0].update).toMatchObject({ source, reason: loop ? "Deployment still provisioning" : "Check deployment", scheduledFor: due });
+      expect(emitted.slice(before).filter(event => event.update.sessionUpdate === "background_tasks_update").at(-1)?.update).toMatchObject({ waiting: false });
+      live.push(assistantText("Checking the deployment again."), { ...resultOk("wake-session"), uuid: "woken-result" });
+      await flushMicrotasks();
+      expect(emitted.indexOf(wakeups[0])).toBeLessThan(emitted.findIndex(event => event.update.sessionUpdate === "agent_message_chunk" && event.update.content.type === "text" && event.update.content.text === "Checking the deployment again."));
+    } finally { await adapter.dispose(); }
+  });
+});

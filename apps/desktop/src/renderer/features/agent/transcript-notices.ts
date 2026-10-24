@@ -71,7 +71,7 @@ export function usageStatusChanges(events: readonly AgentMessage[]): ReadonlyMap
 export function isProviderWorkEvent(event: AgentMessage): boolean {
   if ("parentToolId" in event && event.parentToolId) return false;
   if (event.kind === "text") {
-    return (event.role === "agent" || event.role === "thought") && !event.retracted &&
+    return (event.role === "agent" || event.role === "thought") && !event.retracted && !event.wakeupNotice &&
       !(event.messageId ?? event.id)?.startsWith("claude-feedback-") && !isLegacyAuthenticationNotice(event) &&
       ((typeof event.text === "string" && event.text.trim().length > 0) || event.redacted === true);
   }

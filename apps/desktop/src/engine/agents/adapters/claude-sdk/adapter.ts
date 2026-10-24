@@ -4631,10 +4631,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                 if (
                   input.hook_event_name === "UserPromptSubmit" &&
                   ownsActivity() &&
+                  !input.agent_id &&
                   (input.source === "loop_wakeup" ||
                     input.source === "schedule_wakeup")
                 ) {
                   state.translator.resumeActivity();
+                  state.translator.announceWakeup({
+                    source: input.source,
+                    prompt: input.prompt,
+                    promptId: input.prompt_id,
+                  });
                   state.translator.clearScheduledWakeups();
                   state.providerRunActive = true;
                   this.markSessionBusy(state);

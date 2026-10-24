@@ -520,6 +520,7 @@ export type SessionUpdate =
   | MessageRetractionUpdate
   | ToolResultRetractionUpdate
   | ModelFallbackUpdate
+  | WakeupNoticeUpdate
   | CurrentModelUpdate
   | AvailableCommandsUpdate
   | AvailableSubagentsUpdate
@@ -710,6 +711,20 @@ export interface ModelFallbackUpdate extends ModelFallbackInfo {
   parentToolId?: string;
   /** Originating request clock when the provider can correlate a late notice. */
   turnStartedAt?: number;
+}
+
+export interface WakeupNoticeInfo {
+  source: "loop_wakeup" | "schedule_wakeup";
+  /** A matched task's short label, never the hook's unrecognized prompt. */
+  reason?: string;
+  /** Provider due time in epoch milliseconds. The renderer owns timezone formatting. */
+  scheduledFor?: number;
+}
+
+/** Automatic work continues the existing user turn; this is status, not input. */
+export interface WakeupNoticeUpdate extends WakeupNoticeInfo {
+  sessionUpdate: "wakeup_notice";
+  noticeId: string;
 }
 
 /** Emitted only after adopting a main-session fallback for subsequent sends. */

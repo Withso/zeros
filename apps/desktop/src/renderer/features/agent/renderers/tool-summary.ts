@@ -61,6 +61,8 @@ export function countEventSummary(events: AgentMessage[]): EventSummaryCounts {
   let agents = 0;
   let messages = 0;
   for (const e of events) {
+    // A wake-up marks the start of work; it is neither a message nor a call.
+    if (e.kind === "text" && e.wakeupNotice) continue;
     if (e.kind === "text" && e.localNote) {
       toolCalls++;
       continue;

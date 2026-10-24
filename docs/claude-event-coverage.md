@@ -101,7 +101,18 @@ credential-free bundled CLI confirms this data is available in summary mode.
 See [context-window snapshots](agent-turn-usage.md#context-window-snapshots).
 Optional custom-agent and skill plugin/path metadata is not presented.
 
-Cron `nextFireAt` with its lifecycle wake-up source remains deferred. Plugin additions through
+Both Node integrations consume CronCreate/CronList `nextFireAt` as the native
+due time, ahead of the existing one-shot cron estimate. ScheduleWakeup retains
+its exact `scheduledFor`. The root `UserPromptSubmit` hook emits a typed status
+notice for `loop_wakeup` or `schedule_wakeup`, matching the exact prompt against
+tracked tasks and deduplicating native prompt IDs. Missing or ambiguous matches
+stay generic. Local keeps its existing Stop-hook waiting/idle policy; the cloud
+worker adds only the notice hook. Notices neither accept a queued cloud prompt
+nor prove model progress. The renderer formats due time in the reader's timezone,
+folds the row with its work, and excludes it from counts, titles and copied
+output. See [automatic wake-up presentation](agent-tool-presentation.md).
+
+Plugin additions through
 `reloadPlugins({ addPlugins })` are deferred until Zeros has a flow that enables
 a plugin; current plugin listing and refresh need no additive reload.
 
@@ -194,9 +205,10 @@ order are documented in [the harness capability boundary](agent-harness-capabili
 - `canUseTool`, `onUserDialog` and `onElicitation` already use existing blocking
   approval/question controls and cancellation lifetimes. Elicitation completion
   notifications do not substitute for those callback receipts.
-- Native hooks remain SDK-owned. Zeros registers passive `Stop` and
-  `UserPromptSubmit` callbacks for scheduled wakeups and activity, with query
-  identity guards. Other configured hooks can still run in the CLI; their
+- Native hooks remain SDK-owned. Local registers passive `Stop` and
+  `UserPromptSubmit` callbacks for scheduled wakeups, status and activity; the
+  cloud worker registers only `UserPromptSubmit` for wake-up status. Both guard
+  query identity and ignore child wake hooks. Other configured hooks can still run in the CLI; their
   started/progress/response notifications follow the table. The adapter does
   not register extra hooks merely to claim event coverage.
   The other installed hook names are intentionally unregistered by Zeros:

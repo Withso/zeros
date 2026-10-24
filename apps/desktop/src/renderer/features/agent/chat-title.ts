@@ -43,7 +43,7 @@ export function settledFirstPromptForTitle(input: {
     const message = input.messages[index]!;
     const preamble =
       message.kind === "error_notice" ||
-      (message.kind === "text" && (message.role === "system" || message.retracted === true || message.modelFallback !== undefined));
+      (message.kind === "text" && (message.role === "system" || message.retracted === true || message.modelFallback !== undefined || message.wakeupNotice !== undefined));
     if (!preamble) break;
     index++;
   }
@@ -52,7 +52,7 @@ export function settledFirstPromptForTitle(input: {
   if (first.queued || first.localNote || !first.text.trim()) return null;
   const answered = input.messages
     .slice(index + 1)
-    .some((m) => m.kind === "tool" || (m.kind === "text" && m.role === "agent" && !m.modelFallback && m.text.trim().length > 0));
+    .some((m) => m.kind === "tool" || (m.kind === "text" && m.role === "agent" && !m.modelFallback && !m.wakeupNotice && m.text.trim().length > 0));
   if (input.status !== "ready" && !answered) return null;
   return { messageId: first.id, prompt: first.text };
 }

@@ -358,11 +358,12 @@ export class Agents {
       route.unsubscribe = driver.onEvent((event) => {
         if (route.closed || route.driver !== driver) return;
         const active = route.active;
-        // Summary controls can finish after the next prompt starts. They do
-        // not prove the provider accepted it; native size hints still do.
-        const contextSnapshot = route.agentId === "claude" && event.update.sessionUpdate === "usage_update" &&
-          event.update.categories !== undefined;
-        if (!contextSnapshot && route.nativeRunning && active?.outbox && !active.outbox.accepted) {
+        // Controls and automatic wake-ups can arrive after a user prompt
+        // starts. Neither proves that prompt was accepted; native size hints
+        // and the existing provider events still do.
+        const advisory = event.update.sessionUpdate === "wakeup_notice" ||
+          (route.agentId === "claude" && event.update.sessionUpdate === "usage_update" && event.update.categories !== undefined);
+        if (!advisory && route.nativeRunning && active?.outbox && !active.outbox.accepted) {
           active.outbox.accepted = true;
           void this.store.acceptOutbox(route.chatId, active.requestId).catch(() => this.stop(route));
         }
