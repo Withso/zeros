@@ -170,9 +170,46 @@ describe("skills_list", () => {
     });
     expect(call({ agentId: "claude", cwd })).toEqual([]);
     expect(swapped).toBe(true);
-    expect(opened).toBeTypeOf("number");
-    expect(read.mock.calls.some(([fd]) => fd === opened)).toBe(false);
-    expect(close).toHaveBeenCalledWith(opened);
+    expect(read).not.toHaveBeenCalled();
+    // Darwin refuses the changed parent during open; Linux closes its refused
+    // descriptor after inspecting the kernel path. Neither may expose bytes.
+    if (opened !== undefined) expect(close).toHaveBeenCalledWith(opened);
+  });
+
+  it("does not publish outside bytes when the parent is restored only for path checks", () => {
+    writeSkill(path.join(cwd, "skills"), "review", "ORIGINAL");
+    writeSkill(path.join(home, "outside"), "review", "OUTSIDE");
+    const directory = fs.realpathSync(path.join(cwd, "skills", "review"));
+    const file = path.join(directory, "SKILL.md");
+    const outside = fs.realpathSync(path.join(home, "outside", "review"));
+    const open = fs.openSync.bind(fs);
+    const stat = fs.statSync.bind(fs);
+    const redirect = () => {
+      fs.renameSync(directory, `${directory}.previous`);
+      symlinkSync(outside, directory);
+    };
+    const restore = () => {
+      fs.unlinkSync(directory);
+      fs.renameSync(`${directory}.previous`, directory);
+    };
+    let swapped = false;
+    vi.spyOn(fs, "openSync").mockImplementation((target, flags, mode) => {
+      if (target !== file || swapped) return open(target, flags, mode);
+      swapped = true;
+      redirect();
+      try { return open(target, flags, mode); }
+      finally { restore(); }
+    });
+    // Another process can change a parent between realpath and stat. Exercise
+    // both windows using actual directory entries, without faking metadata.
+    vi.spyOn(fs, "statSync").mockImplementation((target, options) => {
+      if (target !== file || !swapped) return stat(target, options);
+      redirect();
+      try { return stat(target, options); }
+      finally { restore(); }
+    });
+    expect(call({ agentId: "claude", cwd })).toEqual([]);
+    expect(swapped).toBe(true);
   });
 
   it("bounds full-source responses and skips symlinks and oversized files", () => {

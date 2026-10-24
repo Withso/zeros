@@ -67,7 +67,10 @@
   and match its identity to the contained path before reading and publishing.
   The IPC regressions cover an atomic in-library update and a parent-directory
   swap outside the library, including restoration before validation and file
-  descriptor cleanup. Preview reads use an AbortSignal across both asynchronous
+  descriptor cleanup. Swapping again between `realpath` and `stat` can spoof
+  pathname identity, so Linux checks `/proc/self/fd` and Darwin opens with
+  `O_NOFOLLOW_ANY`; a real-entry regression exercises both validation windows.
+  Preview reads use an AbortSignal across both asynchronous
   boundaries so retiring a preview cannot publish after Markdown loads.
 
 Evidence: `scripts/ui-smoke-composer-suggestions.mjs`,

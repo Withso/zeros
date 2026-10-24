@@ -94,9 +94,26 @@ function resolveSkillRoots(agentId: string | null, cwd: string | null): SkillRoo
 
 const MAX_SKILL_BYTES = 256 * 1024;
 const MAX_CATALOG_BYTES = 2 * 1024 * 1024;
+// Like the Local file transport, Darwin uses O_NOFOLLOW_ANY (not exposed by
+// node:fs) to refuse links in every path component. It cannot combine with
+// O_NOFOLLOW. Linux validates the descriptor's real path below.
+const SKILL_READ_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK |
+  (process.platform === "darwin" ? 0x20000000 : fs.constants.O_NOFOLLOW);
 function contained(root: string, file: string): boolean {
   const rel = path.relative(root, file);
   return rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) && !rel.split(path.sep).includes(".git");
+}
+
+function skillStillContained(fd: number, held: fs.Stats, file: string, root: string): boolean {
+  const currentPath = fs.realpathSync(file);
+  if (!contained(root, currentPath)) return false;
+  if (process.platform === "linux") {
+    // A pathname can be swapped again between realpath and stat. The kernel's
+    // descriptor link identifies the file we will actually read instead.
+    return fs.realpathSync(`/proc/self/fd/${fd}`) === currentPath;
+  }
+  const current = fs.statSync(currentPath);
+  return current.dev === held.dev && current.ino === held.ino;
 }
 
 /** The held descriptor and identity checks bound reads even if a repository
@@ -106,21 +123,15 @@ function readSkill(file: string, root: string): string | null {
   try {
     const resolved = fs.realpathSync(file);
     if (!contained(root, resolved)) return null;
-    fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    fd = fs.openSync(resolved, SKILL_READ_FLAGS);
     const held = fs.fstatSync(fd);
     if (!held.isFile() || held.size > MAX_SKILL_BYTES) return null;
     // Validate the opened file, including a parent replaced at open. Looking
     // up its type/size before opening can describe a different directory entry.
-    const openedPath = fs.realpathSync(file);
-    if (!contained(root, openedPath)) return null;
-    const current = fs.statSync(openedPath);
-    if (current.dev !== held.dev || current.ino !== held.ino) return null;
+    if (!skillStillContained(fd, held, file, root)) return null;
     const bytes = Buffer.alloc(MAX_SKILL_BYTES + 1);
     const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
-    const finalPath = fs.realpathSync(file);
-    if (length > MAX_SKILL_BYTES || !contained(root, finalPath)) return null;
-    const after = fs.statSync(finalPath);
-    if (after.dev !== held.dev || after.ino !== held.ino) return null;
+    if (length > MAX_SKILL_BYTES || !skillStillContained(fd, held, file, root)) return null;
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length));
   } catch { return null; }
   finally { if (fd !== undefined) fs.closeSync(fd); }
