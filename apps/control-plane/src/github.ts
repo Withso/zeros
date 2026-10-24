@@ -195,7 +195,7 @@ export function resolveGithubOauthFlowKind(input: {
 }
 
 function parse<T>(
-  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  schema: z.ZodType<T, unknown>,
   value: unknown,
 ): T {
   const result = schema.safeParse(value);

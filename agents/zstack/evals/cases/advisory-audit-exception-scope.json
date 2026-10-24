@@ -1,0 +1,9 @@
+{
+  "id": "advisory-audit-exception-scope",
+  "kind": "replay",
+  "area": "ci-dependencies",
+  "fixedBy": "pr:709",
+  "symptom": "A widened zod advisory and a new body-parser advisory failed both production audits on main with no code change. The pinned Cursor SDK's zod 3 could not be overridden because the SDK calls single-argument z.record(), which zod 4 rejects.",
+  "rule": "playbooks/ci-red.md: date the advisory against the last green main run, raise floors in the root and control-plane graphs, and bound any reviewed exception to its recorded locked parents.",
+  "check": "pnpm test:git scripts/__tests__/audit-exceptions.test.ts && node scripts/check-audit.mjs && (cd apps/control-plane && node ../../scripts/check-audit.mjs)"
+}

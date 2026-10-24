@@ -56,9 +56,19 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
       "Distribute vertically|Distribute horizontally|Resize to fill|Resize to fit",
   );
   await page.keyboard.press("Escape");
+  // Radix restores trigger focus on the task after the menu unmounts, so an
+  // immediate activeElement sample races that handoff.
   check(
     "Escape closes the layout menu and restores its trigger focus",
-    await menu.evaluate((button) => document.activeElement === button),
+    await waitFor(
+      () =>
+        menu.evaluate(
+          (button) =>
+            document.activeElement === button &&
+            button.getAttribute("aria-expanded") === "false",
+        ),
+      "children-menu-escape-focus",
+    ),
   );
   const choose = async (name) => {
     await menu.click();

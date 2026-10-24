@@ -36,7 +36,7 @@ overrides:
   # their entries; keep each override until its parent lock entry naturally
   # resolves to an equal or newer release.
   "@hono/node-server": "2.1.0"
-  body-parser: "2.3.0"
+  body-parser: "2.4.0"
   fast-uri: "3.1.8"
   fflate: "0.4.9"
   hono: "4.13.11"
@@ -48,6 +48,16 @@ overrides:
   qs: "6.16.0"
   # postcss accepts ^1.2.1; 1.2.2 fixes GHSA-68fv-2mgg-jv7q.
   source-map-js: "1.2.2"
+
+# Reviewed production audit exceptions. scripts/__tests__/audit-exceptions.test.ts
+# limits each entry to its recorded locked parents.
+auditConfig:
+  ignoreGhsas:
+    # zod < 4.6.6. Cursor SDK 1.0.37 depends on zod ^3.25 and calls
+    # single-argument z.record(), which zod 4 rejects, so a zod override would
+    # break it. Every other root and control-plane copy is patched. Retire this
+    # entry with the qualified Cursor SDK update that makes zod a peer (1.0.40+).
+    - GHSA-mrhx-c7xc-m3w5
 
 # Cursor SDK 1.0.35 bundles its Node transport and no longer installs Undici 5.
 # Its former Busboy override and Undici advisory exceptions have been retired.
