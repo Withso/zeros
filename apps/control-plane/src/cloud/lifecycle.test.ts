@@ -52,6 +52,76 @@ function setup(claimed: (CloudV2Workspace & { attempts: number })[], options: { 
 }
 
 describe("cloud v2 lifecycle", () => {
+  it("admits a create while an earlier stop is waiting for its worker", async () => {
+    const stopping = workspace("stopping", { boatSandboxId: "bx_stop1" });
+    const creating = workspace("creating", { id: "7f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11" });
+    const f = setup([stopping, creating]);
+    let release!: (value: boolean) => void;
+    vi.mocked(f.stopWorker).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const tick = f.lifecycle.tick();
+    try {
+      await vi.waitFor(() => expect(f.compute.create).toHaveBeenCalledTimes(1));
+      expect(f.compute.stop).not.toHaveBeenCalled();
+    } finally { release(true); await tick; }
+  });
+
+  it("fills free slots on later polls without reclaiming a step whose database lease expired", async () => {
+    const stopping = workspace("stopping", { boatSandboxId: "bx_stop1" });
+    const creating = workspace("creating", { id: "7f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11" });
+    const f = setup([stopping]);
+    vi.mocked(f.store.claimPending).mockResolvedValueOnce([stopping]).mockResolvedValueOnce([creating]);
+    let release!: (value: boolean) => void;
+    vi.mocked(f.stopWorker).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const first = f.lifecycle.tick();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const second = f.lifecycle.tick();
+    try {
+      await vi.waitFor(() => expect(f.compute.create).toHaveBeenCalledTimes(1));
+      expect(f.store.claimPending).toHaveBeenLastCalledWith(3, 120_000, [stopping.id]);
+      expect(f.stopWorker).toHaveBeenCalledTimes(1);
+    } finally { release(true); await Promise.all([first, second]); }
+  });
+
+  it("bounds concurrent steps at four and serializes overlapping claims", async () => {
+    const claimed = Array.from({ length: 4 }, (_, i) => workspace("stopping", { id: `workspace-${i}`, boatSandboxId: "bx_stop1" }));
+    const f = setup(claimed);
+    let release!: (value: boolean) => void;
+    const blocked = new Promise<boolean>(resolve => { release = resolve; });
+    vi.mocked(f.stopWorker).mockImplementation(() => blocked);
+    const first = f.lifecycle.tick(), overlapping = f.lifecycle.tick();
+    let later: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(f.stopWorker).toHaveBeenCalledTimes(4));
+      later = f.lifecycle.tick();
+      // The scan still runs, but no slots are available for another claim.
+      await vi.waitFor(() => expect(f.store.idleSince).toHaveBeenCalledTimes(2));
+      expect(f.store.claimPending).toHaveBeenCalledTimes(1);
+      expect(f.store.claimPending).toHaveBeenCalledWith(4, 120_000, []);
+    } finally { release(true); await Promise.all([first, overlapping, later]); }
+  });
+
+  it("continues interval admission while a step waits and drains it on shutdown", async () => {
+    vi.useFakeTimers();
+    const f = setup([workspace("stopping", { boatSandboxId: "bx_stop1" })]);
+    vi.mocked(f.store.claimPending).mockResolvedValueOnce([workspace("stopping", { boatSandboxId: "bx_stop1" })]).mockResolvedValue([]);
+    let release!: (value: boolean) => void;
+    vi.mocked(f.stopWorker).mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const stop = f.lifecycle.start();
+    let stopped: Promise<void> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(f.store.claimPending).toHaveBeenCalledTimes(2);
+      let drained = false;
+      stopped = stop().then(() => { drained = true; });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(drained).toBe(false);
+      expect(f.store.claimPending).toHaveBeenCalledTimes(2);
+      release(true);
+      await stopped;
+      expect(f.compute.stop).toHaveBeenCalledTimes(1);
+    } finally { release?.(true); await (stopped ?? stop()); vi.useRealTimers(); }
+  });
+
   it("lets the pending-work-aware idle transition run without revoking the worker before its final flush", async () => {
     const idle = workspace("running"), stopIdle = vi.fn(async () => {});
     const f = setup([], { idle: [idle], stopIdle });

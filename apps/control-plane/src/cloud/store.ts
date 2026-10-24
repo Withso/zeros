@@ -378,17 +378,19 @@ export class CloudV2Store {
 
   /** Leases up to `limit` workspaces in a transitional state to one lifecycle
    * worker. A crashed worker's lease simply expires. */
-  async claimPending(limit: number, leaseMs: number): Promise<(CloudV2Workspace & { attempts: number })[]> {
+  async claimPending(limit: number, leaseMs: number, excludeIds: readonly string[] = []): Promise<(CloudV2Workspace & { attempts: number })[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { attempts: number }>(
-      `UPDATE cloud_v2_workspaces w SET attempts = w.attempts + 1,
-         next_attempt_at = clock_timestamp() + make_interval(secs => $2::double precision / 1000)
-       WHERE w.id IN (
+      `WITH claimed AS MATERIALIZED (
          SELECT id FROM cloud_v2_workspaces
          WHERE state IN ('creating','starting','stopping','deleting')
+           AND NOT (id = ANY($3::uuid[]))
            AND coalesce(next_attempt_at, '-infinity') <= clock_timestamp()
          ORDER BY coalesce(next_attempt_at, updated_at) LIMIT $1 FOR UPDATE SKIP LOCKED)
+       UPDATE cloud_v2_workspaces w SET attempts = w.attempts + 1,
+         next_attempt_at = clock_timestamp() + make_interval(secs => $2::double precision / 1000)
+       FROM claimed WHERE w.id = claimed.id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, w.attempts`,
-      [limit, leaseMs],
+      [limit, leaseMs, excludeIds],
     ));
     return rows.map(row => ({ ...workspace(row), attempts: row.attempts }));
   }

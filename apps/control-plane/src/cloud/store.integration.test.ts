@@ -39,6 +39,13 @@ d("cloud v2 store", () => {
     computerBuildId: null,
   });
 
+  it("excludes in-flight workspaces before applying the claim limit even when their lease has expired", async () => {
+    const first = await create(), second = await create();
+    expect((await store.claimPending(1, 0, [first.id])).map(row => row.id)).toEqual([second.id]);
+    expect((await store.claimPending(4, 0, [first.id, second.id]))).toEqual([]);
+    expect((await store.claimPending(1, 0)).map(row => row.id)).toEqual([first.id]);
+  });
+
   it.each(["creator", "relay"] as const)("fences the suspended process before a %s wake can race runtime installation", async source => {
     const w = await create(), oldToken = await store.rotateWorkerToken(w.id), oldBoot = randomUUID();
     await store.acceptWorkerHello(oldToken, oldBoot);

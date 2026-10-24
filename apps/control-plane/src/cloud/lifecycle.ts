@@ -10,7 +10,7 @@ import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { CLOUD_V2_WORKER_PORT } from "./contract.js";
 
-const BATCH = 10;
+const CONCURRENCY = 4;
 const LEASE_MS = 2 * 60_000;
 /** The worker's hello moves the workspace to running at once; this poll only
  * re-delivers a credential to a worker that has not connected. */
@@ -74,17 +74,22 @@ export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Recor
 
 export class CloudV2Lifecycle {
   private timer: NodeJS.Timeout | null = null;
+  /** Only admission is serialized; provider calls run in separate slots. */
   private running: Promise<void> | null = null;
+  private readonly inFlight = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: CloudV2LifecycleDeps, private readonly intervalMs = 2_000) {}
 
   start(): () => Promise<void> {
-    this.timer = setInterval(() => { this.running ??= this.tick().finally(() => { this.running = null; }); }, this.intervalMs);
+    this.timer = setInterval(() => {
+      void this.poll().catch(error => this.deps.logger?.warn(`[cloud-v2] lifecycle poll failed (${errorCode(error)})`));
+    }, this.intervalMs);
     this.timer.unref();
     return async () => {
       if (this.timer) clearInterval(this.timer);
       this.timer = null;
       await this.running;
+      await Promise.all(this.inFlight.values());
       await this.building;
       await this.cleaning;
     };
@@ -95,6 +100,15 @@ export class CloudV2Lifecycle {
   private lastPromptPrune = 0;
 
   async tick(): Promise<void> {
+    await this.poll();
+    await Promise.all(this.inFlight.values());
+  }
+
+  private poll(): Promise<void> {
+    return this.running ??= this.admit().finally(() => { this.running = null; });
+  }
+
+  private async admit(): Promise<void> {
     const now = this.deps.now?.() ?? Date.now();
     await this.deps.prompts?.wakePending();
     if (now - this.lastPromptPrune > 10 * 60_000) {
@@ -109,19 +123,30 @@ export class CloudV2Lifecycle {
       if (this.deps.stopIdle) await this.deps.stopIdle(idle.id, new Date(now - CLOUD_V2_IDLE_STOP_MS));
       else await this.deps.store.transition(idle.id, ["running"], "stopping");
     }
-    for (const workspace of await this.deps.store.claimPending(BATCH, LEASE_MS)) {
-      try {
-        await this.step(workspace, now);
-      } catch (error) {
-        const code = errorCode(error);
-        this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code})`);
-        // Retrying cannot wake or stop a VM that is gone; say so at once.
-        if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error)) {
-          await this.deps.store.revoke(workspace.id, false);
-          await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing" });
-        } else if (workspace.attempts >= MAX_ATTEMPTS) await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
-        else await this.deps.store.defer(workspace.id, workspace.state, Math.min(5_000 * 2 ** workspace.attempts, 5 * 60_000), { failure: true });
-      }
+    const slots = CONCURRENCY - this.inFlight.size;
+    if (slots <= 0) return;
+    for (const workspace of await this.deps.store.claimPending(slots, LEASE_MS, [...this.inFlight.keys()])) {
+      if (this.inFlight.has(workspace.id) || this.inFlight.size >= CONCURRENCY) continue;
+      const step = this.runStep(workspace, now)
+        // A failed retry write must not escape an unobserved background promise.
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] lifecycle retry failed (${errorCode(error)})`))
+        .finally(() => { this.inFlight.delete(workspace.id); });
+      this.inFlight.set(workspace.id, step);
+    }
+  }
+
+  private async runStep(workspace: CloudV2Workspace & { attempts: number }, now: number): Promise<void> {
+    try {
+      await this.step(workspace, now);
+    } catch (error) {
+      const code = errorCode(error);
+      this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code})`);
+      // Retrying cannot wake or stop a VM that is gone; say so at once.
+      if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error)) {
+        await this.deps.store.revoke(workspace.id, false);
+        await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing" });
+      } else if (workspace.attempts >= MAX_ATTEMPTS) await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
+      else await this.deps.store.defer(workspace.id, workspace.state, Math.min(5_000 * 2 ** workspace.attempts, 5 * 60_000), { failure: true });
     }
   }
 
