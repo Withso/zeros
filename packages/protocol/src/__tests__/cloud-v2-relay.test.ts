@@ -72,6 +72,16 @@ describe("cloud v2 relay contract", () => {
     expect(CloudV2ControlFrameSchema.safeParse({ ...config, agents: {} }).success).toBe(true);
   });
 
+  it("accepts bounded optional workspace setup without weakening workspace strictness", () => {
+    const config = { t: "config", loginRevision: "0", agents: {}, workspace: {
+      id, organizationId: id, checkoutPath: "/home/user/example/repo", repository: "example/repo", branch: "zeros/new", baseBranch: "main",
+    } };
+    for (const setup of [undefined, "", "pnpm install", "x".repeat(8000)])
+      expect(CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, setup } }).success).toBe(true);
+    for (const patch of [{ setup: "x".repeat(8001) }, { setup: 1 }, { command: "unrecognized" }])
+      expect(CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, ...patch } }).success).toBe(false);
+  });
+
   it.each(["oauthToken", "apiKey"])("accepts only one bounded Claude %s credential", (field) => {
     const config = {
       t: "config", loginRevision: "0",

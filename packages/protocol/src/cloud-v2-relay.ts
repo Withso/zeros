@@ -120,6 +120,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       /** The workspace branch; created from `baseBranch` on first boot. */
       branch: z.string().min(1).max(255),
       baseBranch: z.string().min(1).max(255),
+      /** Delivered only with workspace-setup-v1; runs once after a new checkout. */
+      setup: z.string().max(8000).optional(),
     }).strict(),
     agents: z.object({
       codex: proxy.optional(),
@@ -144,3 +146,11 @@ export const CloudV2WorkerActivityReplySchema = z.object({
   loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
   state: z.enum(["creating", "starting", "running", "stopping", "stopped", "failed", "deleting", "deleted"]),
 }).strict();
+
+/** Optional diagnostics travel on their own HTTPS endpoint, never in a strict
+ * hello/history frame. No command, path, provider output or credential values. */
+export const CloudV2WorkerTimingSchema = z.object({
+  phase: z.enum(["worker_checkout", "worker_checkout_fetch", "worker_checkout_switch", "worker_session_store", "worker_services", "worker_configure"]),
+  durationMs: z.number().int().nonnegative().max(3_600_000),
+}).strict();
+export type CloudV2WorkerTiming = z.infer<typeof CloudV2WorkerTimingSchema>;

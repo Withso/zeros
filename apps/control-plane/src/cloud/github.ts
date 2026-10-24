@@ -33,3 +33,21 @@ export function createCloudV2RepositoryTokens(pool: pg.Pool, config: GithubBacke
     return { token: minted.token, expiresAt: minted.expiresAtMs };
   };
 }
+
+/** The commit at the tip of one remote branch, read through the same
+ * repository-scoped token; null when GitHub does not answer with one. */
+export function createCloudV2RemoteHeads(pool: pg.Pool, config: GithubBackendConfig, fetchImpl: typeof fetch = fetch) {
+  const forRepository = createCloudV2RepositoryTokens(pool, config, fetchImpl);
+  return async (organizationId: string, userId: string, repository: string, branch: string): Promise<string | null> => {
+    const [owner, name] = repository.split("/");
+    if (!owner || !name) return null;
+    const { token } = await forRepository(organizationId, userId, repository);
+    const ref = branch.split("/").map(encodeURIComponent).join("/");
+    const response = await fetchImpl(`${config.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${ref}`, {
+      headers: { accept: "application/vnd.github.sha", authorization: `Bearer ${token}`, "user-agent": "zeros-control-plane" },
+      redirect: "error", signal: AbortSignal.timeout(10_000),
+    });
+    const sha = response.ok ? (await response.text()).trim() : (await response.body?.cancel(), "");
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  };
+}

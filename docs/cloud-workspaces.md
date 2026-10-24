@@ -68,14 +68,45 @@ credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
 restarts the worker, which registers a new boot identity in `hello` before the
 control plane dials it. The worker rereads the credential on every request.
 
-Each organization has one Cloud Computer: a recipe and an active named snapshot.
-A build starts from Boat's stock image, installs the runtime, clones the
-selected repositories, runs their setup scripts and records the cloned
-branches and commits. A successful build becomes the active snapshot, and
-the temporary builder is deleted. New workspaces fork that snapshot. The
+Each organization has one Cloud Computer: a configured recipe and an active
+named snapshot. Admins edit the recipe (repositories, branch or tag, setup
+script) as an organization setting, saved at a revision so concurrent edits
+from other admins or devices are refused rather than lost. Repositories stay
+until an admin removes them. Settings shows the difference from the live build
+as unbuilt changes, with Discard and Build computer; nothing changes for
+workspaces until a build succeeds. Older apps that send the repositories with
+the build still work, and their selection becomes the configured recipe.
+
+A build starts from the live snapshot when there is one, otherwise from Boat's
+stock image. It installs the runtime, then fetches existing checkouts and moves
+them to the recipe's ref in place, keeping ignored files such as installed
+dependencies. It clones added repositories, deletes removed ones and runs the
+setup scripts. It records each repository's branch and commit and the runtime it
+cached. A successful build becomes the active snapshot, and the temporary
+builder is deleted. An inactive build's snapshot is deleted once no creating
+workspace still needs it; its recipe stays in the history. Activating an older
+build rebuilds it at the same commits and makes its repositories the configured
+ones. If Boat no longer has the live snapshot, the build fails and the next one
+starts clean.
+
+The builder also refreshes the snapshot without being asked. A new runtime pin
+refreshes the runtime only, without Git or setup, so creates and wakes stop
+downloading it; failures are retried after six hours, at most three times per
+pin. Once a day, an organization that used cloud workspaces in the last week is
+rebuilt at its live build's refs when GitHub reports a moved branch; unbuilt
+edits are left for an admin to build. An organization with no new commits is
+not checked again for a day, one GitHub cannot answer for an hour, and
+organizations are visited earliest-due first. An automatic refresh
+is fenced to the live build it was scheduled from, so a build that became live
+meanwhile is never relabelled or rolled back, and a rebuilt older build is never
+refreshed this way. Scans run beside build admission, never ahead of it. Each
+lifecycle process runs one build at a time: a build holds a dedicated lock
+connection for its whole run.
+
+New workspaces fork the snapshot of the build they pinned at creation. The
 worker fetches origin and switches to the workspace branch, creating it from
 the selected base only when absent; it never resets an existing branch.
-Runtime updates do not require rebuilding the Cloud Computer.
+Runtime updates never require a manual rebuild of the Cloud Computer.
 
 ## Testing a branch
 
@@ -163,8 +194,15 @@ recording, installed on create or wake; older turns without snapshots do not
 gain a reconstructed comparison. Older workers may still refuse `turns.list`,
 which the renderer treats as unavailable history. Reset/undo remain Local-only.
 
+## Lifecycle
+
+Each lifecycle replica admits up to four workspace steps concurrently and
+excludes its in-flight workspaces from further claims. A slow stop does not
+hold up another workspace's creation. Running VMs receive a 24-hour Boat
+lease; a bounded background scan renews it after about 12 hours.
+
 The lifecycle loop stops a running VM after ten minutes without activity
-reports. Turns and recent terminal input/output keep reports flowing; an
+reports. Turns, workspace setup and recent terminal input/output keep reports flowing; an
 untouched shell eventually becomes idle. Passive history reads do not wake
 the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
 the single-use ticket carries that intent through bridge admission. The app
@@ -173,6 +211,36 @@ callers. Explicit work over the bridge, or Start, wakes it and reconnects the
 worker. Stop
 retains the VM disk; Delete removes the VM and revokes its access. Account
 and organization deletion also enqueue their workspaces for cleanup.
+
+Creation pins the active Cloud Computer build. The worker receives that
+build's repository setup script, at most 8,000 characters, only when it
+advertises `workspace-setup-v1` on both HTTPS and WebSocket configuration
+carriers. When checkout creates a new workspace branch, setup runs in the
+background with `bash -lc` as `user`, in the checkout, with the same child
+environment and GitHub broker as terminals. It does not delay `ENGINE_READY`.
+Admission and status are saved before execution under
+`/home/user/.local/share/zeros/cloud-worker/workspace-setup/<workspace-id>.json`;
+the sibling `.log` keeps the first 256 KiB of output, privately on the VM.
+Refresh, wake and restart never rerun an admitted script. A failed script
+leaves the workspace available; Stop cancels and joins setup before its ack.
+
+Boat expires stopped disks after 14 days. After 12 stopped days, one background
+retention operation saves a named snapshot, recording its identity before
+calling Boat. Failed or uncertain saves retry against that same name. A wake
+with an expired or missing disk restores from the saved snapshot, then installs
+the runtime and delivers a new worker credential normally. Without a saved
+snapshot, an expired disk remains `failed/sandbox_missing`. The backup is
+removed after the restored worker says hello; Delete also removes it before
+workspace, account or organization erasure can finish. A fresh stop starts a
+new retention age and backup generation.
+
+Create and wake emit value-free `[cloud-v2] timing` records for allocation or
+resume, runtime installation (including whether it changed), protected route,
+token delivery, first hello, worker checkout/session/services and relay readiness.
+Records contain a shortened workspace ID, closed phase name and duration,
+without commands, paths, URLs or credentials. Optional worker timings use a
+separate HTTPS endpoint with no retries; the control plane caps reports per
+boot and phase in bounded memory. Diagnostics never determine startup success.
 
 Archive sets `archivedAt` and requests the same stop lifecycle. The UI treats
 a stopped or failed workspace with that flag as archived; idle stop leaves it

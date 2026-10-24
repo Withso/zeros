@@ -40,7 +40,7 @@ suite("v2 account and organization deletion", () => {
     const computers = new CloudV2Computers(pool);
     const compute: CloudV2Compute = {
       create: vi.fn(async () => ({ sandboxId: "bx_builder1" })),
-      resume: vi.fn(), stop: vi.fn(), delete: vi.fn(async () => {}), deleteSnapshot: vi.fn(async () => {}),
+      resume: vi.fn(), extendLease: vi.fn(async () => {}), stop: vi.fn(), delete: vi.fn(async () => {}), deleteSnapshot: vi.fn(async () => {}),
       exec: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })),
       execLong: vi.fn(async () => ({ exitCode: 0, stdout: `zeros-build-branch=main\n${"a".repeat(40)}\n`, timedOut: false })),
       saveSnapshot: vi.fn(async () => {}),

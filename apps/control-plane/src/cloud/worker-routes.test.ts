@@ -49,6 +49,28 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
 });
+it("reports the first hello from its prior lifecycle state and accepts bounded optional timings without activity", async () => {
+  const f = fixture(), original = await f.deps.store.acceptWorkerHello(f.token, f.bootId);
+  f.deps.timing = vi.fn();
+  vi.mocked(f.deps.store.acceptWorkerHello).mockResolvedValueOnce({ ...original!, helloTiming: { state: "starting", durationMs: 1250 } });
+  expect((await f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) })).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledWith({ workspaceId: original!.id.slice(0, 8), phase: "worker_hello", state: "starting", durationMs: 1250 });
+  expect((await f.request("timing", { phase: "worker_services", durationMs: 23 })).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenLastCalledWith({ workspaceId: original!.id.slice(0, 8), phase: "worker_services", durationMs: 23 });
+  for (const input of [{ phase: "private-command", durationMs: 1 }, { phase: "worker_services", durationMs: -1 }, { phase: "worker_services", durationMs: 1, token: "do-not-log" }])
+    expect((await f.request("timing", input)).status).toBe(400);
+  expect((await f.request("timing", { phase: "worker_services", durationMs: 23 }, { "x-zeros-worker-boot": randomUUID() })).status).toBe(401);
+  expect(f.deps.store.markActive).not.toHaveBeenCalled();
+  f.deps.timing = () => { throw new Error("diagnostics unavailable"); };
+  expect((await f.request("timing", { phase: "worker_services", durationMs: 23 })).status).toBe(200);
+});
+it("logs each optional timing phase only once per authorized workspace boot and acknowledges excess", async () => {
+  const f = fixture(); f.deps.timing = vi.fn();
+  for (let i = 0; i < 20; i++) expect((await f.request("timing", { phase: "worker_services", durationMs: i })).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledTimes(1);
+  expect((await f.request("timing", { phase: "worker_checkout", durationMs: 1 })).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledTimes(2);
+});
 it("authenticates each HTTP carrier and fences obsolete boots before credentials or rows", async () => {
   const f = fixture();
   for (const [path, body] of [["activity", { idle: false }], ["history", { t: "history", bootId: f.bootId, sequence: 1, chats: [] }], ["github-token", {}], ["config", undefined]] as const) {
@@ -88,6 +110,16 @@ it("delivers MCP only to feature-advertising workers over both HTTP config carri
   for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
     expect((await (await f.request(path, body)).json()).config).not.toHaveProperty("mcpServers");
     expect((await (await f.request(path, body, { "x-zeros-worker-features": "prompt-outbox-v1,mcp-v1" })).json()).config.mcpServers).toEqual(mcpServers);
+  }
+});
+
+it("delivers setup only to supporting workers on hello and config refresh", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, workspace: { ...original.workspace, setup: "pnpm install" } });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "mcp-v1", "workspace-setup-v10"])
+      expect((await (await f.request(path, body, { "x-zeros-worker-features": features })).json()).config.workspace).not.toHaveProperty("setup");
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "mcp-v1, workspace-setup-v1" })).json()).config.workspace.setup).toBe("pnpm install");
   }
 });
 

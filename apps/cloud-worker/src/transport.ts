@@ -1,4 +1,4 @@
-import type { CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import type { CloudV2WorkerFrame, CloudV2WorkerTiming } from "@zeros/protocol/cloud-v2-relay";
 import type { McpAuthorizationRequest } from "./mcp/gateway";
 
 export type PromptOperation = "pull" | "ack" | "begin" | "outcome" | "stop-ack" | "stop";
@@ -19,4 +19,6 @@ export interface Transport {
   /** Durable explicit work has its own typed/idempotent HTTPS channel. */
   promptRequest?: PromptRequest;
   mcpAuthorization?: McpAuthorizationRequest;
+  /** Best-effort diagnostics, independent of strict authority/history frames. */
+  reportTiming?: (record: CloudV2WorkerTiming) => void;
 }

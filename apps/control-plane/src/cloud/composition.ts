@@ -14,9 +14,9 @@ import { createCloudV2AgentLogins, createCloudV2CodexRefresh, type CloudV2AgentL
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
-import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./github.js";
+import { createCloudV2GithubTokens, createCloudV2RemoteHeads, createCloudV2RepositoryTokens } from "./github.js";
 import { HISTORY_OPS, readCloudV2History } from "./history.js";
-import { CloudV2Lifecycle } from "./lifecycle.js";
+import { CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
 import { cloudV2Runtime } from "./runtime.js";
@@ -25,7 +25,7 @@ import { CloudV2Store, type CloudV2Workspace } from "./store.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
-import { cloudV2SandboxName } from "./resource-names.js";
+import { cloudV2SandboxName, cloudV2RetentionSnapshotName } from "./resource-names.js";
 import { CloudV2PromptSignals } from "./prompt-signals.js";
 import { createMcpServices } from "../mcp/composition.js";
 
@@ -84,16 +84,18 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const computers = new CloudV2Computers(pool);
   const repositoryToken = config.github ? createCloudV2RepositoryTokens(pool, config.github) : null;
   const mcp = createMcpServices(pool, config);
+  const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
 
   const workerConfig = async (workspace: CloudV2Workspace): Promise<ConfigFrame> => {
     const proxy = async () => {
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const [codex, claude, cursor] = await Promise.all([
+    const [codex, claude, cursor, setup] = await Promise.all([
       logins(workspace.creatorUserId, workspace.organizationId, "codex"),
       logins(workspace.creatorUserId, workspace.organizationId, "claude"),
       logins(workspace.creatorUserId, workspace.organizationId, "cursor"),
+      store.workspaceSetup(workspace.id),
     ]);
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
     return {
@@ -103,6 +105,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
         checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
+        ...(setup !== null ? { setup } : {}),
       },
       agents,
       ...(mcp ? { mcpServers: await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, true) } : {}),
@@ -118,7 +121,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   };
   const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
-    store, ...(securityEvents ? { securityEvents } : {}),
+    store, timing, ...(securityEvents ? { securityEvents } : {}),
     config: workerConfig,
     workerRoute: async id => {
       const route = await store.workerRoute(id);
@@ -131,7 +134,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+  const workers: CloudV2WorkerRouteDeps = { store, timing, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
     ...(mcp ? { mcpAuthorization: (workspace, id, force) =>
       mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force, true) } : {}),
     promptOutbox: v2.promptOutbox === true, waitForPrompts: (id, ms, signal) => promptSignals.wait(id, ms, signal) };
@@ -163,11 +166,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       if (!repositoryToken) throw new HttpError(409, "github_unavailable", "GitHub is not configured");
       return (await repositoryToken(organizationId, userId, repository)).token;
     },
+    ...(config.github ? { remoteHead: createCloudV2RemoteHeads(pool, config.github) } : {}),
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
     ...(builder ? { builds: builder } : {}),
     store,
+    timing,
     compute,
     runtime,
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
@@ -175,6 +180,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     stopWorker: workspace => connections!.stopWorkspace(workspace),
     bootEnv: workspace => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: v2.runtime.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: workspace => cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner),
+    retentionName: workspace => cloudV2RetentionSnapshotName(config.deploymentChannel, workspace.id, workspace.stoppedAt!, localOwner),
     logger: console,
   }) : null;
   return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges, promptChanges, promptSignals };

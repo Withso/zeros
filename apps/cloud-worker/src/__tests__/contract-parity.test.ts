@@ -25,6 +25,7 @@ const cases = {
   CloudV2WorkerHistorySchema: [{ ...history, bootId: WORKSPACE_ID, sequence: 1 }],
   CloudV2WorkerActivitySchema: [{ idle: false }],
   CloudV2WorkerActivityReplySchema: [{ loginRevision: "3", state: "running" }],
+  CloudV2WorkerTimingSchema: [{ phase: "worker_checkout", durationMs: 42 }],
   RuntimeMcpServerSchema: [
     { id: WORKSPACE_ID, name: "fixture", transport: "stdio", command: "tool", args: ["literal arg"], cwd: "~", env: { KEY: "fixture" }, listen_url: "http://127.0.0.1:3333/mcp" },
     { id: WORKSPACE_ID, name: "fixture", transport: "http", url: "https://example.test/mcp", headers: { "X-Key": "fixture" }, auth: "oauth", disabled_tools: ["blocked"] },
@@ -66,6 +67,15 @@ it("rejects stale protocol, malformed revisions and oversized or unordered histo
       expect(contract.CloudV2WorkerHistorySchema.safeParse({ ...cases.CloudV2WorkerHistorySchema[0], sequence }).success).toBe(false);
     expect(contract.CloudV2WorkerHistorySchema.safeParse({ ...cases.CloudV2WorkerHistorySchema[0],
       messages: { ...history.messages, rows: Array.from({ length: 501 }, () => history.messages.rows[0]) } }).success).toBe(false);
+  }
+});
+
+it("keeps optional workspace setup and its bounds identical on both config schemas", () => {
+  for (const contract of [shared, control]) {
+    for (const setup of [undefined, "", "pnpm install", "x".repeat(8000)])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, setup } }).success).toBe(true);
+    for (const setup of ["x".repeat(8001), null, 1])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, workspace: { ...config.workspace, setup } }).success).toBe(false);
   }
 });
 

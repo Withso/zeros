@@ -75,9 +75,18 @@ it("registers its process boot and rereads the worker credential on every HTTP c
   await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
   expect(f.requests.every(request => request.authorized)).toBe(true);
 });
+it("bounds optional timing reports per phase and ignores an older control plane's missing endpoint", async () => {
+  const f = await fixture();
+  for (let i = 0; i < 20; i++) f.transport.reportTiming({ phase: "worker_checkout", durationMs: 10 });
+  await expect.poll(() => f.requests.filter(request => request.path === "timing").length).toBe(1);
+  await f.transport.send({ t: "idle", idle: false });
+  await expect.poll(() => f.requests.some(request => request.path === "activity")).toBe(true);
+  expect(f.requests.filter(request => request.path === "hello")).toHaveLength(1);
+  expect(f.requests.find(request => request.path === "timing")).toMatchObject({ body: { phase: "worker_checkout", durationMs: 10 }, authorized: true });
+});
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
