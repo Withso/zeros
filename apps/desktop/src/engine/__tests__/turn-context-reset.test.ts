@@ -308,6 +308,34 @@ describe("reset provider context", () => {
     expect(JSON.stringify(windowChatMessages("a", 20))).not.toContain("previous_conversation");
   });
 
+  it.each(["claude", "codex", "cursor"])("preserves legacy replay when a resumed %s execution has no chat id", async (provider) => {
+    const execution = "legacy-execution";
+    vi.spyOn(state.agents, "loadSession").mockResolvedValue({
+      executionId: execution,
+      providerBinding: providerBindingForResume(provider, "replacement-native"),
+      resumedFresh: true,
+    });
+    await state.handleMessage({ type: "AGENT_LOAD_SESSION", id: "legacy-load", timestamp: 1, source: "browser",
+      agentId: provider, sessionId: "legacy-native", cwd: root }, client);
+    expect(replies).toContainEqual(expect.objectContaining({ type: "AGENT_SESSION_LOADED", executionId: execution }));
+    expect(state.sessionChat.has(execution)).toBe(false);
+
+    const replay = synthesizeReplayPrompt([
+      { id: "previous-user", kind: "text", role: "user", text: "Keep the requested behavior", createdAt: 1 },
+      { id: "previous-answer", kind: "text", role: "agent", text: "The retained implementation is ready", createdAt: 2 },
+    ]);
+    const prompt = [
+      { type: "text" as const, text: replay.text },
+      { type: "text" as const, text: "Continue" },
+      { type: "image" as const, mimeType: "image/png", data: "fixture" },
+    ];
+    const send = vi.spyOn(state.agents, "prompt").mockResolvedValue({ stopReason: "end_turn" });
+    await state.handleMessage({ type: "AGENT_PROMPT", id: "legacy-prompt", timestamp: 3, source: "browser",
+      agentId: provider, sessionId: execution, userMessageId: "new-user", bubble: { displayText: "Continue" }, prompt }, client);
+    expect(send).toHaveBeenCalledExactlyOnceWith(provider, execution, prompt, "new-user");
+    expect(state.sessionLoadResponses.get(execution)?.resumedFresh).toBe(false);
+  });
+
   it("keeps an undone interrupted turn cancelled when the retired provider finally returns", async () => {
     seed("codex");
     let entered!: () => void;

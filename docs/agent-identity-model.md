@@ -119,7 +119,9 @@ acknowledged only after a successful, non-cancelled prompt on the current route.
 The preamble is provider input, not another persisted user message.
 The engine advertises `conversation.contextReplay.v1` in its existing capability
 list. Without that capability, a renderer keeps its prior replay behavior. A new
-engine replaces a legacy renderer's generated preamble with canonical history.
+engine replaces a legacy renderer's generated preamble with canonical history
+when the execution is bound to a chat. Legacy executions without a chat id keep
+their supplied replay because there is no canonical chat history to rebuild.
 
 Undo retires any replacement execution and reconstructs context from the
 restored transcript. If the chat has continued past the cut, Undo keeps the

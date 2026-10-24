@@ -5002,8 +5002,9 @@ export class ZerosEngine {
           const firstBlock = msg.prompt[0];
           // Legacy renderers put this generated prefix in its own block and
           // carry the visible user text separately. Never accept stale replay
-          // as the authoritative history of a reset conversation.
-          const prompt = msg.bubble?.displayText !== undefined && msg.prompt.length > 1 &&
+          // as the authoritative history of a reset conversation. A legacy
+          // execution without a chat id still depends on the supplied replay.
+          const prompt = activePrompt.chatId && msg.bubble?.displayText !== undefined && msg.prompt.length > 1 &&
             firstBlock?.type === "text" && isConversationReplayPreamble(firstBlock.text)
             ? msg.prompt.slice(1) : msg.prompt;
           let providerPrompt = prompt;
