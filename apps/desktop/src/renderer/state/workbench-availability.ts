@@ -39,9 +39,6 @@ interface AvailabilityEntry {
   stop: () => void;
   notice?: {
     id: string;
-    headline: string;
-    description: string;
-    shown: boolean;
   };
 }
 const entries = new Map<string, AvailabilityEntry>();
@@ -104,19 +101,7 @@ function visibilityKey(folder: string): string {
 function frameVisible(folder: string): boolean {
   return (visibleFrames.get(visibilityKey(folder)) ?? 0) > 0;
 }
-function reconcileCloudNotice(folder: string, entry: AvailabilityEntry): void {
-  const notice = entry.notice;
-  if (!notice) return;
-  const shown = !frameVisible(folder);
-  if (notice.shown === shown) return;
-  notice.shown = shown;
-  const id = notice.id;
-  if (shown)
-    toast.error(notice.headline, { id, description: notice.description });
-  else toast.dismiss(id);
-}
 function visibilityChanged(): void {
-  for (const [folder, entry] of entries) reconcileCloudNotice(folder, entry);
   for (const listener of visibilityListeners) listener();
 }
 export function registerWorkbenchFrameVisibility(folder: string): () => void {
@@ -293,21 +278,23 @@ export function recordWorkbenchConnectionFailure(
   refreshAvailability(entry);
   if (entry.notice?.id !== `cloud-connect:${folder}`)
     clearConnectionNotice(entry);
-  entry.notice = {
-    id: `cloud-connect:${folder}`,
-    headline:
-      kind === "connect"
-        ? "Couldn't connect to this cloud workspace"
-        : "Couldn't open this cloud workspace",
-    description:
-      error instanceof Error
-        ? workbenchFailureDiagnostic(error)
-        : kind === "connect"
-          ? "Try opening the workspace again."
-          : "Open it again to retry.",
-    shown: false,
-  };
-  reconcileCloudNotice(folder, entry);
+  entry.notice = { id: `cloud-connect:${folder}` };
+  // Cloud frames no longer present connection failures. Keep the existing
+  // app toast available whether or not an affected tab is visible.
+  toast.error(
+    kind === "connect"
+      ? "Couldn't connect to this cloud workspace"
+      : "Couldn't open this cloud workspace",
+    {
+      id: entry.notice.id,
+      description:
+        error instanceof Error
+          ? workbenchFailureDiagnostic(error)
+          : kind === "connect"
+            ? "Try opening the workspace again."
+            : "Open it again to retry.",
+    },
+  );
 }
 
 export function clearWorkbenchConnectionFailure(folder: string): void {
