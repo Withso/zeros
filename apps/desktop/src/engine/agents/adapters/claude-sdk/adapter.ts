@@ -62,6 +62,7 @@ import { homedir } from "node:os";
 import {
   query,
   type AccountInfo,
+  type BUILTIN_TOOL_NAMES,
   type ElicitationRequest,
   type ElicitationResult,
   type EffortLevel,
@@ -249,9 +250,10 @@ function toSdkPermissionMode(mode: ClaudeMode): PermissionMode {
 const EDIT_TOOLS: ReadonlySet<string> = new Set([
   "Write",
   "Edit",
+  // Retained for older transcripts and their existing edit-family rules.
   "MultiEdit",
   "NotebookEdit",
-]);
+] satisfies ReadonlyArray<(typeof BUILTIN_TOOL_NAMES)[number] | "MultiEdit">);
 
 /** Normalize whatever mode id the renderer sends to our canonical
  *  ClaudeMode. The composer pill sends the AGENT mode ids

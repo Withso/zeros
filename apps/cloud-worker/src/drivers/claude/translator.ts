@@ -35,6 +35,7 @@ import { boundedStructuredOutput, canonicalResourceLinks, canonicalToolContent, 
 // ──────────────────────────────────────────────────────────
 
 import { createHash, randomUUID } from "node:crypto";
+import { LEGACY_TOOL_NAME_ALIASES, type BUILTIN_TOOL_NAMES } from "@anthropic-ai/claude-agent-sdk";
 
 import type {
   BackgroundTask,
@@ -78,6 +79,16 @@ type ToolKind =
   | "other";
 
 type Emit = (notification: SessionNotification) => void;
+
+const CLAUDE_AGENT_TOOL_NAME = "Agent" satisfies (typeof BUILTIN_TOOL_NAMES)[number];
+// Keep the native name in stored/live events. Only matching resolves aliases,
+// with the same anchored, case-insensitive behavior as the historical pair.
+const CLAUDE_AGENT_TOOL_PATTERN = new RegExp(`^(?:${[
+  CLAUDE_AGENT_TOOL_NAME,
+  ...Object.entries(LEGACY_TOOL_NAME_ALIASES)
+    .filter(([, canonical]) => canonical === CLAUDE_AGENT_TOOL_NAME)
+    .map(([legacy]) => legacy),
+].map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`, "i");
 
 export const SCHEDULED_WAKEUP_TASK_PREFIX = "scheduled-wakeup:";
 
@@ -2253,7 +2264,7 @@ export class ClaudeStreamTranslator {
     const tool = nativeToolUseId ? this.toolInputs.get(nativeToolUseId) : undefined;
     const invocationId = nativeToolUseId && this.toolCallIds.get(nativeToolUseId);
     const toolCallId = existing?.toolCallId ?? invocationId;
-    if (!toolCallId || (!existing && !/^(Agent|Task)$/i.test(tool?.name ?? ""))) return;
+    if (!toolCallId || (!existing && !CLAUDE_AGENT_TOOL_PATTERN.test(tool?.name ?? ""))) return;
     const agent = {
       ...existing,
       agentId: taskId,
@@ -2678,7 +2689,7 @@ export class ClaudeStreamTranslator {
       }
       const agentResult =
         resultCount === 1 &&
-        /^(Agent|Task)$/i.test(nativeTool?.name ?? "") &&
+        CLAUDE_AGENT_TOOL_PATTERN.test(nativeTool?.name ?? "") &&
         isObj(event.tool_use_result)
           ? event.tool_use_result
           : null;
@@ -3129,14 +3140,14 @@ function retainToolInput(
         : {}),
     };
   }
-  if (!command && !description && !/^(Agent|Task|Monitor|OfferChromeSetup)$/i.test(name)) return null;
+  if (!command && !description && !CLAUDE_AGENT_TOOL_PATTERN.test(name) && !/^(Monitor|OfferChromeSetup)$/i.test(name)) return null;
   return {
     name,
     ...(command ? { command: command.slice(0, MAX_RETAINED_TOOL_TEXT) } : {}),
     ...(description
       ? { description: description.slice(0, MAX_RETAINED_TOOL_TEXT) }
       : {}),
-    ...(/^(Agent|Task)$/i.test(name) ? {
+    ...(CLAUDE_AGENT_TOOL_PATTERN.test(name) ? {
       subagentType: pickFirstString(record.subagent_type)?.slice(0, MAX_RETAINED_TOOL_TEXT),
       model: pickFirstString(record.model)?.slice(0, MAX_RETAINED_TOOL_TEXT),
       effort: pickFirstString(record.effort)?.slice(0, MAX_RETAINED_TOOL_TEXT),
@@ -3478,11 +3489,8 @@ export function mapToolKind(name: string): ToolKind {
   if (/^(Edit|Write|MultiEdit)$/i.test(name)) return "edit";
   if (/^Bash$/i.test(name)) return "execute";
   if (/^WebFetch$/i.test(name)) return "fetch";
-  // Claude Code 2.1.63 renamed `Task` → `Agent` for subagent dispatch
-  // (https://github.com/anthropics/claude-code/releases). Match both so
-  // the SubagentCard still fires on the rename — code that hard-coded
-  // "Task" alone silently misses subagent invocations on newer Claude.
-  if (/^(Task|Agent)$/i.test(name)) return "subagent";
+  // Resolve SDK legacy names without rewriting persisted tool identities.
+  if (CLAUDE_AGENT_TOOL_PATTERN.test(name)) return "subagent";
   if (/^AskUserQuestion$/i.test(name)) return "question";
   // ExitPlanMode is Claude's "I'm done planning, please
   // approve and pick the next mode" tool. Routes to the dedicated

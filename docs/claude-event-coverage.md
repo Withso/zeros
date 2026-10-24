@@ -77,10 +77,25 @@ The experimental usage API remains deferred. Native MCP policy/settings fields
 stay SDK-owned; Zeros does not enable `allowNestedUserNamespaces` or interpret
 Artifact `owned` as workspace authority.
 
-Tool-name contract checks, elicitation field order, context category IDs and
-per-server MCP shares, cron `nextFireAt`/lifecycle wake-ups, and plugin additions
-are reserved for the subsequent integration packages. This pin and review update
-does not claim those features are implemented.
+Tool-name contract tests compare the desktop adapters, renderer title matchers
+and standalone cloud worker with the runtime `BUILTIN_TOOL_NAMES` and
+`LEGACY_TOOL_NAME_ALIASES` exports. They read the actual routing expressions,
+with an explicit retired-name compatibility allowlist. A legacy spelling also
+requires coverage of its canonical target, so an SDK alias cannot hide a missed
+rename. Both Node translators
+resolve subagent aliases through the SDK while retaining native names and
+current transcript output. The renderer keeps its mixed-provider title fallbacks
+under source assertions; it does not import the Node SDK at runtime.
+
+Elicitation `property_order` needs no host adoption: the SDK omits it from
+`onElicitation`, and the documented order already matches JavaScript object-key
+order (including index-like names first). The existing Local form mapping
+preserves that order; the cloud worker retains its cancellation response.
+
+Context category IDs and per-server MCP shares, and cron `nextFireAt` with its
+lifecycle wake-up source, remain deferred. Plugin additions through
+`reloadPlugins({ addPlugins })` are deferred until Zeros has a flow that enables
+a plugin; current plugin listing and refresh need no additive reload.
 
 ## 0.3.296 field dispositions
 

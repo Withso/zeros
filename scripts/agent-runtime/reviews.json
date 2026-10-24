@@ -34,19 +34,18 @@
     {
       "provider": "claude",
       "fingerprint": "2fb7fa10ddf922e0a874de054cca08674bcfabaa6d712e597aee68c1e694cf17",
-      "disposition": "sdk-owned",
-      "rationale": "core.d.ts re-exports BUILTIN_TOOL_NAMES and LEGACY_TOOL_NAME_ALIASES from ./sdk.js. The vendor owns this additive barrel change; existing Node imports remain valid. The constants' host contract test is reserved for P2 of PR #717.",
+      "disposition": "implemented",
+      "rationale": "core.d.ts re-exports BUILTIN_TOOL_NAMES and LEGACY_TOOL_NAME_ALIASES from ./sdk.js. The desktop contract imports both runtime entry points and verifies that their inventories agree; desktop and standalone worker tests validate the names Zeros actually handles.",
       "evidence": [
-        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
-        "apps/cloud-worker/src/drivers/claude/driver.ts",
-        "docs/claude-event-coverage.md"
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/tool-name-contract.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/tool-name-contract.test.ts"
       ]
     },
     {
       "provider": "claude",
       "fingerprint": "ccfb4ec511f400b224c4f5bf9cb99a6d97e9383b957e12c0dfc74b26183997df",
       "disposition": "intentionally-deferred",
-      "rationale": "ArtifactOutput adds optional owned flags to five artifact/asset output variants. P1 keeps the existing bounded tool-content/resource-link handling and does not map this provider flag to Zeros workspace ownership or new artifact UI.",
+      "rationale": "ArtifactOutput adds optional owned flags to five artifact/asset output variants. Zeros keeps the existing bounded tool-content/resource-link handling and does not map this provider flag to Zeros workspace ownership or new artifact UI.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
         "apps/cloud-worker/src/drivers/claude/translator.ts",
@@ -57,7 +56,7 @@
       "provider": "claude",
       "fingerprint": "34bee0cd7bd181759605db1efff576e431e481406c1dd196a2ac44cb72efd6ef",
       "disposition": "intentionally-deferred",
-      "rationale": "CronCreateOutput adds nextFireAt?: number. Adoption of the native next-fire timestamp and the lifecycle wake-up source is reserved for P5 of PR #717; P1 does not claim scheduling or idle-retention support for the new field.",
+      "rationale": "CronCreateOutput adds nextFireAt?: number. The native next-fire timestamp is not yet consumed together with the lifecycle wake-up source; existing cron/tool handling makes no next-fire scheduling or idle-retention claim for this field.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
         "apps/cloud-worker/src/drivers/claude/translator.ts",
@@ -68,7 +67,7 @@
       "provider": "claude",
       "fingerprint": "c6d6d68ea0d456818e035a2bb39e4742038f732d0be0532d61b322a357daf413",
       "disposition": "intentionally-deferred",
-      "rationale": "CronListOutput.jobs entries add nextFireAt?: number. P5 of PR #717 will adopt the timestamp together with the lifecycle wake-up source; P1 leaves current cron/tool handling unchanged and makes no next-fire scheduling claim.",
+      "rationale": "CronListOutput.jobs entries add nextFireAt?: number. The native next-fire timestamp is not yet consumed together with the lifecycle wake-up source; existing cron/tool handling makes no next-fire scheduling or idle-retention claim for this field.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
         "apps/cloud-worker/src/drivers/claude/translator.ts",
@@ -78,30 +77,30 @@
     {
       "provider": "claude",
       "fingerprint": "88cdd0faf9ee136f7ce3efa9e3d6a4100a87b95b8e21e1e237f2a307b4b66af0",
-      "disposition": "intentionally-deferred",
-      "rationale": "BUILTIN_TOOL_NAMES is a new readonly tuple of 54 canonical built-in tool names. P2 of PR #717 will add the tool-name contract test against this export. P1 does not change existing tool routing or infer product support merely from a name appearing in the SDK.",
+      "disposition": "implemented",
+      "rationale": "BUILTIN_TOOL_NAMES supplies the runtime inventory for contract tests over the actual desktop adapters, renderer title matchers and standalone cloud worker. Every special-cased name must be canonical, an SDK legacy alias or an explicitly documented retired compatibility name. The existing edit-tool set and canonical Agent name also use the tuple type; inventory membership alone never enables a product feature.",
       "evidence": [
-        "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
-        "apps/cloud-worker/src/drivers/claude/translator.ts",
-        "docs/claude-event-coverage.md"
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/tool-name-contract.test.ts",
+        "apps/desktop/src/renderer/features/agent/__tests__/claude-tool-name-contract.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/tool-name-contract.test.ts"
       ]
     },
     {
       "provider": "claude",
       "fingerprint": "43d354ccaa4b8c469bb60fd45ccec5ebd0245526953ab3eb5d00dc1331e7a170",
-      "disposition": "intentionally-deferred",
-      "rationale": "LEGACY_TOOL_NAME_ALIASES is a new Readonly<Record<string, string>> export. P2 of PR #717 will cover canonical and legacy names in the tool-name contract test; P1 preserves existing aliases and persisted native identities.",
+      "disposition": "implemented",
+      "rationale": "LEGACY_TOOL_NAME_ALIASES supplies subagent aliases to both Node translators. Matching remains anchored and case-insensitive; native names, persisted identities and current output stay unchanged. Contract tests require each legacy spelling to have its canonical target covered by the same surface, and an injected SDK alias proves that routing follows the export. Mixed-provider renderer fallbacks retain their existing behavior under source assertions without importing the Node SDK into the renderer.",
       "evidence": [
-        "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
-        "apps/cloud-worker/src/drivers/claude/translator.ts",
-        "docs/claude-event-coverage.md"
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/tool-name-contract.test.ts",
+        "apps/desktop/src/renderer/features/agent/__tests__/claude-tool-name-contract.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/tool-name-contract.test.ts"
       ]
     },
     {
       "provider": "claude",
       "fingerprint": "9aef836ff824c122a1d8dd0819ca945a1470b17cf62a9c181068b0f214d19ed2",
       "disposition": "sdk-owned",
-      "rationale": "McpSdkServerConfig adds tools?: McpServerToolPolicy[] for host-registered SDK servers. Policy interpretation remains in the Node SDK/CLI. P1 adds no per-tool policy override and preserves existing MCP configuration and approval behavior in both placements.",
+      "rationale": "McpSdkServerConfig adds tools?: McpServerToolPolicy[] for host-registered SDK servers. Policy interpretation remains in the Node SDK/CLI. Zeros adds no per-tool policy override and preserves existing MCP configuration and approval behavior in both placements.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
         "apps/cloud-worker/src/drivers/claude/driver.ts"
@@ -111,7 +110,7 @@
       "provider": "claude",
       "fingerprint": "ac372de1f95ace6998cc5730be8e1fb032d13776001ad820f74465d37db96b29",
       "disposition": "intentionally-deferred",
-      "rationale": "Query.reloadPlugins options add addPlugins?: SdkPluginConfig[]. Existing reloadPlugins() calls remain valid. P6 of PR #717 will adopt additive plugin loading with its native refusal/hold semantics; no plugin is added by P1.",
+      "rationale": "Query.reloadPlugins options add addPlugins?: SdkPluginConfig[]. Zeros lists and refreshes Claude plugins but has no flow that enables one, so the additive option has no caller. Existing no-argument reloads remain valid; adoption is deferred until Zeros can enable plugins.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude-sdk/extensions.ts",
         "docs/claude-event-coverage.md"
@@ -120,19 +119,20 @@
     {
       "provider": "claude",
       "fingerprint": "39915a22921acdda1ec65e439f4bb46925817481152268fe41aca532629d7e75",
-      "disposition": "intentionally-deferred",
-      "rationale": "SDKControlElicitationRequest adds property_order?: string[]. P3 of PR #717 will adopt explicit elicitation field ordering. P1 leaves the current Local form mapping and the cloud worker's cancellation response unchanged; ordering support is not claimed here.",
+      "disposition": "sdk-owned",
+      "rationale": "SDKControlElicitationRequest.property_order is not applicable to host adoption: the SDK does not forward it to onElicitation. Its documented order already follows JavaScript object-key order, including index-like names first, which the existing requestedSchema.properties iteration preserves. Local forms and the cloud cancellation response need no change.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/shared/mcp-elicitation.ts",
         "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
-        "apps/cloud-worker/src/drivers/claude/driver.ts"
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "docs/claude-event-coverage.md"
       ]
     },
     {
       "provider": "claude",
       "fingerprint": "48173e50639e68649737882f0a9655d4b812d12c45358d37cde9ad37080621f4",
       "disposition": "intentionally-deferred",
-      "rationale": "SDKControlGetContextUsageResponse adds category id, per-server mcpInstructions token shares, customAgents pluginId/path, and skills pluginName/pluginId/path metadata. Stable category rows and MCP shares are reserved for P4 of PR #717 in both the Local adapter and cloud worker. P1 adds no mapping for the optional plugin/path metadata.",
+      "rationale": "SDKControlGetContextUsageResponse adds category id, per-server mcpInstructions token shares, customAgents pluginId/path, and skills pluginName/pluginId/path metadata. Stable category IDs and per-server MCP shares are not yet mapped in the Local adapter or cloud worker. Optional plugin/path metadata is not presented.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
         "apps/cloud-worker/src/drivers/claude/driver.ts",
@@ -143,7 +143,7 @@
       "provider": "claude",
       "fingerprint": "7f27fa9bd000f367921d20c7fec30540685aa6f6da13e6bc27585464b6476491",
       "disposition": "intentionally-deferred",
-      "rationale": "SDKControlGetUsageResponse extends both behavior summaries with max_effort, workflow, always_on_context and large_tool_results, plus optional recommendations and fix objects. This usage API is experimental and remains unused; P1 does not expose or depend on it in Local or cloud.",
+      "rationale": "SDKControlGetUsageResponse extends both behavior summaries with max_effort, workflow, always_on_context and large_tool_results, plus optional recommendations and fix objects. This usage API is experimental and remains unused; Zeros does not expose or depend on it in Local or cloud.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
         "apps/cloud-worker/src/drivers/claude/driver.ts",
@@ -154,7 +154,7 @@
       "provider": "claude",
       "fingerprint": "d61bd1e7a366a55d0db6996947dd3897a272490984a92bc4e063e9667617cfd6",
       "disposition": "sdk-owned",
-      "rationale": "SDKControlInitializeRequest.sdkMcpServerConfigs entries add tools?: McpServerToolPolicy[]. The Node wrapper owns this control-handshake serialization. Zeros uses query() rather than authoring initialize frames and P1 supplies no new SDK-server permission policy.",
+      "rationale": "SDKControlInitializeRequest.sdkMcpServerConfigs entries add tools?: McpServerToolPolicy[]. The Node wrapper owns this control-handshake serialization. Zeros uses query() rather than authoring initialize frames and supplies no new SDK-server permission policy.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
         "apps/cloud-worker/src/drivers/claude/driver.ts",
@@ -187,7 +187,7 @@
       "provider": "claude",
       "fingerprint": "1925eaab6c6baf9a7c1729142f6064d51708ffbc18a3ff309ef2a02d3a307aa5",
       "disposition": "intentionally-deferred",
-      "rationale": "SDKControlReloadPluginsRequest adds wire field add_plugins?: SdkPluginConfig[], corresponding to Query.reloadPlugins({ addPlugins }). P6 of PR #717 will adopt the public option with native absolute-path, managed-policy and transport restrictions; P1 retains no-argument reloads.",
+      "rationale": "SDKControlReloadPluginsRequest adds wire field add_plugins?: SdkPluginConfig[], corresponding to Query.reloadPlugins({ addPlugins }). Zeros has no flow that enables a plugin and therefore no caller for additive loading. Adoption is deferred until that flow exists; existing no-argument reloads keep their behavior.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude-sdk/extensions.ts",
         "docs/claude-event-coverage.md"
@@ -197,7 +197,7 @@
       "provider": "claude",
       "fingerprint": "4638a0525584579c0f0e6e4298d93fd2e1d1460db9404722f0070ab32ef52b34",
       "disposition": "sdk-owned",
-      "rationale": "SandboxSettingsSchema adds optional allowNestedUserNamespaces. The CLI defaults it to false and owns native settings validation. P1 never enables it or changes Local permissions or cloud VM isolation; no new sandbox override is supplied.",
+      "rationale": "SandboxSettingsSchema adds optional allowNestedUserNamespaces. The CLI defaults it to false and owns native settings validation. Zeros supplies no override for this setting; existing Local permissions and cloud VM isolation remain unchanged.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
         "apps/cloud-worker/src/drivers/claude/driver.ts",
@@ -208,7 +208,7 @@
       "provider": "claude",
       "fingerprint": "f5ef2d1dcdf7ecc2df1911663969f288b4af390d606ce04caf41a7c1b7dba486",
       "disposition": "sdk-owned",
-      "rationale": "Settings adds attributionProject, attributionProjectPolicy.default, sshHostCommands and sandbox.allowNestedUserNamespaces. These remain native SDK/CLI settings; P1 adds no Zeros preference, telemetry mapping, SSH command surface or sandbox override, and retains each placement's existing settings sources.",
+      "rationale": "Settings adds attributionProject, attributionProjectPolicy.default, sshHostCommands and sandbox.allowNestedUserNamespaces. These remain native SDK/CLI settings; Zeros exposes none of these fields as a preference, telemetry mapping, SSH command surface or sandbox override, and retains each placement's existing settings sources.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
         "apps/cloud-worker/src/drivers/claude/driver.ts",

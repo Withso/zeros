@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
+  "before": "const CLAUDE_AGENT_TOOL_NAME = \"Agent\" satisfies (typeof BUILTIN_TOOL_NAMES)[number];",
+  "after": "const CLAUDE_AGENT_TOOL_NAME = \"UnreviewedAgent\" satisfies (typeof BUILTIN_TOOL_NAMES)[number];"
+}
