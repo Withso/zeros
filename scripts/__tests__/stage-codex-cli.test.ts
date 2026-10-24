@@ -67,16 +67,22 @@ describe("stage Codex CLI", () => {
         path.join(prefix, "codex-package.json"),
       ]),
     );
-    // Linux sandboxing needs the bundled bwrap + zsh assets. This assertion is
-    // intentionally platform-local: other Codex packages may ship a different
-    // resource set, but every file they do ship must be staged below.
+    // Linux retains bwrap and ships the voice runtime. Patched zsh was removed
+    // upstream in 0.163.0. Other platform packages may ship different resources;
+    // every file in the installed package must remain in the staged inventory.
     if (process.platform === "linux") {
       expect(relativePaths).toEqual(
         expect.arrayContaining([
           path.join(prefix, "codex-resources", "bwrap"),
-          path.join(prefix, "codex-resources", "zsh", "bin", "zsh"),
+          path.join(prefix, "codex-resources", "voice", "bin", "codex-voice-host"),
+          path.join(prefix, "codex-resources", "voice", "NOTICE.md"),
+          path.join(prefix, "codex-resources", "voice", "manifest.json"),
+          path.join(prefix, "codex-resources", "voice", "runtime.json"),
         ]),
       );
+      expect(relativePaths.some((file: string) =>
+        file.startsWith(`${path.join(prefix, "codex-resources", "zsh")}${path.sep}`),
+      )).toBe(false);
     }
     for (const file of source.files) expect(existsSync(file.source)).toBe(true);
   });

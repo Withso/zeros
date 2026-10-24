@@ -45,6 +45,7 @@ import { CodexTurnUsage } from "./usage-accounting";
 
 import { normalizeProviderError, type ProviderError } from "../shared/provider-error";
 import { randomUUID } from "node:crypto";
+import { MAX_IMAGE_CONTENT_LENGTH, readGeneratedImage } from "./generated-image";
 import type { ToolArtwork } from "@zeros/protocol/tool-artwork";
 type CodexToolIdentity = { server: string; tool: string; arguments?: unknown };
 
@@ -98,6 +99,8 @@ export interface CodexEventMapperOptions {
   resumed?: boolean;
   emit: Emit;
   onAsyncQuestion?: (request: QuestionRequest) => void;
+  /** Optional media resolver; the default reads a bounded, verified native file. */
+  resolveImage?: (savedPath: string) => Promise<ContentBlock | undefined>;
   /** Called for any notification we don't have a mapping for — useful
    *  for diagnostics when codex ships a new event type. */
   onUnknown?: (method: string, params: unknown) => void;
@@ -117,6 +120,8 @@ export class CodexEventMapper {
   private readonly asyncQuestionItems = new Set<string>();
   private readonly resolveArtwork?: CodexEventMapperOptions["resolveArtwork"];
   private readonly artworkRequests = new Map<string, symbol>();
+  private readonly resolveImage: NonNullable<CodexEventMapperOptions["resolveImage"]>;
+  private readonly imageReads = new Map<string, Promise<void>>();
   /** Auth belongs to the native session, not a turn. Never expose login ids. */
   private readonly mcpOauthAttempts = new Map<string, McpOauthAttempt>();
 
@@ -312,6 +317,7 @@ export class CodexEventMapper {
     };
     this.onUnknown = opts.onUnknown;
     this.resolveArtwork = opts.resolveArtwork;
+    this.resolveImage = opts.resolveImage ?? readGeneratedImage;
   }
 
   /** Independent native-thread state sharing only the canonical event sink. */
@@ -319,6 +325,7 @@ export class CodexEventMapper {
     const child = new CodexEventMapper({
       sessionId: this.sessionId,
       resolveArtwork: this.resolveArtwork,
+      resolveImage: this.resolveImage,
       onUnknown: this.onUnknown,
       onAsyncQuestion: this.onAsyncQuestion,
       emit: (event) => {
@@ -486,6 +493,7 @@ export class CodexEventMapper {
     this.agentActivityStopped = false;
     this.turnPrefix = randomUUID();
     this.artworkRequests.clear();
+    this.imageReads.clear();
     this.toolCallIds.clear();
     this.emittedToolCallIds.clear();
     this.completedItemIds.clear();
@@ -849,6 +857,7 @@ export class CodexEventMapper {
   /** The transport or local Stop ended observation of these children. Never
    * leave a loader active just because their final activity event was lost. */
   endAgentActivity(): void {
+    this.imageReads.clear();
     this.markUnreportedSleeps();
     this.agentActivityStopped = true;
     for (const group of this.agentGroups.values()) {
@@ -1163,13 +1172,14 @@ export class CodexEventMapper {
               : typeof output === "string"
                 ? output
                 : "";
+        const imageContent = item.type === "imageGeneration" ? imageGenerationContent(item) : null;
         const dynamicContent =
           item.type === "dynamicToolCall"
             ? dynamicToolContent(item)
             : item.type === "mcpToolCall"
               ? mcpToolContent(item)
               : item.type === "imageGeneration"
-                ? imageGenerationContent(item)
+                ? imageContent ?? (status === "completed" ? imagePlaceholder() : null)
                 : null;
         const parsed =
           item.type === "commandExecution"
@@ -1204,6 +1214,8 @@ export class CodexEventMapper {
           },
         });
         if (item.type === "mcpToolCall") this.enrichArtwork(item, toolCallId);
+        if (item.type === "imageGeneration" && status === "completed" && !imageContent && typeof item.savedPath === "string")
+          this.enrichImage(toolCallId, item.savedPath);
         if (item.type === "collabAgentToolCall")
           this.syncCollabAgents(item, toolCallId);
         return;
@@ -1860,6 +1872,29 @@ export class CodexEventMapper {
       });
   }
 
+  /** Optional media never delays notification handling or turn settlement.
+   * Replay/qualification can explicitly join the work before inspecting history. */
+  async flushImageReads(): Promise<void> {
+    await Promise.all(this.imageReads.values());
+  }
+
+  private enrichImage(toolCallId: string, savedPath: string): void {
+    const read: Promise<void> = Promise.resolve()
+      .then(() => this.imageReads.get(toolCallId) === read ? this.resolveImage(savedPath) : undefined)
+      .then((content) => {
+        if (!content || this.imageReads.get(toolCallId) !== read) return;
+        this.emit({ sessionId: this.sessionId, update: {
+          sessionUpdate: "tool_call_update", toolCallId,
+          content: [{ type: "content", content }],
+        } });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.imageReads.get(toolCallId) === read) this.imageReads.delete(toolCallId);
+      });
+    this.imageReads.set(toolCallId, read);
+  }
+
   private ensureToolCallId(itemId: string): string {
     const cached = this.toolCallIds.get(itemId);
     if (cached) return cached;
@@ -2426,6 +2461,10 @@ function toolOutput(item: ThreadItemUnion, streamedOutput?: string): unknown {
       status: item.status,
       failure: item.failure,
       savedPath: item.savedPath,
+      ...(Array.isArray(item.inputImages) ? { inputImages: item.inputImages.slice(0, 128).filter((image) =>
+        image && typeof image.path === "string" && image.path.length > 0 && image.path.length <= 4096 &&
+        typeof image.sha256 === "string" && /^[a-f0-9]{64}$/i.test(image.sha256),
+      ).map(({ path, sha256 }) => ({ path, sha256 })) } : {}),
     };
   if (item.type === "webSearch") return { results: item.results ?? null };
   if (item.type === "fileChange")
@@ -2436,11 +2475,15 @@ function toolOutput(item: ThreadItemUnion, streamedOutput?: string): unknown {
   return null;
 }
 
+function imagePlaceholder(): ToolCallContent[] {
+  return [{ type: "content", content: { type: "text", text: "Image saved by Codex" } }];
+}
+
 function imageGenerationContent(
   item: Extract<ThreadItemUnion, { type: "imageGeneration" }>,
 ): ToolCallContent[] | null {
-  const result = item.result;
-  if (!result || result.length > 16 * 1024 * 1024) return null;
+  const result = "result" in item ? item.result : undefined;
+  if (typeof result !== "string" || !result || result.length > MAX_IMAGE_CONTENT_LENGTH) return null;
   // Native image generation supplies PNG base64; data URLs and links use the
   // same validated media conversion as dynamic tools. Never dump binary JSON.
   const content = /^[A-Za-z0-9+/]+={0,2}$/.test(result)

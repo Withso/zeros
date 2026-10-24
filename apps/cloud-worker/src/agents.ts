@@ -32,7 +32,7 @@ interface Runtime {
   checkpointTurnId?: string;
 }
 
-const VERSIONS = { codex: "0.162.1", claude: "0.3.309", cursor: "1.0.37" };
+const VERSIONS = { codex: "0.164.0", claude: "0.3.309", cursor: "1.0.37" };
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
 const MODEL_ENV = { codex: "OPENAI_MODEL", claude: "ANTHROPIC_MODEL", cursor: "CURSOR_MODEL" };
 const initialized = (agentId: CloudV2Agent): InitializeResponse => ({

@@ -9,7 +9,7 @@ import { CompactionRecordCard } from "../renderers/compaction-card";
 import { QuestionRecordCard } from "../renderers/question-card";
 import { CursorTaskCard } from "../renderers/tool-cursor-task";
 import { SubagentCard } from "../renderers/tool-subagent";
-import { generatedImagePath } from "../renderers/tool-artifacts";
+import { generatedImageInputPaths, generatedImagePath } from "../renderers/tool-artifacts";
 
 vi.mock("../renderers/highlighted-code", () => ({
   HighlightedCode: ({ code }: { code: string }) => code,
@@ -36,6 +36,72 @@ const render = (value: AgentToolMessage) =>
   );
 
 describe("expanded tool details", () => {
+  it("keeps structured results beside other providers' generated images", () => {
+    const html = render(tool({ title: "generate_image", toolKind: "other",
+      rawOutput: { structuredContent: { caption: "Retained artifact description" } },
+      content: [{ type: "content", content: { type: "image", mimeType: "image/png", data: "aGVsbG8=" } }],
+    }));
+    expect(html).toContain("Retained artifact description");
+    expect(html).toContain("<img");
+  });
+
+  it("keeps structured failure details beside a Codex partial image", () => {
+    const html = render(tool({ title: "Generating image", toolKind: "other", status: "failed",
+      rawOutput: { failure: { message: "Image generation was interrupted" } },
+      content: [{ type: "content", content: { type: "image", mimeType: "image/png", data: "aGVsbG8=" } }],
+    }));
+    expect(html).toContain("Image generation was interrupted");
+    expect(html).not.toContain("Image saved by Codex");
+  });
+
+  it("keeps native input-image filenames literal and rejects URLs and traversal", () => {
+    const value = tool({ title: "Generating image", rawOutput: { inputImages: [
+      { path: "/workspace/beach%20original.jpg" }, { path: "/workspace/beach%20original.jpg" },
+      { path: "https://example.com/remote.png" }, { path: "../foreign.png" },
+    ] } });
+    expect(generatedImageInputPaths(value)).toEqual(["/workspace/beach%20original.jpg"]);
+  });
+
+  it("shows the placeholder for a restored Codex row with no captured image content", () => {
+    const html = render(tool({ title: "Generating image", toolKind: "other", rawOutput: { status: "completed", failure: null, savedPath: "/workspace/poster.png" } }));
+    expect(html).toContain("Image saved by Codex");
+    expect(html).not.toContain("No output was captured");
+  });
+
+  it("shows observed edit sources as file pills without changing the generated target or counts", () => {
+    const value = tool({ title: "Generating image", toolKind: "other", rawOutput: {
+      savedPath: "/workspace/sunset-poster.png",
+      inputImages: [{ path: "/workspace/beach.jpg", sha256: "a".repeat(64) }, { path: "/workspace/mask.png", sha256: "b".repeat(64) }],
+    }, content: [{ type: "content", content: { type: "image", mimeType: "image/png", data: "aGVsbG8=" } }] });
+    const html = render(value);
+    expect(html).toContain("Edited from");
+    expect(html).toContain('data-file-path="/workspace/beach.jpg"');
+    expect(html).toContain('data-file-path="/workspace/mask.png"');
+    expect(html).not.toContain("sha256");
+    expect(html).not.toContain("inputImages");
+    expect(metaForEvent(value)).toMatchObject({ label: "Generate", target: "sunset-poster.png", trailing: undefined });
+    expect(metaForEvent(value).target).not.toContain("beach");
+  });
+
+  it("renders the unavailable image explanation as a plain status line", () => {
+    const value = tool({ title: "Generating image", toolKind: "other", rawOutput: { status: "completed", savedPath: "/workspace/sunset-poster.png" },
+      content: [{ type: "content", content: { type: "text", text: "Image saved by Codex" } }],
+    });
+    const html = render(value);
+    expect(html).toContain('data-generated-image-placeholder=""');
+    expect(html).toContain("Image saved by Codex");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("No output was captured");
+  });
+
+  it("keeps legacy inline generation images without source chips or a placeholder", () => {
+    const value = tool({ title: "Generating image", toolKind: "other", content: [{ type: "content", content: { type: "image", mimeType: "image/png", data: "aGVsbG8=" } }] });
+    const html = render(value);
+    expect(html).toContain('src="data:image/png;base64,aGVsbG8="');
+    expect(html).not.toContain("Edited from");
+    expect(html).not.toContain("Image saved by Codex");
+  });
+
   it("keeps artifacts beside specialized Read output", () => {
     const html = render(tool({ toolKind: "read", rawInput: { path: "report.txt" }, content: [
       { type: "content", content: { type: "text", text: "Report text" } },

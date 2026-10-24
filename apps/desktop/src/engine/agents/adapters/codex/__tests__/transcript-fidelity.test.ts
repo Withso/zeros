@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 import { CodexAppServerTranslator } from "../app-server-translator";
 import type { QuestionRequest } from "@zeros/protocol/agent-events";
+import type { ImageGenerationItem } from "../generated/ImageGenerationItem";
 
 function transcript() {
   let messages: AgentMessage[] = [];
@@ -328,6 +329,27 @@ describe("Codex transcript fidelity", () => {
       rawOutput: { status: "completed" },
     });
     expect(t.messages()[2]).not.toHaveProperty("rawOutput.output");
+  });
+
+  it("keeps overlapping read calls in start order with independent terminal states", () => {
+    const t = transcript();
+    const read = { type: "dynamicToolCall", namespace: "skills", tool: "read", arguments: { name: "guide" }, status: "inProgress" };
+    t.item({ ...read, id: "first" }, false);
+    t.item({ ...read, id: "second" }, false);
+    t.item({ ...read, id: "second", status: "completed", success: true, contentItems: [{ type: "inputText", text: "Second result" }] });
+    expect(t.messages()).toMatchObject([
+      { nativeToolCallId: "first", status: "in_progress" },
+      { nativeToolCallId: "second", status: "completed", content: [{ content: { text: "Second result" } }] },
+    ]);
+    t.item({ ...read, id: "first", status: "failed", success: false, contentItems: [{ type: "inputText", text: "First failed" }] });
+    const settled = t.messages();
+    expect(settled).toMatchObject([
+      { nativeToolCallId: "first", status: "failed", content: [{ content: { text: "First failed" } }] },
+      { nativeToolCallId: "second", status: "completed", content: [{ content: { text: "Second result" } }] },
+    ]);
+    t.item({ ...read, id: "first" }, false);
+    t.item({ ...read, id: "second" }, false);
+    expect(t.messages()).toEqual(settled);
   });
 
   it("preserves MCP audio and linked or embedded resources", () => {
@@ -659,5 +681,29 @@ describe("Codex transcript fidelity", () => {
     expect(
       JSON.stringify(image.kind === "tool" && image.rawOutput),
     ).not.toContain("aGVsbG8=");
+  });
+
+  it("accepts attachment-store image completions without an inline result", () => {
+    const t = transcript();
+    const native = {
+      id: "image-file",
+      status: "completed",
+      revisedPrompt: "A landscape",
+      fileId: "file-generated-image",
+      failure: null,
+      savedPath: "/workspace/output.png",
+    } satisfies ImageGenerationItem;
+    t.item({ type: "imageGeneration", ...native }, false);
+    const id = t.messages()[0].id;
+    t.item({ type: "imageGeneration", ...native });
+    expect(t.messages()).toEqual([
+      expect.objectContaining({
+        id,
+        nativeToolCallId: native.id,
+        status: "completed",
+        rawInput: expect.objectContaining({ revisedPrompt: native.revisedPrompt }),
+        rawOutput: expect.objectContaining({ savedPath: native.savedPath }),
+      }),
+    ]);
   });
 });
