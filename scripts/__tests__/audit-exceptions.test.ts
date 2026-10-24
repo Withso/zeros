@@ -9,6 +9,7 @@ const yaml = <T>(file: string) =>
 
 type Workspace = { auditConfig?: { ignoreGhsas?: string[] } };
 type Lock = {
+  packages: Record<string, unknown>;
   importers: Record<
     string,
     Partial<
@@ -24,23 +25,6 @@ type Lock = {
       Record<"dependencies" | "optionalDependencies", Record<string, string>>
     >
   >;
-};
-
-// Each reviewed exception names the vulnerable package, its first patched
-// release and the only locked parents still allowed to hold an older copy.
-const REVIEWED: Record<
-  string,
-  { name: string; patched: string; parents: readonly string[] }
-> = {
-  // Cursor SDK 1.0.37 calls single-argument z.record(), which zod 4 rejects,
-  // so this pinned provider runtime cannot take zod 4.6.6. Its private zod 3
-  // parses provider traffic, not public requests. Retire the exception with
-  // the qualified Cursor SDK update that makes zod a peer dependency.
-  "GHSA-mrhx-c7xc-m3w5": {
-    name: "zod",
-    patched: "4.6.6",
-    parents: ["@cursor/sdk@1.0.37"],
-  },
 };
 
 const version = (value: string) => value.replace(/\(.*$/, "");
@@ -69,34 +53,28 @@ function vulnerableHolders(lock: Lock, name: string, patched: string) {
   return [...new Set(holders)].sort();
 }
 
-describe("reviewed production audit exceptions", () => {
+describe("production audit policy", () => {
   const rootWorkspace = yaml<Workspace>("pnpm-workspace.yaml");
   const rootLock = yaml<Lock>("pnpm-lock.yaml");
   const controlPlaneLock = yaml<Lock>("apps/control-plane/pnpm-lock.yaml");
   const ignored = rootWorkspace.auditConfig?.ignoreGhsas ?? [];
 
-  it("ignores only reviewed advisories", () => {
-    expect(ignored.filter((ghsa) => !(ghsa in REVIEWED))).toEqual([]);
+  it("keeps the root production audit free of advisory exceptions", () => {
+    expect(ignored).toEqual([]);
   });
 
-  it.each(Object.entries(REVIEWED))(
-    "limits %s to its reviewed locked parents",
-    (ghsa, { name, patched, parents }) => {
-      const holders = vulnerableHolders(rootLock, name, patched);
-      if (!ignored.includes(ghsa)) return;
-      expect(holders.length, `${ghsa} no longer needs an exception`).toBe(
-        parents.length,
+  it("retires the Cursor zod exception and every vulnerable locked copy", () => {
+    expect(ignored).not.toContain("GHSA-mrhx-c7xc-m3w5");
+    for (const lock of [rootLock, controlPlaneLock]) {
+      const zodPackages = Object.keys(lock.packages).filter((key) =>
+        key.startsWith("zod@"),
       );
-      expect(holders).toEqual([...parents].sort());
-    },
-  );
-
-  it("keeps Cursor SDK pinned while its zod exception exists", () => {
-    const pkg = JSON.parse(
-      readFileSync(path.join(root, "package.json"), "utf8"),
-    ) as { dependencies: Record<string, string> };
-    if (!ignored.includes("GHSA-mrhx-c7xc-m3w5")) return;
-    expect(pkg.dependencies["@cursor/sdk"]).toBe("1.0.37");
+      expect(zodPackages.length).toBeGreaterThan(0);
+      expect(
+        zodPackages.filter((key) => below(key.slice("zod@".length), "4.6.6")),
+      ).toEqual([]);
+      expect(vulnerableHolders(lock, "zod", "4.6.6")).toEqual([]);
+    }
   });
 
   it("keeps the public control plane on patched releases without exceptions", () => {
@@ -110,12 +88,8 @@ describe("reviewed production audit exceptions", () => {
     );
   });
 
-  it("locks every other root zod and body-parser copy at a patched release", () => {
-    expect(
-      vulnerableHolders(rootLock, "zod", "4.6.6").filter(
-        (holder) => !REVIEWED["GHSA-mrhx-c7xc-m3w5"].parents.includes(holder),
-      ),
-    ).toEqual([]);
+  it("locks every root zod and body-parser copy at a patched release", () => {
+    expect(vulnerableHolders(rootLock, "zod", "4.6.6")).toEqual([]);
     expect(vulnerableHolders(rootLock, "body-parser", "2.4.0")).toEqual([]);
   });
 });
