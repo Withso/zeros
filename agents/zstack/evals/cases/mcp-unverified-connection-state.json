@@ -1,0 +1,9 @@
+{
+  "id": "mcp-unverified-connection-state",
+  "kind": "replay",
+  "area": "renderer-settings",
+  "fixedBy": "ca19141bedf216f6d8d8a590dc5452662ad6dd79",
+  "symptom": "Saving an unchecked MCP definition manufactured a failed connection result even though no check had failed.",
+  "rule": "changes/mcp-connection-recovery.md: keep an unverified save distinct from a failed check and retain confirmed inventory only for the exact configuration.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-connection-status.test.ts"
+}
