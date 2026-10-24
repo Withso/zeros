@@ -185,6 +185,40 @@ For Cursor upgrades, compare the installed SDK types with its
 types and native-event regression fixtures define the integration's supported
 delivery shapes.
 
+## Cursor SDK compatibility
+
+Desktop Local workspaces (Personal and organization-owned) and the standalone
+cloud worker bundle Cursor SDK 1.0.40 with zod 4.6.7. The SDK now accepts zod
+as a peer and builds its exported schemas through `zod/v3`, which is included
+in zod 4. The expanded `ZodType` declarations preserve existing tool, callback
+and conversation shapes. No vulnerable zod 3 package or audit exception is
+needed. The fingerprinted decisions in `scripts/agent-runtime/reviews.json`
+cover every declaration change from the prior bundled runtime.
+
+The SDK's optional `teamId` remains unused: it offers no team-listing API, and
+Zeros' account connection retains a minted API key and email without a team
+selection. A Zeros organization is not a Cursor team. A max-mode label in the
+effort menu is also deferred; `ModelSelection.maxMode` and
+`ModelVariant.isMaxMode` do not change Zeros' persisted effort controls. Native
+model resolution remains SDK-owned. Typed `computerUse` calls retain generic
+tool rows; readable action steps are deferred because the SDK executor requires
+an X11 driver (`XDOTOOL` or `NATIVE_X11`), which the Mac app and headless cloud
+VM do not provide.
+
+Background subagents keep their original run and row identities after the
+launching call returns; the background-activity contract below still applies.
+The SDK handles nested Claude Code `PreToolUse` denials and retries eligible
+one-shot outages once; it never replays a streamed agent run for that retry.
+Its platform sandbox helper must retain execute permission in the worker
+bundle and desktop ASAR-unpacked resources.
+
+If a local store fails after text has streamed, the SDK can finish with that
+text and continue in memory. Both Zeros translators currently consume terminal
+statuses only, so the accompanying nonterminal `status.message` warning is
+lost. Surfacing it is deferred. A minimal follow-up would preserve one bounded,
+deduplicated inbetween warning for the owning run, without changing its terminal
+state or reopening it on replay.
+
 ## Cursor managed MCP catalog lifetime
 
 - Publish a catalog revision only after committing the complete gateway tool

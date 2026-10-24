@@ -30,9 +30,9 @@ a vendor grants redistribution rights beyond its stated terms.
 TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 ----------------------------------------------------
 - @anthropic-ai/claude-agent-sdk@0.3.309: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
-- @cursor/sdk@1.0.37: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
+- @cursor/sdk@1.0.40: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (680 resolved package/version records)
+PACKAGE INVENTORY (679 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.309
@@ -431,13 +431,13 @@ PACKAGE INVENTORY (680 resolved package/version records)
   Source: https://github.com/connectrpc/connect-es
   License documents: d17f227e4df5
 
-@cursor/sdk-darwin-arm64@1.0.37
+@cursor/sdk-darwin-arm64@1.0.40
   License: SEE LICENSE IN LICENSE.md
   Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/cursor/cursor
   License documents: 8d17330e28e3
 
-@cursor/sdk@1.0.37
+@cursor/sdk@1.0.40
   License: SEE LICENSE IN LICENSE.md
   Surfaces: root pnpm workspace
   Source: https://github.com/cursor/cursor
@@ -4573,13 +4573,6 @@ zod-to-json-schema@3.25.2
   Author: Stefan Terdell
   Source: https://github.com/StefanTerdell/zod-to-json-schema
   License documents: 7beaa85b57d7
-
-zod@3.25.76
-  License: MIT
-  Surfaces: root pnpm workspace
-  Author: Colin McDonnell <zod@colinhacks.com>
-  Source: https://github.com/colinhacks/zod
-  License documents: 3f1189b28e38
 
 zod@4.6.7
   License: MIT
@@ -10187,8 +10180,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 3f1189b28e38
 SHA-256: 3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8
-Applies to: zod@3.25.76, zod@4.6.7
-Source labels: zod@3.25.76 — LICENSE; zod@4.6.7 — LICENSE
+Applies to: zod@4.6.7
+Source labels: zod@4.6.7 — LICENSE
 ================================================================================
 
 MIT License
@@ -14916,8 +14909,8 @@ Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.309 — terms sup
 ================================================================================
 DOCUMENT 8d17330e28e3
 SHA-256: 8d17330e28e36f8fef39ccc6facd4b7ddc2855313b679b394f0547dde44408c4
-Applies to: @cursor/sdk-darwin-arm64@1.0.37, @cursor/sdk@1.0.37
-Source labels: @cursor/sdk-darwin-arm64@1.0.37 — terms supplied by @cursor/sdk@1.0.37 — LICENSE.md; @cursor/sdk@1.0.37 — LICENSE.md
+Applies to: @cursor/sdk-darwin-arm64@1.0.40, @cursor/sdk@1.0.40
+Source labels: @cursor/sdk-darwin-arm64@1.0.40 — terms supplied by @cursor/sdk@1.0.40 — LICENSE.md; @cursor/sdk@1.0.40 — LICENSE.md
 ================================================================================
 
 # Cursor SDK License
