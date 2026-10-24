@@ -68,14 +68,39 @@ credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
 restarts the worker, which registers a new boot identity in `hello` before the
 control plane dials it. The worker rereads the credential on every request.
 
-Each organization has one Cloud Computer: a recipe and an active named snapshot.
-A build starts from Boat's stock image, installs the runtime, clones the
-selected repositories, runs their setup scripts and records the cloned
-branches and commits. A successful build becomes the active snapshot, and
-the temporary builder is deleted. New workspaces fork that snapshot. The
+Each organization has one Cloud Computer: a configured recipe and an active
+named snapshot. Admins edit the recipe (repositories, branch or tag, setup
+script) as an organization setting, saved at a revision so concurrent edits
+from other admins or devices are refused rather than lost. Repositories stay
+until an admin removes them. Settings shows the difference from the live build
+as unbuilt changes, with Discard and Build computer; nothing changes for
+workspaces until a build succeeds. Older apps that send the repositories with
+the build still work, and their selection becomes the configured recipe.
+
+A build starts from the live snapshot when there is one, otherwise from Boat's
+stock image. It installs the runtime, then fetches existing checkouts and moves
+them to the recipe's ref in place, keeping ignored files such as installed
+dependencies. It clones added repositories, deletes removed ones and runs the
+setup scripts. It records each repository's branch and commit and the runtime it
+cached. A successful build becomes the active snapshot, and the temporary
+builder is deleted. An inactive build's snapshot is deleted once no creating
+workspace still needs it; its recipe stays in the history. Activating an older
+build rebuilds it at the same commits and makes its repositories the configured
+ones. If Boat no longer has the live snapshot, the build fails and the next one
+starts clean.
+
+The builder also refreshes the snapshot without being asked. A new runtime pin
+refreshes the runtime only, without Git or setup, so creates and wakes stop
+downloading it; failures are retried after six hours, at most three times per
+pin. Once a day, an organization that used cloud workspaces in the last week is
+rebuilt at its configured refs when GitHub reports a moved branch. A rebuilt
+older build is never refreshed this way. Builds of different organizations run
+side by side, up to three at a time.
+
+New workspaces fork the snapshot of the build they pinned at creation. The
 worker fetches origin and switches to the workspace branch, creating it from
 the selected base only when absent; it never resets an existing branch.
-Runtime updates do not require rebuilding the Cloud Computer.
+Runtime updates never require a manual rebuild of the Cloud Computer.
 
 ## Testing a branch
 

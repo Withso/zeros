@@ -163,17 +163,32 @@ export const CloudV2RepositorySchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   ref: z.string().optional(),
   commit: z.string().optional(),
+  branch: z.string().optional(),
   setup: z.string().max(8000).optional(),
 });
+/** What an admin edits: a repository, its branch or tag, and its setup. */
+export const CloudV2RepositoryDraftSchema = CloudV2RepositorySchema.pick({ repository: true, ref: true, setup: true });
+export type CloudV2RepositoryDraft = z.infer<typeof CloudV2RepositoryDraftSchema>;
 export const CloudV2BuildSchema = z.object({
   id: uuid, organizationId: uuid, version: z.number().int().positive(),
   recipe: z.object({ repositories: z.array(CloudV2RepositorySchema), rebuiltFrom: z.number().int().optional() }),
   state: z.enum(["queued", "building", "succeeded", "failed", "cancelled"]),
   snapshotId: z.string().nullable(), errorCode: z.string().nullable(),
   createdAt: z.string(), startedAt: z.string().nullable(), finishedAt: z.string().nullable(),
+  /** Absent from older control planes; they only run manual builds. */
+  reason: z.enum(["manual", "reactivate", "runtime", "refresh"]).optional(),
 }).passthrough();
 export type CloudV2Build = z.infer<typeof CloudV2BuildSchema>;
-const ComputerSchema = z.object({ activeBuildId: uuid.nullable(), snapshotName: z.string().nullable(), builds: z.array(CloudV2BuildSchema) });
+const RecipeSchema = z.object({ repositories: z.array(CloudV2RepositoryDraftSchema) });
+const ComputerSchema = z.object({
+  activeBuildId: uuid.nullable(), snapshotName: z.string().nullable(), builds: z.array(CloudV2BuildSchema),
+  /** The configured repositories and their revision; older control planes
+   * have neither, and the app then edits locally and sends the selection. */
+  recipe: RecipeSchema.optional(),
+  recipeRevision: z.number().int().nonnegative().optional(),
+});
+export type CloudV2Computer = z.infer<typeof ComputerSchema>;
+const SavedRecipeSchema = z.object({ recipe: RecipeSchema, recipeRevision: z.number().int().nonnegative() });
 
 /** A repository on the organization's live Cloud Computer. `id` is the
  * lowercase owner/name, which stays the same across builds. */
@@ -199,9 +214,28 @@ export async function getCloudV2Computer(organizationId: string) {
   return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer`, ComputerSchema);
 }
 
+/** Older control planes: build exactly these repositories. */
 export async function buildCloudV2Computer(organizationId: string, repositories: z.infer<typeof CloudV2RepositorySchema>[]) {
   return (await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/builds`,
     z.object({ build: CloudV2BuildSchema }), { body: { repositories }, idempotencyKey: key() })).build;
+}
+
+/** Builds the configured repositories as the editor showed them at `revision`. */
+export async function buildConfiguredCloudV2Computer(organizationId: string, revision: number) {
+  return (await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/builds`,
+    z.object({ build: CloudV2BuildSchema }), { body: { revision }, idempotencyKey: key() })).build;
+}
+
+/** Saves the configured repositories; a build makes them live. */
+export async function saveCloudV2ComputerRecipe(organizationId: string, repositories: CloudV2RepositoryDraft[], revision: number) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/recipe`,
+    SavedRecipeSchema, { body: { repositories, revision }, idempotencyKey: key(), method: "PUT" });
+}
+
+/** Discards unbuilt changes: the configured repositories return to the live build's. */
+export async function discardCloudV2ComputerRecipe(organizationId: string, revision: number) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/recipe/discard`,
+    SavedRecipeSchema, { body: { revision }, idempotencyKey: key() });
 }
 
 export async function activateCloudV2Build(organizationId: string, buildId: string) {

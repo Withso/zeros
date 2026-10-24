@@ -305,8 +305,8 @@ Launch performs the following:
 2. Reserve account/owner generation capacity. Configure the previously published
    standalone worker using `ZEROS_CLOUD_V2_RUNTIME_SHA256`; the control plane
    delivers that version at VM boot. Publish it separately with the control
-   plane's `cloud-v2:publish-runtime` command. Cloud Computer builds use Boat's
-   stock image.
+   plane's `cloud-v2:publish-runtime` command. A first Cloud Computer build
+   uses Boat's stock image; later builds refresh the live snapshot.
 3. Create an empty disposable PostgreSQL 18 branch inside the configured logical
    database. It copies no Alpha schema or data. Create a short-lived migration
    role and a separate runtime role; run the release migrations as stable owner
