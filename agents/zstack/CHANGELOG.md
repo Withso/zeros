@@ -3,6 +3,13 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.1.7
+
+- Folds cloud lifecycle lessons on bounded SQL claims, timestamp precision,
+  durable provider intent, additive migration ladder checks and opt-in provider
+  recovery, plus root protocol invocation, isolated frozen-patch verification
+  and the node-pty rebuild after `--ignore-scripts` (`changes/`, `zstack-verify`).
+
 ## 0.1.6
 
 Folds the lessons from #482 and #484, pins merged eval cases to their merge commits, and adds the

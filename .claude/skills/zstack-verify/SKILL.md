@@ -111,6 +111,17 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   path- and Git-dependent suites; for an exact comparison, swap only your
   changed source files back to the base revision in the same checkout, compare
   failing test names, then rerun every differing test in isolation.
+- In a shared working tree, qualify a frozen patch on its stated base in a
+  separate worktree or disposable projection, with workspace dependency links
+  bound to that tree. Record its SHA-256 and test evidence; never replace
+  concurrent source edits in place to reconstruct the patch.
+- An install with `--ignore-scripts` leaves `node-pty` without its native
+  binding. Run `pnpm --dir apps/cloud-worker rebuild node-pty` before rerunning
+  worker PTY tests; keep the prerequisite failure in the evidence.
+- Run protocol suites from the repository root, for example
+  `timeout 900 pnpm exec vitest run packages/protocol/src/__tests__/cloud-v2-relay.test.ts`.
+  Package-local Vitest inherits root-relative includes and may find no tests;
+  that result is unverified.
 - `pnpm typecheck` keeps incremental state in `node_modules/.cache/zeros-typecheck`.
   An error in a file you did not touch may be stale state: confirm with
   `pnpm exec tsgo --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
@@ -147,6 +158,22 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   still share PostgreSQL's lock table. Size `max_locks_per_transaction` for
   that concurrency before sharding; `out of shared memory` at reset is a
   fixture failure, not a product regression.
+- Materialize a limited `FOR UPDATE SKIP LOCKED` claim set before updating
+  leases. Test the actual returned bound with zero-duration leases and apply
+  in-flight exclusions before the limit; a re-evaluated subquery can overclaim.
+- PostgreSQL timestamps retain microseconds that JavaScript `Date` drops.
+  Round-tripped timestamp compare-and-set predicates must match the token's
+  precision, or use an exact database revision; test a database-origin value.
+- Provider intent must survive Stop, deletion and a lost reply. Persist its
+  identity and deadline before I/O, then test reconciliation with the same key
+  before cleanup can declare the resource gone.
+- Adding columns to an existing table also requires the control plane's
+  `src/migrations.test.ts`. Whole-row ladder comparisons must project the
+  original columns to check preservation and verify new defaults separately.
+- A recovery change to a shared provider method must be opt-in for callers
+  with durable retry identity. Test other callers too: retention can resume a
+  named snapshot, while a new Computer build must not reuse an old `-v1` name
+  after a development database reset.
 - CI's PostgreSQL runs in a service container in another PID namespace, so a
   test cannot signal or inspect the server's processes. Reproduce connection
   races at the protocol layer, for example an in-test TCP relay that holds
