@@ -19,7 +19,10 @@ where it is encoded.
   - one admission fence for background checkout moves;
   - aborting deferred work before Stop cancels its dependency;
   - injecting fixture PATH through the runtime channel;
-  - running VM scripts once on the real image
+  - running VM scripts once on the real image;
+  - testing a case that only a script's primary path passes;
+  - fencing operations by their own generation rather than by state;
+  - running `test:git` under umask 022
   (`changes/`, `zstack-verify`, `integrate-pr`).
 
 ## 0.1.6

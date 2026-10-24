@@ -127,6 +127,17 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   of a shared slot pool, and claim the steps someone is waiting for first.
 - A fixture for a missing Git object must start from a source that never had
   it; assert `git cat-file -e` fails before relying on it.
+- Run `pnpm test:git` under CI's `umask 022`. This sandbox defaults to 0002,
+  and four dev-environment script suites then fail their permission checks.
+- A test helper that trims `git status --porcelain` drops the first line's
+  leading space. Assert with `git diff --name-only` (and `--cached`) instead.
+- A compare-and-set on state and resource identity is no fence once states
+  cycle. Bind records, completions and destructive steps to the operation's
+  own generation, and track uncertainty per operation.
+- `CloudV2Store` builds RETURNING lists by prefixing every word of its column
+  constants with `w.`, so a cast such as `::text` there breaks every claim.
+- Give every script fallback a test case that only the primary path passes.
+  `git update-index` needs `--stdin` as its last argument.
 - Background workspace mutations need one admission fence that every
   work entry point passes, the durable HTTP prompt inbox and metadata-only
   actions included. Stop aborts deferred work before cancelling what it waits
