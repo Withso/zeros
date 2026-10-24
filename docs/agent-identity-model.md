@@ -101,6 +101,38 @@ whose native resume id arrives in the first streamed init event: an immediate
 tab close cannot unmount React before the durable handle reaches SQLite. The
 update never rekeys the live route or changes the conversation.
 
+### Reset changes and Undo
+
+Local Personal and organization-local chats reset the selected turn and every
+later turn in that chat. The engine serializes this with conversation admission
+and close, cancels accepted work (including prompt preparation), and retires
+that chat's executions. Transcript truncation, provider-binding detachment and
+the pending context generation are committed together. Late provider events,
+bind results and renderer identity writes cannot reattach the discarded history.
+
+The next prompt uses a fresh Claude, Codex or Cursor session. The Local engine
+builds a bounded text preamble from the retained SQLite conversation before
+persisting the new user prompt. Historical tool calls and thinking are not
+replayed; this reconstructs portable context rather than rewinding a native
+provider transcript. The pending generation survives app/engine restart and is
+acknowledged only after a successful, non-cancelled prompt on the current route.
+The preamble is provider input, not another persisted user message.
+The engine advertises `conversation.contextReplay.v1` in its existing capability
+list. Without that capability, a renderer keeps its prior replay behavior. A new
+engine replaces a legacy renderer's generated preamble with canonical history.
+
+Undo retires any replacement execution and reconstructs context from the
+restored transcript. If the chat has continued past the cut, Undo keeps the
+current transcript and provider session while applying the existing file undo.
+A files-only reset leaves provider context intact. All connected renderers
+invalidate only the affected chat's route, pending work and history reads; the
+originating renderer receives the same invalidation as other devices.
+
+File checkpoint restoration and conflict handling remain independent of context
+reset. Shared-file attribution during overlapping turns is unchanged. Cloud
+workspaces continue to expose no turn-reset action and retain their existing
+history-replay path.
+
 ### Native provider fork
 
 `AGENT_FORK_CONVERSATION` is a provider-neutral Zeros command. Fork follows the
@@ -195,6 +227,8 @@ Database migrations are forward-only:
 - v30 repairs development databases that previously used the draft
   Codex-specific `native_session_id` and `native_git_info` columns, including a
   database that stopped after only one draft migration.
+- v43 adds engine-owned context generation and pending replay columns. Ordinary
+  chat upserts cannot change them or revive an old binding after a reset.
 
 ## Required invariants
 

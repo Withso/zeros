@@ -18,6 +18,32 @@ export async function runTurnChangesSmoke({ page, check }) {
       await expect(page.getByRole("button", { name: "Copy output" })).toBeEnabled();
       await expect(page.getByRole("button", { name: "Turn actions" })).toBeVisible();
       if (owner === "cloud") expect(await page.evaluate(() => window.__turnChanges.requests().filter(request => request.op?.startsWith("turns.")).length)).toBe(0);
+      await page.getByRole("button", { name: "Turn actions" }).click();
+      const reset = page.getByRole("menuitem", { name: "Reset changes", exact: true });
+      if (owner === "cloud") {
+        await expect(reset).toHaveCount(0);
+        await page.keyboard.press("Escape");
+      } else {
+        await reset.click();
+        const dialog = page.getByRole("dialog", { name: "Reset changes?" });
+        await expect(dialog).toBeVisible();
+        await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+        await expect(dialog.getByRole("button", { name: "Reset changes", exact: true })).toBeEnabled();
+        const description = dialog.locator("[id]").filter({ hasText: /^Reset this chat and its changes to this point\./ }).last();
+        await expect(description).toHaveText("Reset this chat and its changes to this point.This turn and later turns will be removed. You can undo.");
+        const lines = await description.evaluate(element => element.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(element).lineHeight));
+        expect(lines).toBeCloseTo(2, 1);
+        if (owner === "personal" && agent === "claude") {
+          for (const theme of ["dark", "light"]) {
+            await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
+            await dialog.screenshot({ path: `.context/turn-changes/reset-confirmation-${theme}.png` });
+          }
+          await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+        }
+        await page.keyboard.press("Escape");
+        await expect(dialog).toHaveCount(0);
+        expect(await page.evaluate(() => window.__turnChanges.requests().some(request => request.op === "turns.reset"))).toBe(false);
+      }
       for (const theme of ["dark", "light"]) {
         await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
         const colors = await card.evaluate(element => {

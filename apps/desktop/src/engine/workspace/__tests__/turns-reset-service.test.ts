@@ -1,4 +1,4 @@
-// Service-level tests for the "Reset to this point" orchestration —
+// Service-level tests for the "Reset changes" orchestration —
 // turns.reset / turns.undoReset in workspace/service.ts. The git plumbing and
 // DB layers have their own suites; THIS covers the layer that composes them,
 // where an ordering regression (truncating before capturing, dropping the undo
@@ -23,6 +23,8 @@ import {
 import { startTurn, finishTurn, getTurn } from "../../db/turns";
 import { upsertChatMessagesBulk, windowChatMessages } from "../../db/messages";
 import { getResetUndo } from "../../db/reset-undo";
+import { getChat, upsertChat } from "../../db/chats";
+import { providerBindingForResume } from "@zeros/protocol/identities";
 import { snapshotWorkingTree, snapshotRef } from "../../git/turns-git";
 import type { ResetFileOutcome, TurnResetResult } from "../../git/turns-git";
 
@@ -168,6 +170,25 @@ describe("turns.reset / turns.undoReset (service orchestration)", () => {
     expect(rec.turns.map((t) => t.turn_id)).toEqual([turnId]);
     expect(rec.snapshot).toMatch(/^[0-9a-f]{40,64}$/);
     expect(rec.postSnapshot).toMatch(/^[0-9a-f]{40,64}$/);
+  });
+
+  it.each(["claude", "codex", "cursor"])("detaches discarded %s provider history durably without changing another chat", async (provider) => {
+    for (const id of [chatId, "other-chat"]) {
+      upsertChat({
+        id, folder: repo, agentId: provider, agentName: provider, model: null,
+        effort: "", permissionMode: "auto", lastModeId: null, prePlanModeId: null,
+        fast: false, additionalDirectories: [], title: id, createdAt: 1, updatedAt: 1,
+        sessionId: `native-${id}`, providerBinding: providerBindingForResume(provider, `native-${id}`),
+        pinned: false, archived: false, sourceChatId: null, kind: "chat",
+      });
+    }
+    await svc.handle("turns.reset", { chatId, turnId });
+    closeZerosDb();
+    expect(getChat(chatId)).toMatchObject({ sessionId: null, providerBinding: null });
+    expect(getChat("other-chat")).toMatchObject({
+      sessionId: "native-other-chat",
+      providerBinding: providerBindingForResume(provider, "native-other-chat"),
+    });
   });
 
   it("undo restores the files AND the conversation when the chat wasn't continued", async () => {

@@ -143,7 +143,7 @@ import {
 } from "@zeros/protocol/system-instructions";
 import { legacyProviderBinding, sameProviderBinding } from "@zeros/protocol/identities";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
-import { synthesizeReplayPrompt } from "./replay";
+import { CONVERSATION_REPLAY_CAPABILITY, synthesizeReplayPrompt } from "@zeros/protocol/conversation-replay";
 import { activeProviderTurnId } from "./turn-grouping";
 import {
   AuthPromptRecovery,
@@ -569,6 +569,8 @@ export function AgentSessionsProvider({
   // Warm retained chats reconcile against durable history in the background.
   // Hover intent followed by selection must share that same window read.
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
+  const conversationResetFlightsRef = useRef(new Map<string, Promise<void>>());
+  const promptAbortRef = useRef(new Map<string, AbortController>());
   // Exact chat ids owned by the committed 12-view renderer deck. This is
   // intentionally published by a passive effect in ChatDeck, never by
   // an abandoned concurrent render.
@@ -577,10 +579,10 @@ export function AgentSessionsProvider({
   // Atomic guard against concurrent sendPrompt calls. The Zustand
   // `status === "streaming"` check is a read-then-act
   // pattern: two rapid Send-button clicks can both pass it before
-  // either flips the flag. The ref-based set is updated synchronously
+  // either flips the flag. The ref-based map is updated synchronously
   // at the very top of sendPrompt, before any awaited operation, so
   // the second call sees the lock and bails immediately.
-  const sendingChatsRef = useRef(new Set<string>());
+  const sendingChatsRef = useRef(new Map<string, symbol>());
 
   // Cursor "duplicate turn" guard. Tracks whether the in-flight turn for a
   // chat has already STREAMED assistant content (text / reasoning / a tool
@@ -1526,6 +1528,15 @@ export function AgentSessionsProvider({
       [...sendQueueRef.current.values()].flatMap(entries => entries.flatMap(entry => entry.cloudQueue?.draft.attachments ?? [])));
   }, [cloudComputerV2]);
   const prepareForSend = useCallback<SessionsActions["prepareForSend"]>((chatId, wakeIntent) => {
+    if (conversationResetFlightsRef.current.has(chatId)) {
+      return (async () => {
+        for (;;) {
+          const resetting = conversationResetFlightsRef.current.get(chatId);
+          if (!resetting) return;
+          await resetting;
+        }
+      })();
+    }
     if (!cloudComputerV2) return null;
     const current = () => {
       // Never fall back to the active folder: a hidden chat can own an
@@ -2714,7 +2725,7 @@ export function AgentSessionsProvider({
       // correctly queued behind sendingChatsRef. Park such a send the same way
       // a send into a `warming` chat parks: active turn visible now, session
       // build kicked in the background, dispatch via ensureSession's
-      // ready-drain. Must happen BEFORE sendingChatsRef.add — the
+      // ready-drain. Must happen BEFORE sendingChatsRef.set — the
       // turn-completion finally treats a non-`ready` settle as unhealthy and
       // would drop this very queue.
       {
@@ -2826,7 +2837,8 @@ export function AgentSessionsProvider({
           return;
         }
       }
-      sendingChatsRef.current.add(chatId);
+      const sendOwner = Symbol();
+      sendingChatsRef.current.set(chatId, sendOwner);
       let sentUserMessageId: string | null = null;
       let promptDiagnostics: {
         promptId: string;
@@ -3222,7 +3234,11 @@ export function AgentSessionsProvider({
             requestExecutionId = sessionId;
             const pendingIds = new Set(pendingAuth.map((message) => message.id));
             const replayAtDispatch = getStore().sessions[chatId];
-            const replay = replayAtDispatch?.needsConversationReplay
+            // New Local engines own canonical replay. Older engines and cloud
+            // keep their existing renderer path until they advertise support.
+            const rendererReplays = isCloudWorkspace(current.cwd) ||
+              !bridge.supportsEngineCapability?.(CONVERSATION_REPLAY_CAPABILITY);
+            const replay = rendererReplays && replayAtDispatch?.needsConversationReplay
               ? synthesizeReplayPrompt(current.messages.filter((message) =>
                   message.id !== userMessage.id && !pendingIds.has(message.id)
                 ))
@@ -3231,12 +3247,14 @@ export function AgentSessionsProvider({
               ? [{ type: "text" as const, text: replay.text }, ...promptToSend]
               : promptToSend;
             const controller = new AbortController();
+            promptAbortRef.current.set(chatId, controller);
             let timer: ReturnType<typeof setTimeout> | null = null;
             let absoluteTimer: ReturnType<typeof setTimeout> | null = null;
             let settled = false;
 
             const cleanup = () => {
               settled = true;
+              if (promptAbortRef.current.get(chatId) === controller) promptAbortRef.current.delete(chatId);
               if (timer) {
                 clearTimeout(timer);
                 timer = null;
@@ -4158,7 +4176,7 @@ export function AgentSessionsProvider({
           ownsTerminalSlot = ownsPromptTurn();
         }
         if (!ownsTerminalSlot) {
-          sendingChatsRef.current.delete(chatId);
+          if (sendingChatsRef.current.get(chatId) === sendOwner) sendingChatsRef.current.delete(chatId);
           // B may have finished while A still held the RPC lock. Its terminal
           // event could not drain C then; retry only the normal healthy drain,
           // never A's plan/failure/drop cleanup on B's state.
@@ -4167,7 +4185,7 @@ export function AgentSessionsProvider({
               settled?.status === "ready") drainNextQueued(chatId);
         }
         if (ownsTerminalSlot) {
-          sendingChatsRef.current.delete(chatId);
+          if (sendingChatsRef.current.get(chatId) === sendOwner) sendingChatsRef.current.delete(chatId);
           // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
           // the happy path Approve / a typed follow-up cleared pendingPermission
           // before we reached here — this only bites when the turn hit a terminal
@@ -5915,6 +5933,63 @@ export function AgentSessionsProvider({
   );
   hydrateCloudSendRef.current = hydrateChat;
 
+  const resetConversationContext = useCallback((chatId: string): void => {
+    const slot = getStore().sessions[chatId];
+    if (!slot || parseCloudScopedId(chatId) || isCloudWorkspace(slot.cwd)) return;
+    // A reset is an explicit cancellation boundary, including pending bind,
+    // queued-send, and history reads. All cleanup is scoped to this chat.
+    bumpCancelGeneration(cancelGenerationsRef.current, chatId);
+    promptAbortRef.current.get(chatId)?.abort();
+    promptAbortRef.current.delete(chatId);
+    sendingChatsRef.current.delete(chatId);
+    ensureInFlightRef.current.delete(chatId);
+    loadFlightKeysRef.current.delete(chatId);
+    loadFlightAdoptOnlyRef.current.delete(chatId);
+    prebindDirtySessionsRef.current.delete(chatId);
+    clearPrebindGoalSnapshotsForChat(prebindGoalSnapshotsRef.current, chatId);
+    prebindBackgroundTasksRef.current.clearChat(chatId);
+    pendingHydratesRef.current.delete(chatId);
+    invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
+    invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
+    sendQueueRef.current.delete(chatId);
+    queueHeldRef.current.delete(chatId);
+    flushBubbleRef.current.delete(chatId);
+    authPromptsRef.current.delete(chatId);
+    turnProducedOutputRef.current.delete(chatId);
+    announcedDirsRef.current.delete(chatId);
+    promptActivityRef.current.delete(chatId);
+    localTranscriptCache.forget(chatId);
+    forgetFreshLocalChat(chatId);
+    getStore().setCancelling(chatId, false);
+    getStore().setPendingLocalTurn(chatId, null);
+    useWorkspaceStore.getState().dispatch({ type: "UPDATE_CHAT_SETTINGS", id: chatId,
+      updates: { sessionId: undefined, providerBinding: undefined, providerMetadata: undefined } });
+    getStore().setSession(chatId, {
+      ...BLANK,
+      agentId: slot.agentId,
+      agentName: slot.agentName,
+      agentRole: slot.agentRole,
+      designDocumentId: slot.designDocumentId,
+      cwd: slot.cwd,
+      initialize: slot.initialize,
+      currentModeId: slot.currentModeId,
+      availableModes: slot.availableModes,
+      messages: slot.messages,
+      leadingPrompt: slot.leadingPrompt,
+      hasTranscript: slot.hasTranscript,
+      // A full authoritative hydrate can accept an empty reset and an Undo
+      // with no overlapping rows. Tail merging deliberately cannot do either.
+      transcriptState: "cold",
+      transcriptDirty: true,
+    });
+    // Evicted views stay bounded; they'll hydrate when retained again.
+    if (slot.transcriptState === "cold") return;
+    const flight = hydrateChat(chatId).finally(() => {
+      if (conversationResetFlightsRef.current.get(chatId) === flight) conversationResetFlightsRef.current.delete(chatId);
+    });
+    conversationResetFlightsRef.current.set(chatId, flight);
+  }, [getStore, hydrateChat]);
+
   retryHydrateRef.current = async (chatId, isCurrent) => {
     // A disconnect can reject the old request AFTER the replacement socket
     // connected. Wait for that request's finally to release its dedupe entry;
@@ -5943,12 +6018,16 @@ export function AgentSessionsProvider({
       for (const id of targets) {
         const cloud = parseCloudScopedId(id);
         if (cloud && !canBackgroundSyncCloudWorkspace(cloud)) continue;
+        if (!cloud && raw.type === "DB_CHANGED" && raw.kinds.includes("conversationContext")) {
+          resetConversationContext(id);
+          continue;
+        }
         if (parseCloudScopedId(id)) pendingHydratesRef.current.nudge(id);
         void reconcileChatMessages(id);
       }
     });
     return unsub;
-  }, [bridge, getStore, reconcileChatMessages]);
+  }, [bridge, getStore, reconcileChatMessages, resetConversationContext]);
 
   const listSessionsFor = useCallback<SessionsActions["listSessionsFor"]>(
     async (agentId, opts) => {
