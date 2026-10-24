@@ -75,13 +75,20 @@ by the mock-backed regression suites.
 
 ## Context-window snapshots
 
-Context fill is independent of turn billing. Claude refreshes it after each
+Context fill is independent of turn billing. Local and cloud Claude refresh it after each
 accepted root result, including turnless compaction and background continuations.
 Use the query object as the process generation and a monotonically increasing
 refresh revision. After awaiting the SDK, publish only if that query is still
 current, the session is alive and no newer refresh has started. Ordinary
 `system/init` metadata must not reset this ownership. Replacement, idle detach,
 Stop that retires the query and EOF all invalidate its pending responses.
+Background acknowledgement results, child runs and replayed results do not
+refresh the parent gauge. Cloud reads are fire-and-forget with a five-second
+publication deadline and one unresolved SDK control at a time. Newer results
+invalidate the pending reading and coalesce into one follow-up after it settles;
+an unresponsive SDK cannot accumulate controls, hold a turn or delay disposal.
+These delayed control replies do not acknowledge a newer cloud outbox prompt;
+acceptance still waits for the provider's native turn events.
 
 Routine reads use `getContextUsage({ detail: "summary" })`, supported by the
 pinned Claude SDK. This uses last-response usage and local estimates instead of
@@ -92,13 +99,15 @@ invalid window size. A valid zero/lower reading after compaction is allowed.
 Totals and categories come from the same response; an empty/missing breakdown
 clears the old categories rather than keeping stale detail beside new totals.
 
-Preserve the native category `kind` (`used`, `free`, `buffer`, `deferred`)
-through the shared notification and renderer state. SDK 0.3.268+ supplies it;
-only older responses fall back to `isDeferred` and the legacy category names.
-Native kind wins over both. Ignore malformed or unsupported category types
+Preserve known stable category `id`, native `kind` (`used`, `free`, `buffer`,
+`deferred`) and optional per-server estimates through the shared notification
+and renderer state. Unknown future IDs are treated as absent. Native kind wins;
+IDs identify rows ahead of display names, with `isDeferred` and legacy names as
+compatibility fallbacks. Ignore malformed or unsupported category types
 without discarding a valid total. Category-kind changes are meaningful even
-when the name and token count stay equal; repeated equal snapshots stay
-reference-stable. The optional protocol field keeps older peers readable.
+when the name and token count stay equal, as are ID and server-share changes;
+repeated equal snapshots stay reference-stable. The optional protocol fields
+keep older peers and persisted snapshots readable.
 
 The context popover is one continuous list: Free space first, used categories,
 then any compaction buffer. Display native free space once, including zero;
@@ -109,6 +118,25 @@ rows and any explanatory section from this popover. Never sum category
 estimates to replace the authoritative used total. Providers without a
 breakdown keep Used/Free, and the existing ring and Compact now action remain.
 
+When every positive MCP tools/instructions row supplies usable server estimates,
+combine them into one **MCP servers** row. Expanding it shows the three largest
+servers, followed by **N more** with the remaining share; that control expands
+the rest. The controls use native keyboard activation and `aria-expanded`.
+Stable row IDs keep disclosure state and focus through label/order refreshes.
+Skills remain an ordinary used row when the CLI reports them. Missing or
+malformed per-server detail keeps the original category rows.
+
+Tool server names are normalized by the CLI with
+`name.replace(/[^a-zA-Z0-9_-]/g, "_")`, preserving case; instruction names are
+raw. The bundled CLI also extracts the tool server from `tool.name.split("__")[1]`,
+which truncates names containing that delimiter. Join only unambiguous normalized
+identities; collisions, truncation and mismatches remain separate rows. Reconcile
+each split to its category total, then allocate displayed tenths of a percent
+by largest remainders so children sum to the group. The 2.1.309 summary probe
+reported three 192-token tools against a 575-token category. It also reported
+`isLoaded: false` for tools counted as used when tool search was disabled;
+exclude those tools only when native accounting reports a deferred MCP row.
+
 The shared renderer accepts context updates only for the slot's current
 execution, even when the notification supplies a durable chat ID. Preserve
 legacy session-ID routing, unrelated chat references and equal snapshot
@@ -118,7 +146,8 @@ readings. Codex's native router rejects retired-turn usage and keeps child
 usage out of the parent gauge. Cursor has no supported context-window reading;
 its run-token and billing data must not be used to invent one.
 
-Regression coverage lives in the Claude SDK adapter's context refresh tests,
+Regression coverage lives in the shared protocol mapping, Local Claude SDK
+adapter and cloud worker context refresh tests,
 Codex notification ownership tests, `sessions-store-context-usage.test.ts`,
 `context-gauge.test.ts` and the browser `ui-smoke-context-gauge.mjs` checks.
 Keep query replacement/resume, overlapping refreshes, failed refreshes,

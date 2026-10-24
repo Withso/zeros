@@ -728,7 +728,9 @@ type Msg = Record<string, unknown>;
 type ContextUsage = {
   totalTokens?: number;
   maxTokens?: number;
-  categories?: Array<{ name: string; tokens: number; isDeferred?: boolean; kind?: string }>;
+  categories?: Array<{ id?: string; name: string; tokens: number; isDeferred?: boolean; kind?: string }>;
+  mcpTools?: Array<{ name: string; serverName: string; tokens: number; isLoaded?: boolean }>;
+  mcpInstructions?: Array<{ serverName: string; tokens: number }>;
 };
 type ContextUsageOptions = { detail?: "summary" | "full" };
 
@@ -2725,6 +2727,30 @@ describe("ClaudeSdkAdapter", () => {
       };
       return { adapter, mock, session, send, complete, readings: () => readings(emitted) };
     }
+
+    it("forwards stable row IDs and both MCP splits without guessing server identity", async () => {
+      const t = await setup(async () => ({ totalTokens: 20, maxTokens: 100, categories: [
+        { id: "mcp_tools", name: "Connected tools", tokens: 8, kind: "used" },
+        { id: "mcp_instructions", name: "Server guidance", tokens: 5, kind: "used" },
+        { id: "mcp_tools_deferred", name: "Available tools", tokens: 40, kind: "deferred" },
+        { id: "skills", name: "Skills", tokens: 2, kind: "used" },
+        { id: "future_category", name: "Messages", tokens: 5, kind: "used" },
+      ], mcpTools: [
+        { name: "mcp__Team_Docs__read", serverName: "Team_Docs", tokens: 3, isLoaded: true },
+        { name: "mcp__Team_Docs__write", serverName: "Team_Docs", tokens: 5, isLoaded: true },
+        { name: "mcp__unused__read", serverName: "unused", tokens: 40, isLoaded: false },
+      ], mcpInstructions: [{ serverName: "Team Docs", tokens: 5 }] }));
+      try {
+        await t.complete();
+        expect(t.readings().at(-1)?.categories).toEqual([
+          { id: "mcp_tools", name: "Connected tools", tokens: 8, kind: "used", mcpServers: [{ serverName: "Team_Docs", tokens: 8 }] },
+          { id: "mcp_instructions", name: "Server guidance", tokens: 5, kind: "used", mcpServers: [{ serverName: "Team Docs", tokens: 5 }] },
+          { id: "mcp_tools_deferred", name: "Available tools", tokens: 40, kind: "deferred" },
+          { id: "skills", name: "Skills", tokens: 2, kind: "used" },
+          { name: "Messages", tokens: 5, kind: "used" },
+        ]);
+      } finally { await t.adapter.dispose(); }
+    });
 
     it("preserves native category kinds independently of names and legacy deferred hints", async () => {
       const categories = [

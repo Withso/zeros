@@ -15,6 +15,7 @@
     ".": "./src/index.ts",
     "./messages": "./src/messages.ts",
     "./model-context": "./src/model-context.ts",
+    "./context-usage": "./src/context-usage.ts",
     "./model-rejection": "./src/model-rejection.ts",
     "./agent-extensions": "./src/agent-extensions.ts",
     "./provider-auth": "./src/provider-auth.ts",

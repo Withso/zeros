@@ -92,8 +92,16 @@ Elicitation `property_order` needs no host adoption: the SDK omits it from
 order (including index-like names first). The existing Local form mapping
 preserves that order; the cloud worker retains its cancellation response.
 
-Context category IDs and per-server MCP shares, and cron `nextFireAt` with its
-lifecycle wake-up source, remain deferred. Plugin additions through
+Local and cloud context snapshots preserve known stable category IDs and
+per-server MCP shares. The context popover combines tools and instructions into
+an expandable MCP servers row when the reported rows supply usable detail, conserves the
+native category totals, and retains the legacy rows when detail is missing.
+Skills appear when reported; deferred tools stay outside the window. The
+credential-free bundled CLI confirms this data is available in summary mode.
+See [context-window snapshots](agent-turn-usage.md#context-window-snapshots).
+Optional custom-agent and skill plugin/path metadata is not presented.
+
+Cron `nextFireAt` with its lifecycle wake-up source remains deferred. Plugin additions through
 `reloadPlugins({ addPlugins })` are deferred until Zeros has a flow that enables
 a plugin; current plugin listing and refresh need no additive reload.
 

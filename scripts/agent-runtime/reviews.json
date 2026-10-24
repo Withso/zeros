@@ -131,12 +131,18 @@
     {
       "provider": "claude",
       "fingerprint": "48173e50639e68649737882f0a9655d4b812d12c45358d37cde9ad37080621f4",
-      "disposition": "intentionally-deferred",
-      "rationale": "SDKControlGetContextUsageResponse adds category id, per-server mcpInstructions token shares, customAgents pluginId/path, and skills pluginName/pluginId/path metadata. Stable category IDs and per-server MCP shares are not yet mapped in the Local adapter or cloud worker. Optional plugin/path metadata is not presented.",
+      "disposition": "implemented",
+      "rationale": "Local and cloud summary refreshes share validation and forward known stable category IDs plus MCP tool/instruction server estimates through optional wire fields. The renderer uses IDs ahead of name fallbacks, joins only unambiguous CLI-normalized server identities, reconciles rounded estimates to the native totals, and exposes the server breakdown with keyboard disclosures. Missing detail keeps legacy rows; Skills remain visible and deferred tools stay outside the window. The credential-free bundled CLI confirms summary mode supplies the data. Optional custom-agent and skill plugin/path metadata is not presented.",
       "evidence": [
+        "packages/protocol/src/__tests__/context-usage.test.ts",
         "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/adapter.test.ts",
         "apps/cloud-worker/src/drivers/claude/driver.ts",
-        "docs/claude-event-coverage.md"
+        "apps/cloud-worker/src/drivers/claude/__tests__/context-usage.test.ts",
+        "apps/desktop/src/renderer/features/agent/__tests__/context-gauge.test.ts",
+        "apps/desktop/src/renderer/features/agent/__tests__/sessions-store-context-usage.test.ts",
+        "scripts/ui-smoke-context-gauge.mjs",
+        "docs/agent-turn-usage.md"
       ]
     },
     {

@@ -800,9 +800,28 @@ export interface ToolResultRetractionUpdate {
   toolCallIds: string[];
 }
 
+export const CONTEXT_USAGE_CATEGORY_IDS = [
+  "system_prompt", "system_tools", "mcp_tools", "mcp_instructions",
+  "mcp_tools_deferred", "system_tools_deferred", "custom_agents", "memory_files",
+  "skills", "messages", "autocompact_buffer", "compact_buffer", "free_space",
+] as const;
+export type ContextUsageCategoryId = (typeof CONTEXT_USAGE_CATEGORY_IDS)[number];
+
+export interface ContextUsageMcpServer {
+  /** Tools use the provider-normalized name; instructions retain the original
+   * name. Join only when normalization identifies one unambiguous server. */
+  serverName: string;
+  tokens: number;
+}
+
 export interface ContextUsageCategory {
+  /** Stable native identity. Unknown future IDs are treated as absent. */
+  id?: ContextUsageCategoryId;
   name: string;
   tokens: number;
+  /** Optional estimates within the MCP tools/instructions row. The category
+   * total remains authoritative; older snapshots omit this breakdown. */
+  mcpServers?: ContextUsageMcpServer[];
   /** Native semantics, independent of the display name. Optional for older
    * peers/snapshots. Deferred schemas are outside the context window; buffer
    * is compaction reserve, not used content or available free space. */

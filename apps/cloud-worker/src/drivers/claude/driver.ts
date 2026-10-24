@@ -5,6 +5,7 @@ import { query, type Options, type Query, type Settings, type SDKUserMessage } f
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { providerBindingForResume } from "@zeros/protocol/identities";
+import { mapClaudeContextUsage } from "@zeros/protocol/context-usage";
 import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
 import { agentEnvironment } from "../shared/agent-environment";
@@ -19,6 +20,7 @@ export const CLAUDE_VERSION = "0.3.309";
 interface NativeQuery extends AsyncIterable<unknown> {
   interrupt(): Promise<unknown>; setModel(model: string): Promise<void>; close(): void;
   applyFlagSettings: Query["applyFlagSettings"];
+  getContextUsage?: (options: { detail: "summary" }) => Promise<unknown>;
 }
 interface ClaudeOptions {
   query?: (args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => NativeQuery;
@@ -27,7 +29,10 @@ interface ClaudeOptions {
   gitEnvironment?: NodeJS.ProcessEnv;
   interruptTimeoutMs?: number;
 }
-interface Process { query: NativeQuery; input: InputQueue<SDKUserMessage> }
+interface Process {
+  query: NativeQuery; input: InputQueue<SDKUserMessage>;
+  contextRead?: { revision: number; expired: boolean; timer?: ReturnType<typeof setTimeout> };
+}
 interface Turn extends Deferred<PromptResponse> { uuids: Set<string>; model?: string; observed?: boolean }
 interface Receipt extends Deferred<SteerOutcome> { timer?: ReturnType<typeof setTimeout> }
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -49,6 +54,7 @@ export class ClaudeDriver implements Driver {
   private stopping?: Promise<void>;
   private disposed = false;
   private running = false;
+  private contextUsageRevision = 0;
 
   constructor(private readonly options: ClaudeOptions = {}) {}
 
@@ -184,6 +190,9 @@ export class ClaudeDriver implements Driver {
           this.emit({ sessionId: this.input!.sessionId, update: { sessionUpdate: "provider_binding_update", providerBinding: providerBindingForResume("claude", this.nativeSessionId!) } });
         }
         if (!isResult) continue;
+        // Like Local, refresh after every accepted settled root run, including
+        // turnless compaction/continuations. A control read never holds a turn.
+        if (accepted && !acknowledgement) this.emitContextUsage(process);
         if (typeof frame.queued_turn_count === "number" && frame.queued_turn_count > 0) {
           for (const receipt of this.steers.values()) { clearTimeout(receipt.timer); receipt.timer = undefined; }
         } else if (!acknowledgement && (!this.active || owned)) this.boundSteering();
@@ -234,6 +243,34 @@ export class ClaudeDriver implements Driver {
       }
     }
   }
+  private emitContextUsage(process: Process): void {
+    const revision = ++this.contextUsageRevision;
+    if (this.disposed || this.process !== process || !process.query.getContextUsage) return;
+    // One SDK control per query at a time. New results invalidate the old
+    // reading and coalesce into one follow-up when it settles. A stuck SDK
+    // promise cannot accumulate controls or prevent turns/disposal completing.
+    if (process.contextRead) return;
+    const pending: NonNullable<Process["contextRead"]> = { revision, expired: false };
+    process.contextRead = pending;
+    pending.timer = setTimeout(() => { pending.expired = true; pending.timer = undefined; }, 5_000);
+    pending.timer.unref?.();
+    void (async () => {
+      try {
+        const value = await process.query.getContextUsage!({ detail: "summary" });
+        if (pending.expired || this.disposed || this.process !== process || this.contextUsageRevision !== revision) return;
+        const update = mapClaudeContextUsage(value);
+        if (update) this.emit({ sessionId: this.input!.sessionId, update });
+      } catch { /* Best-effort; retain the last confirmed context reading. */ }
+      finally {
+        clearTimeout(pending.timer);
+        if (process.contextRead === pending) {
+          process.contextRead = undefined;
+          if (!this.disposed && this.process === process && this.contextUsageRevision !== revision)
+            this.emitContextUsage(process);
+        }
+      }
+    })();
+  }
   private boundSteering(): void {
     for (const [id, receipt] of this.steers) if (!receipt.timer) {
       receipt.timer = setTimeout(() => this.receipt(id, "interrupted"), 5_000); receipt.timer.unref?.();
@@ -245,6 +282,7 @@ export class ClaudeDriver implements Driver {
   }
   private detach(process: Process): void {
     if (this.process !== process) return;
+    clearTimeout(process.contextRead?.timer); process.contextRead = undefined;
     this.process = undefined;
     for (const message of process.input.discardPending()) if (message.uuid) this.receipt(message.uuid, "queued");
     process.input.end();

@@ -83,9 +83,9 @@ import { isClaudeParentProgress } from "../claude/event-feedback";
 import type {
   AdvertisedModel,
   AvailableCommand,
-  ContextUsageCategory,
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
+import { mapClaudeContextUsage } from "@zeros/protocol/context-usage";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
 import { BROWSER_TOOL_NAMESPACE } from "@zeros/protocol/browser-tools";
 import { LOCAL_ORCHESTRATION_TOOL_SERVER } from "@zeros/protocol/local-orchestration";
@@ -1971,16 +1971,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   private async emitContextUsage(state: SdkSession): Promise<void> {
     const query = state.query;
     const q = query as unknown as {
-      getContextUsage?: (options?: { detail: "summary" }) => Promise<{
-        totalTokens?: number;
-        maxTokens?: number;
-        categories?: Array<{
-          name?: string;
-          tokens?: number;
-          isDeferred?: boolean;
-          kind?: string;
-        }>;
-      }>;
+      getContextUsage?: (options: { detail: "summary" }) => Promise<unknown>;
     } | null;
     if (state.disposed || !q || typeof q.getContextUsage !== "function") return;
     const revision = ++state.contextUsageRevision;
@@ -1990,41 +1981,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.disposed || state.query !== query ||
         state.contextUsageRevision !== revision
       ) return;
-      const size = usage?.maxTokens;
-      const used = usage?.totalTokens;
-      if (
-        typeof size !== "number" || !Number.isFinite(size) || size <= 0 ||
-        typeof used !== "number" || !Number.isFinite(used) || used < 0
-      ) return;
-      const categories: ContextUsageCategory[] = (Array.isArray(usage.categories) ? usage.categories : [])
-        .filter(
-          (c): c is { name: string; tokens: number; isDeferred?: boolean; kind?: string } =>
-            typeof c?.name === "string" && !!c.name.trim() && typeof c?.tokens === "number" &&
-            Number.isFinite(c.tokens) && c.tokens >= 0,
-        )
-        .flatMap((c): ContextUsageCategory[] => {
-          const name = c.name.trim();
-          // SDK 0.3.268+ classifies directly. Names/isDeferred are only a
-          // compatibility fallback for older runtimes, never an override.
-          const kind = c.kind ?? (
-            c.isDeferred || /\(deferred\)$/i.test(name) ? "deferred" :
-            /^free space$/i.test(name) ? "free" :
-            /^(auto)?compact buffer$/i.test(name) ? "buffer" : "used"
-          );
-          // Do not guess that a future category type consumes context.
-          if (kind !== "used" && kind !== "free" && kind !== "buffer" && kind !== "deferred") return [];
-          return [{ name, tokens: c.tokens, kind }];
-        });
+      const update = mapClaudeContextUsage(usage);
+      if (!update) return;
       this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: state.zerosSessionId,
-        update: {
-          sessionUpdate: "usage_update",
-          size,
-          used,
-          // An empty/missing breakdown must not keep categories from an older
-          // snapshot beside these new totals. Zero used is valid after clear.
-          categories,
-        } as never,
+        update,
       });
     } catch {
       /* best-effort — the gauge just keeps its previous reading */
