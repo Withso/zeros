@@ -9,61 +9,38 @@
 // a newer action for that workspace.
 // ──────────────────────────────────────────────────────────
 
-import { useSyncExternalStore } from "react";
+import {
+  claimWorkspaceGitAction, releaseWorkspaceGitAction, workspaceGitActionClaim,
+  useWorkspaceGitActionClaim, resetWorkspaceGitActionClaimsForTesting,
+  type WorkspaceGitActionClaim,
+} from "./workspace-git-action-claims";
 
-export interface PrCreateActionClaim {
-  readonly workspaceId: string;
-}
-
-const claims = new Map<string, PrCreateActionClaim>();
-const listeners = new Set<() => void>();
-
-/** Publish one primitive snapshot change to every mounted Create PR control. */
-function emit(): void {
-  for (const listener of listeners) listener();
-}
-
-/** Register a renderer subscriber for the shared exact-workspace map. */
-function subscribe(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
+export type PrCreateActionClaim = WorkspaceGitActionClaim;
 
 /** Acquire one exact-workspace owner synchronously. */
 export function claimPrCreateAction(
   workspaceId: string,
+  behavior: "prompt" | "create" = "create",
 ): PrCreateActionClaim | null {
-  if (claims.has(workspaceId)) return null;
-  const owner = { workspaceId };
-  claims.set(workspaceId, owner);
-  emit();
-  return owner;
+  return claimWorkspaceGitAction(workspaceId, { kind: "create-pr", behavior });
 }
 
 /** Release only the owner that is still current for its workspace. */
 export function releasePrCreateAction(owner: PrCreateActionClaim): void {
-  if (claims.get(owner.workspaceId) !== owner) return;
-  claims.delete(owner.workspaceId);
-  emit();
+  releaseWorkspaceGitAction(owner);
 }
 
 /** Exact-key snapshot shared by the hook and focused tests. */
 export function isPrCreateActionClaimed(workspaceId: string): boolean {
-  return claims.has(workspaceId);
+  return workspaceGitActionClaim(workspaceId) != null;
 }
 
 /** Remount-safe busy signal for one workspace's Create PR control. */
 export function usePrCreateActionClaimed(workspaceId: string): boolean {
-  return useSyncExternalStore(
-    subscribe,
-    () => isPrCreateActionClaimed(workspaceId),
-    () => false,
-  );
+  return useWorkspaceGitActionClaim(workspaceId) != null;
 }
 
 /** Clear module state between focused tests. */
 export function resetPrCreateActionClaimsForTesting(): void {
-  if (claims.size === 0) return;
-  claims.clear();
-  emit();
+  resetWorkspaceGitActionClaimsForTesting();
 }

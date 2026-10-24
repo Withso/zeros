@@ -52,6 +52,8 @@ import {
 import { recentSummaryContext, summaryDestinationTab } from "./summary-model";
 import { isWorkspaceReviewAvailable } from "../workbench/tab-capabilities";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
+import { SummaryGitStatus } from "./summary-git-status";
+import { supportsSummaryGitStatus } from "./summary-git-status-model";
 
 const DESTINATIONS = [
   "changes",
@@ -342,6 +344,16 @@ export function SummaryContents({
           );
         })}
       </nav>
+
+      {project?.isGitRepository !== false && supportsSummaryGitStatus(workspace) && (
+        <SummaryGitStatus
+          key={workspace.id}
+          workspace={workspace}
+          originUrl={project?.originUrl ?? null}
+          active={active}
+          onNavigate={onNavigate}
+        />
+      )}
 
       <section
         aria-label="Recent context"

@@ -4372,6 +4372,7 @@ export class WorkspaceService {
         const result = await status(reqStr(params, "workspaceId"), {
           paths: optStrArr(params, "paths"),
           includeTracking: optBool(params, "includeTracking"),
+          includeSummary: optBool(params, "includeSummary"),
         });
         if (!remote) return result;
         // (#1) Mirror the file.tree/read/diff secret boundary: a remote client

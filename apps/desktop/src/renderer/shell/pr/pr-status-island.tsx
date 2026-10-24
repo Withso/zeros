@@ -86,14 +86,11 @@ import { useArchiveWorkspace } from "../../state/archive-actions";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { useShowReviewTab } from "./use-open-review-tab";
 import {
-  claimPrIslandAction,
   derivePrIslandState,
   isActionDisabledByIslandClaim,
   isActionGatedWhileAgentWorking,
-  releasePrIslandAction,
   type PrIslandAction,
   type PrIslandActionBehavior,
-  type PrIslandActionClaim,
   type PrIslandActionKind,
   type PrIslandState,
   type PrIslandTone,
@@ -130,6 +127,10 @@ import { useDocumentActive } from "../../state/use-document-active";
 import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { documentIsForeground } from "../../shared/lib/element-activity";
 import { CloudPrStatusReads } from "./cloud-pr-status-reads";
+import {
+  claimWorkspaceGitAction, releaseWorkspaceGitAction, useWorkspaceGitActionClaim,
+  type WorkspaceGitActionClaim,
+} from "./workspace-git-action-claims";
 
 interface PrStatusIslandProps {
   workspace: Workspace;
@@ -337,24 +338,15 @@ export function PrStatusIsland({
   // The claimed prompt/direct operation. Its button swaps to a spinner;
   // mutating peers disable, while pure navigation — and Archive during an
   // agent prompt it deliberately stops — follow the shared action policy.
-  const [acting, setActing] = useState<PrIslandActionClaim | null>(null);
-  const actionClaimRef = useRef<PrIslandActionClaim | null>(null);
+  const acting = useWorkspaceGitActionClaim(workspace.id);
   const claimAction = useCallback(
     (
       kind: PrIslandActionKind,
       behavior: PrIslandActionBehavior,
-    ): PrIslandActionClaim | null => {
-      const owner = claimPrIslandAction(actionClaimRef, { kind, behavior });
-      if (!owner) return null;
-      setActing(owner);
-      return owner;
-    },
-    [],
+    ): WorkspaceGitActionClaim | null => claimWorkspaceGitAction(workspace.id, { kind, behavior }),
+    [workspace.id],
   );
-  const finishAction = useCallback((owner: PrIslandActionClaim): void => {
-    releasePrIslandAction(actionClaimRef, owner);
-    setActing((current) => (current === owner ? null : current));
-  }, []);
+  const finishAction = releaseWorkspaceGitAction;
   const archiveWorkspace = useArchiveWorkspace();
   // Park git-mutating actions while an agent turn is in flight (see
   // isActionGatedWhileAgentWorking for the policy).
@@ -919,7 +911,7 @@ export function PrStatusIsland({
         const Icon = ACTION_ICON[action.kind];
         const gated = agentWorking && isActionGatedWhileAgentWorking(action);
         const claimBlocked = isActionDisabledByIslandClaim(
-          acting?.behavior ?? null,
+          acting?.behavior === "create" ? "push" : acting?.behavior ?? null,
           action,
         );
         return (

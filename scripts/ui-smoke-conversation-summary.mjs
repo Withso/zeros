@@ -598,6 +598,151 @@ export async function runConversationSummarySmoke({
     },
   );
 
+  await verify("Git status uses plain rows and the primary Create PR split control in both themes", async () => {
+    const git = island.getByRole("region", { name: "Git status", exact: true });
+    const create = git.getByRole("button", { name: "Create PR", exact: true });
+    const more = git.getByRole("button", { name: "More PR options" });
+    await expect(git.getByText("5 uncommitted changes", { exact: true })).toBeVisible();
+    await expect(git.getByText("4 commits behind main", { exact: true })).toBeVisible();
+    await expect(create).toBeEnabled();
+    await expect(git.locator("[data-git-status-row] svg")).toHaveCount(0);
+    expect(await git.textContent()).not.toMatch(/No PR (created|open)/);
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+      const colors = await create.evaluate(node => {
+        const probe = document.createElement("span");
+        probe.style.backgroundColor = "var(--primary-button-bg)";
+        document.body.appendChild(probe);
+        const expected = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return { shell: getComputedStyle(node.closest("div")).backgroundColor, expected };
+      });
+      expect(colors.shell).toBe(colors.expected);
+      await create.hover();
+      await expect.poll(() => create.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+      await create.focus();
+      await page.keyboard.press("Tab");
+      await expect(more).toBeFocused();
+      expect(await more.evaluate(node => getComputedStyle(node).outlineStyle)).toBe("solid");
+      await page.keyboard.press("Enter");
+      await expect(page.getByRole("menuitem", { name: "Create draft PR", exact: true })).toBeVisible();
+      await expect(page.getByRole("menuitem", { name: "Create PR directly", exact: true })).toBeVisible();
+      await expect(page.getByRole("menuitem", { name: "Create PR manually", exact: true })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(more).toBeFocused();
+    }
+    await more.click();
+    // A modal menu hides its siblings from the accessibility tree. Exercise
+    // a programmatic panel collapse while that portal still owns focus.
+    await island.locator('button[aria-label="Collapse summary"]').dispatchEvent("click");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+  });
+
+  await verify("Git facts coexist, exclude CI failures, and mark a draft ready directly", async () => {
+    const git = island.getByRole("region", { name: "Git status", exact: true });
+    await page.evaluate(() => {
+      window.__summaryHarness.setPr("draft");
+      window.__summaryHarness.setGit({ ahead: 10, behind: 1, conflicted: [{ path: "file.ts", status: "conflicted" }], conflictState: "merge" });
+    });
+    for (const name of ["PR is in draft", "5 uncommitted changes", "1 commit behind remote", "10 commits ahead of remote", "4 commits behind main", "Merge conflicts detected", "Incompatible with remote"]) {
+      await expect(git.getByText(name, { exact: true })).toBeVisible();
+    }
+    await expect(git.getByRole("button", { name: "Push", exact: true })).toBeDisabled();
+    await expect(git.getByRole("button", { name: "Create PR", exact: true })).toHaveCount(0);
+    await git.getByRole("button", { name: "Ready for review", exact: true }).click();
+    await expect(git.getByText("PR is open", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prMarkReady").length)).toBe(1);
+    await page.evaluate(() => {
+      window.__summaryHarness.setPr("ready", "unstable");
+      window.__summaryHarness.setGit({ ahead: 0, behind: 0, conflicted: [], conflictState: null }, { uncommitted: 0 });
+    });
+    await expect(git.getByText("Merge conflicts detected", { exact: true })).toHaveCount(0);
+    expect(await git.textContent()).not.toMatch(/checks|CI|failed|Unable to merge/i);
+    expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prChecks").length)).toBe(0);
+  });
+
+  await verify("Git mutations stay single-flight across collapse and Pull exposes conflicts", async () => {
+    const git = island.getByRole("region", { name: "Git status", exact: true });
+    const push = git.getByRole("button", { name: "Push", exact: true });
+    await expect(push).toBeEnabled();
+    await page.evaluate(() => window.__summaryHarness.holdMutation());
+    await push.click();
+    await expect(push).toBeDisabled();
+    await expect(git.getByRole("button", { name: "Create PR", exact: true })).toBeDisabled();
+    await island.getByRole("button", { name: "Collapse summary" }).click();
+    await island.getByRole("button", { name: "Expand summary" }).click();
+    await expect(push).toBeDisabled();
+    expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "git.push").length)).toBe(1);
+    await page.evaluate(() => window.__summaryHarness.releaseMutation());
+    await expect(push).toHaveCount(0);
+    await page.evaluate(() => {
+      window.__summaryHarness.setGit({ behind: 1 });
+      window.__summaryHarness.pullConflicts(true);
+    });
+    await git.locator('[data-git-status-row="behind-remote"]').getByRole("button", { name: "Pull", exact: true }).click();
+    await expect(git.getByText("Merge conflicts detected", { exact: true })).toBeVisible();
+    await expect(git.getByRole("button", { name: "Commit and push", exact: true })).toBeDisabled();
+    const pulls = await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "git.pull"));
+    expect(pulls).toHaveLength(1);
+    expect(pulls[0].params).toMatchObject({ workspaceId: "ws_summary_a", strategy: "rebase", autoStash: true });
+  });
+
+  await verify("Git refresh retains exact-owner data and rejects a late workspace response", async () => {
+    const git = island.getByRole("region", { name: "Git status", exact: true });
+    await expect(git.getByText("5 uncommitted changes", { exact: true })).toBeVisible();
+    await page.evaluate(() => window.__summaryHarness.failGit(true));
+    await expect(git.getByRole("button", { name: "Commit and push", exact: true })).toBeDisabled();
+    await expect(git.getByText("5 uncommitted changes", { exact: true })).toBeVisible();
+    await expect(git.getByRole("button", { name: "Retry", exact: true })).toBeEnabled();
+    await page.evaluate(() => window.__summaryHarness.failGit(false));
+    await expect(git.getByRole("button", { name: "Commit and push", exact: true })).toBeEnabled();
+    const before = await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "git.status").length);
+    await page.evaluate(() => window.__summaryHarness.delayGit());
+    await expect.poll(() => page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "git.status").length)).toBeGreaterThan(before);
+    await page.evaluate(() => window.__summaryHarness.switchFolder("b"));
+    await expect(git.getByText("1 uncommitted change", { exact: true })).toBeVisible();
+    await page.evaluate(() => window.__summaryHarness.releaseGit());
+    await expect(git.getByText("5 uncommitted changes", { exact: true })).toHaveCount(0);
+    await page.evaluate(() => window.__summaryHarness.switchFolder("a"));
+    await expect(git.getByText("5 uncommitted changes", { exact: true })).toBeVisible();
+  });
+
+  await verify("Git edits do not poll terminal PRs, while reopening Summary refreshes metadata", async () => {
+    await page.clock.install();
+    await page.evaluate(() => window.__summaryHarness.setPr("merged"));
+    const git = island.getByRole("region", { name: "Git status", exact: true });
+    await expect(git.getByText("PR is merged", { exact: true })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prGet").length)).toBeGreaterThan(0);
+    const reads = await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prGet").length);
+    await page.clock.fastForward(120_000);
+    await page.evaluate(() => window.__summaryHarness.setGit({ ahead: 9 }));
+    await expect(git.getByText("9 commits ahead of remote", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prGet").length)).toBe(reads);
+    await island.getByRole("button", { name: "Collapse summary" }).click();
+    await island.getByRole("button", { name: "Expand summary" }).click();
+    await expect.poll(() => page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prGet").length)).toBeGreaterThan(reads);
+  });
+
+  await verify("collapsed Summary stops Git/PR reads and cloud placement removes the section", async () => {
+    await page.clock.install();
+    await page.evaluate(() => window.__summaryHarness.setPr("draft"));
+    const git = island.getByRole("region", { name: "Git status", exact: true });
+    await expect(git.getByText("PR is in draft", { exact: true })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prGet").length)).toBeGreaterThan(0);
+    await island.getByRole("button", { name: "Collapse summary" }).click();
+    const reads = await page.evaluate(() => window.__summaryHarness.messages.filter(m => ["git.status", "git.changeCounts", "gh.prGet"].includes(m.op)).length);
+    await page.evaluate(() => window.__summaryHarness.setGit({ ahead: 9 }));
+    await page.clock.fastForward(120_000);
+    expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => ["git.status", "git.changeCounts", "gh.prGet"].includes(m.op)).length)).toBe(reads);
+    await island.getByRole("button", { name: "Expand summary" }).click();
+    await expect(git.getByText("9 commits ahead of remote", { exact: true })).toBeVisible();
+    await page.evaluate(() => window.__summaryHarness.setPlacement("cloud"));
+    await expect(git).toHaveCount(0);
+    const cloudReads = await page.evaluate(() => window.__summaryHarness.messages.filter(m => ["git.status", "gh.prGet"].includes(m.op)).length);
+    await page.clock.fastForward(120_000);
+    expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => ["git.status", "gh.prGet"].includes(m.op)).length)).toBe(cloudReads);
+  });
+
   check(
     "Summary: no uncaught browser errors",
     errors.length === 0,

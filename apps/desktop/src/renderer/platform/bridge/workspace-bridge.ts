@@ -1118,7 +1118,7 @@ export async function bridgeContextGraphScaffold(
 export async function bridgeGitStatus(
   bridge: RuntimeClient,
   workspaceId: string,
-  options: { paths?: string[]; includeTracking?: boolean } = {},
+  options: { paths?: string[]; includeTracking?: boolean; includeSummary?: boolean } = {},
 ): Promise<StatusResult> {
   return (await workspaceOp(
     bridge,
@@ -1127,6 +1127,7 @@ export async function bridgeGitStatus(
       workspaceId,
       paths: options.paths,
       includeTracking: options.includeTracking,
+      ...(options.includeSummary === undefined ? {} : { includeSummary: options.includeSummary }),
     },
     GIT_READ_TIMEOUT_MS,
   )) as StatusResult;

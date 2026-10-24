@@ -77,6 +77,11 @@ export interface StatusResult {
   upstream: string | null;
   /** Cloud setup can fall back to bounded history; probe the current Git state. */
   shallow?: boolean;
+  /** Opt-in Local Summary facts. Absent on older engines and cloud workers. */
+  summary?: {
+    branch: string | null;
+    base: { ref: string; behind: number } | null;
+  };
 }
 
 export interface StatusOptions {
@@ -86,6 +91,8 @@ export interface StatusOptions {
   paths?: string[];
   /** Skip the unrelated upstream ahead/behind probe for targeted callers. */
   includeTracking?: boolean;
+  /** Compare the selected base for the Local conversation Summary. */
+  includeSummary?: boolean;
 }
 
 /** File totals for the four live Changes scopes. Each total is computed from
@@ -375,12 +382,16 @@ export async function status(
       const tracking = options.includeTracking === false ? { ahead: null, behind: null, upstream: null }
         : observed.trackingMeasured ? observed.tracking : await upstreamAheadBehind(ws.path);
       const conflictState = await getInProgressState(ws.path).catch(() => null);
+      const summary = options.includeSummary
+        ? { branch: observed.branch, base: await summaryBaseComparison(ws, remote, observed.head) }
+        : undefined;
       return {
         staged: observed.parsed.staged.filter((entry) => !isInternal(entry.path)),
         unstaged: observed.parsed.unstaged.filter((entry) => !isInternal(entry.path)),
         untracked: observed.parsed.untracked.filter((entry) => !isInternal(entry)),
         conflicted: observed.parsed.conflicted.filter((entry) => !isInternal(entry.path)),
         conflictState, ...tracking,
+        ...(summary === undefined ? {} : { summary }),
       };
     });
   }
@@ -443,6 +454,39 @@ export async function status(
     upstream: tracking.upstream,
     ...(shallow === undefined ? {} : { shallow }),
   };
+}
+
+/** Summary compares the selected base's latest known tip, even for a draft or
+ * an unpublished branch. Unlike the All Changes fork point, this prefers the
+ * configured remote and never substitutes a different base. Reads stay offline. */
+async function summaryBaseComparison(
+  workspace: Workspace,
+  remote: string,
+  head: string | null,
+): Promise<{ ref: string; behind: number } | null> {
+  if (!head) return null;
+  const base = workspace.baseBranch;
+  if (!base || base.startsWith("-") || base.includes("\0")) return null;
+  if (!remote || remote.startsWith("-") || remote.includes("\0")) return null;
+  for (const ref of [`refs/remotes/${remote}/${base}`, `refs/heads/${base}`]) {
+    let tip: string;
+    try {
+      tip = (await runGitRead(workspace.path, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).stdout.trim();
+    } catch {
+      continue;
+    }
+    try {
+      const { stdout } = await runGitRead(workspace.path, ["rev-list", "--count", `${head}..${tip}`]);
+      const behind = Number(stdout.trim());
+      return Number.isSafeInteger(behind) && behind >= 0
+        ? { ref: ref.replace(/^refs\/(remotes|heads)\//, ""), behind }
+        : null;
+    } catch {
+      // A missing/corrupt history is unknown, never a confirmed zero.
+      return null;
+    }
+  }
+  return null;
 }
 
 function addVisibleChanges(
