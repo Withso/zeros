@@ -41,9 +41,6 @@
       "apps/desktop/src/renderer/features/agent/context-gauge.tsx": {
         "text-[12.5px]": 2
       },
-      "apps/desktop/src/renderer/features/agent/mention-picker.tsx": {
-        "z-[25]": 1
-      },
       "apps/desktop/src/renderer/features/agent/pr-picker.tsx": {
         "z-[25]": 1
       },
@@ -61,9 +58,6 @@
       },
       "apps/desktop/src/renderer/features/agent/renderers/text-message.tsx": {
         "py-[3px]": 1
-      },
-      "apps/desktop/src/renderer/features/agent/slash-command-picker.tsx": {
-        "z-[25]": 1
       },
       "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
         "rounded-[2px]": 1,
@@ -394,9 +388,6 @@
       "apps/desktop/src/renderer/features/agent/renderers/tool-resource-link.tsx": {
         "button": 1
       },
-      "apps/desktop/src/renderer/features/agent/slash-command-picker.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/features/agent/turn-container.tsx": {
         "button": 2
       },
@@ -595,13 +586,7 @@
       "apps/desktop/src/renderer/features/agent/goal-card.tsx": {
         "shadow-xs": 1
       },
-      "apps/desktop/src/renderer/features/agent/mention-picker.tsx": {
-        "shadow-lg": 1
-      },
       "apps/desktop/src/renderer/features/agent/pr-picker.tsx": {
-        "shadow-lg": 1
-      },
-      "apps/desktop/src/renderer/features/agent/slash-command-picker.tsx": {
         "shadow-lg": 1
       },
       "apps/desktop/src/renderer/features/browser/browser-variant-frame.tsx": {

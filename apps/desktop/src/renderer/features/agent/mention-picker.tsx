@@ -48,12 +48,7 @@ export function MentionPicker({
     }
   }, [highlightIndex]);
 
-  // Mention picker — popover that opens ABOVE the composer card. Match the
-  // slash-command picker EXACTLY: same bg-bg1
-  // surface and bg-bg1-hover row highlight (the old bg-bg3 surface hid the
-  // default top-item highlight because the active row used the same bg-bg3).
-  const menuWrap =
-    "absolute inset-x-0 bottom-[calc(100%+6px)] z-[25] overflow-hidden rounded-lg border border-border1 bg-bg1 shadow-lg";
+  const menuWrap = "flex min-h-0 flex-col overflow-hidden";
 
   if (items.length === 0) {
     if (status === "loading") {
@@ -77,7 +72,7 @@ export function MentionPicker({
       <div className="border-border1 text-fg2 border-b px-3 py-1.5 text-xs">
         Mention · {items.length} result{items.length === 1 ? "" : "s"}
       </div>
-      <div ref={listRef} className="max-h-[220px] overflow-y-auto">
+      <div ref={listRef} className="min-h-0 max-h-[220px] overflow-y-auto overscroll-contain">
         {items.map((item, i) => {
           const active = i === highlightIndex;
           return (
@@ -85,14 +80,15 @@ export function MentionPicker({
               key={item.id}
               variant="ghost"
               type="button"
+              data-selected={active || undefined}
               onMouseEnter={() => onHover(i)}
               onMouseDown={(e) => {
                 // mousedown (not click) so we beat the textarea blur.
                 e.preventDefault();
                 onPick(item);
               }}
-              className={`text-fg1 hover:bg-bg1-hover flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-1.5 text-left transition-[background] duration-150 ease-out ${
-                active ? "!bg-bg1-hover" : ""
+              className={`text-fg1 hover:bg-(--surface-hover) flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-1.5 text-left transition-colors ${
+                active ? "bg-(--surface-hover)" : ""
               }`}
             >
               {/* Single-line row like the slash picker: the Files-tab colored
@@ -104,7 +100,7 @@ export function MentionPicker({
                 className="shrink-0"
               />
               <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                <span className="text-fg1 shrink-0 text-xs">{item.label}</span>
+                <span className="text-fg1 max-w-[60%] shrink-0 truncate text-xs">{item.label}</span>
                 {item.hint && (
                   <span className="text-fg2 min-w-0 flex-1 overflow-hidden text-xs text-ellipsis whitespace-nowrap">
                     {item.hint}

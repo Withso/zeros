@@ -130,7 +130,7 @@ Cursor `models.list`, plus the provider model documentation:
 Discovery proves advertised availability, not permission to run every model
 on every account. Preserve exact-model live restrictions after discovery.
 
-The subsequent Claude SDK 0.3.296 / Claude Code 2.1.296 and Codex 0.162.1
+The subsequent Claude SDK 0.3.309 / Claude Code 2.1.309 and Codex 0.162.1
 runtime update retains catalog version 13 and these defaults. The compared
 Claude model literals and Codex's 11-model bundled catalog add no model IDs.
 The Codex 0.162.1 launch smoke confirms all eight curated IDs via native

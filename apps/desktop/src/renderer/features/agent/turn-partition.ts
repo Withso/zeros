@@ -57,7 +57,7 @@ export function isManualCompaction(e: AgentMessage): boolean {
 }
 
 function isOutputText(e: AgentMessage): boolean {
-  if (e.kind !== "text") return false;
+  if (e.kind !== "text" || e.wakeupNotice) return false;
   const text = e as { role?: string; phase?: string };
   const role = text.role;
   // Reasoning ("thought") is working content, never the answer.
@@ -115,6 +115,16 @@ function partitionVisible(
   options?: PartitionOptions,
 ): TurnPartition & { events: AgentMessage[] } {
   events = withoutRedundantAgentTasks(events).filter(isVisibleTranscriptEvent);
+  // The cloud hook can precede native activity. Keep the settled answer and
+  // waiting line intact until work actually starts; do not create an empty
+  // status-only chip at the idle tail. Full activity export keeps the record.
+  if (options?.live === false) {
+    while (events.length > 0) {
+      const last = events.at(-1)!;
+      if (last.kind !== "text" || !last.wakeupNotice) break;
+      events.pop();
+    }
+  }
   // Usage is inbetween status, like other runtime feedback: later work follows
   // it in the working feed. A repeated receipt adds no row.
   if (events.some(isUsageNotice)) {
@@ -136,6 +146,7 @@ function partitionVisible(
     if (
       event.kind === "text" &&
       event.role === "agent" &&
+      !event.wakeupNotice &&
       (event.phase === "final_answer" || event.phase === "partial_answer")
     ) {
       finalOutputIndexes.add(index);

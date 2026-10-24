@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useCachedRead } from "../../state/use-cached-read";
-import { useActiveOrganization } from "../../features/team/team-store";
+import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../../features/team/team-store";
 import { canCreateWorkspaceIn } from "../../features/team/organization-capabilities";
 import { cloudWorkspaceCapability } from "../../platform/cloud-capability";
 import { isCloudV2BaseBranch } from "../../platform/cloud-v2";
@@ -24,7 +24,7 @@ export function useCloudCreateAvailability(active: boolean) {
   const warm = () => {
     if (readCloud) void capabilityCache.load("desktop", cloudWorkspaceCapability, { maxAgeMs: Infinity }).catch(() => {});
   };
-  return { organization, canCreateCloud, reason, warm };
+  return { organization, canCreateCloud, reason, warm, checking: readCloud && !capability.data && !capability.error };
 }
 
 /** The v2 worker runs `git switch -c <branch> origin/<baseBranch>`, so a source
@@ -44,11 +44,13 @@ export function cloudSourceBaseBranch(base: DispatcherBase | null): { baseBranch
 export function useCloudCreate(
   active: boolean,
   computerSource: { owner: string; base: DispatcherBase } | null = null,
+  preferredRepositoryId: string | null = null,
+  selectionIntent?: string | null,
 ) {
   const computer = useCloudComputerV2CreateGate(active);
   const availability = useCloudCreateAvailability(active);
-  const computerMode = Boolean(computer.enabled && computer.repositories != null);
-  const selection = useComputerRepositorySelection(computer.key ?? null, computer.repositories, active);
+  const computerMode = Boolean(availability.organization && !availability.organization.isPersonal || getActiveOrganizationIdSnapshot() !== null);
+  const selection = useComputerRepositorySelection(computer.key ?? null, computer.repositories, active, preferredRepositoryId, selectionIntent);
   const computerRepository = computerMode ? selection.repository : null;
   const repository = useMemo(
     () => computerRepository ? { owner: computerRepository.owner, repo: computerRepository.name } : null,
@@ -69,12 +71,14 @@ export function useCloudCreate(
     (!computerRepository ? "Add a repository to your Cloud Computer." : source.reason);
   return {
     reason,
+    checking: availability.checking || computer.checking,
     organization: availability.organization,
     repository,
     baseBranch: source.baseBranch,
     computerMode,
     computerOwner: computer.key,
     computerRepository,
+    rememberedRepositoryId: selection.rememberedId,
     computerRepositories: computer.repositories ?? undefined,
     selectComputerRepository: selection.select,
     sourceOwner,

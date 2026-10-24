@@ -75,7 +75,7 @@ interface TabBodyProps {
 // FileViewer's read effect is deps-guarded so it won't re-read, but this also
 // skips the wasted render work. (React.memo does NOT block context updates, so
 // the workspace/cwd hooks below still see live changes.)
-export const FilesTab = React.memo(function FilesTab({
+const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
   tab,
   active,
   scope,
@@ -483,4 +483,18 @@ export const FilesTab = React.memo(function FilesTab({
       )}
     </div>
   );
+});
+
+function SkillFileTab({ tab, active, scope }: TabBodyProps) {
+  const cwd = useChatCwd();
+  const dispatch = useWorkspaceDispatch();
+  return <FileViewer tabId={tab.id} active={active} cwd={cwd}
+    path={tab.skillSource!.path} workspaceId={null} refreshKey={0} readOnly
+    skillSource={tab.skillSource} viewerMode={tab.viewerMode} headerBorder
+    onOpenPath={() => {}}
+    onViewerModeChange={viewerMode => dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope, updates: { viewerMode } })} />;
+}
+
+export const FilesTab = React.memo(function FilesTab(props: TabBodyProps) {
+  return props.tab.skillSource ? <SkillFileTab {...props} /> : <WorkspaceFilesTab {...props} />;
 });

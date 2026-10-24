@@ -11,9 +11,9 @@ const usage = {
   categories: [{ name: "Messages", tokens: 20 }],
 };
 
-function update(executionId: string, values: Partial<UsageUpdateNotification> = {}): SessionNotification & { chatId: string } {
+function update(executionId: string, values: Partial<UsageUpdateNotification> = {}, chatId = "chat"): SessionNotification & { chatId: string } {
   return {
-    chatId: "chat",
+    chatId,
     sessionId: executionId,
     executionId,
     update: { sessionUpdate: "usage_update", size: 100, used: 90, ...values },
@@ -21,6 +21,28 @@ function update(executionId: string, values: Partial<UsageUpdateNotification> = 
 }
 
 describe("context usage execution ownership", () => {
+  it.each(["local", "cloud"])("publishes IDs and server shares for %s while retaining equal snapshots", (placement) => {
+    const store = useSessionsStore.getState();
+    const chatId = placement === "cloud" ? "cloud://owner/workspace/chat" : "/local/workspace/chat";
+    const categories = [{ name: "MCP tools", tokens: 20, kind: "used" as const }];
+    store.setSession(chatId, { ...BLANK, agentId: "claude", sessionId: "current", usage: { ...usage, categories } });
+    const before = useSessionsStore.getState();
+    const enriched = [{ ...categories[0], id: "mcp_tools" as const, mcpServers: [{ serverName: "docs", tokens: 20 }] }];
+    store.applyBridgeUpdate(update("current", { used: 20, categories: enriched }, chatId));
+    const after = useSessionsStore.getState();
+    expect(after).not.toBe(before);
+    expect(after.sessions[chatId].usage.categories).toEqual(enriched);
+    expect(after.sessions[chatId].messages).toBe(before.sessions[chatId].messages);
+    store.applyBridgeUpdate(update("current", { used: 20, categories: structuredClone(enriched) }, chatId));
+    expect(useSessionsStore.getState()).toBe(after);
+    const changed = [{ ...enriched[0], mcpServers: [{ serverName: "other", tokens: 20 }] }];
+    store.applyBridgeUpdate(update("current", { used: 20, categories: changed }, chatId));
+    expect(useSessionsStore.getState().sessions[chatId].usage.categories).toEqual(changed);
+    const current = useSessionsStore.getState();
+    store.applyBridgeUpdate(update("retired", { used: 20, categories: enriched }, chatId));
+    expect(useSessionsStore.getState()).toBe(current);
+  });
+
   it("publishes category-kind changes while keeping repeated classified snapshots stable", () => {
     const store = useSessionsStore.getState();
     const categories = [{ name: "Tools", tokens: 20, kind: "used" as const }];

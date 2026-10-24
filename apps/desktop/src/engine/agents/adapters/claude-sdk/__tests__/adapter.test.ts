@@ -728,7 +728,9 @@ type Msg = Record<string, unknown>;
 type ContextUsage = {
   totalTokens?: number;
   maxTokens?: number;
-  categories?: Array<{ name: string; tokens: number; isDeferred?: boolean; kind?: string }>;
+  categories?: Array<{ id?: string; name: string; tokens: number; isDeferred?: boolean; kind?: string }>;
+  mcpTools?: Array<{ name: string; serverName: string; tokens: number; isLoaded?: boolean }>;
+  mcpInstructions?: Array<{ serverName: string; tokens: number }>;
 };
 type ContextUsageOptions = { detail?: "summary" | "full" };
 
@@ -2725,6 +2727,30 @@ describe("ClaudeSdkAdapter", () => {
       };
       return { adapter, mock, session, send, complete, readings: () => readings(emitted) };
     }
+
+    it("forwards stable row IDs and both MCP splits without guessing server identity", async () => {
+      const t = await setup(async () => ({ totalTokens: 20, maxTokens: 100, categories: [
+        { id: "mcp_tools", name: "Connected tools", tokens: 8, kind: "used" },
+        { id: "mcp_instructions", name: "Server guidance", tokens: 5, kind: "used" },
+        { id: "mcp_tools_deferred", name: "Available tools", tokens: 40, kind: "deferred" },
+        { id: "skills", name: "Skills", tokens: 2, kind: "used" },
+        { id: "future_category", name: "Messages", tokens: 5, kind: "used" },
+      ], mcpTools: [
+        { name: "mcp__Team_Docs__read", serverName: "Team_Docs", tokens: 3, isLoaded: true },
+        { name: "mcp__Team_Docs__write", serverName: "Team_Docs", tokens: 5, isLoaded: true },
+        { name: "mcp__unused__read", serverName: "unused", tokens: 40, isLoaded: false },
+      ], mcpInstructions: [{ serverName: "Team Docs", tokens: 5 }] }));
+      try {
+        await t.complete();
+        expect(t.readings().at(-1)?.categories).toEqual([
+          { id: "mcp_tools", name: "Connected tools", tokens: 8, kind: "used", mcpServers: [{ serverName: "Team_Docs", tokens: 8 }] },
+          { id: "mcp_instructions", name: "Server guidance", tokens: 5, kind: "used", mcpServers: [{ serverName: "Team Docs", tokens: 5 }] },
+          { id: "mcp_tools_deferred", name: "Available tools", tokens: 40, kind: "deferred" },
+          { id: "skills", name: "Skills", tokens: 2, kind: "used" },
+          { name: "Messages", tokens: 5, kind: "used" },
+        ]);
+      } finally { await t.adapter.dispose(); }
+    });
 
     it("preserves native category kinds independently of names and legacy deferred hints", async () => {
       const categories = [
@@ -7497,6 +7523,47 @@ describe("Claude background acknowledgement terminal races", () => {
       await tick();
       live.push({ ...resultOk("failed"), uuid: "failed", num_turns: 0, result: "", is_error: true, errors: ["Permission denied"], result_index: 0, queued_turn_count: 1 });
       expect((await turn).failure.message).toBe("Permission denied");
+    } finally { await adapter.dispose(); }
+  });
+});
+
+
+describe("Claude lifecycle wake-up notices", () => {
+  it.each(["loop_wakeup", "schedule_wakeup"] as const)("announces %s once, before its continuation, with matched due time", async source => {
+    const live = makePushableQuery();
+    const emitted: SessionNotification[] = [];
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
+    const due = 1_800_000_017_000;
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const initial = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Watch the deployment")] });
+      await flushMicrotasks();
+      const loop = source === "loop_wakeup";
+      live.push(initMsg("wake-session"), {
+        type: "assistant", uuid: "schedule-frame", message: { id: "schedule-message", role: "assistant", content: [
+          { type: "tool_use", id: "schedule-tool", name: loop ? "ScheduleWakeup" : "CronCreate",
+            input: loop ? { prompt: "Check deployment", reason: "Deployment still provisioning" } : { cron: "0 12 5 8 *", prompt: "Check deployment", recurring: false } },
+        ] },
+      }, {
+        type: "user", tool_use_result: loop ? { scheduledFor: due } : { id: "job", recurring: false, nextFireAt: due },
+        message: { content: [{ type: "tool_result", tool_use_id: "schedule-tool", content: "Scheduled" }] },
+      }, resultOk("wake-session"));
+      await initial;
+      const hooks = live.captured[0].hooks as Record<string, Array<{ hooks: Array<(input: Msg) => Promise<unknown>> }>>;
+      await hooks.Stop[0].hooks[0]({ hook_event_name: "Stop", session_crons: [{ id: "job", recurring: false, schedule: "0 12 5 8 *", prompt: "Check deployment" }] });
+      const before = emitted.length;
+      const input = { hook_event_name: "UserPromptSubmit", source, prompt: "Check deployment", prompt_id: "native-wakeup" };
+      await hooks.UserPromptSubmit[0].hooks[0]({ ...input, agent_id: "child" });
+      expect(emitted.slice(before).some(event => event.update.sessionUpdate === "wakeup_notice")).toBe(false);
+      await hooks.UserPromptSubmit[0].hooks[0](input);
+      await hooks.UserPromptSubmit[0].hooks[0](input);
+      const wakeups = emitted.slice(before).filter(event => event.update.sessionUpdate === "wakeup_notice");
+      expect(wakeups).toHaveLength(1);
+      expect(wakeups[0].update).toMatchObject({ source, reason: loop ? "Deployment still provisioning" : "Check deployment", scheduledFor: due });
+      expect(emitted.slice(before).filter(event => event.update.sessionUpdate === "background_tasks_update").at(-1)?.update).toMatchObject({ waiting: false });
+      live.push(assistantText("Checking the deployment again."), { ...resultOk("wake-session"), uuid: "woken-result" });
+      await flushMicrotasks();
+      expect(emitted.indexOf(wakeups[0])).toBeLessThan(emitted.findIndex(event => event.update.sessionUpdate === "agent_message_chunk" && event.update.content.type === "text" && event.update.content.text === "Checking the deployment again."));
     } finally { await adapter.dispose(); }
   });
 });

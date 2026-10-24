@@ -12,7 +12,16 @@
 import { Node, mergeAttributes } from "@tiptap/core";
 import { ReactNodeViewRenderer } from "@tiptap/react";
 
-import { MentionPill, AttachmentPill } from "./pills";
+import { MentionPill, AttachmentPill, SkillPill } from "./pills";
+
+export const SkillNode = Node.create({
+  name: "skill", group: "inline", inline: true, atom: true, selectable: true, draggable: false,
+  addAttributes: () => ({ name: { default: "" }, label: { default: "" }, path: { default: "" }, source: { default: null, rendered: false }, provider: { default: null, rendered: false } }),
+  parseHTML: () => [{ tag: "span[data-skill]" }],
+  renderHTML: ({ HTMLAttributes, node }) => ["span", mergeAttributes(HTMLAttributes, { "data-skill": "" }), node.attrs.label],
+  renderText: ({ node }) => `/${node.attrs.name}`,
+  addNodeView: () => ReactNodeViewRenderer(SkillPill),
+});
 
 export const MentionNode = Node.create({
   name: "mention",

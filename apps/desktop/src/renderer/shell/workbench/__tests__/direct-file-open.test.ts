@@ -21,6 +21,13 @@ const file = (
 });
 
 describe("buildDirectFileOpenAction", () => {
+  it("does not focus a library source as an ordinary repository file", () => {
+    const source = { ...file("skill", "skills/review/SKILL.md"), skillSource: {
+      agentId: "claude" as const, path: "/home/.claude/skills/review/SKILL.md", name: "review",
+    } };
+    expect(buildDirectFileOpenAction([source], source.filePath!, { preferredExistingTabId: source.id }))
+      .toMatchObject({ type: "ADD_WORKBENCH_TAB" });
+  });
   it.each([
     ["expanded extra", file("extra", "src/mcp/tools.ts", true)],
     ["collapsed extra", file("extra", "src/mcp/tools.ts", false)],

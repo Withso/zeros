@@ -47,6 +47,7 @@ import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-
 import { useNativeRuntime } from "../platform/runtime";
 import { useAuth } from "../features/auth";
 import { useAgentSessions } from "../features/agent/sessions-hooks";
+import { ComposerDraftIndicator } from "../features/agent/composer-draft-indicator";
 import {
   prefetchSettingsForRepo,
   usePrefetchSettings,
@@ -54,8 +55,10 @@ import {
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 import { OrganizationSwitcher } from "../features/team/organization-switcher";
 import { getActiveOrganizationIdSnapshot, getTeamStoreState, useActiveOrganization } from "../features/team/team-store";
+import { CONTROL_PLANE_URL } from "../features/team/control-plane";
 import { useArchiveWorkspace } from "../state/archive-actions";
 import { draftChatIdsByWorkspace } from "../state/composer-draft-presence";
+import { createComposerDraftOwner, useCreateComposerHasDraft } from "../state/create-composer-drafts";
 import {
   dedupePendingCreates,
   useLiveVisible,
@@ -276,6 +279,13 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const archiveWorkspace = useArchiveWorkspace();
   const { session, email, userId } = useAuth();
   const filterOwner = sidebarRepositoryFilterOwner(userId ?? getTeamStoreState().me?.user.id, getActiveOrganizationIdSnapshot());
+  const createDraftOwner = createComposerDraftOwner({
+    backend: CONTROL_PLANE_URL,
+    userId: userId ?? getTeamStoreState().me?.user.id,
+    organizationId: getActiveOrganizationIdSnapshot(),
+  });
+  const hasCreateDraft = useCreateComposerHasDraft(createDraftOwner);
+  const showCreateDraft = activePage !== "create" && hasCreateDraft;
   const preferences = useSidebarListPreferences();
   const repositoryIds = sidebarRepositoryIds(filterOwner);
 
@@ -784,12 +794,16 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             <Button
               type="button"
               variant="ghost"
-              className={SIDEBAR_ENTRY_CLS}
+              className={cn(SIDEBAR_ENTRY_CLS, "[&_[data-draft-icon]]:size-3")}
               aria-label="Create workspace"
+              aria-description={showCreateDraft ? "Unsent draft" : undefined}
               onClick={() => openDispatcher(contextProject?.id)}
             >
               <Plus strokeWidth={1.5} />
               <span className="truncate">Create</span>
+              <span className="ml-auto inline-flex size-4 shrink-0 items-center justify-center">
+                {showCreateDraft && <ComposerDraftIndicator />}
+              </span>
             </Button>
           </div>
         </div>

@@ -54,7 +54,7 @@ describe("every WorkbenchTabType enters the status frame", () => {
   it("keeps portal-owned Setup/terminal fallbacks quiet during a silent retry", () => {
     setActiveBridge({ status: "connected", onStatusChange: () => () => {} } as never);
     const tab = { id: "setup", type: "terminal" as const, title: "Setup" };
-    const sources = workbenchSourcesFor(workbenchStatusKey("/portal", tab));
+    const sources = workbenchSourcesFor(workbenchStatusKey("/portal", tab), "/portal");
     sources.update("fixture", { error: "first failure", pending: false, retry: vi.fn() });
     const markup = renderToStaticMarkup(createElement(WorkbenchTabFrame, {
       tab, folder: "/portal", active: true,
@@ -76,7 +76,7 @@ describe("every WorkbenchTabType enters the status frame", () => {
         onStatusChange: () => () => {},
       } as never);
       const tab = { id: type, type, title: type };
-      const sources = workbenchSourcesFor(workbenchStatusKey("/contract", tab));
+      const sources = workbenchSourcesFor(workbenchStatusKey("/contract", tab), "/contract");
       sources.update("fixture", {
         primary: true,
         pending: false,

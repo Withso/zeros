@@ -74,6 +74,7 @@ import { subscribeToLiveChatDrafts, liveChatDraftEntries } from "../features/age
 import { liveEditDraftEntries, subscribeToLiveEditDrafts, pruneLiveEditDrafts } from "../features/agent/edit-live-drafts";
 import { onNativeBeforeQuit } from "../platform/runtime";
 import { startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
+import "./create-composer-drafts";
 import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
 import { localTranscriptCache, cloudTranscriptCache } from "./local-transcript-cache";
@@ -2112,6 +2113,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         // updates can neither demote the fixed Files home nor mint a new one.
         fixed: target.fixed,
       };
+      if (target.skillSource && Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&
+        action.updates.filePath !== target.filePath && !Object.prototype.hasOwnProperty.call(action.updates, "skillSource"))
+        updatedTarget.skillSource = undefined;
       if (
         (target.type === "files" || target.type === "changes") &&
         Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&

@@ -9,6 +9,7 @@ import {
   validateTask,
 } from "./contracts.mjs";
 import {
+  appCommit,
   labelsOf,
   ownedProposal,
   planProposal,
@@ -36,12 +37,7 @@ export function manifestPins(text) {
  * Human-authored commits with a copied trailer are not a recovery authority. */
 export function recoverBaseline(commits, provider, appSlug, previous) {
   for (const commit of [...commits].reverse()) {
-    if (
-      commit.committer?.type !== "Bot" ||
-      commit.committer.login !== `${appSlug}[bot]` ||
-      commit.commit?.verification?.verified !== true
-    )
-      continue;
+    if (!appCommit(commit, appSlug)) continue;
     if (
       !new RegExp(`^Zeros-Runtime-Provider: ${provider}$`, "m").test(
         commit.commit.message ?? "",
@@ -158,7 +154,7 @@ export async function reconcileProposals({
         previous = recoverBaseline(commits, provider, appSlug, previous);
         const integration = [...commits]
           .reverse()
-          .find((commit) => commit.committer?.type !== "Bot");
+          .find((commit) => !appCommit(commit, appSlug));
         const progress = `${openPr.number}:${integration?.sha ?? "creation"}`;
         if (previous.reviewProgress !== progress) {
           const changedAt =
@@ -325,7 +321,8 @@ export async function refreshPrReports(
   state,
   { trackingIssue = null, updatesEnabled = true } = {},
 ) {
-  let failed = false;
+  let failed = false,
+    status = null;
   for (const [provider, proposal] of Object.entries(state.proposals)) {
     if (!proposal.pr || !sha(proposal.head)) continue;
     const report =
@@ -365,14 +362,19 @@ export async function refreshPrReports(
         signals,
         trackingIssue,
       });
-    } catch {
+    } catch (error) {
       failed = true;
+      status ??= Number.isSafeInteger(error?.status) ? error.status : null;
     }
   }
-  invariant(
-    !failed,
-    "One or more PR reports could not be refreshed; the other providers were still attempted.",
-  );
+  if (failed) {
+    const error = new Error(
+      "One or more PR reports could not be refreshed; the other providers were still attempted.",
+    );
+    // Only GitHub's numeric status crosses this boundary, never a response body.
+    if (status !== null) error.status = status;
+    throw error;
+  }
 }
 
 export function finalizeResults(input, tasks, results, now, runUrl) {
@@ -510,9 +512,7 @@ export async function confirmWrittenResults(github, tasks, results, appSlug) {
       .reverse()
       .find(
         (commit) =>
-          commit.committer?.type === "Bot" &&
-          commit.committer.login === `${appSlug}[bot]` &&
-          commit.commit?.verification?.verified === true &&
+          appCommit(commit, appSlug) &&
           commit.commit.message?.includes(
             `Zeros-Runtime-Task: ${task.recoveryTaskId ?? task.id}`,
           ) &&

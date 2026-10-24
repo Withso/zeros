@@ -4,7 +4,7 @@
 //
 // One hook the three composer surfaces (AgentChat, EmptyComposer, edit-in-
 // place) consume. It owns:
-//   • the TipTap editor (minimal schema + the 2 atom pill nodes + keymap +
+//   • the TipTap editor (minimal schema + reference/attachment atoms + keymap +
 //     placeholder + undo) with React-18-safe options
 //   • the @/slash/# Suggestion bridge wired to the EXISTING filters via refs
 //     (editor is created once, yet always sees current files/commands/PRs)
@@ -40,10 +40,11 @@ import { closeHistory } from "@tiptap/pm/history";
 import { X as XIcon } from "lucide-react";
 
 import "./composer-editor.css";
-import { MentionNode, AttachmentNode } from "./nodes";
+import { MentionNode, AttachmentNode, SkillNode } from "./nodes";
 import { LocalLinkNode, localLinkPasteSlice } from "./local-link-node";
 import { useLocalLinks } from "../local-links/context";
 import { ComposerKeymap } from "./keymap";
+import { SlashCommandDecoration, slashCommandDecorationKey } from "./slash-command-decoration";
 import {
   ComposerSuggestions,
   SuggestionStore,
@@ -88,7 +89,13 @@ import {
   mergeCommands,
 } from "../../../platform/bridge/agent-events";
 import type { AvailableCommand } from "../../../platform/bridge/agent-events";
-import { listSkills } from "../../../platform/app";
+import type { Skill } from "../../../platform/app";
+import { skillCatalog, skillCatalogKey, fetchSkillCatalog, loadSkillCatalog } from "../../../platform/skill-catalog";
+import { useCachedRead } from "../../../state/use-cached-read";
+import { canBackgroundSyncCloudWorkspace, subscribeCloudWorkspaces } from "../../../state/cloud-workspace-catalog";
+import { parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
+import { filePillPath } from "../../../shell/workbench/file-pill-navigation";
+import { validSkillSource } from "../../../platform/skill-source";
 import { useBrowserPickerSelection } from "../../../state/workspace-store";
 import { useWorkspaceProvisioning } from "../../../state/pending-workspaces";
 import type {
@@ -101,6 +108,7 @@ import type {
 // scroll cap below. Keep the entire empty area editable and clickable.
 const EDITOR_MIN_HEIGHT_CLASS = "min-h-[40px]";
 const COMPOSER_FALLBACK_MIN_HEIGHT = 44;
+const EMPTY_SKILLS: Skill[] = [];
 
 // The editable area caps at 200px tall, then scrolls IN PLACE. The cap +
 // overflow MUST live on the SAME element — the .composer-pm contenteditable
@@ -136,6 +144,16 @@ export interface UseComposerEditorOpts {
    *  canvas. Such surfaces rely on the send-path safety net, which stages
    *  into whatever workspace the prompt actually lands in. */
   stageIntoContextGraph?: boolean;
+  /** Create drafts must recover independently of a native source or workspace. */
+  portableAttachmentSources?: boolean;
+  /** No workspace exists yet in cloud Create; never discover Local skills there. */
+  discoverSkills?: boolean;
+  /** A pre-workspace surface can preview sources without opening a file tab. */
+  onOpenAttachment?: (attachment: ComposerAttachment) => void;
+  /** False before a workspace exists; source references remain removable. */
+  sourceFilesOpen?: boolean;
+  /** Workspace menus sit above the composer; Create follows the caret. */
+  suggestionPlacement?: "composer" | "caret";
   /** Repo origin for the #-PR picker (null disables it). */
   originUrl: string | null;
   /** Session-discovered slash commands (merged under the curated floor). */
@@ -437,34 +455,20 @@ export function useComposerEditor(
   // (commands have their curated floor; this is the skill equivalent, and it
   // needs no live agent session). It is ALSO the only skill source for Cursor,
   // whose SDK reports no skills/commands at all.
-  const [projectSkills, setProjectSkills] = useState<AvailableCommand[]>([]);
-  useEffect(() => {
-    let alive = true;
-    // Pass agentId so each agent reads ITS skill dirs (~/.claude/skills,
-    // ~/.codex/skills, ~/.cursor/skills, plus the workspace-level dirs).
-    void listSkills(cwd ?? undefined, agentId ?? undefined)
-      .then((skills) => {
-        if (!alive) return;
-        setProjectSkills(
-          skills.map((s) => ({
-            name: s.id,
-            description: s.description || s.name,
-            kind: "skill" as const,
-          })),
-        );
-        // The re-push into an already-open "/" menu happens in the
-        // slashCommands effect below — NOT here. Calling refreshRef.current()
-        // synchronously after setProjectSkills would read the pre-render
-        // slashCommandsRef (still missing these skills); the effect runs after
-        // the render that refreshes the ref.
-      })
-      .catch(() => {
-        if (alive) setProjectSkills([]);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [cwd, agentId]);
+  const skillKey = opts.discoverSkills === false ? null : skillCatalogKey(cwd, agentId);
+  const skillDiscoveryReady = useSyncExternalStore(subscribeCloudWorkspaces, () => {
+    const target = parseCloudWorkspaceKey(cwd);
+    return !target || canBackgroundSyncCloudWorkspace(target);
+  });
+  const skillSnapshot = useCachedRead(skillCatalog, skillKey, fetchSkillCatalog, {
+    maxAgeMs: 10_000, enabled: attachmentImagesActive && skillDiscoveryReady,
+  });
+  const skillSources = skillSnapshot.data ?? EMPTY_SKILLS;
+  const skillSourcesRef = useRef(skillSources);
+  skillSourcesRef.current = skillSources;
+  const projectSkills = useMemo<AvailableCommand[]>(() => skillSources.map(skill => ({
+    name: skill.id, description: skill.description || skill.name, kind: "skill",
+  })), [skillSources]);
 
   const slashCommands = useMemo(
     // mergeCommands(projectSkills, availableCommands): the agent's OWN reported
@@ -479,6 +483,7 @@ export function useComposerEditor(
   );
   const slashCommandsRef = useRef(slashCommands);
   slashCommandsRef.current = slashCommands;
+  useEffect(() => { store.dismiss(); }, [store, cwd, agentId, attachmentImagesActive]);
 
   // Re-push into an already-open "/" menu whenever the slash list changes
   // (project skills land async, or the agent reports/updates its commands), so
@@ -489,7 +494,10 @@ export function useComposerEditor(
   // early-returns), so the mount pass costs nothing.
   useEffect(() => {
     refreshRef.current();
-  }, [slashCommands]);
+    const editor = editorRef.current;
+    if (attachmentImagesActive && editor && !editor.isDestroyed)
+      editor.view.dispatch(editor.state.tr.setMeta(slashCommandDecorationKey, true));
+  }, [slashCommands, attachmentImagesActive]);
 
   const originUrlRef = useRef(originUrl);
   originUrlRef.current = originUrl;
@@ -644,6 +652,17 @@ export function useComposerEditor(
 
   const onPickSlash = useCallback(
     (editor: Editor, range: Range, item: AvailableCommand) => {
+      if (item.kind === "skill") {
+        const skill = skillSourcesRef.current.find(skill => skill.id === item.name || skill.name === item.name);
+        const path = skill ? filePillPath(optsRef.current.cwd, skill.path) : null;
+        const source = skill && !path ? { agentId: optsRef.current.agentId, path: skill.path, name: skill.name } : null;
+        editor.chain().focus().insertContentAt(range, [{ type: "skill", attrs: {
+          name: item.name, label: skill?.name || item.name, path: path || "",
+          source: validSkillSource(source) ? source : null,
+          provider: optsRef.current.agentId,
+        } }, { type: "text", text: " " }]).run();
+        return;
+      }
       // Inline action / terminal command → run it, insert nothing.
       if (
         optsRef.current.onSlashCommand?.(item.name) ||
@@ -706,7 +725,9 @@ export function useComposerEditor(
       Text,
       MentionNode,
       AttachmentNode,
+      SkillNode,
       LocalLinkNode,
+      SlashCommandDecoration.configure({ commands: () => slashCommandsRef.current }),
       ComposerKeymap.configure({
         onSubmit: handleSubmit,
         onEscape: handleEscape,
@@ -725,7 +746,13 @@ export function useComposerEditor(
           if (optsRef.current.attachmentImagesActive !== false)
             filesSearch.refresh(optsRef.current.cwd, filesQueryRef.current);
         },
-        onSlashOpen: () => optsRef.current.onSlashOpen?.(),
+        onSlashOpen: () => {
+          const options = optsRef.current;
+          if (options.attachmentImagesActive === false) return;
+          options.onSlashOpen?.();
+          if (options.discoverSkills !== false)
+            void loadSkillCatalog(options.cwd, options.agentId).catch(() => {});
+        },
         prEnabled,
         onPickMention,
         onPickSlash,
@@ -882,6 +909,7 @@ export function useComposerEditor(
             agentName: v.agentName,
             agentSupportsImage: v.agentSupportsImage,
             modelId: v.modelId,
+            portableSources: v.portableAttachmentSources,
           });
           const ed = editorRef.current;
           if (!ed || !videoStaged()) return;
@@ -925,6 +953,7 @@ export function useComposerEditor(
         agentName: v.agentName,
         agentSupportsImage: v.agentSupportsImage,
         modelId: v.modelId,
+        portableSources: v.portableAttachmentSources,
       });
       if (atts.length === 0) return;
       const ed = editorRef.current;
@@ -1067,6 +1096,11 @@ export function useComposerEditor(
   const [dragActive, setDragActive] = useState(false);
   const dragDepth = useRef(0);
   useEffect(() => {
+    if (!attachmentImagesActive) {
+      dragDepth.current = 0;
+      setDragActive(false);
+      return;
+    }
     const onDragOver = (e: DragEvent) => {
       if (looksLikeFileDrag(e)) e.preventDefault();
     };
@@ -1093,7 +1127,7 @@ export function useComposerEditor(
       document.removeEventListener("drop", onDrop);
       document.removeEventListener("dragend", endDrag);
     };
-  }, []);
+  }, [attachmentImagesActive]);
 
   const dragHandlers = useMemo(
     () => ({
@@ -1131,13 +1165,14 @@ export function useComposerEditor(
   const openPreview = useCallback((src: string) => setPreviewSrc(src), []);
   const closePreview = useCallback(() => setPreviewSrc(null), []);
   useEffect(() => {
+    if (!attachmentImagesActive) { closePreview(); return; }
     if (!previewSrc) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") closePreview();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [previewSrc, closePreview]);
+  }, [previewSrc, closePreview, attachmentImagesActive]);
 
   // ── imperative API ──
   const serialize = useCallback((): ComposerSerialized | null => {
@@ -1253,8 +1288,12 @@ export function useComposerEditor(
       cwd,
       attachmentImagesActive,
       editable,
+      sourceFilesOpen: opts.sourceFilesOpen,
+      onOpenAttachment: opts.onOpenAttachment,
+      agentId,
+      skills: skillSources,
     }),
-    [cwd, attachmentImagesActive, editable],
+    [cwd, attachmentImagesActive, editable, opts.sourceFilesOpen, opts.onOpenAttachment, agentId, skillSources],
   );
 
   const editorContent = (
@@ -1275,11 +1314,11 @@ export function useComposerEditor(
   );
 
   const suggestionPopup = (
-    <ComposerSuggestionPopup store={store} agentId={agentId} />
+    <ComposerSuggestionPopup store={store} agentId={agentId} active={attachmentImagesActive} placement={opts.suggestionPlacement} />
   );
 
   const imagePreviewOverlay =
-    previewSrc && typeof document !== "undefined"
+    attachmentImagesActive && previewSrc && typeof document !== "undefined"
       ? createPortal(
           <div data-zeros-root="">
             <div

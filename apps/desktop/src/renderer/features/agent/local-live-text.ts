@@ -205,6 +205,7 @@ export function isLocalLiveTextAppend(
     left.role === right.role &&
     !left.retracted &&
     !left.modelFallback &&
+    !left.wakeupNotice &&
     !!left.text.trim() &&
     right.text.startsWith(left.text) &&
     sameFieldsExcept(left, right, TEXT_FIELDS)
