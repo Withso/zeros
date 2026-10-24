@@ -17,13 +17,17 @@ import { markFreshLocalChat, paintLocalTranscriptFromMemory, presentCachedLocalT
 import { forgetEmptyLocalChat, isKnownEmptyLocalChat, rememberEmptyLocalChat } from "../fresh-local-chats";
 import { groupMessagesIntoTurns } from "../turn-grouping";
 import { presentLeadingPrompt } from "../transcript-leading-prompt";
+import { bumpCancelGeneration, clearPrebindGoalSnapshotsForChat } from "../session-reload-lifecycle";
+import { forgetFreshLocalChat } from "../local-transcript-presentation";
 
 const ast = ts.createSourceFile("sessions-provider.tsx", readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let hydrateSource = "", reconcileSource = "", cacheSubscriptionSource = "";
+let hydrateSource = "", reconcileSource = "", resetContextSource = "", prepareSource = "", cacheSubscriptionSource = "";
 (function collect(node: ts.Node) {
   if (ts.isVariableDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer)) {
     if (node.name.getText(ast) === "hydrateChat") hydrateSource = node.initializer.arguments[0]!.getText(ast);
     if (node.name.getText(ast) === "reconcileChatMessages") reconcileSource = node.initializer.arguments[0]!.getText(ast);
+    if (node.name.getText(ast) === "resetConversationContext") resetContextSource = node.initializer.arguments[0]!.getText(ast);
+    if (node.name.getText(ast) === "prepareForSend") prepareSource = node.initializer.arguments[0]!.getText(ast);
   }
   if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" &&
       node.arguments[0]?.getText(ast).includes("rememberTranscript(")) {
@@ -54,19 +58,32 @@ function harness(connected = true) {
     hydrateInFlightRef: { current: requests },
     pendingHydratesRef: { current: pendingHydrates }, localTranscriptCache, presentCachedLocalTranscript, takeFreshLocalChat,
     presentKnownEmptyLocalTranscript, consumeFreshCloudChat, transcriptCacheFor, presentCachedTranscript, canReplaceCloudTranscript,
+    bumpCancelGeneration, clearPrebindGoalSnapshotsForChat, forgetFreshLocalChat,
+    prebindBackgroundTasksRef: { current: { clearChat: vi.fn() } },
   };
+  const resetMaps = ["cancelGenerationsRef", "promptAbortRef", "sendingChatsRef", "ensureInFlightRef", "loadFlightKeysRef",
+    "loadFlightAdoptOnlyRef", "prebindDirtySessionsRef", "prebindGoalSnapshotsRef", "sendQueueRef", "queueHeldRef",
+    "flushBubbleRef", "authPromptsRef", "turnProducedOutputRef", "announcedDirsRef", "promptActivityRef", "conversationResetFlightsRef"];
+  const refs = Object.fromEntries(resetMaps.map(name => [name, { current: new Map() }]));
+  Object.assign(context, refs);
   vm.runInNewContext(code, context);
   Object.assign(context, {
     useSessionsStore, rememberLocalTranscript, rememberTranscript, isLocalTranscriptChat, rememberEmptyLocalChat, forgetEmptyLocalChat,
     noteLocalChatPrompt: vi.fn(), forgetLocalChatPrompt: vi.fn(),
-    useWorkspaceStore: { getState: () => ({ chats: [] }) },
+    useWorkspaceStore: { getState: () => ({ chats: [], dispatch: vi.fn() }) },
     window: { setTimeout, clearTimeout },
   });
   vm.runInNewContext(ts.transpileModule("globalThis.subscribeToCache = " + cacheSubscriptionSource,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  context.hydrateChat = context.hydrate;
+  vm.runInNewContext(ts.transpileModule(`globalThis.resetContext = ${resetContextSource};\nglobalThis.prepare = ${prepareSource};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return {
     hydrate: context.hydrate as (chatId: string) => Promise<void>, read, resolve, pendingHydrates,
     subscribeToCache: context.subscribeToCache as () => () => void,
+    resetContext: context.resetContext as (chatId: string) => void,
+    prepare: context.prepare as (chatId: string) => Promise<void> | null,
+    refs,
   };
 }
 
@@ -81,6 +98,81 @@ beforeEach(() => {
 afterEach(() => {
   localTranscriptCache.resetForTesting();
   vi.useRealTimers();
+});
+
+describe("conversation context reset", () => {
+  it.each(["/repo", "/organization/repo"])("retires only the reset chat and waits for canonical history before sending in %s", async (folder) => {
+    const before = [user("kept"), agent("kept-answer"), user("removed"), agent("removed-answer")];
+    const binding = { version: 1 as const, kind: "native" as const, providerId: "codex", resumeId: "old" };
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", { ...BLANK, cwd: folder, agentId: "codex", executionId: "old-execution", sessionId: "old-execution",
+      providerBinding: binding, messages: before, status: "streaming", hasTranscript: true });
+    store.setSession("chat-2", { ...BLANK, cwd: "/other", agentId: "claude", sessionId: "other", messages: [user("other")] });
+    const other = slot("chat-2");
+    const h = harness();
+    const abort = new AbortController();
+    h.refs.promptAbortRef.current.set("chat-1", abort);
+    h.refs.ensureInFlightRef.current.set("chat-1", Promise.resolve());
+    h.refs.ensureInFlightRef.current.set("chat-2", Promise.resolve());
+    h.refs.sendQueueRef.current.set("chat-1", ["queued before reset"]);
+    h.resetContext("chat-1");
+    expect(abort.signal.aborted).toBe(true);
+    expect(h.refs.cancelGenerationsRef.current.get("chat-1")).toBe(1);
+    expect(h.refs.ensureInFlightRef.current.has("chat-1")).toBe(false);
+    expect(h.refs.ensureInFlightRef.current.has("chat-2")).toBe(true);
+    expect(h.refs.sendQueueRef.current.has("chat-1")).toBe(false);
+    expect(slot("chat-1")).toMatchObject({ executionId: null, sessionId: null, providerBinding: null, status: "idle" });
+    expect(useSessionsStore.getState().executionToChatId["old-execution"]).toBeUndefined();
+    expect(slot("chat-2")).toBe(other);
+    let prepared = false;
+    const preparation = h.prepare("chat-1")!.then(() => { prepared = true; });
+    await Promise.resolve();
+    expect(prepared).toBe(false);
+    h.resolve({ messages: before.slice(0, 2), source: "local" });
+    await preparation;
+    expect(slot("chat-1")?.messages).toEqual(before.slice(0, 2));
+    expect(slot("chat-2")).toBe(other);
+  });
+
+  it.each([[], [user("restored"), agent("restored-answer")]].map(messages => ({ messages })))("accepts authoritative empty history or an Undo without an overlapping row: $messages", async ({ messages }) => {
+    useSessionsStore.getState().setSession("chat-1", { ...BLANK, cwd: "/repo", messages: [user("old")] });
+    const h = harness();
+    h.resetContext("chat-1");
+    const preparation = h.prepare("chat-1");
+    h.resolve({ messages, source: "local" });
+    await preparation;
+    expect(slot("chat-1")?.messages).toEqual(messages);
+    expect(slot("chat-1")?.hasTranscript).toBe(messages.length > 0);
+  });
+
+  it("ignores a pre-reset history read that finishes after the reset's canonical read", async () => {
+    useSessionsStore.getState().setSession("chat-1", { ...BLANK, cwd: "/repo", transcriptState: "cold" });
+    const h = harness();
+    let resolveOld!: (page: Page) => void;
+    h.read.mockImplementationOnce(() => new Promise<Page>(resolve => { resolveOld = resolve; }));
+    const stale = h.hydrate("chat-1");
+    h.resetContext("chat-1");
+    const preparation = h.prepare("chat-1");
+    h.resolve({ messages: [user("kept")], source: "local" });
+    await preparation;
+    resolveOld({ messages: [user("kept"), agent("discarded")], source: "local" });
+    await stale;
+    expect(slot("chat-1")?.messages.map(message => message.id)).toEqual(["kept"]);
+  });
+
+  it("leaves cloud and evicted chats unloaded", () => {
+    const cloud = cloudScopedId({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" }, "chat");
+    const store = useSessionsStore.getState();
+    store.setSession(cloud, { ...BLANK, cwd: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", sessionId: "cloud-native" });
+    store.setSession("chat-1", { ...BLANK, cwd: "/repo", transcriptState: "cold", sessionId: "old" });
+    const cloudBefore = slot(cloud);
+    const h = harness();
+    h.resetContext(cloud);
+    h.resetContext("chat-1");
+    expect(h.read).not.toHaveBeenCalled();
+    expect(slot(cloud)).toBe(cloudBefore);
+    expect(slot("chat-1")).toMatchObject({ transcriptState: "cold", sessionId: null });
+  });
 });
 
 describe("Local transcript hydration", () => {

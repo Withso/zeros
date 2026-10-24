@@ -1622,6 +1622,16 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE local_orchestration_notifications ADD COLUMN note_json TEXT;
     `,
   },
+  {
+    version: 43,
+    name: "conversation context reset",
+    up: `
+      -- Engine-owned: a transcript reset must also retire its native context,
+      -- including when the app restarts before the next prompt is sent.
+      ALTER TABLE chats ADD COLUMN context_generation INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE chats ADD COLUMN context_replay_pending INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 /** Run all pending migrations in order, each in its own transaction. Idempotent

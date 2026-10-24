@@ -657,13 +657,13 @@ export const TurnFooter = memo(function TurnFooter({
       } else {
         toast.success(
           restored > 0
-            ? `Reset to this point — ${restored} file${restored === 1 ? "" : "s"} restored`
-            : "Reset to this point",
+            ? `Reset changes — ${restored} file${restored === 1 ? "" : "s"} restored`
+            : "Reset changes",
           { action: undo },
         );
       }
     } catch (err) {
-      toast.error("Couldn’t reset to this point", {
+      toast.error("Couldn’t reset changes", {
         description: err instanceof Error ? err.message : String(err),
       });
     } finally {
@@ -684,10 +684,6 @@ export const TurnFooter = memo(function TurnFooter({
   // may fail, or an edit may be a no-op). Only the engine's persisted
   // pre/post-snapshot diff may produce a row. Missing records show no card.
   const files = readOnly ? [] : turnFooterFiles(turn);
-  // Whether this selected turn's own files have a retained checkpoint. Later
-  // turns are evaluated independently by the reset service; this only controls
-  // the selected-turn warning in the confirmation dialog.
-  const hasSnapshot = turn?.preSnapshot != null;
   const cardFailure = turnFailureForCard({
     events,
     turnId,
@@ -798,7 +794,7 @@ export const TurnFooter = memo(function TurnFooter({
                   }}
                 >
                   <RotateCcw className="size-3.5" />
-                  Reset to this point
+                  Reset changes
                 </DropdownMenuItem>
               )}
             </DropdownMenuContent>
@@ -843,24 +839,14 @@ export const TurnFooter = memo(function TurnFooter({
         <Dialog open onOpenChange={(o) => !o && setConfirmOpen(false)}>
           <DialogContent className="max-w-md">
             <DialogHeader>
-              <DialogTitle>Reset to this point?</DialogTitle>
+              <DialogTitle>Reset changes?</DialogTitle>
             </DialogHeader>
             <DialogBody>
               <DialogDescription>
-                This rolls back this turn and every later turn in this chat —
-                the conversation is truncated here, and recorded file changes
-                from those turns are unwound from each turn’s own checkpoint.
+                Reset this chat and its changes to this point.
+                <br />
+                This turn and later turns will be removed. You can undo.
               </DialogDescription>
-              {files.length > 0 && !hasSnapshot && (
-                <p className="text-yellow-primary text-xs">
-                  This turn’s file checkpoint is no longer available, so its
-                  file changes will be left untouched.
-                </p>
-              )}
-              <p className="text-fg2 text-xs">
-                Concurrent edits are preserved when possible; overlapping edits
-                are left untouched. You can undo the reset afterward.
-              </p>
             </DialogBody>
             <DialogFooter>
               <Button
@@ -877,7 +863,7 @@ export const TurnFooter = memo(function TurnFooter({
                 onClick={runReset}
                 disabled={resetting}
               >
-                Reset
+                Reset changes
               </Button>
             </DialogFooter>
           </DialogContent>

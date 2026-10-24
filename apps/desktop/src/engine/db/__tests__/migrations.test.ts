@@ -79,6 +79,19 @@ function tableColumnsForTest(
 }
 
 describe("Zeros DB — migration ladder data safety (forward-only)", () => {
+  it("adds reset context state without detaching existing provider conversations", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 42);
+      const binding = JSON.stringify({ version: 1, kind: "native", providerId: "codex", resumeId: "existing-thread" });
+      db.prepare("INSERT INTO chats (id, agent_id, session_id, provider_binding) VALUES (?, ?, ?, ?)")
+        .run("existing-chat", "codex", "existing-thread", binding);
+      runMigrations(db);
+      expect(db.prepare("SELECT session_id, provider_binding, context_generation, context_replay_pending FROM chats WHERE id = ?").get("existing-chat"))
+        .toEqual({ session_id: "existing-thread", provider_binding: binding, context_generation: 0, context_replay_pending: 0 });
+    } finally { db.close(); }
+  });
+
   it("applies the whole ladder empty→head (contiguous 1..latest) and re-running is a no-op", () => {
     const db = new Database(":memory:");
     try {
