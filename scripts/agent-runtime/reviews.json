@@ -234,6 +234,466 @@
         "apps/cloud-worker/src/drivers/claude/driver.ts",
         "docs/claude-event-coverage.md"
       ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "45c8ea4f33ad2729af9cb3265a5324cce45bdb595d146fc4237bd3435a88f911",
+      "disposition": "generated-only",
+      "rationale": "The five new methods (thread/sample, thread/sample/cancel, thread/readState/update, thread/items/read and feedback/save) are typed protocol availability only. Zeros sends none of them; sampling suggestions and diagnostic ZIP export are explicitly deferred.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "c7204885ee2bb20b2e82a1dbf5c845f37d4ecd9a17d9886f597a883d64247e91",
+      "disposition": "preserved-generically",
+      "rationale": "thread/readState/changed is available through the generic typed native subscription. It has no canonical transcript, unread UI or worker behavior; existing notification handling remains unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "c3638bb69699f07b5ffdc3f43a7239af3717f604c0abe356eb8ad0dffe20c4d6",
+      "disposition": "generated-only",
+      "rationale": "The aggregate v2 schema follows the individual reviewed subjects: new client methods stay generated-only, read-state notification subscription stays generic, and image-generation changes are handled by the desktop and standalone worker mappers. This wrapper adds no separate product capability.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/codex_app_server_protocol.v2.schemas.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ec289aa35857b546a0a831cc4fa303e11720b27331f4d4e0290cd34e93b6ef33",
+      "disposition": "generated-only",
+      "rationale": "Managed storage defaults describe Codex Desktop workspace creation, not filesystem grants. Zeros does not call configRequirements/read or adopt provider project-parent or projectless-workspace roots; Local and cloud workspace ownership remains Zeros-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ApplicationStorageRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ab8276efc53e59d18e0ff4613768bc0473ea3c08f707ee2232d2c5be2ed8610b",
+      "disposition": "generated-only",
+      "rationale": "Managed storage defaults describe Codex Desktop workspace creation, not filesystem grants. Zeros does not call configRequirements/read or adopt provider project-parent or projectless-workspace roots; Local and cloud workspace ownership remains Zeros-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ApplicationStorageRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "4d7c70fa45b306ee467a370120163122de074e1e350000ec975e35e76dbec340",
+      "disposition": "generated-only",
+      "rationale": "The five new methods (thread/sample, thread/sample/cancel, thread/readState/update, thread/items/read and feedback/save) are typed protocol availability only. Zeros sends none of them; sampling suggestions and diagnostic ZIP export are explicitly deferred.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "db3eb9ce772bdb3c1b76adca39d712ad182e1e3ffdf0438e0384399d56a89497",
+      "disposition": "sdk-owned",
+      "rationale": "Optional output_text annotations and logprobs belong to native Responses content. Zeros consumes normalized agent-message events and does not promote these raw fields into the canonical transcript.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/ContentItem.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "7946a0428918322630b5216fa4dc48ee1703b5201ac8f019f21f97fe744418d8",
+      "disposition": "generated-only",
+      "rationale": "The optional WebSocket request ID affects the native environment/add connection and reconnect. Zeros does not call that generated-only route or use Codex environments as workspace placement identities.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/EnvironmentAddParams.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "9e4880c3267014378448115b11bc542d81f79aaf141365185dc7ef08e95b2bc7",
+      "disposition": "intentionally-deferred",
+      "rationale": "Local diagnostics ZIP export through feedback/save is explicitly deferred. No renderer or worker action requests an archive or adopts its host savePath; existing Zeros feedback and redaction boundaries remain in force.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/FeedbackSaveParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "85541c66e78facc5a269cb88eb42d3070e6d13a5a691edd6ae37493c22405d44",
+      "disposition": "intentionally-deferred",
+      "rationale": "Local diagnostics ZIP export through feedback/save is explicitly deferred. No renderer or worker action requests an archive or adopts its host savePath; existing Zeros feedback and redaction boundaries remain in force.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/FeedbackSaveParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b40b9918cc20a4cba90f71746f5c29cf8a841bc6166d835cca6f8ef1288fa1cb",
+      "disposition": "preserved-generically",
+      "rationale": "preModelRequest and postModelRequest use the existing hook/started and hook/completed lifecycle. Both mappers retain the bounded event-name string and stable hook identity without a new special-case UI or config surface.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-translator.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "06e832ef77e935f048b6c17844137e55041cacbefe15e60cff311fe5e9d0e9cc",
+      "disposition": "implemented",
+      "rationale": "Observed inputImages path/SHA-256 metadata is retained and presented as input-image chips for generated images. Optional omission preserves older records; input references do not become output previews or change workspace identity.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "f2bab50f0509eb8a3b3df515b746d21fd6a0239d8377e586588544dc1d080aa1",
+      "disposition": "sdk-owned",
+      "rationale": "PreModelRequest and PostModelRequest managed hook matchers are executed and enforced by the native runtime. Zeros does not author managed hook requirements; its existing generic hook notifications remain the transcript boundary.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ManagedHooksRequirements.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "db4102d8491659f3788e0e20436ea2b3c141a18a98d86eaca4a7bab6afe1cef2",
+      "disposition": "generated-only",
+      "rationale": "The added toolListMeta is opaque first-page catalog metadata. Zeros keeps the existing server/tool inventory and OAuth status mapping and does not expose or interpret this new metadata as credentials, tools or product state.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/McpServerStatus.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/native-mcp.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/mcp-oauth.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ae14b155406c6d21e5ab1e8b5a594c5ab9e827d352f5ceffbfca8c1192d371d9",
+      "disposition": "preserved-generically",
+      "rationale": "sci and sci_plus remain opaque account plan strings. The account reader and quota projection already accept strings; no plan-name allowlist controls execution, model selection or cloud organization authorization.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-translator.test.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "1c3c162f443b5c91000151fb62db0681633bc7c28735db9daf340d3e5f1b8895",
+      "disposition": "generated-only",
+      "rationale": "New voice names, optional v3 voice inventory and voiceSessionId are available in generated bindings only. Zeros has no native realtime-session UI. The shipped codex-resources/voice runtime is retained in desktop and worker packages; excluding it is a deferred packaging decision.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "scripts/__tests__/stage-codex-cli.test.ts",
+        "apps/cloud-worker/docs/runtime.md",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "f0812259bd994b09a2ee672d8a0f8ed46fc68d551e0eb11813233f29b110cc66",
+      "disposition": "generated-only",
+      "rationale": "New voice names, optional v3 voice inventory and voiceSessionId are available in generated bindings only. Zeros has no native realtime-session UI. The shipped codex-resources/voice runtime is retained in desktop and worker packages; excluding it is a deferred packaging decision.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "scripts/__tests__/stage-codex-cli.test.ts",
+        "apps/cloud-worker/docs/runtime.md",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "7a1e42e394a7c2c76442ba0e0c5624eacababe8c138cdead417b3f2cf149b8ba",
+      "disposition": "sdk-owned",
+      "rationale": "Optional encrypted_content and status fields on raw Responses items stay within Codex persistence and model transport. Zeros uses normalized ThreadItem notifications; it neither decodes the ciphertext nor projects it as transcript text.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/ResponseItem.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "bdf54fba512fab8b5c9ceaa930494f989ff4570779c008a6680c3ef5a691d427",
+      "disposition": "preserved-generically",
+      "rationale": "thread/readState/changed is available through the generic typed native subscription. It has no canonical transcript, unread UI or worker behavior; existing notification handling remains unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ac5a16cef695909d6c488bb88accdf7ae85b6f2cbbcb4d8bfc516f2755dde5d0",
+      "disposition": "generated-only",
+      "rationale": "experimentalPredictionMode and experimentalDisablePredictionMcp are not set by the existing explicit thread/fork path. Cache-preserving prediction forks and sample suggestions are not enabled; normal fork model, workspace and history behavior stays unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-binding.test.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "bd17fa4aa560b099d45d5c5b51c55c09fbf7a5e4d5a1ef9e11bf505d488d10e2",
+      "disposition": "implemented",
+      "rationale": "Image generation accepts either attachment-store fileId or fallback inline result. Desktop and worker preserve inline previews, use the validated savedPath for file-backed previews, show a placeholder when no preview is available, and retain optional input-image chips. A fileId is never fabricated into a URL; existing failure, replay and tool identity semantics remain intact.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ba573c2c0634e567183ace4d372d474ff401fea47e5172f906a57ca2ae701e65",
+      "disposition": "generated-only",
+      "rationale": "The experimental bounded persisted-item read route is not called. Zeros continues to load its own durable transcript and existing native history paths; exposing item-by-ID retrieval is not part of this runtime upgrade.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/history.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "95bb83b6f4ee4b300d457b47c05f4e4b4a9ce5cf9461df7af56c59e21f68c53c",
+      "disposition": "generated-only",
+      "rationale": "The experimental bounded persisted-item read route is not called. Zeros continues to load its own durable transcript and existing native history paths; exposing item-by-ID retrieval is not part of this runtime upgrade.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/history.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "61f20b8a895258f5ad1009111bd07f525eceb558acd6532303074f2d15e16eda",
+      "disposition": "generated-only",
+      "rationale": "Optional excludedThreadIds is omitted by the native thread inventory caller. Existing cwd-scoped pagination and binding discovery stay unchanged; no thread exclusion or selection policy is introduced.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/session-inventory.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/session-inventory.test.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "bdaff0e75409cda4843fbf6ab4a7912747e6ff59a30adef934a79cfbbe5ccbd0",
+      "disposition": "generated-only",
+      "rationale": "Native readStates/readState receipts are not consumed. Zeros continues to use its own durable chat state and existing thread inventory/history mappings, without adopting Codex unread markers or revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/session-inventory.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/history.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "22f5ec8cb551cb9ccc170d125651a12b159623d7e9b8681f7b5093c808f41513",
+      "disposition": "generated-only",
+      "rationale": "Native readStates/readState receipts are not consumed. Zeros continues to use its own durable chat state and existing thread inventory/history mappings, without adopting Codex unread markers or revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/session-inventory.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/history.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "a906453d70dfe034dc0d934f3305f3f53ec232257c4950561f67b27600430bc8",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "3421795deb3262071934c8375e3dfd3a0f63befeb95b5a705d1f50f3a59682c5",
+      "disposition": "preserved-generically",
+      "rationale": "The new notification can be subscribed to through onNotificationTyped and is classified forwarded. No canonical transcript, worker lifecycle or unread-state product consumer is registered.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b7a54fcea396ccfdcfa55e5bb0e457a8ee1778a15ee1e168daa311fc5e8f2cb0",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "6efcdec14f13c14dd2e2f8bba893c2bc1df11c778cd6710796c276d2ff0284d1",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "832a15eecd5687038acc5ce218f5c1c62c15cbcc210a19f488c164d73e495886",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "cfcc6c7cbc8ab9cd8e08e82985b057043fea66457312159fe628880b48e619fc",
+      "disposition": "generated-only",
+      "rationale": "New voice names, optional v3 voice inventory and voiceSessionId are available in generated bindings only. Zeros has no native realtime-session UI. The shipped codex-resources/voice runtime is retained in desktop and worker packages; excluding it is a deferred packaging decision.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "scripts/__tests__/stage-codex-cli.test.ts",
+        "apps/cloud-worker/docs/runtime.md",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "962bb96691ef4c22892016d1a1a921c4aaf483372f41ba535f7c477cefc5b28f",
+      "disposition": "intentionally-deferred",
+      "rationale": "thread/sample and thread/sample/cancel composer suggestions are explicitly deferred. Zeros sends neither route and does not create speculative turns or prediction forks; the types remain available for a separately reviewed feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "def83ab11c0f1e13fa7241667ef0639b7f7c22e8870a14978e4436b77ac289f6",
+      "disposition": "intentionally-deferred",
+      "rationale": "thread/sample and thread/sample/cancel composer suggestions are explicitly deferred. Zeros sends neither route and does not create speculative turns or prediction forks; the types remain available for a separately reviewed feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "19cdcd9046fa2cfd02b1e007af61b9a56672213979863f127662bfbe875a771d",
+      "disposition": "intentionally-deferred",
+      "rationale": "thread/sample and thread/sample/cancel composer suggestions are explicitly deferred. Zeros sends neither route and does not create speculative turns or prediction forks; the types remain available for a separately reviewed feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ea96796627329d445b28dc5a1ef481c762cb1204f6f97110d5a6e3bc8fab01cb",
+      "disposition": "intentionally-deferred",
+      "rationale": "thread/sample and thread/sample/cancel composer suggestions are explicitly deferred. Zeros sends neither route and does not create speculative turns or prediction forks; the types remain available for a separately reviewed feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "5b72830ea6e41360531d77de7f2d35b79c1a65344cd8247e868e506954bb0091",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b6e0d1a48311bad62c9cd9abb059c97c455ec34fe87a308f2e8480b3a50c4591",
+      "disposition": "generated-only",
+      "rationale": "Optional responsesapiClientMetadataPatch is not sent by Zeros. Existing native turn/start and turn/steer keep their current input, model, effort, permission and expected-turn identity parameters; metadata merge semantics remain runtime-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-steer.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "a2dc5506138a38139b0521ec939de56ad0f4ef16ff0a3f094b08f452dd8a894d",
+      "disposition": "generated-only",
+      "rationale": "Optional responsesapiClientMetadataPatch is not sent by Zeros. Existing native turn/start and turn/steer keep their current input, model, effort, permission and expected-turn identity parameters; metadata merge semantics remain runtime-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-steer.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "4d5aded7f74d7f85fbaf67b882f0bf9b3bac4c5dd65dba21ae0cfa857e9a6ed4",
+      "disposition": "generated-only",
+      "rationale": "The optional retain flag controls native model-history retention of injected tool output. Zeros does not send TurnToolOutput on turn/start and does not infer any new transcript or persistence authority from the flag.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/TurnToolOutput.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
     }
   ]
 }

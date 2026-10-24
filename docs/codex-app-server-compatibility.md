@@ -37,7 +37,7 @@ the compatibility manifest. A regenerated method cannot silently appear or
 disappear without review.
 
 The control-plane authentication keeper is independently qualified at 0.154.0
-while the interactive runtime is 0.162.1. Its version participates in encrypted
+while the interactive runtime is 0.164.0. Its version participates in encrypted
 cache authentication and a database constraint. `check:codex-pin` checks that
 package against `CODEX_AUTH_RUNTIME_VERSION`, not the desktop protocol version;
 Renovate excludes it from routine agent upgrades. A keeper upgrade requires an
@@ -69,8 +69,8 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.162.1 pin this covers 268 methods: 171 client requests, 11 server
-requests, and 86 server notifications. The five `userVerification/*` client
+At the 0.164.0 pin this covers 274 methods: 176 client requests, 11 server
+requests, and 87 server notifications. The five `userVerification/*` client
 methods are generated-only: Zeros does not expose native identity verification.
 Relative to 0.154.0, `userVerification/cancel`, the three `thread/attachment/*`
 requests, `memory/status`, `rollout/compress`, and the three
@@ -88,6 +88,60 @@ the same validated, fail-closed form path as `openai/form`. Run
 `pnpm check:codex-coverage` for the offline drift check.
 
 ## Transcript fidelity
+
+### 0.164.0 compatibility
+
+The desktop and standalone cloud worker both pin Codex 0.164.0. Generated
+images now carry either an attachment-store `fileId` or an inline `result`
+fallback, plus optional observed `inputImages` path/SHA-256 metadata. Both
+mappers narrow that union before rendering an inline result; a `fileId` is an
+opaque provider reference, not a URL. Existing tool identity, completion,
+failure and saved-path metadata remain compatible with older records.
+
+The five new client methods remain generated-only:
+
+| Method | Zeros boundary |
+| --- | --- |
+| `thread/sample`, `thread/sample/cancel` | Composer suggestions are explicitly deferred; no speculative sample or prediction fork is started. |
+| `feedback/save` | Diagnostics ZIP export is explicitly deferred; no host archive path is requested or exposed. |
+| `thread/readState/update` | Native read/unread receipts do not replace Zeros' durable chat state. |
+| `thread/items/read` | No bounded item-by-ID history reader is added. Existing history loading remains in use. |
+
+`thread/readState/changed` is classified forwarded: a typed native subscription
+is available, with no canonical transcript or product consumer. The new
+`readStates`/`readState` fields on thread list/read responses are not consumed.
+The surface review in `scripts/agent-runtime/reviews.json` records all 40
+structural changes, including the optional metadata, managed storage defaults,
+prediction-fork flags, raw Responses fields and realtime types.
+
+Instant interruption and code-mode cancellation are now native defaults. Zeros
+still settles Stop through the exact native turn and keeps late item repairs
+separate from turn liveness. Parallel native reads retain separate item IDs,
+start order and terminal status. Steering still targets the active turn;
+interrupting native sleep/wait work is owned by Codex. Cold resume restores
+native saved settings, while Zeros' explicit model and per-turn approval and
+sandbox overrides remain authoritative. No persisted identity or permission
+mapping changes are required.
+
+Enterprise-managed MCP sign-in, account-grant selection and confidential OAuth
+clients are native runtime behavior. Local uses the existing MCP OAuth and
+inventory lifecycle; cloud keeps its current MCP authentication policy. The
+native abandonment of unanswered elicitations uses the existing request
+settlement boundary. The new `sci` and `sci_plus` plan values remain opaque
+account strings and do not grant Zeros organization or execution permissions.
+
+The complete `codex-resources/voice` runtime ships in the desktop app and cloud
+worker, including its notices and libraries. Excluding it is a deferred
+packaging decision; generated realtime bindings alone enable no voice UI.
+Upstream removed the patched zsh backend and `codex-resources/zsh` from packages
+in 0.163.0 ([backend](https://github.com/openai/codex/pull/52160),
+[packaging](https://github.com/openai/codex/pull/52213)). Linux retains `bwrap`.
+The staging test checks the installed package's actual resources.
+
+Offline adapter, transcript and relocated-worker tests cover these Zeros
+contracts. Native launch/model-list smoke is credential-free; it does not
+qualify authenticated enterprise sign-in, inference, macOS packaging or a
+deployed cloud VM.
 
 ### 0.162.1 compatibility
 

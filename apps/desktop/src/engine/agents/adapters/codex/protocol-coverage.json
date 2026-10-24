@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "codexProtocolVersion": "0.162.1",
+  "codexProtocolVersion": "0.164.0",
   "threadItems": {
     "handled": [
       "userMessage",
@@ -65,6 +65,8 @@
       "userVerification/delete",
       "userVerification/cancel",
       "thread/prediction/request",
+      "thread/sample",
+      "thread/sample/cancel",
       "thread/attachment/add",
       "thread/attachment/list",
       "thread/attachmentOwner/list",
@@ -78,6 +80,7 @@
       "thread/decrement_elicitation",
       "thread/name/set",
       "thread/metadata/update",
+      "thread/readState/update",
       "thread/settings/update",
       "thread/unarchive",
       "thread/shellCommand",
@@ -88,6 +91,7 @@
       "thread/read",
       "thread/turns/list",
       "thread/items/list",
+      "thread/items/read",
       "thread/timeline/list",
       "thread/inject_items",
       "skills/extraRoots/set",
@@ -153,6 +157,7 @@
       "account/workspaceMessages/read",
       "account/sendAddCreditsNudgeEmail",
       "feedback/upload",
+      "feedback/save",
       "command/exec",
       "command/exec/write",
       "command/exec/terminate",
@@ -279,6 +284,7 @@
       "thread/unarchived",
       "skills/changed",
       "thread/name/updated",
+      "thread/readState/changed",
       "rawResponseItem/completed",
       "rawResponse/completed",
       "process/exited",

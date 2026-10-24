@@ -2439,7 +2439,7 @@ function toolOutput(item: ThreadItemUnion, streamedOutput?: string): unknown {
 function imageGenerationContent(
   item: Extract<ThreadItemUnion, { type: "imageGeneration" }>,
 ): ToolCallContent[] | null {
-  const result = item.result;
+  const result = "result" in item ? item.result : undefined;
   if (!result || result.length > 16 * 1024 * 1024) return null;
   // Native image generation supplies PNG base64; data URLs and links use the
   // same validated media conversion as dynamic tools. Never dump binary JSON.

@@ -6,7 +6,9 @@ The worker never imports the Local engine runtime.
 The relay carries existing bridge frames; app disconnects leave work running.
 
 Chat snapshots coalesce streamed rows at 250 ms and flush at turn end.
-Pinned providers: Codex 0.162.1, Claude Agent SDK 0.3.309 and Cursor SDK 1.0.37.
+Pinned providers: Codex 0.164.0, Claude Agent SDK 0.3.309 and Cursor SDK 1.0.37.
+Codex's voice runtime ships with its package; excluding it is deferred. The
+patched zsh runtime was removed upstream in 0.163.0 and is no longer bundled.
 Full relay config replaces provider logins; active turns keep their spawn token.
 Credentials are kept out of arguments, logs and session files.
 Tests use synthetic native streams and local processes without model access.
