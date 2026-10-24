@@ -40,6 +40,17 @@ Real errors, cancellations and unreported completions retain normal treatment.
   Derive saved image links only from result paths or explicit resource links;
   an input `filePath`/`file_path` is only a requested destination, even after
   the operation reaches a terminal status.
+- Codex keeps the image preview beneath its Generate row. Preserve legacy
+  inline results; otherwise the Local adapter or cloud worker reads the native
+  `savedPath` once at completion, asynchronously, and stores verified image
+  bytes in the canonical transcript. The app never reads a VM path directly.
+  Accept only bounded regular PNG, JPEG or WebP files, without following
+  symlinks. If no preview is available, including a failed browser decode, show
+  the plain status “Image saved by Codex” instead of a broken image.
+  Observed `inputImages` appear below the preview as “Edited from” file pills,
+  using the existing workspace-aware Files navigation and active-only warming.
+  Source paths stay literal; they do not change the generated target, title or
+  count. Hidden rows release media and keep source pills inert.
 - Keep supported tool content (text, images, audio, resource links and embedded
   resource text), plus bounded structured results. A text summary must not hide
   a sibling report link or MCP `structuredContent`. Preserve errors and native

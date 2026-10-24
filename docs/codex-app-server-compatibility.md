@@ -98,6 +98,27 @@ mappers narrow that union before rendering an inline result; a `fileId` is an
 opaque provider reference, not a URL. Existing tool identity, completion,
 failure and saved-path metadata remain compatible with older records.
 
+When no usable inline result exists, a completed image item starts one optional
+asynchronous read of its native `savedPath`. Local reads on the agent's host;
+the standalone worker reads inside the VM and persists the same canonical
+image content so history remains viewable after reload. Reads require an
+absolute canonical path, reject symlinks at every component, open one held
+descriptor, verify a stable regular file and its path identity, and recognize
+PNG, JPEG or WebP by magic bytes. The existing 16 MiB encoded-content bound
+allows at most 12 MiB of saved-file bytes after base64 expansion. Failures leave
+the quiet “Image saved by Codex” status. The renderer also replaces a failed
+decode with that status, never a broken-image icon.
+
+Image enrichment updates only the captured tool row's content. It does not
+block other notifications or turn settlement, repeat reads on item replay, or
+change tool/turn status; Stop and replacement turns fence pending enrichment.
+Observed `inputImages` paths and SHA-256 hashes remain optional tool-output
+metadata. The renderer shows deduplicated “Edited from” file pills using the
+chat's existing Local/cloud Files routing. Sources do not affect the generated
+target, row title or counts, and older inline-only records keep their preview.
+Mapper regressions, worker driver/history parity and the focused Codex
+transcript browser smoke cover these boundaries in both themes.
+
 The five new client methods remain generated-only:
 
 | Method | Zeros boundary |

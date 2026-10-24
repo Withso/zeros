@@ -213,7 +213,8 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
 
   if (isImageGenerationTool(tool)) {
     const path = generatedImagePath(tool);
-    return { Icon: Sparkles, label: "Generate", target: path ? basename(path) : undefined, filePath: path ?? undefined, targetFile: !!path, targetKind: "file", expandable: true };
+    // Input-image provenance belongs below the row, never in its title/count.
+    return { Icon: Sparkles, label: "Generate", target: path ? basename(path) : undefined, filePath: path ?? undefined, targetFile: !!path, targetKind: "file", trailing: undefined, expandable: true };
   }
 
   if (kind === "read") {

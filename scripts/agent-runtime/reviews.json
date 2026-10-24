@@ -364,12 +364,17 @@
       "provider": "codex",
       "fingerprint": "06e832ef77e935f048b6c17844137e55041cacbefe15e60cff311fe5e9d0e9cc",
       "disposition": "implemented",
-      "rationale": "Observed inputImages path/SHA-256 metadata is retained and presented as input-image chips for generated images. Optional omission preserves older records; input references do not become output previews or change workspace identity.",
+      "rationale": "Desktop and worker retain optional bounded inputImages path/SHA-256 metadata in tool output. The renderer presents deduplicated literal source paths as Edited from file pills through the chat's existing Local/cloud Files navigation. Sources never change the generated target, title or count; old records omit the row and hidden rows cannot warm or open sources.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
-        "apps/desktop/src/engine/agents/adapters/codex/__tests__/transcript-fidelity.test.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/generated-image.test.ts",
         "apps/cloud-worker/src/drivers/codex/event-mapper.ts",
-        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts"
+        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/tool-artifacts.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/event-meta.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/event-row-renderer.tsx",
+        "apps/desktop/src/renderer/features/agent/__tests__/tool-details.test.ts",
+        "scripts/ui-smoke-generated-images.mjs"
       ]
     },
     {
@@ -467,12 +472,20 @@
       "provider": "codex",
       "fingerprint": "bd17fa4aa560b099d45d5c5b51c55c09fbf7a5e4d5a1ef9e11bf505d488d10e2",
       "disposition": "implemented",
-      "rationale": "Image generation accepts either attachment-store fileId or fallback inline result. Desktop and worker preserve inline previews, use the validated savedPath for file-backed previews, show a placeholder when no preview is available, and retain optional input-image chips. A fileId is never fabricated into a URL; existing failure, replay and tool identity semantics remain intact.",
+      "rationale": "Image generation accepts attachment-store fileId or fallback inline result. Desktop and worker preserve usable inline previews; otherwise completion schedules one nonblocking savedPath read of a bounded, stable regular PNG/JPEG/WebP file without symlink traversal. Canonical image bytes survive worker history reload. Missing, unsafe or undecodable previews show Image saved by Codex; optional source pills stay separate. A fileId is never a URL, and late content enrichment cannot change status or cross Stop/turn replacement.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/generated-image.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/generated-image.test.ts",
         "apps/desktop/src/engine/agents/adapters/codex/__tests__/transcript-fidelity.test.ts",
         "apps/cloud-worker/src/drivers/codex/event-mapper.ts",
-        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts"
+        "apps/cloud-worker/src/drivers/codex/generated-image.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/generated-image.test.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/event-row-renderer.tsx",
+        "apps/desktop/src/renderer/features/agent/__tests__/tool-details.test.ts",
+        "scripts/ui-smoke-generated-images.mjs",
+        "docs/codex-app-server-compatibility.md"
       ]
     },
     {

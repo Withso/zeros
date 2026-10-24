@@ -1,4 +1,5 @@
 import { runTurnUsageSmoke } from "./ui-smoke-turn-usage.mjs";
+import { runGeneratedImagesSmoke } from "./ui-smoke-generated-images.mjs";
 import { runArtifactLinksSmoke } from "./ui-smoke-artifact-links.mjs";
 import { runSubagentPresentationSmoke } from "./ui-smoke-subagent-presentation.mjs";
 import { runModelFallbackSmoke } from "./ui-smoke-model-fallback.mjs";
@@ -47,7 +48,7 @@ export async function runBackgroundClockSmoke({ page, check }) {
   check("Background elapsed time catches up on reveal before a polling tick", true);
 }
 
-export async function runCodexTranscriptSmoke({ page, check }) {
+export async function runCodexTranscriptSmoke({ page, check, captureDirectory }) {
   await page.goto(
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-codex-transcript.html`,
   );
@@ -265,4 +266,5 @@ export async function runCodexTranscriptSmoke({ page, check }) {
   await runModelFallbackSmoke({ page, check });
   await runWakeupSmoke({ page, check });
   await runTurnUsageSmoke({ page, check });
+  await runGeneratedImagesSmoke({ page, check, captureDirectory });
 }

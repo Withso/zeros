@@ -1,6 +1,8 @@
 import { ToolResourceLink } from "./tool-resource-link";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
-import { generatedImagePath, structuredToolOutput } from "./tool-artifacts";
+import { generatedImageInputPaths, generatedImagePath, isCodexImageGenerationTool, isImageGenerationTool, structuredToolOutput } from "./tool-artifacts";
+import { FileTag } from "./file-tag";
+import { filePillPath, openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
 import { fileRefPath } from "../markdown-file-path";
 import { cursorSearchOutput } from "./search-output";
 // ──────────────────────────────────────────────────────────
@@ -473,6 +475,7 @@ function ToolDetail({ tool, ctx }: { tool: AgentToolMessage; ctx: RendererContex
 function renderToolOutput(tool: AgentToolMessage, ctx: RendererContext): React.ReactNode {
   const resources = new Map<string, { label: string; description?: string }>();
   const path = generatedImagePath(tool);
+  const sources = generatedImageInputPaths(tool);
   for (const block of tool.content ?? []) {
     if (block.type !== "content") continue;
     const content = block.content;
@@ -481,9 +484,17 @@ function renderToolOutput(tool: AgentToolMessage, ctx: RendererContext): React.R
   }
   for (const link of tool.resourceLinks ?? []) resources.set(link.uri, { label: link.title ?? link.name, description: link.description });
   if (path && ![...resources.keys()].some(uri => fileRefPath(uri, true) === path)) resources.set(path, { label: path.split("/").pop() ?? path });
-  const structured = tool.content?.length && !["read", "execute", "search", "list"].includes(tool.toolKind ?? "") ? asDisplayString(structuredToolOutput(tool.rawOutput)) : null;
+  let structured: string | null = null;
+  if (tool.content?.length && !["read", "execute", "search", "list"].includes(tool.toolKind ?? "")) {
+    const output = structuredToolOutput(tool.rawOutput);
+    const record = toolRecord(output);
+    // Hide only empty native metadata; sibling results and real failures
+    // remain inspectable beside images from Codex or any other provider.
+    const emptyFailure = isCodexImageGenerationTool(tool) && Object.keys(record).length === 1 && record.failure == null;
+    if (!emptyFailure) structured = asDisplayString(output);
+  }
   const body = renderToolBody(tool, ctx, !!structured);
-  if (!resources.size && !structured) return body;
+  if (!resources.size && !structured && !sources.length) return body;
   return <div className="min-w-0">
     {resources.size > 0 && <div className="zeros-agent-md space-y-1 px-3 py-2">{[...resources].map(([uri, resource]) => (
       <div key={uri}><ToolResourceLink uri={uri} label={resource.label} ctx={ctx} />
@@ -491,8 +502,34 @@ function renderToolOutput(tool: AgentToolMessage, ctx: RendererContext): React.R
       </div>
     ))}</div>}
     {body}
+    {sources.length > 0 && <div data-generated-image-sources="" className="flex flex-wrap items-center gap-1.5 px-3 py-2 text-sm text-fg3">
+      <span>Edited from</span>
+      {sources.map((source) => {
+        const active = ctx.attachmentImagesActive !== false && !!filePillPath(ctx.attachmentCwd, source);
+        const warm = () => { if (active) warmFilePill(ctx.attachmentCwd, source); };
+        return <FileTag key={source} name={source} data-file-path={source} title={source}
+          aria-label={`Open ${source.split("/").pop()}`} aria-disabled={!active || undefined}
+          onPointerEnter={warm} onFocus={warm}
+          onClick={() => { if (active) openFilePill(ctx.attachmentCwd, source); }} />;
+      })}
+    </div>}
     {structured && <HighlightedCode code={structured} lang="json" className={OUTPUT_CLASS} />}
   </div>;
+}
+
+function GeneratedImagePlaceholder({ codex = true }: { codex?: boolean }) {
+  return <p data-generated-image-placeholder="" className="px-3 py-2 text-sm text-fg3">{codex ? "Image saved by Codex" : "Image preview unavailable"}</p>;
+}
+
+function GeneratedImagePreview({ src, codex }: { src: string; codex: boolean }) {
+  const [load, setLoad] = useState({ src, failed: false });
+  // Reset synchronously for a replacement source; a late error from the old
+  // image cannot suppress its replacement or retain an older payload forever.
+  if (load.src !== src) setLoad({ src, failed: false });
+  if (load.src === src && load.failed) return <GeneratedImagePlaceholder codex={codex} />;
+  return <img src={src} alt="tool output"
+    className="border-border1 mb-2 max-h-[320px] max-w-full rounded-md border"
+    onError={() => setLoad({ src, failed: true })} />;
 }
 
 function renderToolBody(
@@ -571,10 +608,12 @@ function renderToolBody(
       // fallback below covers shell/terminal output.
     }
     if (texts.length > 0 || images.length > 0 || audio.length > 0) {
+      if (isImageGenerationTool(tool) && !images.length && texts.length === 1 && texts[0] === "Image saved by Codex")
+        return <GeneratedImagePlaceholder />;
       return (
         <div className="min-w-0">
           {ctx.attachmentImagesActive !== false &&
-            images.map((src, i) => (
+            images.map((src, i) => isImageGenerationTool(tool) ? <GeneratedImagePreview key={i} src={src} codex={isCodexImageGenerationTool(tool)} /> : (
               <img
                 key={i}
                 src={src}
@@ -604,6 +643,10 @@ function renderToolBody(
       );
     }
   }
+  // Older Codex records may have only saved-path metadata. Missing bytes
+  // remain a quiet saved-image status, never a guessed URL or empty preview.
+  if (isCodexImageGenerationTool(tool) && tool.status === "completed")
+    return <GeneratedImagePlaceholder />;
   if (hasStructuredOutput) return null;
   // Fall back to captured OUTPUT before raw input — fixes adapters that
   // populate `rawOutput` (or emit only a terminal block) instead of
