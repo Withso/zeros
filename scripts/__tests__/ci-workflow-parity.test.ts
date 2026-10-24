@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
@@ -116,6 +117,45 @@ const comparable = (job: Job) => ({
 describe("CI and Preflight job parity", () => {
   const ci = workflow("ci.yml");
   const preflight = workflow("preflight.yml");
+
+  it.each(["ci.yml", "preflight.yml"])(
+    "uses a Playwright-supported pinned Ubuntu image for browser jobs in %s",
+    (file) => {
+      const require = createRequire(import.meta.url);
+      const testRequire = createRequire(
+        require.resolve("@playwright/test/package.json"),
+      );
+      const playwrightRequire = createRequire(
+        testRequire.resolve("playwright/package.json"),
+      );
+      const core = path.dirname(
+        playwrightRequire.resolve("playwright-core/package.json"),
+      );
+      // Match the installed, lockfile-pinned Playwright dependency inventory.
+      // A mutable runner alias can advance to an OS this release cannot install.
+      const { deps } = require(
+        path.join(core, "lib/server/registry/nativeDeps.js"),
+      ) as {
+        deps: Record<string, { chromium?: string[] }>;
+      };
+      const jobs = Object.entries(workflow(file).jobs).filter(
+        ([, job]) =>
+          typeof job["runs-on"] === "string" &&
+          job["runs-on"].startsWith("ubuntu-") &&
+          job.steps?.some((step) =>
+            /\bplaywright install\b/.test(step.run ?? ""),
+          ),
+      );
+      expect(jobs.length).toBeGreaterThan(0);
+      for (const [id, job] of jobs) {
+        const platform = `${String(job["runs-on"]).replace("ubuntu-", "ubuntu")}-x64`;
+        expect(
+          deps[platform]?.chromium,
+          `${file}/${id}: ${String(job["runs-on"])} must be supported by the pinned Playwright`,
+        ).toBeDefined();
+      }
+    },
+  );
 
   it("defines the same workloads apart from explicit profile gates", () => {
     expect(
