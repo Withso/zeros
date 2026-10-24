@@ -64,6 +64,13 @@ it("reports the first hello from its prior lifecycle state and accepts bounded o
   f.deps.timing = () => { throw new Error("diagnostics unavailable"); };
   expect((await f.request("timing", { phase: "worker_services", durationMs: 23 })).status).toBe(200);
 });
+it("logs each optional timing phase only once per authorized workspace boot and acknowledges excess", async () => {
+  const f = fixture(); f.deps.timing = vi.fn();
+  for (let i = 0; i < 20; i++) expect((await f.request("timing", { phase: "worker_services", durationMs: i })).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledTimes(1);
+  expect((await f.request("timing", { phase: "worker_checkout", durationMs: 1 })).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledTimes(2);
+});
 it("authenticates each HTTP carrier and fences obsolete boots before credentials or rows", async () => {
   const f = fixture();
   for (const [path, body] of [["activity", { idle: false }], ["history", { t: "history", bootId: f.bootId, sequence: 1, chats: [] }], ["github-token", {}], ["config", undefined]] as const) {

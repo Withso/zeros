@@ -62,6 +62,9 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
  * credential and current boot, never by an id supplied in the body. */
 export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   const app = new Hono();
+  // The VM can read its bearer token. Do not trust its client-side diagnostic
+  // throttle; bound both log volume per boot and retained admission state.
+  const timingBoots = new Map<string, Set<string>>();
   app.use(`${CLOUD_V2_WORKER_API}/*`, bodyLimit({ maxSize: CLOUD_V2_MAX_FRAME_BYTES, onError: c => c.json({ error: { code: "payload_too_large" } }, 413) }));
   app.use(`${CLOUD_V2_WORKER_API}/*`, async (c, next) => { bearer(c); c.header("Cache-Control", "no-store"); await next(); });
   app.post(`${CLOUD_V2_WORKER_API}/hello`, async c => {
@@ -76,6 +79,14 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   });
   app.post(`${CLOUD_V2_WORKER_API}/timing`, async c => {
     const auth = await session(c, deps), record = await body(c, CloudV2WorkerTimingSchema);
+    const key = `${auth.workspace.id}:${auth.bootId}`;
+    let phases = timingBoots.get(key);
+    if (!phases) {
+      if (timingBoots.size >= 1024) timingBoots.delete(timingBoots.keys().next().value!);
+      phases = new Set(); timingBoots.set(key, phases);
+    }
+    if (phases.has(record.phase)) return c.json({ ok: true });
+    phases.add(record.phase);
     emitCloudV2Timing(deps.timing, { workspaceId: auth.workspace.id.slice(0, 8), ...record });
     return c.json({ ok: true });
   });

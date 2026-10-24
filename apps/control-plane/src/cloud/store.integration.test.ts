@@ -56,6 +56,114 @@ d("cloud v2 store", () => {
     expect((await store.acceptWorkerHello(token, bootId))?.helloTiming).toBeUndefined();
   });
 
+  it("renews only due running leases and fences the result by sandbox and lifecycle state", async () => {
+    const a = await create(), b = await create();
+    await store.transition(a.id, ["creating"], "running", { boatSandboxId: "bx_first" });
+    await store.transition(b.id, ["creating"], "running", { boatSandboxId: "bx_other" });
+    const due = new Date(Date.now() - 13 * 60 * 60_000), recent = new Date();
+    expect(await store.markLeaseRenewed(a.id, "bx_first", due)).toBe(true);
+    expect(await store.markLeaseRenewed(b.id, "bx_other", recent)).toBe(true);
+    expect((await store.leasesDue(new Date(Date.now() - 12 * 60 * 60_000), 4)).map(w => w.id)).toEqual([a.id]);
+    expect(await store.markLeaseRenewed(a.id, "bx_replaced", recent)).toBe(false);
+    await store.transition(a.id, ["running"], "stopping");
+    expect(await store.markLeaseRenewed(a.id, "bx_first", recent)).toBe(false);
+    expect(await store.leasesDue(recent, 4)).toEqual([]);
+    expect(await store.get(a.id, creator)).not.toHaveProperty("leaseRenewedAt");
+  });
+
+  async function retainedCandidate(days = 12) {
+    const w = await create();
+    await store.transition(w.id, ["creating"], "stopped", { boatSandboxId: `bx_${w.id.slice(0, 8)}` });
+    await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp()-make_interval(days=>$2) WHERE id=$1", [w.id, days]);
+    const rows = await store.retentionDue(new Date(Date.now() - 12 * 86_400_000), 10);
+    return rows.find(row => row.id === w.id)!;
+  }
+
+  it("starts retention age only on a completed stop and preserves it through archive metadata changes", async () => {
+    const w = await create();
+    const stoppedAt = async () => (await pool.query("SELECT stopped_at FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].stopped_at;
+    expect(await stoppedAt()).toBeNull();
+    await store.transition(w.id, ["creating"], "running");
+    await store.transition(w.id, ["running"], "stopping");
+    expect(await stoppedAt()).toBeNull();
+    await store.transition(w.id, ["stopping"], "stopped");
+    const first = await stoppedAt();
+    expect(first).toBeInstanceOf(Date);
+    await store.requestLifecycle(w.id, creator, "archive");
+    expect(await stoppedAt()).toEqual(first);
+    expect(await store.retentionDue(new Date(Date.now() - 12 * 86_400_000), 10)).toEqual([]);
+  });
+
+  it("claims one retention save durably across lifecycle replicas and fences wake until it finishes", async () => {
+    const a = await retainedCandidate(13), b = await retainedCandidate(13);
+    const claimed = await Promise.all([store.beginRetention(a, "zeros-alpha-ret-a"), store.beginRetention(b, "zeros-alpha-ret-b")]);
+    expect(claimed.filter(Boolean)).toHaveLength(1);
+    const w = claimed[0] ? a : b, name = claimed[0] ? "zeros-alpha-ret-a" : "zeros-alpha-ret-b";
+    await store.requestLifecycle(w.id, creator, "start");
+    expect((await store.claimPending(4, 0)).some(row => row.id === w.id)).toBe(false);
+    const intent = (await pool.query("SELECT retention_snapshot,retention_saved_at,retention_operation_until FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0];
+    expect(intent.retention_snapshot).toBe(name); expect(intent.retention_saved_at).toBeNull();
+    expect(intent.retention_operation_until.getTime()).toBeGreaterThan(Date.now());
+    await store.finishRetention(w.id, w.boatSandboxId!, name);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)).toMatchObject({ retentionSnapshot: name, retentionSavedAt: expect.any(String), state: "starting" });
+    expect(await store.get(w.id, creator)).not.toHaveProperty("retentionSnapshot");
+  });
+
+  it("keeps failed retention intent through its remote deadline and rejects stale save receipts", async () => {
+    const w = await retainedCandidate(13);
+    expect(await store.beginRetention(w, "zeros-alpha-ret-keep")).toBe(true);
+    await store.deferRetention(w.id, "zeros-alpha-ret-keep");
+    expect(await store.retentionDue(new Date(), 10)).toEqual([]);
+    await store.finishRetention(w.id, "bx_obsolete", "zeros-alpha-ret-keep");
+    expect((await pool.query("SELECT retention_saved_at FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].retention_saved_at).toBeNull();
+    await pool.query("UPDATE cloud_v2_workspaces SET retention_operation_until=clock_timestamp()-interval '1 second',next_attempt_at=NULL WHERE id=$1", [w.id]);
+    expect((await store.retentionDue(new Date(), 10))[0]).toMatchObject({ retentionSnapshot: "zeros-alpha-ret-keep", retentionSavedAt: null });
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.beginRetention(w, "zeros-alpha-ret-other")).toBe(false);
+  });
+
+  it("can recover a named save from a claimed wake after the original save's acknowledgement was lost", async () => {
+    const w = await retainedCandidate(15), name = "zeros-alpha-ret-unacknowledged";
+    await store.beginRetention(w, name);
+    await pool.query("UPDATE cloud_v2_workspaces SET retention_operation_until=clock_timestamp()-interval '1 second' WHERE id=$1", [w.id]);
+    await store.requestLifecycle(w.id, creator, "start");
+    const claimed = (await store.claimPending(4, 120_000))[0]!;
+    expect(await store.beginRetention(claimed, name)).toBe(true);
+    await store.finishRetention(w.id, w.boatSandboxId!, name);
+    expect(await store.beginRestore(w.id, w.boatSandboxId, name)).toBe(true);
+  });
+
+  it("cleans retention after hello or a later stop, while preserving a sleeping workspace's current snapshot", async () => {
+    const w = await retainedCandidate(13), name = "zeros-alpha-ret-clean";
+    await store.beginRetention(w, name); await store.finishRetention(w.id, w.boatSandboxId!, name);
+    expect(await store.retentionCleanupDue()).toEqual([]);
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.retentionCleanupDue()).toEqual([]);
+    const token = await store.rotateWorkerToken(w.id); await store.acceptWorkerHello(token, randomUUID());
+    expect((await store.retentionCleanupDue()).map(row => row.id)).toEqual([w.id]);
+    // A rapid second stop before cleanup cannot keep using the previous stop's image.
+    await store.transition(w.id, ["running"], "stopping"); await store.transition(w.id, ["stopping"], "stopped");
+    expect((await store.retentionCleanupDue()).map(row => row.id)).toEqual([w.id]);
+    expect(await store.beginRetentionCleanup(w.id, name)).toBe(true);
+    await store.requestLifecycle(w.id, creator, "start");
+    expect(await store.claimPending(4, 0)).toEqual([]);
+    await store.finishRetentionCleanup(w.id, name);
+    expect((await store.claimPending(4, 0))[0]).toMatchObject({ retentionSnapshot: null, retentionSavedAt: null });
+  });
+
+  it("retains a pending restore allocation through a deletion race and records its new sandbox for erasure", async () => {
+    const w = await retainedCandidate(13), name = "zeros-alpha-ret-restore";
+    await store.beginRetention(w, name); await store.finishRetention(w.id, w.boatSandboxId!, name);
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.beginRestore(w.id, w.boatSandboxId, name)).toBe(true);
+    expect(await store.claimPending(4, 0)).toEqual([]);
+    await store.transition(w.id, ["starting"], "deleting");
+    expect(await store.claimPending(4, 0)).toEqual([]);
+    expect(await store.finishRestore(w.id, w.boatSandboxId, name, "bx_restored", new Date())).toBe("deleting");
+    expect((await store.claimPending(4, 0))[0]).toMatchObject({ state: "deleting", boatSandboxId: "bx_restored", restorePending: false, retentionSnapshot: name });
+    expect(await store.finishRestore(w.id, w.boatSandboxId, name, "bx_wrong", new Date())).toBeNull();
+  });
+
   it.each(["creator", "relay"] as const)("fences the suspended process before a %s wake can race runtime installation", async source => {
     const w = await create(), oldToken = await store.rotateWorkerToken(w.id), oldBoot = randomUUID();
     await store.acceptWorkerHello(oldToken, oldBoot);

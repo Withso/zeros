@@ -6,7 +6,7 @@ import type { BoatApiClient } from "../cloud/boat-client.js";
 const SANDBOX_ID = /^bx_[a-z0-9]{4,32}$/;
 const SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/;
 /** Our own idle stop decides when to stop; Boat's lease is only a backstop. */
-const LEASE_SECONDS = 24 * 60 * 60;
+export const CLOUD_V2_LEASE_SECONDS = 24 * 60 * 60;
 
 export type CloudV2CommandResult = { exitCode: number; stdout: string; timedOut: boolean };
 
@@ -20,6 +20,8 @@ export interface CloudV2Compute {
   /** From a named snapshot, or Boat's stock image without `from`. */
   create(input: { key: string; from?: string; name: string; env: Record<string, string> }): Promise<{ sandboxId: string }>;
   resume(sandboxId: string): Promise<void>;
+  /** Boat sets the deadline to now + ttl, without restarting the sandbox. */
+  extendLease(sandboxId: string, ttlSeconds: number): Promise<void>;
   stop(sandboxId: string): Promise<void>;
   /** Succeeds when the sandbox is already gone. */
   delete(sandboxId: string): Promise<void>;
@@ -60,7 +62,7 @@ export class BoatCloudV2Compute implements CloudV2Compute {
         type: this.machineType,
         ...(input.from ? { from: input.from } : {}),
         name: input.name,
-        ttlSeconds: LEASE_SECONDS,
+        ttlSeconds: CLOUD_V2_LEASE_SECONDS,
         env: input.env,
         // Boat's process tracer would keep prompts and logins written to pipes.
         monitoring: false,
@@ -70,7 +72,12 @@ export class BoatCloudV2Compute implements CloudV2Compute {
   }
 
   async resume(sandboxId: string): Promise<void> {
-    await this.client.request(`/sandboxes/${this.id(sandboxId)}/resume`, { method: "POST", body: { ttlSeconds: LEASE_SECONDS } });
+    await this.client.request(`/sandboxes/${this.id(sandboxId)}/resume`, { method: "POST", body: { ttlSeconds: CLOUD_V2_LEASE_SECONDS } });
+  }
+
+  async extendLease(sandboxId: string, ttlSeconds: number): Promise<void> {
+    if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0 || ttlSeconds > CLOUD_V2_LEASE_SECONDS) throw new Error("Invalid Boat lease");
+    await this.client.request(`/sandboxes/${this.id(sandboxId)}`, { method: "PATCH", body: { ttlSeconds } });
   }
 
   async hostPort(sandboxId: string, input: { port: number; localhost: true; title: string }): Promise<{ url: string; token: string }> {
@@ -140,7 +147,17 @@ export class BoatCloudV2Compute implements CloudV2Compute {
   /** Boat answers the save at once and finishes it in the background. */
   async saveSnapshot(sandboxId: string, name: string): Promise<void> {
     if (!SNAPSHOT_NAME.test(name)) throw new Error("Invalid Boat snapshot name");
-    await this.client.request("/named-snapshots", { method: "POST", body: { sandboxId: this.id(sandboxId), name } });
+    const id = this.id(sandboxId);
+    let saving = false;
+    try {
+      const { status } = NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot;
+      if (status === "ready") return;
+      if (status === "failed") await this.deleteSnapshot(name);
+      else saving = true;
+    } catch (error) { if (!notFound(error)) throw error; }
+    // A retry after a lost save reply must observe the named result before
+    // touching the source disk, which Boat may since have expired.
+    if (!saving) await this.client.request("/named-snapshots", { method: "POST", body: { sandboxId: id, name } });
     for (const deadline = Date.now() + SNAPSHOT_SAVE_MS; Date.now() < deadline;) {
       const { status } = NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot;
       if (status === "ready") return;

@@ -25,7 +25,7 @@ import { CloudV2Store, type CloudV2Workspace } from "./store.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
-import { cloudV2SandboxName } from "./resource-names.js";
+import { cloudV2SandboxName, cloudV2RetentionSnapshotName } from "./resource-names.js";
 import { CloudV2PromptSignals } from "./prompt-signals.js";
 import { createMcpServices } from "../mcp/composition.js";
 
@@ -178,6 +178,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     stopWorker: workspace => connections!.stopWorkspace(workspace),
     bootEnv: workspace => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: v2.runtime.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: workspace => cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner),
+    retentionName: workspace => cloudV2RetentionSnapshotName(config.deploymentChannel, workspace.id, workspace.stoppedAt!, localOwner),
     logger: console,
   }) : null;
   return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges, promptChanges, promptSignals };

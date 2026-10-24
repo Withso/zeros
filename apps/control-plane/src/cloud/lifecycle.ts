@@ -3,11 +3,11 @@
 // repeats it: creation uses the workspace id as Boat's idempotency key, and
 // the worker credential is delivered by command after boot, never in the
 // sandbox definition, so it can be rotated on any retry.
-import type { CloudV2Compute, CloudV2CommandResult } from "./boat.js";
+import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult } from "./boat.js";
 import { BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
-import type { CloudV2Store, CloudV2Workspace } from "./store.js";
+import type { CloudV2Store, CloudV2Workspace, CloudV2LifecycleWorkspace } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming } from "./contract.js";
 
 const CONCURRENCY = 4;
@@ -17,6 +17,9 @@ const LEASE_MS = 2 * 60_000;
 const HELLO_POLL_MS = 30_000;
 const BOOT_DEADLINE_MS = 10 * 60_000;
 const MAX_ATTEMPTS = 8;
+const LEASE_RENEW_MS = 12 * 60 * 60_000;
+const MAINTENANCE_SCAN_MS = 60_000;
+const RETENTION_AGE_MS = 12 * 24 * 60 * 60_000;
 export const CLOUD_V2_IDLE_STOP_MS = 10 * 60_000;
 /** Boat's stock image runs commands as its one user, `user`. The worker and
  * agents run as that user too, so its credential lives in its config dir. */
@@ -37,7 +40,8 @@ export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => vo
 }
 
 export type CloudV2LifecycleDeps = {
-  store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute">;
+  store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed"
+    | "retentionDue" | "beginRetention" | "finishRetention" | "deferRetention" | "retentionCleanupDue" | "beginRetentionCleanup" | "finishRetentionCleanup" | "beginRestore" | "finishRestore">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   stopIdle?: (id: string, before: Date) => Promise<void>;
@@ -50,6 +54,7 @@ export type CloudV2LifecycleDeps = {
   /** Non-secret boot settings, e.g. the relay URL and workspace id. */
   bootEnv(workspace: CloudV2Workspace): Record<string, string>;
   sandboxName(workspace: CloudV2Workspace): string;
+  retentionName(workspace: CloudV2LifecycleWorkspace): string;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void> };
   now?: () => number;
@@ -103,6 +108,8 @@ export class CloudV2Lifecycle {
       this.timer = null;
       await this.running;
       await Promise.all(this.inFlight.values());
+      await this.renewing;
+      await this.retaining;
       await this.building;
       await this.cleaning;
     };
@@ -111,6 +118,10 @@ export class CloudV2Lifecycle {
   private building: Promise<void> | null = null;
   private cleaning: Promise<void> | null = null;
   private lastPromptPrune = 0;
+  private renewing: Promise<void> | null = null;
+  private lastLeaseScan = -Infinity;
+  private retaining: Promise<void> | null = null;
+  private lastRetentionScan = -Infinity;
 
   async tick(): Promise<void> {
     await this.poll();
@@ -136,6 +147,18 @@ export class CloudV2Lifecycle {
       if (this.deps.stopIdle) await this.deps.stopIdle(idle.id, new Date(now - CLOUD_V2_IDLE_STOP_MS));
       else await this.deps.store.transition(idle.id, ["running"], "stopping");
     }
+    if (!this.renewing && now - this.lastLeaseScan >= MAINTENANCE_SCAN_MS) {
+      this.lastLeaseScan = now;
+      this.renewing = this.renewLeases(now)
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] lease scan failed (${errorCode(error)})`))
+        .finally(() => { this.renewing = null; });
+    }
+    if (!this.retaining && now - this.lastRetentionScan >= MAINTENANCE_SCAN_MS) {
+      this.lastRetentionScan = now;
+      this.retaining = this.maintainRetention(now)
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] retention scan failed (${errorCode(error)})`))
+        .finally(() => { this.retaining = null; });
+    }
     const slots = CONCURRENCY - this.inFlight.size;
     if (slots <= 0) return;
     for (const workspace of await this.deps.store.claimPending(slots, LEASE_MS, [...this.inFlight.keys()])) {
@@ -148,7 +171,48 @@ export class CloudV2Lifecycle {
     }
   }
 
-  private async runStep(workspace: CloudV2Workspace & { attempts: number }, now: number): Promise<void> {
+  private async renewLeases(now: number): Promise<void> {
+    const { store, compute } = this.deps;
+    const workspaces = await store.leasesDue(new Date(now - LEASE_RENEW_MS), CONCURRENCY);
+    await Promise.all(workspaces.map(async workspace => {
+      if (!workspace.boatSandboxId) return;
+      const renewedAt = new Date(this.deps.now?.() ?? Date.now());
+      try {
+        await compute.extendLease(workspace.boatSandboxId, CLOUD_V2_LEASE_SECONDS);
+        await store.markLeaseRenewed(workspace.id, workspace.boatSandboxId, renewedAt);
+      } catch (error) { this.deps.logger?.warn(`[cloud-v2] lease renewal failed (${errorCode(error)})`); }
+    }));
+  }
+
+  private async maintainRetention(now: number): Promise<void> {
+    const { store, compute } = this.deps;
+    // Running means an authenticated hello has registered the new worker. A
+    // later stop also retires the previous stop's now-stale backup.
+    for (const workspace of await store.retentionCleanupDue(CONCURRENCY)) {
+      const name = workspace.retentionSnapshot;
+      if (!name || !await store.beginRetentionCleanup(workspace.id, name)) continue;
+      try {
+        await compute.deleteSnapshot(name);
+        await store.finishRetentionCleanup(workspace.id, name);
+      } catch (error) {
+        await store.deferRetention(workspace.id, name);
+        this.deps.logger?.warn(`[cloud-v2] retention cleanup failed (${errorCode(error)})`);
+      }
+    }
+    const workspace = (await store.retentionDue(new Date(now - RETENTION_AGE_MS), 1))[0];
+    if (!workspace?.boatSandboxId || !workspace.stoppedAt) return;
+    const name = workspace.retentionSnapshot ?? this.deps.retentionName(workspace);
+    if (!await store.beginRetention(workspace, name)) return;
+    try {
+      await compute.saveSnapshot(workspace.boatSandboxId, name);
+      await store.finishRetention(workspace.id, workspace.boatSandboxId, name);
+    } catch (error) {
+      await store.deferRetention(workspace.id, name);
+      this.deps.logger?.warn(`[cloud-v2] retention save failed (${errorCode(error)})`);
+    }
+  }
+
+  private async runStep(workspace: CloudV2LifecycleWorkspace & { attempts: number }, now: number): Promise<void> {
     try {
       if (workspace.state === "creating" || workspace.state === "starting")
         await this.measure(workspace, "total", () => this.step(workspace, now));
@@ -165,7 +229,7 @@ export class CloudV2Lifecycle {
     }
   }
 
-  private async step(workspace: CloudV2Workspace & { attempts: number }, now: number): Promise<void> {
+  private async step(workspace: CloudV2LifecycleWorkspace & { attempts: number }, now: number): Promise<void> {
     const { store, compute } = this.deps;
     switch (workspace.state) {
       case "creating": {
@@ -180,10 +244,12 @@ export class CloudV2Lifecycle {
             await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_build_required" });
             return;
           }
+          const renewedAt = new Date(this.deps.now?.() ?? Date.now());
           ({ sandboxId } = await this.measure(workspace, "boat_create", () => compute.create({
             key: workspace.id, from, name: this.deps.sandboxName(workspace), env: this.deps.bootEnv(workspace),
           })));
           await store.defer(workspace.id, "creating", 0, { boatSandboxId: sandboxId });
+          await store.markLeaseRenewed(workspace.id, sandboxId, renewedAt);
         }
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
         if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
@@ -192,41 +258,102 @@ export class CloudV2Lifecycle {
         return;
       }
       case "starting": {
-        if (!workspace.boatSandboxId) {
+        let sandboxId = workspace.boatSandboxId;
+        if (!sandboxId && !workspace.retentionSavedAt) {
           await store.transition(workspace.id, ["starting"], "failed", { errorCode: "sandbox_missing" });
           return;
         }
-        const waking = now - Date.parse(workspace.updatedAt);
+        // A wake requested during a save waits for that operation. Its boot
+        // budget starts once the dependency permits it to touch the VM.
+        const waking = now - Math.max(Date.parse(workspace.updatedAt), Date.parse(workspace.retentionOperationUntil ?? "") || 0);
         if (waking > BOOT_DEADLINE_MS) {
           await store.transition(workspace.id, ["starting"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
         // Resume and protected hosting are idempotent. Rotate the HTTP token
         // and restart every wake to register a new process boot identity.
-        await this.measure(workspace, "boat_resume", () => compute.resume(workspace.boatSandboxId!));
+        if (workspace.restorePending || !sandboxId) {
+          const restored = await this.restore(workspace);
+          if (!restored || restored.state !== "starting") return;
+          sandboxId = restored.sandboxId;
+        } else {
+          const renewedAt = new Date(this.deps.now?.() ?? Date.now());
+          try {
+            await this.measure(workspace, "boat_resume", () => compute.resume(sandboxId!));
+            await store.markLeaseRenewed(workspace.id, sandboxId, renewedAt);
+          } catch (error) {
+            if (!sandboxLost(error) || !workspace.retentionSnapshot) throw error;
+            let retained = workspace;
+            if (!workspace.retentionSavedAt) {
+              // The save may have committed before its HTTP/DB acknowledgement
+              // was lost. saveSnapshot observes the named result first; a lost
+              // source cannot start another real save alongside the background job.
+              if (!await store.beginRetention(workspace, workspace.retentionSnapshot)) return;
+              await compute.saveSnapshot(sandboxId, workspace.retentionSnapshot);
+              await store.finishRetention(workspace.id, sandboxId, workspace.retentionSnapshot);
+              retained = { ...workspace, retentionSavedAt: new Date(this.deps.now?.() ?? Date.now()).toISOString() };
+            }
+            const restored = await this.restore(retained);
+            if (!restored || restored.state !== "starting") return;
+            sandboxId = restored.sandboxId;
+          }
+        }
         // A runtime shipped while the VM slept is installed now.
-        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(workspace.boatSandboxId!), runtimeChanged => ({ runtimeChanged }));
-        if (!await this.measure(workspace, "protected_route", () => this.host(workspace, workspace.boatSandboxId!))) return;
-        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, workspace.boatSandboxId!));
+        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
+        if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
+        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId));
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
       }
-      case "stopping":
-        if (workspace.boatSandboxId) {
-          await this.deps.stopWorker(workspace);
-          await compute.stop(workspace.boatSandboxId);
+      case "stopping": {
+        let sandboxId = workspace.boatSandboxId;
+        if (workspace.restorePending) {
+          const restored = await this.restore(workspace);
+          if (!restored) return;
+          sandboxId = restored.sandboxId;
+        }
+        if (sandboxId) {
+          await this.deps.stopWorker({ ...workspace, boatSandboxId: sandboxId });
+          await compute.stop(sandboxId);
         }
         await store.revoke(workspace.id, false);
         await store.transition(workspace.id, ["stopping"], "stopped");
         return;
-      case "deleting":
-        if (workspace.boatSandboxId) await compute.delete(workspace.boatSandboxId);
+      }
+      case "deleting": {
+        let sandboxId = workspace.boatSandboxId;
+        if (workspace.restorePending) {
+          const restored = await this.restore(workspace);
+          if (!restored) return;
+          sandboxId = restored.sandboxId;
+        }
+        if (sandboxId) await compute.delete(sandboxId);
+        if (workspace.retentionSnapshot) {
+          await compute.deleteSnapshot(workspace.retentionSnapshot);
+          await store.finishRetentionCleanup(workspace.id, workspace.retentionSnapshot);
+        }
         await store.revoke(workspace.id, true);
         await store.transition(workspace.id, ["deleting"], "deleted");
         return;
+      }
       default:
         return;
     }
+  }
+
+  private async restore(workspace: CloudV2LifecycleWorkspace): Promise<{ sandboxId: string; state: CloudV2Workspace["state"] } | null> {
+    const { store, compute } = this.deps;
+    const name = workspace.retentionSnapshot;
+    if (!name || !workspace.retentionSavedAt || !await store.beginRestore(workspace.id, workspace.boatSandboxId, name)) return null;
+    const renewedAt = new Date(this.deps.now?.() ?? Date.now());
+    const create = () => compute.create({ key: `restore:${workspace.id}:${name}`, from: name,
+      name: this.deps.sandboxName(workspace), env: this.deps.bootEnv(workspace) });
+    const { sandboxId } = workspace.state === "starting" ? await this.measure(workspace, "boat_create", create) : await create();
+    // The expired sandbox may still have a Boat record. Keep its id until
+    // deletion succeeds; a lost reply replays the same new allocation key.
+    if (workspace.boatSandboxId && workspace.boatSandboxId !== sandboxId) await compute.delete(workspace.boatSandboxId);
+    const state = await store.finishRestore(workspace.id, workspace.boatSandboxId, name, sandboxId, renewedAt);
+    return state ? { sandboxId, state } : null;
   }
 
   private async deliverToken(workspace: CloudV2Workspace, sandboxId: string): Promise<void> {

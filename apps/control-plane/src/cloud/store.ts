@@ -49,6 +49,16 @@ export type CloudV2Workspace = {
   updatedAt: string;
 };
 
+/** Internal lifecycle metadata is never included in public workspace documents. */
+export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  stoppedAt: string | null;
+  retentionSnapshot: string | null;
+  retentionSavedAt: string | null;
+  leaseRenewedAt: string | null;
+  retentionOperationUntil: string | null;
+  restorePending: boolean;
+};
+
 type Row = {
   id: string; org_id: string; creator_user_id: string; name: string; repository: string; branch: string; base_branch: string;
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
@@ -57,6 +67,19 @@ type Row = {
 
 const COLUMNS = `id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at`;
+
+type LifecycleRow = Row & {
+  stopped_at: Date | null; retention_snapshot: string | null; retention_saved_at: Date | null;
+  lease_renewed_at: Date | null; retention_operation_until: Date | null; restore_pending: boolean;
+};
+const LIFECYCLE_COLUMNS = `${COLUMNS}, stopped_at, retention_snapshot, retention_saved_at, lease_renewed_at, retention_operation_until, restore_pending`;
+
+function lifecycleWorkspace(row: LifecycleRow): CloudV2LifecycleWorkspace {
+  return { ...workspace(row), stoppedAt: row.stopped_at?.toISOString() ?? null,
+    retentionSnapshot: row.retention_snapshot, retentionSavedAt: row.retention_saved_at?.toISOString() ?? null,
+    leaseRenewedAt: row.lease_renewed_at?.toISOString() ?? null,
+    retentionOperationUntil: row.retention_operation_until?.toISOString() ?? null, restorePending: row.restore_pending };
+}
 
 function workspace(row: Row): CloudV2Workspace {
   return {
@@ -209,6 +232,7 @@ export class CloudV2Store {
          worker_boot_id = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_boot_id END,
          active_at = CASE WHEN $3 = 'running' THEN clock_timestamp() ELSE active_at END,
          archived_at = CASE WHEN $3 = 'starting' THEN NULL ELSE archived_at END,
+         stopped_at = CASE WHEN $3 = 'stopped' AND state <> 'stopped' THEN clock_timestamp() ELSE stopped_at END,
          attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
        WHERE id = $1 AND state = ANY($2::text[]) RETURNING ${COLUMNS}`,
       [id, from, to, patch.boatSandboxId !== undefined, patch.boatSandboxId ?? null,
@@ -387,21 +411,136 @@ export class CloudV2Store {
 
   /** Leases up to `limit` workspaces in a transitional state to one lifecycle
    * worker. A crashed worker's lease simply expires. */
-  async claimPending(limit: number, leaseMs: number, excludeIds: readonly string[] = []): Promise<(CloudV2Workspace & { attempts: number })[]> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { attempts: number }>(
+  async claimPending(limit: number, leaseMs: number, excludeIds: readonly string[] = []): Promise<(CloudV2LifecycleWorkspace & { attempts: number })[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow & { attempts: number }>(
       `WITH claimed AS MATERIALIZED (
          SELECT id FROM cloud_v2_workspaces
          WHERE state IN ('creating','starting','stopping','deleting')
            AND NOT (id = ANY($3::uuid[]))
            AND coalesce(next_attempt_at, '-infinity') <= clock_timestamp()
+           AND coalesce(retention_operation_until, '-infinity') <= clock_timestamp()
          ORDER BY coalesce(next_attempt_at, updated_at) LIMIT $1 FOR UPDATE SKIP LOCKED)
        UPDATE cloud_v2_workspaces w SET attempts = w.attempts + 1,
          next_attempt_at = clock_timestamp() + make_interval(secs => $2::double precision / 1000)
        FROM claimed WHERE w.id = claimed.id
-       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, w.attempts`,
+       RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, w.attempts`,
       [limit, leaseMs, excludeIds],
     ));
-    return rows.map(row => ({ ...workspace(row), attempts: row.attempts }));
+    return rows.map(row => ({ ...lifecycleWorkspace(row), attempts: row.attempts }));
+  }
+
+  async leasesDue(before: Date, limit = 4): Promise<CloudV2Workspace[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
+      `SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE state='running' AND boat_sandbox_id IS NOT NULL
+       AND (lease_renewed_at IS NULL OR lease_renewed_at<$1)
+       ORDER BY lease_renewed_at NULLS FIRST LIMIT $2`, [before, limit]));
+    return rows.map(workspace);
+  }
+
+  /** A late renewal cannot advance the lease of a replacement or stopped VM. */
+  async markLeaseRenewed(id: string, sandboxId: string, renewedAt: Date): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET lease_renewed_at=greatest(lease_renewed_at,$3::timestamptz)
+       WHERE id=$1 AND boat_sandbox_id=$2 AND state IN ('creating','starting','running')`, [id, sandboxId, renewedAt]));
+    return Boolean(result.rowCount);
+  }
+
+  async retentionDue(before: Date, limit = 1): Promise<CloudV2LifecycleWorkspace[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow>(
+      `SELECT ${LIFECYCLE_COLUMNS} FROM cloud_v2_workspaces
+       WHERE state='stopped' AND stopped_at<=$1 AND boat_sandbox_id IS NOT NULL AND retention_saved_at IS NULL
+         AND coalesce(next_attempt_at,'-infinity')<=clock_timestamp()
+         AND coalesce(retention_operation_until,'-infinity')<=clock_timestamp()
+       ORDER BY stopped_at LIMIT $2`, [before, limit]));
+    return rows.map(lifecycleWorkspace);
+  }
+
+  /** One save across lifecycle replicas. The short transaction records intent;
+   * provider I/O never holds a database lock or connection. */
+  async beginRetention(candidate: CloudV2LifecycleWorkspace, name: string): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ acquired: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended('cloud-v2-retention-save',0)) AS acquired");
+      if (!rows[0]?.acquired) return false;
+      const result = await tx.query(
+        `UPDATE cloud_v2_workspaces w SET retention_snapshot=coalesce(retention_snapshot,$4),
+           retention_operation_until=clock_timestamp()+interval '35 minutes', next_attempt_at=NULL
+         WHERE id=$1 AND boat_sandbox_id=$2 AND state=$5
+           AND (state='stopped' OR (state='starting' AND retention_snapshot=$4))
+           AND date_trunc('milliseconds',stopped_at)=$3::timestamptz
+           AND retention_saved_at IS NULL AND (retention_snapshot IS NULL OR retention_snapshot=$4)
+           AND coalesce(retention_operation_until,'-infinity')<=clock_timestamp()
+           AND ($5='starting' OR coalesce(next_attempt_at,'-infinity')<=clock_timestamp())
+           AND ($5='starting' OR NOT EXISTS (SELECT 1 FROM cloud_v2_workspaces saving WHERE saving.retention_snapshot IS NOT NULL
+             AND saving.retention_saved_at IS NULL AND NOT saving.restore_pending
+             AND saving.retention_operation_until>clock_timestamp()))`,
+        [candidate.id, candidate.boatSandboxId, candidate.stoppedAt, name, candidate.state]);
+      return Boolean(result.rowCount);
+    });
+  }
+
+  async finishRetention(id: string, sandboxId: string, name: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET retention_saved_at=clock_timestamp(), next_attempt_at=NULL,
+         retention_operation_until=CASE WHEN state='starting' THEN clock_timestamp() ELSE NULL END
+       WHERE id=$1 AND boat_sandbox_id=$2 AND retention_snapshot=$3 AND state<>'deleted'`, [id, sandboxId, name]));
+  }
+
+  /** An error may have lost the provider's reply. Keep the name and operation
+   * deadline so cleanup cannot run ahead of a still-finishing remote save. */
+  async deferRetention(id: string, name: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET next_attempt_at=clock_timestamp()+interval '5 minutes'
+       WHERE id=$1 AND retention_snapshot=$2 AND state<>'deleted'`, [id, name]));
+  }
+
+  async retentionCleanupDue(limit = 4): Promise<CloudV2LifecycleWorkspace[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow>(
+      `SELECT ${LIFECYCLE_COLUMNS} FROM cloud_v2_workspaces WHERE retention_snapshot IS NOT NULL AND NOT restore_pending
+         AND (state='running' OR (state='stopped' AND coalesce(retention_saved_at,retention_operation_until)<stopped_at))
+         AND coalesce(retention_operation_until,'-infinity')<=clock_timestamp()
+         AND coalesce(next_attempt_at,'-infinity')<=clock_timestamp()
+       ORDER BY coalesce(retention_saved_at,stopped_at) LIMIT $1`, [limit]));
+    return rows.map(lifecycleWorkspace);
+  }
+
+  async beginRetentionCleanup(id: string, name: string): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET retention_operation_until=clock_timestamp()+interval '5 minutes'
+       WHERE id=$1 AND retention_snapshot=$2 AND NOT restore_pending
+         AND (state='running' OR (state='stopped' AND coalesce(retention_saved_at,retention_operation_until)<stopped_at))
+         AND coalesce(retention_operation_until,'-infinity')<=clock_timestamp()
+         AND coalesce(next_attempt_at,'-infinity')<=clock_timestamp()`, [id, name]));
+    return Boolean(result.rowCount);
+  }
+
+  async finishRetentionCleanup(id: string, name: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET retention_snapshot=NULL,retention_saved_at=NULL,next_attempt_at=NULL,
+         retention_operation_until=CASE WHEN state='starting' THEN clock_timestamp() ELSE NULL END
+       WHERE id=$1 AND retention_snapshot=$2 AND NOT restore_pending`, [id, name]));
+  }
+
+  /** Persist the idempotent create before calling Boat, including during
+   * deletion recovery after an earlier create lost its response. */
+  async beginRestore(id: string, sandboxId: string | null, name: string): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET restore_pending=true,retention_operation_until=clock_timestamp()+interval '5 minutes'
+       WHERE id=$1 AND boat_sandbox_id IS NOT DISTINCT FROM $2::text AND retention_snapshot=$3 AND retention_saved_at IS NOT NULL
+         AND (state='starting' OR (state IN ('stopping','deleting') AND restore_pending))
+         AND coalesce(retention_operation_until,'-infinity')<=clock_timestamp()`, [id, sandboxId, name]));
+    return Boolean(result.rowCount);
+  }
+
+  /** Even if Stop or deletion won during create, retain the new VM so that
+   * lifecycle cleanup can find it. Only a still-starting row may boot it. */
+  async finishRestore(id: string, previousSandboxId: string | null, name: string, sandboxId: string, renewedAt: Date): Promise<CloudV2WorkspaceState | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ state: CloudV2WorkspaceState }>(
+      `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$4,lease_renewed_at=$5,restore_pending=false,next_attempt_at=NULL,
+         worker_route_url=NULL,worker_port_token=NULL,worker_token_hash=NULL,worker_boot_id=NULL,
+         retention_operation_until=CASE WHEN state='starting' THEN clock_timestamp() ELSE NULL END
+       WHERE id=$1 AND boat_sandbox_id IS NOT DISTINCT FROM $2::text AND retention_snapshot=$3 AND restore_pending AND state<>'deleted'
+       RETURNING state`, [id, previousSandboxId, name, sandboxId, renewedAt]));
+    return rows[0]?.state ?? null;
   }
 
   /** Schedules the next step. Waiting for an outside event (the worker's

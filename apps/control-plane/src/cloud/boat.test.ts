@@ -5,6 +5,14 @@ import { BoatApiClient } from "./boat-client.js";
 describe("cloud v2 Boat compute", () => {
   const client = () => ({ request: vi.fn() });
 
+  it("renews the existing sandbox lease with a bounded TTL and never allocates another VM", async () => {
+    const boat = client(), compute = new BoatCloudV2Compute(boat);
+    await compute.extendLease("bx_abc12345", 86_400);
+    expect(boat.request).toHaveBeenCalledExactlyOnceWith("/sandboxes/bx_abc12345", { method: "PATCH", body: { ttlSeconds: 86_400 } });
+    for (const ttl of [0, -1, 1.5, NaN, 86_401]) await expect(compute.extendLease("bx_abc12345", ttl)).rejects.toThrow("Invalid Boat lease");
+    expect(boat.request).toHaveBeenCalledTimes(1);
+  });
+
   it("hosts only a protected localhost port and splits its token from the saved URL", async () => {
     const fetcher = vi.fn(async () => Response.json({ type: "sandbox.host", url: "https://fixture-41783.on.boat.dev/?_token=synthetic-port-token", access: "private", isProtected: true, localhost: true }));
     const compute = new BoatCloudV2Compute(new BoatApiClient({ apiKey: "synthetic-unused-key", timeoutMs: 1000, fetch: fetcher }));
@@ -27,12 +35,18 @@ describe("cloud v2 Boat compute", () => {
 
   it("returns from a snapshot save only once Boat can deploy it", async () => {
     const boat = client();
-    boat.request.mockResolvedValueOnce({ snapshot: { status: "saving" } })
+    boat.request.mockRejectedValueOnce({ httpStatus: 404 }).mockResolvedValueOnce({ snapshot: { status: "saving" } })
       .mockResolvedValueOnce({ snapshot: { status: "saving" } })
       .mockResolvedValueOnce({ snapshot: { status: "ready" } });
     await new BoatCloudV2Compute(boat, "default", async () => {}).saveSnapshot("bx_abc12345", "zeros-alpha-org-v1");
-    expect(boat.request).toHaveBeenNthCalledWith(1, "/named-snapshots", expect.objectContaining({ method: "POST", body: { sandboxId: "bx_abc12345", name: "zeros-alpha-org-v1" } }));
-    expect(boat.request).toHaveBeenNthCalledWith(3, "/named-snapshots/zeros-alpha-org-v1", { method: "GET" });
+    expect(boat.request).toHaveBeenNthCalledWith(2, "/named-snapshots", expect.objectContaining({ method: "POST", body: { sandboxId: "bx_abc12345", name: "zeros-alpha-org-v1" } }));
+    expect(boat.request).toHaveBeenNthCalledWith(4, "/named-snapshots/zeros-alpha-org-v1", { method: "GET" });
+  });
+
+  it("recovers a saved snapshot after a lost reply without depending on the stopped source disk", async () => {
+    const boat = client(); boat.request.mockResolvedValue({ snapshot: { status: "ready" } });
+    await new BoatCloudV2Compute(boat).saveSnapshot("bx_expired", "zeros-alpha-retained");
+    expect(boat.request).toHaveBeenCalledExactlyOnceWith("/named-snapshots/zeros-alpha-retained", { method: "GET" });
   });
 
   it("reports a failed save", async () => {

@@ -42,6 +42,7 @@ d("cloud v2 Cloud Computer builds", () => {
     return {
       create: vi.fn(async () => ({ sandboxId: "bx_build1" })),
       resume: vi.fn(async () => {}),
+      extendLease: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
       delete: vi.fn(async () => {}),
       exec: vi.fn(async (_id: string, command: string) => ({ exitCode: 0, stdout: command.includes("rev-parse") ? `Cloning\n${commit}\n` : "installed", timedOut: false })),
