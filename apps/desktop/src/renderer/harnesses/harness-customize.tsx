@@ -21,10 +21,10 @@ import { Toaster } from "../shared/ui/primitives/elements/toast";
 
 declare global {
   interface Window {
-    mcpFormFixture: { failSave: boolean; failProbe: boolean; holdProbe?: boolean; releaseProbe?: () => void; toolNames: string[]; probeCount: number; saveCount: number; setSurfaceActive?: (active: boolean) => void };
+    mcpFormFixture: { failSave: boolean; failProbe: boolean; requiresAuth?: boolean; authorizations: string[]; holdProbe?: boolean; releaseProbe?: () => void; toolNames: string[]; probeCount: number; saveCount: number; setSurfaceActive?: (active: boolean) => void };
   }
 }
-window.mcpFormFixture = { failSave: false, failProbe: false, toolNames: ["read_file", "search", "delete_file"], probeCount: 0, saveCount: 0 };
+window.mcpFormFixture = { failSave: false, failProbe: false, authorizations: [], toolNames: ["read_file", "search", "delete_file"], probeCount: 0, saveCount: 0 };
 const connectedServers = new Set<string>();
 
 if (!getSetting("customize:selection", null))
@@ -95,7 +95,7 @@ RuntimeClient.prototype.request = async function <
     window.mcpFormFixture.probeCount++;
     if (window.mcpFormFixture.failProbe) throw new Error("Fixture connection unavailable");
     const server = params.server as Record<string, unknown>;
-    const needsAuth = server.auth === "oauth" && !connectedServers.has(String(server.name));
+    const needsAuth = (server.auth === "oauth" || window.mcpFormFixture.requiresAuth) && !connectedServers.has(String(server.name));
     result = { status: needsAuth ? "needs-auth" : "connected", toolCount: needsAuth ? 0 : window.mcpFormFixture.toolNames.length,
       ...(!needsAuth ? { tools: [...window.mcpFormFixture.toolNames] } : {}),
       stages: [{ stage: "validation", status: "passed" }, { stage: "transport", status: "passed" },
@@ -103,6 +103,7 @@ RuntimeClient.prototype.request = async function <
     if (window.mcpFormFixture.holdProbe) await new Promise<void>(resolve => { window.mcpFormFixture.releaseProbe = resolve; });
   }
   if (request.op === "mcp.gateway.authorize") {
+    window.mcpFormFixture.authorizations.push(String(params.server));
     connectedServers.add(String(params.server));
     result = { status: { name: params.server, state: "connected", toolCount: 3 } };
   }

@@ -24,10 +24,12 @@ export function mcpConnectionKey(owner: string, server: RawServer, definition?: 
 }
 export function rememberMcpConnection(owner: string, server: RawServer, result?: McpProbeResult, definition?: DefinitionRevision): void {
   const key = mcpConnectionKey(owner, server, definition);
+  // Saving without a check is unverified, not a failed connection.
+  if (!result) { mcpConnectionCache.forget(key); return; }
   const previous = mcpConnectionCache.getSnapshot(key).data;
   // A failed refresh must not erase a confirmed exact-key inventory. An
   // unverified save still clears it, and an authoritative [] replaces it.
-  mcpConnectionCache.setData(key, result ? { ...result,
+  mcpConnectionCache.setData(key, { ...result,
     ...(result.tools === undefined && previous?.tools ? { tools: previous.tools } : {}),
-  } : { status: "failed", stages: [] });
+  });
 }

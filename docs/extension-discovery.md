@@ -12,12 +12,17 @@ inventory endpoints remain available to engine callers for future UI work;
 browsing Customize does not start native account discovery. Legacy selections
 for provider inventories restore synchronously to a Zeros category.
 
-MCP creation uses one segmented editor for Local and organization owners:
-Server (name, owner and project), Runtime, Variables, and HTTP authentication.
+MCP creation uses one Settings-style editor for Local and organization owners:
+Connection, Server (name, owner and project), Runtime, HTTP authentication,
+Variables, and Tools. Groups use the shared borderless Settings surface and
+typography. Save remains available in the sticky heading. Authentication uses
+one method picker; advanced OAuth client options are collapsed by default.
 Variables, headers and custom OAuth client secrets are write-only values;
 reopening a server never retrieves them into the renderer. Importing JSON,
 Codex TOML, a URL or a literal command fills a draft for review and does not
-save it. Validation runs on Save and reports action failures through a toast.
+save it. Validation runs before saving or checking and reports action failures
+through a toast. Changing authentication methods retains unsaved header input,
+but No sign-in and STDIO omit those dormant headers from requests and saves.
 
 Local definitions belong to **You** and target all local projects or one local
 repository. Organization definitions belong to **Organisation** or **You**
@@ -28,16 +33,29 @@ Computer prerequisite. The picker first refreshes the native human/App
 repository intersection, then reads the actor-bound expiring admission catalog.
 Account/organization generations fence all late reads and writes.
 
-Saved connection status is a last confirmed check, not a consequence of saving.
-HTTP checks run only while the editor is active, are debounced and cancellable,
-and never launch a process or open a browser. Changing secret values invalidates
-the draft check; cloud verification also includes the definition ID and revision.
-STDIO processes start only when an agent admits the configuration. OAuth
-**Connect** opens the provider login; polling exists only during an active
-organization sign-in and stops on cancellation, navigation or owner replacement.
+Saved connection status comes from the latest exact-configuration observation,
+not from saving. Both lists and the editor offer **Connect** for unverified or
+authentication-required HTTP/SSE servers. The editor uses **Save & connect**
+when authorization needs a saved draft; only a successful save may start OAuth,
+using the returned definition and revision. Rejected API keys stay in the API-key
+flow. Failed connections offer Retry, connected ones offer Check connection,
+and disabled or on-demand STDIO servers have no Connect action. Diagnostic
+stages are available under Connection details.
+
+Passive HTTP checks run only while the editor is active, are debounced and
+cancellable, and never launch a process or open a browser. An explicit Connect
+may continue an authentication challenge into sign-in. Changing secret values
+invalidates the draft check; cloud verification also includes the definition ID
+and revision. STDIO processes start only when an agent admits the configuration.
+OAuth opens the provider login; Local engines without a browser can return an
+authorization URL for the device browser and accept a pasted code. Polling exists
+only during an active organization sign-in and stops on cancellation, navigation
+or owner replacement. Cancellation retires UI authority immediately so a late
+reply cannot overwrite a retry. Read-only members can authorize an existing
+shared OAuth definition, but cannot change its authentication settings.
 
 The editor's Tools section shows the complete discovered inventory, including
-disabled names. Test and Refresh share the bounded connection check; a failed
+disabled names. Refresh uses the bounded connection check; a failed
 refresh retains the last confirmed inventory for that exact configuration.
 An empty catalog differs from one not yet listed. Search and 50-row pages bound
 rendering for large catalogs. Tool choices stay in the draft until Save,

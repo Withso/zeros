@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runMcpConnectionSmoke } from "./ui-smoke-mcp-connection.mjs";
 import { runMcpFormSmoke } from "./ui-smoke-mcp-form.mjs";
 import { runOrganizationMcpSmoke } from "./ui-smoke-mcp-organization.mjs";
 import { runMcpToolsSmoke } from "./ui-smoke-mcp-tools.mjs";
@@ -61,7 +62,7 @@ export async function runCustomizeSmoke({ page, check }) {
   const authUrl = new URL(page.url());
   authUrl.searchParams.set("gatewayState", "needs-auth");
   await page.goto(authUrl.href);
-  await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "No browser?", exact: true })).toBeVisible();
   check("SSE authentication failures retain both existing sign-in flows", true);
   await page.evaluate(async () => {
@@ -95,6 +96,7 @@ export async function runCustomizeSmoke({ page, check }) {
   await runMcpConcurrentAuthSmoke({ page, check });
   await runMcpToolsSmoke({ page, check });
   await runOrganizationMcpSmoke({ page, check });
+  await runMcpConnectionSmoke({ page, check });
 }
 
 export async function runMcpConcurrentAuthSmoke({ page, check }) {
@@ -142,7 +144,7 @@ export async function runMcpConcurrentAuthSmoke({ page, check }) {
       return request.call(this, message, ...args);
     };
   });
-  const signIn = page.getByRole("button", { name: /Sign in$/ });
+  const signIn = page.getByRole("button", { name: /Connect$/ });
   const headless = page.getByRole("button", { name: "No browser?", exact: true });
   await expect(signIn).toHaveCount(2);
   await signIn.evaluateAll((buttons) => {
@@ -160,7 +162,7 @@ export async function runMcpConcurrentAuthSmoke({ page, check }) {
   await headless.nth(1).click();
   const dialog = page.getByRole("dialog", { name: "Sign in to gateway-second" });
   await expect(dialog).toBeVisible();
-  await expect(page.getByRole("button", { name: /Sign in$/, includeHidden: true }).first()).toBeDisabled();
+  await expect(page.getByRole("button", { name: /Connect$/, includeHidden: true }).first()).toBeDisabled();
   await expect(page.getByRole("button", { name: "No browser?", exact: true, includeHidden: true }).first()).toBeDisabled();
   await dialog.getByPlaceholder("code=… or the full …/callback?code=… URL").fill("fixture-code");
   await dialog.getByRole("button", { name: "Finish sign-in", exact: true }).click();

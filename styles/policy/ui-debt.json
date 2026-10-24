@@ -331,7 +331,7 @@
         "button": 1
       },
       "apps/desktop/src/renderer/features/agent-extensions/customize-mcp.tsx": {
-        "button": 4
+        "button": 2
       },
       "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
         "button": 1

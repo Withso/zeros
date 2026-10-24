@@ -8,6 +8,13 @@ describe("MCP submit", () => {
     await expect(saveMcpDraft({ draft: secureDraftFromServer(null), initial: null, takenNames: new Set(), persist })).rejects.toThrow("Name is required");
     expect(persist).not.toHaveBeenCalled();
   });
+  it("rejects an empty new API key before persistence", async () => {
+    const persist = vi.fn();
+    const draft = secureDraftFromServer({ name: "api", transport: "http", url: "https://example.test/mcp", auth: "header" });
+    draft.headers = [{ id: 1, key: "Authorization", value: "", stored: false, secret: true }];
+    await expect(saveMcpDraft({ draft, initial: null, takenNames: new Set(), persist })).rejects.toThrow("Enter a value for the Authorization header.");
+    expect(persist).not.toHaveBeenCalled();
+  });
   it("separates all variable and header values from configuration", async () => {
     for (const raw of [
       { name: "local", transport: "stdio", command: "node", env: { LOG_LEVEL: "debug", TOKEN: "fixture" } },

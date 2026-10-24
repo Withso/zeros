@@ -16,6 +16,8 @@ export async function runMcpFormSmoke({ page, check }) {
   await button("Edit gateway-error").click();
   await expect(select("Transport")).toContainText("Legacy SSE");
   await expect.poll(() => page.evaluate(() => window.mcpFormFixture.probeCount)).toBeGreaterThan(beforeLegacyProbe);
+  await button("Connect").click();
+  await expect(section("Connection")).toContainText("Connected");
   const beforeLegacyRetry = await page.evaluate(() => window.mcpFormFixture.probeCount);
   await button("Check connection").click();
   await expect.poll(() => page.evaluate(() => window.mcpFormFixture.probeCount)).toBeGreaterThan(beforeLegacyRetry);
@@ -48,6 +50,8 @@ export async function runMcpFormSmoke({ page, check }) {
   await page.getByRole("option", { name: "Repo A", exact: true }).click();
   await button("Add server").click();
   await expect(button("Edit literal-tools")).toBeVisible();
+  await expect(button("Edit literal-tools").locator("..").locator("..")).toContainText("Starts with agent");
+  await expect(button("Edit literal-tools").locator("..").getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
   await expect(button("Customize scope")).toContainText("Repo A");
   const stored = JSON.parse(await page.locator("#last-write").textContent());
   expect(stored).toMatchObject({ layer: "repo-local", repoRoot: "/fixture/repo-a", server: { args: ["  a literal argument  ", ""], cwd: "tools", env: { REGION: "${zeros.secret}" } } });
@@ -73,7 +77,7 @@ export async function runMcpFormSmoke({ page, check }) {
   await expect(field("Header name 2")).toHaveValue("X-Region");
   await expect(field("Variable name 1")).toHaveValue("REGION");
   expect(await page.evaluate(() => window.mcpFormFixture.saveCount)).toBe(before);
-  await expect(section("Runtime")).toContainText("Connected · 3 tools available");
+  await expect(section("Connection")).toContainText("3 tools available.");
   await page.evaluate(() => { window.mcpFormFixture.failSave = true; });
   await button("Add server").click();
   await expect(page.locator("[data-sonner-toast]").filter({ hasText: "MCP secrets could not be saved securely" })).toBeVisible();
@@ -85,7 +89,7 @@ export async function runMcpFormSmoke({ page, check }) {
   await expect(page.locator("#last-write")).not.toContainText("fixture-api");
   await button("Edit api-tools").click();
   await field("Header value 1").fill("replacement-fixture");
-  await expect(page.getByText("Save your changes before connecting.", { exact: true })).toBeVisible();
+  await expect(section("Connection")).not.toContainText("Connected");
   check("Import fills an editable draft, masked headers stay private, and failed saves keep the draft", true);
   await button("MCP").click();
 
@@ -94,9 +98,11 @@ export async function runMcpFormSmoke({ page, check }) {
   await select("Transport").click();
   await page.getByRole("option", { name: "Streamable HTTP", exact: true }).click();
   await field("URL").fill("https://oauth.example.test/mcp");
-  await page.getByRole("radio", { name: /^Sign in/ }).click();
-  await button("Change").click();
-  await page.getByRole("radio", { name: /^Your own client/ }).click();
+  await select("Authentication").click();
+  await page.getByRole("option", { name: "Sign in", exact: true }).click();
+  await button("Advanced sign-in options").click();
+  await select("OAuth client").click();
+  await page.getByRole("option", { name: "Your own client", exact: true }).click();
   await field("Client ID").fill("fixture-client");
   await field("Client secret").fill("fixture-client-secret");
   await field("Scopes").fill("read write");
@@ -105,10 +111,10 @@ export async function runMcpFormSmoke({ page, check }) {
   await expect(page.locator("#last-write")).not.toContainText("fixture-client-secret");
   await button("Edit oauth-tools").click();
   await expect(field("Client secret")).toHaveValue("");
-  await expect(section("Runtime")).toContainText("sign-in required");
+  await expect(section("Connection")).toContainText("Sign-in required");
   await button("Connect").click();
   await expect(section("Connection")).toContainText("Connected");
-  await expect(section("Runtime")).toContainText("Connected · 3 tools available");
+  await expect(section("Connection")).toContainText("3 tools available.");
   check("OAuth client configuration reopens without secrets and Connect refreshes the saved status", true);
 
   await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
@@ -119,7 +125,7 @@ export async function runMcpFormSmoke({ page, check }) {
     await page.setViewportSize({ width: 1200, height: 2200 });
     await page.screenshot({ path: `.context/mcp-editor-${theme}.png`, fullPage: true });
     const inputs = await page.locator('input:not([type="hidden"]):not([type="file"]), textarea').evaluateAll(elements => elements.map(element => ({ font: getComputedStyle(element).fontFamily, size: getComputedStyle(element).fontSize })));
-    expect(inputs.every(input => input.size === "14px" && !/mono/i.test(input.font))).toBe(true);
+    expect(inputs.every(input => input.size === "13px" && !/mono/i.test(input.font))).toBe(true);
   }
   await page.setViewportSize({ width: 500, height: 900 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
