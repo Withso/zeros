@@ -106,6 +106,7 @@ export {
   SelectValue,
   selectTriggerClassName,
   splitTriggerClassNames,
+  splitTriggerClasses,
 } from "./select";
 export {
   InputGroup,

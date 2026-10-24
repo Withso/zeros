@@ -533,13 +533,15 @@ export function useGitRefreshKey(
   return key;
 }
 
-/** Test-only snapshot access for exact-scope publication assertions. */
-export function getGitRefreshKeyForTests(
+/** Read the current exact scope for pointer/focus prefetch without subscribing. */
+export function getGitRefreshKey(
   cwd?: string | null,
   workspaceId?: string | null,
 ): number {
   return refreshSnapshot(makeRefreshScope(cwd, workspaceId));
 }
+
+export const getGitRefreshKeyForTests = getGitRefreshKey;
 
 /** Test-only listener binding for fan-out assertions without mounting React. */
 export function subscribeGitRefreshForTests(

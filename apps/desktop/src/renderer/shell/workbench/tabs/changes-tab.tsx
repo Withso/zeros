@@ -54,10 +54,8 @@ import {
 } from "lucide-react";
 
 import {
-  gitChangeCounts,
   gitDiff,
   gitShowCommit,
-  gitStatus,
   gitInitInPlace,
   isGitErrorShape,
   workspaceInspectFolder,
@@ -65,7 +63,6 @@ import {
   type ChangeCounts,
   type FileChange,
   type FileChangeStatus,
-  type StatusResult,
 } from "@/renderer/platform/git";
 import { isNativeRuntime } from "@/renderer/platform/runtime";
 import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
@@ -76,7 +73,8 @@ import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { LatestGenerationFlight } from "@/renderer/shared/lib/latest-generation-flight";
 import { beginChangeLineObservation } from "../../workspace-change-line-cache";
-import { registerReviewCacheForget } from "@/renderer/features/code-review/review-cache-forget";
+import { statusForGeneration, changeCountsForGeneration } from "../../git-status-reads";
+export { statusForGeneration, changeCountsForGeneration } from "../../git-status-reads";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useAddProject } from "../../add-project-provider";
 import {
@@ -212,39 +210,6 @@ function pathBaseName(path: string): string {
   return slash === -1 ? path : path.slice(slash + 1);
 }
 
-// Refreshes can arrive faster than a pathological repository answers. Keep
-// each exact owner to one running request and one latest queued successor; an
-// old generation must not compete with every intermediate invalidation.
-const statusRequests = new LatestGenerationFlight<StatusResult>();
-const statusRequestOwners = new Set<{ workspaceId: string; folder: string }>();
-
-registerReviewCacheForget((ownsFolder) => {
-  for (const owner of statusRequestOwners) {
-    if (!ownsFolder(owner.folder)) continue;
-    statusRequests.forget(owner.workspaceId);
-    statusRequestOwners.delete(owner);
-  }
-});
-
-/** Exported so the PR-status island joins the same coalesced generation
- *  instead of issuing a second `git status` for the same refresh key. */
-export function statusForGeneration(
-  workspaceId: string,
-  refreshKey: number,
-  cwd: string,
-): Promise<StatusResult> {
-  const owner = { workspaceId, folder: cwd };
-  statusRequestOwners.add(owner);
-  const request = statusRequests.run(workspaceId, refreshKey, () =>
-    gitStatus(workspaceId),
-  );
-  const release = () => {
-    statusRequestOwners.delete(owner);
-  };
-  void request.then(release, release);
-  return request;
-}
-
 // Coalesce the (up to two) mounted Changes surfaces' turns fetches onto ONE
 // request per refresh generation — same in-flight-only dedup as status above.
 // Besides halving the IPC, a shared snapshot means the deleted-turn cleanup in
@@ -313,19 +278,6 @@ const ZERO_CHANGE_COUNTS: ChangeCounts = Object.freeze({
   staged: 0,
   unstaged: 0,
 });
-const changeCountRequests = new LatestGenerationFlight<ChangeCounts>();
-
-/** Shared by the Changes badge/menu, Create-PR state, and PR status row so one
- * refresh generation cannot briefly disagree about the net working-tree diff. */
-export function changeCountsForGeneration(
-  workspaceId: string,
-  refreshKey: number,
-): Promise<ChangeCounts> {
-  return changeCountRequests.run(workspaceId, refreshKey, () =>
-    gitChangeCounts(workspaceId),
-  );
-}
-
 export function useChangeCounts(
   workspaceId: string | null,
   refreshKey: number,

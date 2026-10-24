@@ -7,6 +7,24 @@ export async function runPrActionsSmoke({ page, check }) {
       (type) => window.prActionsFixture.requests.filter((r) => r.type === type),
       type,
     );
+  for (const [summary, label, text, autoAction] of [
+    ["commit", "Commit and push", "Commit and push all changes", "commit-and-push"],
+    ["base", "Pull", "merge the selected base origin/main", "update-branch"],
+    ["conflicts", "Resolve", "rebase already in progress", "resolve"],
+  ]) {
+    await page.goto(`${base}?summary=${summary}`);
+    const button = page.getByRole("region", { name: "Git status", exact: true }).getByRole("button", { name: label, exact: true });
+    await expect(button).toBeEnabled();
+    await button.click();
+    await expect.poll(() => requests("AGENT_PROMPT")).toHaveLength(1);
+    const [prompt] = await requests("AGENT_PROMPT");
+    expect(prompt.prompt[0].text).toContain(text);
+    expect(prompt.bubble.autoAction).toBe(autoAction);
+    expect(await requests("AGENT_NEW_SESSION")).toMatchObject([{ chatId: "chat-a", cwd: "/pr-fixture" }]);
+    expect(prompt.executionId).toBe("execution-a");
+    await expect(button).toBeEnabled();
+    check(`Summary ${label} sends the specific Git brief to its own chat`, true);
+  }
   for (const finishOffline of [false, true]) {
     await page.goto(`${base}?holdPrompt=1`);
     await page.getByRole("button", { name: "Create PR", exact: true }).click();

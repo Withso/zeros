@@ -25,7 +25,7 @@ vi.mock("../use-send-to-active-chat", () => ({ useSendToActiveChat: () => fixtur
 vi.mock("../use-agent-working", () => ({ useWorkspaceAgentWorking: () => false, AGENT_WORKING_REASON: "Agent is working" }));
 vi.mock("../pr-create-claim", () => ({ usePrCreateActionClaimed: () => false, claimPrCreateAction: fixture.claim, releasePrCreateAction: fixture.release }));
 vi.mock("../../../shared/ui/primitives", () => ({ Tooltip: ({ children, label }: { children: React.ReactNode; label: string }) => React.createElement("div", { "data-tooltip": label }, children),
-  splitTriggerClassNames: { shell: "", main: "", chevron: "" } }));
+  splitTriggerClasses: () => ({ shell: "", main: "", chevron: "" }) }));
 vi.mock("../../../shared/ui/primitives/elements", () => ({ toast: { error: fixture.toast } }));
 vi.mock("../../../shared/ui/primitives/dropdown-menu", () => {
   const pass = ({ children }: { children: React.ReactNode }) => children;

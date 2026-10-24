@@ -18,6 +18,7 @@ import { useWorkspaceStore } from "../state/workspace-store";
 import type { ChatThread } from "../state/store";
 import { CreatePrButton } from "../shell/pr/create-pr-button";
 import { PrStatusIsland } from "../shell/pr/pr-status-island";
+import { SummaryGitStatus } from "../shell/conversation/summary-git-status";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
 
@@ -243,15 +244,16 @@ RuntimeClient.prototype.request = async function <
         break;
       case "git.status":
         result = {
-          conflicted: [],
-          conflictState: null,
+          conflicted: params.get("summary") === "conflicts" ? [{ path: "conflict.ts", status: "conflicted" }] : [],
+          conflictState: params.get("summary") === "conflicts" ? "rebase" : null,
           upstream: "origin/feature",
           ahead: 0,
           behind: 0,
+          summary: { branch: "feature", base: { ref: "origin/main", behind: params.get("summary") === "base" ? 4 : 0 } },
         };
         break;
       case "git.changeCounts":
-        result = { all: 1, uncommitted: 0, staged: 0, unstaged: 0 };
+        result = { all: 1, uncommitted: params.get("summary") === "commit" ? 5 : 0, staged: 0, unstaged: 0 };
         break;
       case "gh.prGet":
         result = {
@@ -324,7 +326,11 @@ function Harness() {
   }, [sessions]);
   return (
     <div className="bg-bg1 text-fg1 min-h-screen p-4">
-      {workspace.prNumber ? (
+      {params.has("summary") ? (
+        <div className="w-72">
+          <SummaryGitStatus workspace={workspace} originUrl="https://github.com/example/fixture.git" active onNavigate={() => {}} />
+        </div>
+      ) : workspace.prNumber ? (
         <PrStatusIsland workspace={workspace} active localDesktop />
       ) : (
         <CreatePrButton

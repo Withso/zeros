@@ -121,6 +121,18 @@ const splitTriggerClassNames = {
     "inline-flex items-center justify-center border-l border-border3 px-1 text-fg2 outline-none transition-[color,background-color] enabled:hover:bg-bg2-highlight focus-visible:bg-bg2-highlight data-[state=open]:bg-bg2-highlight disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0 [&_svg]:opacity-50",
 } as const
 
+/** Primary keeps the split geometry and independent segment hovers. Its
+ * opaque inset focus outline remains visible inside the clipped shell. */
+function splitTriggerClasses(appearance: "secondary" | "primary" = "secondary") {
+  if (appearance === "secondary") return splitTriggerClassNames
+  const focus = "focus-visible:outline-solid focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-highlighted-bright"
+  return {
+    shell: cn(splitTriggerClassNames.shell, "border-primary-button-bg bg-primary-button-bg hover:border-primary-button-bg has-[[data-state=open]]:border-primary-button-bg has-[:disabled]:hover:border-primary-button-bg"),
+    main: cn(splitTriggerClassNames.main, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover", focus),
+    chevron: cn(splitTriggerClassNames.chevron, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover data-[state=open]:bg-primary-button-hover", focus),
+  }
+}
+
 const SelectTrigger = React.forwardRef<
   HTMLButtonElement,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger> & {
@@ -340,4 +352,5 @@ export {
   SelectValue,
   selectTriggerClassName,
   splitTriggerClassNames,
+  splitTriggerClasses,
 }

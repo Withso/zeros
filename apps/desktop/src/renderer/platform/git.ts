@@ -1331,6 +1331,11 @@ export interface StatusResult {
   upstream?: string | null;
   /** Present on cloud workers that can report bounded-history fallback. */
   shallow?: boolean;
+  /** Local-only, opt-in branch/base facts; older engines omit this field. */
+  summary?: {
+    branch: string | null;
+    base: { ref: string; behind: number } | null;
+  };
 }
 
 export interface ChangeCounts {
@@ -1349,7 +1354,7 @@ export interface ChangeLineCounts {
 
 export async function gitStatus(
   workspaceId: string,
-  options: { paths?: string[]; includeTracking?: boolean } = {},
+  options: { paths?: string[]; includeTracking?: boolean; includeSummary?: boolean } = {},
 ): Promise<StatusResult> {
   return bridgeGitStatus(
     requireBridge("read Git status"),

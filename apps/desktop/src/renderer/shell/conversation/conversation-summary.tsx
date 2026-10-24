@@ -25,6 +25,10 @@ import { prefetchSettingsForRepo } from "../../features/settings/use-settings";
 import { loadContextGraph } from "../context-graph-data";
 import { SummaryContents } from "./summary-contents";
 import { summaryHasSplitColumns } from "./summary-model";
+import { supportsSummaryGitStatus } from "./summary-git-status-model";
+import { loadSummaryGit, loadSummaryPr } from "./summary-git-status-data";
+import { getGitRefreshKey } from "../use-git-refresh-key";
+import { isNativeRuntime } from "../../platform/runtime";
 import "./conversation-summary.css";
 
 type SummaryState = {
@@ -55,7 +59,7 @@ export function ConversationSummaryProvider({
   onRevealWorkbench: () => void;
   children: React.ReactNode;
 }) {
-  const { workspace, folder } = useActiveWorkspace();
+  const { workspace, folder, project } = useActiveWorkspace();
   const layout = usePaneLayout(folder);
   const active =
     useWorkspaceStore((state) => state.activePage === "workspace") && enabled;
@@ -106,11 +110,16 @@ export function ConversationSummaryProvider({
         if (!cwd) return;
         void loadContextGraph(cwd).catch(() => {});
         prefetchSettingsForRepo(workspace?.path || cwd);
+        if (isNativeRuntime() && project?.isGitRepository !== false && supportsSummaryGitStatus(workspace)) {
+          void loadSummaryGit(workspace, getGitRefreshKey(workspace.path, workspace.id)).catch(() => {});
+          void loadSummaryPr(workspace).catch(() => {});
+        }
       },
     }),
     [
       cwd,
       workspace,
+      project?.isGitRepository,
       docked,
       openOwner,
       collapsedOwner,
