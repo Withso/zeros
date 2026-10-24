@@ -277,7 +277,11 @@ conflicts as unstaged changes, not as the operation itself. The capture and
 restore technique follows Conductor's checkpointer (a scratch index, private
 refs and `read-tree`), extended to carry objects to a different VM. Unlike
 Conductor, which restores in place, a restore never runs `git clean` on the new
-checkout, whose own Git directory may live inside it.
+checkout. A checkpoint never holds the old checkout's own Git directory or the
+links inside it that its `.git` file goes through. Before changing anything, a
+restore refuses a checkout that keeps its Git directory inside itself under any
+name but `.git`, or reaches it through anything inside itself. Cloud Computer
+checkouts never do either.
 
 The object is `cloud-v2/checkpoints/<workspace>/<checkpoint>.zck` in the
 runtime bucket. It is AES-256-GCM in authenticated 1 MiB chunks, so tampering,
