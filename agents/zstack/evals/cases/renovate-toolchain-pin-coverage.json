@@ -1,0 +1,9 @@
+{
+  "id": "renovate-toolchain-pin-coverage",
+  "kind": "replay",
+  "area": "ci-dependencies",
+  "fixedBy": "pr:711",
+  "symptom": "A digest-pinned gitleaks container and an unpinned Bun toolchain had no updater, and Electron advisories were invisible to the production-only audit while Renovate stalled.",
+  "rule": "changes/dependency-automation-gaps.md: give every toolchain or container pin an updater that can read it, pin setup-bun's bun-version, and keep same-major Electron updates enabled.",
+  "check": "pnpm test:git scripts/__tests__/renovate-coverage.test.ts"
+}

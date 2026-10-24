@@ -4,7 +4,8 @@
     "Renovate owns general dependency/security maintenance and monthly GitHub Action pins. The dedicated runtime updater owns the three bundled root SDK/CLI pins and keeps one working PR per provider; see docs/agent-runtime-notifications.md.",
     "Keep Dependabot alerts enabled as Renovate input, and Dependabot security-update PRs disabled to avoid duplicate writers. Runtime advisories go to the subscribed tracking issue and require review on the working runtime PR.",
     "Runtime ignoreDeps is scoped to the exact package/file pair and is evaluated before vulnerability overrides. Unrelated direct and transitive advisory fixes retain the existing vulnerabilityAlerts policy. The control-plane Codex auth keeper remains a separate manual migration/qualification boundary.",
-    "This open-source repository currently accepts maintainer and automation work. Automated maintenance is labelled automated and excluded from generated release notes."
+    "This open-source repository currently accepts maintainer and automation work. Automated maintenance is labelled automated and excluded from generated release notes.",
+    "Renovate cannot regenerate THIRD-PARTY-LICENSES.txt. Any PR that changes a shipped package version fails check:licenses until a maintainer pushes the output of pnpm licenses:generate to its branch."
   ],
   "extends": [
     ":dependencyDashboard",
@@ -12,7 +13,18 @@
     "helpers:pinGitHubActionDigests"
   ],
   "timezone": "Asia/Kolkata",
-  "enabledManagers": ["npm", "github-actions"],
+  "enabledManagers": ["npm", "github-actions", "custom.regex"],
+  "customManagers": [
+    {
+      "description": "The secret-scan gitleaks container is pinned by tag and digest in a workflow env value, which the github-actions manager does not read.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/(ci|preflight)\\.yml$/"],
+      "matchStrings": [
+        "GITLEAKS_IMAGE: (?<depName>ghcr\\.io/gitleaks/gitleaks):(?<currentValue>v\\d+\\.\\d+\\.\\d+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
   "labels": ["dependencies", "automated"],
   "prHeader": "Automated maintenance opened by Renovate. This open-source repository does not currently review outside pull requests; bot upgrade PRs are the only non-maintainer PRs that are merged here.",
   "packageRules": [
@@ -45,6 +57,24 @@
       "ignoreDeps": ["@openai/codex"]
     },
     {
+      "description": "Electron is the runtime shipped to every desktop user, yet it is a devDependency, so the production audit never sees it. Its fixes usually ship as patch releases before any advisory. Opt into minor and patch releases within the current major: one weekly PR, reviewed and never automerged. Majors remain a reviewed runtime migration together with the node-abi floor in pnpm-workspace.yaml.",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["package.json"],
+      "matchPackageNames": ["electron"],
+      "groupName": "electron runtime",
+      "rangeStrategy": "bump",
+      "schedule": ["* * * * 1"],
+      "automerge": false
+    },
+    {
+      "description": "Only same-major Electron releases are enabled; see the rule above.",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["package.json"],
+      "matchPackageNames": ["electron"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "enabled": true
+    },
+    {
       "description": "GitHub Actions are pinned to full commit SHAs (with the version in a trailing comment) so a compromised upstream can't repoint a tag into a job that holds the Developer ID cert and the R2 write keys. A SHA pin only stays safe if something bumps it, and that something is this rule \u2014 without it the pins silently rot into permanently-outdated code. Grouped into one monthly PR so the pin refresh is a single reviewable diff rather than a trickle, and never auto-merged: the whole point of a SHA pin is that a human looks at what the new SHA is. SCHEDULE IS A WHOLE DAY, NOT A MORNING: `* * 1 * *` = any time on the 1st (cron, in the `timezone` above), widened from `before 6am on the first day of the month` on 2026-08-04 for the reason spelled out in the agent-CLI rule above \u2014 a 3m34s margin against the observed run time, where a miss costs a MONTH rather than a week. Whole-day windows are the shape Renovate's own presets use for day-granular schedules (`schedule:quarterly` is `* * 1 */3 *`), so this is the documented idiom, not a workaround. A missed window here is the worst kind: this rule is the only thing that stops the SHA pins rotting, so silently skipping a month directly weakens the supply-chain posture the pins exist to provide.",
       "matchManagers": ["github-actions"],
       "enabled": true,
@@ -58,6 +88,16 @@
       "matchManagers": ["github-actions"],
       "matchDepNames": ["node", "postgres"],
       "enabled": false
+    },
+    {
+      "description": "The gitleaks secret-scan container is pinned like an action SHA, so it needs the same monthly reviewed refresh. Bun's setup-bun pin is already a github-actions dependency in that group.",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["ghcr.io/gitleaks/gitleaks"],
+      "enabled": true,
+      "groupName": "github actions",
+      "labels": ["dependencies", "automated", "ci"],
+      "schedule": ["* * 1 * *"],
+      "automerge": false
     }
   ],
   "vulnerabilityAlerts": {
