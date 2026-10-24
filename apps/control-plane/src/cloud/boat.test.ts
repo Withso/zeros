@@ -53,6 +53,21 @@ describe("cloud v2 Boat compute", () => {
     expect(boat.request).toHaveBeenCalledExactlyOnceWith("/named-snapshots", { method: "POST", body: { sandboxId: "bx_newbuild", name: "zeros-alpha-org-v1" } });
   });
 
+  it("finds a sandbox by exact name, newest first, without reading past its creation window", async () => {
+    const boat = client();
+    const at = (minutes: number) => new Date(Date.UTC(2026, 9, 24, 12, minutes)).toISOString();
+    boat.request
+      .mockResolvedValueOnce({ sandboxes: [{ id: "bx_other111", name: "zeros-alpha-ws-x", createdAt: at(50) }], pageInfo: { hasMore: true, nextCursor: "c/2" } })
+      .mockResolvedValueOnce({ sandboxes: [{ id: "bx_found111", name: "zeros-alpha-ws-r1", createdAt: at(40) }], pageInfo: { hasMore: false, nextCursor: null } });
+    const compute = new BoatCloudV2Compute(boat);
+    expect(await compute.findSandbox("zeros-alpha-ws-r1", new Date(at(30)))).toBe("bx_found111");
+    expect(boat.request.mock.calls.map(([path]) => path)).toEqual(["/sandboxes?limit=200&sort=desc", "/sandboxes?limit=200&sort=desc&cursor=c%2F2"]);
+    boat.request.mockReset().mockResolvedValueOnce({ sandboxes: [{ id: "bx_same111", name: "zeros-alpha-ws-r1", createdAt: at(10) }], pageInfo: { hasMore: true, nextCursor: "c" } });
+    // Older than the attempt: never another attempt's VM, and no further pages.
+    expect(await compute.findSandbox("zeros-alpha-ws-r1", new Date(at(30)))).toBeNull();
+    expect(boat.request).toHaveBeenCalledTimes(1);
+  });
+
   it("reports a failed save", async () => {
     const boat = client();
     boat.request.mockResolvedValueOnce({ snapshot: { status: "saving" } }).mockResolvedValueOnce({ snapshot: { status: "failed" } });

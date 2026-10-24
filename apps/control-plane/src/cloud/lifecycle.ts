@@ -28,6 +28,11 @@ const RESTORE_DEADLINE_MS = 25 * 60_000;
 const CHECKPOINT_LEASE_MS = (CLOUD_V2_CHECKPOINT_SECONDS + 120) * 1000;
 /** GitHub answers while Boat boots the VM; never longer than this. */
 const BASE_COMMIT_MS = 3_000;
+/** An upload whose command reply was lost can still land until its URL has
+ * expired (15 minutes) and curl's own limit (7 minutes) has passed. */
+const UPLOAD_HORIZON_MS = 25 * 60_000;
+/** Boat keeps an idempotency key for 24 hours. */
+const CREATE_KEY_MS = 23 * 60 * 60_000;
 const MAX_ATTEMPTS = 8;
 const LEASE_RENEW_MS = 12 * 60 * 60_000;
 const MAINTENANCE_SCAN_MS = 60_000;
@@ -54,7 +59,8 @@ export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => vo
 
 export type CloudV2LifecycleDeps = {
   store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed"
-    | "setBaseCommit" | "saveCheckpoint" | "checkpointFailed" | "beginRestore" | "replaceSandbox" | "finishRestore">;
+    | "setBaseCommit" | "saveCheckpoint" | "checkpointFailed" | "checkpointUpload" | "checkpointUploadDone" | "checkpointUploadHorizon" | "stopCurrent"
+    | "beginRestore" | "replaceSandbox" | "finishRestore">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   stopIdle?: (id: string, before: Date) => Promise<void>;
@@ -220,12 +226,18 @@ export class CloudV2Lifecycle {
     } catch (error) {
       const code = errorCode(error);
       this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code})`);
-      // Retrying cannot wake or stop a VM that is gone; say so at once.
-      if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error)) {
-        await this.deps.store.revoke(workspace.id, false);
-        await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing" });
-      } else if (workspace.attempts >= MAX_ATTEMPTS) await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
-      else await this.deps.store.defer(workspace.id, workspace.state, Math.min(5_000 * 2 ** workspace.attempts, 5 * 60_000), { failure: true });
+      // A stop's outcome belongs to that stop alone, never to a newer one.
+      const fence = workspace.state === "stopping" ? { stopGeneration: workspace.stopGeneration } : {};
+      // Retrying cannot wake or stop a VM that is gone; say so at once. With a
+      // checkpoint the next attempt restores instead.
+      if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error) && !workspace.checkpoint) {
+        await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing", revoke: true, ...fence });
+      } else if (workspace.attempts >= MAX_ATTEMPTS) {
+        // A restore that gives up keeps its checkpoint; Start tries again.
+        const restore = workspace.state === "starting" && workspace.restorePending && !(CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(code);
+        await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: restore ? "checkpoint_restore_failed" : code, ...fence });
+      }
+      else await this.deps.store.defer(workspace.id, workspace.state, Math.min(5_000 * 2 ** workspace.attempts, 5 * 60_000), { failure: true, ...fence });
     }
   }
 
@@ -265,7 +277,8 @@ export class CloudV2Lifecycle {
         let sandboxId = workspace.boatSandboxId, restoring = workspace.restorePending;
         const deadline = restoring || (!sandboxId && workspace.checkpoint) ? RESTORE_DEADLINE_MS : BOOT_DEADLINE_MS;
         if (now - Date.parse(workspace.updatedAt) > deadline) {
-          await store.transition(workspace.id, ["starting"], "failed", { errorCode: "worker_boot_timeout" });
+          await store.transition(workspace.id, ["starting"], "failed",
+            { errorCode: deadline === RESTORE_DEADLINE_MS ? "checkpoint_restore_failed" : "worker_boot_timeout" });
           return;
         }
         if (!sandboxId) {
@@ -310,10 +323,17 @@ export class CloudV2Lifecycle {
           await this.deps.stopWorker({ ...workspace, boatSandboxId: sandboxId });
           // A replacement without its checkpoint holds nothing of the user's yet.
           if (!workspace.restorePending) await this.checkpoint(workspace, sandboxId);
-          await compute.stop(sandboxId);
+          // A stop that a later one has replaced leaves the VM to that one,
+          // whose checkpoint may still be running on it.
+          if (!await store.stopCurrent(workspace.id, workspace.stopGeneration)) return;
+          try { await compute.stop(sandboxId); }
+          catch (error) {
+            // Nothing is left to stop; the next wake restores the checkpoint.
+            if (!sandboxLost(error) || !workspace.checkpoint) throw error;
+          }
         }
-        await store.revoke(workspace.id, false);
-        await store.transition(workspace.id, ["stopping"], "stopped");
+        // Credentials go only with this stop's own completion.
+        await store.transition(workspace.id, ["stopping"], "stopped", { stopGeneration: workspace.stopGeneration, revoke: true });
         return;
       }
       case "deleting": {
@@ -322,6 +342,13 @@ export class CloudV2Lifecycle {
         if (sandboxId) await compute.delete(sandboxId);
         // Every checkpoint object, including any a crashed upload left behind.
         await this.deps.checkpoints?.storage.prune(workspace.id);
+        // An upload whose outcome is unknown may still land; prune again once it
+        // no longer can. Read live: no upload is admitted once deletion began.
+        const uploadUntil = Date.parse(this.deps.checkpoints ? await store.checkpointUploadHorizon(workspace.id) ?? "" : "");
+        if (this.deps.checkpoints && uploadUntil > now) {
+          await store.defer(workspace.id, "deleting", uploadUntil - now + 1_000);
+          return;
+        }
         await store.revoke(workspace.id, true);
         await store.transition(workspace.id, ["deleting"], "deleted");
         return;
@@ -332,37 +359,43 @@ export class CloudV2Lifecycle {
   }
 
   /** The VM a restore applies the checkpoint to. `lost` starts a restore
-   * (null when the workspace has no VM); undefined continues one, creating the
-   * replacement again under the same key after a lost reply. With `find`, a
-   * stop or deletion only looks for one and never fails the workspace. */
+   * (null when the workspace has no VM); undefined continues one. A restore
+   * records its attempt and exact request first, so a lost reply replays the
+   * same request and finds the same VM, even after a runtime release or once
+   * its build is retiring. Each attempt names its VM uniquely, so once Boat
+   * has forgotten the key the VM is found by name instead of made again. With
+   * `find`, a stop or deletion only looks for it. */
   private async replacement(workspace: CloudV2LifecycleWorkspace, lost: string | null | undefined, options: { find?: boolean } = {}): Promise<string | null> {
     const { store, compute } = this.deps;
-    const checkpoint = workspace.checkpoint;
-    if (!checkpoint) return null;
-    let from: string | null;
+    if (!workspace.checkpoint) return null;
+    let attempt = workspace.restoreAttempt, request = workspace.restoreCreate;
     if (lost !== undefined) {
-      const begun = await store.beginRestore(workspace.id, lost);
+      const next = randomUUID();
+      const begun = await store.beginRestore(workspace.id, lost,
+        { attempt: next, name: `${this.deps.sandboxName(workspace)}-r${next.slice(0, 8)}`, env: this.deps.bootEnv(workspace) });
       if (begun === "no_computer") {
         await store.transition(workspace.id, ["starting"], "failed", { errorCode: "cloud_computer_build_required" });
         return null;
       }
       if (!begun) return null;
-      from = begun.snapshot;
+      ({ attempt, create: request } = begun);
       // Boat may keep a record of the expired VM.
       if (lost) await compute.delete(lost).catch(() => {});
-    } else {
-      from = await store.computerSnapshot(workspace.organizationId, workspace.computerBuildId);
-      if (!from) {
-        if (!options.find) await store.transition(workspace.id, ["starting"], "failed", { errorCode: "cloud_computer_build_required" });
-        return null;
-      }
     }
-    const renewedAt = new Date(this.deps.now?.() ?? Date.now());
-    const create = () => compute.create({ key: `restore:${workspace.id}:${checkpoint.object}`, from: from!,
-      name: this.deps.sandboxName(workspace), env: this.deps.bootEnv(workspace) });
-    const { sandboxId } = workspace.state === "starting" ? await this.measure(workspace, "boat_create", create) : await create();
+    if (!attempt || !request) return null;
+    const { requestedAt, ...body } = request;
+    let sandboxId: string | null;
+    if ((this.deps.now?.() ?? Date.now()) - Date.parse(requestedAt) < CREATE_KEY_MS) {
+      const create = () => compute.create({ key: `restore:${workspace.id}:${attempt}`, ...body });
+      ({ sandboxId } = workspace.state === "starting" ? await this.measure(workspace, "boat_create", create) : await create());
+    } else {
+      sandboxId = await compute.findSandbox(body.name, new Date(Date.parse(requestedAt) - 10 * 60_000));
+      // Nothing was made under this attempt: a wake starts a new one; a stop
+      // or deletion has nothing to clean.
+      if (!sandboxId) return options.find || workspace.state !== "starting" ? null : this.replacement(workspace, null);
+    }
     // A stop or deletion that won the race finds this VM in the row.
-    const state = await store.replaceSandbox(workspace.id, sandboxId, renewedAt);
+    const state = await store.replaceSandbox(workspace.id, attempt, sandboxId, new Date(this.deps.now?.() ?? Date.now()));
     return state && (options.find || state === "starting") ? sandboxId : null;
   }
 
@@ -372,28 +405,44 @@ export class CloudV2Lifecycle {
     const checkpoints = this.deps.checkpoints;
     if (!checkpoints) return;
     // A retried stop already saved this one.
-    if (workspace.checkpoint && Date.parse(workspace.checkpoint.savedAt) >= Date.parse(workspace.updatedAt)) return;
+    if (workspace.checkpoint?.stopGeneration === workspace.stopGeneration) return;
     const object = cloudV2CheckpointObject(workspace.id, randomUUID()), key = randomBytes(32);
+    const uploadUntil = new Date((this.deps.now?.() ?? Date.now()) + UPLOAD_HORIZON_MS);
+    // Whether this upload is known to be over, whatever its outcome.
+    let settled = false;
     try {
-      await this.deps.store.defer(workspace.id, "stopping", CHECKPOINT_LEASE_MS, { failure: true });
+      await this.deps.store.defer(workspace.id, "stopping", CHECKPOINT_LEASE_MS, { failure: true, stopGeneration: workspace.stopGeneration });
+      // Recorded before the URL exists. A stop that no longer owns the VM, for
+      // instance once deletion began, issues no upload at all.
+      if (!await this.deps.store.checkpointUpload(workspace.id, sandboxId, workspace.stopGeneration, object, uploadUntil)) return;
       const command = checkpointCommand({ checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, home: CLOUD_V2_HOME,
         baseBranch: workspace.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(workspace.id, object) });
       const result = await this.measure(workspace, "checkpoint", () => this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS));
       const saved = parseCheckpointResult(result.stdout);
-      if (!saved.ok) throw checkpointError(saved.code);
+      // A failure before the upload step never started one. A failed upload,
+      // a timeout or a lost reply may still land, so its intent stays.
+      if (!saved.ok) { settled = !result.timedOut && saved.step !== "upload" && saved.step !== "unknown"; throw checkpointError(saved.code); }
       if (result.exitCode !== 0 || result.timedOut) throw checkpointError("checkpoint_failed");
+      // curl reported the upload complete, so nothing is in flight.
+      settled = true;
       if (await checkpoints.storage.size(workspace.id, object) !== saved.bytes) throw checkpointError("checkpoint_upload_failed");
-      const recorded = await this.deps.store.saveCheckpoint(workspace.id, sandboxId,
+      // Only this stop records it: a late save from an earlier stop is refused.
+      const recorded = await this.deps.store.saveCheckpoint(workspace.id, sandboxId, workspace.stopGeneration,
         { object, key: checkpoints.seal(key, workspace.id, object), sha256: saved.sha256, bytes: saved.bytes });
-      // Older checkpoints, and anything a crashed upload left, are no longer needed.
-      if (recorded) await checkpoints.storage.prune(workspace.id, object).catch(error => this.deps.logger?.warn(`[cloud-v2] checkpoint prune failed (${errorCode(error)})`));
-      else await checkpoints.storage.delete(workspace.id, object).catch(() => {});
+      // Only the checkpoint this one replaced is retired, never anything newer;
+      // anything a crashed upload left goes with the workspace.
+      if (recorded && recorded.replaced) await checkpoints.storage.delete(workspace.id, recorded.replaced)
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] checkpoint retire failed (${errorCode(error)})`));
+      if (!recorded) await checkpoints.storage.delete(workspace.id, object).catch(() => {});
     } catch (error) {
       const code = (CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(errorCode(error)) ? errorCode(error) : "checkpoint_failed";
       this.deps.logger?.warn(`[cloud-v2] checkpoint failed (${code})`);
-      await this.deps.store.checkpointFailed(workspace.id, sandboxId, code).catch(() => {});
+      await this.deps.store.checkpointFailed(workspace.id, sandboxId, workspace.stopGeneration, code).catch(() => {});
       await checkpoints.storage.delete(workspace.id, object).catch(() => {});
-    } finally { key.fill(0); }
+    } finally {
+      key.fill(0);
+      if (settled) await this.deps.store.checkpointUploadDone(workspace.id, object).catch(() => {});
+    }
   }
 
   /** Applies the last checkpoint before the worker starts. Idempotent, so a

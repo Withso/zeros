@@ -32,9 +32,17 @@ export interface CloudV2Compute {
   saveSnapshot(sandboxId: string, name: string): Promise<void>;
   deleteSnapshot(name: string): Promise<void>;
   hostPort(sandboxId: string, input: { port: number; localhost: true; title: string }): Promise<{ url: string; token: string }>;
+  /** A sandbox with exactly this name created at or after `since`, newest first. */
+  findSandbox(name: string, since: Date): Promise<string | null>;
 }
 
 const Created = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }).passthrough() }).passthrough();
+const Listed = z.object({
+  sandboxes: z.array(z.object({ id: z.string(), name: z.string().nullable().optional(), createdAt: z.string() }).passthrough()),
+  pageInfo: z.object({ nextCursor: z.string().nullable().optional(), hasMore: z.boolean() }).passthrough(),
+}).passthrough();
+/** Pages of 200 newest first; a lookup reads at most this many. */
+const FIND_PAGES = 50;
 const Command = z.object({
   exitCode: z.number().int().nullable().optional(),
   stdout: z.string().optional(),
@@ -164,6 +172,20 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     } catch (error) {
       if (!notFound(error)) throw error;
     }
+  }
+
+  async findSandbox(name: string, since: Date): Promise<string | null> {
+    let cursor: string | null | undefined;
+    for (let page = 0; page < FIND_PAGES; page++) {
+      const listed = Listed.parse(await this.client.request(`/sandboxes?limit=200&sort=desc${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { method: "GET" }));
+      for (const sandbox of listed.sandboxes) {
+        if (Date.parse(sandbox.createdAt) < since.getTime()) return null;
+        if (sandbox.name === name && SANDBOX_ID.test(sandbox.id)) return sandbox.id;
+      }
+      if (!listed.pageInfo.hasMore || !listed.pageInfo.nextCursor) return null;
+      cursor = listed.pageInfo.nextCursor;
+    }
+    throw Object.assign(new Error("sandbox lookup too long"), { code: "provider_request_failed" });
   }
 
   private id(sandboxId: string): string {

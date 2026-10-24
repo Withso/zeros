@@ -18,17 +18,33 @@ ALTER TABLE cloud_v2_workspaces
   ADD COLUMN checkpoint_sha256 text CHECK (checkpoint_sha256 IS NULL OR checkpoint_sha256 ~ '^[0-9a-f]{64}$'),
   ADD COLUMN checkpoint_bytes bigint CHECK (checkpoint_bytes IS NULL OR checkpoint_bytes > 0),
   ADD COLUMN checkpoint_saved_at timestamptz,
+  -- Counts entries into stopping. A checkpoint is recorded only by the stop
+  -- that took it, so a late save from an earlier stop can never replace a
+  -- newer one; the saved checkpoint remembers which stop took it.
+  ADD COLUMN stop_generation bigint NOT NULL DEFAULT 0 CHECK (stop_generation >= 0),
+  ADD COLUMN checkpoint_stop_generation bigint,
   -- Why the latest stop could not save a checkpoint; the previous one is kept.
   ADD COLUMN checkpoint_error text CHECK (checkpoint_error IS NULL OR checkpoint_error ~ '^[a-z0-9_]{1,64}$'),
+  -- Uploads that may still land, by object, with the time each no longer can.
+  -- An entry is removed once its upload is known to be over; deletion prunes
+  -- again after the latest remaining one.
+  ADD COLUMN checkpoint_uploads jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(checkpoint_uploads) = 'object'),
   -- boat_sandbox_id names a replacement VM that has not had the checkpoint
   -- applied yet. Wake retries the apply; deletion removes the replacement.
   ADD COLUMN restore_pending boolean NOT NULL DEFAULT false,
+  -- Each restore's own identity and its exact replacement request, recorded
+  -- before Boat is called: a lost reply replays the same request and finds the
+  -- same VM, whatever has changed since, and a later restore never finds an
+  -- earlier one.
+  ADD COLUMN restore_attempt uuid,
+  ADD COLUMN restore_create jsonb CHECK (restore_create IS NULL OR jsonb_typeof(restore_create) = 'object'),
   ADD CONSTRAINT cloud_v2_checkpoint_complete CHECK (
     (checkpoint_object IS NULL) = (checkpoint_key IS NULL) AND
     (checkpoint_object IS NULL) = (checkpoint_sha256 IS NULL) AND
     (checkpoint_object IS NULL) = (checkpoint_bytes IS NULL) AND
     (checkpoint_object IS NULL) = (checkpoint_saved_at IS NULL)),
-  ADD CONSTRAINT cloud_v2_restore_requires_checkpoint CHECK (NOT restore_pending OR checkpoint_object IS NOT NULL);
+  ADD CONSTRAINT cloud_v2_restore_requires_checkpoint CHECK (NOT restore_pending OR
+    (checkpoint_object IS NOT NULL AND restore_attempt IS NOT NULL AND restore_create IS NOT NULL));
 
 UPDATE cloud_v2_workspaces SET stopped_at = updated_at WHERE state = 'stopped';
 

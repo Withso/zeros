@@ -13,15 +13,22 @@ function workspace(state: CloudV2Workspace["state"], extra: Partial<CloudV2Lifec
   return {
     id: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", organizationId: "org", creatorUserId: "u", name: "w", repository: "o/r",
     branch: "zeros/w", baseBranch: "main", state, boatSandboxId: null, computerBuildId: null, errorCode: null, activeAt: null, archivedAt: null,
-    leaseRenewedAt: null, baseCommit: null, checkpoint: null, restorePending: false,
+    leaseRenewedAt: null, baseCommit: null, checkpoint: null, restorePending: false, restoreAttempt: null, restoreCreate: null, checkpointUploadUntil: null, stopGeneration: "2",
     createdAt: new Date(NOW - 60_000).toISOString(), updatedAt: new Date(NOW).toISOString(), attempts: 1, ...extra,
   };
 }
 
 const WS = "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11";
 const SAVED = { object: `cloud-v2/checkpoints/${WS}/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.zck`, key: { sealed: "previous" },
-  sha256: "d".repeat(64), bytes: 4096, savedAt: new Date(NOW - 86_400_000).toISOString() };
+  sha256: "d".repeat(64), bytes: 4096, savedAt: new Date(NOW - 86_400_000).toISOString(), stopGeneration: "1" };
 const SAVED_LINE = `zeros-checkpoint-saved bytes=1234 sha256=${"e".repeat(64)}`;
+const PENDING = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+// A pending restore's recorded request: an older runtime and the build it pinned.
+const RECORDED = { from: "cv2-alpha-org-pinned", name: "zeros-alpha-6f2b7c1e-r1a2b3c4d", env: { CLOUD_V2_RUNTIME_SHA256: "0".repeat(64), ZEROS_WORKSPACE_ID: "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11" },
+  requestedAt: new Date(NOW - 60_000).toISOString() };
+const { requestedAt: _requestedAt, ...REPLAYED } = RECORDED;
+/** The attempt the lifecycle generated for its newest restore. */
+const begunAttempt = (f: { store: CloudV2LifecycleDeps["store"] }) => vi.mocked(f.store.beginRestore).mock.calls.at(-1)![2].attempt;
 
 function checkpointsFake() {
   return {
@@ -44,9 +51,10 @@ function vmCommands(f: { compute: CloudV2Compute }, overrides: { checkpoint?: st
 const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(f.compute.exec).mock.calls.find(([, command]) => command.includes(marker));
 
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
-  checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"] } = {}) {
+  checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string } = {}) {
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
+    findSandbox: vi.fn(async (): Promise<string | null> => null),
     resume: vi.fn(async () => {}),
     extendLease: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
@@ -73,7 +81,12 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     setBaseCommit: vi.fn(async () => {}),
     saveCheckpoint: vi.fn(async (): Promise<{ replaced: string | null } | false> => ({ replaced: SAVED.object })),
     checkpointFailed: vi.fn(async () => {}),
-    beginRestore: vi.fn(async (): Promise<{ snapshot: string } | "no_computer" | null> => ({ snapshot: "cv2-alpha-org-2" })),
+    beginRestore: vi.fn(async (_id: string, _lost: string | null, request: { attempt: string; name: string; env: Record<string, string> }): Promise<{ attempt: string; create: { from: string; name: string; env: Record<string, string>; requestedAt: string } } | "no_computer" | null> =>
+      ({ attempt: request.attempt, create: { from: "cv2-alpha-org-2", name: request.name, env: request.env, requestedAt: new Date(NOW).toISOString() } })),
+    checkpointUpload: vi.fn(async () => true),
+    checkpointUploadHorizon: vi.fn(async (): Promise<string | null> => options.uploadHorizon ?? null),
+    stopCurrent: vi.fn(async () => true),
+    checkpointUploadDone: vi.fn(async () => {}),
     replaceSandbox: vi.fn(async (): Promise<CloudV2Workspace["state"] | null> => "starting"),
     finishRestore: vi.fn(async () => true),
   };
@@ -113,27 +126,32 @@ describe("cloud v2 lifecycle", () => {
     expect(command).not.toContain(Buffer.alloc(32, 7).toString("base64"));
     expect(timeout).toBe(540);
     const saved = vi.mocked(f.store.saveCheckpoint).mock.calls[0]!;
-    expect(saved[0]).toBe(stopping.id); expect(saved[1]).toBe("bx_abc1");
-    expect(saved[2]).toEqual({ object: expect.stringMatching(new RegExp(`^cloud-v2/checkpoints/${WS}/[0-9a-f-]{36}\\.zck$`)), key: { sealed: "new" }, sha256: "e".repeat(64), bytes: 1234 });
-    expect(saved[2].object).not.toBe(SAVED.object);
-    expect(checkpoints.seal).toHaveBeenCalledWith(expect.any(Buffer), stopping.id, saved[2].object);
-    expect(checkpoints.storage.uploadUrl).toHaveBeenCalledWith(stopping.id, saved[2].object);
-    expect(checkpoints.storage.prune).toHaveBeenCalledWith(stopping.id, saved[2].object);
+    expect(saved[0]).toBe(stopping.id); expect(saved[1]).toBe("bx_abc1"); expect(saved[2]).toBe("2");
+    expect(saved[3]).toEqual({ object: expect.stringMatching(new RegExp(`^cloud-v2/checkpoints/${WS}/[0-9a-f-]{36}\\.zck$`)), key: { sealed: "new" }, sha256: "e".repeat(64), bytes: 1234 });
+    expect(saved[3].object).not.toBe(SAVED.object);
+    expect(checkpoints.seal).toHaveBeenCalledWith(expect.any(Buffer), stopping.id, saved[3].object);
+    expect(checkpoints.storage.uploadUrl).toHaveBeenCalledWith(stopping.id, saved[3].object);
+    expect(checkpoints.storage.delete).toHaveBeenCalledExactlyOnceWith(stopping.id, SAVED.object);
+    expect(checkpoints.storage.prune).not.toHaveBeenCalled();
+    expect(f.store.checkpointUpload).toHaveBeenCalledWith(stopping.id, "bx_abc1", "2", saved[3].object, new Date(NOW + 25 * 60_000));
+    expect(f.store.checkpointUpload).toHaveBeenCalledBefore(checkpoints.storage.uploadUrl);
+    expect(f.store.checkpointUploadDone).toHaveBeenCalledWith(stopping.id, saved[3].object);
     // The claim is held for the whole command; the worker stopped first; Boat stops last.
-    expect(f.store.defer).toHaveBeenCalledWith(stopping.id, "stopping", 660_000, { failure: true });
+    expect(f.store.defer).toHaveBeenCalledWith(stopping.id, "stopping", 660_000, { failure: true, stopGeneration: "2" });
     expect(f.stopWorker).toHaveBeenCalledBefore(vi.mocked(f.compute.exec));
     expect(f.store.saveCheckpoint).toHaveBeenCalledBefore(vi.mocked(f.compute.stop));
     expect(f.compute.stop).toHaveBeenCalledWith("bx_abc1");
-    expect(f.store.transition).toHaveBeenCalledWith(stopping.id, ["stopping"], "stopped");
+    expect(f.store.transition).toHaveBeenCalledWith(stopping.id, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
     expect(records).toContain("checkpoint");
   });
 
   it.each([
-    ["the VM reports a failure", { checkpoint: "zeros-checkpoint-error checkpoint_too_large pack" }, 1234, "checkpoint_too_large"],
-    ["the upload is missing", {}, null, "checkpoint_upload_failed"],
-    ["the upload has another size", {}, 99, "checkpoint_upload_failed"],
-    ["the command prints nothing", { checkpoint: "" }, 1234, "checkpoint_failed"],
-  ] as const)("still stops, keeps the previous checkpoint and records why when %s", async (_case, vm, size, code) => {
+    ["the VM reports a failure before uploading", { checkpoint: "zeros-checkpoint-error checkpoint_too_large pack" }, 1234, "checkpoint_too_large", true],
+    ["the upload itself fails", { checkpoint: "zeros-checkpoint-error checkpoint_upload_failed upload" }, 1234, "checkpoint_upload_failed", false],
+    ["the upload is missing", {}, null, "checkpoint_upload_failed", true],
+    ["the upload has another size", {}, 99, "checkpoint_upload_failed", true],
+    ["the command prints nothing", { checkpoint: "" }, 1234, "checkpoint_failed", false],
+  ] as const)("still stops, keeps the previous checkpoint and records why when %s", async (_case, vm, size, code, settled) => {
     const checkpoints = checkpointsFake(), logs: string[] = [];
     checkpoints.storage.size.mockResolvedValue(size);
     const stopping = workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED });
@@ -142,12 +160,51 @@ describe("cloud v2 lifecycle", () => {
     vmCommands(f, vm);
     await f.lifecycle.tick();
     expect(f.store.saveCheckpoint).not.toHaveBeenCalled();
-    expect(f.store.checkpointFailed).toHaveBeenCalledWith(stopping.id, "bx_abc1", code);
-    expect(checkpoints.storage.delete).toHaveBeenCalledWith(stopping.id, expect.stringMatching(/^cloud-v2\/checkpoints\//));
+    expect(f.store.checkpointFailed).toHaveBeenCalledWith(stopping.id, "bx_abc1", "2", code);
+    expect(checkpoints.storage.delete).toHaveBeenCalledExactlyOnceWith(stopping.id, expect.stringMatching(/^cloud-v2\/checkpoints\//));
+    expect(checkpoints.storage.delete).not.toHaveBeenCalledWith(stopping.id, SAVED.object);
     expect(checkpoints.storage.prune).not.toHaveBeenCalled();
+    // Only an upload known to be over gives up its deletion horizon.
+    expect(f.store.checkpointUploadDone).toHaveBeenCalledTimes(settled ? 1 : 0);
     expect(f.compute.stop).toHaveBeenCalledWith("bx_abc1");
-    expect(f.store.transition).toHaveBeenCalledWith(stopping.id, ["stopping"], "stopped");
+    expect(f.store.transition).toHaveBeenCalledWith(stopping.id, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
     expect(logs).toEqual([`[cloud-v2] checkpoint failed (${code})`]);
+  });
+
+  it("keeps the upload intent when the command's reply is lost, so deletion can wait for it", async () => {
+    const checkpoints = checkpointsFake();
+    const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })], { checkpoints });
+    vi.mocked(f.compute.exec).mockImplementation(async (_id, command) => {
+      if (command.includes("zeros-checkpoint-saved")) throw Object.assign(new Error("reply lost"), { code: "provider_request_failed" });
+      return { exitCode: 0, stdout: "", timedOut: false };
+    });
+    await f.lifecycle.tick();
+    expect(f.store.checkpointUpload).toHaveBeenCalledTimes(1);
+    expect(f.store.checkpointUploadDone).not.toHaveBeenCalled();
+    expect(f.store.checkpointFailed).toHaveBeenCalledWith(WS, "bx_abc1", "2", "checkpoint_failed");
+    // A stop that no longer owns the VM, for instance once deletion began, uploads nothing.
+    const fenced = setup([workspace("stopping", { boatSandboxId: "bx_abc1" })], { checkpoints: checkpointsFake() });
+    vi.mocked(fenced.store.checkpointUpload).mockResolvedValueOnce(false);
+    vmCommands(fenced);
+    await fenced.lifecycle.tick();
+    expect(vmCommand(fenced, "zeros-checkpoint-saved")).toBeUndefined();
+    expect(fenced.compute.stop).toHaveBeenCalledWith("bx_abc1");
+    expect(f.compute.stop).toHaveBeenCalledWith("bx_abc1");
+    const timedOut = setup([workspace("stopping", { boatSandboxId: "bx_abc1" })], { checkpoints: checkpointsFake() });
+    vi.mocked(timedOut.compute.exec).mockImplementation(async () => ({ exitCode: -1, stdout: "", timedOut: true }));
+    await timedOut.lifecycle.tick();
+    expect(timedOut.store.checkpointUploadDone).not.toHaveBeenCalled();
+  });
+
+  it("leaves the VM to a later stop once this one has been replaced", async () => {
+    const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1" })], { checkpoints: checkpointsFake() });
+    vmCommands(f);
+    vi.mocked(f.store.stopCurrent).mockResolvedValueOnce(false);
+    await f.lifecycle.tick();
+    expect(f.store.stopCurrent).toHaveBeenCalledWith(WS, "2");
+    expect(f.compute.stop).not.toHaveBeenCalled();
+    expect(f.store.transition).not.toHaveBeenCalled();
+    expect(f.store.revoke).not.toHaveBeenCalled();
   });
 
   it("removes only its own upload when another stop or deletion fenced it out, and saves once per stop", async () => {
@@ -155,12 +212,13 @@ describe("cloud v2 lifecycle", () => {
     const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1" })], { checkpoints });
     vmCommands(f); vi.mocked(f.store.saveCheckpoint).mockResolvedValueOnce(false);
     await f.lifecycle.tick();
-    const object = vi.mocked(f.store.saveCheckpoint).mock.calls[0]![2].object;
+    const object = vi.mocked(f.store.saveCheckpoint).mock.calls[0]![3].object;
     expect(checkpoints.storage.delete).toHaveBeenCalledExactlyOnceWith(WS, object);
     expect(checkpoints.storage.prune).not.toHaveBeenCalled();
-    // A stop retried after its checkpoint was saved does not save it again.
-    const retried = setup([workspace("stopping", { boatSandboxId: "bx_abc1", updatedAt: new Date(NOW - 60_000).toISOString(),
-      checkpoint: { ...SAVED, savedAt: new Date(NOW - 30_000).toISOString() } })], { checkpoints: checkpointsFake() });
+    // A stop retried after its checkpoint was saved does not save it again,
+    // even if an archive changed the document's time since.
+    const retried = setup([workspace("stopping", { boatSandboxId: "bx_abc1", updatedAt: new Date(NOW).toISOString(),
+      checkpoint: { ...SAVED, savedAt: new Date(NOW - 30_000).toISOString(), stopGeneration: "2" } })], { checkpoints: checkpointsFake() });
     vmCommands(retried);
     await retried.lifecycle.tick();
     expect(vmCommand(retried, "zeros-checkpoint-saved")).toBeUndefined();
@@ -176,11 +234,16 @@ describe("cloud v2 lifecycle", () => {
     vmCommands(f);
     vi.mocked(f.compute.resume).mockRejectedValueOnce(kind === "expired" ? new BoatSnapshotExpiredError() : new CloudProviderError("provider_not_found", "gone", false, { httpStatus: 404 }));
     await f.lifecycle.tick();
-    expect(f.store.beginRestore).toHaveBeenCalledWith(waking.id, "bx_expired");
-    expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ key: `restore:${waking.id}:${SAVED.object}`, from: "cv2-alpha-org-2" }));
+    const attempt = begunAttempt(f);
+    expect(attempt).toMatch(/^[0-9a-f-]{36}$/);
+    // Each attempt names its VM uniquely, so it can be found even after Boat forgets the key.
+    expect(f.store.beginRestore).toHaveBeenCalledWith(waking.id, "bx_expired",
+      { attempt, name: `zeros-alpha-6f2b7c1e-r${attempt.slice(0, 8)}`, env: { CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: waking.id } });
+    expect(f.compute.create).toHaveBeenCalledWith({ key: `restore:${waking.id}:${attempt}`, from: "cv2-alpha-org-2",
+      name: `zeros-alpha-6f2b7c1e-r${attempt.slice(0, 8)}`, env: { CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: waking.id } });
     expect(f.store.beginRestore).toHaveBeenCalledBefore(vi.mocked(f.compute.create));
     expect(f.compute.delete).toHaveBeenCalledWith("bx_expired");
-    expect(f.store.replaceSandbox).toHaveBeenCalledWith(waking.id, "bx_new1", new Date(NOW));
+    expect(f.store.replaceSandbox).toHaveBeenCalledWith(waking.id, attempt, "bx_new1", new Date(NOW));
     const [, restore] = vmCommand(f, "zeros-checkpoint-restored")!;
     expect(restore).toContain("/home/user/o/r");
     expect(restore).toContain("https://github.com/o/r.git");
@@ -199,15 +262,16 @@ describe("cloud v2 lifecycle", () => {
   });
 
   it("continues a pending restore under the same key, and retries a failed apply without losing the checkpoint", async () => {
-    const lostReply = setup([workspace("starting", { restorePending: true, computerBuildId: "build-2", checkpoint: SAVED })], { checkpoints: checkpointsFake() });
+    const lostReply = setup([workspace("starting", { restorePending: true, restoreAttempt: PENDING, restoreCreate: RECORDED, computerBuildId: "build-2", checkpoint: SAVED })], { checkpoints: checkpointsFake() });
     vmCommands(lostReply);
     await lostReply.lifecycle.tick();
     expect(lostReply.store.beginRestore).not.toHaveBeenCalled();
-    expect(lostReply.store.computerSnapshot).toHaveBeenCalledWith("org", "build-2");
-    expect(lostReply.compute.create).toHaveBeenCalledWith(expect.objectContaining({ key: `restore:${WS}:${SAVED.object}` }));
+    // The recorded request is replayed byte for byte, even after a runtime release.
+    expect(lostReply.store.computerSnapshot).not.toHaveBeenCalled();
+    expect(lostReply.compute.create).toHaveBeenCalledWith({ key: `restore:${WS}:${PENDING}`, ...REPLAYED });
     expect(lostReply.store.finishRestore).toHaveBeenCalledWith(WS, "bx_new1");
 
-    const failed = setup([workspace("starting", { boatSandboxId: "bx_new1", restorePending: true, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
+    const failed = setup([workspace("starting", { boatSandboxId: "bx_new1", restorePending: true, restoreAttempt: PENDING, restoreCreate: RECORDED, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
     vmCommands(failed, { restore: "zeros-checkpoint-error checkpoint_corrupt download" });
     await failed.lifecycle.tick();
     expect(failed.compute.resume).toHaveBeenCalledWith("bx_new1");
@@ -219,7 +283,7 @@ describe("cloud v2 lifecycle", () => {
     const fresh = setup([workspace("starting", { checkpoint: SAVED })], { checkpoints: checkpointsFake() });
     vmCommands(fresh);
     await fresh.lifecycle.tick();
-    expect(fresh.store.beginRestore).toHaveBeenCalledWith(WS, null);
+    expect(fresh.store.beginRestore).toHaveBeenCalledWith(WS, null, expect.anything());
     expect(fresh.store.finishRestore).toHaveBeenCalledWith(WS, "bx_new1");
 
     const noComputer = setup([workspace("starting", { boatSandboxId: "bx_expired", checkpoint: SAVED })], { checkpoints: checkpointsFake() });
@@ -230,22 +294,103 @@ describe("cloud v2 lifecycle", () => {
     expect(noComputer.store.transition).toHaveBeenCalledWith(WS, ["starting"], "failed", { errorCode: "cloud_computer_build_required" });
   });
 
+  it("starts a new restore attempt when the replacement itself is lost, never reusing its key", async () => {
+    const { BoatSnapshotExpiredError } = await import("./boat-client.js");
+    const f = setup([workspace("starting", { boatSandboxId: "bx_new1", restorePending: true, restoreAttempt: PENDING, restoreCreate: RECORDED, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
+    vmCommands(f);
+    vi.mocked(f.compute.resume).mockRejectedValueOnce(new BoatSnapshotExpiredError());
+    vi.mocked(f.compute.create).mockResolvedValueOnce({ sandboxId: "bx_new2" });
+    await f.lifecycle.tick();
+    expect(f.store.beginRestore).toHaveBeenCalledWith(WS, "bx_new1", expect.anything());
+    expect(f.compute.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ key: `restore:${WS}:${begunAttempt(f)}` }));
+    expect(begunAttempt(f)).not.toBe(PENDING);
+    expect(f.store.finishRestore).toHaveBeenCalledWith(WS, "bx_new2");
+  });
+
   it("never checkpoints a replacement that has not received the checkpoint, and finds one whose create reply was lost", async () => {
     for (const state of ["stopping", "deleting"] as const) {
       const checkpoints = checkpointsFake();
-      const f = setup([workspace(state, { restorePending: true, computerBuildId: "build-2", checkpoint: SAVED })], { checkpoints });
+      const f = setup([workspace(state, { restorePending: true, restoreAttempt: PENDING, restoreCreate: RECORDED, computerBuildId: "build-2", checkpoint: SAVED })], { checkpoints });
       vi.mocked(f.store.replaceSandbox).mockResolvedValueOnce(state);
       vmCommands(f);
       await f.lifecycle.tick();
-      expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ key: `restore:${WS}:${SAVED.object}` }));
+      // No lookup of the build, which organization deletion may already be retiring.
+      expect(f.store.computerSnapshot).not.toHaveBeenCalled();
+      expect(f.compute.create).toHaveBeenCalledWith({ key: `restore:${WS}:${PENDING}`, ...REPLAYED });
       expect(vmCommand(f, "zeros-checkpoint-saved")).toBeUndefined();
       if (state === "stopping") expect(f.compute.stop).toHaveBeenCalledWith("bx_new1");
       else {
         expect(f.compute.delete).toHaveBeenCalledWith("bx_new1");
         expect(checkpoints.storage.prune).toHaveBeenCalledWith(WS);
       }
-      expect(f.store.transition).toHaveBeenCalledWith(WS, [state], state === "stopping" ? "stopped" : "deleted");
+      expect(f.store.transition).toHaveBeenCalledWith(WS, [state], ...(state === "stopping" ? ["stopped", { stopGeneration: "2", revoke: true }] : ["deleted"]));
     }
+  });
+
+  it("finds a replacement by its unique name once Boat has forgotten the create key, never making another", async () => {
+    const old = { ...RECORDED, requestedAt: new Date(NOW - 25 * 60 * 60_000).toISOString() };
+    for (const state of ["stopping", "deleting"] as const) {
+      const found = setup([workspace(state, { restorePending: true, restoreAttempt: PENDING, restoreCreate: old, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
+      vi.mocked(found.compute.findSandbox).mockResolvedValueOnce("bx_old1");
+      vi.mocked(found.store.replaceSandbox).mockResolvedValueOnce(state);
+      await found.lifecycle.tick();
+      expect(found.compute.findSandbox).toHaveBeenCalledWith(RECORDED.name, new Date(Date.parse(old.requestedAt) - 10 * 60_000));
+      expect(found.compute.create).not.toHaveBeenCalled();
+      expect(found.store.replaceSandbox).toHaveBeenCalledWith(WS, PENDING, "bx_old1", new Date(NOW));
+      if (state === "stopping") expect(found.compute.stop).toHaveBeenCalledWith("bx_old1");
+      else expect(found.compute.delete).toHaveBeenCalledWith("bx_old1");
+      const none = setup([workspace(state, { restorePending: true, restoreAttempt: PENDING, restoreCreate: old, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
+      await none.lifecycle.tick();
+      expect(none.compute.create).not.toHaveBeenCalled();
+      expect(none.store.transition).toHaveBeenCalledWith(WS, [state], ...(state === "stopping" ? ["stopped", { stopGeneration: "2", revoke: true }] : ["deleted"]));
+    }
+    // A wake whose attempt made nothing starts a new attempt instead.
+    const wake = setup([workspace("starting", { restorePending: true, restoreAttempt: PENDING, restoreCreate: old, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
+    vmCommands(wake);
+    await wake.lifecycle.tick();
+    expect(wake.store.beginRestore).toHaveBeenCalledWith(WS, null, expect.anything());
+    expect(wake.compute.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ key: `restore:${WS}:${begunAttempt(wake)}` }));
+    expect(wake.store.finishRestore).toHaveBeenCalledWith(WS, "bx_new1");
+  });
+
+  it("waits for an upload whose reply was lost before finishing a deletion, then prunes again", async () => {
+    const checkpoints = checkpointsFake();
+    // The claimed row predates the intent: deletion reads it live.
+    const pending = workspace("deleting", { boatSandboxId: "bx_abc1", checkpoint: SAVED });
+    const f = setup([pending], { checkpoints, uploadHorizon: new Date(NOW + 60_000).toISOString() });
+    await f.lifecycle.tick();
+    expect(f.compute.delete).toHaveBeenCalledWith("bx_abc1");
+    expect(checkpoints.storage.prune).toHaveBeenCalledTimes(1);
+    expect(f.store.defer).toHaveBeenLastCalledWith(WS, "deleting", 61_000);
+    expect(f.store.transition).not.toHaveBeenCalled();
+    expect(f.store.revoke).not.toHaveBeenCalled();
+    const later = setup([pending], { checkpoints, uploadHorizon: new Date(NOW - 1).toISOString() });
+    await later.lifecycle.tick();
+    expect(checkpoints.storage.prune).toHaveBeenCalledTimes(2);
+    expect(later.store.transition).toHaveBeenCalledWith(WS, ["deleting"], "deleted");
+  });
+
+  it("keeps a workspace whose VM is gone restorable: a stop finishes, and a restore that gives up can be retried", async () => {
+    const { CloudProviderError } = await import("./provider-error.js");
+    const gone = () => new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 });
+    const stop = setup([workspace("stopping", { boatSandboxId: "bx_gone1", checkpoint: SAVED })], { checkpoints: checkpointsFake() });
+    vi.mocked(stop.compute.stop).mockRejectedValueOnce(gone());
+    await stop.lifecycle.tick();
+    expect(stop.store.transition).toHaveBeenCalledWith(WS, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
+    // Mid-restore, losing the replacement is retried rather than failed at once.
+    const applying = setup([workspace("starting", { boatSandboxId: "bx_new1", restorePending: true, restoreAttempt: PENDING, restoreCreate: RECORDED, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
+    vi.mocked(applying.compute.exec).mockRejectedValue(gone());
+    await applying.lifecycle.tick();
+    expect(applying.store.transition).not.toHaveBeenCalled();
+    expect(applying.store.defer).toHaveBeenLastCalledWith(WS, "starting", 10_000, { failure: true });
+    const exhausted = setup([workspace("starting", { boatSandboxId: "bx_new1", restorePending: true, restoreAttempt: PENDING, restoreCreate: RECORDED, checkpoint: SAVED, attempts: 8 })], { checkpoints: checkpointsFake() });
+    vi.mocked(exhausted.compute.resume).mockRejectedValue(Object.assign(new Error("busy"), { code: "provider_request_failed" }));
+    await exhausted.lifecycle.tick();
+    expect(exhausted.store.transition).toHaveBeenCalledWith(WS, ["starting"], "failed", { errorCode: "checkpoint_restore_failed" });
+    const slow = setup([workspace("starting", { boatSandboxId: "bx_new1", restorePending: true, restoreAttempt: PENDING, restoreCreate: RECORDED, checkpoint: SAVED,
+      updatedAt: new Date(NOW - 26 * 60_000).toISOString() })], { checkpoints: checkpointsFake() });
+    await slow.lifecycle.tick();
+    expect(slow.store.transition).toHaveBeenCalledWith(WS, ["starting"], "failed", { errorCode: "checkpoint_restore_failed" });
   });
 
   it("deletes every checkpoint object with the workspace and retries when storage fails", async () => {
@@ -507,11 +652,11 @@ describe("cloud v2 lifecycle", () => {
     const failing = setup([workspace("stopping", { boatSandboxId: "bx_abc1", attempts: 2 })]);
     vi.mocked(failing.compute.stop).mockRejectedValueOnce(Object.assign(new Error("boom"), { code: "provider_request_failed" }));
     await failing.lifecycle.tick();
-    expect(failing.store.defer).toHaveBeenCalledWith(expect.any(String), "stopping", 20_000, { failure: true });
+    expect(failing.store.defer).toHaveBeenCalledWith(expect.any(String), "stopping", 20_000, { failure: true, stopGeneration: "2" });
     const last = setup([workspace("stopping", { boatSandboxId: "bx_abc1", attempts: 8 })]);
     vi.mocked(last.compute.stop).mockRejectedValueOnce(Object.assign(new Error("boom"), { code: "provider_budget_exhausted" }));
     await last.lifecycle.tick();
-    expect(last.store.transition).toHaveBeenCalledWith(expect.any(String), ["stopping"], "failed", { errorCode: "provider_budget_exhausted" });
+    expect(last.store.transition).toHaveBeenCalledWith(expect.any(String), ["stopping"], "failed", { errorCode: "provider_budget_exhausted", stopGeneration: "2" });
   });
 
   it("stops idle workspaces, revokes tokens on stop and drops history on delete", async () => {
@@ -524,7 +669,9 @@ describe("cloud v2 lifecycle", () => {
     expect(vi.mocked(store.idleSince).mock.calls[0]![0].getTime()).toBe(NOW - CLOUD_V2_IDLE_STOP_MS);
     expect(store.transition).toHaveBeenCalledWith(idle.id, ["running"], "stopping");
     expect(compute.stop).toHaveBeenCalledWith("bx_abc1");
-    expect(store.revoke).toHaveBeenCalledWith(idle.id, false);
+    // The stop's own completion drops the worker's credentials, in one transaction.
+    expect(store.transition).toHaveBeenCalledWith(idle.id, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
+    expect(store.revoke).not.toHaveBeenCalledWith(idle.id, false);
     expect(compute.delete).toHaveBeenCalledWith("bx_def1");
     expect(store.revoke).toHaveBeenCalledWith("7f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", true);
   });
@@ -574,8 +721,9 @@ describe("cloud v2 lifecycle", () => {
       const f = setup([workspace(state, { boatSandboxId: "bx_gone1", updatedAt: new Date(NOW - 5_000).toISOString() })]);
       vi.mocked(f.compute[call]).mockRejectedValueOnce(error);
       await f.lifecycle.tick();
-      expect(f.store.transition).toHaveBeenCalledWith(expect.any(String), [state], "failed", { errorCode: "sandbox_missing" });
-      expect(f.store.revoke).toHaveBeenCalledWith(expect.any(String), false);
+      expect(f.store.transition).toHaveBeenCalledWith(expect.any(String), [state], "failed",
+        { errorCode: "sandbox_missing", revoke: true, ...(state === "stopping" ? { stopGeneration: "2" } : {}) });
+      expect(f.store.revoke).not.toHaveBeenCalled();
       expect(f.store.defer).not.toHaveBeenCalled();
     }
     // Any other refusal keeps the bounded retry.
@@ -583,7 +731,12 @@ describe("cloud v2 lifecycle", () => {
     vi.mocked(busy.compute.stop).mockRejectedValueOnce(new CloudProviderError("provider_request_failed", "Boat API request did not succeed", false, { httpStatus: 409 }));
     await busy.lifecycle.tick();
     expect(busy.store.transition).not.toHaveBeenCalled();
-    expect(busy.store.defer).toHaveBeenCalledWith(expect.any(String), "stopping", 10_000, { failure: true });
+    expect(busy.store.defer).toHaveBeenCalledWith(expect.any(String), "stopping", 10_000, { failure: true, stopGeneration: "2" });
+    // A stop that gives up fails only its own generation, never a newer stop.
+    const last = setup([workspace("stopping", { boatSandboxId: "bx_abc1", attempts: 8 })]);
+    vi.mocked(last.compute.stop).mockRejectedValueOnce(new CloudProviderError("provider_request_failed", "Boat API request did not succeed", false, { httpStatus: 409 }));
+    await last.lifecycle.tick();
+    expect(last.store.transition).toHaveBeenCalledWith(expect.any(String), ["stopping"], "failed", { errorCode: "provider_request_failed", stopGeneration: "2" });
   });
 
   it("writes the token through base64 without ever putting it in shell syntax", () => {

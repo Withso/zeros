@@ -127,6 +127,20 @@ function https(value: string): string {
   return url.href;
 }
 
+/** Prints the checkout's own Git directories that live inside it, relative to
+ * it: the resolved Git and common directories, and the `.git` file's target,
+ * which may be a link inside the checkout. Runs in the checkout. */
+const OWN_GIT_DIRS = [
+  "own_git_dirs() {",
+  "  local here dir link; here=$(pwd -P)",
+  "  { for dir in \"$(git rev-parse --absolute-git-dir)\" \"$(git rev-parse --git-common-dir)\"; do (cd \"$dir\" && pwd -P); done",
+  "    if [ -f .git ]; then link=$(sed -n 's/^gitdir: //p' .git | head -n 1)",
+  "      if [ -n \"$link\" ]; then case \"$link\" in /*) ;; *) link=\"$here/$link\" ;; esac; printf '%s/%s\\n' \"$(cd \"$(dirname \"$link\")\" && pwd -P)\" \"$(basename \"$link\")\"; fi",
+  "    fi",
+  "  } | while IFS= read -r dir; do case \"$dir/\" in \"$here/\"*) printf '%s\\n' \"${dir#\"$here/\"}\" ;; esac; done | sort -u",
+  "}",
+];
+
 /** Shared prologue: results go to the original stdout as one line; every
  * other output is discarded, so file names and contents never reach the
  * control plane. A failure names only its step. */
@@ -145,6 +159,8 @@ function prologue(kind: "checkpoint" | "restore", lines: string[]): string[] {
     "}",
     "exec 3>&1 >/dev/null 2>&1",
     "trap finish EXIT",
+    // A killed command still cleans up: bash runs no EXIT trap on an untrapped signal.
+    "trap 'exit 143' TERM INT HUP",
     "export GIT_TERMINAL_PROMPT=0 GIT_AUTHOR_NAME=Zeros GIT_AUTHOR_EMAIL=checkpoint@zeros.invalid GIT_COMMITTER_NAME=Zeros GIT_COMMITTER_EMAIL=checkpoint@zeros.invalid",
     "command -v node || { step=node; fail checkpoint_failed; }",
     "mkdir -p \"$home/.cache\"",
@@ -176,16 +192,43 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     // changed files are hashed again: tracked and untracked, never ignored.
     "  step=worktree",
     "  scratch() { GIT_INDEX_FILE=\"$work/index\" git \"$@\"; }",
-    "  index=$(git rev-parse --git-path index)",
-    "  if ! { [ -f \"$index\" ] && cp \"$index\" \"$work/index\" && scratch add -A -- .; }; then",
-    "    rm -f \"$work/index\"",
-    "    if [ -n \"$head\" ]; then scratch read-tree \"$head\"; else scratch read-tree --empty; fi",
-    "    scratch add -A -- .",
+    // Edits Git was told to ignore are still the user's work. A skip-worktree
+    // file missing from disk is sparse, not deleted, so it keeps its mark.
+    "  unhide() {",
+    "    { scratch ls-files -z -v | grep -z '^[a-z] ' || true; } | cut -z -c3- | scratch update-index -z --no-assume-unchanged --stdin",
+    "    while IFS= read -r -d '' path; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then printf '%s\\0' \"$path\"; fi; done \\",
+    "      < <(scratch ls-files -z -t | grep -z '^S ' | cut -z -c3- || true) | scratch update-index -z --no-skip-worktree --stdin",
+    "  }",
+    // Git lists its own directory as untracked files when it lives inside the
+    // checkout under another name; it is never part of the checkpoint, even if
+    // something already staged it. --sparse: edits outside a sparse cone count.
+    ...OWN_GIT_DIRS,
+    "  own=(); keep=(); while IFS= read -r rel; do own+=(\":(top,literal)$rel\"); keep+=(\":(exclude,top,literal)$rel\"); done < <(own_git_dirs)",
+    "  addall() { scratch add -A --sparse -- . ${keep[@]+\"${keep[@]}\"}; }",
+    "  forget() { if [ ${#own[@]} -gt 0 ]; then GIT_INDEX_FILE=\"$1\" git rm -r -q -f --cached --sparse --ignore-unmatch -- \"${own[@]}\"; fi; }",
+    // A conflicted index has no tree; the restore then shows every change as unstaged.
+    "  staged=$(git write-tree) || staged=''",
+    "  if [ -n \"$staged\" ] && [ ${#own[@]} -gt 0 ]; then",
+    "    GIT_INDEX_FILE=\"$work/staged\" git read-tree \"$staged\"; forget \"$work/staged\"; staged=$(GIT_INDEX_FILE=\"$work/staged\" git write-tree)",
     "  fi",
+    "  index=$(git rev-parse --git-path index)",
+    "  if ! { [ -f \"$index\" ] && cp \"$index\" \"$work/index\" && unhide && addall; }; then",
+    // A fresh index, seeded from the staged tree as Conductor's checkpointer
+    // does, and made as complete as a copy: sparse files absent from disk keep
+    // their mark, and every path the real index lists (unmerged and
+    // intent-to-add entries included) is added even if it matches .gitignore.
+    "    rm -f \"$work/index\"",
+    "    if [ -n \"$staged\" ]; then scratch read-tree \"$staged\"; elif [ -n \"$head\" ]; then scratch read-tree \"$head\"; else scratch read-tree --empty; fi",
+    "    while IFS= read -r -d '' path; do if ! [ -e \"$path\" ] && ! [ -L \"$path\" ]; then printf '%s\\0' \"$path\"; fi; done \\",
+    "      < <(git ls-files -z -t | grep -z '^[Ss] ' | cut -z -c3- || true) | scratch update-index -z --skip-worktree --stdin",
+    "    addall",
+    "    while IFS= read -r -d '' path; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then printf '%s\\0' \"$path\"; fi; done < <(git ls-files -z) \\",
+    "      | scratch --literal-pathspecs add -f --sparse --pathspec-from-file=- --pathspec-file-nul",
+    "  fi",
+    "  forget \"$work/index\"",
     "  tree=$(scratch write-tree)",
     "  parent=(); if [ -n \"$head\" ]; then parent=(-p \"$head\"); fi",
-    // A conflicted index has no tree; the restore then shows every change as unstaged.
-    "  if staged=$(git write-tree); then",
+    "  if [ -n \"$staged\" ]; then",
     "    staged=$(git commit-tree --no-gpg-sign ${parent[@]+\"${parent[@]}\"} -m zeros-checkpoint-index \"$staged\")",
     "    git update-ref refs/zeros-checkpoint/index \"$staged\"; printf 'index %s\\n' \"$staged\" >> \"$m\"; parent=(-p \"$staged\")",
     "  fi",
@@ -193,6 +236,23 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     "  git update-ref refs/zeros-checkpoint/worktree \"$files\"; printf 'worktree %s\\n' \"$files\" >> \"$m\"",
     "  step=refs",
     "  git for-each-ref --format='branch %(objectname) %(refname)' refs/heads >> \"$m\"",
+    "  git for-each-ref --format='tag %(objectname) %(refname)' refs/tags >> \"$m\"",
+    // Remotes other than origin (which the Cloud Computer has): every URL, push
+    // URL and fetch setting, without credentials.
+    "  strip() { printf %s \"$1\" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\\1#' | base64 -w0; }",
+    "  while read -r name; do",
+    "    if [ \"$name\" = origin ] || ! [[ \"$name\" =~ ^[A-Za-z0-9._-]{1,100}$ ]]; then continue; fi",
+    "    printf 'remote %s\\n' \"$name\" >> \"$m\"",
+    // Effective URLs, with this checkout's insteadOf rewriting already applied.
+    "    while read -r value; do printf 'remoteurl %s %s\\n' \"$name\" \"$(strip \"$value\")\" >> \"$m\"; done < <(git remote get-url --all \"$name\" || true)",
+    // Push URLs too whenever pushing goes elsewhere, through an explicit pushurl
+    // or a pushInsteadOf rule that the new checkout does not have.
+    "    fetches=$(git remote get-url --all \"$name\" || true); pushes=$(git remote get-url --push --all \"$name\" || true)",
+    "    if [ \"$pushes\" != \"$fetches\" ]; then",
+    "      while read -r value; do printf 'remotepush %s %s\\n' \"$name\" \"$(strip \"$value\")\" >> \"$m\"; done <<< \"$pushes\"",
+    "    fi",
+    "    while read -r spec; do printf 'remotefetch %s %s\\n' \"$name\" \"$(printf %s \"$spec\" | base64 -w0)\" >> \"$m\"; done < <(git config --get-all \"remote.$name.fetch\" || true)",
+    "  done < <(git remote)",
     "  while read -r name remote merge; do",
     "    if [ -n \"$remote\" ] && [ -n \"$merge\" ]; then printf 'upstream %s %s %s\\n' \"$name\" \"$remote\" \"$merge\" >> \"$m\"; fi",
     "  done < <(git for-each-ref --format='%(refname) %(upstream:remotename) %(upstream:remoteref)' refs/heads)",
@@ -204,7 +264,7 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     // Objects the base branch already has stay out; a new Cloud Computer has them.
     "  step=bundle",
     "  negative=(); if git rev-parse -q --verify \"refs/remotes/origin/$base^{commit}\"; then negative=(--not \"refs/remotes/origin/$base\"); fi",
-    "  git bundle create \"$c/repo.bundle\" --branches --glob=refs/zeros-checkpoint ${negative[@]+\"${negative[@]}\"}",
+    "  git bundle create \"$c/repo.bundle\" --branches --tags --glob=refs/zeros-checkpoint ${negative[@]+\"${negative[@]}\"}",
     "  step=ignored; total=0",
     "  while IFS= read -r -d '' path; do",
     "    case \"$path\" in */) continue ;; esac",
@@ -267,6 +327,7 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "rm -f \"$work/plain\"; m=\"$c/manifest\"",
     "[ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
     "hex() { [[ \"$1\" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || fail checkpoint_corrupt; }",
+    ...OWN_GIT_DIRS,
     "branch() { [[ \"$1\" == refs/heads/* ]] && git check-ref-format \"$1\" || fail checkpoint_corrupt; }",
     // Network only when the Cloud Computer lacks a commit the checkpoint needs.
     ...(token ? [
@@ -276,19 +337,23 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     ] : ["remote_git() { git -c credential.helper= \"$@\"; }"]),
     "fetched=''",
     "need() {",
-    "  hex \"$1\"; if git cat-file -e \"$1^{commit}\"; then return 0; fi",
-    "  if [ -z \"$fetched\" ]; then fetched=1; remote_git fetch -q origin || true; fi",
-    "  git cat-file -e \"$1^{commit}\" || remote_git fetch -q origin \"$1\" || true",
-    "  git cat-file -e \"$1^{commit}\" || fail checkpoint_prerequisites_missing",
+    "  hex \"$1\"; local object=\"$1^{${2:-commit}}\"; if git cat-file -e \"$object\"; then return 0; fi",
+    "  if [ -z \"$fetched\" ]; then fetched=1; remote_git fetch -q --tags origin || true; fi",
+    "  git cat-file -e \"$object\" || remote_git fetch -q origin \"$1\" || true",
+    "  git cat-file -e \"$object\" || fail checkpoint_prerequisites_missing",
     "}",
     "step=sessions",
     "if [ -f \"$c/home.tar\" ]; then tar -xf \"$c/home.tar\" -C \"$home\" --no-same-owner; fi",
     "if grep -q '^worktree ' \"$m\"; then",
     "  step=repository",
-    "  if ! [ -d \"$repo/.git\" ]; then",
+    "  if ! { [ -d \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$repo\" && pwd -P)\" = \"$(cd \"$top\" && pwd -P)\" ]; }; then",
     ...(remote ? [`    remote_git clone -q --no-checkout ${quote(remote)} "$repo" || fail checkpoint_repository_missing`] : ["    fail checkpoint_repository_missing"]),
     "  fi",
     "  cd \"$repo\"",
+    // A checkout that keeps its own Git directory inside itself, under any
+    // name but .git, could have it overwritten by saved files or history.
+    // Cloud Computer checkouts never do; refuse before changing anything.
+    "  step=gitdir; while IFS= read -r rel; do [ \"$rel\" = .git ] || fail checkpoint_restore_failed; done < <(own_git_dirs)",
     "  step=objects",
     "  if [ -f \"$c/repo.bundle\" ]; then",
     "    while read -r sha; do need \"$sha\"; done < <(sed '/^$/q' \"$c/repo.bundle\" | grep -a '^-' | cut -c2- | cut -d' ' -f1)",
@@ -296,12 +361,22 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "  fi",
     "  step=refs",
     "  while read -r _ sha name; do hex \"$sha\"; branch \"$name\"; need \"$sha\"; git update-ref \"$name\" \"$sha\"; done < <(grep '^branch ' \"$m\" || true)",
+    "  while read -r _ sha name; do",
+    "    hex \"$sha\"; [[ \"$name\" == refs/tags/* ]] && git check-ref-format \"$name\" || fail checkpoint_corrupt",
+    "    need \"$sha\" object; git update-ref \"$name\" \"$sha\"",
+    "  done < <(grep '^tag ' \"$m\" || true)",
     "  line=$(grep '^head ' \"$m\" || true)",
     "  case \"$line\" in",
-    "    'head ref '*) ref=${line#head ref }; branch \"$ref\"; git symbolic-ref HEAD \"$ref\" ;;",
+    // An unborn branch stays unborn even where the Cloud Computer has it.
+    "    'head ref '*) ref=${line#head ref }; branch \"$ref\"",
+    "      if ! grep -q '^commit ' \"$m\"; then git update-ref -d \"$ref\" || true; fi",
+    "      git symbolic-ref HEAD \"$ref\" ;;",
     "    'head detached '*) sha=${line#head detached }; need \"$sha\"; git update-ref --no-deref HEAD \"$sha\" ;;",
     "  esac",
     "  step=files",
+    // The restored files must all reach disk, whatever this checkout's sparse rules.
+    "  if [ \"$(git config --bool core.sparseCheckout || true)\" = true ]; then git sparse-checkout disable; fi",
+    "  { git ls-files -z -t | grep -z '^S ' || true; } | cut -z -c3- | git update-index -z --no-skip-worktree --stdin",
     "  worktree=$(awk '$1 == \"worktree\" { print $2 }' \"$m\"); need \"$worktree\"",
     "  git read-tree -u --reset \"$worktree^{tree}\"",
     "  staged=$(awk '$1 == \"index\" { print $2 }' \"$m\")",
@@ -310,10 +385,20 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "  else git read-tree --empty; fi",
     "  git update-index -q --refresh || true",
     "  if [ -f \"$c/ignored.tar\" ]; then tar -xf \"$c/ignored.tar\" -C \"$repo\" --no-same-owner; fi",
-    "  step=stash",
+    // A retried restore stores the same stashes again, never twice.
+    "  step=stash; git update-ref -d refs/stash || true",
     "  while read -r _ sha message; do",
     "    need \"$sha\"; git stash store -q -m \"$(printf %s \"$message\" | base64 -d)\" \"$sha\"",
     "  done < <(grep '^stash ' \"$m\" | tac || true)",
+    "  step=remotes",
+    "  saved() { [[ \"$1\" =~ ^[A-Za-z0-9._-]{1,100}$ ]] && [ \"$1\" != origin ] || fail checkpoint_corrupt; }",
+    // Every URL, push URL and fetch setting comes from the checkpoint, never from this checkout.
+    "  while read -r _ name; do saved \"$name\"; for key in url pushurl fetch; do git config --unset-all \"remote.$name.$key\" || true; done; done < <(grep '^remote ' \"$m\" || true)",
+    "  while read -r kind name value; do",
+    "    saved \"$name\"; grep -qxF \"remote $name\" \"$m\" || fail checkpoint_corrupt",
+    "    case \"$kind\" in remoteurl) key=url ;; remotepush) key=pushurl ;; remotefetch) key=fetch ;; esac",
+    "    git config --add \"remote.$name.$key\" \"$(printf %s \"$value\" | base64 -d)\"",
+    "  done < <(grep -E '^(remoteurl|remotepush|remotefetch) ' \"$m\" || true)",
     "  step=upstream",
     "  while read -r _ name remote merge; do",
     "    branch \"$name\"; branch \"$merge\"; [[ \"$remote\" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || fail checkpoint_corrupt",
@@ -336,7 +421,7 @@ export function restoreCommand(input: RestoreInput & { downloadUrl: string }): s
   ].join("\n"))}`;
 }
 
-export type CheckpointResult = { ok: true; bytes: number; sha256: string } | { ok: false; code: CloudV2CheckpointError };
+export type CheckpointResult = { ok: true; bytes: number; sha256: string } | { ok: false; code: CloudV2CheckpointError; step: string };
 
 /** The one result line a checkpoint command prints; anything else is a failure. */
 export function parseCheckpointResult(stdout: string): CheckpointResult {
@@ -346,10 +431,10 @@ export function parseCheckpointResult(stdout: string): CheckpointResult {
       const bytes = Number(saved[1]);
       if (Number.isSafeInteger(bytes) && bytes <= CLOUD_V2_CHECKPOINT_MAX_BYTES + 64 * 1024 * 1024) return { ok: true, bytes, sha256: saved[2]! };
     }
-    const failed = /^zeros-checkpoint-error ([a-z_]+)\b/.exec(line);
-    if (failed) return { ok: false, code: errorCode(failed[1]!, "checkpoint_failed") };
+    const failed = /^zeros-checkpoint-error ([a-z_]+)(?: ([a-z]+))?$/.exec(line);
+    if (failed) return { ok: false, code: errorCode(failed[1]!, "checkpoint_failed"), step: failed[2] ?? "unknown" };
   }
-  return { ok: false, code: "checkpoint_failed" };
+  return { ok: false, code: "checkpoint_failed", step: "unknown" };
 }
 
 export function parseRestoreResult(stdout: string): { ok: true } | { ok: false; code: CloudV2CheckpointError } {
@@ -371,8 +456,8 @@ export interface CloudV2CheckpointStorage {
   /** The stored size, or null when the object does not exist. */
   size(workspaceId: string, object: string): Promise<number | null>;
   delete(workspaceId: string, object: string): Promise<void>;
-  /** Deletes every checkpoint object of the workspace except `keep`. */
-  prune(workspaceId: string, keep?: string): Promise<void>;
+  /** Deletes every checkpoint object of the workspace, for its deletion. */
+  prune(workspaceId: string): Promise<void>;
 }
 
 export function cloudV2CheckpointStorage(client: S3Client, store: Pick<CloudV2RuntimeStore, "bucket">): CloudV2CheckpointStorage {
@@ -387,14 +472,13 @@ export function cloudV2CheckpointStorage(client: S3Client, store: Pick<CloudV2Ru
     async delete(workspaceId, object) {
       await client.send(new DeleteObjectCommand({ Bucket, Key: objectOf(workspaceId, object) }));
     },
-    async prune(workspaceId, keep) {
+    async prune(workspaceId) {
       const Prefix = checkpointPrefix(workspaceId);
-      if (keep !== undefined) objectOf(workspaceId, keep);
       let ContinuationToken: string | undefined;
       do {
         const page = await client.send(new ListObjectsV2Command({ Bucket, Prefix, ContinuationToken, MaxKeys: 1000 }));
         for (const object of page.Contents ?? [])
-          if (object.Key && object.Key.startsWith(Prefix) && object.Key !== keep) await client.send(new DeleteObjectCommand({ Bucket, Key: object.Key }));
+          if (object.Key?.startsWith(Prefix)) await client.send(new DeleteObjectCommand({ Bucket, Key: object.Key }));
         ContinuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
       } while (ContinuationToken);
     },

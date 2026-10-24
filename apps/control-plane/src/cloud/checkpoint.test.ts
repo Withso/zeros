@@ -266,6 +266,314 @@ describe("cloud v2 checkpoints", () => {
     expect(attempt(good)).toEqual({ ok: true });
   });
 
+  it("keeps edits Git was told to ignore, while a sparse file stays a file and not a deletion", () => {
+    const w = workspaces();
+    const { git, write } = w;
+    git(w.oldRepo, "update-index", "--assume-unchanged", "a.txt"); write(join(w.oldRepo, "a.txt"), "assumed edit\n");
+    git(w.oldRepo, "update-index", "--skip-worktree", "b.txt"); write(join(w.oldRepo, "b.txt"), "skipped edit\n");
+    // Like a sparse checkout: marked skip-worktree and absent from disk.
+    git(w.oldRepo, "update-index", "--skip-worktree", "c.txt"); rmSync(join(w.oldRepo, "c.txt"));
+    git(w.root, "clone", "-q", w.origin, w.newRepo);
+    const key = randomBytes(32), archive = join(w.root, "bits.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    expect(git(w.oldRepo, "ls-files", "-v", "a.txt", "b.txt", "c.txt")).toBe("h a.txt\nS b.txt\nS c.txt");
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "a.txt"), "utf8")).toBe("assumed edit\n");
+    expect(readFileSync(join(w.newRepo, "b.txt"), "utf8")).toBe("skipped edit\n");
+    expect(readFileSync(join(w.newRepo, "c.txt"), "utf8")).toBe("c1\n");
+    // Both edits are unstaged changes now; nothing is staged or deleted.
+    expect(git(w.newRepo, "diff", "--name-only")).toBe("a.txt\nb.txt");
+    expect(git(w.newRepo, "diff", "--cached", "--name-only")).toBe("");
+  });
+
+  it("restores the same stashes and an unborn branch however often the restore runs", () => {
+    const w = workspaces();
+    const { git, write } = w;
+    write(join(w.oldRepo, "a.txt"), "first stash\n"); git(w.oldRepo, "stash", "push", "-q", "-m", "first");
+    write(join(w.oldRepo, "b.txt"), "second stash\n"); git(w.oldRepo, "stash", "push", "-q", "-m", "second");
+    // An orphan branch that reuses a name the Cloud Computer already has.
+    git(w.oldRepo, "checkout", "-q", "--detach"); git(w.oldRepo, "branch", "-q", "-D", "main");
+    git(w.oldRepo, "checkout", "-q", "--orphan", "main"); git(w.oldRepo, "rm", "-q", "-r", "--cached", ".");
+    write(join(w.oldRepo, "fresh.txt"), "orphan start\n");
+    const stashes = git(w.oldRepo, "stash", "list", "--format=%gs");
+    git(w.root, "clone", "-q", w.origin, w.newRepo);
+    const key = randomBytes(32), archive = join(w.root, "again.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+      expect(git(w.newRepo, "stash", "list", "--format=%gs")).toBe(stashes);
+      expect(git(w.newRepo, "symbolic-ref", "HEAD")).toBe("refs/heads/main");
+      expect(spawnSync("git", ["rev-parse", "-q", "--verify", "HEAD"], { cwd: w.newRepo, env: w.env }).status).not.toBe(0);
+      expect(readFileSync(join(w.newRepo, "fresh.txt"), "utf8")).toBe("orphan start\n");
+    }
+  });
+
+  it("restores every edit onto a sparse checkout, tags with what only they reach, and saved remotes", () => {
+    const w = workspaces();
+    const { git, write } = w;
+    write(join(w.oldRepo, "hidden", "two.txt"), "edited outside the new checkout's cone\n");
+    git(w.oldRepo, "add", "-A"); git(w.oldRepo, "commit", "-q", "-m", "hidden dir");
+    write(join(w.oldRepo, "hidden", "two.txt"), "edited again, unstaged\n");
+    // A private commit reachable only from a tag, plus ordinary local tags.
+    git(w.oldRepo, "switch", "-q", "-c", "scratch"); write(join(w.oldRepo, "t.txt"), "tag only\n"); git(w.oldRepo, "add", "t.txt");
+    git(w.oldRepo, "commit", "-q", "-m", "tag only"); const tagOnly = git(w.oldRepo, "rev-parse", "HEAD");
+    git(w.oldRepo, "tag", "private-tip"); git(w.oldRepo, "switch", "-q", "main"); git(w.oldRepo, "branch", "-q", "-D", "scratch");
+    git(w.oldRepo, "tag", "-a", "-m", "release notes", "v-local"); git(w.oldRepo, "tag", "light");
+    // An upstream on a second remote.
+    const backup = join(w.root, "backup.git"); git(w.root, "clone", "-q", "--bare", w.origin, backup);
+    git(w.oldRepo, "remote", "add", "backup", backup); git(w.oldRepo, "fetch", "-q", "backup");
+    git(w.oldRepo, "branch", "-q", "--set-upstream-to=backup/main", "main");
+    const before = { tags: git(w.oldRepo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/tags"), unstaged: git(w.oldRepo, "diff", "--binary") };
+    // The replacement Computer's checkout is sparse and leaves hidden/ out.
+    git(w.root, "clone", "-q", w.origin, w.newRepo); git(w.newRepo, "fetch", "-q", "origin");
+    git(w.newRepo, "sparse-checkout", "set", "--no-cone", "/README.md", "/a.txt");
+    expect(existsSync(join(w.newRepo, "b.txt"))).toBe(false);
+    const key = randomBytes(32), archive = join(w.root, "more.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "hidden", "two.txt"), "utf8")).toBe("edited again, unstaged\n");
+    expect(readFileSync(join(w.newRepo, "b.txt"), "utf8")).toBe("b1\n");
+    expect(git(w.newRepo, "diff", "--binary")).toBe(before.unstaged);
+    expect(git(w.newRepo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/tags")).toBe(before.tags);
+    expect(git(w.newRepo, "rev-parse", "private-tip^{commit}")).toBe(tagOnly);
+    expect(git(w.newRepo, "cat-file", "-t", "v-local")).toBe("tag");
+    expect(git(w.newRepo, "remote", "get-url", "backup")).toBe(backup);
+    git(w.newRepo, "fetch", "-q", "backup");
+    expect(git(w.newRepo, "rev-parse", "--abbrev-ref", "main@{upstream}")).toBe("backup/main");
+  });
+
+  it("restores into a checkout whose .git is a file, and never saves credentials in a remote URL", () => {
+    const w = workspaces();
+    w.git(w.oldRepo, "switch", "-q", "-c", "linked"); w.write(join(w.oldRepo, "l.txt"), "linked\n"); w.git(w.oldRepo, "add", "l.txt"); w.git(w.oldRepo, "commit", "-q", "-m", "linked");
+    w.git(w.oldRepo, "remote", "add", "mirror", "https://user:secret-token@example.test/acme/app.git");
+    const key = randomBytes(32), archive = join(w.root, "linked.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    // The new checkout is a linked worktree: its .git is a file.
+    const main = join(w.root, "main-clone"); w.git(w.root, "clone", "-q", w.origin, main);
+    w.git(main, "worktree", "add", "-q", "--detach", w.newRepo);
+    expect(lstatSync(join(w.newRepo, ".git")).isFile()).toBe(true);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(w.git(w.newRepo, "symbolic-ref", "HEAD")).toBe("refs/heads/linked");
+    expect(readFileSync(join(w.newRepo, "l.txt"), "utf8")).toBe("linked\n");
+    expect(w.git(w.newRepo, "remote", "get-url", "mirror")).toBe("https://example.test/acme/app.git");
+    // A remote of that name on the new checkout takes the saved URL.
+    const again = join(w.root, "again-home", "acme", "app"); w.git(w.root, "clone", "-q", w.origin, again);
+    w.git(again, "remote", "add", "mirror", "https://wrong.example.test/other.git");
+    expect(restore({ home: join(w.root, "again-home"), repo: again, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(w.git(again, "remote", "get-url", "mirror")).toBe("https://example.test/acme/app.git");
+    // Push settings come from the checkpoint: a push override on the new checkout is dropped,
+    // and one the old checkout had is kept.
+    const pushed = join(w.root, "pushed-home", "acme", "app"); w.git(w.root, "clone", "-q", w.origin, pushed);
+    w.git(pushed, "remote", "add", "mirror", "https://example.test/acme/app.git");
+    w.git(pushed, "config", "remote.mirror.pushurl", "https://wrong.example.test/push.git");
+    expect(restore({ home: join(w.root, "pushed-home"), repo: pushed, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(spawnSync("git", ["config", "--get-all", "remote.mirror.pushurl"], { cwd: pushed, env: w.env, encoding: "utf8" }).stdout).toBe("");
+    w.git(w.oldRepo, "config", "remote.mirror.pushurl", "https://user:token@push.example.test/acme/app.git");
+    const withPush = join(w.root, "with-push.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: withPush }, w.env).parsed.ok).toBe(true);
+    expect(restore({ home: join(w.root, "pushed-home"), repo: pushed, key, sha256: sha(withPush), from: withPush }, w.env).parsed).toEqual({ ok: true });
+    expect(w.git(pushed, "config", "--get-all", "remote.mirror.pushurl")).toBe("https://push.example.test/acme/app.git");
+    // A remote with several URLs on the new checkout gets exactly the saved set.
+    const many = join(w.root, "many-home", "acme", "app"); w.git(w.root, "clone", "-q", w.origin, many);
+    w.git(many, "remote", "add", "mirror", "https://one.example.test/a.git");
+    w.git(many, "config", "--add", "remote.mirror.url", "https://two.example.test/b.git");
+    w.git(w.oldRepo, "config", "--add", "remote.mirror.url", "https://second.example.test/acme/app.git");
+    const twoUrls = join(w.root, "two-urls.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: twoUrls }, w.env).parsed.ok).toBe(true);
+    expect(restore({ home: join(w.root, "many-home"), repo: many, key, sha256: sha(twoUrls), from: twoUrls }, w.env).parsed).toEqual({ ok: true });
+    expect(w.git(many, "config", "--get-all", "remote.mirror.url")).toBe("https://example.test/acme/app.git\nhttps://second.example.test/acme/app.git");
+    expect(w.git(many, "config", "--get-all", "remote.mirror.pushurl")).toBe("https://push.example.test/acme/app.git");
+    // URLs written through an insteadOf alias are saved as the URLs they mean.
+    w.git(w.oldRepo, "config", "url.https://real.example.test/.insteadOf", "alias:");
+    w.git(w.oldRepo, "config", "url.https://push.real.example.test/.pushInsteadOf", "alias:");
+    w.git(w.oldRepo, "remote", "add", "aliased", "alias:acme/app.git");
+    w.git(w.oldRepo, "config", "remote.aliased.pushurl", "alias:acme/push.git");
+    const aliased = join(w.root, "aliased.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: aliased }, w.env).parsed.ok).toBe(true);
+    expect(restore({ home: join(w.root, "many-home"), repo: many, key, sha256: sha(aliased), from: aliased }, w.env).parsed).toEqual({ ok: true });
+    expect(w.git(many, "remote", "get-url", "aliased")).toBe("https://real.example.test/acme/app.git");
+    expect(w.git(many, "remote", "get-url", "--push", "aliased")).toBe("https://real.example.test/acme/push.git");
+    expect(spawnSync("git", ["config", "--get-all", "remote.mirror.pushurl"], { cwd: many, env: w.env, encoding: "utf8" }).stdout.trim()).toBe("https://push.example.test/acme/app.git");
+  });
+
+  it("cleans up its temporary refs and scratch files when the command is killed", () => {
+    const w = workspaces();
+    w.write(join(w.oldRepo, "work.txt"), "unsaved\n");
+    // A git that signals the script just as it bundles, like a deadline would.
+    // It sits in $HOME/.local/bin as well as first on PATH, because some
+    // shells' startup puts that directory ahead of the given PATH.
+    const real = execFileSync("bash", ["-c", "command -v git"], { env: w.env, encoding: "utf8" }).trim();
+    const fakeHome = join(w.root, "fake-home"), stub = join(fakeHome, ".local", "bin"); mkdirSync(stub, { recursive: true });
+    writeFileSync(join(stub, "git"), `#!/bin/sh\ncase " $* " in *" bundle create "*) kill -TERM "$PPID"; sleep 2 ;; esac\nexec ${real} "$@"\n`); chmodSync(join(stub, "git"), 0o755);
+    const killed = checkpoint({ home: w.oldHome, repo: w.oldRepo, key: randomBytes(32), out: join(w.root, "never.zck") },
+      { ...w.env, HOME: fakeHome, PATH: `${stub}:${w.env.PATH}` });
+    expect(killed.status).toBe(143);
+    expect(w.git(w.oldRepo, "for-each-ref", "refs/zeros-checkpoint")).toBe("");
+    expect(execFileSync("ls", ["-A", join(w.oldHome, ".cache")], { encoding: "utf8" })).toBe("");
+    expect(w.git(w.oldRepo, "status", "--porcelain")).toBe("?? work.txt");
+  });
+
+  it("keeps a force-added ignored file, with a split index too, and the new checkout's own untracked files", () => {
+    const w = workspaces();
+    w.write(join(w.oldRepo, ".env.forced"), "FORCED=1\n"); w.git(w.oldRepo, "add", "-f", ".env.forced");
+    w.write(join(w.oldRepo, "notes.txt"), "mine\n");
+    // A split index still copies; the fallback itself is covered by the transient filter cases.
+    w.git(w.oldRepo, "config", "core.splitIndex", "true"); w.git(w.oldRepo, "update-index", "--split-index");
+    const key = randomBytes(32), archive = join(w.root, "split.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    // Something only the new checkout has, neither tracked nor ignored: it came
+    // from the Cloud Computer and stays, as in any new workspace.
+    w.write(join(w.newRepo, "computer-only.txt"), "from the build\n");
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, ".env.forced"), "utf8")).toBe("FORCED=1\n");
+    expect(w.git(w.newRepo, "diff", "--cached", "--name-only")).toBe(".env.forced");
+    expect(readFileSync(join(w.newRepo, "notes.txt"), "utf8")).toBe("mine\n");
+    expect(readFileSync(join(w.newRepo, "computer-only.txt"), "utf8")).toBe("from the build\n");
+  });
+
+  it.each(["a conflicted index", "an ignored intent-to-add entry"])("keeps a force-added ignored file when the fallback runs with %s", kind => {
+    const w = workspaces();
+    const { git, write } = w;
+    // A required clean filter that fails once makes the copied index's add fail.
+    const state = join(w.root, "filter-failed");
+    write(join(w.oldRepo, ".gitattributes"), "*.dat filter=flaky\n"); git(w.oldRepo, "add", ".gitattributes"); git(w.oldRepo, "commit", "-q", "-m", "attributes");
+    git(w.oldRepo, "config", "filter.flaky.clean", `sh -c 'if [ -e ${state} ]; then cat; else : > ${state}; exit 1; fi'`);
+    git(w.oldRepo, "config", "filter.flaky.required", "true");
+    write(join(w.oldRepo, "data.dat"), "data\n");
+    if (kind === "a conflicted index") {
+      write(join(w.oldRepo, ".env.forced"), "FORCED=1\n"); git(w.oldRepo, "add", "-f", ".env.forced");
+      git(w.oldRepo, "switch", "-q", "-c", "left"); write(join(w.oldRepo, "a.txt"), "left\n"); git(w.oldRepo, "commit", "-qam", "left");
+      git(w.oldRepo, "switch", "-q", "main"); write(join(w.oldRepo, "a.txt"), "right\n"); git(w.oldRepo, "commit", "-q", "-m", "right", "a.txt");
+      expect(spawnSync("git", ["merge", "-q", "left"], { cwd: w.oldRepo, env: w.env }).status).not.toBe(0);
+    } else {
+      write(join(w.oldRepo, ".env.forced"), "FORCED=1\n"); git(w.oldRepo, "add", "-f", "-N", ".env.forced");
+    }
+    rmSync(state, { force: true });
+    const key = randomBytes(32), archive = join(w.root, "fallback.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    // The first add really failed, so the fallback is what ran.
+    expect(existsSync(state)).toBe(true);
+    git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, ".env.forced"), "utf8")).toBe("FORCED=1\n");
+    expect(readFileSync(join(w.newRepo, "data.dat"), "utf8")).toBe("data\n");
+  });
+
+  it("leaves a new checkout that keeps its Git directory inside itself untouched, refusing every restore", () => {
+    const w = workspaces();
+    w.git(w.oldRepo, "switch", "-q", "-c", "own"); w.write(join(w.oldRepo, "o.txt"), "own\n"); w.git(w.oldRepo, "add", "o.txt"); w.git(w.oldRepo, "commit", "-q", "-m", "own");
+    const key = randomBytes(32), archive = join(w.root, "own-gitdir.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", "--separate-git-dir", join(w.newRepo, ".repository"), w.origin, w.newRepo);
+    const head = w.git(w.newRepo, "rev-parse", "HEAD");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed)
+        .toEqual({ ok: false, code: "checkpoint_restore_failed" });
+      expect(existsSync(join(w.newRepo, ".repository", "HEAD"))).toBe(true);
+      expect(w.git(w.newRepo, "rev-parse", "HEAD")).toBe(head);
+    }
+  });
+
+  it("never saves a repository's own Git directory that lives inside its checkout", () => {
+    const w = workspaces();
+    const source = join(w.oldHome, "acme", "own");
+    w.git(w.root, "clone", "-q", "--separate-git-dir", join(source, ".repository"), w.origin, source);
+    w.write(join(source, "work.txt"), "work\n");
+    const key = randomBytes(32), archive = join(w.root, "source-gitdir.zck");
+    expect(checkpoint({ home: w.oldHome, repo: source, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "work.txt"), "utf8")).toBe("work\n");
+    expect(existsSync(join(w.newRepo, ".repository"))).toBe(false);
+  });
+
+  it("saves an edit outside the sparse cone of the checkout it came from", () => {
+    const w = workspaces();
+    const { git, write } = w;
+    write(join(w.oldRepo, "kept", "one.txt"), "one\n"); write(join(w.oldRepo, "hidden", "two.txt"), "two\n");
+    git(w.oldRepo, "add", "-A"); git(w.oldRepo, "commit", "-q", "-m", "dirs");
+    git(w.oldRepo, "sparse-checkout", "set", "--cone", "kept");
+    expect(existsSync(join(w.oldRepo, "hidden", "two.txt"))).toBe(false);
+    // The user brings one file outside the cone back and edits it.
+    write(join(w.oldRepo, "hidden", "two.txt"), "edited outside the cone\n");
+    const key = randomBytes(32), archive = join(w.root, "cone.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo); w.git(w.newRepo, "fetch", "-q", "origin");
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "hidden", "two.txt"), "utf8")).toBe("edited outside the cone\n");
+  });
+
+  it("drops a repository's own Git directory even when something already staged it", () => {
+    const w = workspaces();
+    const source = join(w.oldHome, "acme", "own");
+    w.git(w.root, "clone", "-q", "--separate-git-dir", join(source, ".repository"), w.origin, source);
+    // An earlier `git add -A` staged the repository's own files.
+    w.git(source, "add", "-A");
+    expect(w.git(source, "diff", "--cached", "--name-only")).toContain(".repository/config");
+    const key = randomBytes(32), archive = join(w.root, "staged-gitdir.zck");
+    expect(checkpoint({ home: w.oldHome, repo: source, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(existsSync(join(w.newRepo, ".repository"))).toBe(false);
+    expect(w.git(w.newRepo, "ls-files", ".repository")).toBe("");
+    // Even committed into history, the old checkout's metadata never moves the restored branch.
+    w.git(source, "commit", "-q", "-m", "everything, metadata too"); w.write(join(source, "next.txt"), "next\n");
+    w.git(source, "add", "next.txt"); w.git(source, "commit", "-q", "-m", "next");
+    const committed = join(w.root, "committed-gitdir.zck");
+    expect(checkpoint({ home: w.oldHome, repo: source, key, out: committed }, w.env).parsed.ok).toBe(true);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(committed), from: committed }, w.env).parsed).toEqual({ ok: true });
+    expect(w.git(w.newRepo, "rev-parse", "HEAD")).toBe(w.git(source, "rev-parse", "HEAD"));
+    expect(readFileSync(join(w.newRepo, "next.txt"), "utf8")).toBe("next\n");
+  });
+
+  it.each(["a saved file", "the old checkout's link to its Git directory"])("refuses to write %s over the new checkout's own Git directory", kind => {
+    const w = workspaces();
+    if (kind === "a saved file") w.write(join(w.oldRepo, ".repository"), "an ordinary project file\n");
+    w.write(join(w.oldRepo, "draft.txt"), "draft\n");
+    const source = kind === "a saved file" ? w.oldRepo : join(w.oldHome, "acme", "linked");
+    if (kind !== "a saved file") {
+      const metadata = join(w.root, "linked-metadata");
+      w.git(w.root, "clone", "-q", "--separate-git-dir", metadata, w.origin, source);
+      rmSync(join(source, ".git")); symlinkSync(metadata, join(source, ".repository"));
+      writeFileSync(join(source, ".git"), "gitdir: .repository\n");
+      expect(w.git(source, "rev-parse", "--is-inside-work-tree")).toBe("true");
+      w.write(join(source, "draft.txt"), "draft\n");
+    }
+    const key = randomBytes(32), archive = join(w.root, "collide.zck");
+    expect(checkpoint({ home: w.oldHome, repo: source, key, out: archive }, w.env).parsed.ok).toBe(true);
+    if (kind !== "a saved file") {
+      // The link is the old checkout's own metadata, never saved: a normal checkout restores it fine.
+      const plainHome = join(w.root, "plain-home"), plain = join(plainHome, "acme", "app");
+      w.git(w.root, "clone", "-q", w.origin, plain);
+      expect(restore({ home: plainHome, repo: plain, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+      expect(readFileSync(join(plain, "draft.txt"), "utf8")).toBe("draft\n");
+      expect(existsSync(join(plain, ".repository"))).toBe(false);
+    }
+    w.git(w.root, "clone", "-q", "--separate-git-dir", join(w.newRepo, ".repository"), w.origin, w.newRepo);
+    const head = w.git(w.newRepo, "rev-parse", "HEAD");
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed)
+      .toEqual({ ok: false, code: "checkpoint_restore_failed" });
+    expect(lstatSync(join(w.newRepo, ".repository")).isDirectory()).toBe(true);
+    expect(w.git(w.newRepo, "rev-parse", "HEAD")).toBe(head);
+    expect(w.git(w.newRepo, "rev-parse", "--is-inside-work-tree")).toBe("true");
+  });
+
+  it("saves where a remote pushes when a pushInsteadOf rule sends pushes elsewhere", () => {
+    const w = workspaces();
+    w.git(w.oldRepo, "config", "url.https://push.example.test/.pushInsteadOf", "https://fetch.example.test/");
+    w.git(w.oldRepo, "remote", "add", "split", "https://fetch.example.test/acme/app.git");
+    w.git(w.oldRepo, "remote", "add", "plain", "https://plain.example.test/acme/app.git");
+    const key = randomBytes(32), archive = join(w.root, "push-rule.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(w.git(w.newRepo, "remote", "get-url", "split")).toBe("https://fetch.example.test/acme/app.git");
+    expect(w.git(w.newRepo, "remote", "get-url", "--push", "split")).toBe("https://push.example.test/acme/app.git");
+    // A remote that pushes where it fetches gets no push override.
+    expect(spawnSync("git", ["config", "--get-all", "remote.plain.pushurl"], { cwd: w.newRepo, env: w.env, encoding: "utf8" }).stdout).toBe("");
+  });
+
   it("carries only what the base branch does not already have", () => {
     const w = workspaces();
     w.write(join(w.seed, "assets.bin"), randomBytes(2 * 1024 * 1024)); w.git(w.seed, "add", "assets.bin");
@@ -281,7 +589,7 @@ describe("cloud v2 checkpoints", () => {
     const w = workspaces();
     w.write(join(w.oldRepo, "large.bin"), randomBytes(256 * 1024));
     const result = checkpoint({ home: w.oldHome, repo: w.oldRepo, key: randomBytes(32), out: join(w.root, "large.zck"), maxBytes: 64 * 1024 }, w.env);
-    expect(result.parsed).toEqual({ ok: false, code: "checkpoint_too_large" });
+    expect(result.parsed).toEqual({ ok: false, code: "checkpoint_too_large", step: "pack" });
     expect(w.git(w.oldRepo, "status", "--porcelain")).toBe("?? large.bin");
     expect(w.git(w.oldRepo, "for-each-ref", "refs/zeros-checkpoint")).toBe("");
   });
@@ -316,12 +624,34 @@ describe("cloud v2 checkpoints", () => {
     expect(() => checkpointCommand({ checkoutPath: "/home/user/acme/app", home: "/home/user", baseBranch: "main", key: randomBytes(16), uploadUrl: "https://x.test/" })).toThrow();
 
     expect(parseCheckpointResult("noise\nzeros-checkpoint-saved bytes=12 sha256=" + "b".repeat(64))).toEqual({ ok: true, bytes: 12, sha256: "b".repeat(64) });
-    expect(parseCheckpointResult("zeros-checkpoint-error checkpoint_too_large pack")).toEqual({ ok: false, code: "checkpoint_too_large" });
-    expect(parseCheckpointResult("zeros-checkpoint-error something_else pack")).toEqual({ ok: false, code: "checkpoint_failed" });
-    expect(parseCheckpointResult("zeros-checkpoint-saved bytes=0 sha256=" + "b".repeat(64))).toEqual({ ok: false, code: "checkpoint_failed" });
-    expect(parseCheckpointResult("")).toEqual({ ok: false, code: "checkpoint_failed" });
+    expect(parseCheckpointResult("zeros-checkpoint-error checkpoint_too_large pack")).toEqual({ ok: false, code: "checkpoint_too_large", step: "pack" });
+    expect(parseCheckpointResult("zeros-checkpoint-error checkpoint_upload_failed upload")).toEqual({ ok: false, code: "checkpoint_upload_failed", step: "upload" });
+    expect(parseCheckpointResult("zeros-checkpoint-error something_else pack")).toEqual({ ok: false, code: "checkpoint_failed", step: "pack" });
+    expect(parseCheckpointResult("zeros-checkpoint-saved bytes=0 sha256=" + "b".repeat(64))).toEqual({ ok: false, code: "checkpoint_failed", step: "unknown" });
+    expect(parseCheckpointResult("")).toEqual({ ok: false, code: "checkpoint_failed", step: "unknown" });
     expect(parseRestoreResult("zeros-checkpoint-error checkpoint_corrupt decrypt")).toEqual({ ok: false, code: "checkpoint_corrupt" });
     expect(parseRestoreResult("unexpected")).toEqual({ ok: false, code: "checkpoint_restore_failed" });
+  });
+
+  it("prunes every checkpoint object of the workspace, and only of that workspace", async () => {
+    const { cloudV2CheckpointStorage } = await import("./checkpoint.js");
+    const workspace = randomUUID();
+    const owned = Array.from({ length: 3 }, () => cloudV2CheckpointObject(workspace, randomUUID()));
+    const deleted: string[] = [], pages = [owned.slice(0, 2), owned.slice(2)];
+    const client = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      if (command.constructor.name === "ListObjectsV2Command") {
+        expect(command.input.Prefix).toBe(`cloud-v2/checkpoints/${workspace}/`);
+        const page = command.input.ContinuationToken === "next" ? 1 : 0;
+        return { Contents: pages[page]!.map(Key => ({ Key })), IsTruncated: page === 0, NextContinuationToken: "next" };
+      }
+      if (command.constructor.name === "DeleteObjectCommand") { deleted.push(String(command.input.Key)); return {}; }
+      throw new Error(`unexpected ${command.constructor.name}`);
+    } };
+    const storage = cloudV2CheckpointStorage(client as never, { bucket: "bucket" });
+    await storage.prune(workspace);
+    expect(deleted).toEqual(owned);
+    await expect(storage.prune("../other")).rejects.toThrow();
+    await expect(storage.delete(workspace, cloudV2CheckpointObject(randomUUID(), randomUUID()))).rejects.toThrow();
   });
 
   it("names objects per workspace and binds each data key to its workspace and object", () => {

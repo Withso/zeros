@@ -251,8 +251,10 @@ presigned URL that expires in 15 minutes. Boat stops the VM only after that.
 A checkpoint holds:
 
 - the workspace repository's Git state: branches with their local commits,
-  stashes, upstream settings, the index, and every tracked or untracked file
-  that is not ignored;
+  tags and what only they reach, stashes, upstream settings with their
+  remotes' effective URLs and push URLs (after `insteadOf` rewriting, without
+  credentials) and fetch settings, the index, and every tracked or untracked
+  file that is not ignored;
 - ignored files of up to 1 MiB outside ignored directories, such as
   `.env.local`, 32 MiB in total;
 - the worker's state directory and the agents' session files (`.claude/projects`,
@@ -262,7 +264,20 @@ It never holds credential files, the worker token, setup status, or ignored
 directories such as dependencies and build outputs. Those come back from the
 Cloud Computer, the setup script and credential delivery. Git objects that the
 base branch already has stay out, so a checkpoint normally holds only the
-user's own work.
+user's own work. Edits to files marked assume-unchanged or skip-worktree are
+kept and come back as ordinary unstaged changes, without the marks. Not kept:
+the commits and changes inside a submodule's or another nested repository's own
+`.git` (the Cloud Computer does not initialize submodules), and sparse-checkout
+settings. A restored workspace has a full checkout, even if the new Cloud
+Computer checkout was sparse, and every saved file comes back. Untracked files
+that the new checkout itself has, from the Cloud Computer, stay, as in any new
+workspace.
+An in-progress merge, rebase or cherry-pick comes back as its files, with
+conflicts as unstaged changes, not as the operation itself. The capture and
+restore technique follows Conductor's checkpointer (a scratch index, private
+refs and `read-tree`), extended to carry objects to a different VM. Unlike
+Conductor, which restores in place, a restore never runs `git clean` on the new
+checkout, whose own Git directory may live inside it.
 
 The object is `cloud-v2/checkpoints/<workspace>/<checkpoint>.zck` in the
 runtime bucket. It is AES-256-GCM in authenticated 1 MiB chunks, so tampering,
@@ -270,16 +285,30 @@ truncation and appended data all fail. Each checkpoint has its own random
 data key, sealed in the database with the credential keyring and bound to the
 workspace and object. The VM returns only one result line with the size and
 SHA-256, never file names or contents. The control plane confirms the stored
-size before it records the checkpoint, and only then removes older objects.
+size before it records the checkpoint, and only then removes the one it
+replaced, never anything newer. Each entry into `stopping` has its own
+generation: only that stop records its checkpoint, stops the VM, fails or
+completes, and drops the worker's credentials only as it completes, so a late
+step from an earlier stop can never replace a newer checkpoint, fail a newer
+stop or revoke a worker that a newer wake started.
+Before issuing an upload URL, the stop records until when that upload could
+still land; it does so only while it still owns the VM, so none starts once
+deletion has begun. The record is removed when the upload is known to be over.
+A failed transfer, a timeout or a lost reply keeps it, and deletion waits for
+the latest remaining one, then prunes again.
 A failed or oversized checkpoint (over 4 GiB) never blocks the stop: the
 previous checkpoint stays, and the workspace records `checkpoint_error`.
 
 A wake whose VM Boat deleted restores the last checkpoint:
 
-1. Pin the organization's active Cloud Computer and record the restore, before
-   anything is created.
-2. Create a replacement VM under a key derived from the checkpoint, so a lost
-   reply finds the same VM.
+1. Pin the organization's active Cloud Computer and record the restore, with its
+   own attempt ID and the exact replacement request, before anything is created.
+2. Create the replacement VM under that attempt's key and its own name. A lost
+   reply replays the same request and finds the same VM, even after a runtime
+   release or once the pinned build is retiring. After Boat's 24-hour key
+   lifetime the VM is found by its name instead, never created twice. A late
+   reply for an earlier attempt cannot take a later attempt's place, and a
+   later restore uses a new attempt.
 3. Install the runtime.
 4. Download the checkpoint, verify its digest and apply it, before the worker
    starts.
@@ -291,10 +320,12 @@ no longer has the repository, the restore clones it. The worker then runs the
 setup once more, because the replacement VM comes from a newer Cloud Computer.
 A stop or deletion during a restore still finds the replacement. A replacement
 that has not received the checkpoint is never checkpointed itself, so it cannot
-replace the real one. A restore that still fails after its retries leaves the
-workspace `failed` with a `checkpoint_*` code. The checkpoint stays, and Start
-tries the restore again; a damaged checkpoint (`checkpoint_corrupt`) cannot be
-restored. Without a checkpoint, a lost VM remains `failed/sandbox_missing`. Delete removes every checkpoint object of the
+replace the real one. A restore that still fails after its retries, or runs past its 25-minute
+deadline, leaves the workspace `failed` with a `checkpoint_*` code. The
+checkpoint stays, and Start tries the restore again; a damaged checkpoint
+(`checkpoint_corrupt`) cannot be restored. A workspace with a checkpoint whose
+VM Boat lost is never `sandbox_missing`: a stop finishes, and the next wake
+restores. The worker's boot deadline starts again once the checkpoint is applied. Without a checkpoint, a lost VM remains `failed/sandbox_missing`. Delete removes every checkpoint object of the
 workspace before workspace, account or organization erasure can finish.
 
 Create and wake emit value-free `[cloud-v2] timing` records for allocation or
