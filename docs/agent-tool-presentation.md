@@ -600,8 +600,31 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   and usage accounting independently.
 - Keep the request's original elapsed-time anchor during background work. A
   later parent reply extends the footer beyond the first settled send; use its
-  last changed text time, excluding child/tool bookkeeping and identical replay.
+  last changed text time, excluding child/tool bookkeeping, wake-up status and identical replay.
   Older persisted text without `updatedAt` uses its existing creation time.
+- Automatic Claude wake-ups continue the existing user turn without a user
+  message. While pending, keep the settled output/footer followed by the
+  existing **Waiting for N background tasks · elapsed** line. When work resumes,
+  its first working-feed row is an alarm-clock status: **Woke up for “reason” ·
+  due time** for dynamic loops, or **Scheduled task “name” · due time** for
+  CronCreate/routines. Format the epoch due time in the reader's timezone, and
+  omit it when unknown (a recurring job's later runs) while keeping the name.
+  Without a known reason use **Woke up on schedule** or **Scheduled task
+  started**. A new ScheduleWakeup supersedes the pending dynamic wake, as the
+  CLI does. Never show this notice next to the waiting line; if the cloud
+  hook arrives before actual activity, retain it until that work begins.
+  Once settled, fold it into the chip of the work it started, without adding a
+  message or tool count. It is plain status, with no panel or pill. Exclude it
+  from titles, answer copying, concise/fork transcripts, live prose smoothing
+  and evidence of model recovery. Full activity exports label it **Status**;
+  ordinary history/search retain its readable fallback text and optional metadata.
+  Reset/truncation keeps the existing user-turn boundaries.
+  Match hook prompts exactly against tracked task prompts; ambiguous matches
+  stay generic. Deduplicate using the native prompt ID through replay/resume.
+  CronCreate/CronList `nextFireAt` includes the scheduler offset and outranks the
+  one-shot cron estimate; ScheduleWakeup keeps `scheduledFor`. The cloud worker
+  registers only the notice hook, preserving its background/idle policy. A
+  wake-up notice is never evidence that a different cloud outbox prompt was accepted.
 - Claude `system/init` is turn metadata, not process replacement. Only the
   adapter creating a new query resets process-owned tasks, wakeups, lifecycle
   joins and workflow narration. Resume can reuse the native session ID; it

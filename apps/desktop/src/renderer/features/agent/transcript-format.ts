@@ -44,6 +44,7 @@ import { partitionTurn } from "./turn-partition";
 import { groupMessagesIntoTurns, isProviderTurnTail } from "./turn-grouping";
 import { readableTextFromArray } from "./renderers/raw-output";
 import { fallbackProse } from "./model-fallback";
+import { wakeupDisplayText } from "./wakeup-notice";
 import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 import { pendingChecksMessage } from "./renderers/tool-pending-checks";
 import { isUsageNotice, usageStatusChanges } from "./transcript-notices";
@@ -420,6 +421,7 @@ function renderUser(m: AgentTextMessage, depth: Depth = 0): string {
 
 function renderText(m: AgentTextMessage, depth: Depth): string {
   if (m.role === "user") return renderUser(m, depth);
+  if (m.wakeupNotice) return `${h(2, depth)} Status\n\n${clipField(wakeupDisplayText(m.wakeupNotice))}`;
   if (m.role === "thought") {
     const body = m.redacted
       ? "_(redacted by the model)_"

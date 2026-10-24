@@ -328,19 +328,47 @@ const lockedDarwinOnly = (lockfile, key) =>
       lockfileEntryKey(entry) === key && /^    os: \[darwin\]$/m.test(entry),
   );
 
+// A workspace inventory can contain several provider versions. Resolve each
+// direct release dependency from its own install, not the first workspace row.
+function installedPlatformParentVersions(directory) {
+  const { dependencies = {} } = JSON.parse(
+    readFileSync(join(directory, "package.json"), "utf8"),
+  );
+  const names = new Set(
+    [...PACKAGED_PLATFORM_PACKAGES, ...PACKAGED_MACOS_ONLY_PACKAGES].map(
+      (target) => target.parentName,
+    ),
+  );
+  return Object.fromEntries(
+    [...names]
+      .filter((name) => Object.hasOwn(dependencies, name))
+      .map((name) => [name, JSON.parse(
+        readFileSync(join(directory, "node_modules", name, "package.json"), "utf8"),
+      ).version]),
+  );
+}
+
 function normalizePackagedPlatformRecords(records, {
   targets = PACKAGED_PLATFORM_PACKAGES,
   macosOnly = PACKAGED_MACOS_ONLY_PACKAGES,
   lockfile = ROOT_LOCKFILE,
   surface = `desktop packaged runtime (${PACKAGED_DESKTOP_PLATFORM})`,
+  parentVersions = {},
 } = {}) {
-  const macosOnlyRecords = macosOnly.map((target) => {
-    const parent = records.find((record) => record.name === target.parentName);
-    if (!parent) {
+  const releaseParent = (inventory, name) => {
+    const matches = inventory.filter((record) =>
+      record.name === name &&
+      (!Object.hasOwn(parentVersions, name) || record.version === parentVersions[name]),
+    );
+    if (matches.length !== 1) {
       throw new Error(
-        `${target.parentName}: parent package is missing from the production inventory`,
+        `${name}: exact release parent is missing or ambiguous in the production inventory`,
       );
     }
+    return matches[0];
+  };
+  const macosOnlyRecords = macosOnly.map((target) => {
+    const parent = releaseParent(records, target.parentName);
     const version = lockedOptionalVersion(lockfile, parent, target.name);
     if (!version || !lockedDarwinOnly(lockfile, `${target.name}@${version}`)) {
       throw new Error(
@@ -371,14 +399,7 @@ function normalizePackagedPlatformRecords(records, {
   );
 
   for (const target of targets) {
-    const parent = normalized.find(
-      (record) => record.name === target.parentName,
-    );
-    if (!parent) {
-      throw new Error(
-        `${target.parentName}: parent package is missing from the production inventory`,
-      );
-    }
+    const parent = releaseParent(normalized, target.parentName);
 
     const manifest = JSON.parse(
       readFileSync(join(parent.packagePath, "package.json"), "utf8"),
@@ -644,6 +665,7 @@ function fallbackDocuments(record) {
 
 const rootRecords = normalizePackagedPlatformRecords(
   runPnpmLicenseInventory(ROOT, "root pnpm workspace"),
+  { parentVersions: installedPlatformParentVersions(ROOT) },
 );
 const controlPlaneRecords = normalizePackagedPlatformRecords(runPnpmLicenseInventory(
   join(ROOT, "apps", "control-plane"),
@@ -653,6 +675,7 @@ const controlPlaneRecords = normalizePackagedPlatformRecords(runPnpmLicenseInven
   macosOnly: [],
   lockfile: readFileSync(join(ROOT, "apps/control-plane/pnpm-lock.yaml"), "utf8"),
   surface: "control plane native runtime (Linux x64)",
+  parentVersions: installedPlatformParentVersions(join(ROOT, "apps/control-plane")),
 });
 const marketingRecords = runPnpmLicenseInventory(
   join(ROOT, "apps", "marketing"),

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { CloudV2MessageRow } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2HistoryFrameSchema } from "@zeros/protocol/cloud-v2-relay";
 import { SessionStore } from "../session-store";
 
 const workspace = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
@@ -28,6 +29,20 @@ const row = (id: string, role: "user" | "agent", extra: Partial<AgentTextMessage
 const prompt = (id: string) => ({ requestId: id, userMessageId: `user-${id}`, prompt: [{ type: "text" as const, text: id }], startedAt: 100 });
 
 describe("durable per-chat sessions", () => {
+  it("mirrors wake-up status as a compatible text row and retains it through restart and repeated delivery", async () => {
+    const { store, directory } = await setup();
+    const notification = { sessionId: "exec", update: { sessionUpdate: "wakeup_notice" as const, noticeId: "native-wake", source: "schedule_wakeup" as const, reason: "Check deployment", scheduledFor: 1_800_000_017_000 } };
+    await store.fold("chat", notification);
+    const rows = store.window("chat").messages;
+    expect(rows).toHaveLength(1);
+    expect(CloudV2HistoryFrameSchema.safeParse({ t: "history", messages: { chatId: "chat", rows } }).success).toBe(true);
+    expect(JSON.parse(rows[0].payload)).toMatchObject({ kind: "text", role: "agent", phase: "commentary", wakeupNotice: { source: "schedule_wakeup", scheduledFor: 1_800_000_017_000 } });
+    await store.flush();
+    const reopened = await SessionStore.open(directory, workspace);
+    stores.push(reopened);
+    await reopened.fold("chat", notification);
+    expect(reopened.window("chat").messages).toEqual(rows);
+  });
   it("retains and refuses corrupt outbox epochs instead of dispatching them after restart", async () => {
     const { directory, store } = await setup();
     await store.enqueue("chat", prompt("one"));

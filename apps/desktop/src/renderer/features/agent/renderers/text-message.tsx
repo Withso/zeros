@@ -28,6 +28,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { memo, useMemo, useRef, type SyntheticEvent } from "react";
+import { AlarmClock } from "lucide-react";
 import type { Renderer, RendererContext } from "./types";
 import type {
   AgentTextMessage,
@@ -52,6 +53,7 @@ import { MarkdownCodeBlock } from "./markdown-code-block";
 import { useAttachmentImageSource } from "../attachment-image-source";
 import { useStreamingText, useStreamingTextEdge } from "./use-streaming-text";
 import { fallbackDisplayText } from "../model-fallback";
+import { wakeupDisplayText } from "../wakeup-notice";
 import { LocalLinkHtml, LocalLinkText } from "../local-links/text";
 import { LocalNoteRow } from "../local-links/note-row";
 
@@ -106,7 +108,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     // changes the hook count and React throws "Rendered more hooks than
     // during the previous render", blanking the chat surface.
     const role = mapRole(message.role);
-    const useMarkdown = message.role === "agent" && !message.modelFallback;
+    const useMarkdown = message.role === "agent" && !message.modelFallback && !message.wakeupNotice;
     const text = message.modelFallback ? fallbackDisplayText(message.modelFallback) : message.text;
     const proseRef = useRef<HTMLDivElement>(null);
     const smooth = useStreamingText(text, useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id && ctx.attachmentImagesActive !== false, ctx.liveTextPresentation);
@@ -134,6 +136,12 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     // this renderer; this guard covers any other dispatch path.
     if (message.resumeBoundary || message.retracted) return null;
     if (message.localNote) return <LocalNoteRow note={message.localNote} />;
+    if (message.wakeupNotice) return (
+      <div data-wakeup-notice role={ctx.isStreaming ? "status" : undefined} className="text-fg3 flex items-start gap-2 py-1 text-sm">
+        <AlarmClock aria-hidden="true" className="text-fg2 mt-0.5 size-4 shrink-0" />
+        <span>{wakeupDisplayText(message.wakeupNotice)}</span>
+      </div>
+    );
 
     return (
       <>

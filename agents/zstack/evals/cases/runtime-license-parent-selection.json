@@ -1,0 +1,9 @@
+{
+  "id": "runtime-license-parent-selection",
+  "kind": "replay",
+  "area": "runtime license packaging",
+  "fixedBy": "pr:717",
+  "symptom": "The runtime radar generated the older cloud worker's macOS Claude license identity instead of the desktop candidate, and check:licenses accepted the same incorrect inventory.",
+  "rule": "Resolve release platform parents from the owning install, independent of workspace inventory order, and refuse a missing exact parent; changes/runtime-license-parent-selection.md.",
+  "check": "pnpm test:git scripts/__tests__/license-platforms.test.ts"
+}

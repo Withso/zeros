@@ -12,7 +12,10 @@ session itself.
    against the frozen base, then apply in scratch and verify every source hash;
    include new-file cases. GNU patch alone does not check Git patch metadata.
 2. **Integrate in a separate worktree,** never the checkout that live operator
-   runs use. Apply with `git apply --index --whitespace=error`.
+   runs use. Apply with `git apply --index --whitespace=error`. When a patch
+   changes `pnpm-lock.yaml`, run `pnpm install --frozen-lockfile` in the
+   integration checkout before verifying: its packages (for example
+   `apps/cloud-worker/node_modules`) otherwise keep the previous versions.
 3. **Review the full diff yourself** (`zstack-review`). For a revised patch you
    already reviewed, review the interdiff (`git range-diff`).
 4. **Commit** with the workspace's own identity. The message gives the why and
@@ -31,6 +34,10 @@ session itself.
    a push with `git ls-remote`, not with a pipeline's exit status.
 7. **Merge** with `pnpm agent:merge <n>`, which arms auto-merge. Only one armed
    PR at a time: queue the rest and arm each one after the previous merges.
+   Apply `ci:*` and `agent-runtime:hold` labels before the final push. A label
+   added later starts a new CI run for the same head and cancels the running
+   one, whose roll-ups then fail with "Invalid … selection/result"; read the
+   newest run instead.
    CI-definition PRs need the owner's merge. Before arming, wait for the PR's
    `CodeQL` alert check (separate from the `codeql` job). It is not required,
    so auto-merge won't wait for it; a new high alert, even in a test, is fixed

@@ -3,6 +3,7 @@ import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import type { SessionUpdate } from "@zeros/protocol/agent-events";
 import { CloudWorker } from "../worker";
 import { SessionStore, type SessionData } from "../sessions/session-store";
 import { CLIENT_A, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
@@ -13,11 +14,11 @@ const defer = <T = void>() => {
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
 };
-const delivery = (id = randomUUID(), chatId = "chat", epoch = "0", sequence = "1") => ({
+const delivery = (id = randomUUID(), chatId = "chat", epoch = "0", sequence = "1", agentId: "codex" | "claude" = "codex") => ({
   receipt: { workspaceId: WORKSPACE_ID, chatId, userMessageId: id, epoch, sequence,
     acceptedAt: new Date(0).toISOString(), workspaceState: "running" as const },
   deliveryId: randomUUID(),
-  payload: { chatId, userMessageId: id, agentId: "codex" as const, model: "gpt-6-luna", effort: "low",
+  payload: { chatId, userMessageId: id, agentId, model: agentId === "claude" ? "claude-opus-4-8" : "gpt-6-luna", effort: "low",
     prompt: [{ type: "text" as const, text: "Reply with exactly: ok" }], startedAt: 1 },
 });
 type Delivery = ReturnType<typeof delivery>;
@@ -53,14 +54,16 @@ class PullRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { relay?: PullRelay; driver?: FakeDriver; createDriver?: () => FakeDriver; directory?: string; enabled?: boolean } = {}) {
+async function setup(options: { relay?: PullRelay; driver?: FakeDriver; createDriver?: () => FakeDriver; directory?: string; enabled?: boolean; agent?: "codex" | "claude" } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), "zeros-outbox-"));
   if (!options.directory) directories.push(directory);
   const relay = options.relay ?? new PullRelay(), driver = options.driver ?? new FakeDriver();
   const worker = new CloudWorker({ directory, transport: relay, workspaceId: WORKSPACE_ID,
-    prepareCheckout: async () => {}, drivers: { codex: options.createDriver ?? (() => driver) } });
+    prepareCheckout: async () => {}, drivers: { [options.agent ?? "codex"]: options.createDriver ?? (() => driver) } });
   workers.push(worker); worker.start();
-  await relay.receive({ ...config, ...(options.enabled === false ? {} : { promptOutbox: 1 }) });
+  await relay.receive({ ...config,
+    ...(options.agent === "claude" ? { agents: { claude: { apiKey: "fixture-claude-token" } } } : {}),
+    ...(options.enabled === false ? {} : { promptOutbox: 1 }) });
   return { worker, relay, driver, directory };
 }
 async function persisted(directory: string) {
@@ -226,6 +229,30 @@ it("keeps provider acceptance separate from the inbox ACK and publishes it once"
   await until(() => relay.calls.filter(call => call.op === "outcome" && call.body.state === "accepted").length).toBe(1);
   f.driver.complete();
   await until(() => relay.calls.filter(call => call.op === "outcome" && call.body.state === "completed").length).toBe(1);
+});
+
+it.each<[string, SessionUpdate]>([
+  ["context snapshot", { sessionUpdate: "usage_update", size: 100, used: 20, categories: [] }],
+  ["wake-up notice", { sessionUpdate: "wakeup_notice", noticeId: "wakeup", source: "loop_wakeup" }],
+])("does not treat a delayed Claude %s as acceptance of the next prompt", async (_kind, update) => {
+  const f = await setup({ agent: "claude" });
+  const first = delivery(randomUUID(), "chat", "0", "1", "claude"), second = delivery(randomUUID(), "chat", "0", "2", "claude");
+  f.relay.enqueue({ prompts: [first, second], stops: [] });
+  await until(() => f.driver.prompts.length).toBe(1);
+  f.driver.complete();
+  await until(() => f.driver.prompts.length).toBe(2);
+  const accept = vi.spyOn(SessionStore.prototype, "acceptOutbox");
+  try {
+    f.driver.emit(update);
+    // Driver event admission is synchronous; observing the spy needs no sleep or
+    // race with the async journal writer. This reply belongs to the prior result.
+    expect(accept).not.toHaveBeenCalled();
+    f.driver.emit({ sessionUpdate: "agent_message_chunk", messageId: "answer", content: { type: "text", text: "ok" } });
+    expect(accept).toHaveBeenCalledWith("chat", `outbox:${second.receipt.userMessageId}`);
+    await until(() => f.relay.calls.some(call => call.op === "outcome" && call.body.userMessageId === second.receipt.userMessageId && call.body.state === "accepted")).toBe(true);
+    f.driver.complete();
+    await until(() => f.relay.calls.some(call => call.op === "outcome" && call.body.userMessageId === second.receipt.userMessageId && call.body.state === "completed")).toBe(true);
+  } finally { accept.mockRestore(); }
 });
 
 it("settles a cold-start failure without a dispatch permit and saves a safe failure notice", async () => {

@@ -247,7 +247,7 @@ export function turnFooterDuration(
   startedAt: number,
 ): number {
   const parentOutput = events.filter(
-    (e) => e.kind === "text" && e.role === "agent" && !e.parentToolId,
+    (e) => e.kind === "text" && e.role === "agent" && !e.parentToolId && !e.wakeupNotice,
   );
   const end = Math.max(
     turn?.endedAt ?? 0,

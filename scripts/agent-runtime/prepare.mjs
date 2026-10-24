@@ -208,6 +208,19 @@ export async function prepareUpdate(
     files,
   };
   validatePatch(patch, task, tree);
+  // Generation and --check can agree on the wrong workspace's native runtime.
+  // Require the candidate's release identity in the exact bytes being proposed.
+  const licenses =
+    files.find((file) => file.path === "THIRD-PARTY-LICENSES.txt")?.after ??
+    readBoundedRegularFile(root, "THIRD-PARTY-LICENSES.txt").toString("utf8");
+  const name = PROVIDERS[task.provider].package;
+  const releasePackage = task.provider === "codex"
+    ? `${name}@${task.version}-darwin-arm64`
+    : `${name}-darwin-arm64@${task.version}`;
+  invariant(
+    licenses.split("\n").includes(releasePackage),
+    "Prepared bundle is missing the candidate's macOS release license inventory.",
+  );
   let changes = [];
   let surfaceStatus = "passed";
   try {

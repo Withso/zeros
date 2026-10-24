@@ -20,6 +20,7 @@ import { Button } from "../shared/ui/primitives/button";
 import { Textarea } from "../shared/ui/primitives/textarea";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { ClaudeBackgroundFixture } from "./claude-background-fixture";
+import { WakeupFixture } from "./wakeup-fixture";
 import { SubagentPresentationFixture } from "./subagent-presentation-fixture";
 import { StreamingTextFixture } from "./streaming-text-fixture";
 import { ToolPresentationFixture } from "./tool-presentation-fixture";
@@ -279,6 +280,7 @@ function Harness() {
         <AgentNoticeFixture ctx={ctx} />
         <TurnFailureFixture ctx={ctx} />
         <ClaudeBackgroundFixture ctx={ctx} />
+        <WakeupFixture ctx={ctx} />
         <ToolPresentationFixture ctx={ctx} />
         <ToolWaitFixture ctx={ctx} />
         <ArtifactLinksFixture ctx={ctx} />

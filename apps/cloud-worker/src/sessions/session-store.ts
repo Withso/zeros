@@ -275,7 +275,7 @@ export class SessionStore {
       const first = session.messages[index];
       if (first?.kind !== "text" || !first.text.trim()) return [];
       const answered = session.messages.slice(index + 1).some(message => message.kind === "tool" ||
-        (message.kind === "text" && message.role === "agent" && message.modelFallback == null && !!message.text.trim())) ||
+        (message.kind === "text" && message.role === "agent" && message.modelFallback == null && message.wakeupNotice == null && !!message.text.trim())) ||
         session.inbox.some(entry => entry.userMessageId === first.id && ["completed", "failed", "cancelled", "interrupted"].includes(entry.state));
       // The renderer's title request keeps the first 400 and last 100 Unicode
       // characters. Bound the wire payload to that same input, without secrets

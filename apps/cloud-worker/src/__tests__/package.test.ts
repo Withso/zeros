@@ -41,7 +41,7 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
   expect((await lstat(dist)).isSymbolicLink()).toBe(true); expect(await realpath(dist)).toBe(runtime);
   const manifest = JSON.parse(await readFile(join(dist, "runtime-manifest.json"), "utf8"));
   expect(manifest).toMatchObject({ node: "24", platform: process.platform, arch: process.arch,
-    pins: { "@openai/codex": "0.162.1", "@anthropic-ai/claude-agent-sdk": "0.3.296", "@cursor/sdk": "1.0.37", "node-pty": "1.1.0" } });
+    pins: { "@openai/codex": "0.162.1", "@anthropic-ai/claude-agent-sdk": "0.3.309", "@cursor/sdk": "1.0.37", "node-pty": "1.1.0" } });
   const files: string[] = [];
   async function walk(relative = ""): Promise<void> {
     for (const entry of await readdir(join(dist, relative), { withFileTypes: true })) {
@@ -82,8 +82,8 @@ it("loads pinned binaries and SDKs through the runtime symlink without the check
     const claude = createRequire(claudeSdk).resolve('@anthropic-ai/claude-agent-sdk-' + process.platform + '-' + process.arch + '/claude');
     for (const path of [codex, claude, require.resolve('@cursor/sdk')]) assert(realpathSync(path).startsWith(root + '/node_modules/'));
     assert.equal(require(codexManifest).version, '0.162.1');
-    assert.equal(require(join(dirname(claudeSdk), 'package.json')).version, '0.3.296');
-    assert.equal(require(join(dirname(claude), 'package.json')).version, '0.3.296');
+    assert.equal(require(join(dirname(claudeSdk), 'package.json')).version, '0.3.309');
+    assert.equal(require(join(dirname(claude), 'package.json')).version, '0.3.309');
     assert.match(execFileSync(process.execPath, [codex, '--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }), /0\\.162\\.1/);
     assert.match(execFileSync(claude, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }), /Claude Code/);
     const pty = require('node-pty').spawn('/bin/sh', ['-c', 'printf WORKER_NATIVE_OK'], {cwd:process.cwd(),env:{PATH:'/usr/bin:/bin'}});
