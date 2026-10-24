@@ -35,18 +35,38 @@ describe("cloud v2 Boat compute", () => {
 
   it("returns from a snapshot save only once Boat can deploy it", async () => {
     const boat = client();
-    boat.request.mockRejectedValueOnce({ httpStatus: 404 }).mockResolvedValueOnce({ snapshot: { status: "saving" } })
+    boat.request.mockResolvedValueOnce({ snapshot: { status: "saving" } })
       .mockResolvedValueOnce({ snapshot: { status: "saving" } })
       .mockResolvedValueOnce({ snapshot: { status: "ready" } });
     await new BoatCloudV2Compute(boat, "default", async () => {}).saveSnapshot("bx_abc12345", "zeros-alpha-org-v1");
-    expect(boat.request).toHaveBeenNthCalledWith(2, "/named-snapshots", expect.objectContaining({ method: "POST", body: { sandboxId: "bx_abc12345", name: "zeros-alpha-org-v1" } }));
-    expect(boat.request).toHaveBeenNthCalledWith(4, "/named-snapshots/zeros-alpha-org-v1", { method: "GET" });
+    expect(boat.request).toHaveBeenNthCalledWith(1, "/named-snapshots", expect.objectContaining({ method: "POST", body: { sandboxId: "bx_abc12345", name: "zeros-alpha-org-v1" } }));
+    expect(boat.request).toHaveBeenNthCalledWith(3, "/named-snapshots/zeros-alpha-org-v1", { method: "GET" });
+  });
+
+  it.each([undefined, { resume: false }])("never treats a stale build snapshot as a new save without explicit resume (%j)", async options => {
+    const boat = client();
+    boat.request.mockImplementation(async (_path, input) => {
+      if (input.method === "POST") throw Object.assign(new Error("name already exists"), { code: "snapshot_name_exists", httpStatus: 409 });
+      return { snapshot: { status: "ready" } };
+    });
+    await expect(new BoatCloudV2Compute(boat).saveSnapshot("bx_newbuild", "zeros-alpha-org-v1", options))
+      .rejects.toMatchObject({ code: "snapshot_name_exists" });
+    expect(boat.request).toHaveBeenCalledExactlyOnceWith("/named-snapshots", { method: "POST", body: { sandboxId: "bx_newbuild", name: "zeros-alpha-org-v1" } });
   });
 
   it("recovers a saved snapshot after a lost reply without depending on the stopped source disk", async () => {
     const boat = client(); boat.request.mockResolvedValue({ snapshot: { status: "ready" } });
-    await new BoatCloudV2Compute(boat).saveSnapshot("bx_expired", "zeros-alpha-retained");
+    await new BoatCloudV2Compute(boat).saveSnapshot("bx_expired", "zeros-alpha-retained", { resume: true });
     expect(boat.request).toHaveBeenCalledExactlyOnceWith("/named-snapshots/zeros-alpha-retained", { method: "GET" });
+  });
+
+  it.each(["missing", "saving"])("resumes only the admitted retention save when its named result is %s", async state => {
+    const boat = client();
+    if (state === "missing") boat.request.mockRejectedValueOnce({ httpStatus: 404 }).mockResolvedValueOnce({ snapshot: { status: "saving" } });
+    else boat.request.mockResolvedValueOnce({ snapshot: { status: "saving" } });
+    boat.request.mockResolvedValueOnce({ snapshot: { status: "ready" } });
+    await new BoatCloudV2Compute(boat, "default", async () => {}).saveSnapshot("bx_stopped", "zeros-alpha-retained", { resume: true });
+    expect(boat.request.mock.calls.map(([, input]) => input.method)).toEqual(state === "missing" ? ["GET", "POST", "GET"] : ["GET", "GET"]);
   });
 
   it("reports a failed save", async () => {

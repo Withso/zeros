@@ -28,8 +28,9 @@ export interface CloudV2Compute {
   exec(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
   /** Runs past the per-command limit: starts a detached job, then polls it. */
   execLong(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
-  /** Saves the sandbox's disk under a name and returns once it can deploy. */
-  saveSnapshot(sandboxId: string, name: string): Promise<void>;
+  /** Saves the disk and waits until it can deploy. Resume only a previously
+   * admitted save with the same identity, never a new build reusing a name. */
+  saveSnapshot(sandboxId: string, name: string, options?: { resume?: boolean }): Promise<void>;
   deleteSnapshot(name: string): Promise<void>;
   hostPort(sandboxId: string, input: { port: number; localhost: true; title: string }): Promise<{ url: string; token: string }>;
 }
@@ -145,18 +146,21 @@ export class BoatCloudV2Compute implements CloudV2Compute {
   }
 
   /** Boat answers the save at once and finishes it in the background. */
-  async saveSnapshot(sandboxId: string, name: string): Promise<void> {
+  async saveSnapshot(sandboxId: string, name: string, options: { resume?: boolean } = {}): Promise<void> {
     if (!SNAPSHOT_NAME.test(name)) throw new Error("Invalid Boat snapshot name");
     const id = this.id(sandboxId);
     let saving = false;
-    try {
-      const { status } = NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot;
-      if (status === "ready") return;
-      if (status === "failed") await this.deleteSnapshot(name);
-      else saving = true;
-    } catch (error) { if (!notFound(error)) throw error; }
-    // A retry after a lost save reply must observe the named result before
-    // touching the source disk, which Boat may since have expired.
+    if (options.resume) {
+      // Retention retries observe the admitted result before touching a disk
+      // that Boat may since have expired. Build names can be reused after a
+      // database reset, so ordinary saves must always submit the current disk.
+      try {
+        const { status } = NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot;
+        if (status === "ready") return;
+        if (status === "failed") await this.deleteSnapshot(name);
+        else saving = true;
+      } catch (error) { if (!notFound(error)) throw error; }
+    }
     if (!saving) await this.client.request("/named-snapshots", { method: "POST", body: { sandboxId: id, name } });
     for (const deadline = Date.now() + SNAPSHOT_SAVE_MS; Date.now() < deadline;) {
       const { status } = NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot;

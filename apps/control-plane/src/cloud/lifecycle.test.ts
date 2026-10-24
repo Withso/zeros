@@ -82,7 +82,7 @@ describe("cloud v2 lifecycle", () => {
     vi.mocked(f.compute.saveSnapshot).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
     try {
       await f.lifecycle.tick();
-      await vi.waitFor(() => expect(f.compute.saveSnapshot).toHaveBeenCalledWith("bx_stopped", "zeros-alpha-ret-6f2b7c1e"));
+      await vi.waitFor(() => expect(f.compute.saveSnapshot).toHaveBeenCalledWith("bx_stopped", "zeros-alpha-ret-6f2b7c1e", { resume: true }));
       expect(f.store.beginRetention).toHaveBeenCalledWith(stopped, "zeros-alpha-ret-6f2b7c1e");
       expect(f.store.beginRetention).toHaveBeenCalledBefore(f.compute.saveSnapshot);
       vi.mocked(f.store.claimPending).mockResolvedValueOnce([workspace("creating")]);
@@ -108,7 +108,7 @@ describe("cloud v2 lifecycle", () => {
       await f.lifecycle.tick(); expect(f.compute.saveSnapshot).toHaveBeenCalledTimes(1);
       now += 60_001; await f.lifecycle.tick();
       await vi.waitFor(() => expect(f.store.finishRetention).toHaveBeenCalledTimes(1));
-      expect(f.compute.saveSnapshot).toHaveBeenLastCalledWith("bx_stopped", stopped.retentionSnapshot);
+      expect(f.compute.saveSnapshot).toHaveBeenLastCalledWith("bx_stopped", stopped.retentionSnapshot, { resume: true });
     } finally { await stop(); }
   });
 
@@ -146,7 +146,7 @@ describe("cloud v2 lifecycle", () => {
     const f = setup([retained]);
     vi.mocked(f.compute.resume).mockRejectedValueOnce(new BoatSnapshotExpiredError());
     await f.lifecycle.tick();
-    expect(f.compute.saveSnapshot).toHaveBeenCalledWith("bx_expired", "zeros-alpha-retained");
+    expect(f.compute.saveSnapshot).toHaveBeenCalledWith("bx_expired", "zeros-alpha-retained", { resume: true });
     expect(f.store.finishRetention).toHaveBeenCalledBefore(f.compute.create);
     expect(f.compute.hostPort).toHaveBeenCalledWith("bx_new1", expect.anything());
     expect(f.store.transition).not.toHaveBeenCalled();

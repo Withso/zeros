@@ -204,7 +204,7 @@ export class CloudV2Lifecycle {
     const name = workspace.retentionSnapshot ?? this.deps.retentionName(workspace);
     if (!await store.beginRetention(workspace, name)) return;
     try {
-      await compute.saveSnapshot(workspace.boatSandboxId, name);
+      await compute.saveSnapshot(workspace.boatSandboxId, name, { resume: true });
       await store.finishRetention(workspace.id, workspace.boatSandboxId, name);
     } catch (error) {
       await store.deferRetention(workspace.id, name);
@@ -289,7 +289,7 @@ export class CloudV2Lifecycle {
               // was lost. saveSnapshot observes the named result first; a lost
               // source cannot start another real save alongside the background job.
               if (!await store.beginRetention(workspace, workspace.retentionSnapshot)) return;
-              await compute.saveSnapshot(sandboxId, workspace.retentionSnapshot);
+              await compute.saveSnapshot(sandboxId, workspace.retentionSnapshot, { resume: true });
               await store.finishRetention(workspace.id, sandboxId, workspace.retentionSnapshot);
               retained = { ...workspace, retentionSavedAt: new Date(this.deps.now?.() ?? Date.now()).toISOString() };
             }
