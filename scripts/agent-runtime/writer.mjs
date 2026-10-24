@@ -6,7 +6,13 @@ import {
   REPOSITORY,
 } from "./config.mjs";
 import { invariant, sha, validateTask } from "./contracts.mjs";
-import { held, labelsOf, ownedProposal, proposalMarker } from "./proposals.mjs";
+import {
+  appCommit,
+  held,
+  labelsOf,
+  ownedProposal,
+  proposalMarker,
+} from "./proposals.mjs";
 import {
   gitBlob,
   validateLockChange,
@@ -106,9 +112,7 @@ export async function writeProposal({ github, task, patch, appSlug }) {
     const previous = await github.get(`/git/commits/${existingRef.object.sha}`);
     const signed = await github.get(`/commits/${existingRef.object.sha}`);
     invariant(
-      signed.committer?.type === "Bot" &&
-        signed.committer.login === `${appSlug}[bot]` &&
-        signed.commit?.verification?.verified === true &&
+      appCommit(signed, appSlug) &&
         previous.message.includes(
           `Zeros-Runtime-Task: ${task.recoveryTaskId ?? task.id}`,
         ) &&

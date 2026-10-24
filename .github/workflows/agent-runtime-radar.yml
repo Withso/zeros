@@ -36,7 +36,9 @@ jobs:
       contents: read
       actions: read
       issues: write
-      pull-requests: read
+      # publish() refreshes the report comment on each App PR; GITHUB_TOKEN
+      # cannot comment on a pull request with issues: write alone.
+      pull-requests: write
     outputs:
       tasks: ${{ steps.scan.outputs.tasks }}
       has-tasks: ${{ steps.scan.outputs.has-tasks }}
@@ -138,7 +140,9 @@ jobs:
       actions: read
     strategy:
       fail-fast: false
-      max-parallel: 3
+      # Writers share one App installation and GitHub's content-creation limit;
+      # a parallel Codex write of ~100 objects starved the Claude writer.
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.scan.outputs.tasks) }}
     steps:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -197,7 +201,9 @@ jobs:
       contents: read
       actions: read
       issues: write
-      pull-requests: read
+      # publish() refreshes the report comment on each App PR; GITHUB_TOKEN
+      # cannot comment on a pull request with issues: write alone.
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

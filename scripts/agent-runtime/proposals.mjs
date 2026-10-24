@@ -33,6 +33,21 @@ export function held(pr) {
   );
 }
 
+/** GitHub signs commits an App creates through the API: the App is the author
+ * and GitHub's web-flow account the committer. A push keeps its own committer,
+ * and a web-UI edit keeps its human author, so neither can pass as the App. */
+export function appCommit(commit, appSlug) {
+  const app = `${appSlug}[bot]`;
+  return (
+    commit?.author?.type === "Bot" &&
+    commit.author.login === app &&
+    commit.commit?.verification?.verified === true &&
+    ((commit.committer?.type === "User" &&
+      commit.committer.login === "web-flow") ||
+      (commit.committer?.type === "Bot" && commit.committer.login === app))
+  );
+}
+
 export function ownedProposal(pr, provider, appSlug) {
   return (
     pr?.head?.repo?.full_name?.toLowerCase() === REPOSITORY.toLowerCase() &&

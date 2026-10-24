@@ -20,6 +20,7 @@ function fixture() {
   let remote = "a".repeat(40);
   let labels: any[] = [];
   let race = false;
+  let recovered: { git: any; signed: any } | null = null;
   const calls: any[] = [];
   const taskBase = {
     schema: 1,
@@ -85,7 +86,13 @@ function fixture() {
       if (path.startsWith("/git/trees/"))
         return { sha: "e".repeat(40), tree, truncated: false };
       if (path.startsWith("/git/ref/")) return { object: { sha: remote } };
+      if (recovered && path.startsWith("/git/commits/")) return recovered.git;
+      if (recovered && path.startsWith("/commits/")) return recovered.signed;
       throw new Error(`unexpected ${path}`);
+    },
+    async pages(path: string) {
+      calls.push({ method: "GET", path });
+      return [];
     },
     async file(path: string) {
       return contents[path];
@@ -95,6 +102,8 @@ function fixture() {
       if (path === "/git/blobs") return { sha: gitBlob(body.content) };
       if (path === "/git/trees") return { sha: "f".repeat(40) };
       if (path === "/git/commits") return { sha: "1".repeat(40) };
+      if (path === "/pulls") return { number: 42 };
+      if (path === "/issues/42/labels") return [];
       throw new Error(`unexpected ${path}`);
     },
     async patch(path: string, body: any) {
@@ -141,6 +150,9 @@ function fixture() {
     move: () => {
       remote = "9".repeat(40);
     },
+    recover: (evidence: { git: any; signed: any }) => {
+      recovered = evidence;
+    },
   };
 }
 function regeneration() {
@@ -160,6 +172,67 @@ function regeneration() {
     patch: { ...f.patch, taskId: task.id, version: task.version, files: [] },
   };
 }
+
+describe("interrupted first write recovery", () => {
+  function interrupted() {
+    const f = fixture();
+    const { id: _id, ...base } = f.task;
+    const identity = { ...base, pr: null, lastBotCommit: null };
+    const task = { ...identity, id: hash(identity) };
+    const sha = f.remote();
+    const git = {
+      sha,
+      message: `Update Codex runtime to 1.1.0\n\nZeros-Runtime-Task: ${task.id}\nZeros-Runtime-Provider: codex`,
+      parents: [{ sha: task.head }],
+    };
+    // The shape GitHub returned for the App's hosted commit on #714.
+    const signed = {
+      sha,
+      author: { type: "Bot", login: "runtime-updater[bot]" },
+      committer: { type: "User", login: "web-flow" },
+      commit: {
+        message: git.message,
+        verification: { verified: true, reason: "valid" },
+      },
+    };
+    return { ...f, task, patch: { ...f.patch, taskId: task.id }, git, signed };
+  }
+  it("reuses the GitHub-signed App commit left by an interrupted first run", async () => {
+    const f = interrupted();
+    f.recover({ git: f.git, signed: f.signed });
+    const result = await writeProposal({ ...f, appSlug: "runtime-updater" });
+    expect(result).toMatchObject({
+      status: "written",
+      pr: 42,
+      head: f.git.sha,
+    });
+    expect(f.calls.some((call) => call.path === "/git/commits")).toBe(false);
+    expect(f.calls.some((call) => call.path === "/pulls")).toBe(true);
+  });
+  it("refuses a recovered branch commit that GitHub did not sign for the App", async () => {
+    for (const signed of [
+      (f: any) => ({
+        ...f.signed,
+        author: { type: "User", login: "maintainer" },
+      }),
+      (f: any) => ({
+        ...f.signed,
+        committer: { type: "User", login: "maintainer" },
+      }),
+      (f: any) => ({
+        ...f.signed,
+        commit: { ...f.signed.commit, verification: { verified: false } },
+      }),
+    ]) {
+      const f = interrupted();
+      f.recover({ git: f.git, signed: signed(f) });
+      await expect(
+        writeProposal({ ...f, appSlug: "runtime-updater" }),
+      ).rejects.toThrow("manual reconciliation");
+      expect(f.calls.some((call) => call.method === "POST")).toBe(false);
+    }
+  });
+});
 
 describe("trusted runtime branch writer", () => {
   it("appends to the human head, updates the same PR and never force-pushes", async () => {
