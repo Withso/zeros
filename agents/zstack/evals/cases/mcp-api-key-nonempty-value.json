@@ -2,7 +2,7 @@
   "id": "mcp-api-key-nonempty-value",
   "kind": "replay",
   "area": "renderer-settings",
-  "fixedBy": "ca19141bedf216f6d8d8a590dc5452662ad6dd79",
+  "fixedBy": "pr:723",
   "symptom": "An API-key header with a name but no new value was accepted for persistence, leaving an unusable server configuration.",
   "rule": "changes/mcp-connection-recovery.md: validate new API-key values before either Local or organization persistence while retaining masked stored values.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-form-save.test.ts"

@@ -2,7 +2,7 @@
   "id": "mcp-cloud-connection-owner-replacement",
   "kind": "replay",
   "area": "renderer-settings",
-  "fixedBy": "ca19141bedf216f6d8d8a590dc5452662ad6dd79",
+  "fixedBy": "pr:723",
   "symptom": "A delayed probe, authorization-start or authorization-status response could be accepted after an account A to B to A replacement.",
   "rule": "changes/mcp-connection-recovery.md: recheck the account generation after each account-bound await before publishing a result or opening authorization.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-cloud-api.test.ts"
