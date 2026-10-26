@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { withWorkspaceGitMutation } from "../mutation-lock";
+import { withWorkspaceGitMutation, withWorkspaceMutation } from "../mutation-lock";
 
 function deferred() {
   let resolve!: () => void;
@@ -15,6 +15,96 @@ function deferred() {
 }
 
 describe("workspace Git mutation lane", () => {
+  it("rejects an already cancelled admission without running its mutation", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const mutation = vi.fn(async () => undefined);
+    await expect(withWorkspaceMutation("/workspace/cancelled", mutation, {
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect(mutation).not.toHaveBeenCalled();
+  });
+
+  it("cancels a queued admission while preserving the active owner's lane", async () => {
+    const entered = deferred();
+    const release = deferred();
+    const first = withWorkspaceGitMutation("/workspace/cancel-queued", async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    const controller = new AbortController();
+    const observed = vi.spyOn(controller.signal, "addEventListener");
+    const cancelledMutation = vi.fn(async () => undefined);
+    let cancelled = false;
+    const waiting = withWorkspaceMutation("/workspace/cancel-queued", cancelledMutation, {
+      signal: controller.signal,
+    }).then(() => undefined, (error: unknown) => { cancelled = true; return error; });
+    let successor: Promise<unknown> | undefined;
+    try {
+      // Admission must actually be queued before cancellation, rather than
+      // merely cancelled during path resolution.
+      await vi.waitFor(() => expect(observed).toHaveBeenCalled());
+      controller.abort();
+      await vi.waitFor(() => expect(cancelled).toBe(true));
+      expect(await waiting).toMatchObject({ name: "AbortError" });
+      expect(cancelledMutation).not.toHaveBeenCalled();
+
+      const successorController = new AbortController();
+      const successorObserved = vi.spyOn(successorController.signal, "addEventListener");
+      const successorMutation = vi.fn(async () => undefined);
+      successor = withWorkspaceMutation("/workspace/cancel-queued", successorMutation, {
+        signal: successorController.signal,
+      });
+      await vi.waitFor(() => expect(successorObserved).toHaveBeenCalled());
+      expect(successorMutation).not.toHaveBeenCalled();
+      release.resolve();
+      await Promise.all([first, successor]);
+      expect(successorMutation).toHaveBeenCalledOnce();
+    } finally {
+      release.resolve();
+      await Promise.all([first, waiting, successor]);
+      observed.mockRestore();
+    }
+    expect(cancelledMutation).not.toHaveBeenCalled();
+  });
+
+  it("joins an admitted mutation after its admission signal is cancelled", async () => {
+    const entered = deferred();
+    const release = deferred();
+    const controller = new AbortController();
+    const mutation = withWorkspaceMutation("/workspace/cancel-active", async () => {
+      entered.resolve();
+      await release.promise;
+      return "completed";
+    }, { signal: controller.signal });
+    await entered.promise;
+    controller.abort();
+    release.resolve();
+    await expect(mutation).resolves.toBe("completed");
+  });
+
+  it("never enters a mutation with an aborted signal at the admission handoff", async () => {
+    const controller = new AbortController();
+    const remove = controller.signal.removeEventListener.bind(controller.signal);
+    const handoff = vi.spyOn(controller.signal, "removeEventListener").mockImplementation((...args) => {
+      remove(...args);
+      controller.abort();
+    });
+    try {
+      const outcome = await withWorkspaceMutation("/workspace/cancel-handoff", async () =>
+        controller.signal.aborted ? "entered-aborted" : "entered-active",
+      { signal: controller.signal }).catch((error: unknown) => {
+        expect(error).toMatchObject({ name: "AbortError" });
+        return "cancelled";
+      });
+      expect(controller.signal.aborted).toBe(true);
+      expect(["entered-active", "cancelled"]).toContain(outcome);
+    } finally {
+      handoff.mockRestore();
+    }
+  });
+
   it("runs same-worktree index and history mutations in submission order", async () => {
     const firstEntered = deferred();
     const releaseFirst = deferred();

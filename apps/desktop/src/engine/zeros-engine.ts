@@ -293,6 +293,7 @@ import {
   WINDOW_MAX_ROWS,
 } from "./db/messages";
 import { BootPhaseTimer } from "./boot-phase-timer";
+import { startStartupMaintenance } from "./startup-maintenance";
 import {
   startTurn as startTurnRow,
   finishTurn as finishTurnRow,
@@ -1106,6 +1107,7 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
+  private startupMaintenance?: ReturnType<typeof startStartupMaintenance>;
   constructor(options?: EngineOptions) {
     this.root = options?.root
       ? path.resolve(options.root)
@@ -2743,24 +2745,17 @@ export class ZerosEngine {
     }
     bootPhases.mark("seed");
 
-    // Mode/legacy-permission reconcile. First complete any mode transition a crash
-    // interrupted (the durable marker knows the intended direction). Then two
-    // routine invariants, per live stable owner, before any agent can spawn:
-    //
-    //   1. Every checkout sheds the process-independent ACLs installed by
-    //      historical builds. The current boundary is scoped to Zeros actors,
-    //      so external editors and coding platforms retain ordinary access.
-    //   2. The one-time cleanup is durable and idempotent. A cleanup failure is
-    //      logged and retried next boot, but is not an agent-admission gate.
+    // Complete interrupted view transitions before serving workspace rows.
+    // Historical filesystem ACL cleanup is optional maintenance after readiness;
+    // it is neither agent admission nor part of the current process boundary.
     try {
       const { listWorkspaces, getWorkspaceLifecycle } =
         await import("./git/state");
       const { reconcileDesignModeTransition } =
         await import("./git/design-mode");
-      const { cleanupLegacyDesignFilesystemGuards } =
-        await import("./design/workspace-lock");
       for (const workspace of listWorkspaces()) {
         if (
+          workspace.placement === "cloud" ||
           workspace.archivedAt != null ||
           getWorkspaceLifecycle(workspace.id) ||
           !fs.existsSync(workspace.path)
@@ -2774,17 +2769,6 @@ export class ZerosEngine {
             }`,
           );
         });
-        // Re-read: the transition reconcile may have flipped the row.
-        const settled = getWorkspaceById(workspace.id) ?? workspace;
-        await cleanupLegacyDesignFilesystemGuards(settled.path).catch(
-          (error) => {
-            console.warn(
-              `[Zeros] couldn't remove historical Design ACLs for ${workspace.id}; cleanup will retry next boot: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          },
-        );
       }
     } catch {
       /* best-effort — failures are logged per workspace above */
@@ -2852,21 +2836,6 @@ export class ZerosEngine {
       /* best-effort — never block startup on seed migration */
     }
     bootPhases.mark("seed-migration");
-
-    // 1b.3. Repin surviving recovery snapshots without pruning shared archive
-    // refs, then clean up stale branch-ownership proofs. Runs after seedFromDisk
-    // so this instance's workspace rows and lifecycle journals are available.
-    try {
-      const {
-        pruneOrphanArchiveSnapshots,
-        pruneOrphanWorkspaceBranchOwnershipRefs,
-      } = await import("./git/worktree");
-      await pruneOrphanArchiveSnapshots();
-      await pruneOrphanWorkspaceBranchOwnershipRefs();
-    } catch {
-      /* best-effort — never block startup on retention */
-    }
-    bootPhases.mark("archive-refs");
 
     // 1b.5. One-time cleanup of phantom worktree "projects" in the repos table:
     // a stale renderer regex (pre Phase-0 relocation) upserted worktrees under
@@ -3079,6 +3048,40 @@ export class ZerosEngine {
     );
     const slowBootPhases = bootPhases.slowPhases();
     if (slowBootPhases) console.log(`[Zeros] slow boot phases: ${slowBootPhases}`);
+
+    // Recovery above owns readiness. Retention scans scale with every saved
+    // repository and must not hold chat/history/Git reads behind old archives.
+    this.startupMaintenance = startStartupMaintenance([
+      { name: "archive-refs", run: async (signal) => {
+        const { pruneOrphanArchiveSnapshots } = await import("./git/worktree");
+        await pruneOrphanArchiveSnapshots({ signal });
+      } },
+      { name: "branch-refs", run: async (signal) => {
+        const { pruneOrphanWorkspaceBranchOwnershipRefs } = await import("./git/worktree");
+        await pruneOrphanWorkspaceBranchOwnershipRefs({ signal });
+      } },
+      { name: "design-acls", run: async (signal) => {
+        const { cleanupLegacyDesignFilesystemGuards } = await import("./design/workspace-lock");
+        const { withWorkspaceMutation } = await import("./git/mutation-lock");
+        for (const workspace of listWorkspaces()) {
+          if (signal.aborted) break;
+          if (workspace.placement === "cloud" || workspace.archivedAt != null) continue;
+          // Archive/delete/move share this lane. Recheck after admission so a
+          // queued cleanup cannot walk a retired or replacement checkout.
+          await withWorkspaceMutation(workspace.path, async () => {
+            if (signal.aborted) return;
+            const current = getWorkspaceById(workspace.id);
+            if (!current || current.path !== workspace.path || current.placement === "cloud" ||
+                current.archivedAt != null || getWorkspaceLifecycleStatus(current.id).operation != null ||
+                !fs.existsSync(current.path)) return;
+            await cleanupLegacyDesignFilesystemGuards(current.path).catch(() => {
+              console.warn("[Zeros] historical Design ACL cleanup deferred until next launch");
+            });
+          }, { signal });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      } },
+    ]);
   }
 
   /** Stop the engine gracefully. */
@@ -3101,6 +3104,10 @@ export class ZerosEngine {
       return;
     }
     this.running = false;
+    const maintenance = this.startupMaintenance;
+    this.startupMaintenance = undefined;
+    // Abort immediately, then join before the engine releases its resources.
+    const maintenanceStopped = maintenance?.stop();
     if (this.localOrchestration) {
       this.localOrchestration.registry.clear();
       await settle(() => this.localOrchestration?.server.stop());
@@ -3171,6 +3178,9 @@ export class ZerosEngine {
     this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
     if (watchHost) await settle(() => watchHost.dispose());
+    // A janitor may be queued behind a tool's workspace mutation. Retire those
+    // owners first; joining the janitor before disposing them can deadlock Stop.
+    if (maintenanceStopped) await settle(() => maintenanceStopped);
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
       await settle(() => transport.stop());

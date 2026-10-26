@@ -101,10 +101,6 @@ const server = await createServer({
         if (id.endsWith("/workbench/tabs/changes-surface.tsx"))
           return code
             .replace(
-              "function ChangesSurface({",
-              "export function ChangesSurface({",
-            )
-            .replace(
               "const model = useChangesModel({",
               "const model = window.__changesLayoutModel({",
             );

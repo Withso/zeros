@@ -8,8 +8,8 @@
 // Design mode permits native file authoring; cloud execution policy is separate.
 // New builds never install a checkout ACL for either mode.
 //
-// Boot owns the cold, durable ACL migration so admission and canvas writes do
-// not walk the tree.
+// Startup maintenance owns the cold, durable ACL migration so engine readiness,
+// admission and canvas writes do not walk the tree.
 // ──────────────────────────────────────────────────────────
 
 import { existsSync } from "node:fs";
@@ -94,7 +94,7 @@ async function releaseKnownDesignDirectoryAcls(
 
 /** One-time, durable migration for ACLs installed by earlier builds. It is
  * deliberately outside agent admission and Design document writes: cleanup
- * can be retried at boot, but it is not part of the containment proof or a hot
+ * can be retried after boot, but it is not part of the containment proof or a hot
  * interaction path. */
 export async function cleanupLegacyDesignFilesystemGuards(
   workspacePath: string,
