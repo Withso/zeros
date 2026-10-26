@@ -20,20 +20,3 @@
       var(--ease-out);
   }
 }
-
-.conversation-summary-expansion {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows var(--default-transition-duration)
-    var(--default-transition-timing-function);
-}
-
-.conversation-summary-expansion[data-expanded="true"] {
-  grid-template-rows: 1fr;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .conversation-summary-expansion {
-    transition: none;
-  }
-}

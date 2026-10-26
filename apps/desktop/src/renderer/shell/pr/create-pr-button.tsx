@@ -87,6 +87,7 @@ interface CreatePrButtonProps {
   /** Tooltip shown on the main segment while `disabled` explains why. */
   disabledReason?: string;
   appearance?: "secondary" | "primary";
+  size?: "default" | "compact";
   /** A retained Summary must close its portalled menu when hidden. */
   active?: boolean;
 }
@@ -99,6 +100,7 @@ export function CreatePrButton({
   disabled,
   disabledReason,
   appearance = "secondary",
+  size = "default",
   active = true,
 }: CreatePrButtonProps) {
   const sendToChat = useSendToActiveChat(workspace.path, chatId);
@@ -107,7 +109,7 @@ export function CreatePrButton({
   const busy = claimed?.kind === "create-pr";
   const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => { if (!active) setMenuOpen(false); }, [active]);
-  const classes = splitTriggerClasses(appearance);
+  const classes = splitTriggerClasses(appearance, size);
   // The repo's configured push/PR remote — the brief must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
