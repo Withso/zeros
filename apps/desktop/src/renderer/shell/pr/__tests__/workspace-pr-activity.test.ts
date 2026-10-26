@@ -77,6 +77,132 @@ describe("Local workspace PR discovery activity", () => {
     expect(fixture.probe).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("coalesces refreshes during a pending probe into one fresh successor", async () => {
+    let finish!: (value: null) => void;
+    fixture.probe.mockImplementationOnce(() => new Promise(done => { finish = done; }));
+    Fixture();
+    for (let index = 0; index < 3; index++) {
+      unmount(); fixture.refreshKey++; Fixture();
+    }
+    expect(fixture.probe).toHaveBeenCalledOnce();
+    finish(null); await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not confirm an invalidated absence before its successor finishes", async () => {
+    const { workspacePrDiscoverySnapshot } = await import("../workspace-pr-discovery-state");
+    const finishes: Array<(value: null) => void> = [];
+    fixture.probe.mockImplementation(() => new Promise(done => { finishes.push(done); }));
+    Fixture(); unmount(); fixture.refreshKey++; Fixture();
+    finishes[0](null); await vi.advanceTimersByTimeAsync(0);
+    expect(workspacePrDiscoverySnapshot("local-a")).toEqual({ pending: true, checked: false, error: null });
+    finishes[1](null); await vi.advanceTimersByTimeAsync(0);
+    expect(workspacePrDiscoverySnapshot("local-a")).toEqual({ pending: false, checked: true, error: null });
+  });
+
+  it("defers the pending successor while hidden and catches up on a quick reveal", async () => {
+    let finish!: (value: null) => void;
+    fixture.probe.mockImplementationOnce(() => new Promise(done => { finish = done; }));
+    Fixture(); unmount(); fixture.refreshKey++; Fixture();
+    focused = false; window.dispatchEvent(new Event("blur"));
+    finish(null); await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledOnce();
+    focused = true; window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps failures distinct from an empty successful observation and recovers on refresh", async () => {
+    const { workspacePrDiscoverySnapshot } = await import("../workspace-pr-discovery-state");
+    const error = new Error("GitHub is temporarily unavailable");
+    fixture.probe.mockRejectedValueOnce(error);
+    Fixture(); await vi.advanceTimersByTimeAsync(0);
+    expect(workspacePrDiscoverySnapshot("local-a")).toMatchObject({ pending: false, checked: false, error });
+    expect(workspacePrDiscoverySnapshot("local-b").error).toBeNull();
+    unmount(); fixture.refreshKey++; Fixture(); await vi.advanceTimersByTimeAsync(0);
+    expect(workspacePrDiscoverySnapshot("local-a")).toEqual({ pending: false, checked: true, error: null });
+  });
+
+  it("rechecks after returning from GitHub during a pending lookup without a Git refresh", async () => {
+    let finish!: (value: null) => void;
+    fixture.probe.mockImplementationOnce(() => new Promise(done => { finish = done; }));
+    Fixture();
+    focused = false; window.dispatchEvent(new Event("blur"));
+    await vi.advanceTimersByTimeAsync(3_000);
+    focused = true; window.dispatchEvent(new Event("focus")); page.dispatchEvent(new Event("visibilitychange"));
+    expect(fixture.probe).toHaveBeenCalledOnce();
+    finish(null); await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it("awaits one fresh manual retry when the previous lookup is still pending", async () => {
+    const { retryWorkspacePrDiscovery } = await import("../use-workspace-pr-sync");
+    const finishes: Array<(value: null) => void> = [];
+    fixture.probe.mockImplementation(() => new Promise(done => { finishes.push(done); }));
+    Fixture();
+    let retried = false;
+    const retry = retryWorkspacePrDiscovery("local-a").then(() => { retried = true; });
+    finishes[0](null); await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledTimes(2);
+    expect(retried).toBe(false);
+    finishes[1](null); await retry;
+    expect(retried).toBe(true);
+  });
+
+  it("retires loading snapshots when pending observations are evicted", async () => {
+    const { workspacePrDiscoverySnapshot } = await import("../workspace-pr-discovery-state");
+    const finishes: Array<(value: null) => void> = [];
+    fixture.probe.mockImplementation(() => new Promise(done => { finishes.push(done); }));
+    for (let index = 0; index < 140; index++) {
+      Fixture(`/workspace-${index}`, `workspace-${index}`); unmount();
+    }
+    for (const finish of finishes) finish(null);
+    await vi.advanceTimersByTimeAsync(0);
+    for (let index = 0; index < 140; index++) expect(workspacePrDiscoverySnapshot(`workspace-${index}`).pending).toBe(false);
+    expect(workspacePrDiscoverySnapshot("workspace-0")).toBe(workspacePrDiscoverySnapshot("never-visited"));
+  });
+
+  it("shares manual retries across multiple mounted consumers of one workspace", async () => {
+    const { retryWorkspacePrDiscovery } = await import("../use-workspace-pr-sync");
+    const finishes: Array<(value: null) => void> = [];
+    fixture.probe.mockImplementation(() => new Promise(done => { finishes.push(done); }));
+    Fixture(); Fixture();
+    const retry = retryWorkspacePrDiscovery("local-a");
+    finishes[0](null); await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledTimes(2);
+    finishes[1](null); await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledTimes(2);
+    await retry;
+  });
+
+  it("does not republish discovery or notify a deleted workspace", async () => {
+    const { forgetPrCachesForWorkspace } = await import("../pr-cache-forget");
+    const { workspacePrDiscoverySnapshot } = await import("../workspace-pr-discovery-state");
+    let finish!: (value: { number: number }) => void;
+    fixture.probe.mockImplementationOnce(() => new Promise(done => { finish = done; }));
+    Fixture(); unmount(); forgetPrCachesForWorkspace("local-a");
+    finish({ number: 12 }); await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.changed).not.toHaveBeenCalled();
+    expect(workspacePrDiscoverySnapshot("local-a")).toBe(workspacePrDiscoverySnapshot("never-visited"));
+  });
+
+  it("restores exact-key discovery across Local, organization and cloud navigation", async () => {
+    const { workspacePrDiscoverySnapshot } = await import("../workspace-pr-discovery-state");
+    const error = new Error("GitHub unavailable for A");
+    fixture.probe.mockRejectedValueOnce(error);
+    Fixture(); await vi.advanceTimersByTimeAsync(0); unmount();
+    const retained = workspacePrDiscoverySnapshot("local-a");
+    Fixture("/organization/project", "local-b"); await vi.advanceTimersByTimeAsync(0); unmount();
+    const cloud = "cloud://organization/workspace";
+    Fixture(cloud, cloud); await vi.advanceTimersByTimeAsync(0); unmount();
+    Fixture(); await vi.advanceTimersByTimeAsync(0);
+    expect(workspacePrDiscoverySnapshot("local-a")).toBe(retained);
+    expect(retained.error).toBe(error);
+    expect(workspacePrDiscoverySnapshot("local-b")).toEqual({ pending: false, checked: true, error: null });
+    expect(workspacePrDiscoverySnapshot(cloud)).toEqual({ pending: false, checked: true, error: null });
+    expect(fixture.probe.mock.calls).toEqual([["local-a"], ["local-b"], [cloud]]);
+  });
+
   it.each(["hidden", "blurred"])("does no cloud discovery or timer work while %s", async mode => {
     if (mode === "hidden") page.visibilityState = "hidden";
     else focused = false;

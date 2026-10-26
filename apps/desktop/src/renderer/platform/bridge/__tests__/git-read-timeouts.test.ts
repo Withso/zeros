@@ -7,11 +7,13 @@ import {
   bridgeGitDiff,
   bridgeGitShow,
   bridgeGitLog,
+  bridgeGhPrSync,
   workspaceOp,
 } from "../workspace-bridge";
 import type { RuntimeClient } from "../ws-client";
 
 const reads = [
+  ["gh.prSync", (bridge: RuntimeClient) => bridgeGhPrSync(bridge, "ws-a")],
   ["git.status", (bridge: RuntimeClient) => bridgeGitStatus(bridge, "ws-a")],
   [
     "git.changeCounts",
@@ -64,7 +66,7 @@ function slowBridge(delayMs: number) {
 
 afterEach(() => vi.useRealTimers());
 
-describe("Changes Git read budgets", () => {
+describe("Git and GitHub observation budgets", () => {
   it.each(reads)(
     "keeps a slow %s pending through the old 10s cutoff",
     async (_op, read) => {

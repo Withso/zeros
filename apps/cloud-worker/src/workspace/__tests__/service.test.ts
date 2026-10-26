@@ -5,6 +5,7 @@ import type { BridgeMessage } from "@zeros/protocol/messages";
 import { WorkspaceService } from "../service";
 import { repositoryFixture } from "./repository-fixture";
 import { DEFERRED_GIT_OPS } from "../git";
+import { commandRunner } from "../commands";
 
 const services: WorkspaceService[] = [];
 const noPr = async () => ({ prNumber: null, prState: null, prUrl: null });
@@ -25,6 +26,28 @@ it("returns one native workspace row with live HEAD and cached branch PR metadat
   expect(await service.handle("workspace.get", {})).toMatchObject({ branch: "workspace/other" });
   expect(calls).toEqual(["workspace/fixture", "workspace/other"]);
   await expect(service.handle("workspace.get", { workspaceId: "foreign" })).rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" });
+});
+
+it("keeps cloud discovery on an unqualified branch when gh resolves a transferred repository", async () => {
+  const { scope, state, root, git } = await repositoryFixture();
+  await git("remote", "add", "origin", "https://github.com/fixture/repo.git");
+  const run = commandRunner(root), lookups: string[][] = [];
+  const service = await WorkspaceService.open(scope, state, {
+    watch: false,
+    run: async (program, args, options) => {
+      if (program !== "gh") return run(program, args, options);
+      lookups.push(args);
+      return { code: 0, stdout: JSON.stringify({ number: 12, state: "OPEN", isDraft: false, url: "https://github.com/new-owner/repo/pull/12" }) };
+    },
+  });
+  services.push(service);
+
+  expect(await service.handle("workspace.get", {})).toMatchObject({
+    placement: "cloud", branch: "workspace/fixture", prNumber: 12, prState: "ready", prUrl: "https://github.com/new-owner/repo/pull/12",
+  });
+  expect(lookups).toEqual([["pr", "view", "workspace/fixture", "--repo", "fixture/repo", "--json", "number,state,url,isDraft"]]);
+  expect(await git("remote", "get-url", "origin")).toBe("https://github.com/fixture/repo.git");
+  await expect(service.handle("gh.prSync", {})).rejects.toMatchObject({ code: "CLOUD_V2_UNSUPPORTED" });
 });
 
 it("persists target metadata across restart and identical replacement config", async () => {
