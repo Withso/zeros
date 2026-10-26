@@ -1427,74 +1427,102 @@ export async function createPr(
  *  would otherwise never learn its prNumber (→ the island stays hidden) or that
  *  the PR merged (→ the workspace would sit in "in-review" forever).
  *
- *  Queries `state: "all"` so it catches both a live PR (→ "in-review") and a
- *  merged PR (→ "done", the external-merge path). Lifecycle moves go through
+ *  Finds open PRs before historical ones and reconciles a recorded PR by its
+ *  number. Lifecycle moves go through
  *  advanceLifecycle, so a manually-cancelled / archived row is never disturbed.
  *
  *  Idempotent + best-effort: returns the PR when one is found (stamping the row
  *  only if something changed, to avoid needless DB_CHANGED churn), else null.
- *  Never throws for the ordinary "no origin / not authenticated / no PR yet"
- *  cases — the caller reads null as "no PR". */
+ *  A missing GitHub remote or matching PR returns null. Authentication and API
+ *  failures reject: an unavailable observation cannot prove that no PR exists. */
 export async function syncWorkspacePr(workspaceId: string): Promise<PR | null> {
   const ws = getWorkspace(workspaceId);
-  let owner: string;
-  let repo: string;
+  let remote: Awaited<ReturnType<typeof workspaceRemote>>;
   try {
-    ({ owner, repo } = await workspaceRemote(workspaceId));
+    remote = await workspaceRemote(workspaceId);
   } catch {
     return null; // no GitHub origin → nothing to sync
   }
-  let rows;
-  try {
-    rows = await withAuthRetry((oct) =>
+  let { owner, repo } = remote;
+  const readDetail = (number: number) => withAuthRetry(
+    (oct) => oct.pulls.get({ owner, repo, pull_number: number }),
+    ["pulls.get", owner, repo, number],
+  );
+  let parsed: PR;
+  if (ws.prNumber != null) {
+    // A PR number is scoped to its repository. Preserve the recorded URL's
+    // repository if Git remotes change; GitHub still follows its redirects.
+    // Legacy rows without a URL fall back to the configured remote.
+    if (ws.prUrl) {
+      const recorded = /^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/pull\/([1-9][0-9]*)\/?$/i.exec(ws.prUrl);
+      if (!recorded || Number(recorded[3]) !== ws.prNumber) {
+        throw new GitError({ code: "VALIDATION_FAILED", message: "The recorded pull request URL does not match its number." });
+      }
+      ({ owner, repo } = parseGitHubRemote(`https://github.com/${recorded[1]}/${recorded[2]}`));
+    }
+    // Retain adopted fork PRs and closed PRs with a deleted head repository.
+    // A newer PR on this branch cannot replace it; Continue clears the link.
+    parsed = octoPrToPr((await readDetail(ws.prNumber)).data);
+  } else {
+    // GitHub redirects an old repository URL after a transfer/rename, but the
+    // `head=owner:branch` query survives that redirect verbatim. Resolve the
+    // canonical owner before building it or a valid PR looks absent forever.
+    // Share only concurrent reads so a later transfer is visible on refresh.
+    const repository = await withAuthRetry(
+      (oct) => oct.repos.get({ owner, repo }),
+      ["repos.get", owner, repo],
+    );
+    owner = repository.data.owner.login;
+    repo = repository.data.name;
+    const repositoryId = repository.data.id;
+    const list = (state: "open" | "all") => withAuthRetry((oct) =>
       oct.pulls.list({
         owner,
         repo,
-        state: "all", // include merged/closed so an external merge → "done"
+        state,
         head: `${owner}:${ws.branch}`,
         per_page: 10,
       }),
-      ["pulls.list", owner, repo, "all", `${owner}:${ws.branch}`, 10],
+      ["pulls.list", owner, repo, state, `${owner}:${ws.branch}`, 10],
     );
-  } catch {
-    return null; // not authenticated / network / API error → stay quiet
-  }
-  // Server-side `head` filter should already scope to this branch, but it can be
-  // silently ignored/misapplied — so require an exact `head.ref` match and bail
-  // otherwise. (A fallback to rows.data[0] here would stamp an UNRELATED PR onto
-  // this workspace whenever the filter misfires — the exact case this re-check
-  // guards against.) Prefer a still-open PR; otherwise take the newest match
-  // (pulls.list is created-desc), which is the relevant merged/closed one.
-  const matches = rows.data.filter((p) => p.head?.ref === ws.branch);
-  if (matches.length === 0) return null; // no PR for THIS branch
-  const chosen = matches.find((p) => p.state === "open") ?? matches[0];
-
-  // List rows may omit merged_at, so for a CLOSED row fetch PR detail to tell a
-  // merge from a plain close (one extra call, only when a closed PR is found).
-  let parsed: PR;
-  if (chosen.state === "open") {
-    parsed = octoPrToPr({
-      ...chosen,
-      merged_at: null,
-      mergeable: null,
-      mergeable_state: undefined,
-    });
-  } else {
-    try {
-      const detail = await withAuthRetry((oct) =>
-        oct.pulls.get({ owner, repo, pull_number: chosen.number }),
-        ["pulls.get", owner, repo, chosen.number],
-      );
-      parsed = octoPrToPr(detail.data);
-    } catch {
+    // A fork can carry the same branch name. Validate the stable repository
+    // identity even if GitHub ignores the head filter. Open-first discovery
+    // prevents newer closed PRs from pushing a live PR beyond the first page.
+    const matches = (rows: Awaited<ReturnType<typeof list>>) => rows.data.filter(
+      (p) => p.head?.ref === ws.branch && p.head.repo?.id === repositoryId,
+    );
+    const open = matches(await list("open")).find((p) => p.state === "open");
+    const chosen = open ?? matches(await list("all"))[0];
+    if (!chosen) return null;
+    if (chosen.state === "open") {
       parsed = octoPrToPr({
-        ...chosen,
-        merged_at: null,
-        mergeable: null,
-        mergeable_state: undefined,
+        ...chosen, merged_at: null, mergeable: null, mergeable_state: undefined,
       });
+    } else {
+      // Do not invent "closed" when detail is unavailable: this may be merged.
+      parsed = octoPrToPr((await readDetail(chosen.number)).data);
     }
   }
+
+  // Async GitHub reads can outlive a remote edit, Continue, owner reassignment
+  // or deletion. Recheck the configured target, then the captured row without
+  // yielding again before durable publication.
+  let currentRemote;
+  try { currentRemote = await workspaceRemote(workspaceId); } catch { return null; }
+  if (
+    currentRemote.remote !== remote.remote ||
+    currentRemote.owner.toLowerCase() !== remote.owner.toLowerCase() ||
+    currentRemote.repo.toLowerCase() !== remote.repo.toLowerCase()
+  ) return null;
+  let current;
+  try { current = getWorkspace(workspaceId); } catch { return null; }
+  if (
+    current.branch !== ws.branch || current.path !== ws.path ||
+    current.repoRoot !== ws.repoRoot || current.organizationId !== ws.organizationId ||
+    current.placement !== ws.placement || current.archivedAt !== ws.archivedAt ||
+    current.prNumber !== ws.prNumber || current.prState !== ws.prState ||
+    current.prUrl !== ws.prUrl
+  ) return null;
 
   // A closed-unmerged PR is historical, not an active review. When the workspace
   // has no recorded PR yet, do not backfill it: doing so hides the Create PR

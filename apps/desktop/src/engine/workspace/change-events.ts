@@ -189,6 +189,9 @@ export const LONG_LIFECYCLE_OPS = new Set([
   "gh.prCreate",
   "gh.prMarkReady",
   "gh.prMerge",
+  // Discovery also persists PR metadata. A late response must still refresh
+  // the requesting window after its finite bridge deadline has expired.
+  "gh.prSync",
 ]);
 
 /** Should the DB_CHANGED broadcast reach the client that CAUSED it?

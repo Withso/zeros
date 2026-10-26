@@ -21,6 +21,7 @@ import {
   bridgeGhBranchList,
   bridgeGhPrMarkReady,
   bridgeGhPrMerge,
+  bridgeGhPrSync,
   bridgeWorkspaceArchive,
   bridgeWorkspaceAdoptExisting,
   bridgeWorkspaceCreateFromBranch,
@@ -778,6 +779,10 @@ describe("git/gh write timeouts", () => {
           prNumber: 7,
           method: "squash",
         }),
+    ],
+    [
+      "gh.prSync",
+      (b: RuntimeClient) => bridgeGhPrSync(b, "ws1"),
     ],
   ] as const)("network-bound %s gets the 60s budget", async (op, run) => {
     const seen: { timeoutMs?: number } = {};

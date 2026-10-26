@@ -116,7 +116,7 @@ const GIT_OP_ANALYTICS: Record<
 };
 
 /** Budget for NETWORK-BOUND git/GitHub writes (push / pull / fetch / rebase,
- *  PR create / mark-ready / merge). The 10s `workspaceOp` default is tuned for
+ *  PR create / mark-ready / merge / discovery). The 10s `workspaceOp` default is tuned for
  *  local DB reads; a slow remote or the GitHub merge API routinely exceeds it,
  *  so "Merge PR" used to reject with "Request timeout" → "Couldn't merge PR"
  *  even though GitHub completed the merge. If the op outlives even this budget
@@ -1591,7 +1591,12 @@ export async function bridgeGhPrSync(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<PR | null> {
-  return (await workspaceOp(bridge, "gh.prSync", { workspaceId })) as PR | null;
+  return (await workspaceOp(
+    bridge,
+    "gh.prSync",
+    { workspaceId },
+    NETWORK_GIT_TIMEOUT_MS,
+  )) as PR | null;
 }
 
 export async function bridgeGhPrChecks(
