@@ -43,7 +43,7 @@ vi.mock("../../../shared/ui/primitives/dropdown-menu", () => {
 import { CreatePrButton } from "../create-pr-button";
 
 const workspace = (id: string): Workspace => ({ id, path: id, repoRoot: id, repoSlug: "fixture/repo", branch: "feature", baseBranch: "main" } as Workspace);
-const render = (id: string) => renderToStaticMarkup(React.createElement(CreatePrButton, { workspace: workspace(id), originUrl: "https://github.com/fixture/repo.git" }));
+const render = (id: string, originUrl: string | null = "https://github.com/fixture/repo.git") => renderToStaticMarkup(React.createElement(CreatePrButton, { workspace: workspace(id), originUrl }));
 beforeEach(() => {
   vi.clearAllMocks(); fixture.menu.clear();
   fixture.claim.mockImplementation(id => ({ id }));
@@ -53,6 +53,15 @@ beforeEach(() => {
   fixture.commit.mockResolvedValue({ sha: "fixture-sha", branch: "feature" });
   fixture.log.mockResolvedValue([{ message: "Update source" }]);
   fixture.create.mockResolvedValue({ number: 42 });
+});
+
+it.each([null, "", " ", "https://gitlab.com/fixture/repo.git"])("offers no PR entry point without a GitHub remote (%s)", originUrl => {
+  for (const id of ["personal-local", "organization-local", "cloud://organization/workspace"]) {
+    expect(render(id, originUrl)).toBe("");
+    expect(fixture.menu.size).toBe(0);
+  }
+  expect(fixture.access).not.toHaveBeenCalled();
+  expect(fixture.send).not.toHaveBeenCalled();
 });
 
 it.each([

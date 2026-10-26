@@ -11,6 +11,7 @@ import { Button, Tooltip } from "../../shared/ui/primitives";
 import { toast } from "../../shared/ui/primitives/elements";
 import { ZerosSpinner } from "../../shared/ui/loading";
 import { useGitRemote } from "../../features/settings/use-git-remote";
+import { useRepositoryRemote } from "../../features/repositories/use-repository-remote";
 import { notifyWorkspacesChanged } from "../../state/use-projects";
 import { CreatePrButton } from "../pr/create-pr-button";
 import { isGithubDotComRemote } from "../pr/github-url";
@@ -65,6 +66,7 @@ export function SummaryGitStatus({
   const sendToChat = useSendToActiveChat(workspace.path);
   const showPr = useShowReviewTab();
   const remote = useGitRemote(workspace.repoRoot);
+  const { remoteUrl } = useRepositoryRemote(workspace.repoRoot, originUrl, active && nativeReady);
   const facts = git.data;
   const rows = summaryGitRows({
     facts,
@@ -182,11 +184,11 @@ export function SummaryGitStatus({
         Git status
       </div>
       {workspace.prNumber == null &&
-        (!originUrl || isGithubDotComRemote(originUrl)) && (
+        isGithubDotComRemote(remoteUrl) && (
           <div className="px-1.5 py-1">
             <CreatePrButton
               workspace={workspace}
-              originUrl={originUrl}
+              originUrl={remoteUrl}
               appearance="primary"
               size="compact"
               active={active && nativeReady}

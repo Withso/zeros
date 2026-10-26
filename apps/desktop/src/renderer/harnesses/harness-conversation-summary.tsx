@@ -19,7 +19,8 @@ import {
   OPEN_OVERLAY_SELECTOR,
   shouldReclaimComposerFocus,
 } from "../features/agent/composer-focus";
-import { upsertProject } from "../state/projects-store";
+import { loadProjects, upsertProject } from "../state/projects-store";
+import { invalidateCreateSourceCaches } from "../state/read-caches";
 import { selectWorkbench, useWorkspaceStore } from "../state/workspace-store";
 import { useChatPanesStore } from "../state/chat-panes-store";
 import { DEFAULT_PANE_LAYOUT, splitLeaf } from "../state/chat-panes";
@@ -35,6 +36,7 @@ const repoA = "/summary-fixture/a";
 const repoB = "/summary-fixture/b";
 const folderA = `${repoA}/worktree`;
 const folderB = `${repoB}/worktree`;
+let alternateRemote: string | null = null;
 // This fixture exercises every destination, including GitHub Review. Plain
 // folder and local-only Review absence live in harness-folder-workspace.
 upsertProject({
@@ -182,6 +184,23 @@ RuntimeClient.prototype.request = async function <
       sources: {},
       warnings: [],
     };
+  if (message.op === "git.repoBranchCatalog") {
+    const project = loadProjects().find(project => project.repoRoot === params.repoRoot);
+    const custom = params.repoRoot === repoA ? alternateRemote : null;
+    const url = custom ?? project?.originUrl ?? null;
+    const name = custom ? "upstream" : "origin";
+    result = {
+      remotes: url ? [{ name, url, isGitHub: url.includes("github.com") }] : [],
+      effectiveRemote: name,
+      remoteExists: !!url,
+      baseExplicit: false,
+      effectiveBase: "main",
+      detectedDefault: url ? "main" : null,
+      listedRemote: url ? name : null,
+      branchSource: url ? "remote" : "local",
+      branches: [{ name: "main", lastCommitDate: 1 }],
+    };
+  }
   if (message.op === "context.graph.list") {
     const names =
       workspaceFolder === folderB ? ["Workspace B notes.md"] : contextItems;
@@ -258,6 +277,10 @@ useWorkspaceStore.setState({
 Object.assign(window, {
   __summaryHarness: {
     messages,
+    setAlternateRemote: (url: string | null) => {
+      alternateRemote = url;
+      invalidateCreateSourceCaches(false);
+    },
     overlayIntent: () => overlayIntents.at(-1) ?? false,
     state: () => selectWorkbench(useWorkspaceStore.getState()),
     setGit: (status: Partial<StatusResult>, counts: Partial<ChangeCounts> = {}) => {

@@ -38,8 +38,9 @@ import {
 } from "../../platform/git";
 import { shellOpenUrl } from "../../platform/app";
 import { buildPrInstructions, prBubbleDisplayText } from "./pr-instructions";
-import { githubCompareUrl, parseRemote } from "./github-url";
+import { githubCompareUrl, isGithubDotComRemote, parseRemote } from "./github-url";
 import { useGitRemote } from "../../features/settings/use-git-remote";
+import { useRepositoryRemote } from "../../features/repositories/use-repository-remote";
 import { useSendToActiveChat } from "./use-send-to-active-chat";
 import {
   AGENT_WORKING_REASON,
@@ -92,7 +93,12 @@ interface CreatePrButtonProps {
   active?: boolean;
 }
 
-export function CreatePrButton({
+export function CreatePrButton(props: CreatePrButtonProps) {
+  const { remoteUrl } = useRepositoryRemote(props.workspace.repoRoot, props.originUrl, props.active);
+  return isGithubDotComRemote(remoteUrl) ? <GithubCreatePrButton {...props} originUrl={remoteUrl} /> : null;
+}
+
+function GithubCreatePrButton({
   workspace,
   chatId,
   onMenuOpenChange,

@@ -30,6 +30,7 @@ import { useWorkspaceHasChanges } from "./use-workspace-has-changes";
 import { isGithubDotComRemote } from "./github-url";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
+import { useRepositoryRemote } from "../../features/repositories/use-repository-remote";
 
 export function PrStatusRow({
   workspace,
@@ -50,6 +51,7 @@ export function PrStatusRow({
   const hasChanges = useWorkspaceHasChanges(prWorkspace, active) ?? false;
   // Cloud v2 serves no GitHub PR operations yet; the target branch still works.
   const cloud = isCloudWorkspace(prWorkspace?.path) || isCloudWorkspace(prWorkspace?.id);
+  const { remoteUrl } = useRepositoryRemote(prWorkspace?.repoRoot, originUrl, active && !cloud);
 
   if (prWorkspace && cloud) {
     return (
@@ -81,15 +83,12 @@ export function PrStatusRow({
           {/* Left: pick the base branch (remote-only). Right: Create PR. */}
           <TargetBranchButton workspace={prWorkspace} disabled={!nativeReady} />
           <div className="flex-1" />
-          {/* `originUrl` is only the project row's boot cache and is legitimately
-              blank for folders registered without one (bind-folder, quick start,
-              pre-backfill rows). Hide the button only when we positively know the
-              remote is a non-GitHub host; the engine re-resolves the real remote
-              per op, so a blank cache must not remove PR creation. */}
-          {nativeReady && (!originUrl || isGithubDotComRemote(originUrl)) && (
+          {/* Project capability refresh discovers added/removed remotes. A
+              missing remote must not advertise a GitHub-only action. */}
+          {nativeReady && isGithubDotComRemote(remoteUrl) && (
             <CreatePrButton
               workspace={prWorkspace}
-              originUrl={originUrl}
+              originUrl={remoteUrl}
               disabled={!hasChanges}
               disabledReason="Nothing to PR yet — this branch has no changes"
             />
