@@ -25,6 +25,10 @@ interface PageInfo {
   hasNextPage: boolean;
   endCursor: string | null;
 }
+
+const ANNOTATION_READ_CONCURRENCY = 3;
+const ANNOTATION_READ_ERROR =
+  "Some check annotations could not be loaded. Refresh to try again.";
 interface ThreadNode {
   id: string;
   path: string;
@@ -287,23 +291,39 @@ export function createGithubInlineReviewService(deps: Dependencies) {
         (run) => run.output.annotations_count > 0,
       );
       if (annotatedRuns.length > 20) snapshot.annotationsTruncated = true;
+      const runsToRead = annotatedRuns.slice(0, 20);
+      const readAnnotations = async (runId: number, page: number) => {
+        try {
+          return await deps.withAuth((oct) => oct.checks.listAnnotations({
+            ...repository, check_run_id: runId, per_page: 100, page,
+          }));
+        } catch {
+          return null;
+        }
+      };
+      // Most checks fit in one page. Overlap only a small first-page window;
+      // consume in GitHub's order and paginate the current run on demand. This
+      // preserves the shared count/byte bounds without buffering whole reviews.
+      const firstPages = new Map<number, ReturnType<typeof readAnnotations>>();
+      runsToRead.slice(0, ANNOTATION_READ_CONCURRENCY).forEach((run, index) => {
+        firstPages.set(index, readAnnotations(run.id, 1));
+      });
       let annotationBytes = 0;
       let annotationBudgetFull = false;
-      for (const run of annotatedRuns.slice(0, 20)) {
+      for (const [runIndex, run] of runsToRead.entries()) {
+        const firstPage = firstPages.get(runIndex);
+        firstPages.delete(runIndex);
         let count = 0;
         for (
           let page = 1;
           page <= 10 && snapshot.annotations.length < 1000;
           page++
         ) {
-          const annotations = await deps.withAuth((oct) =>
-            oct.checks.listAnnotations({
-              ...repository,
-              check_run_id: run.id,
-              per_page: 100,
-              page,
-            }),
-          );
+          const annotations = await (page === 1 ? firstPage : readAnnotations(run.id, page));
+          if (!annotations) {
+            snapshot.annotationError = ANNOTATION_READ_ERROR;
+            break;
+          }
           for (const [index, annotation] of annotations.data.entries()) {
             if (snapshot.annotations.length >= 1000) {
               snapshot.annotationsTruncated = true;
@@ -351,12 +371,16 @@ export function createGithubInlineReviewService(deps: Dependencies) {
           snapshot.annotationsTruncated = true;
           break;
         }
+        const nextIndex = runIndex + ANNOTATION_READ_CONCURRENCY;
+        const next = runsToRead[nextIndex];
+        if (next && snapshot.annotations.length < 1000) {
+          firstPages.set(nextIndex, readAnnotations(next.id, 1));
+        }
       }
     } catch {
       // Preserve partial findings and discussions. Do not turn a denied Checks
       // permission or a network failure into a claim of zero findings.
-      snapshot.annotationError =
-        "Some check annotations could not be loaded. Refresh to try again.";
+      snapshot.annotationError = ANNOTATION_READ_ERROR;
     }
     return snapshot;
   }

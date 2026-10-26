@@ -740,6 +740,16 @@ Escape, native overlay intent cleanup and reduced motion.
 - Empty-chat transcript row: shared Local folder list, persisted paint and pending prompts in `apps/desktop/src/renderer/features/agent/use-chat-transcript-summaries.ts`; the grace in `agent-chat.tsx`.
 - Long-turn opening prompt: `windowChatMessagesPage` in `apps/desktop/src/engine/db/messages.ts` and `apps/desktop/src/renderer/features/agent/transcript-leading-prompt.ts`.
 - Engine start attribution: `apps/desktop/src/engine/boot-phase-timer.ts` names slow phases on the "Engine ready" line.
+- Engine readiness follows mandatory process/lifecycle recovery and history
+  migration. Archive-ref retention and historical Design ACL cleanup run after
+  readiness through `engine/startup-maintenance.ts`, one task at a time. Stop
+  aborts and joins this queue; maintenance rechecks Local workspace ownership
+  after I/O and never treats another instance's missing row as deletion proof.
+  Queued ACL cleanup cancels admission on Stop while preserving the active
+  mutation owner's lock; already admitted cleanup still joins.
+- PR review annotation reads overlap at most three independent first pages,
+  then consume them in check order under the shared count and byte limits.
+  Pagination stays on demand, and a failed check retains the other findings.
 - Local streaming transcript writes: "Streaming write coalescing" in `apps/desktop/src/engine/db/messages.ts` buffers each streamed row for 150 ms (newest version wins); every read, write or delete of that chat's rows drains it first, prompts stay write-through, and cloud workers keep write-through persistence.
 
 ## Review checklist

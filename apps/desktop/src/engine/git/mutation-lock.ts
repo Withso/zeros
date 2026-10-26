@@ -70,7 +70,9 @@ async function repositoryMutationKey(
 async function withMutationKey<T>(
   key: string,
   run: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
+  signal?.throwIfAborted();
   const inherited = workspaceMutationAdmissions.getStore();
   if (inherited?.get(key)?.active) return run();
 
@@ -81,16 +83,41 @@ async function withMutationKey<T>(
   });
   const queued = previous.then(() => turn);
   mutationFlights.set(key, queued);
-  await previous;
-  const admission: WorkspaceMutationAdmission = { active: true };
+  const admission: WorkspaceMutationAdmission = { active: false };
   const admissions = new Map(inherited);
   admissions.set(key, admission);
   try {
+    if (signal) await waitForMutationAdmission(previous, signal);
+    else await previous;
+    signal?.throwIfAborted();
+    admission.active = true;
     return await workspaceMutationAdmissions.run(admissions, run);
   } finally {
     admission.active = false;
     release();
-    if (mutationFlights.get(key) === queued) mutationFlights.delete(key);
+    // A cancelled waiter must keep forwarding the previous owner's gate.
+    // Deleting it before that owner exits would let a successor bypass it.
+    void queued.then(() => {
+      if (mutationFlights.get(key) === queued) mutationFlights.delete(key);
+    });
+  }
+}
+
+async function waitForMutationAdmission(
+  previous: Promise<void>,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    await Promise.race([previous, cancelled]);
+    signal.throwIfAborted();
+  } finally {
+    signal.removeEventListener("abort", abort);
   }
 }
 
@@ -101,13 +128,17 @@ async function withMutationKey<T>(
  *
  * The active bit matters for detached async work: AsyncLocalStorage context can
  * outlive the callback that created it, but an operation spawned and forgotten
- * must not retain authority after its admitted parent has released the lane. */
+ * must not retain authority after its admitted parent has released the lane.
+ * An optional signal cancels queued admission; an admitted mutation is always
+ * joined and owns cancellation of its own work. */
 export async function withWorkspaceMutation<T>(
   workspacePath: string,
   run: () => Promise<T>,
+  options: { signal?: AbortSignal } = {},
 ): Promise<T> {
+  options.signal?.throwIfAborted();
   const key = await workspaceMutationKey(workspacePath);
-  return withMutationKey(key, run);
+  return withMutationKey(key, run, options.signal);
 }
 
 /** Git-facing name retained at call sites to make the mutation authority

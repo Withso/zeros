@@ -1,0 +1,9 @@
+{
+  "id": "startup-maintenance-readiness",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pr:731",
+  "symptom": "Optional archive and legacy ACL maintenance blocked the Local engine from serving history and Git reads, while stale maintenance scans could race lifecycle changes or touch another owner.",
+  "rule": "Keep optional maintenance outside readiness, cancel queued admission while preserving active mutation ownership, join admitted work at shutdown, and recheck Local ownership and lifecycle state after I/O; zstack changes/startup-maintenance-readiness.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/engine-startup.test.ts apps/desktop/src/engine/git/__tests__/archive-snapshot-pins.test.ts apps/desktop/src/engine/git/__tests__/mutation-lock.test.ts"
+}

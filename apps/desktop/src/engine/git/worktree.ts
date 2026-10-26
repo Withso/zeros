@@ -2062,11 +2062,13 @@ export async function reconcileInterruptedWorkspaceLifecycles(
  * Repin surviving objects from our durable records, without replacing an
  * existing ref (which may belong to an in-flight archive). Explicit deletion
  * owns removal. The legacy return value counts removals and is always zero. */
-export async function pruneOrphanArchiveSnapshots(): Promise<number> {
+export async function pruneOrphanArchiveSnapshots(
+  options: { signal?: AbortSignal } = {},
+): Promise<number> {
   let workspaces: Workspace[];
   let lifecycles: WorkspaceLifecycleJournal[];
   try {
-    workspaces = listWorkspacesFromDb();
+    workspaces = listWorkspacesFromDb().filter((workspace) => workspace.placement !== "cloud");
     lifecycles = listWorkspaceLifecycles();
   } catch {
     return 0;
@@ -2074,8 +2076,8 @@ export async function pruneOrphanArchiveSnapshots(): Promise<number> {
   const pending = new Map(
     lifecycles.map((entry) => [entry.workspaceId, entry]),
   );
-  // Every workspace ever archived keeps its snapshot, and this runs before the
-  // engine is ready: list each repository's pins once instead of starting one
+  // Every workspace ever archived keeps its snapshot: list each repository's
+  // pins once instead of starting one
   // Git process per saved snapshot. An unreadable repository retries next boot.
   const pins = new Map<string, Set<string> | null>();
   const savedIn = workspaces.filter(
@@ -2083,12 +2085,13 @@ export async function pruneOrphanArchiveSnapshots(): Promise<number> {
       pending.get(workspace.id)?.archiveSnapshot ?? workspace.archiveSnapshot,
   );
   for (const repoRoot of new Set(savedIn.map((ws) => ws.repoRoot))) {
+    if (options.signal?.aborted) return 0;
     pins.set(
       repoRoot,
       await runGit(
         repoRoot,
         ["for-each-ref", "--format=%(refname)", "refs/zeros/archive/"],
-        { readOnly: true },
+        { readOnly: true, timeoutMs: 10_000, signal: options.signal },
       ).then(
         ({ stdout }) =>
           new Set(
@@ -2102,24 +2105,27 @@ export async function pruneOrphanArchiveSnapshots(): Promise<number> {
     );
   }
   for (const workspace of workspaces) {
+    if (options.signal?.aborted) break;
     if (
       workspaceLifecycleFlights.has(workspace.id) ||
       snapshotMaintenance.has(workspace.id)
     )
       continue;
-    const journal = pending.get(workspace.id);
+    // A user can restore/discard/delete while the repository listing awaits
+    // disk. Re-read the durable owner before acquiring its maintenance flight.
+    const current = getWorkspaceById(workspace.id);
+    if (!current || current.placement === "cloud" || current.repoRoot !== workspace.repoRoot) continue;
+    const journal = getWorkspaceLifecycle(workspace.id);
     if (journal?.operation === "delete") continue;
-    const snapshot = journal?.archiveSnapshot ?? workspace.archiveSnapshot;
+    const snapshot = journal?.archiveSnapshot ?? current.archiveSnapshot;
     if (!snapshot) continue;
     const pinned = pins.get(workspace.repoRoot);
     if (!pinned || pinned.has(archiveSnapshotRef(workspace.id))) continue;
-    // compare-and-create: an existing pin always wins over a stale DB read.
+    // Compare-and-create: an existing pin wins. Never follow a symbolic ref
+    // into a user branch, including a dangling ref omitted by the listing.
     const pin = runGit(workspace.repoRoot, [
-      "update-ref",
-      archiveSnapshotRef(workspace.id),
-      snapshot,
-      "",
-    ])
+      "update-ref", "--no-deref", archiveSnapshotRef(workspace.id), snapshot, "",
+    ], { timeoutMs: 10_000, signal: options.signal })
       .then(
         () => {},
         () => {},
@@ -2133,65 +2139,51 @@ export async function pruneOrphanArchiveSnapshots(): Promise<number> {
   return 0;
 }
 
-/** Drop stale branch-ownership proofs left by a crash after the workspace row
- * was published but before best-effort marker cleanup. A marker is retained
- * only while the matching lifecycle journal still exists; without that intent
- * it has no rollback authority and merely pins a commit. */
-export async function pruneOrphanWorkspaceBranchOwnershipRefs(): Promise<number> {
+/** Drop stale branch-ownership proofs for this instance's Local workspaces.
+ * Shared repositories may contain another instance's in-progress proofs: an
+ * absent row is never permission to remove one. */
+export async function pruneOrphanWorkspaceBranchOwnershipRefs(
+  options: { signal?: AbortSignal } = {},
+): Promise<number> {
   let workspaces: Workspace[];
-  let lifecycles: WorkspaceLifecycleJournal[];
   try {
-    workspaces = listWorkspacesFromDb();
-    lifecycles = listWorkspaceLifecycles();
+    workspaces = listWorkspacesFromDb().filter((workspace) => workspace.placement !== "cloud");
   } catch {
     return 0;
   }
-  const retained: Record<WorkspaceBranchOwnershipOperation, Set<string>> = {
-    create: new Set(
-      lifecycles
-        .filter((entry) => entry.operation === "create")
-        .map((entry) => entry.workspaceId),
-    ),
-    restore: new Set(
-      lifecycles
-        .filter((entry) => entry.operation === "restore")
-        .map((entry) => entry.workspaceId),
-    ),
-  };
-  const repoRoots = [
-    ...new Set([
-      ...workspaces.map((workspace) => workspace.repoRoot).filter(Boolean),
-      ...listKnownRepoRoots(),
-    ]),
-  ];
+  // A repository with no owned workspace cannot contain a proof we may prune.
+  const repoRoots = new Set(workspaces.map((workspace) => workspace.repoRoot).filter(Boolean));
   let dropped = 0;
   for (const repoRoot of repoRoots) {
-    for (const operation of ["create", "restore"] as const) {
-      const prefix = `refs/zeros/${operation}/`;
-      let refs: string[];
-      try {
-        const { stdout } = await runGit(repoRoot, [
-          "for-each-ref",
-          "--format=%(refname)",
-          prefix,
-        ]);
-        refs = stdout
-          .split("\n")
-          .map((ref) => ref.trim())
-          .filter((ref) => ref.startsWith(prefix));
-      } catch {
-        continue;
-      }
-      for (const ref of refs) {
-        const workspaceId = ref.slice(prefix.length);
-        if (retained[operation].has(workspaceId)) continue;
-        try {
-          await runGit(repoRoot, ["update-ref", "-d", ref]);
-          dropped++;
-        } catch {
-          /* best effort; retry at the next startup */
-        }
-      }
+    if (options.signal?.aborted) break;
+    let refs: string[];
+    try {
+      const { stdout } = await runGit(repoRoot, [
+        "for-each-ref", "--format=%(refname) %(objectname)",
+        "refs/zeros/create/", "refs/zeros/restore/",
+      ], { readOnly: true, timeoutMs: 10_000, signal: options.signal });
+      refs = stdout.split("\n");
+    } catch {
+      continue;
+    }
+    for (const line of refs) {
+      if (options.signal?.aborted) break;
+      const match = /^(refs\/zeros\/(?:create|restore)\/(.+)) ([0-9a-f]{40,64})$/.exec(line.trim());
+      if (!match) continue;
+      const [, ref, workspaceId, objectId] = match;
+      const current = getWorkspaceById(workspaceId);
+      if (!current || current.placement === "cloud" || current.repoRoot !== repoRoot ||
+          getWorkspaceLifecycle(workspaceId) || workspaceLifecycleFlights.has(workspaceId) ||
+          snapshotMaintenance.has(workspaceId)) continue;
+      // Compare-and-delete protects a ref replaced since the listing. Lifecycle
+      // admission joins the exact maintenance flight before creating a new one.
+      const pruning = runGit(repoRoot, ["update-ref", "--no-deref", "-d", ref, objectId], {
+        timeoutMs: 10_000, signal: options.signal,
+      }).then(() => { dropped++; }, () => {}).finally(() => {
+        snapshotMaintenance.delete(workspaceId);
+      });
+      snapshotMaintenance.set(workspaceId, pruning);
+      await pruning;
     }
   }
   if (dropped > 0) {
