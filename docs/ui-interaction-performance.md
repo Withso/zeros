@@ -545,6 +545,23 @@ Changing a PR target updates target metadata only. Rebasing or merging the
 working branch is a separate explicit operation; a picker action must never
 implicitly autostash or rewrite history.
 
+Files keeps one draft across source editing, unified editable diff and Markdown
+preview. Diff view is an Edit option; Changes and Review retain their read-only
+comparisons. Pierre receives a stable edit session, a full-context Git baseline,
+and the complete current draft. Native change events update the draft without
+replacing the controlled input on every keystroke. Empty files still provide an
+editable caret, and old/deleted comparison lines never become writable source.
+
+Auto save defaults on and saves after the typing debounce or leaving the editor.
+File options also provides Save file and Discard changes; discard restores the
+last saved source draft. Save failures retain the dirty draft and wait for a new
+edit or explicit save. A pending save cannot clear newer typing, and old save
+echoes cannot undo a newer write. External disk updates keep their established
+authority after acknowledgement. Unsaved tabs show a neutral dot. One keyed Git
+status snapshot supplies status letters for file rows and tabs; tree filenames
+stay neutral, while file tab names use the status color. These decorations do
+not redefine Changes comparisons or counts.
+
 ### 3. Move work before or after the click
 
 Pointer-enter and keyboard-focus intent should warm the exact likely destination. A click performs the urgent selection only; it must not await I/O, parsing, highlighting, or hydration.

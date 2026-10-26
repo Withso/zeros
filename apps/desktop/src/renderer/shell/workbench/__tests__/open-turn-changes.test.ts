@@ -31,6 +31,27 @@ function setup(folder: string) {
 }
 
 describe("Review turn changes", () => {
+  it.each(["/personal/project", "/organization/project", cloud])("opens a clicked footer file in its exact turn in %s", folder => {
+    const { turn, changes, file } = setup(folder);
+    turn.files.push({ path: "src/deleted.ts", status: "deleted", additions: 0, deletions: 4 });
+    openTurnChanges(turn, "src/deleted.ts");
+    const current = useWorkspaceStore.getState().workbenchByScope[folder];
+    expect(current.activeId).toBe(changes.id);
+    expect(current.tabs.find(tab => tab.id === changes.id)).toMatchObject({
+      filePath: "src/deleted.ts", changesPresentation: "single", diffScope: "history",
+      diffHistory: { kind: "turn-range", from: { chatId: turn.chatId, turnId: turn.turnId }, to: { chatId: turn.chatId, turnId: turn.turnId } },
+    });
+    expect(current.tabs.find(tab => tab.id === file.id)).toBe(file);
+    expect(current.tabs.filter(tab => tab.type === "files")).toHaveLength(1);
+  });
+
+  it("does not navigate a footer file that is not owned by the recorded turn", () => {
+    const { turn } = setup("/personal/project");
+    const before = useWorkspaceStore.getState();
+    openTurnChanges(turn, "../other.ts");
+    expect(useWorkspaceStore.getState()).toBe(before);
+  });
+
   it.each(["/personal/project", "/organization/project", cloud])("opens the complete exact-turn destination synchronously in %s", folder => {
     const { turn, changes, file } = setup(folder);
     const snapshots: unknown[] = [];

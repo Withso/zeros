@@ -75,6 +75,13 @@ import {
   useBrowserTabFavicon,
 } from "../../features/browser/browser-tab-favicon-store";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { useActiveWorkspace } from "../../state/use-active-workspace";
+import { isLocalMainWorkspace } from "../../state/local-main-workspace";
+import { useWorkspaceReviewStatus } from "../../features/code-review/use-workspace-review-status";
+import { statusForGeneration } from "../git-status-reads";
+import { fileStatusesForFolder, FILE_STATUS_PRESENTATION } from "./tabs/file-status";
+import type { FileChangeStatus } from "../../platform/git";
+import { useWorkbenchDirtyEditorIds } from "./tabs/code-editor/editor-state";
 
 interface WorkbenchTabStripProps {
   /** The persisted workbench home + open-File tab list — see Workbench. */
@@ -102,6 +109,11 @@ export function WorkbenchTabStrip({
   // (and refresh bus) the default Changes list reads, so the two always agree.
   const refreshKey = useGitRefreshKey(folderKey, workspaceId);
   const changeCount = useWorkspaceChangeCount(refreshKey);
+  const dirtyEditors = useWorkbenchDirtyEditorIds();
+  const { workspace } = useActiveWorkspace();
+  const gitRoot = workspace && isLocalMainWorkspace(workspace) ? workspace.repoRoot : workspace?.path;
+  const gitStatus = useWorkspaceReviewStatus({ cwd: folderKey, workspaceId, active: tabs.some(tab => tab.type === "files" && !!tab.filePath && !tab.skillSource), refreshKey, read: statusForGeneration });
+  const fileStatuses = React.useMemo(() => fileStatusesForFolder(gitStatus.data, folderKey, gitRoot), [gitStatus.data, folderKey, gitRoot]);
 
   const strip = useStickyTabStrip({
     activeKey: activeId,
@@ -177,6 +189,8 @@ export function WorkbenchTabStrip({
                   (tab.type === "files" && (!tab.fixed || !!tab.filePath))
                 }
                 badge={tab.type === "changes" ? changeCount : 0}
+                fileStatus={tab.type === "files" && tab.filePath && !tab.skillSource ? fileStatuses.get(tab.filePath) : undefined}
+                dirty={tab.type === "files" && dirtyEditors.has(tab.id)}
                 terminalIndicator={
                   tab.terminalId
                     ? terminalIndicators[tab.terminalId]
@@ -220,6 +234,8 @@ interface TabPillProps {
   canClose: boolean;
   /** Count rendered after the label (the Changes pill's live change count). */
   badge: number;
+  fileStatus?: FileChangeStatus;
+  dirty: boolean;
   terminalIndicator?: TerminalTabIndicator;
   onIntent: () => void;
   onActivate: () => void;
@@ -240,6 +256,8 @@ function TabPill({
   active,
   canClose,
   badge,
+  fileStatus,
+  dirty,
   terminalIndicator,
   onIntent,
   onActivate,
@@ -249,6 +267,7 @@ function TabPill({
   const meta = TAB_TYPE_META[tab.type];
   const Icon = meta.icon;
   const showLabel = tabShowsLabel(tab);
+  const statusPresentation = fileStatus ? FILE_STATUS_PRESENTATION[fileStatus] : undefined;
   // A File tab wears its file's own colored type glyph (same sprite as the tree
   // and the viewer breadcrumb); everything else keeps its type's lucide glyph.
   const iconPath = workbenchTabIconPath(tab);
@@ -351,6 +370,7 @@ function TabPill({
         <span
           className={[
             "truncate",
+            statusPresentation?.className ?? "",
             browserWorking ? "zeros-browser-tab-working" : "",
           ].join(" ")}
         >
@@ -359,6 +379,14 @@ function TabPill({
             <span className="ml-1 opacity-70">(exited)</span>
           )}
         </span>
+      )}
+      {statusPresentation && (
+        <span title={statusPresentation.label} className={cn("text-2xxs shrink-0 font-medium", statusPresentation.className)}>
+          {statusPresentation.letter}
+        </span>
+      )}
+      {dirty && (
+        <span aria-label="Unsaved changes" title="Unsaved changes" className="bg-fg3 size-1.5 shrink-0 rounded-full" />
       )}
       {terminalIndicator?.dot && (
         <span

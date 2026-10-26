@@ -82,6 +82,14 @@ export async function runTurnChangesSmoke({ page, check }) {
       });
       expect(selected.tab.type).toBe("changes");
       expect(selected.filter.scope).toMatchObject({ kind: "turn-range", from: { turnId: "opening" }, to: { turnId: "opening" } });
+      await card.locator("[data-turn-file]").nth(1).click();
+      const fileSelection = await page.evaluate(() => {
+        const state = window.__turnChanges.state();
+        return { tab: state.tabs.find(tab => tab.id === state.activeId), filter: window.__turnChanges.filter() };
+      });
+      expect(fileSelection.tab).toMatchObject({ type: "changes", filePath: "docs/paris.md", changesPresentation: "single", diffHistory: { kind: "turn-range", from: { turnId: "opening" }, to: { turnId: "opening" } } });
+      expect(fileSelection.filter.scope).toEqual(selected.filter.scope);
+      await expect(page.locator('[data-review-fixture] [contenteditable="true"]')).toHaveCount(0);
       await page.getByRole("button", { name: "Switch turn" }).click();
       await expect(card.locator("[data-turn-file]")).toHaveCount(4);
       check(`${owner}/${agent}: bounded turn card, both themes, exact Review filter and turn switch`, true);
@@ -134,6 +142,13 @@ export async function runTurnChangesSmoke({ page, check }) {
       await expect(page.locator('[data-fixture-turn="opening-3"] [data-turn-changes]')).toBeVisible();
       await toggle.click();
       await expect(page.locator("[data-turn-changes]")).toHaveCount(2);
+      await first.locator("[data-turn-file]").nth(2).click();
+      const historicalFile = await page.evaluate(() => {
+        const state = window.__turnChanges.state();
+        return { tab: state.tabs.find(tab => tab.id === state.activeId), filter: window.__turnChanges.filter() };
+      });
+      expect(historicalFile.tab).toMatchObject({ type: "changes", filePath: "docs/cairo.md", changesPresentation: "single" });
+      expect(historicalFile.filter.scope).toMatchObject({ kind: "turn-range", from: { turnId: "opening" }, to: { turnId: "opening" } });
       await page.getByRole("button", { name: "Switch workspace", exact: true }).click();
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(toggle).toHaveText("+3−1");

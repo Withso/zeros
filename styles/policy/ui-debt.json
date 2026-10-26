@@ -276,9 +276,6 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
         "z-10": 1
       },
-      "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/source-editor.tsx": {
-        "z-10": 1
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/files-tab.tsx": {
         "z-20": 1
       },
@@ -531,9 +528,6 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
         "button": 2
       },
-      "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/source-editor.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/design-files-pane.tsx": {
         "button": 1
       },
@@ -631,9 +625,6 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
         "shadow-lg": 1,
         "shadow-sm": 3
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/source-editor.tsx": {
-        "shadow-sm": 2
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
         "shadow-sm": 2

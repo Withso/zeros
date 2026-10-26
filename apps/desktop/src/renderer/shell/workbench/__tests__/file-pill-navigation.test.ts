@@ -219,7 +219,7 @@ describe("file pill navigation", () => {
   );
 
   it.each(owners)(
-    "opens ignored and unchanged edit targets in Files for %s",
+    "keeps ignored and unchanged diff targets in Changes for %s",
     (cwd) => {
       confirmedChanges(cwd, ["src/changed.ts"]);
       const dispatch = recordNavigation();
@@ -235,11 +235,11 @@ describe("file pill navigation", () => {
         expect(dispatch).toHaveBeenLastCalledWith(
           expect.objectContaining({
             scope: cwd,
-            updates: expect.objectContaining({ filePath: path, diff: false }),
+            updates: expect.objectContaining({ filePath: path, diff: true, changesRequestedFile: path }),
           }),
         );
       }
-      expect(filter).not.toHaveBeenCalled();
+      expect(filter).toHaveBeenCalledWith(cwd, { kind: "all" });
     },
   );
 
@@ -271,14 +271,14 @@ describe("file pill navigation", () => {
       expect.objectContaining({
         updates: expect.objectContaining({
           filePath: "README.md",
-          diff: false,
+          diff: true,
         }),
       }),
     );
   });
 
   it.each(owners)(
-    "keeps fallback file paths relative to the chat folder in %s",
+    "keeps absent diff targets relative to the owning Git root in %s",
     (root) => {
       confirmedChanges(root, ["src/other.ts"]);
       const dispatch = recordNavigation();
@@ -287,8 +287,8 @@ describe("file pill navigation", () => {
         expect.objectContaining({
           scope: `${root}/packages/app`,
           updates: expect.objectContaining({
-            filePath: ".context/notes.md",
-            diff: false,
+            filePath: "packages/app/.context/notes.md",
+            diff: true,
           }),
         }),
       );
@@ -296,7 +296,7 @@ describe("file pill navigation", () => {
   );
 
   it.each(owners)(
-    "warms the Files destination for an absent edit in %s",
+    "warms a local Changes destination without waking a cloud VM in %s",
     (cwd) => {
       confirmedChanges(cwd, []);
       const read = vi
@@ -306,8 +306,9 @@ describe("file pill navigation", () => {
         .spyOn(fileData, "prefetchWorkspaceFileDiff")
         .mockImplementation(() => {});
       warmFilePill(cwd, ".context/notes.md", "changes");
-      expect(read).toHaveBeenCalledWith(cwd, ".context/notes.md");
-      expect(diff).not.toHaveBeenCalled();
+      expect(read).not.toHaveBeenCalled();
+      if (cwd === cloud) expect(diff).not.toHaveBeenCalled();
+      else expect(diff).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: cwd, path: ".context/notes.md", diffScope: "all" }));
     },
   );
 
