@@ -827,7 +827,7 @@ export const TurnFooter = memo(function TurnFooter({
             className="hover:bg-bg1-hover focus-visible:ring-highlighted-bright h-5 shrink-0 rounded-sm px-1 py-0 font-normal tabular-nums focus-visible:ring-2"
           >
             <span className="text-green-primary">+{additions}</span>
-            <span className="text-blue-primary">−{deletions}</span>
+            <span className="text-red-primary">−{deletions}</span>
           </Button>
         )}
       </div>

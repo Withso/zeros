@@ -104,11 +104,11 @@ export async function runTurnChangesSmoke({ page, check }) {
         await expect.poll(() => toggle.evaluate(element => {
           const probe = document.createElement("span");
           probe.style.backgroundColor = "var(--bg1-hover)";
-          probe.style.color = "var(--blue-primary)";
+          probe.style.color = "var(--red-primary)";
           element.append(probe);
           const actual = getComputedStyle(element), expected = getComputedStyle(probe);
           const matches = actual.backgroundColor === expected.backgroundColor &&
-            getComputedStyle(element.querySelector(".text-blue-primary")).color === expected.color;
+            getComputedStyle(element.querySelector("span:nth-child(2)")).color === expected.color;
           probe.remove(); return matches;
         })).toBe(true);
         if (owner === "personal" && agent === "claude") await page.locator("[data-footer-fixture]").screenshot({ path: `.context/turn-changes/history-${theme}.png` });
