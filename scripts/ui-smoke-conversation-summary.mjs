@@ -57,6 +57,74 @@ export async function runConversationSummarySmoke({
     );
   };
 
+  await verify("unpublished Git shows Local and hides PR creation through owner switches and publication", async () => {
+    const header = page.getByLabel("Workspace header", { exact: true });
+    const createPr = () => island.getByRole("button", { name: "Create PR", exact: true });
+    const setOrigin = (originUrl) => page.evaluate(async originUrl => {
+      const { loadProjects, applyProjectGitInspection, projectGitRevision } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
+      const { notifyProjectsChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+      const project = loadProjects().find(project => project.repoRoot === "/summary-fixture/a");
+      applyProjectGitInspection(project, projectGitRevision(project.id), { isRepo: true, originUrl });
+      notifyProjectsChanged();
+    }, originUrl);
+    for (const organizationId of [null, "summary-org"]) {
+      await page.evaluate(id => window.__summaryHarness.setOrganization(id), organizationId);
+      await setOrigin(null);
+      await expect(header.getByText("Local", { exact: true })).toBeVisible();
+      await expect(header.locator(".lucide-hard-drive")).toBeVisible();
+      await expect(header.locator(".lucide-git-branch")).toHaveCount(0);
+      await expect(createPr()).toHaveCount(0);
+      await page.evaluate(() => window.__summaryHarness.switchFolder("b"));
+      await expect(header.locator(".lucide-git-branch")).toBeVisible();
+      await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
+      await expect(createPr()).toBeVisible();
+      await page.evaluate(() => window.__summaryHarness.switchFolder("a"));
+      await expect(header.getByText("Local", { exact: true })).toBeVisible();
+      await expect(createPr()).toHaveCount(0);
+      await setOrigin("git@github.com:example/summary-a.git");
+      await expect(header.locator(".lucide-git-branch")).toBeVisible();
+      await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
+      await expect(createPr()).toBeVisible();
+    }
+    await setOrigin(null);
+    await expect(header.getByText("Local", { exact: true })).toBeVisible();
+    await expect(createPr()).toHaveCount(0);
+    const catalogReads = () => page.evaluate(() => window.__summaryHarness.messages.filter(message => message.op === "git.repoBranchCatalog"));
+    const before = (await catalogReads()).length;
+    await page.evaluate(() => window.__summaryHarness.setAlternateRemote("git@github.com:example/summary-a.git"));
+    await expect(header.locator(".lucide-git-branch")).toBeVisible();
+    await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
+    await expect(createPr()).toBeVisible();
+    expect((await catalogReads()).length - before).toBe(1);
+    expect((await catalogReads()).every(message => message.params.fetch === false)).toBe(true);
+    await page.evaluate(() => window.__summaryHarness.setAlternateRemote("https://gitlab.com/example/summary-a.git"));
+    await expect(createPr()).toHaveCount(0);
+    await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
+    await page.evaluate(() => window.__summaryHarness.setAlternateRemote(null));
+    await expect(header.getByText("Local", { exact: true })).toBeVisible();
+    await expect(createPr()).toHaveCount(0);
+  });
+
+  await verify("catalog GitHub flags use the remote host", async () => {
+    for (const [url, isGitHub] of [
+      ["https://github.com.example.test/example/summary-a.git", false],
+      ["https://example.test/github.com/summary-a.git", false],
+      ["https://github.com@example.test/example/summary-a.git", false],
+      ["git@github.com.example.test:example/summary-a.git", false],
+      ["https://github.com/example/summary-a.git", true],
+      ["git@github.com:example/summary-a.git", true],
+      ["ssh://git@ssh.github.com:443/example/summary-a.git", true],
+    ]) {
+      const remote = await page.evaluate(async url => {
+        window.__summaryHarness.setAlternateRemote(url);
+        const { gitRepoBranchCatalog } = await import("/apps/desktop/src/renderer/platform/git.ts");
+        const catalog = await gitRepoBranchCatalog({ repoRoot: "/summary-fixture/a", fetch: false });
+        return catalog.remotes[0];
+      }, url);
+      expect(remote).toEqual({ name: "upstream", url, isGitHub });
+    }
+  });
+
   await verify("omits Context and never reads its graph", async () => {
     const contextReads = () => page.evaluate(() =>
       window.__summaryHarness.messages.filter(message => message.op === "context.graph.list").length,

@@ -29,18 +29,24 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
 }
 
 describe("resolveCardActionKind", () => {
+  it("does not offer Create PR for unpublished work, even when changes are confirmed", () => {
+    expect(resolveCardActionKind(makeWorkspace(), true, false)).toBeNull();
+    expect(resolveCardActionKind(makeWorkspace(), true, true)).toBe("create-pr");
+  });
+
   it("nothing done → no action", () => {
-    expect(resolveCardActionKind(makeWorkspace(), false)).toBeNull();
+    expect(resolveCardActionKind(makeWorkspace(), false, true)).toBeNull();
   });
 
   it("local changes, no PR → create-pr", () => {
-    expect(resolveCardActionKind(makeWorkspace(), true)).toBe("create-pr");
+    expect(resolveCardActionKind(makeWorkspace(), true, true)).toBe("create-pr");
   });
 
   it("open PR + local changes → commit-push", () => {
     expect(
       resolveCardActionKind(
         makeWorkspace({ prNumber: 7, prState: "ready" }),
+        true,
         true,
       ),
     ).toBe("commit-push");
@@ -51,6 +57,7 @@ describe("resolveCardActionKind", () => {
       resolveCardActionKind(
         makeWorkspace({ prNumber: 7, prState: "draft" }),
         false,
+        true,
       ),
     ).toBe("ready-for-review");
   });
@@ -60,6 +67,7 @@ describe("resolveCardActionKind", () => {
       resolveCardActionKind(
         makeWorkspace({ prNumber: 7, prState: "ready" }),
         false,
+        true,
       ),
     ).toBe("merge");
   });
@@ -69,6 +77,7 @@ describe("resolveCardActionKind", () => {
       resolveCardActionKind(
         makeWorkspace({ prNumber: 7, prState: "merged" }),
         undefined,
+        false,
       ),
     ).toBe("archive");
   });
@@ -78,6 +87,7 @@ describe("resolveCardActionKind", () => {
       resolveCardActionKind(
         makeWorkspace({ prNumber: 7, prState: "closed" }),
         undefined,
+        false,
       ),
     ).toBe("archive");
   });
@@ -92,6 +102,7 @@ describe("resolveCardActionKind", () => {
         resolveCardActionKind(
           makeWorkspace({ prNumber: 7, prState: "ready" }),
           undefined,
+          true,
         ),
       ).toBeNull();
     });
@@ -101,12 +112,13 @@ describe("resolveCardActionKind", () => {
         resolveCardActionKind(
           makeWorkspace({ prNumber: 7, prState: "draft" }),
           undefined,
+          true,
         ),
       ).toBeNull();
     });
 
     it("no PR → no button", () => {
-      expect(resolveCardActionKind(makeWorkspace(), undefined)).toBeNull();
+      expect(resolveCardActionKind(makeWorkspace(), undefined, true)).toBeNull();
     });
   });
 
@@ -116,7 +128,7 @@ describe("resolveCardActionKind", () => {
   describe("orphaned workspace (present === false)", () => {
     it("plain orphan → recover", () => {
       expect(
-        resolveCardActionKind(makeWorkspace({ present: false }), false),
+        resolveCardActionKind(makeWorkspace({ present: false }), false, false),
       ).toBe("recover");
     });
 
@@ -125,6 +137,7 @@ describe("resolveCardActionKind", () => {
         resolveCardActionKind(
           makeWorkspace({ present: false, prNumber: 7, prState: "merged" }),
           undefined,
+          false,
         ),
       ).toBe("recover");
     });
@@ -134,6 +147,7 @@ describe("resolveCardActionKind", () => {
         resolveCardActionKind(
           makeWorkspace({ present: false, prNumber: 7, prState: "ready" }),
           true,
+          false,
         ),
       ).toBe("recover");
     });
@@ -144,7 +158,7 @@ describe("resolveCardActionKind", () => {
     // (the engine's stampPresence always writes a boolean, and the
     // WorktreeMissingPanel gate is likewise `present === false`).
     expect(
-      resolveCardActionKind(makeWorkspace({ present: undefined }), true),
+      resolveCardActionKind(makeWorkspace({ present: undefined }), true, true),
     ).toBe("create-pr");
   });
 });

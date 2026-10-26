@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Archive, ArrowUpRight, Cloud, FolderOpen, GitPullRequest, GitPullRequestClosed, GitMerge, GitCommitVertical } from "lucide-react";
 import { RepositoryIcon } from "../features/repositories/repository-icon";
+import { useRepositoryRemote } from "../features/repositories/use-repository-remote";
 import { formatCompactAge } from "../features/agent/format-age";
 import { useOptionalAgentSessions } from "../features/agent/sessions-hooks";
 import { useSessionsStore, useAnyChatWorking } from "../features/agent/sessions-store";
@@ -55,7 +56,8 @@ export function SidebarWorkspaceHoverCard({
   }, [chatId, sessions]);
   const cloud = isCloudWorkspace(workspace.path);
   const folder = isLocalMainWorkspace(workspace);
-  const github = !project?.originUrl || isGithubDotComRemote(project.originUrl);
+  const { remoteUrl } = useRepositoryRemote(workspace.repoRoot, project?.originUrl ?? null, !cloud && !folder);
+  const github = isGithubDotComRemote(remoteUrl);
   const finished = workspace.prState === "merged" || workspace.prState === "closed";
   const hasChanges = useWorkspaceHasChanges(
     cloud || folder || finished || workspace.present === false ? null : workspace,
@@ -64,7 +66,7 @@ export function SidebarWorkspaceHoverCard({
   );
   const working = useAnyChatWorking(chatIds);
   const sendToChat = useSendToChat(workspace.path);
-  const action = folder ? null : resolveCardActionKind(workspace, hasChanges);
+  const action = folder ? null : resolveCardActionKind(workspace, hasChanges, github);
   const chatTitle = chat?.title.trim();
   const title = chatTitle && chatTitle !== "Untitled" ? chatTitle : workspaceLabel(workspace);
   const repoName = project?.name ?? workspace.repoSlug;
@@ -116,7 +118,7 @@ export function SidebarWorkspaceHoverCard({
         ) : workspace.prNumber == null ? (
           <CreatePrButton
             workspace={workspace}
-            originUrl={project?.originUrl ?? null}
+            originUrl={remoteUrl}
             chatId={chat?.id ?? null}
             onMenuOpenChange={onMenuOpenChange}
             disabled={working || hasChanges !== true}
