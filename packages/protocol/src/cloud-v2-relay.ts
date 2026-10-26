@@ -117,9 +117,13 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       organizationId: z.uuid(),
       checkoutPath: z.string().min(1).max(1024),
       repository: z.string().min(1).max(512),
-      /** The workspace branch; created from `baseBranch` on first boot. */
+      /** Created from the locally available baseCommit, else the on-disk baseBranch. */
       branch: z.string().min(1).max(255),
       baseBranch: z.string().min(1).max(255),
+      /** Delivered only with checkout-v2; the base head recorded at creation. */
+      baseCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+      /** Delivered only with workspace-setup-v1; runs once after a new checkout. */
+      setup: z.string().max(8000).optional(),
     }).strict(),
     agents: z.object({
       codex: proxy.optional(),
@@ -144,3 +148,11 @@ export const CloudV2WorkerActivityReplySchema = z.object({
   loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
   state: z.enum(["creating", "starting", "running", "stopping", "stopped", "failed", "deleting", "deleted"]),
 }).strict();
+
+/** Optional diagnostics travel on their own HTTPS endpoint, never in a strict
+ * hello/history frame. No command, path, provider output or credential values. */
+export const CloudV2WorkerTimingSchema = z.object({
+  phase: z.enum(["worker_checkout", "worker_checkout_fetch", "worker_checkout_switch", "worker_session_store", "worker_services", "worker_configure"]),
+  durationMs: z.number().int().nonnegative().max(3_600_000),
+}).strict();
+export type CloudV2WorkerTiming = z.infer<typeof CloudV2WorkerTimingSchema>;

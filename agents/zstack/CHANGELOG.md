@@ -3,6 +3,31 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.1.7
+
+- Folds cloud lifecycle lessons on bounded SQL claims, timestamp precision,
+  durable provider intent, additive migration ladder checks and opt-in provider
+  recovery, plus root protocol invocation, isolated frozen-patch verification
+  and the node-pty rebuild after `--ignore-scripts` (`changes/`, `zstack-verify`).
+- Adds lock-holding concurrency sized to the role's pool, one test database
+  per concurrent run, and the advisory-lock purpose registry check
+  (`changes/`, `zstack-verify`).
+- Adds the checkpoint round's lessons:
+  - capping slow step classes in a shared slot pool;
+  - missing-object Git fixtures;
+  - comparing the staged diff with a frozen patch before committing;
+  - one admission fence for background checkout moves;
+  - aborting deferred work before Stop cancels its dependency;
+  - injecting fixture PATH through the runtime channel;
+  - running VM scripts once on the real image;
+  - testing a case that only a script's primary path passes;
+  - fencing operations by their own generation rather than by state;
+  - passing shell path lists NUL-terminated, keeping trailing newlines, and
+    checking the lister's status;
+  - guarding every name on a pointer's route, not only where it resolves;
+  - running `test:git` under umask 022
+  (`changes/`, `zstack-verify`, `integrate-pr`).
+
 ## 0.1.6
 
 Folds the lessons from #482 and #484, pins merged eval cases to their merge commits, and adds the

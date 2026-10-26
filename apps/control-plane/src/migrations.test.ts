@@ -1368,7 +1368,9 @@ d("migration ladder", { timeout: 30_000 }, () => {
       { kind: "connect", provider_session_id: "session-b" },
       { kind: "proxy", provider_session_id: null },
     ]);
-    expect(JSON.stringify((await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [id])).rows) === JSON.stringify(before)).toBe(true);
+    // Later migrations may add columns; every value this row already had is unchanged.
+    const after = (await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [id])).rows;
+    expect(JSON.stringify(after.map(row => Object.fromEntries(Object.keys(before[0]).map(key => [key, row[key]]))))).toBe(JSON.stringify(before));
   });
 
   it("preserves issued security cursors even after every historical event was erased", async () => {

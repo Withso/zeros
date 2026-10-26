@@ -82,6 +82,11 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   server-side state: control-plane logs and the workspace row through the API.
 - Provider keys stay in `.env.agent` (Alpha and test only) or Actions; never
   copy them into the checkout or into output.
+- Run a control-plane-generated VM script (runtime install, checkpoint,
+  restore) on the real Boat image once: one throwaway VM from the Alpha Cloud
+  Computer, with no storage writes, deleted afterwards. Local tests run this
+  host's Git, tar and coreutils, not the image's. Ad-hoc probes that reuse
+  `createGithubAppJwt` must pass `clientId`; the App ID works as the issuer.
 
 ## Evidence rules
 
@@ -111,6 +116,38 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   path- and Git-dependent suites; for an exact comparison, swap only your
   changed source files back to the base revision in the same checkout, compare
   failing test names, then rerun every differing test in isolation.
+- In a shared working tree, qualify a frozen patch on its stated base in a
+  separate worktree or disposable projection, with workspace dependency links
+  bound to that tree. Record its SHA-256 and test evidence; never replace
+  concurrent source edits in place to reconstruct the patch. The control plane
+  installs separately: run `pnpm --dir apps/control-plane install` in that
+  worktree too, or worker suites that import its source fail to load.
+- Make a slow step class (a stop that saves a checkpoint) take at most part
+  of a shared slot pool, and claim the steps someone is waiting for first.
+- A fixture for a missing Git object must start from a source that never had
+  it; assert `git cat-file -e` fails before relying on it.
+- Run `pnpm test:git` under CI's `umask 022`. This sandbox defaults to 0002,
+  and four dev-environment script suites then fail their permission checks.
+- A test helper that trims `git status --porcelain` drops the first line's
+  leading space. Assert with `git diff --name-only` (and `--cached`) instead.
+- A compare-and-set on state and resource identity is no fence once states
+  cycle. Bind records, completions and destructive steps to the operation's
+  own generation, and track uncertainty per operation.
+- `CloudV2Store` builds RETURNING lists by prefixing every word of its column
+  constants with `w.`, so a cast such as `::text` there breaks every claim.
+- Give every script fallback a test case that only the primary path passes.
+  `git update-index` needs `--stdin` as its last argument.
+- Background workspace mutations need one admission fence that every
+  work entry point passes, the durable HTTP prompt inbox and metadata-only
+  actions included. Stop aborts deferred work before cancelling what it waits
+  for.
+- An install with `--ignore-scripts` leaves `node-pty` without its native
+  binding. Run `pnpm --dir apps/cloud-worker rebuild node-pty` before rerunning
+  worker PTY tests; keep the prerequisite failure in the evidence.
+- Run protocol suites from the repository root, for example
+  `timeout 900 pnpm exec vitest run packages/protocol/src/__tests__/cloud-v2-relay.test.ts`.
+  Package-local Vitest inherits root-relative includes and may find no tests;
+  that result is unverified.
 - `pnpm typecheck` keeps incremental state in `node_modules/.cache/zeros-typecheck`.
   An error in a file you did not touch may be stale state: confirm with
   `pnpm exec tsgo --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
@@ -136,6 +173,14 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   with `git --no-lazy-fetch`, which needs Git 2.44 or later. A shallow clone,
   or Git 2.43 (Ubuntu 24.04), reports `runtime_skew_source_unavailable`. Fetch
   full history and check `git --version` before suspecting the pins.
+- Work that holds a pooled connection across provider I/O (Cloud Computer
+  builds hold an advisory-lock connection per build) must leave one
+  connection free in its role's pool; the worker pool has two. Test concurrent
+  jobs at that size.
+- A new advisory lock needs one `/* lock_purpose='…' */` tag registered in
+  `ADVISORY_LOCK_PURPOSES`; only `src/database-lock-tags.test.ts` checks it.
+- Never point an ad-hoc run at a test database a running suite uses: global
+  setup resets the schema. Rerun any overlapping failure alone first.
 - Database-backed control-plane suites skip without `TEST_DATABASE_URL`. Give
   each concurrent agent its own PostgreSQL 18 server, not only its own
   database: migration 0004 creates the cluster-wide `zeros_app` role with a
@@ -147,6 +192,22 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   still share PostgreSQL's lock table. Size `max_locks_per_transaction` for
   that concurrency before sharding; `out of shared memory` at reset is a
   fixture failure, not a product regression.
+- Materialize a limited `FOR UPDATE SKIP LOCKED` claim set before updating
+  leases. Test the actual returned bound with zero-duration leases and apply
+  in-flight exclusions before the limit; a re-evaluated subquery can overclaim.
+- PostgreSQL timestamps retain microseconds that JavaScript `Date` drops.
+  Round-tripped timestamp compare-and-set predicates must match the token's
+  precision, or use an exact database revision; test a database-origin value.
+- Provider intent must survive Stop, deletion and a lost reply. Persist its
+  identity and deadline before I/O, then test reconciliation with the same key
+  before cleanup can declare the resource gone.
+- Adding columns to an existing table also requires the control plane's
+  `src/migrations.test.ts`. Whole-row ladder comparisons must project the
+  original columns to check preservation and verify new defaults separately.
+- A recovery change to a shared provider method must be opt-in for callers
+  with durable retry identity. Test other callers too: a retried save may
+  resume its own named result, while a new Computer build must not reuse an
+  old `-v1` name after a development database reset.
 - CI's PostgreSQL runs in a service container in another PID namespace, so a
   test cannot signal or inspect the server's processes. Reproduce connection
   races at the protocol layer, for example an in-test TCP relay that holds

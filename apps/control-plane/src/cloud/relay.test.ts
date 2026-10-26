@@ -115,6 +115,18 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  it("times the first dial through readiness, including retry and configuration", async () => {
+    const timing = vi.fn(); deps.timing = timing;
+    let now = 1000; deps.now = () => now;
+    vi.mocked(deps.workerRoute).mockResolvedValueOnce({ workspace: workspace("starting"), accessEpoch, url: null, token: null, bootId: null });
+    const original = deps.config;
+    deps.config = async ws => { now += 75; return original(ws); };
+    await app();
+    await vi.waitFor(() => expect(timing).toHaveBeenCalledTimes(1));
+    expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75 });
+    expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+  });
+
   it.each([false, true])("delivers optional MCP config only after WebSocket upgrade support=%s", async supported => {
     if (supported) workerServer.on("headers", headers => { headers.push("X-Zeros-Worker-Features: mcp-v1"); });
     const mcpServers = [{ id: workspaceId, name: "fixture", transport: "http" as const, url: "https://mcp.example.test" }];
@@ -127,6 +139,42 @@ describe("cloud v2 relay", () => {
     if (supported) expect(frames.find(frame => frame.t === "config").mcpServers).toEqual(mcpServers);
     else expect(frames.find(frame => frame.t === "config")).not.toHaveProperty("mcpServers");
   });
+
+  it.each([false, true])("gates setup on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",workspace-setup-v1" : ""}`); });
+    const original = deps.config;
+    deps.config = async ws => { const value = await original(ws); return { ...value, workspace: { ...value.workspace, setup: "pnpm install" } }; };
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1";
+    await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (supported) expect(frame.workspace.setup).toBe("pnpm install");
+      else expect(frame.workspace).not.toHaveProperty("setup");
+    }
+  });
+
+  it.each(["", "workspace-setup-v1", "checkout-v20", "checkout-v2", "checkout-v2, workspace-setup-v1"])(
+    "independently gates baseCommit on WebSocket initial and refreshed config: %s", async features => {
+      workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+      const original = deps.config, baseCommit = "a".repeat(40);
+      deps.config = async ws => { const value = await original(ws); return { ...value, workspace: { ...value.workspace, baseCommit, setup: "pnpm install" } }; };
+      const frames: any[] = [];
+      workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+      loginRevision = "1"; await relay.refreshLogins();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+      for (const frame of frames.filter(frame => frame.t === "config")) {
+        if (features.split(",").some(value => value.trim() === "checkout-v2")) expect(frame.workspace.baseCommit).toBe(baseCommit);
+        else expect(frame.workspace).not.toHaveProperty("baseCommit");
+        if (features.includes("workspace-setup-v1")) expect(frame.workspace.setup).toBe("pnpm install");
+        else expect(frame.workspace).not.toHaveProperty("setup");
+      }
+    });
 
   it("settles only prompts forwarded to a lost worker and preserves prompts queued for its successor", async () => {
     const forwarded: any[][] = [];

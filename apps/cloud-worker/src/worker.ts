@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
 import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/version";
@@ -14,7 +16,8 @@ import { SessionStore } from "./sessions/session-store";
 import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
-import { prepareCheckout } from "./workspace/checkout";
+import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
+import { WorkspaceSetup, type SetupRunner } from "./workspace/setup";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
@@ -23,13 +26,15 @@ import { Terminals } from "./terminals/service";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
 import { PromptInbox } from "./prompt-inbox";
 import { McpGateway } from "./mcp/gateway";
+import { measureStartup, recordStartupTiming, type StartupTimingObserver } from "./startup-timings";
 
 interface WorkerOptions {
   directory: string;
   workspaceId?: string;
   transport: Transport;
   drivers?: DriverFactories;
-  prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv) => Promise<void>;
+  prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<CheckoutResult | void>;
+  setupRunner?: SetupRunner;
   gitAskpassPath?: string;
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
@@ -53,6 +58,8 @@ export class CloudWorker {
   private promptInbox?: PromptInbox;
   private workspace?: WorkspaceService;
   private terminals?: Terminals;
+  private setup?: WorkspaceSetup;
+  private checkoutRefresh?: CheckoutRefresh;
   private readonly tokens: GithubTokens;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
@@ -75,7 +82,7 @@ export class CloudWorker {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    this.heartbeat = setInterval(() => { void this.reportIdle(Boolean(this.agents?.busy || this.terminals?.busy)); }, 55_000);
+    this.heartbeat = setInterval(() => { void this.reportIdle(Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy)); }, 55_000);
     this.heartbeat.unref?.();
     this.options.transport.start({
       open: async () => {
@@ -108,6 +115,7 @@ export class CloudWorker {
     if (this.disposed) return;
     this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect();
     await this.configuring.catch(() => {});
+    await this.stopCheckout();
     await this.promptInbox?.dispose();
     await this.terminals?.dispose();
     await this.workspace?.dispose();
@@ -180,10 +188,18 @@ export class CloudWorker {
       return;
     }
     if (frame.type === "HEARTBEAT") return;
-    if (frame.type.startsWith("AGENT_")) return this.agents!.handle(client, frame);
-    if (frame.type.startsWith("PTY_")) return this.terminals!.handle(client, frame);
+    if (frame.type.startsWith("AGENT_")) {
+      if (frame.type !== "AGENT_LIST_AGENTS" && frame.type !== "AGENT_INIT_AGENT") await this.touchCheckout();
+      return this.agents!.handle(client, frame);
+    }
+    if (frame.type.startsWith("PTY_")) {
+      if (frame.type !== "PTY_LIST") await this.touchCheckout();
+      return this.terminals!.handle(client, frame);
+    }
     if (frame.type === "WORKSPACE_REQUEST") {
       try {
+        // Target changes write metadata without going through the Git runner.
+        if (frame.op === "file.write" || frame.op === "git.changeTarget") await this.touchCheckout();
         const service = /^(chats|messages|turns)\./.test(frame.op) ? this.chats! : this.workspace!;
         const result = await service.handle(frame.op, frame.params ?? {});
         await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
@@ -195,6 +211,8 @@ export class CloudWorker {
   }
 
   private async configure(config: WorkerConfig): Promise<void> {
+    const started = performance.now(), initial = !this.scope;
+    const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
     if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
@@ -202,14 +220,27 @@ export class CloudWorker {
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
     if (!this.scope) {
       await this.github.start(); this.tokens.invalidate();
-      await (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment);
-      const store = await SessionStore.open(join(this.options.directory, "sessions"), scope.key);
+      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing);
+      this.checkoutRefresh = checkout?.refresh;
+      const restoreMarker = join(this.options.directory, "restored-from-checkpoint");
+      const restored = await access(restoreMarker).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return false;
+      });
+      const store = await measureStartup("worker_session_store", () => SessionStore.open(join(this.options.directory, "sessions"), scope.key), timing);
+      const servicesStarted = performance.now();
       // Earlier worker snapshots stored a cloud key in chat metadata. Native
       // bridge rows must round-trip through the renderer's existing mapper.
       for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
+      const run = this.options.workspaceServices?.run ?? commandRunner(scope.root, this.gitEnvironment);
       this.workspace = await WorkspaceService.open(scope, this.options.directory, {
         historyDiff: params => this.agents!.turns.historyDiff(params),
-        run: commandRunner(scope.root, this.gitEnvironment), ...this.options.workspaceServices, publish: (frame) => { void this.broadcast(frame); },
+        ...this.options.workspaceServices,
+        run: async (program, args, options) => {
+          if (options?.readOnly !== true) await this.touchCheckout();
+          return run(program, args, options);
+        },
+        publish: (frame) => { void this.broadcast(frame); },
       });
       this.scope = scope; this.store = store;
       this.mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport) });
@@ -230,20 +261,53 @@ export class CloudWorker {
       }), store.onError((chatId) => {
         this.options.onError?.("storage"); void this.agents!.closeChat(chatId).catch(() => {});
       }));
+      recordStartupTiming("worker_services", servicesStarted, timing);
+      const refresh = this.checkoutRefresh, refreshing = refresh?.start();
+      this.setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment,
+        runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
+        beforeRun: async () => {
+          if (refresh?.mayFastForward) await refreshing;
+          await refresh?.touch();
+        },
+        onAdmitted: () => rm(restoreMarker, { force: true }).catch(() => {}),
+      });
+      this.setup.start(checkout?.createdBranch === true || restored);
     } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
     this.history!.connect();
     if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
-      this.promptInbox ??= new PromptInbox(this.store!, this.agents!, (op, body, signal) => this.options.transport.promptRequest!(op, body, signal));
+      this.promptInbox ??= new PromptInbox(this.store!, this.agents!, async (op, body, signal) => {
+        const reply = await this.options.transport.promptRequest!(op, body, signal);
+        // The HTTP inbox bypasses app bridge dispatch. Fence it before the
+        // inbox can materialize attachments or open a native driver.
+        if (op === "pull") {
+          const batch = CloudV2PromptPullReplySchema.safeParse(reply);
+          if (batch.success && batch.data.prompts.length) await this.touchCheckout();
+        }
+        return reply;
+      });
       this.promptInbox.start();
     } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
     await this.reportIdle(true);
+    if (initial) recordStartupTiming("worker_configure", started, timing);
   }
 
   private broadcast(frame: BridgeMessage): Promise<void> { return this.send({ t: "frame", clientId: "*", frame }).then(() => {}); }
+  private async touchCheckout(): Promise<void> {
+    await this.checkoutRefresh?.touch();
+    if (this.disposed || this.stopping) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
+  }
+  private async stopCheckout(): Promise<void> {
+    // Abort setup before releasing its refresh wait; otherwise it could launch
+    // as refresh cancellation finishes, while Stop is already checkpointing.
+    const setup = this.setup?.dispose();
+    await this.checkoutRefresh?.dispose();
+    await setup;
+  }
   private async prepareStop(): Promise<void> {
     clearInterval(this.heartbeat);
     await this.configuring;
+    await this.stopCheckout();
     await this.promptInbox?.dispose();
     await this.agents?.dispose();
     await this.terminals?.dispose();
@@ -256,13 +320,13 @@ export class CloudWorker {
   }
   private async reportIdle(force = false): Promise<void> {
     if (!this.online || !this.agents) return;
-    const idle = !this.agents.busy && !this.terminals?.busy;
+    const idle = !this.agents.busy && !this.terminals?.busy && !this.setup?.busy;
     if (force || this.idle !== idle) {
       if (idle) {
         try { await this.store?.flush(); await this.history?.flush(); }
         catch { this.options.onError?.("storage"); return; }
         // A new prompt may have arrived while persistence was draining.
-        if (!this.online || this.agents.busy || this.terminals?.busy) return;
+        if (!this.online || this.agents.busy || this.terminals?.busy || this.setup?.busy) return;
       }
       this.idle = idle; await this.send({ t: "idle", idle });
     }
