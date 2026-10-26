@@ -13,3 +13,7 @@
   regressions, plus the Summary browser smoke's publication, owner-switch and
   alternate-remote scenarios. Review also proved that recovery and archiving
   remain available without a GitHub remote.
+- CI caught a substring host check in the browser catalog fixture. Fixtures
+  must use the existing parsed-host predicate too; the Summary smoke now
+  rejects lookalike hosts and GitHub text in credentials or paths while
+  accepting the supported HTTPS and SSH forms.

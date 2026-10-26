@@ -105,6 +105,26 @@ export async function runConversationSummarySmoke({
     await expect(createPr()).toHaveCount(0);
   });
 
+  await verify("catalog GitHub flags use the remote host", async () => {
+    for (const [url, isGitHub] of [
+      ["https://github.com.example.test/example/summary-a.git", false],
+      ["https://example.test/github.com/summary-a.git", false],
+      ["https://github.com@example.test/example/summary-a.git", false],
+      ["git@github.com.example.test:example/summary-a.git", false],
+      ["https://github.com/example/summary-a.git", true],
+      ["git@github.com:example/summary-a.git", true],
+      ["ssh://git@ssh.github.com:443/example/summary-a.git", true],
+    ]) {
+      const remote = await page.evaluate(async url => {
+        window.__summaryHarness.setAlternateRemote(url);
+        const { gitRepoBranchCatalog } = await import("/apps/desktop/src/renderer/platform/git.ts");
+        const catalog = await gitRepoBranchCatalog({ repoRoot: "/summary-fixture/a", fetch: false });
+        return catalog.remotes[0];
+      }, url);
+      expect(remote).toEqual({ name: "upstream", url, isGitHub });
+    }
+  });
+
   await verify("omits Context and never reads its graph", async () => {
     const contextReads = () => page.evaluate(() =>
       window.__summaryHarness.messages.filter(message => message.op === "context.graph.list").length,

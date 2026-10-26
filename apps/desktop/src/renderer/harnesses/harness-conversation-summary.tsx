@@ -31,6 +31,7 @@ import {
   ConversationSummaryIsland,
 } from "../shell/conversation/conversation-summary";
 import { WorkspaceHeader } from "../shell/conversation/workspace-header";
+import { isGithubDotComRemote } from "../shell/pr/github-url";
 
 const repoA = "/summary-fixture/a";
 const repoB = "/summary-fixture/b";
@@ -190,7 +191,7 @@ RuntimeClient.prototype.request = async function <
     const url = custom ?? project?.originUrl ?? null;
     const name = custom ? "upstream" : "origin";
     result = {
-      remotes: url ? [{ name, url, isGitHub: url.includes("github.com") }] : [],
+      remotes: url ? [{ name, url, isGitHub: isGithubDotComRemote(url) }] : [],
       effectiveRemote: name,
       remoteExists: !!url,
       baseExplicit: false,
