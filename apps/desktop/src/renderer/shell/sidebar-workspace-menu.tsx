@@ -9,7 +9,6 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -108,14 +107,23 @@ export function SidebarWorkspaceMenu({
             size="icon-compact"
             className={cn(
               SIDEBAR_ROW_ACTION_CLS,
+              "relative",
               !open &&
                 !filtered &&
                 "opacity-0 group-hover/section:opacity-100 focus-visible:opacity-100",
             )}
             aria-label="Filter workspaces"
+            aria-description={filtered ? "Repository filter active" : undefined}
             data-filtered={filtered || undefined}
           >
             <ListFilter strokeWidth={1.5} />
+            {filtered && (
+              <span
+                data-filter-indicator
+                aria-hidden="true"
+                className="bg-blue-primary absolute top-0.5 right-0.5 size-1.5 rounded-full"
+              />
+            )}
           </Button>
         </DropdownMenuTrigger>
       </Tooltip>
@@ -148,12 +156,7 @@ export function SidebarWorkspaceMenu({
         </DropdownMenuRadioGroup>
         <DropdownMenuSeparator />
         <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <span>Filter</span>
-            <span className="text-fg3 text-3xxs ml-auto">
-              {filtered ? `${repositoryIds.length} selected` : "None"}
-            </span>
-          </DropdownMenuSubTrigger>
+          <DropdownMenuSubTrigger>Filter</DropdownMenuSubTrigger>
           <DropdownMenuSubContent
             className="w-44"
             aria-label="Workspace filters"
@@ -173,9 +176,9 @@ export function SidebarWorkspaceMenu({
                 className="w-64"
                 aria-label="Filter by repository"
               >
-                <div className="flex items-center gap-1 px-1 py-1">
+                <div className="flex h-9 items-center gap-2 px-2">
                   <Search
-                    className="text-fg3 size-3.5 shrink-0"
+                    className="text-fg3 size-4 shrink-0"
                     aria-hidden="true"
                   />
                   <Input
@@ -183,7 +186,7 @@ export function SidebarWorkspaceMenu({
                     type="search"
                     aria-label="Search repositories"
                     placeholder="Search repositories…"
-                    className="min-w-0 text-xs"
+                    className="min-w-0 rounded-none border-0 px-0 text-xs shadow-none"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                     onKeyDown={(event) => {
@@ -212,14 +215,6 @@ export function SidebarWorkspaceMenu({
                     }}
                   />
                 </div>
-                <DropdownMenuItem
-                  onSelect={(event) => {
-                    event.preventDefault();
-                    onRepositoryIdsChange([]);
-                  }}
-                >
-                  All repositories
-                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 {matching.map(({ project, label }) => (
                   <DropdownMenuCheckboxItem
