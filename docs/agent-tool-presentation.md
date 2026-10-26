@@ -321,8 +321,9 @@ and the saved pick and settings are retried after the window. Development
 builds log each refused selection and the account's advertised registry
 schema. `zeros local models` reads the adapter's current catalog, so a refused
 model shows as unavailable there too. Unavailable menu rows retain their saved
-identity, explain the reason, and offer a view of eligible choices without
-changing the selection or favorite.
+identity and explain the reason. Eligible models are directly selectable in
+the same catalog and search, without a separate availability filter. Browsing
+never changes the selection or favorite.
 
 Agent failures stay in the affected chat: terminal initialization failures use an
 inline notice before any prompt exists, prompt failures use their turn notice,
