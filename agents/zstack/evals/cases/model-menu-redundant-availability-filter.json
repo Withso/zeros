@@ -1,0 +1,9 @@
+{
+  "id": "model-menu-redundant-availability-filter",
+  "kind": "replay",
+  "area": "renderer-agent",
+  "fixedBy": "pr:728",
+  "symptom": "The model picker and its catalog submenu both show Show available models even though eligible alternatives are already selectable.",
+  "rule": "Keep unavailable rows disabled and explained while allowing eligible models to be selected directly from catalog and search, with no separate availability filter. See agents/zstack/changes/model-menu-redundant-availability-filter.md.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}
