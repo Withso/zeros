@@ -152,6 +152,24 @@ describe("archive snapshot pins at startup", () => {
     expect(await git(repoRoot, "for-each-ref", "--format=%(refname)", archiveSnapshotRef(ws.id))).toBe("");
   });
 
+  it("retains an archive pin published after the repository listing", async () => {
+    const [saved] = await archivedWorkspaces(1);
+    const ref = archiveSnapshotRef(saved!.workspaceId);
+    const replacement = await git(repoRoot, "rev-parse", "HEAD");
+    expect(replacement).not.toBe(saved!.snapshot);
+    await git(repoRoot, "update-ref", "-d", ref);
+    const held = holdListing();
+    const maintenance = pruneOrphanArchiveSnapshots();
+    try {
+      await held.listed;
+      await git(repoRoot, "update-ref", ref, replacement);
+    } finally {
+      held.release();
+      await maintenance;
+    }
+    expect(await git(repoRoot, "rev-parse", ref)).toBe(replacement);
+  });
+
   it("checks both branch proof namespaces with one listing and preserves another instance's refs", async () => {
     const created = await createWorkspace({ repoRoot });
     for (const operation of ["create", "restore"]) {
@@ -223,7 +241,16 @@ describe("archive snapshot pins at startup", () => {
     await git(repoRoot, "symbolic-ref", ref, "refs/heads/unrelated");
     await pruneOrphanArchiveSnapshots();
     expect(await git(repoRoot, "for-each-ref", "--format=%(refname)", "refs/heads/unrelated")).toBe("");
-    expect(await git(repoRoot, "rev-parse", ref)).toBe(saved!.snapshot);
+    // Recent Git refuses create-only updates of dangling symrefs; older Git
+    // replaces the internal ref under --no-deref. Both are safe outcomes, but
+    // neither may lose the durable snapshot or write through to the user ref.
+    const symbolicTarget = await git(repoRoot, "symbolic-ref", "--quiet", "--no-recurse", ref).catch(() => null);
+    if (symbolicTarget === null) {
+      expect(await git(repoRoot, "rev-parse", ref)).toBe(saved!.snapshot);
+    } else {
+      expect(symbolicTarget).toBe("refs/heads/unrelated");
+    }
+    expect(getWorkspaceById(saved!.workspaceId)?.archiveSnapshot).toBe(saved!.snapshot);
   });
 
   it.each(["archive", "ownership"] as const)("stops %s maintenance after an aborted repository read", async (kind) => {

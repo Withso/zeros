@@ -21,6 +21,13 @@ handoff separately from cancellation while the predecessor is held.
 Hidden-ref maintenance must use `update-ref --no-deref`: a symbolic recovery
 ref must never redirect cleanup or repinning into a user branch. Both direct
 and dangling symbolic refs are covered by archive-snapshot-pins.
+Git 2.52 and newer deliberately refuse create-only updates of dangling symrefs;
+older Git replaces the internal ref under `--no-deref`. Assert the exact safe
+outcomes and retained durable snapshot on both versions, rather than requiring
+repinning to succeed. Never remove the old-OID comparison to pass that check:
+a pin published after the repository listing must win, covered by a held-listing
+regression. The original CI failure was reproduced on Git 2.55 before correcting
+the version-dependent assertion.
 
 Slow PR discussions → independent check-annotation reads were serialized and
 one failed read discarded later findings → overlap a bounded first-page window,
