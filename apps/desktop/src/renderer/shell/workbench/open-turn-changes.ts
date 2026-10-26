@@ -26,9 +26,10 @@ function destination(turn: TurnInfo) {
 
 /** Explicit historical identity, even when this is currently the latest turn.
  * Navigation never waits for a Git read or borrows the active owner's scope. */
-export function openTurnChanges(turn: TurnInfo): void {
+export function openTurnChanges(turn: TurnInfo, path?: string): void {
   const target = destination(turn);
-  if (!target) return;
+  const selected = path === undefined ? turn.files[0] : turn.files.find(file => file.path === path);
+  if (!target || !selected) return;
   const state = useWorkspaceStore.getState();
   const current = state.workbenchByScope[target.scope] ?? defaultScopeFor(target.scope);
   const tab = current.tabs.find((item) => item.type === "changes");
@@ -38,9 +39,10 @@ export function openTurnChanges(turn: TurnInfo): void {
   }], target.baseBranch);
   setChangesScope(target.workspaceId, target.history);
   const updates = {
-    filePath: turn.files[0].path, diff: true, diffScope: "history" as const,
+    filePath: selected.path, diff: true, diffScope: "history" as const,
     diffHistory: target.history, diffSha: undefined, turnChatId: undefined, turnId: undefined,
     discardable: false, isNewFile: false, viewerMode: undefined, changesRequestedFile: undefined,
+    ...(path !== undefined ? { changesPresentation: "single" as const } : {}),
   };
   if (tab) state.dispatch({ type: "OPEN_WORKBENCH_TAB", scope: target.scope, id: tab.id,
     updates: isWorkbenchEditorDirty(tab.id) ? undefined : updates });

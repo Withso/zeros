@@ -49,6 +49,7 @@ import {
   designSectionDirectories,
 } from "./design-files-section";
 import { WorkspaceFileTree } from "./workspace-file-tree";
+import type { FileChangeStatus } from "@/renderer/platform/git";
 
 /** Share of the sidebar column the OPEN section takes — always, regardless of
  *  content. Must match the pane's `h-1/2` class. */
@@ -163,6 +164,7 @@ export interface DesignFilesPaneProps {
   active: boolean;
   cwd: string;
   reloadKey: number;
+  fileStatuses?: ReadonlyMap<string, FileChangeStatus>;
   initialSelectedPath?: string | null;
   selectedPath?: string | null;
   scrollMemoryKey: string;
@@ -174,6 +176,7 @@ export function DesignFilesPane({
   active,
   cwd,
   reloadKey,
+  fileStatuses,
   initialSelectedPath,
   selectedPath,
   scrollMemoryKey,
@@ -284,6 +287,7 @@ export function DesignFilesPane({
           active={active && !collapsed}
           cwd={cwd}
           reloadKey={reloadKey}
+          fileStatuses={fileStatuses}
           designFilter="only-design"
           initialSelectedPath={initialSelectedPath}
           selectedPath={selectedPath}

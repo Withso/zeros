@@ -78,13 +78,13 @@ Real errors, cancellations and unreported completions retain normal treatment.
   active. Unknown provider resource schemes stay readable without invoking an
   arbitrary OS handler. Generated HTML is source content in Files, not trusted
   app code. Do not bypass existing image size or binary-preview limits.
-- Edit file pills prefer their exact Branch comparison, including a recorded
-  source path that Git now reports as renamed. Ignored and unchanged targets
-  open in Files. Use the cached comparison when available; a cold request
-  waits for its own successful comparison before falling back. Preserve the
-  chat's working folder when translating Git-root-relative paths, consume the
-  request with the Files navigation, and keep newer selections and unsaved
-  editors intact. A failed comparison is not evidence of an unchanged file.
+- Diff file pills open Changes at their exact Branch comparison, including a
+  recorded source path that Git now reports as renamed. Ignored and unchanged
+  targets retain that Changes selection with an explicit empty state. Use a
+  cached comparison when available; cold reads never delay navigation or
+  replace the requested file with an unrelated change. Preserve the chat's
+  working folder when translating Git-root-relative paths, keep newer
+  selections and unsaved editors intact, and never wake a cloud VM for hover.
 - Code-agent startup instructions place task files (plans, notes, logs,
   screenshots, handoffs) in `.context/<task>/` and ask agents not to commit
   them unless the user asks. Read relevant existing context, pass exact paths
@@ -1068,8 +1068,9 @@ expansion moves focus to the first newly revealed file. Closing the card or
 changing its owner resets the file-list disclosure.
 
 Review publishes the Changes tab with the explicit selected turn range,
-including for the latest turn, so later work cannot retarget it. File rows
-retain their exact historical diff navigation. Apply this to Claude, Codex
+including for the latest turn, so later work cannot retarget it. Each file row
+opens Changes in single-file presentation with that same explicit turn range
+and the clicked path. Apply this to Claude, Codex
 and Cursor in Personal Local, organization-local and cloud workspaces. Local
 uses keyed turn records; cloud uses the worker's mirrored opening-message
 summary, without waking the VM for passive transcript reads or hover previews.

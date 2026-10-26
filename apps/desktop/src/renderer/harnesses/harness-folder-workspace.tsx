@@ -5,6 +5,7 @@ import "../../../../../styles/globals.css";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
+import type { StatusResult } from "../platform/git";
 import type { SessionsActions } from "../features/agent/sessions-context";
 import type { AuthContextValue } from "../features/auth/auth-context";
 
@@ -234,6 +235,14 @@ setActiveBridge({
       result = { effective: {}, sources: {}, warnings: [] };
     if (message.op === "settings.read")
       result = { doc: {}, text: "", exists: false };
+    if (message.op === "git.status")
+      result = {
+        staged: [],
+        unstaged: [],
+        untracked: [],
+        conflicted: [],
+        conflictState: null,
+      } satisfies StatusResult;
     if (message.op === "file.tree" || message.op === "file.ignored") {
       await filesReady;
       if (fileListingFails) throw new Error("File listing unavailable");
