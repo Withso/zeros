@@ -532,7 +532,7 @@ describe("turn footer first paint after a reopen", () => {
     expect(html).toContain("+21");
     expect(html).toContain("−15");
     expect(html).toContain("text-green-primary");
-    expect(html).toContain("text-blue-primary");
+    expect(html).toContain("text-red-primary");
     expect(html).not.toContain("file-0.ts");
     expect(useWorkspaceFileDiffSnapshot).not.toHaveBeenCalled();
   });
@@ -544,7 +544,7 @@ describe("turn footer first paint after a reopen", () => {
     const html = renderFooter({ isLastTurn: false });
     expect(html).toContain("data-turn-changes-toggle");
     expect(html).toContain("+0");
-    expect(html).toContain("−0");
+    expect(html).toContain('class="text-red-primary">−0</span>');
     expect(html).not.toContain("data-turn-changes=");
     turnRowCache.setData(turnRowKey("chat-1", "user-1"), row());
     expect(renderFooter({ isLastTurn: false })).not.toContain("data-turn-changes");

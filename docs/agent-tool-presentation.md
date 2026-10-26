@@ -1054,7 +1054,7 @@ query replacement, host disposal, buffered input, and native cancellation receip
 Keep duration, copy and the action menu in the settled turn's toolbar. Only
 the actual last turn automatically shows its recorded changes; a last turn
 without changes never promotes an older card. Historical turns show aggregate
-green additions and blue deletions beside the menu, including zero-line
+green additions and red deletions beside the menu, including zero-line
 metadata changes. Clicking or pressing Enter/Space toggles that turn's card;
 the control uses `bg1-hover` and exposes its expanded state. A new thread tail
 or a changed chat/workspace identity closes manually opened historical cards.
