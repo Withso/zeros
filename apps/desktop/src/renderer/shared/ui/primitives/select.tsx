@@ -123,13 +123,23 @@ const splitTriggerClassNames = {
 
 /** Primary keeps the split geometry and independent segment hovers. Its
  * opaque inset focus outline remains visible inside the clipped shell. */
-function splitTriggerClasses(appearance: "secondary" | "primary" = "secondary") {
-  if (appearance === "secondary") return splitTriggerClassNames
+function splitTriggerClasses(
+  appearance: "secondary" | "primary" = "secondary",
+  size: "default" | "compact" = "default",
+) {
+  const classes = size === "compact"
+    ? {
+        ...splitTriggerClassNames,
+        shell: cn(splitTriggerClassNames.shell, "h-6"),
+        main: cn(splitTriggerClassNames.main, "py-0"),
+      }
+    : splitTriggerClassNames
+  if (appearance === "secondary") return classes
   const focus = "focus-visible:outline-solid focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-highlighted-bright"
   return {
-    shell: cn(splitTriggerClassNames.shell, "border-primary-button-bg bg-primary-button-bg hover:border-primary-button-bg has-[[data-state=open]]:border-primary-button-bg has-[:disabled]:hover:border-primary-button-bg"),
-    main: cn(splitTriggerClassNames.main, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover", focus),
-    chevron: cn(splitTriggerClassNames.chevron, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover data-[state=open]:bg-primary-button-hover", focus),
+    shell: cn(classes.shell, "border-primary-button-bg bg-primary-button-bg hover:border-primary-button-bg has-[[data-state=open]]:border-primary-button-bg has-[:disabled]:hover:border-primary-button-bg"),
+    main: cn(classes.main, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover", focus),
+    chevron: cn(classes.chevron, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover data-[state=open]:bg-primary-button-hover", focus),
   }
 }
 

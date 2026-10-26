@@ -72,9 +72,6 @@ const listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const messages: Array<Record<string, unknown>> = [];
 const overlayIntents: boolean[] = [];
 listenForNativeSurfaceOverlayIntent((open) => overlayIntents.push(open));
-let failContext = false;
-let delayContext = false;
-let releaseContext: (() => void) | undefined;
 let runCount = 2;
 const runs = new Map<string, Record<string, unknown>>();
 let previewLog = "Local: http://localhost:5173/\n";
@@ -197,11 +194,6 @@ RuntimeClient.prototype.request = async function <
       bytes: 10,
       mtimeMs: index + 1,
     }));
-    if (delayContext && workspaceFolder === folderA)
-      await new Promise<void>((resolve) => {
-        releaseContext = resolve;
-      });
-    if (failContext) throw new Error("Context fixture failure");
     result = { exists: true, items, truncated: false };
   }
   if (message.op === "file.tree") result = { files: [] };
@@ -274,6 +266,10 @@ Object.assign(window, {
       triggerGitRefresh(folderA);
     },
     setPr,
+    setOrganization: (organizationId: string | null) => {
+      workspaces = workspaces.map(row => row.id === "ws_summary_a" ? { ...row, organizationId } : row);
+      emit("DB_CHANGED", { kinds: ["workspaces"], workspaceIds: ["ws_summary_a"] });
+    },
     setPlacement: (placement: "local" | "cloud") => {
       workspaces = workspaces.map(row => row.id === "ws_summary_a" ? { ...row, placement } : row);
       emit("DB_CHANGED", { kinds: ["workspaces"], workspaceIds: ["ws_summary_a"] });
@@ -323,18 +319,6 @@ Object.assign(window, {
     changeContext: (names: string[]) => {
       contextItems = names;
       notifyContextGraphChanged(folderA);
-    },
-    failContext: (value: boolean) => {
-      failContext = value;
-      notifyContextGraphChanged(folderA);
-    },
-    delayContext: () => {
-      delayContext = true;
-      notifyContextGraphChanged(folderA);
-    },
-    releaseContext: () => {
-      delayContext = false;
-      releaseContext?.();
     },
     switchFolder: (folder: "a" | "b") =>
       useWorkspaceStore.getState().dispatch({

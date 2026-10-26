@@ -1,19 +1,14 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback } from "react";
 import {
   ArrowUpRight,
-  FileText,
-  Image,
   Plus,
   Square,
 } from "lucide-react";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
-import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import {
   useWorkspaceStore,
   workbenchScopeForFolder,
 } from "../../state/workspace-store";
-import { isNativeRuntime } from "../../platform/runtime";
-import { subscribeContextGraphChanged } from "../../platform/context-graph";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { DynamicIcon } from "../../shared/ui/icon-registry";
 import { RunStream } from "../../shared/ui/loading";
@@ -23,10 +18,7 @@ import { useRunStatuses } from "../terminal/use-run-status";
 import { useRunPreviewUrls } from "../terminal/use-run-preview-urls";
 import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 import { useOpenBrowserInWorkbench } from "../workbench/use-open-browser";
-import { buildDirectFileOpenAction } from "../workbench/direct-file-open";
-import { warmChatFileInWorkbench } from "../workbench/use-open-file";
 import { useWorkspaceChangeLines } from "../use-workspace-change-lines";
-import { useGitRefreshKey } from "../use-git-refresh-key";
 import { warmWorkspaceFiles } from "../workspace-files-cache";
 import { warmIgnoredRoots } from "../workbench/tabs/ignored-entries-cache";
 import { parseRemote } from "../pr/github-url";
@@ -43,13 +35,7 @@ import {
   type WorkbenchTabType,
 } from "../workbench/tab-model";
 import { useOpenScriptsSettings } from "../workbench/tabs/setup-tab";
-import {
-  contextGraphKey,
-  loadContextGraph,
-  loadContextGraphForRefresh,
-  useContextGraphSnapshot,
-} from "../context-graph-data";
-import { recentSummaryContext, summaryDestinationTab } from "./summary-model";
+import { summaryDestinationTab } from "./summary-model";
 import { isWorkspaceReviewAvailable } from "../workbench/tab-capabilities";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 import { SummaryGitStatus } from "./summary-git-status";
@@ -90,31 +76,6 @@ export function SummaryContents({
   const changeLines = useWorkspaceChangeLines(workspace, active);
   const hasChanges = changeLines.additions > 0 || changeLines.deletions > 0;
   const openRunSettings = useOpenScriptsSettings("run-actions");
-  const workspaceId = workspace
-    ? isLocalMainWorkspace(workspace)
-      ? workspace.repoRoot
-      : workspace.id
-    : null;
-  const refreshKey = useGitRefreshKey(folder, workspaceId, active);
-  const snapshot = useContextGraphSnapshot(folder);
-  const recent = useMemo(
-    () => recentSummaryContext(snapshot.data?.items ?? []),
-    [snapshot.data],
-  );
-
-  useEffect(() => {
-    if (!active) return;
-    void loadContextGraphForRefresh(folder, refreshKey).catch(() => {});
-  }, [active, folder, refreshKey]);
-
-  useEffect(() => {
-    if (!active) return;
-    return subscribeContextGraphChanged((changedCwd) => {
-      if (contextGraphKey(changedCwd) !== contextGraphKey(folder)) return;
-      void loadContextGraph(folder).catch(() => {});
-    });
-  }, [active, folder]);
-
   const warm = useCallback(
     (type: WorkbenchTabType) => {
       if (type === "files" || type === "changes") {
@@ -134,19 +95,6 @@ export function SummaryContents({
     },
     [folder, workspace, project?.originUrl],
   );
-
-  const openContextFile = (path: string) => {
-    const store = useWorkspaceStore.getState();
-    const scope = workbenchScopeForFolder(folder);
-    const current = store.workbenchByScope[scope] ?? defaultScopeFor(scope);
-    store.dispatch(
-      buildDirectFileOpenAction(current.tabs, path, {
-        preferredExistingTabId: current.activeId,
-        scope,
-      }),
-    );
-    onNavigate();
-  };
 
   const navigate = (type: WorkbenchTabType) => {
     const store = useWorkspaceStore.getState();
@@ -355,43 +303,6 @@ export function SummaryContents({
         />
       )}
 
-      <section
-        aria-label="Recent context"
-        className="border-border1 border-t pt-3"
-      >
-        {recent.length > 0 && <div className={SECTION_LABEL}>Context</div>}
-        {recent.map((item) => {
-          const Icon = item.kind === "image" ? Image : FileText;
-          return (
-            <Button
-              key={item.relPath}
-              variant="ghost"
-              className={ROW}
-              onPointerEnter={() =>
-                warmChatFileInWorkbench(folder, item.relPath)
-              }
-              onFocus={() => warmChatFileInWorkbench(folder, item.relPath)}
-              onClick={() => openContextFile(item.relPath)}
-            >
-              <Icon className="text-muted-fg size-4" aria-hidden="true" />
-              <Tooltip label={item.name} side="left">
-                <span className="text-fg1 min-w-0 truncate">{item.name}</span>
-              </Tooltip>
-            </Button>
-          );
-        })}
-        {recent.length === 0 && (
-          <p className="text-muted-fg px-1.5 py-1 text-xs">
-            {!isNativeRuntime()
-              ? "Context is available in the desktop app."
-              : !snapshot.data && snapshot.error
-                ? "Couldn’t load context."
-                : !snapshot.data
-                  ? "Loading context…"
-                  : "No context added yet"}
-          </p>
-        )}
-      </section>
     </div>
   );
 }

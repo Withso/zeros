@@ -30,8 +30,8 @@ Existing records there stay in place and remain listed, readable and
 archivable; new writes never create those folders. The share action
 (`context.graph.setShared`) is retired and answers older clients with an error.
 The workbench Context tab and its canvas are retired. The conversation summary
-retains its recent context list and opens items in the Files viewer. The shared
-renderer cache lives in `apps/desktop/src/renderer/shell/context-graph-data.ts`.
+has no Context section or context-graph reads; attachments remain accessible
+through their messages and the Files viewer.
 Listing items keep their `scope` field for wire compatibility: everything Zeros
 writes now reports `local`.
 

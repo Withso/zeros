@@ -38,7 +38,10 @@ import {
 } from "./summary-git-status-model";
 
 const ACTION_CLASS =
-  "text-fg3 hover:text-fg1 hover:bg-bg1-hover shrink-0 font-normal";
+  "text-fg3 hover:text-fg1 enabled:hover:bg-bg2-highlight focus-visible:bg-bg2-highlight shrink-0 font-normal";
+const ROW_CLASS =
+  "flex min-w-0 items-center gap-2 rounded-md px-1.5 py-0.5 hover:bg-bg2-hover focus-within:bg-bg2-hover";
+const LABEL_CLASS = "text-fg1 min-w-0 flex-1 truncate text-xs";
 
 /** Mounted only for managed Local Git workspaces, for both owner types. */
 export function SummaryGitStatus({
@@ -185,6 +188,7 @@ export function SummaryGitStatus({
               workspace={workspace}
               originUrl={originUrl}
               appearance="primary"
+              size="compact"
               active={active && nativeReady}
               disabled={!!createReason}
               disabledReason={createReason}
@@ -203,12 +207,12 @@ export function SummaryGitStatus({
         return (
           <div
             key={row.id}
-            className="flex min-w-0 items-start justify-between gap-2 px-1.5 py-0.5"
+            className={ROW_CLASS}
             data-git-status-row={row.id}
           >
-            <span className="text-fg2 min-w-0 py-0.5 text-xs break-words">
-              {row.name}
-            </span>
+            <Tooltip label={row.name} side="left">
+              <span className={LABEL_CLASS}>{row.name}</span>
+            </Tooltip>
             <Tooltip label={reason ?? ""} disabled={!reason}>
               <span className="inline-flex shrink-0">
                 <Button
@@ -233,8 +237,8 @@ export function SummaryGitStatus({
         );
       })}
       {git.error && (
-        <div className="flex items-center justify-between gap-2 px-1.5 py-0.5">
-          <span className="text-fg3 text-xs">Git status unavailable</span>
+        <div className={ROW_CLASS}>
+          <span className={LABEL_CLASS}>Git status unavailable</span>
           <Button
             variant="ghost"
             size="compact"
@@ -247,7 +251,7 @@ export function SummaryGitStatus({
         </div>
       )}
       {facts && !git.error && rows.length === 0 && (
-        <p className="text-fg3 px-1.5 py-1 text-xs">Working tree clean</p>
+        <p className="text-fg1 truncate px-1.5 py-1 text-xs">Working tree clean</p>
       )}
     </section>
   );
