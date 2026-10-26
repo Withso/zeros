@@ -85,6 +85,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   const chevron = zeros.locator("svg.lucide-chevron-down");
   await expect(chevron).toBeHidden();
   await zeros.hover();
+  await expect(zeros).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await expect(settings).toBeVisible();
   await expect(more).toBeVisible();
   await expect(chevron).toBeVisible();

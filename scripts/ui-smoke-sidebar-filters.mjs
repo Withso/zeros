@@ -7,7 +7,18 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   const trigger = page.getByRole("button", {
     name: "Filter workspaces",
     exact: true,
+    // The modal menu hides the surrounding sidebar from the accessibility
+    // tree while its still-visible trigger updates the filter indicator.
+    includeHidden: true,
   });
+  const indicator = trigger.locator("[data-filter-indicator]");
+  const expectFilterIndicator = async (active) => {
+    await expect(trigger).toHaveAccessibleDescription(
+      active ? "Repository filter active" : "",
+    );
+    await expect(indicator).toHaveCount(active ? 1 : 0);
+    if (active) await expect(indicator).toBeVisible();
+  };
   const row = (id) => page.locator(`[data-workspace-id="${id}"]`);
   const order = () =>
     page
@@ -24,14 +35,21 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   };
   const openRepositories = async () => {
     await trigger.click();
-    await page.getByRole("menuitem", { name: /^Filter/ }).hover();
+    const filter = page.getByRole("menuitem", { name: /^Filter/ });
+    await expect(filter).toHaveText("Filter");
+    await filter.hover();
     await page.getByRole("menuitem", { name: "Repo", exact: true }).hover();
     const search = page.getByRole("searchbox", { name: "Search repositories" });
     await expect(search).toBeVisible();
     await expect(search).toBeFocused();
+    await expect(search).toHaveCSS("border-top-width", "0px");
+    await expect(
+      page.getByRole("menuitem", { name: "All repositories", exact: true }),
+    ).toHaveCount(0);
     return search;
   };
 
+  await expectFilterIndicator(false);
   await selectGroup("None");
   const createdOrder = await order();
   await page.evaluate(() =>
@@ -107,6 +125,29 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await expect(zeros).toBeFocused();
   await zeros.press("Enter");
   await expect(zeros).toHaveAttribute("aria-checked", "true");
+  await expectFilterIndicator(true);
+  const originalTheme = await page.evaluate(
+    () => document.documentElement.dataset.theme,
+  );
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate(
+      (value) => (document.documentElement.dataset.theme = value),
+      theme,
+    );
+    const colors = await indicator.evaluate((node) => {
+      const swatch = document.createElement("span");
+      swatch.style.backgroundColor = "var(--blue-primary)";
+      document.body.append(swatch);
+      const expected = getComputedStyle(swatch).backgroundColor;
+      swatch.remove();
+      return { actual: getComputedStyle(node).backgroundColor, expected };
+    });
+    expect(colors.actual).toBe(colors.expected);
+  }
+  await page.evaluate((theme) => {
+    if (theme) document.documentElement.dataset.theme = theme;
+    else delete document.documentElement.dataset.theme;
+  }, originalTheme);
   await expect.poll(order).toEqual(["ws-boston", "ws-atlanta"]);
   await search.fill("ocolors");
   const colors = page.getByRole("menuitemcheckbox", {
@@ -123,16 +164,18 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await expect(row("ws-seville")).toBeVisible();
   await expect(row("ws-paris-mumbai-city-docs")).toHaveCount(0);
   await expect(trigger).toHaveAttribute("data-filtered", "true");
+  await expectFilterIndicator(true);
   check(
     "Repo supports search, keyboard selection, multiple repositories and reload persistence",
     true,
   );
 
   await openRepositories();
-  await page
-    .getByRole("menuitem", { name: "All repositories", exact: true })
-    .click();
+  await zeros.click();
+  await expectFilterIndicator(true);
+  await colors.click();
   await expect(row("ws-paris-mumbai-city-docs")).toBeVisible();
+  await expectFilterIndicator(false);
   await expect(
     page.locator('button[aria-label="Filter workspaces"]'),
   ).not.toHaveAttribute("data-filtered");
@@ -167,6 +210,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     .click();
   const cloud = await page.evaluate(() => window.appSidebarSeedCloud());
   await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+  await expectFilterIndicator(false);
   await expect(row(cloud.keys[0])).toBeVisible();
   await expect(row(cloud.keys[1])).toBeVisible();
   await expect(row("ws-atlanta")).toHaveCount(0);
@@ -176,22 +220,26 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     .click();
   await expect(row(cloud.keys[0])).toHaveCount(0);
   await expect(row(cloud.keys[1])).toBeVisible();
+  await expectFilterIndicator(true);
   await page.evaluate(
     (id) => window.appSidebarSelectOwner(id),
     cloud.otherOrganizationId,
   );
   await expect(row(cloud.keys[2])).toBeVisible();
   await expect(row(cloud.keys[1])).toHaveCount(0);
+  await expectFilterIndicator(false);
   await page.evaluate(
     (id) => window.appSidebarSelectOwner(id),
     cloud.organizationId,
   );
   await expect(row(cloud.keys[1])).toBeVisible();
   await expect(row(cloud.keys[0])).toHaveCount(0);
+  await expectFilterIndicator(true);
   await page.evaluate(() => window.appSidebarSelectOwner(null));
   await expect(row("ws-atlanta")).toBeVisible();
   await expect(row("ws-seville")).toHaveCount(0);
   await expect(row(cloud.keys[1])).toHaveCount(0);
+  await expectFilterIndicator(true);
   check(
     "Local and cloud repository filters restore independently through owner switches, closing stale menus",
     true,
