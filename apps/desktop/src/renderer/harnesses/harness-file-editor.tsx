@@ -24,7 +24,16 @@ import { ActionsCtx } from "../features/agent/sessions-context";
 import { TooltipProvider } from "../shared/ui/primitives";
 import { setPrefs } from "../shared/theme/store";
 
-const owner = new URLSearchParams(location.search).get("owner") ?? "personal";
+// URL input selects a fixed fixture; it must never become persisted app data.
+const requestedOwner = new URLSearchParams(location.search).get("owner");
+const owner =
+  requestedOwner === "cloud"
+    ? "cloud"
+    : requestedOwner === "organization"
+      ? "organization"
+      : requestedOwner === "plain"
+        ? "plain"
+        : "personal";
 const cloud =
   "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const roots = [

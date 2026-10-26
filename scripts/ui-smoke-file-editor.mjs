@@ -44,6 +44,16 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
   };
   await mkdir(".context/files-editor", { recursive: true });
   try {
+    await fixture.goto(`${url}?owner=unexpected&reset`);
+    await expect(source()).toBeVisible();
+    expect(
+      await fixture.evaluate(() =>
+        window.__fileEditor
+          .requests()
+          .find((request) => request.op === "file.read")?.params?.workspaceId,
+      ),
+    ).toBe("/personal/project");
+    check("An unknown fixture owner uses the fixed Personal workspace", true);
     for (const owner of ["personal", "organization", "cloud"]) {
       await fixture.goto(`${url}?owner=${owner}&reset`);
       await expect(source()).toBeVisible();

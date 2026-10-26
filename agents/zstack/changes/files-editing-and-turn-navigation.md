@@ -32,3 +32,9 @@
   Files. Footer file rows publish the clicked path and explicit recorded turn
   together. Preserve the previous nested-path, rename and draft safeguards.
   Encoded in navigation unit suites and tool/turn browser smoke scenarios.
+- A new aggregate Files status read also reaches existing workspace harnesses.
+  The folder fixture's generic empty response crashed after Git initialization;
+  return a complete, typed `StatusResult` and exercise the existing folder
+  Review smoke. URL parameters may select fixed fixture owners, but must not
+  be interpolated into persisted workspace data. The editor smoke now proves
+  unknown owners fall back to the fixed Personal workspace.
