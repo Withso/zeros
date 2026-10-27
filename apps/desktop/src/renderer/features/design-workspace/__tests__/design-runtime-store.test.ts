@@ -255,7 +255,7 @@ describe("design runtime store", () => {
     store.publishSnapshot("workspace-a", "/design/a", "home.html", { ...structuredClone(snapshot), revision: 5 }, SOURCE_VERSION);
     expect(notifications).toBe(1);
     const changedRoot = structuredClone({ ...snapshot, revision: 5 });
-    changedRoot.frame.styles = { ...changedRoot.frame.styles, backgroundColor: "rgb(0, 0, 0)" };
+    changedRoot.frame.styles = { ...changedRoot.frame.styles, opacity: "0.5" };
     store.publishSnapshot("workspace-a", "/design/a", "home.html", changedRoot, SOURCE_VERSION);
     expect(notifications).toBe(2);
     useDesignRuntimeStore.getState().retireFrame("workspace-a", "home.html");

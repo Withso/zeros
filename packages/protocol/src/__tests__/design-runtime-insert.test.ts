@@ -201,7 +201,7 @@ describe("runtime child insertion", () => {
       const cleared = await window.layoutRequest("clearPreviewInserts", { nodeIds: ["frame-child"] });
       return {
         both,
-        remaining: [...document.querySelectorAll('[data-oid^="frame-"]')].map((element) => element.getAttribute("data-oid")),
+        remaining: Array.from(document.querySelectorAll('[data-oid^="frame-"]')).map((element) => element.getAttribute("data-oid")),
         tree: cleared.snapshot.tree[0].children.map((node: { oid: string }) => node.oid),
       };
     }, { insert });
