@@ -736,6 +736,16 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("requiredFiles: layersOpenFiles");
   });
 
+  it("warms the editor of the frame the pointer or Layers focus rests on", () => {
+    // The likely next selection boots before the click, so selecting it
+    // paints Layers and the full inspector instead of a fallback view.
+    expect(source).toContain("const intentFile = useDesignFrameIntent(active ? workspaceId : null);");
+    expect(source).toContain("...(intentFile && !currentPlayback ? [intentFile] : []),");
+    expect(source).toContain("onPointerOver={(event) => {");
+    expect(source).toContain("if (!active && workspaceId) clearDesignFrameIntent(workspaceId);");
+    expect(layersSource).toContain("noteDesignFrameIntent(workspaceId, frame.file);");
+  });
+
   it("reads the Option measure modifier outside the canvas focus scope", () => {
     // The overlay is a display affordance, so it follows the live modifier
     // instead of a keydown that the sidebar's focus owner would have kept.

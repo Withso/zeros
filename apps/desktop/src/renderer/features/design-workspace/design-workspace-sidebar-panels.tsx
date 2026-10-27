@@ -43,6 +43,7 @@ import {
   toggleDesignNodeSelection,
 } from "./state/design-selection";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { noteDesignFrameIntent } from "./state/design-frame-intent";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useReadRecovery } from "../../state/use-read-recovery";
 import { useDocumentActive } from "../../state/use-document-active";
@@ -1191,6 +1192,12 @@ function OwnedDesignWorkspaceSidebarPanels({
                       aria-expanded={row.discloses ? row.expanded : undefined}
                       aria-keyshortcuts="F2 Meta+C Control+C Meta+D Control+D Delete Backspace"
                       onDoubleClick={(event) => handleRowDoubleClick(event, row)}
+                      onPointerEnter={() => {
+                        if (workspaceId) noteDesignFrameIntent(workspaceId, frame.file);
+                      }}
+                      onFocus={() => {
+                        if (workspaceId) noteDesignFrameIntent(workspaceId, frame.file);
+                      }}
                       onClick={(event) => {
                         if (
                           row.discloses &&
@@ -1265,6 +1272,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                     className="group relative flex h-7 min-w-0 shrink-0 items-center"
                     onPointerEnter={() => {
                       if (!workspaceId || !folder) return;
+                      noteDesignFrameIntent(workspaceId, frame.file);
                       void hoverDesignNode({
                         workspaceId,
                         folder,

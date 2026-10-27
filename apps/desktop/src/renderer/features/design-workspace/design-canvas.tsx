@@ -208,6 +208,7 @@ import {
   releaseDesignLayoutToolsLive,
 } from "./state/design-layout-tools-live";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { clearDesignFrameIntent, noteDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
 import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
@@ -1194,6 +1195,13 @@ export function DesignCanvas({
     paintNestTarget(file);
     setNestLiveFile(file);
   }, [paintNestTarget]);
+  // The frame the pointer (or Layers focus) rests on is the likely next
+  // selection: boot its editor now so the click paints ready Layers and
+  // inspector data. One latest frame, ranked after explicit demand.
+  const intentFile = useDesignFrameIntent(active ? workspaceId : null);
+  useEffect(() => {
+    if (!active && workspaceId) clearDesignFrameIntent(workspaceId);
+  }, [active, workspaceId]);
   const layersOpenFiles = useMemo(
     () => [
       ...(currentPlayback ? [currentPlayback.file] : []),
@@ -1202,8 +1210,9 @@ export function DesignCanvas({
         .map(([file]) => file),
       ...agentDraftFiles,
       ...(nestLiveFile ? [nestLiveFile] : []),
+      ...(intentFile && !currentPlayback ? [intentFile] : []),
     ],
-    [agentDraftFiles, currentPlayback, layerDisclosures, nestLiveFile, view.layersVisible],
+    [agentDraftFiles, currentPlayback, intentFile, layerDisclosures, nestLiveFile, view.layersVisible],
   );
   // Saved pictures of this directory's frames. A frame painted no larger
   // than its picture shows the picture instead of running its document.
@@ -7455,6 +7464,17 @@ export function DesignCanvas({
         // keydown lost to another focus owner (or pressed before the window was
         // focused) still resolves the moment the pointer enters the canvas.
         onPointerMove={(event) => syncMeasureModifier(event.altKey)}
+        // Crossing into a frame (or out to empty canvas) is the intent
+        // signal; movement within one element never reaches React state.
+        onPointerOver={(event) => {
+          if (!workspaceId || !active) return;
+          const target = event.target instanceof Element ? event.target : null;
+          noteDesignFrameIntent(workspaceId,
+            target?.closest<HTMLElement>("[data-design-frame]")?.dataset.designFrame ?? null);
+        }}
+        onPointerLeave={() => {
+          if (workspaceId) clearDesignFrameIntent(workspaceId);
+        }}
         aria-label="Design canvas"
       >
         <div className="pointer-events-none absolute inset-0 isolate">
