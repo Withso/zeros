@@ -3575,12 +3575,15 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     });
   }
 
-  function clearInsertPreviews(keep) {
+  /** Remove previewed inserts: the named ones, or all of them. A preview lives
+   * until its own commit adopts it, its author cancels it, or a preview with
+   * the same id replaces it; another generation's commit never retires it. */
+  function clearInsertPreviews(only) {
     if (!previewInsertsByOid.size) return false;
     var removed = false;
     withoutObservedMutations(function () {
       Array.from(previewInsertsByOid.entries()).reverse().forEach(function (entry) {
-        if (keep && keep.has(entry[0])) return;
+        if (only && !only.has(entry[0])) return;
         var preview = entry[1];
         if (preview.element.parentNode) preview.element.parentNode.removeChild(preview.element);
         restoreInsertParentStyles(preview.parentStyles);
@@ -3598,7 +3601,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Invalid insert preview.");
     var updates = args.updates === undefined ? [] : args.updates;
     if (!Array.isArray(updates) || updates.length > 8) throw new Error("Invalid insert parent styles.");
-    clearInsertPreviews(null);
+    if (Array.isArray(args.inserts)) {
+      clearInsertPreviews(new Set(args.inserts.map(function (insert) { return insert && insert.nodeId; })));
+    }
+    if (previewInsertsByOid.size >= 8) throw new Error("Too many pending layer inserts.");
     var plans = prepareInserts(args.inserts);
     var parentStyles = updates.map(function (update) {
       if (!update || typeof update !== "object" || typeof update.nodeId !== "string" ||
@@ -3621,8 +3627,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return { snapshot: nextSnapshot, details: inserted.map(function (element) { return detailsOf(element); }) };
   }
 
-  function clearPreviewInserts() {
-    clearInsertPreviews(null);
+  function clearPreviewInserts(nodeIds) {
+    if (nodeIds !== undefined && (!Array.isArray(nodeIds) || nodeIds.length > 8 ||
+        nodeIds.some(function (oid) { return typeof oid !== "string"; }))) {
+      throw new Error("Invalid insert preview ids.");
+    }
+    clearInsertPreviews(nodeIds === undefined ? null : new Set(nodeIds));
     return { snapshot: snapshot() };
   }
   var dragPaintStyle = null;
@@ -3771,7 +3781,6 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     withoutObservedMutations(function () {
       cancelMovePreviews();
       Array.from(previewStyleOverridesByOid.keys()).forEach(clearPreviewStyles);
-      clearInsertPreviews(null);
       var apply = function (entry, forward) {
         var inserts = entry.inserts || [];
         if (entry.moves.length || inserts.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
@@ -3980,9 +3989,6 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       });
       if (generationPatch.changed) applyCommittedGenerationPatch(generationPatch);
     });
-    // The confirmed generation is exactly what the engine saved; a preview
-    // this commit did not adopt belonged to an abandoned attempt.
-    clearInsertPreviews(null);
     if (historyInserts.length) refreshElementMap();
     if (generationPatch.changed) generationHistory = [];
     else {
@@ -4581,7 +4587,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         if (enabledOptInMethods.indexOf("clearPreviewInserts") < 0) {
           throw new Error("Unknown design runtime method: clearPreviewInserts");
         }
-        return clearPreviewInserts();
+        return clearPreviewInserts(args.nodeIds);
       default:
         throw new Error("Unknown design runtime method: " + method);
     }

@@ -133,7 +133,8 @@ export interface DesignFrameRuntimeConnection {
     input: DesignRuntimeInsertPreview,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeInsertPreviewResult>;
-  clearPreviewInserts(signal?: AbortSignal): Promise<{ snapshot: DesignRuntimeSnapshot }>;
+  /** Remove the named previews (all when omitted). */
+  clearPreviewInserts(nodeIds?: readonly string[], signal?: AbortSignal): Promise<{ snapshot: DesignRuntimeSnapshot }>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -786,11 +787,12 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   }
 
   async clearPreviewInserts(
+    nodeIds?: readonly string[],
     signal?: AbortSignal,
   ): Promise<{ snapshot: DesignRuntimeSnapshot }> {
     if (!this.supports("clearPreviewInserts"))
       throw runtimeError("clearPreviewInserts is not supported", "METHOD_NOT_SUPPORTED");
-    const result = await this.request("clearPreviewInserts", {}, signal) as
+    const result = await this.request("clearPreviewInserts", nodeIds ? { nodeIds: [...nodeIds] } : {}, signal) as
       { snapshot?: unknown } | null;
     if (
       !result ||

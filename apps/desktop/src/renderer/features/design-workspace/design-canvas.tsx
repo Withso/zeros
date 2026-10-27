@@ -6614,7 +6614,7 @@ export function DesignCanvas({
       } catch (error) {
         if (preview) {
           const { runtime, nodeId } = preview;
-          void runtime.clearPreviewInserts().then(({ snapshot }) => {
+          void runtime.clearPreviewInserts([nodeId]).then(({ snapshot }) => {
             useDesignRuntimeStore.getState().publishSnapshot(workspaceId, folder, owner.file, snapshot, owner.sourceVersion);
           }).catch(() => {});
           const current = designWorkspaceView(workspaceId);

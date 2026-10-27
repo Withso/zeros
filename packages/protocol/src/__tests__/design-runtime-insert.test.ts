@@ -167,6 +167,47 @@ describe("runtime child insertion", () => {
     expect(result).toEqual({ created: true, afterUndo: { html: true, tree: ["a"] }, sameElement: true, redoTree: ["a", "frame-child"] });
   });
 
+  it("keeps a pending child across an earlier unrelated commit, then adopts it once", async () => {
+    // A style write queued before the child's own transaction confirms first.
+    // It must not erase the newer provisional child the inspector is showing.
+    const result = await page.evaluate(async ({ insert, parentStyles }) => {
+      await window.layoutRequest("previewInsert", { inserts: [insert], updates: parentStyles });
+      const previewed = document.querySelector('[data-oid="frame-child"]');
+      const unrelated = await window.layoutRequest("commitStyles", {
+        updates: [{ nodeId: "a", styles: { width: "140px" } }],
+        nextSourceVersion: "c".repeat(24),
+      });
+      const survived = document.querySelector('[data-oid="frame-child"]') === previewed;
+      const adopted = await window.layoutRequest("commitStyles", {
+        updates: parentStyles, patch: { inserts: [insert] }, nextSourceVersion: "d".repeat(24),
+      });
+      return {
+        survived,
+        unrelatedTree: unrelated.snapshot.tree.length === 0 || unrelated.treeUnchanged,
+        same: document.querySelector('[data-oid="frame-child"]') === previewed,
+        count: document.querySelectorAll('[data-oid="frame-child"]').length,
+        adoptedTree: adopted.snapshot.tree[0].children.map((node: { oid: string }) => node.oid),
+      };
+    }, { insert, parentStyles });
+    expect(result).toEqual({ survived: true, unrelatedTree: true, same: true, count: 1, adoptedTree: ["a", "frame-child"] });
+  });
+
+  it("keeps concurrent pending children and cancels only the named one", async () => {
+    const result = await page.evaluate(async ({ insert }) => {
+      const second = { ...insert, nodeId: "frame-second", style: insert.style.replace("left:40px", "left:200px") };
+      await window.layoutRequest("previewInsert", { inserts: [insert] });
+      await window.layoutRequest("previewInsert", { inserts: [second] });
+      const both = ["frame-child", "frame-second"].every((oid) => document.querySelector(`[data-oid="${oid}"]`));
+      const cleared = await window.layoutRequest("clearPreviewInserts", { nodeIds: ["frame-child"] });
+      return {
+        both,
+        remaining: [...document.querySelectorAll('[data-oid^="frame-"]')].map((element) => element.getAttribute("data-oid")),
+        tree: cleared.snapshot.tree[0].children.map((node: { oid: string }) => node.oid),
+      };
+    }, { insert });
+    expect(result).toEqual({ both: true, remaining: ["frame-second"], tree: ["a", "frame-second"] });
+  });
+
   it("rejects inserts into void parents, duplicate ids and unbounded styles", async () => {
     const errors = await page.evaluate(async ({ insert }) => {
       const attempt = (args: Record<string, unknown>) => window.layoutRequest("previewInsert", args).then(() => "ok", (error: Error) => error.message);
