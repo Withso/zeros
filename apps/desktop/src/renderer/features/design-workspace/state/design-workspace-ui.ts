@@ -562,6 +562,22 @@ export function designWorkspaceView(
   );
 }
 
+/** True while nobody has explicitly selected anything since `before` was
+ * read. Every explicit selection advances `selectionEvent`, so choosing the
+ * same target again still counts as a newer choice. */
+export function designSelectionUnchangedSince(
+  workspaceId: string,
+  before: DesignWorkspaceViewState,
+): boolean {
+  const current = designWorkspaceView(workspaceId);
+  return (
+    current.selectionEvent === before.selectionEvent &&
+    current.selectedFrame === before.selectedFrame &&
+    current.selectedNodeId === before.selectedNodeId &&
+    current.frameSelected === before.frameSelected
+  );
+}
+
 export function captureDesignPageOwner(workspaceId: string): DesignPageOwner {
   const view = designWorkspaceView(workspaceId);
   return { workspaceId, directoryId: view.directoryId, pageId: view.activePageId, revision: view.ownerRevision ?? 0 };

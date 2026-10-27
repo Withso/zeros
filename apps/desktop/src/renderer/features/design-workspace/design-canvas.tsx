@@ -264,6 +264,7 @@ import {
   captureDesignPageOwner,
   useDesignWorkspaceUiStore,
   useDesignWorkspaceView,
+  designSelectionUnchangedSince,
 } from "./state/design-workspace-ui";
 import { useDesignFoundation } from "./state/use-design-foundation";
 
@@ -1719,10 +1720,9 @@ export function DesignCanvas({
       primeDesignFrameIntent(workspaceId, frame.file);
       void waitForDesignRuntimeFrame(workspaceId, frame.file, frame.sourceVersion, 1_000).then(() => {
         if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
-        // A selection the person made meanwhile wins over the creation's.
-        const current = designWorkspaceView(workspaceId);
-        if (current.selectedFrame !== selectionBefore.selectedFrame ||
-          current.selectedNodeId !== selectionBefore.selectedNodeId) return;
+        // Any selection the person made meanwhile wins over the creation's,
+        // including choosing the same target again or clearing it.
+        if (!designSelectionUnchangedSince(workspaceId, selectionBefore)) return;
         publishSelection(frame, { selected: true, reveal: true });
       });
       return frame;
