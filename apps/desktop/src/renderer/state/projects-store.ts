@@ -62,7 +62,11 @@ interface ProjectReadFlight {
   request: Promise<boolean>;
 }
 let projectSync: ProjectReadFlight | null = null;
-let nativeOriginRead: ProjectReadFlight | null = null;
+let nativeOriginRead: {
+  bridge: ProjectReadFlight["bridge"];
+  state: { revision: number; invalidated: boolean };
+  request: Promise<boolean>;
+} | null = null;
 export function projectGitRevision(id: string): number {
   return gitRevisions.get(id) ?? 0;
 }
@@ -208,10 +212,18 @@ function pushRemove(repoRoot: string): void {
   void bridgeProjectRemove(bridge, repoRoot).catch(() => {});
 }
 
-function applyNativeProjectOrigins(projects: Project[], native: Project[]): boolean {
+function captureProjectOrigins(projects: Project[]) {
+  return new Map(projects.map(project => [project.id, { project, revision: projectGitRevision(project.id) }]));
+}
+
+function applyNativeProjectOrigins(owners: ReturnType<typeof captureProjectOrigins>, native: Project[]): boolean {
+  const origins = new Map(native.map(row => [normalizeProjectRoot(row.repoRoot), row]));
   let changed = false;
-  const next = projects.map(project => {
-    const row = native.find(item => normalizeProjectRoot(item.repoRoot) === project.repoRoot);
+  const next = loadStoredProjects().map(project => {
+    const owner = owners.get(project.id);
+    if (!owner || owner.project.repoRoot !== project.repoRoot || owner.project.originUrl !== project.originUrl ||
+        owner.revision !== projectGitRevision(project.id)) return project;
+    const row = origins.get(project.repoRoot);
     if (!row || row.originRevision === undefined || row.originRevision < (project.originRevision ?? 0) ||
         row.originUrl === project.originUrl && row.originRevision === project.originRevision) return project;
     changed = true;
@@ -223,22 +235,36 @@ function applyNativeProjectOrigins(projects: Project[], native: Project[]): bool
   return changed;
 }
 
-/** A DB_CHANGED notification is a read, never another bulk write. Keep the
- * confirmed snapshot and exact registration generation while sharing reads. */
-export function refreshNativeProjectOrigins(): Promise<boolean> {
+/** A DB_CHANGED notification is a read, never another bulk write. Invalidate
+ * an older in-flight read explicitly so it cannot consume a newer notification.
+ * Apply replies only to their captured project owners, preserving other edits. */
+export function refreshNativeProjectOrigins(options: { invalidated?: boolean } = {}): Promise<boolean> {
   const bridge = getActiveBridge();
   if (!bridge || bridge.status !== "connected") return Promise.resolve(false);
   const revision = projectMutationRevision;
-  if (nativeOriginRead?.bridge === bridge && nativeOriginRead.revision === revision) return nativeOriginRead.request;
-  const projects = loadStoredProjects();
-  if (!projects.length) return Promise.resolve(false);
-  const request = requestProjectList(bridge).then(native => {
-    if (getActiveBridge() !== bridge || bridge.status !== "connected" || projectMutationRevision !== revision) return false;
-    return applyNativeProjectOrigins(projects, native);
-  }).catch(() => false).finally(() => {
+  if (nativeOriginRead?.bridge === bridge) {
+    if (options.invalidated || nativeOriginRead.state.revision !== revision) nativeOriginRead.state.invalidated = true;
+    return nativeOriginRead.request;
+  }
+  const state = { revision, invalidated: false };
+  const request = (async () => {
+    let changed = false;
+    do {
+      state.invalidated = false;
+      state.revision = projectMutationRevision;
+      const owners = captureProjectOrigins(loadStoredProjects());
+      if (!owners.size) break;
+      try {
+        const native = await requestProjectList(bridge);
+        if (getActiveBridge() !== bridge || bridge.status !== "connected") break;
+        if (!state.invalidated) changed = applyNativeProjectOrigins(owners, native) || changed;
+      } catch { /* Retain confirmed Origins. Only a new invalidation requests another read. */ }
+    } while (state.invalidated && getActiveBridge() === bridge && bridge.status === "connected");
+    return changed;
+  })().finally(() => {
     if (nativeOriginRead?.request === request) nativeOriginRead = null;
   });
-  nativeOriginRead = { bridge, revision, request };
+  nativeOriginRead = { bridge, state, request };
   return request;
 }
 
@@ -274,6 +300,7 @@ export function syncProjectsToEngine(): Promise<boolean> {
         return false;
       }
     }
+    const owners = captureProjectOrigins(projects);
     await bridgeProjectBulkUpsert(
       bridge,
       projects.map((p) => ({
@@ -286,8 +313,8 @@ export function syncProjectsToEngine(): Promise<boolean> {
     ).catch(() => {});
     try {
       const native = await requestProjectList(bridge);
-      if (getActiveBridge() !== bridge || bridge.status !== "connected" || projectMutationRevision !== revision) return false;
-      return applyNativeProjectOrigins(projects, native);
+      if (getActiveBridge() !== bridge || bridge.status !== "connected") return false;
+      return applyNativeProjectOrigins(owners, native);
     } catch { return false; }
   })().finally(() => {
     if (projectSync?.request === request) projectSync = null;

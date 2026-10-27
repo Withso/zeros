@@ -178,7 +178,7 @@ export function useSyncProjectsToEngine(): void {
       stopChanges = bridge.on("DB_CHANGED", message => {
         const { kinds, snapshotPublication } = message as { kinds?: string[]; snapshotPublication?: boolean };
         if (getActiveBridge() !== bridge || snapshotPublication || !kinds?.includes("projects")) return;
-        void refreshNativeProjectOrigins().then(changed => { if (changed) notifyProjectsChanged(); });
+        void refreshNativeProjectOrigins({ invalidated: true }).then(changed => { if (changed) notifyProjectsChanged(); });
       });
       void syncProjectsToEngine().then((recovered) => {
         if (recovered) notifyProjectsChanged();

@@ -251,4 +251,19 @@ describe("verified GitHub repository reconciliation", () => {
     expect(project().repoSlug).toBe(before.repoSlug);
     expect(project().canonicalId).toBe(before.canonicalId);
   });
+
+  it.each(["project.upsert", "project.bulkUpsert"])("%s preserves the saved Origin revision when rebuilding an empty registry", async op => {
+    await reconcile();
+    repository = { ...repository, owner: { login: "third" } };
+    await reconcile();
+    const saved = project();
+    expect(saved.originRevision).toBe(2);
+    closeZerosDb();
+    setZerosDbPathForTesting(path.join(root, "recovered-state.db"));
+    await service.handle(op, op === "project.upsert" ? { ...saved } : { projects: [saved] });
+    expect(project()).toMatchObject({ originUrl: saved.originUrl, originRevision: saved.originRevision });
+    repository = { ...repository, owner: { login: "fourth" } };
+    await reconcile();
+    expect(project()).toMatchObject({ originUrl: "git@github.com:fourth/renamed.git", originRevision: saved.originRevision + 1 });
+  });
 });

@@ -108,13 +108,13 @@ describe("native project recovery after an empty renderer cache", () => {
 
   it("rejects a stale canonical metadata reply after removing and re-adding the same root", async () => {
     const project = upsertProject({ repoRoot: local.repoRoot });
-    let resolve!: (rows: typeof local[]) => void;
+    let resolve!: (rows: (typeof local & { originRevision: number })[]) => void;
     mocks.read.mockReturnValue(new Promise(done => { resolve = done; }));
     const pending = syncProjectsToEngine();
     await vi.waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
     removeProject(project.id);
     const replacement = upsertProject({ repoRoot: local.repoRoot });
-    resolve([{ ...local, originUrl: "git@github.com:current/renamed.git" }]);
+    resolve([{ ...local, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
     await pending;
     expect(loadProjects()).toEqual([replacement]);
   });
@@ -132,13 +132,58 @@ describe("native project recovery after an empty renderer cache", () => {
     expect(mocks.push).not.toHaveBeenCalled();
   });
 
-  it.each(["remove", "replace bridge"])("discards a held Origin notification after %s", async change => {
+  it("reads again when a transfer invalidates an older in-flight snapshot", async () => {
+    const project = upsertProject({ repoRoot: local.repoRoot, originUrl: "git@github.com:former/widgets.git" });
+    mocks.push.mockClear();
+    let resolve!: (rows: (typeof local & { originRevision: number })[]) => void;
+    mocks.read.mockReturnValueOnce(new Promise(done => { resolve = done; }))
+      .mockResolvedValueOnce([{ ...local, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
+    const pending = refreshNativeProjectOrigins();
+    const invalidated = refreshNativeProjectOrigins({ invalidated: true });
+    const coalesced = refreshNativeProjectOrigins({ invalidated: true });
+    expect(mocks.read).toHaveBeenCalledOnce();
+    resolve([{ ...local, originUrl: project.originUrl, originRevision: 1 }]);
+    await Promise.all([pending, invalidated, coalesced]);
+    expect(mocks.read).toHaveBeenCalledTimes(2);
+    expect(loadProjects()).toEqual([{ ...project, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
+    expect(mocks.push).not.toHaveBeenCalled();
+  });
+
+  it.each(["notification", "boot sync"])("applies %s Origin updates while another project is added", async source => {
+    const project = upsertProject({ repoRoot: local.repoRoot, originUrl: "git@github.com:former/widgets.git" });
+    let resolve!: (rows: (typeof local & { originRevision: number })[]) => void;
+    mocks.read.mockReturnValue(new Promise(done => { resolve = done; }));
+    const pending = source === "notification" ? refreshNativeProjectOrigins() : syncProjectsToEngine();
+    await vi.waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
+    const other = upsertProject({ repoRoot: "/repo/other", name: "Another repository" });
+    mocks.push.mockClear();
+    resolve([{ ...local, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
+    expect(await pending).toBe(true);
+    expect(loadProjects()).toEqual([other, { ...project, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
+    expect(mocks.push).not.toHaveBeenCalled();
+  });
+
+  it("retains confirmed Origins when a read fails without retrying on its own", async () => {
+    const project = upsertProject({ repoRoot: local.repoRoot, originUrl: "git@github.com:current/renamed.git" });
+    mocks.push.mockClear();
+    mocks.read.mockRejectedValue(new Error("connection unavailable"));
+    expect(await refreshNativeProjectOrigins({ invalidated: true })).toBe(false);
+    expect(mocks.read).toHaveBeenCalledOnce();
+    expect(loadProjects()).toEqual([project]);
+    expect(mocks.push).not.toHaveBeenCalled();
+  });
+
+  it.each(["remove", "re-add", "edit Git", "replace bridge"])("discards a held Origin notification after %s", async change => {
     const project = upsertProject({ repoRoot: local.repoRoot });
     let resolve!: (rows: (typeof local & { originRevision: number })[]) => void;
     mocks.read.mockReturnValue(new Promise(done => { resolve = done; }));
     const pending = refreshNativeProjectOrigins();
-    if (change === "remove") removeProject(project.id);
-    else mocks.bridge = { status: "connected" };
+    if (change === "replace bridge") mocks.bridge = { status: "connected" };
+    else if (change === "edit Git") upsertProject({ repoRoot: local.repoRoot, isGitRepository: true });
+    else {
+      removeProject(project.id);
+      if (change === "re-add") upsertProject({ repoRoot: local.repoRoot });
+    }
     const current = loadProjects();
     resolve([{ ...local, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
     expect(await pending).toBe(false);

@@ -162,15 +162,16 @@ interface ProjectInput {
 }
 
 /** Insert or update a repo by root. Preserves the existing id + added_at on
- *  update; refreshes the curated fields (name / slug / origin). */
+ *  update; refreshes the curated fields (name / slug / origin). New rows retain
+ *  the cached Origin revision so rebuilding the registry does not reset CAS. */
 export function upsertRepoByRoot(p: ProjectInput): void {
   if (!p.repoRoot) return;
   const root = canonicalRepoRoot(p.repoRoot);
   openZerosDb()
     .prepare(
       `INSERT INTO repos
-         (id, canonical_id, name, repo_slug, remote_url, root_path, added_at)
-       VALUES (@id, @canonical_id, @name, @repo_slug, @remote_url, @root_path, @added_at)
+         (id, canonical_id, name, repo_slug, remote_url, origin_revision, root_path, added_at)
+       VALUES (@id, @canonical_id, @name, @repo_slug, @remote_url, @origin_revision, @root_path, @added_at)
        ON CONFLICT(root_path) DO UPDATE SET
          name       = excluded.name,
          repo_slug  = COALESCE(NULLIF(excluded.repo_slug, ''), repos.repo_slug),

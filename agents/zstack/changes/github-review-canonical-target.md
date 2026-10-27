@@ -35,6 +35,17 @@
   Origin of a re-added checkout. Recheck effective Git URLs after network I/O
   too: an included transport file can change without touching `.git/config`.
   Both cases have retained regressions in `github-repository-reconciliation.test.ts`.
+- Shared reads can consume a newer native invalidation while returning an old
+  snapshot. Queue one fresh read for invalidations received during a read, and
+  apply each reply against its captured project identity and Git generation so
+  an unrelated catalog edit cannot discard it. Retain the latest other rows and
+  reject removed, re-added or edited owners. Encoded in
+  `projects-engine-recovery.test.ts`.
+- A revision fence must survive recovery on both sides: inserting a saved
+  project into an empty native registry must retain its cached Origin revision.
+  Resetting it to zero makes later native corrections appear stale to the
+  renderer. Both single and bulk restore paths have a subsequent-transfer
+  regression in `github-repository-reconciliation.test.ts`.
 - Placement coverage does not require adding a missing cloud feature to a
   Local fix. Test the explicit cloud exclusion and retain the existing cloud
   regression. Keep broader cloud implementation separate when the user asks
