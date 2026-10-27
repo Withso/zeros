@@ -33,10 +33,24 @@ async function fixture(version = 1) {
 
   const requests: { method: string; path: string; authorization: string; body: Buffer }[] = [];
   const status = { head: 404, archive: 200, index: 200 };
+  // What a runtime listing returns, and the bodies of stored source indices.
+  const listing: { key: string; lastModified: string; size: number }[] = [], stored: Record<string, string> = {};
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     requests.push({ method: request.method!, path: request.url!, authorization: request.headers.authorization ?? "", body: Buffer.concat(chunks) });
+    const url = new URL(request.url!, "http://storage.test");
+    if (request.method === "GET" && url.searchParams.get("list-type") === "2") {
+      const contents = listing.map(o => `<Contents><Key>${o.key}</Key><LastModified>${o.lastModified}</LastModified><Size>${o.size}</Size></Contents>`).join("");
+      response.writeHead(200, { "content-type": "application/xml" }).end(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><KeyCount>${listing.length}</KeyCount><IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`);
+      return;
+    }
+    if (request.method === "POST" && url.searchParams.has("delete")) {
+      response.writeHead(200, { "content-type": "application/xml" }).end(`<?xml version="1.0" encoding="UTF-8"?><DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>`);
+      return;
+    }
+    const body = request.method === "GET" ? stored[url.pathname.split("/").slice(2).join("/")] : undefined;
+    if (body !== undefined) { response.writeHead(200, { "content-type": "application/json" }).end(body); return; }
     response.writeHead(request.method === "HEAD" ? status.head : request.url!.includes("/sources/") ? status.index : status.archive).end();
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -58,13 +72,15 @@ async function fixture(version = 1) {
   const publish = (...args: string[]) => run(process.execPath, ["--import", "tsx", "src/cloud/publish-runtime.ts", "--artifact", archive, ...args], {
     cwd: resolve(import.meta.dirname, "../.."), env, timeout: 15_000,
   });
-  return { archive, contents, env, profile, publish, requests, sha256, storage, status };
+  return { archive, contents, env, listing, profile, publish, requests, sha256, storage, status, stored };
 }
 
 it.each([1, 2])("publishes --local with the version %i profile's storage, without exposing credentials", async version => {
   const test = await fixture(version);
   const { stdout, stderr } = await test.publish("--local");
-  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT"]);
+  // The last request lists older runtimes; a Dev store keeps its newest without a pin.
+  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT", "GET"]);
+  expect(stdout).toContain("no older runtimes to remove");
   for (const request of test.requests.slice(0, 2)) {
     expect(request.path.split("?")[0]).toBe(`/fixture-local/cloud-v2/runtime/${test.sha256}.tar.gz`);
     expect(request.authorization).toContain("Credential=fixture-local-access/");
@@ -81,8 +97,10 @@ it.each([1, 2])("publishes --local with the version %i profile's storage, withou
 
 it("keeps environment-based publishing when --local is absent", async () => {
   const test = await fixture();
-  const { stdout } = await test.publish();
+  const { stdout, stderr } = await test.publish();
+  // Without its live pin, a deployment store is never pruned.
   expect(test.requests).toHaveLength(3);
+  expect(stderr).toContain("Runtime retention skipped");
   expect(test.requests[1]!.path.split("?")[0]).toBe(`/fixture-hosted/cloud-v2/runtime/${test.sha256}.tar.gz`);
   expect(test.requests[1]!.authorization).toContain("Credential=fixture-hosted-access/");
   expect(stdout).toContain(`CLOUD_V2_RUNTIME_SHA256=${test.sha256}`);
@@ -92,7 +110,7 @@ it("publishes --local with no CLOUD_V2_RUNTIME_STORE_* environment variables", a
   const test = await fixture();
   for (const key of Object.keys(test.env)) if (key.startsWith("CLOUD_V2_RUNTIME_STORE_")) delete test.env[key];
   const { stdout } = await test.publish("--local");
-  expect(test.requests).toHaveLength(3);
+  expect(test.requests).toHaveLength(4);
   expect(test.requests[1]!.path.split("?")[0]).toBe(`/fixture-local/cloud-v2/runtime/${test.sha256}.tar.gz`);
   expect(stdout).toContain(`CLOUD_V2_RUNTIME_SHA256=${test.sha256}`);
 });
@@ -116,4 +134,34 @@ it("does not treat a storage refusal as a missing runtime or publish an index af
   test.requests.length = 0; test.status.head = 404; test.status.archive = 403;
   expect((await test.publish("--local").catch(error => error)).code).toBe(1);
   expect(test.requests.map(r => r.method)).toEqual(["HEAD", "PUT"]);
+});
+
+it("removes older runtimes from a deployment store once its live pin is known, indices first", async () => {
+  const test = await fixture();
+  const old = "d".repeat(64), pin = "e".repeat(64), source = "f".repeat(64), week = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  test.listing.push({ key: `cloud-v2/runtime/${old}.tar.gz`, lastModified: week, size: 300e6 },
+    { key: `cloud-v2/runtime/${pin}.tar.gz`, lastModified: new Date(Date.now() - 9 * 86_400_000).toISOString(), size: 300e6 },
+    { key: `cloud-v2/runtime/${"c".repeat(64)}.tar.gz`, lastModified: new Date(Date.now() - 2 * 86_400_000).toISOString(), size: 300e6 },
+    { key: `cloud-v2/runtime/${test.sha256}.tar.gz`, lastModified: new Date().toISOString(), size: 1000 },
+    { key: `cloud-v2/runtime/sources/${source}.json`, lastModified: week, size: 200 });
+  test.stored[`cloud-v2/runtime/sources/${source}.json`] = JSON.stringify({ version: 1, sourceSha256: source, sha256: old, commit: "a".repeat(40) });
+  test.env.CLOUD_V2_RUNTIME_SHA256 = pin;
+  const { stdout, stderr } = await test.publish();
+  const deletes = test.requests.filter(request => request.method === "POST").map(request => request.body.toString());
+  expect(deletes).toHaveLength(2);
+  expect(deletes[0]).toContain(`<Key>cloud-v2/runtime/sources/${source}.json</Key>`);
+  expect(deletes[1]).toContain(`<Key>cloud-v2/runtime/${old}.tar.gz</Key>`);
+  for (const kept of [pin, "c".repeat(64), test.sha256]) expect(deletes.join("")).not.toContain(kept);
+  expect(stdout).toContain("removed 1 older runtime (300 MB)");
+  expect(stderr).toBe("");
+});
+
+it("skips retention with --no-prune and refuses an invalid --keep before contacting storage", async () => {
+  const test = await fixture();
+  await test.publish("--local", "--no-prune");
+  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT"]);
+  test.requests.length = 0;
+  const result = await test.publish("--keep", "not-a-sha").catch(error => error);
+  expect(result.code).toBe(1);
+  expect(test.requests).toEqual([]);
 });

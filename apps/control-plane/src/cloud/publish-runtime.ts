@@ -4,6 +4,7 @@
 //   pnpm --dir apps/control-plane cloud-v2:publish-runtime
 //
 // Store comes from CLOUD_V2_RUNTIME_STORE_* or the private local profile with --local.
+// Afterwards older runtimes are removed: see runtime-retention.ts.
 import { createReadStream, copyFileSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -13,9 +14,11 @@ import { HeadObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/cli
 import { z } from "zod";
 import { cloudV2RuntimeKey, type CloudV2RuntimeStore } from "./runtime.js";
 import { inspectRuntimeArchive } from "./runtime-artifact.js";
+import { pruneRuntimes } from "./runtime-retention.js";
 import { cloudV2RuntimeSourceKey, runtimeObjectMissing, runtimeStorageClient } from "./runtime-source.js";
 
 const root = resolve(import.meta.dirname, "../../../..");
+const SHA256 = /^[0-9a-f]{64}$/;
 const required = (name: string) => {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -83,17 +86,43 @@ export async function publishRuntime({ storage, artifact, docker, allowDirty, re
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { local: { type: "boolean" }, artifact: { type: "string" }, docker: { type: "boolean" }, "allow-dirty": { type: "boolean" }, help: { type: "boolean" } } });
+  const { values } = parseArgs({ options: { local: { type: "boolean" }, artifact: { type: "string" }, docker: { type: "boolean" }, "allow-dirty": { type: "boolean" },
+    keep: { type: "string", multiple: true }, "no-prune": { type: "boolean" }, help: { type: "boolean" } } });
   if (values.help) {
-    console.log("cloud-v2:publish-runtime [--local] [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. --local reads the electron:cloud profile's storage section; otherwise uses CLOUD_V2_RUNTIME_STORE_*. Publishes the SHA-pinned archive and a source-hash index for automatic startup.");
+    console.log("cloud-v2:publish-runtime [--local] [--artifact <Linux archive.tar.gz> | --docker] [--allow-dirty] [--keep <sha256>]... [--no-prune]\nMac builds require Docker. --artifact validates and uploads an existing archive without building. --local reads the electron:cloud profile's storage section; otherwise uses CLOUD_V2_RUNTIME_STORE_*. Publishes the SHA-pinned archive and a source-hash index for automatic startup, then removes older runtimes: it keeps the live pin (CLOUD_V2_RUNTIME_SHA256 or --keep), the two newest and anything from the last day. A deployment store is pruned only when its live pin is known; --no-prune skips this.");
     return;
   }
   if (values.artifact && (values.docker || values["allow-dirty"])) throw new Error("Choose either an existing artifact or build options");
+  if (values.keep?.some(sha => !SHA256.test(sha))) throw new Error("--keep takes a runtime sha256");
   const { systemEnvironment } = await import(pathToFileURL(join(root, "scripts/dev-environment/state.mjs")).href);
-  const result = await publishRuntime({ storage: await runtimeStore(values.local === true), ...(values.artifact ? { artifact: values.artifact } : {}),
+  const storage = await runtimeStore(values.local === true);
+  const result = await publishRuntime({ storage, ...(values.artifact ? { artifact: values.artifact } : {}),
     docker: values.docker ?? false, allowDirty: values["allow-dirty"] ?? false, env: systemEnvironment() });
   console.log(`${result.stored ? "already stored" : "stored"} ${(result.bytes / 1e6).toFixed(0)} MB`);
   console.log(`CLOUD_V2_RUNTIME_SHA256=${result.sha256}`);
+  if (!values["no-prune"]) await retain(storage, values.local === true, result.sha256, values.keep ?? []);
+}
+
+/** Removes older runtimes after a publish. A deployment store must name its
+ * live pin, as `railway run` provides through CLOUD_V2_RUNTIME_SHA256, or it
+ * is left alone. A Dev store has no single pin: its stacks select runtimes
+ * by source, and one that lost its runtime publishes it again on restart. */
+async function retain(storage: CloudV2RuntimeStore, local: boolean, published: string, keep: readonly string[]) {
+  const pins = [...keep, process.env.CLOUD_V2_RUNTIME_SHA256, process.env.ZEROS_CLOUD_V2_RUNTIME_SHA256]
+    .flatMap(sha => sha && SHA256.test(sha.trim()) ? [sha.trim()] : []);
+  if (!local && !pins.length) {
+    console.error("Runtime retention skipped: set CLOUD_V2_RUNTIME_SHA256 or pass --keep <sha256> so the live runtime is kept.");
+    return;
+  }
+  const client = runtimeStorageClient(storage);
+  try {
+    const plan = await pruneRuntimes(client, storage.bucket, { protect: [published, ...pins] });
+    const count = plan.archives.length;
+    console.log(count ? `removed ${count} older runtime${count === 1 ? "" : "s"} (${(plan.bytes / 1e6).toFixed(0)} MB); kept ${plan.kept.map(sha => sha.slice(0, 12)).join(", ")}`
+      : "no older runtimes to remove");
+  } catch {
+    console.error("Runtime retention failed; the published runtime is unaffected.");
+  } finally { client.destroy(); }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

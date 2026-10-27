@@ -576,7 +576,12 @@ and derives each Dev generation's worker signing key.
 uploads it from a clean Linux x64 checkout. Set the returned archive digest
 in the target deployment. Publishing an archive alone does not change running
 workspaces; create and wake apply the
-configured pin. Tests use fake worker connections and native provider streams;
+configured pin. Each publish then removes that store's older runtimes and
+their source indices, indices first. It keeps the live pin
+(`CLOUD_V2_RUNTIME_SHA256`, which `railway run` provides, or `--keep <sha256>`),
+the two newest and anything from the last day. A deployment store is pruned
+only when its live pin is known, and `--no-prune` skips this. A removed runtime
+can be published again from the commit its index records. Tests use fake worker connections and native provider streams;
 live verification must also cover the private route, stop, offline history, wake
 and deletion.
 
