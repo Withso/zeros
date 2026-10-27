@@ -50,9 +50,10 @@
   microtask did not establish that ReadableStream had requested the next packet
   → await the observed request count before inspecting, replying or cancelling
   → Electron `file-media-stream.test.ts`, reproduced on Node 22.23.3.
-- CodeQL flagged a replacement-file fixture that wrote through a checked path
-  → renaming the old file does not make a later pathname write exclusive →
-  create the replacement exclusively and write through its held descriptor
+- CodeQL flagged a replacement-file fixture that reopened a checked path,
+  including after adding exclusive creation → prepare the replacement at a
+  separate path through an exclusive descriptor before checking the original,
+  then rename it atomically over the original without reopening that pathname
   → engine `file-media-stream.test.ts`, preserving the replacement rejection.
 
 The verification skill now requires real native range/seek evidence and

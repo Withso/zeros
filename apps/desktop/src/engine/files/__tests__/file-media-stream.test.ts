@@ -49,6 +49,10 @@ it.each([false, true])("reads only the requested bytes and fences replaced media
   const root = fixture("clip.mp4", 200_000_000), target = path.join(root, "clip.mp4");
   const file = fs.openSync(target, "r+");
   fs.writeSync(file, Buffer.from([1, 2, 3, 4]), 0, 4, 180_000_000); fs.closeSync(file);
+  const replacementPath = path.join(root, "replacement.mp4");
+  const replacement = fs.openSync(replacementPath, "wx", 0o600);
+  try { fs.writeFileSync(replacement, "replacement"); }
+  finally { fs.closeSync(replacement); }
   const version = readWorkspaceFile(root, "clip.mp4", { remote, includeVideo: true, streamMedia: true }).media!.version;
   const read = vi.spyOn(fs, "read"), readAll = vi.spyOn(fs, "readFileSync");
   const args = { path: "clip.mp4", version, offset: 180_000_000, length: 4 };
@@ -57,10 +61,8 @@ it.each([false, true])("reads only the requested bytes and fences replaced media
   expect(readAll).not.toHaveBeenCalled();
   await expect(readWorkspaceMediaRange(root, { ...args, length: 1024 * 1024 + 1 }, remote)).rejects.toThrow();
   await expect(readWorkspaceMediaRange(root, { ...args, offset: 200_000_000 }, remote)).resolves.toEqual({ bytes: 0, base64: "" });
-  fs.renameSync(target, path.join(root, "old.mp4"));
-  const replacement = fs.openSync(target, "wx", 0o600);
-  try { fs.writeFileSync(replacement, "replacement"); }
-  finally { fs.closeSync(replacement); }
+  // Replace atomically without reopening the pathname whose version was checked.
+  fs.renameSync(replacementPath, target);
   await expect(readWorkspaceMediaRange(root, args, remote)).rejects.toThrow(/changed/);
   await expect(readWorkspaceMediaRange(root, { ...args, path: "../outside.mp4" }, remote)).rejects.toThrow();
   fs.mkdirSync(path.join(root, ".ssh")); fs.writeFileSync(path.join(root, ".ssh", "private.mp4"), "secret");
