@@ -677,6 +677,32 @@ export function designRuntimeFrameState(
   ];
 }
 
+/** Resolve once a runtime has reported this exact frame generation (true), or
+ * after `timeoutMs` (false). Used to select a new frame together with its
+ * inspector data instead of through a fallback view. */
+export function waitForDesignRuntimeFrame(
+  workspaceId: string,
+  file: string,
+  sourceVersion: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const reported = () =>
+    useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[file]
+      ?.snapshot?.sourceVersion === sourceVersion;
+  if (reported()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    const unsubscribe = useDesignRuntimeStore.subscribe(() => {
+      if (reported()) finish(true);
+    });
+    function finish(value: boolean) {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(value);
+    }
+  });
+}
+
 export function forgetDesignRuntimeWorkspace(workspaceId: string): void {
   useDesignRuntimeStore.getState().forgetWorkspace(workspaceId);
 }

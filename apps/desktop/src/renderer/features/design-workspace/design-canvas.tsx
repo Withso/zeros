@@ -207,8 +207,8 @@ import {
   publishDesignLayoutToolsLive,
   releaseDesignLayoutToolsLive,
 } from "./state/design-layout-tools-live";
-import { useDesignRuntimeStore } from "./state/design-runtime-store";
-import { clearDesignFrameIntent, noteDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
+import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
+import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
 import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
@@ -1660,12 +1660,17 @@ export function DesignCanvas({
 
   /** Frame creation returns the aggregate snapshot, avoiding a follow-up read.
    * Drawn geometry is authored in that same mutation, so no default-size frame
-   * can flash before a second resize write. */
+   * can flash before a second resize write. The new frame's editor boots at
+   * once and the frame is selected when it reports (bounded), so the
+   * inspector moves straight to its full properties; the drawn rectangle
+   * covers the canvas until the frame paints. */
   const createFrame = useCallback(
     async (geometry?: DesignFrameGeometryWire) => {
       if (!workspaceId || creatingFrameRef.current) return null;
       creatingFrameRef.current = true;
       setCreatingFrame(true);
+      const selectionBefore = designWorkspaceView(workspaceId);
+      let created: DesignCanvasFrameWire | null = null;
       try {
         const result = await createDesignFrameAndRefresh(
           workspaceId,
@@ -1674,15 +1679,10 @@ export function DesignCanvas({
           undefined,
           canvasPageOwner?.pageId,
         );
-        const created = result.snapshot.frames.find(
+        created = result.snapshot.frames.find(
           (frame) => frame.file === result.frame.file,
-        );
+        ) ?? null;
         if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return null;
-        if (created) {
-          publishSelection(created, { selected: true, reveal: true });
-          if (!geometry) fitFrames([created]);
-        }
-        return created ?? null;
       } catch (createError) {
         toast.error("Couldn't create a design frame", {
           description: errorMessage(createError),
@@ -1692,6 +1692,19 @@ export function DesignCanvas({
         creatingFrameRef.current = false;
         setCreatingFrame(false);
       }
+      if (!created) return null;
+      const frame = created;
+      if (!geometry) fitFrames([frame]);
+      primeDesignFrameIntent(workspaceId, frame.file);
+      void waitForDesignRuntimeFrame(workspaceId, frame.file, frame.sourceVersion, 1_000).then(() => {
+        if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
+        // A selection the person made meanwhile wins over the creation's.
+        const current = designWorkspaceView(workspaceId);
+        if (current.selectedFrame !== selectionBefore.selectedFrame ||
+          current.selectedNodeId !== selectionBefore.selectedNodeId) return;
+        publishSelection(frame, { selected: true, reveal: true });
+      });
+      return frame;
     },
     [fitFrames, publishSelection, workspaceId, canvasPageOwner],
   );
@@ -6460,6 +6473,8 @@ export function DesignCanvas({
     ) => {
       const draft = creationDraftRef.current;
       if (!draft) return;
+      // A new gesture owns the draft; a previous creation's hand-off ends.
+      creationHandoffRef.current += 1;
       draft.dataset.designCreationDraft = kind;
       draft.style.display = "block";
       draft.style.left = `${rect.x}px`;
@@ -6478,11 +6493,36 @@ export function DesignCanvas({
     [],
   );
 
+  const creationHandoffRef = useRef(0);
   const hideCreationDraft = useCallback(() => {
+    creationHandoffRef.current += 1;
     if (creationDraftRef.current) {
       creationDraftRef.current.style.display = "none";
     }
   }, []);
+  /** A created frame paints only once its document or pixels are ready. Keep
+   * the drawn rectangle until then so the canvas never blinks empty; a new
+   * gesture, retirement or a 2 s bound ends the hand-off. */
+  const hideCreationDraftWhenPainted = useCallback((file: string) => {
+    const token = ++creationHandoffRef.current;
+    const started = performance.now();
+    const tick = () => {
+      if (creationHandoffRef.current !== token) return;
+      const article = frameElementsRef.current.get(file);
+      const painted = article?.querySelector(
+        'iframe[data-design-document-buffer="displayed"][data-design-document-ready], [data-design-source-ready], [data-design-frame-pixels-ready]',
+      );
+      if (painted || !article?.isConnected && performance.now() - started > 250 || performance.now() - started > 2_000) {
+        hideCreationDraft();
+        return;
+      }
+      window.requestAnimationFrame(tick);
+    };
+    window.requestAnimationFrame(tick);
+  }, [hideCreationDraft]);
+  useLayoutEffect(() => {
+    if (!active) hideCreationDraft();
+  }, [active, hideCreationDraft]);
 
   /** A frame drawn inside a document belongs to its nearest frame container.
    * A capable runtime paints the child on release and adopts the saved
@@ -6750,16 +6790,20 @@ export function DesignCanvas({
         );
         cleanup(false);
         activateTool("select");
-        const creation = owner
-          ? createChildFrame(
-              owner,
-              { x: start.x - owner.x, y: start.y - owner.y },
-              moved
-                ? { x: latest.x - owner.x, y: latest.y - owner.y }
-                : undefined,
-            )
-          : createFrame(geometry);
-        void creation.finally(hideCreationDraft);
+        if (owner) {
+          void createChildFrame(
+            owner,
+            { x: start.x - owner.x, y: start.y - owner.y },
+            moved
+              ? { x: latest.x - owner.x, y: latest.y - owner.y }
+              : undefined,
+          ).finally(hideCreationDraft);
+        } else {
+          void createFrame(geometry).then(
+            (created) => created ? hideCreationDraftWhenPainted(created.file) : hideCreationDraft(),
+            hideCreationDraft,
+          );
+        }
       };
       const cancel = () => cleanup();
 
@@ -6780,6 +6824,7 @@ export function DesignCanvas({
       createFrame,
       createChildFrame,
       hideCreationDraft,
+      hideCreationDraftWhenPainted,
       paintCreationDraft,
       frameViews,
       canvasPageOwner,

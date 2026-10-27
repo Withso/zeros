@@ -244,4 +244,61 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
       .getByRole("group", { name: "Align children", exact: true })
       .count()) === 1,
   );
+
+  // A new top-level frame keeps its drawn rectangle until its document or
+  // pixels paint, and is selected together with its full inspector.
+  const empty = await page.evaluate(() => {
+    const canvas = document.querySelector("[data-design-canvas-viewport]").getBoundingClientRect();
+    const clear = (x, y) => {
+      const hit = document.elementFromPoint(x, y);
+      return hit && !hit.closest("[data-design-frame], [data-design-controls], [data-design-floating-panel], button");
+    };
+    for (let y = canvas.top + 120; y < canvas.bottom - 200; y += 40)
+      for (let x = canvas.left + 80; x < canvas.right - 520; x += 40)
+        if (clear(x, y) && clear(x + 160, y + 140) && clear(x + 80, y + 70)) return { x, y };
+    return null;
+  });
+  check("the canvas has room to draw a top-level frame", Boolean(empty));
+  if (!empty) return;
+  const before = new Set(await page.locator("[data-design-frame]").evaluateAll(
+    (frames) => frames.map((frame) => frame.getAttribute("data-design-frame")),
+  ));
+  await page.evaluate((known) => {
+    const probe = { blank: 0, fallback: 0, created: null, done: false };
+    window.__designFrameCreation = probe;
+    const sample = () => {
+      const article = [...document.querySelectorAll("[data-design-frame]")]
+        .find((frame) => !known.includes(frame.getAttribute("data-design-frame")));
+      const draft = document.querySelector("[data-design-creation-draft]");
+      const painted = article?.querySelector('iframe[data-design-document-buffer="displayed"][data-design-document-ready], [data-design-source-ready], [data-design-frame-pixels-ready]');
+      if (article) probe.created = article.getAttribute("data-design-frame");
+      if (article && !painted && (!draft || getComputedStyle(draft).display === "none")) probe.blank++;
+      const inspector = document.querySelector("[data-design-inspector]");
+      if (inspector?.querySelector("[data-design-inspector-header]")?.textContent?.trim() === "Frame" &&
+          !inspector.querySelector("[data-design-layout-section]")) probe.fallback++;
+      if (!probe.done) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }, [...before]);
+  await page.getByRole("button", { name: "Frame tool", exact: true }).click();
+  await page.mouse.move(empty.x, empty.y);
+  await page.mouse.down();
+  await page.mouse.move(empty.x + 160, empty.y + 140, { steps: 6 });
+  await page.mouse.up();
+  await waitFor(async () => {
+    const created = await page.evaluate(() => window.__designFrameCreation.created);
+    return created && (await page.locator(`[data-design-frame-row="${created}"][aria-selected="true"]`).count()) === 1 &&
+      (await layout.count()) === 1;
+  }, "top-level-frame-selected");
+  await page.waitForTimeout(300);
+  const topLevel = await page.evaluate(() => {
+    const probe = window.__designFrameCreation;
+    probe.done = true;
+    return probe;
+  });
+  check(
+    "a new top-level frame never blinks empty or shows the fallback inspector",
+    Boolean(topLevel.created) && topLevel.blank === 0 && topLevel.fallback === 0,
+    JSON.stringify(topLevel),
+  );
 }

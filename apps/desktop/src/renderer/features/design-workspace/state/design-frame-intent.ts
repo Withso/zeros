@@ -52,6 +52,12 @@ export function noteDesignFrameIntent(workspaceId: string, file: string | null):
   pendingByWorkspace.set(workspaceId, { file, timer });
 }
 
+/** A frame that is about to be selected (just created): warm it at once. */
+export function primeDesignFrameIntent(workspaceId: string, file: string): void {
+  cancelPending(workspaceId);
+  publish(workspaceId, file);
+}
+
 /** The pointer left the canvas, the surface deactivated or its owner changed. */
 export function clearDesignFrameIntent(workspaceId: string): void {
   cancelPending(workspaceId);
