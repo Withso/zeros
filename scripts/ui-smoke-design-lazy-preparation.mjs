@@ -101,14 +101,20 @@ export async function runDesignLazyPreparationSmoke({ page: parent, check, captu
   // An unchanged metadata revision cannot carry the prior source authority.
   await page.evaluate(() => {
     const c = window.__zerosHarnessDesignSurface;
+    window.__designRevalidationPrevious = c.snapshots.peekSnapshot("ws_design_harness").data;
     c.lazy.hold();
     window.__zerosHarnessAgentDrafts.save('<html><body><h1 data-oid="home-heading">Changed source</h1></body></html>', "d".repeat(24));
     c.lazy.refresh();
   });
-  await page.waitForFunction(() => window.__zerosHarnessDesignSurface.snapshots.peekSnapshot("ws_design_harness").data?.preparation?.current.length === 0);
-  check("watcher revalidation clears source authority even with identical catalog metadata", await page.evaluate(() => {
-    const value = window.__zerosHarnessDesignSurface.snapshots.peekSnapshot("ws_design_harness").data;
-    return value.preparation.revision === "a".repeat(64) && value.frames.length > 0 && value.preparation.current.length === 0;
+  await page.waitForFunction(() => {
+    const c = window.__zerosHarnessDesignSurface;
+    return c.snapshots.peekSnapshot("ws_design_harness").refreshing && c.resources().preparation.running > 0;
+  });
+  check("watcher revalidation retains confirmed presentation until demanded source validation finishes", await page.evaluate(() => {
+    const read = window.__zerosHarnessDesignSurface.snapshots.peekSnapshot("ws_design_harness");
+    const previous = window.__designRevalidationPrevious;
+    return read.refreshing && read.data === previous && previous.preparation.current.length > 0 &&
+      previous.frames.find(frame => frame.file === "home.html")?.sourceVersion !== "d".repeat(24);
   }));
   await page.evaluate(() => window.__zerosHarnessDesignSurface.owner("org_local"));
   await page.waitForFunction(() => window.__zerosHarnessDesignSurface.snapshots.peekSnapshot("org_local").data?.preparation);
