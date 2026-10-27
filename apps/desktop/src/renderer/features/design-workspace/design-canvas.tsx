@@ -569,7 +569,19 @@ export function DesignCanvas({
       });
     }),
   );
-  const selectionRuntimeFrames = useDesignRuntimeStore(state => workspaceId ? state.byWorkspace[workspaceId]?.frames : undefined);
+  // Only the secondary targets' own readbacks: hover reads, screenshots and
+  // other frames' snapshots must not re-render the whole canvas.
+  const secondaryTargetDetails = useDesignRuntimeStore(useShallow((state) => {
+    const frames = workspaceId ? state.byWorkspace[workspaceId]?.frames : undefined;
+    const details: Record<string, DesignRuntimeNodeDetails> = {};
+    if (!frames) return details;
+    for (const target of view.selectedTargets) {
+      if (!target.nodeId) continue;
+      const value = frames[target.frame]?.detailsByNode[target.nodeId];
+      if (value) details[`${target.frame}\u0000${target.nodeId}`] = value;
+    }
+    return details;
+  }));
   const selectedRuntimeTree = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame) return EMPTY_DESIGN_TREE;
     return (
@@ -7566,7 +7578,7 @@ export function DesignCanvas({
             const frameSelectedOnly =
               view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId);
             const secondaryElements = (prepared ? view.selectedTargets : []).filter(target => target.frame === frame.file && target.nodeId &&
-              !selectedElements.some(details => details.oid === target.nodeId)).map(target => selectionRuntimeFrames?.[frame.file]?.detailsByNode[target.nodeId!])
+              !selectedElements.some(details => details.oid === target.nodeId)).map(target => secondaryTargetDetails[`${frame.file}\u0000${target.nodeId}`])
               .filter((details): details is DesignRuntimeNodeDetails => Boolean(details && details.sourceVersion === frame.sourceVersion));
             // Guides and Option/Alt measurements anchor on the primary
             // selection's parent; a root-level selection measures against the
