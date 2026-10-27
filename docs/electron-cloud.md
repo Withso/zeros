@@ -82,6 +82,11 @@ node apps/cloud-worker/scripts/package-runtime.mjs --out /tmp/worker-runtime.tar
 pnpm --dir apps/control-plane cloud-v2:publish-runtime --local --artifact /tmp/worker-runtime.tar.gz
 ```
 
+Publishing with `--local` also removes the Dev store's older runtimes. It
+keeps the two newest and anything from the last day; `--no-prune` skips this.
+A stack whose runtime was removed publishes it again on its next start, which
+on a Mac needs Docker. Startup's own automatic publish never removes anything.
+
 The packager builds natively on Linux x64 with Node 24. Elsewhere it builds in
 Docker (`node:24-bookworm`, `linux/amd64`) from a filtered copy of the source,
 without the checkout, private profile or installed dependencies; `--docker`
