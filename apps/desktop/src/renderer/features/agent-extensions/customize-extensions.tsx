@@ -8,7 +8,7 @@ import { ArrowLeft, Plus } from "lucide-react";
 import { Button, Input, Textarea } from "../../shared/ui";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import { createExtensionResource, extensionResource } from "./extensions-cache";
 import {
   providerAuthRevision,
@@ -171,12 +171,13 @@ export function CustomizeExtensionsSection({
     providerAuthRevision,
   );
   const key = resource.key(query);
-  const read = useCachedRead(
+  const read = useRecoveringRead(
     resource.cache,
     isLocal ? key : null,
     resource.fetch,
     {
       enabled: isLocal && surfaceActive && status === "connected",
+      connected: status === "connected",
       maxAgeMs: 30_000,
     },
   );

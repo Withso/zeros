@@ -228,13 +228,26 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
     dialog.getByRole("button", { name: "feature/local", exact: true }),
   ).toBeVisible();
   await dialog.getByRole("tab", { name: "Pull requests", exact: true }).click();
+  await dialog.evaluate(node => {
+    window.sourceReadAlerts = [];
+    window.sourceReadObserver = new MutationObserver(records => {
+      for (const record of records) for (const added of record.addedNodes) {
+        if (added instanceof Element && (added.matches('[role="alert"]') || added.querySelector('[role="alert"]')))
+          window.sourceReadAlerts.push(added.textContent);
+      }
+    });
+    window.sourceReadObserver.observe(node, { childList: true, subtree: true });
+  });
   await page.evaluate(() =>
     window.releaseFolderPrRead("GitHub is temporarily unavailable"),
   );
-  await expect(dialog.getByRole("alert")).toContainText(
-    "GitHub is temporarily unavailable",
-  );
-  await dialog.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: /#42 · Improve the project picker/ })).toBeVisible();
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  expect(await page.evaluate(() => {
+    window.sourceReadObserver.disconnect();
+    return window.sourceReadAlerts;
+  })).toEqual([]);
+  check("a transient GitHub source read retries without an error flash or manual retry", true);
   await dialog
     .getByRole("button", { name: /#42 · Improve the project picker/ })
     .click();

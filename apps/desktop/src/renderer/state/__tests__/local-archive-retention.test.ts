@@ -1,5 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({ effects: [] as Array<() => void | (() => void)> }));
+// These tests drive cache subscriptions outside React. Presentation recovery
+// is exercised with mounted readers in read-recovery.test.ts.
+vi.mock("../../platform/bridge/use-bridge", () => ({ useBridgeStatus: () => "connected" }));
+vi.mock("../use-read-recovery", () => ({
+  useReadRecovery: (_key: string, read: { error: Error | null; pending: boolean }) => read,
+}));
 vi.mock("react", async original => ({ ...(await original<typeof import("react")>()),
  useEffect: (effect: () => void | (() => void)) => harness.effects.push(effect),
  useCallback: (fn: unknown) => fn, useMemo: (fn: () => unknown) => fn(), useRef: (current: unknown) => ({ current }),

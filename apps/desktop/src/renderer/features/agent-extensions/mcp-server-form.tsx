@@ -34,7 +34,7 @@ function LocalMcpEditor({ initial: source, initialProject, onBack, onSaved, surf
   const [project, setProject] = useState(initialProject);
   const repoRoot = project === "all" ? undefined : project;
   const layerName = repoRoot ? "repo-local" : "user";
-  const { layer, loading, error } = useSettingsLayer(layerName, repoRoot);
+  const { layer, loading, readError } = useSettingsLayer(layerName, repoRoot);
   const { projects } = useProjects();
   const bridge = useBridge();
   const execution = useSyncExternalStore(
@@ -115,7 +115,7 @@ function LocalMcpEditor({ initial: source, initialProject, onBack, onSaved, surf
     finally { if (generation === authGeneration.current) { pendingAuth.current = null; setConnecting(false); setHeadlessBusy(false); setHeadlessAuth(null); } }
   };
   const onSave = useCallback(async (draft: Draft, verification?: McpProbeResult) => {
-    if (!bridge || !layer || loading || error) throw new Error("The selected project is unavailable. Reconnect and try again.");
+    if (!bridge || !layer || loading || readError) throw new Error("The selected project is unavailable. Reconnect and try again.");
     if (repoRoot && !projects.some(row => row.repoRoot === repoRoot)) throw new Error("This project was removed. Choose another project.");
     const takenNames = new Set(servers.filter(row => !(initial && (initial.credential_id ? row.credential_id === initial.credential_id : row.name === initial.name))).map(row => String(row.name)));
     let saved!: RawServer;
@@ -146,7 +146,7 @@ function LocalMcpEditor({ initial: source, initialProject, onBack, onSaved, surf
     } });
     setInitial(saved);
     return saved;
-  }, [bridge, execution, layer, loading, error, repoRoot, projects, servers, initial, layerName, id, statusKey]);
+  }, [bridge, execution, layer, loading, readError, repoRoot, projects, servers, initial, layerName, id, statusKey]);
   const probe = useCallback(async (draft: Draft, signal: AbortSignal): Promise<McpProbeResult> => {
     if (!bridge) throw new Error("Connect to the local engine to check this server.");
     const requestId = crypto.randomUUID();

@@ -79,7 +79,7 @@ import {
   useWorkspaceStore,
   selectActiveFolder,
 } from "../../state/store";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import {
   providerMemorySettingsCache,
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
@@ -1204,20 +1204,13 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
     surfaceActive &&
     providerSettingsTab === "codex" &&
     bridgeStatus === "connected";
-  const memoryRead = useCachedRead(
+  const memoryRead = useRecoveringRead(
     providerMemorySettingsCache,
     codexDiagnosticsActive ? "codex" : null,
     (agentId) => sessions.readMemorySettings(agentId),
-    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS },
+    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS, connected: bridgeStatus === "connected" },
   );
   const codexMemory = memoryRead.data ?? null;
-
-  useEffect(() => {
-    if (!codexDiagnosticsActive || !memoryRead.error) return;
-    toast.error("Couldn't read Codex memory settings", {
-      description: memoryRead.error.message,
-    });
-  }, [codexDiagnosticsActive, memoryRead.error]);
 
   // Resolve against the same exact-workspace snapshot as New Chat. Keep a
   // saved disconnected default visible, while only connected choices can pick.
@@ -1404,6 +1397,13 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
               own storage.
             </p>
             <SettingsList className={MODELS_SECTION_CLS}>
+              {memoryRead.error && (
+                <SettingsRow label="Couldn't read memory settings">
+                  <Button variant="ghost" size="sm" onClick={memoryRead.refresh}>
+                    Retry
+                  </Button>
+                </SettingsRow>
+              )}
               <SettingsRow
                 label="Local memories"
                 hint="Let Codex learn reusable project context on this device"

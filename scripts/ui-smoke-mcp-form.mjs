@@ -2,6 +2,12 @@ import { expect } from "@playwright/test";
 
 /** Production Local editor and storage boundary with deterministic fixtures. */
 export async function runMcpFormSmoke({ page, check }) {
+  // The full smoke runner shares an origin with other project fixtures.
+  // Verify that this fixture establishes its own catalog on each visit.
+  await page.evaluate(async () => {
+    const { upsertProject } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
+    upsertProject({ repoRoot: "/fixture/previous-scenario", name: "Previous scenario" });
+  });
   await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-customize.html`);
   await page.getByRole("button", { name: "Customize scope" }).click();
   await page.getByRole("menuitem").filter({ hasText: "User" }).click();

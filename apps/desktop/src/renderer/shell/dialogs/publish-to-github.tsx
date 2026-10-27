@@ -47,7 +47,8 @@ import {
   ghOwnersCache,
   GITHUB_READ_MAX_AGE_MS,
 } from "../../state/read-caches";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
+import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 
 const NO_OWNERS: GithubOwner[] = [];
@@ -94,11 +95,12 @@ export function PublishToGithubDialog({
 
   // Owners (authed user + orgs) change rarely: cached, so reopening the
   // dialog shows the account list instantly and refetches only when stale.
-  const ownersRead = useCachedRead(
+  const connected = useBridgeStatus() === "connected";
+  const ownersRead = useRecoveringRead(
     ghOwnersCache,
     open ? "owners" : null,
     () => ghListOwners(),
-    { maxAgeMs: GITHUB_READ_MAX_AGE_MS },
+    { maxAgeMs: GITHUB_READ_MAX_AGE_MS, connected },
   );
   const owners = ownersRead.data ?? NO_OWNERS;
   const ownersError =
@@ -213,9 +215,10 @@ export function PublishToGithubDialog({
         </DialogHeader>
         <DialogBody className="gap-5">
           {ownersError ? (
-            <p className="text-red-primary text-sm">
-              {ownersError}. Sign in to GitHub in Settings first.
-            </p>
+            <div className="flex items-center gap-2 text-sm text-fg2">
+              <p>Couldn't load GitHub accounts.</p>
+              <Button variant="secondary" size="sm" onClick={ownersRead.refresh}>Retry</Button>
+            </div>
           ) : (
             <>
               {/* Owner */}

@@ -1,17 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeClient } from "../../../platform/bridge/ws-client";
+import { RuntimeClient } from "../../../platform/bridge/ws-client";
+import { classifyRpcError } from "../../../platform/bridge/failure";
 const mocks = vi.hoisted(() => ({
   op: vi.fn(),
   models: vi.fn(),
   providers: vi.fn(),
   error: vi.fn(),
+  dismiss: vi.fn(),
 }));
 vi.mock("../../../platform/bridge/workspace-bridge", () => ({
   workspaceOp: mocks.op,
 }));
 vi.mock("../../../platform/runtime", () => ({ isNativeRuntime: () => true }));
 vi.mock("../../../shared/ui/primitives/elements", () => ({
-  toast: { error: mocks.error },
+  toast: { error: mocks.error, dismiss: mocks.dismiss },
 }));
 vi.mock("../../agent/new-chat-defaults", () => ({
   hydrateModelsFromSettings: mocks.models,
@@ -37,38 +39,225 @@ describe("agent settings synchronization", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
-  async function setup() {
-    let onDb!: (message: unknown) => void, onStatus!: (status: string) => void;
-    const bridge = {
-      status: "connected",
-      executionIdentity: { kind: "local" },
-      on: (_: string, fn: typeof onDb) => {
-        onDb = fn;
-        return () => {};
-      },
-      onStatusChange: (fn: typeof onStatus) => {
-        onStatus = fn;
-        return () => {};
-      },
+  async function setup(status: "connected" | "connecting" = "connected") {
+    const bridge = new RuntimeClient();
+    const internals = bridge as unknown as {
+      isOpen(): boolean;
+      setStatus(status: string): void;
+      handleIncoming(message: unknown): void;
     };
+    vi.spyOn(internals, "isOpen").mockImplementation(
+      () => bridge.status === "connected",
+    );
+    internals.setStatus(status);
     const outbox = await import("../../../platform/agent-preferences");
     const { startAgentPreferencesSync } =
       await import("../agent-preferences-sync");
-    const stop = startAgentPreferencesSync(bridge as unknown as RuntimeClient);
+    const stopSync = startAgentPreferencesSync(bridge);
     return {
-      stop,
+      stopSync,
+      stop: () => {
+        stopSync();
+        bridge.dispose();
+      },
       bridge,
       outbox,
-      change: () => onDb({ kinds: ["settings"] }),
+      change: () =>
+        internals.handleIncoming({ type: "DB_CHANGED", kinds: ["settings"] }),
+      connect: () => internals.setStatus("connected"),
+      disconnect: () => internals.setStatus("disconnected"),
       reconnect: () => {
-        bridge.status = "disconnected";
-        onStatus("disconnected");
-        bridge.status = "connected";
-        onStatus("connected");
+        internals.setStatus("disconnected");
+        internals.setStatus("connected");
       },
     };
   }
+  it.each(["startup", "reconnect"])(
+    "waits silently for local %s and acknowledges settings before releasing session setup",
+    async (phase) => {
+      let acknowledge!: (doc: Record<string, unknown>) => void;
+      mocks.op.mockResolvedValue({});
+      const { stop, outbox, connect, disconnect } = await setup(
+        phase === "startup" ? "connecting" : "connected",
+      );
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        if (phase === "reconnect") disconnect();
+        mocks.op
+          .mockClear()
+          .mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                acknowledge = resolve;
+              }),
+          )
+          .mockResolvedValue({
+            doc: { providers: { codex: { auth: "cli" } } },
+          });
+        outbox.queueAgentPreferenceChanges({
+          providers: { codex: { auth: "cli" } },
+        });
+        const settled = vi.fn();
+        const flushing = outbox.flushAgentPreferences().then(
+          () => settled("saved"),
+          (error: Error) => settled(error.message),
+        );
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(settled).not.toHaveBeenCalled();
+        expect(mocks.op).not.toHaveBeenCalled();
+        expect(mocks.error).not.toHaveBeenCalled();
+        expect(outbox.pendingAgentPreferences().size).toBe(1);
+
+        connect();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(mocks.op).toHaveBeenCalledOnce();
+        expect(mocks.op).toHaveBeenCalledWith(
+          expect.anything(),
+          "settings.syncAgentPreferences",
+          expect.objectContaining({
+            changes: [{ path: ["providers", "codex", "auth"], value: "cli" }],
+          }),
+        );
+        expect(settled).not.toHaveBeenCalled();
+        acknowledge({ providers: { codex: { auth: "cli" } } });
+        await flushing;
+        expect(settled).toHaveBeenCalledExactlyOnceWith("saved");
+        expect(outbox.pendingAgentPreferences().size).toBe(0);
+        expect(mocks.error).not.toHaveBeenCalled();
+      } finally {
+        stop();
+      }
+    },
+  );
+
+  it("retires a startup waiter with its synchronizer and preserves pending settings", async () => {
+    const { stop, stopSync, outbox, connect } = await setup("connecting");
+    try {
+      outbox.queueAgentPreferenceChanges({
+        models: { default_plan_mode: true },
+      });
+      const settled = vi.fn();
+      const flushing = outbox.flushAgentPreferences().then(
+        () => settled("saved"),
+        (error: Error) => settled(error.message),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).not.toHaveBeenCalled();
+      stopSync();
+      await flushing;
+      expect(settled).toHaveBeenCalledExactlyOnceWith(
+        expect.stringMatching(/aborted/i),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      connect();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.op).not.toHaveBeenCalled();
+      expect(outbox.pendingAgentPreferences().size).toBe(1);
+      expect(mocks.error).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+  it("keeps an unedited startup quiet when the connection drops as readiness settles", async () => {
+    mocks.op.mockImplementation(async (_bridge, op) =>
+      op === "settings.read" ? { doc: {} } : {},
+    );
+    const { stop, outbox, connect, disconnect } = await setup("connecting");
+    try {
+      const settled = vi.fn();
+      const flushing = outbox.flushAgentPreferences().then(
+        () => settled("saved"),
+        (error: Error) => settled(error.message),
+      );
+      connect();
+      disconnect();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).not.toHaveBeenCalled();
+      expect(mocks.models).not.toHaveBeenCalled();
+      connect();
+      await flushing;
+      expect(settled).toHaveBeenCalledExactlyOnceWith("saved");
+      expect(mocks.error).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+  it("bounds a prolonged local readiness wait and keeps it recoverable", async () => {
+    const { stop, outbox } = await setup("connecting");
+    try {
+      const settled = vi.fn();
+      const flushing = outbox
+        .flushAgentPreferences()
+        .catch((error: unknown) => {
+          settled(classifyRpcError(error));
+        });
+      await vi.advanceTimersByTimeAsync(44_999);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await flushing;
+      expect(settled).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          kind: "transport-closed",
+          message: expect.stringMatching(/local engine.*reconnecting/i),
+        }),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      expect(mocks.error).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+  it("still rejects a genuine settings save failure after the engine connects", async () => {
+    const failure = new Error("Settings file is read-only");
+    mocks.op.mockRejectedValue(failure);
+    const { stop, outbox, connect } = await setup("connecting");
+    try {
+      outbox.queueAgentPreferenceChanges({
+        models: { default_plan_mode: true },
+      });
+      const flushing = outbox.flushAgentPreferences();
+      const rejected = expect(flushing).rejects.toBe(failure);
+      connect();
+      await vi.advanceTimersByTimeAsync(1_500);
+      await rejected;
+      expect(outbox.pendingAgentPreferences().size).toBe(1);
+      expect(mocks.error).toHaveBeenCalledOnce();
+    } finally {
+      stop();
+    }
+  });
+  it("does not let a cloud synchronizer replace or wait on the Local flush", async () => {
+    const outbox = await import("../../../platform/agent-preferences");
+    const { startAgentPreferencesSync } =
+      await import("../agent-preferences-sync");
+    const localFlush = vi.fn(async () => {});
+    const stopLocal = outbox.registerAgentPreferencesFlush(localFlush);
+    const cloud = new RuntimeClient();
+    vi.spyOn(cloud, "executionIdentity", "get").mockReturnValue({
+      kind: "cloud",
+      organizationId: "organization",
+      workspaceId: "workspace",
+      generation: 1,
+      authorityEpoch: 1,
+      engineInstanceId: "engine",
+    });
+    const wait = vi.spyOn(cloud, "waitUntilReady");
+    const stopCloud = startAgentPreferencesSync(cloud);
+    try {
+      await outbox.flushAgentPreferences();
+      stopCloud();
+      await outbox.flushAgentPreferences();
+      expect(localFlush).toHaveBeenCalledTimes(2);
+      expect(mocks.op).not.toHaveBeenCalled();
+      expect(wait).not.toHaveBeenCalled();
+    } finally {
+      stopCloud();
+      stopLocal();
+      cloud.dispose();
+    }
+  });
   it("retries failed saves, retains newer pending edits, and treats file deletion as authoritative", async () => {
     mocks.op
       .mockRejectedValueOnce(new Error("disk busy"))
@@ -84,8 +273,8 @@ describe("agent settings synchronization", () => {
       });
       await vi.advanceTimersByTimeAsync(0);
       expect(outbox.pendingAgentPreferences().size).toBe(1);
-      expect(mocks.error).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1000);
+      expect(mocks.error).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_500);
       expect(outbox.pendingAgentPreferences().size).toBe(0);
       change();
       await vi.advanceTimersByTimeAsync(0);
@@ -99,6 +288,53 @@ describe("agent settings synchronization", () => {
     } finally {
       stop();
     }
+  });
+  it("keeps a chat's settings flush pending through one failed attempt instead of publishing a transient session error", async () => {
+    mocks.op.mockRejectedValueOnce(new Error("temporarily busy")).mockResolvedValue({});
+    const { stop, outbox } = await setup();
+    try {
+      const settled = vi.fn();
+      const flushing = outbox.flushAgentPreferences().then(
+        () => settled("saved"),
+        () => settled("failed"),
+      );
+      await vi.advanceTimersByTimeAsync(1_499);
+      expect(settled).not.toHaveBeenCalled();
+      expect(mocks.error).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await flushing;
+      expect(settled).toHaveBeenCalledExactlyOnceWith("saved");
+      expect(mocks.error).not.toHaveBeenCalled();
+    } finally { stop(); }
+  });
+  it("deduplicates persistent sync feedback and clears it on recovery", async () => {
+    mocks.op.mockRejectedValue(new Error("read-only settings"));
+    const { stop } = await setup();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.error).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(mocks.error).toHaveBeenCalledExactlyOnceWith(expect.any(String), expect.objectContaining({ id: "agent-preferences-sync" }));
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(mocks.error).toHaveBeenCalledOnce();
+      mocks.op.mockResolvedValue({});
+      window.dispatchEvent(new Event("focus"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.dismiss).toHaveBeenCalledWith("agent-preferences-sync");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { stop(); }
+  });
+  it("retires the silent settings retry with the synchronizer", async () => {
+    mocks.op.mockRejectedValue(new Error("temporarily busy"));
+    const { stop, outbox } = await setup();
+    const flushing = outbox.flushAgentPreferences().catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    await flushing;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(mocks.op).toHaveBeenCalledOnce();
+    expect(mocks.error).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
   it.each(["resolve", "reject"])(
     "discards an old connection's %s while serializing a new edit",

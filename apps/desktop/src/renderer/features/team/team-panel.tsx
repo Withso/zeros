@@ -19,6 +19,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useRef, useState } from "react";
+import { useTeamReadRecovery } from "./use-team-read-recovery";
 import {
   Check,
   ChevronsUpDown,
@@ -67,7 +68,6 @@ import {
   refreshTeams,
   requestCreateTeamDialog,
   useActiveTeam,
-  useTeams,
 } from "./team-store";
 import { TEAM_LOGO_ACCEPT, fileToTeamLogo } from "./team-logo";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -122,8 +122,8 @@ export function TeamLogo({
   );
 }
 
-export function TeamPanel() {
-  const { me, error, reload } = useTeams();
+export function TeamPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+  const { me, error, reload } = useTeamReadRecovery(surfaceActive);
   const activeTeam = useActiveTeam();
 
   if (!CONTROL_PLANE_URL) {

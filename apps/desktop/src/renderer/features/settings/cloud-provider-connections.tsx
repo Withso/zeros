@@ -12,7 +12,7 @@ import { modelsForAgent } from "../agent/model-catalog";
 import { AgentIcon } from "../agent/agent-icon";
 import { NativeBrowserAvailability } from "../agent/native-browser-availability";
 import { invalidateCloudOrganizationAgentRegistry } from "../agent/workspace-agent-registry";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
 import { CloudCredentialRemovalDialog } from "./cloud-credential-removal-dialog";
 import { useCloudCredentialRemoval } from "./use-cloud-credential-removal";
@@ -111,7 +111,7 @@ function CloudProviderConnection({
   surfaceActive: boolean;
 }) {
   const key = settingsOwnerKey(userId, organizationId);
-  const snapshot = useCachedRead(
+  const snapshot = useRecoveringRead(
     cloudOrganizationConnectionsCache,
     key,
     () => readCloudOrganizationConnections(organizationId),

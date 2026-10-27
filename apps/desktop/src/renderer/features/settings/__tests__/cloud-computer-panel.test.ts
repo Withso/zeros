@@ -6,13 +6,14 @@ import type { CloudV2Build, CloudV2Computer } from "../../../platform/cloud-v2";
 const state = vi.hoisted(() => ({
   role: "owner" as string,
   data: undefined as CloudV2Computer | undefined,
+  error: null as Error | null,
 }));
 vi.mock("../../team/team-store", () => ({
   useActiveOrganization: () => ({ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, role: state.role }),
   useTeams: () => ({ me: { user: { id: "22222222-2222-4222-8222-222222222222" } } }),
 }));
 vi.mock("../../../state/use-cached-read", () => ({
-  useCachedRead: () => ({ data: state.data, error: null, loading: false, refresh: () => {} }),
+  useCachedRead: () => ({ data: state.data, error: state.error, loading: false, refresh: () => {} }),
 }));
 vi.mock("../cloud-repository-picker", () => ({
   CloudRepositoryPicker: ({ label }: { label?: string }) => createElement("span", { "data-picker": "" }, label),
@@ -35,12 +36,19 @@ const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "
 
 beforeEach(() => {
   state.role = "owner";
+  state.error = null;
   const builds = [build(5), build(4, { createdAt: ago(14 * day), finishedAt: ago(14 * day) })];
   state.data = { activeBuildId: builds[0]!.id, snapshotName: "zeros-alpha-x-v5", builds,
     recipe: { repositories: [{ repository: "iamarunrk/0kit" }] }, recipeRevision: 3 };
 });
 
 describe("Cloud Computer settings panel", () => {
+  it("keeps the configured computer visible without announcing a first refresh failure", () => {
+    state.error = new Error("temporary network failure");
+    const html = text(render());
+    expect(html).toContain("Last build 13d ago");
+    expect(html).not.toContain("Cloud Computer could not be refreshed");
+  });
   it("shows the last build, a Build computer action and the build history", () => {
     const html = text(render());
     expect(html).toContain("Last build 13d ago");

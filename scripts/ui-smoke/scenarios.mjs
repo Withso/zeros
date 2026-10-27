@@ -218,13 +218,22 @@ export const scenarioRegistry = [
     1440,
     960,
   ),
-  shared(
-    "design-frame-recovery",
-    "design-frame-recovery",
-    "runDesignFrameRecoverySmoke",
-    1440,
-    960,
-  ),
+  {
+    ...shared(
+      "design-frame-recovery",
+      "design-frame-recovery",
+      "runDesignFrameRecoverySmoke",
+      1440,
+      960,
+    ),
+    // Its visibility/retirement checks install a context-wide simulated clock.
+    // Later pointer and layout scenarios need their ordinary browser clock.
+    fixture: {
+      page: "design-frame-recovery",
+      viewport: { width: 1440, height: 960 },
+      navigation: "origin",
+    },
+  },
   shared(
     "design-inline-tools",
     "design-inline-tools",

@@ -8,7 +8,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "../../shared/ui/primitives/popover";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import {
   cloudGithubCatalogCache,
   cloudGithubRepositoriesCache,
@@ -56,7 +56,7 @@ export function CloudRepositoryPicker({
   const [open, setOpen] = useState(false),
     [installationId, setInstallationId] = useState<string | null>(null);
   const scope = cloudGithubScopeKey(userId, organizationId);
-  const catalog = useCachedRead(
+  const catalog = useRecoveringRead(
     cloudGithubCatalogCache,
     scope,
     (key) => readCloudGithubCatalog((JSON.parse(key) as string[])[1]!),
@@ -195,7 +195,7 @@ function RepositoryPage({
   const [page, setPage] = useState(1),
     [query, setQuery] = useState("");
   const key = JSON.stringify([userId, organizationId, installationId, page]);
-  const result = useCachedRead(
+  const result = useRecoveringRead(
     cloudGithubRepositoriesCache,
     key,
     (key) => {

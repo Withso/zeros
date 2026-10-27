@@ -1,0 +1,9 @@
+{
+  "id": "seeded-summary-retry-action-safety",
+  "kind": "seeded",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:738",
+  "symptom": "Summary Git actions become enabled with stale facts when a quiet retry clears the cache error before its replacement read succeeds.",
+  "rule": "Carry retained read safety through mutation consumers and gate actions on the owning connection. See agents/zstack/changes/transient-read-presentation.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/shell/conversation/__tests__/summary-git-status.test.ts -t 'keeps mutations guarded'"
+}

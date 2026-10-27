@@ -9,7 +9,8 @@ import {
   workspaceRecover,
   workspaceRestore,
 } from "../platform/git";
-import { useCachedRead } from "../state/use-cached-read";
+import { useRecoveringRead } from "../state/use-recovering-read";
+import { useBridgeStatus } from "../platform/bridge/use-bridge";
 import {
   workspaceRecoveryCache,
   workspaceRecoveryKey,
@@ -33,11 +34,12 @@ export function WorkspaceHistoryBar({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recoveryKey = workspaceRecoveryKey(workspace);
-  const recovery = useCachedRead(
+  const connected = useBridgeStatus(workspace.path) === "connected";
+  const recovery = useRecoveringRead(
     workspaceRecoveryCache,
     recoveryKey,
     readWorkspaceRecovery,
-    { maxAgeMs: RECOVERY_MAX_AGE_MS, enabled: surfaceActive },
+    { maxAgeMs: RECOVERY_MAX_AGE_MS, enabled: surfaceActive, connected, folder: workspace.path },
   );
   const banner = workspaceHistoryBanner(workspace, recovery.data);
   useEffect(() => {

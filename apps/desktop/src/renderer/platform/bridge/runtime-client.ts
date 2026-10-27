@@ -425,7 +425,11 @@ export class RuntimeClient {
         else if (this._status === "connected" && this.isOpen()) finish();
       };
       const abort = () => finish(makeRequestAbortError("runtime readiness"));
-      const timer = setTimeout(() => finish(new CloudRuntimeAccessError({ code: "cloud_actor_runtime_unavailable", status: 503 })), options.timeoutMs ?? 30_000);
+      const timer = setTimeout(() => finish(
+        this.executionIdentity.kind === "local"
+          ? new Error("The local engine is still reconnecting.")
+          : new CloudRuntimeAccessError({ code: "cloud_actor_runtime_unavailable", status: 503 }),
+      ), options.timeoutMs ?? 30_000);
       const offStatus = this.onStatusChange(check);
       const offRejection = this.onConnectionRejected(check);
       const offIdentity = this.onExecutionIdentityChange(next => {
