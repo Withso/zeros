@@ -319,6 +319,12 @@ function OwnedDesignWorkspaceSidebarPanels({
   );
   const selectedTargets = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.selectedTargets : undefined);
   const targetSelected = (frame: string, nodeId?: string) => selectedTargets?.some((target: DesignSelectionTarget) => target.frame === frame && target.nodeId === nodeId) ?? false;
+  /** A selected frame already has its editor; noting it as intent would only
+   * publish and clear again on every hovered or focused row. */
+  const noteFrameIntent = (file: string) => {
+    if (workspaceId && !selectedTargets?.some((target: DesignSelectionTarget) => target.frame === file))
+      noteDesignFrameIntent(workspaceId, file);
+  };
   const frameSelected = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.frameSelected ?? false)
@@ -1193,12 +1199,8 @@ function OwnedDesignWorkspaceSidebarPanels({
                       aria-expanded={row.discloses ? row.expanded : undefined}
                       aria-keyshortcuts="F2 Meta+C Control+C Meta+D Control+D Delete Backspace"
                       onDoubleClick={(event) => handleRowDoubleClick(event, row)}
-                      onPointerEnter={() => {
-                        if (workspaceId) noteDesignFrameIntent(workspaceId, frame.file);
-                      }}
-                      onFocus={() => {
-                        if (workspaceId) noteDesignFrameIntent(workspaceId, frame.file);
-                      }}
+                      onPointerEnter={() => noteFrameIntent(frame.file)}
+                      onFocus={() => noteFrameIntent(frame.file)}
                       onClick={(event) => {
                         if (
                           row.discloses &&
@@ -1273,7 +1275,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                     className="group relative flex h-7 min-w-0 shrink-0 items-center"
                     onPointerEnter={() => {
                       if (!workspaceId || !folder) return;
-                      noteDesignFrameIntent(workspaceId, frame.file);
+                      noteFrameIntent(frame.file);
                       void hoverDesignNode({
                         workspaceId,
                         folder,
@@ -1326,7 +1328,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                       aria-keyshortcuts="F2 Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
                       onFocus={() => {
                         if (!workspaceId || !folder) return;
-                        noteDesignFrameIntent(workspaceId, frame.file);
+                        noteFrameIntent(frame.file);
                         warmDesignNodeDetails({
                           workspaceId,
                           folder,

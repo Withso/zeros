@@ -744,7 +744,10 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("onPointerOver={(event) => {");
     expect(source).toContain(`target?.closest("[data-design-frame-chrome]")`);
     expect(source).toContain("if (!active && workspaceId) clearDesignFrameIntent(workspaceId);");
-    expect(layersSource).toContain("noteDesignFrameIntent(workspaceId, frame.file);");
+    // A selected frame is never noted again, so hovering its rows cannot
+    // publish and clear intent (and re-render the canvas) on every row.
+    expect(layersSource).toContain("if (workspaceId && !selectedTargets?.some((target: DesignSelectionTarget) => target.frame === file))");
+    expect(layersSource).toContain("onPointerEnter={() => noteFrameIntent(frame.file)}");
   });
 
   it("reads the Option measure modifier outside the canvas focus scope", () => {
