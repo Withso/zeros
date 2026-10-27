@@ -96,6 +96,16 @@ exposed in Settings → General. It applies to both Local and cloud composers.
 Queue waits for foreground and background work; Steer submits immediately.
 Cmd/Ctrl+Enter uses the alternate behavior for a new follow-up.
 
+`preferences.restart_automatically_on_update` defaults to `false` and is exposed
+as **Restart automatically on update** in Settings → General. Enabling it arms
+the existing restart-when-idle flow once the native installer confirms a staged
+update, including one already downloaded. Zeros waits for 30 continuous seconds
+without agent work across Local, organization-local and cloud sessions; new work
+resets that wait. Disabling it cancels automatic intent while preserving any
+separately requested manual idle restart. This device preference applies across
+owner switches and does not restart cloud workers. Required updates retain their
+existing mandatory restart flow.
+
 Browser storage is a synchronous cache for app startup, with a durable outbox
 for unacknowledged preference edits. The first migration merges under existing
 file choices; `preferences_version = 1` prevents deleted choices from being
