@@ -251,6 +251,15 @@ export async function prepareDesignMovementFrame(
 /** Edits (not history steps) queued or running in each workspace's lane. An
  * edit still saving has not recorded its history prediction yet. */
 const pendingEditCountByWorkspace = new Map<string, number>();
+/** History steps whose prediction waits inside the lane. Later steps wait
+ * behind them, so predictions advance the cursor in submission order. */
+const deferredPredictionCountByWorkspace = new Map<string, number>();
+
+function adjustCount(counts: Map<string, number>, key: string, delta: number): void {
+  const next = (counts.get(key) ?? 0) + delta;
+  if (next > 0) counts.set(key, next);
+  else counts.delete(key);
+}
 
 async function runLocalDesignMutation<T>(
   workspaceId: string,
@@ -259,8 +268,7 @@ async function runLocalDesignMutation<T>(
 ): Promise<T> {
   const directoryId = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId;
   const finishMutation = beginLocalDesignMutation(workspaceId);
-  if (kind === "edit")
-    pendingEditCountByWorkspace.set(workspaceId, (pendingEditCountByWorkspace.get(workspaceId) ?? 0) + 1);
+  if (kind === "edit") adjustCount(pendingEditCountByWorkspace, workspaceId, 1);
   const previous = localMutationTailByWorkspace.get(workspaceId);
   const result = (previous ?? Promise.resolve())
     .catch(() => undefined)
@@ -278,11 +286,7 @@ async function runLocalDesignMutation<T>(
   try {
     return await result;
   } finally {
-    if (kind === "edit") {
-      const remaining = (pendingEditCountByWorkspace.get(workspaceId) ?? 1) - 1;
-      if (remaining > 0) pendingEditCountByWorkspace.set(workspaceId, remaining);
-      else pendingEditCountByWorkspace.delete(workspaceId);
-    }
+    if (kind === "edit") adjustCount(pendingEditCountByWorkspace, workspaceId, -1);
     finishMutation();
     if (localMutationTailByWorkspace.get(workspaceId) === tail) {
       localMutationTailByWorkspace.delete(workspaceId);
@@ -2242,10 +2246,22 @@ export async function applyDesignHistoryCached(
   // painted; a predicted inverse painted first would be recorded as that
   // edit's baseline and undone to the wrong state. Predict once earlier edits
   // have landed, inside the lane, still ahead of this history round trip.
-  const afterPendingEdits = pendingEditCountByWorkspace.has(workspaceId);
+  const afterPendingEdits =
+    pendingEditCountByWorkspace.has(workspaceId) ||
+    deferredPredictionCountByWorkspace.has(workspaceId);
+  let awaitingPrediction = afterPendingEdits;
+  if (awaitingPrediction) adjustCount(deferredPredictionCountByWorkspace, workspaceId, 1);
+  const settlePrediction = () => {
+    if (!awaitingPrediction) return;
+    awaitingPrediction = false;
+    adjustCount(deferredPredictionCountByWorkspace, workspaceId, -1);
+  };
   let prediction = afterPendingEdits ? null : predict();
   return runLocalDesignMutation(workspaceId, async () => {
-    if (afterPendingEdits) prediction = predict();
+    if (awaitingPrediction) {
+      prediction = predict();
+      settlePrediction();
+    }
     const previousSourceVersions = new Map(
       (
         designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ??
@@ -2353,7 +2369,7 @@ export async function applyDesignHistoryCached(
     }
     if (!result.snapshot) invalidateWorkspaceDesignFoundations(workspaceId);
     return result;
-  }, "history").catch(async (error) => {
+  }, "history").finally(settlePrediction).catch(async (error) => {
     historyPreview.clear(workspaceId);
     if (prediction) {
       const runtime = designFrameRuntime(workspaceId, prediction.frame);
@@ -2374,6 +2390,7 @@ export function resetDesignWorkspaceCacheForTests(): void {
   pendingAdoptedSettlementByFrame.clear();
   pendingLocalMutationByWorkspace.clear();
   pendingEditCountByWorkspace.clear();
+  deferredPredictionCountByWorkspace.clear();
   localMutationTailByWorkspace.clear();
   localFrameGenerationByOwner.clear();
   localTokenGenerationByWorkspace.clear();
