@@ -58,7 +58,7 @@ function workspace(id: string, wsPath: string, extra: Partial<Workspace> = {}): 
 }
 
 function project(id: string, root: string, name: string): EngineProject {
-  return { id, canonicalId: `${id}-uuid`, name, repoRoot: root, repoSlug: name, originUrl: null, addedAt: 1 };
+  return { id, canonicalId: `${id}-uuid`, name, repoRoot: root, repoSlug: name, originUrl: null, originRevision: 0, addedAt: 1 };
 }
 
 function chat(id: string, folder: string, extra: Partial<ChatRow> = {}): ChatRow {

@@ -321,13 +321,20 @@ interface ProjectPush {
   repoSlug?: string;
   name?: string;
   originUrl?: string | null;
+  originRevision?: number;
 }
 
 export async function bridgeProjectUpsert(
   bridge: RuntimeClient,
   p: ProjectPush,
-): Promise<void> {
-  await workspaceOp(bridge, "project.upsert", { ...p });
+): Promise<Project | null> {
+  const result = await workspaceOp(bridge, "project.upsert", { ...p }) as { project?: Project } | undefined;
+  return result?.project ?? null;
+}
+
+/** Explicit background maintenance; ordinary PR/catalog reads never mutate Git. */
+export async function bridgeReconcileGithubRemote(bridge: RuntimeClient, repoRoot: string): Promise<{ project: Project | null; changed: boolean }> {
+  return await workspaceOp(bridge, "project.reconcileGithubRemote", { repoRoot }, NETWORK_GIT_TIMEOUT_MS) as { project: Project | null; changed: boolean };
 }
 
 export async function bridgeProjectRemove(

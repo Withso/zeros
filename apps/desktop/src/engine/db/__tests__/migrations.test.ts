@@ -79,6 +79,25 @@ function tableColumnsForTest(
 }
 
 describe("Zeros DB — migration ladder data safety (forward-only)", () => {
+  it("adds remote identity tracking without renaming existing projects or workspace history", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 43);
+      db.prepare("INSERT INTO repos (id,canonical_id,name,repo_slug,root_path,remote_url) VALUES (?,?,?,?,?,?)")
+        .run("project", "11111111-1111-4111-8111-111111111111", "My project", "former-widgets", "/repo", "git@github.com:former/widgets.git");
+      const before = db.prepare("SELECT * FROM repos").get();
+      runMigrations(db);
+      const { origin_revision, ...after } = db.prepare("SELECT * FROM repos").get() as Record<string, unknown>;
+      expect(after).toEqual(before);
+      expect(origin_revision).toBe(0);
+      expect(db.prepare("SELECT * FROM github_repository_remotes").all()).toEqual([]);
+      db.prepare(`INSERT INTO github_repository_remotes
+        (repo_id, remote_name, remote_url, github_repository_id, github_node_id, owner, name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run("project", "origin", "git@github.com:former/widgets.git", "123", "R_fixture", "former", "widgets");
+      expect(db.prepare("SELECT pending_urls FROM github_repository_remotes").get()).toEqual({ pending_urls: "[]" });
+    } finally { db.close(); }
+  });
   it("adds reset context state without detaching existing provider conversations", () => {
     const db = new Database(":memory:");
     try {

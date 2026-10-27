@@ -40,6 +40,7 @@ import {
 } from "./git-exec";
 import { refExists } from "./default-branch";
 import { resolveRepoGit } from "../settings/repo-git";
+import { githubRemoteIdentity, type GithubRemoteIdentity } from "../db/projects";
 import { push } from "./ops";
 import type { PR, PrState } from "./types";
 import { setGitCredentialSource } from "./credential-broker";
@@ -72,6 +73,8 @@ async function loadOctokit(): Promise<typeof import("@octokit/rest")> {
 
 export interface TokenStore {
   get(): Promise<string | null>;
+  /** Synchronous selection epoch, including A → B → A and sign-out. */
+  generation?(): number;
   /** Provider-aware working credential for Git-over-HTTPS. Older stores may
    * expose only get(); those safely retain the github.com defaults. */
   getCredential?(): Promise<GithubCredential | null>;
@@ -1160,6 +1163,7 @@ async function workspaceRemote(workspaceId: string): Promise<{
   owner: string;
   repo: string;
   remote: string;
+  identity: GithubRemoteIdentity | null;
 }> {
   const ws = getWorkspace(workspaceId);
   // The repo's configured `git.remote` (the "Remote origin" setting, default
@@ -1189,16 +1193,57 @@ async function workspaceRemote(workspaceId: string): Promise<{
       cause: err,
     });
   }
-  return { ...parseGitHubRemote(stdout.trim()), remote };
+  return { ...parseGitHubRemote(stdout.trim()), remote,
+    identity: githubRemoteIdentity(ws.repoRoot, remote, stdout.trim()) };
+}
+
+/** Resolve GitHub's current identity, including transfers, renames and casing.
+ * Share concurrent reads only: a later refresh must observe another move. */
+export async function canonicalGithubRepository(
+  { owner, repo }: { owner: string; repo: string },
+  identity?: Pick<GithubRemoteIdentity, "repositoryId" | "nodeId"> | null,
+) {
+  if (identity) {
+    const { node } = await withAuthRetry(oct => oct.graphql<{
+      node: { databaseId: number; id: string; name: string; owner: { login: string } } | null;
+    }>(`query RepositoryIdentity($id: ID!) {
+      node(id: $id) { ... on Repository { databaseId id name owner { login } } }
+    }`, { id: identity.nodeId }), ["repository.node", identity.nodeId]);
+    if (!node || String(node.databaseId) !== identity.repositoryId) {
+      throw new GitError({ code: "VALIDATION_FAILED", message: "The connected GitHub account cannot verify this repository's saved identity.",
+        remediation: "Check the repository access of the selected connection in Settings → Integrations." });
+    }
+    return { owner: node.owner.login, repo: node.name, id: node.databaseId, nodeId: node.id };
+  }
+  const { data } = await withAuthRetry(
+    (oct) => oct.repos.get({ owner, repo }),
+    ["repos.get", owner, repo],
+  );
+  return { owner: data.owner.login, repo: data.name, id: data.id, nodeId: data.node_id };
+}
+
+/** A background repair may use only the connection that began its observation.
+ * Rotation is conservative too: a later refresh can retry with the new token. */
+export async function githubRepositorySelection(): Promise<() => Promise<boolean>> {
+  const store = tokenStore, generation = store.generation?.();
+  const token = await store.get();
+  if (!token) throw new GitError({ code: "NOT_AUTHENTICATED", message: "Not signed in to GitHub",
+    remediation: "Connect GitHub in Settings → Integrations." });
+  return async () => tokenStore === store && (await store.get()) === token &&
+    store.generation?.() === generation;
 }
 
 /** Resolve the configured hosted-review target once at the adapter boundary.
- * The optional pre-resolved target passed to PR operations below prevents a
- * settings/remote TOCTOU between identity validation and the GitHub request. */
+ * A redirected PR carries its canonical URL, so validating it against the old
+ * remote spelling rejects a valid review. Keep that validation strict and
+ * resolve the canonical target before any hosted operation. The pre-resolved
+ * target also avoids re-reading settings/remote after identity validation. */
 export async function resolveGithubWorkspaceRepository(
   workspaceId: string,
 ): Promise<{ owner: string; repo: string; remote: string }> {
-  return workspaceRemote(workspaceId);
+  const target = await workspaceRemote(workspaceId);
+  const { owner, repo } = await canonicalGithubRepository(target, target.identity);
+  return { owner, repo, remote: target.remote };
 }
 
 function githubRepositoryFor(
@@ -1468,13 +1513,10 @@ export async function syncWorkspacePr(workspaceId: string): Promise<PR | null> {
     // `head=owner:branch` query survives that redirect verbatim. Resolve the
     // canonical owner before building it or a valid PR looks absent forever.
     // Share only concurrent reads so a later transfer is visible on refresh.
-    const repository = await withAuthRetry(
-      (oct) => oct.repos.get({ owner, repo }),
-      ["repos.get", owner, repo],
-    );
-    owner = repository.data.owner.login;
-    repo = repository.data.name;
-    const repositoryId = repository.data.id;
+    const repository = await canonicalGithubRepository({ owner, repo }, remote.identity);
+    owner = repository.owner;
+    repo = repository.repo;
+    const repositoryId = repository.id;
     const list = (state: "open" | "all") => withAuthRetry((oct) =>
       oct.pulls.list({
         owner,

@@ -13,8 +13,8 @@ function ws(id: string, wsPath: string, extra: Partial<Workspace> = {}): Workspa
 }
 
 const projects: EngineProject[] = [
-  { id: "proj_repo", canonicalId: "u1", name: "repo", repoRoot: "/repo", repoSlug: "repo", originUrl: null, addedAt: 1 },
-  { id: "proj_plain", canonicalId: "u2", name: "notes", repoRoot: "/notes", repoSlug: "notes", originUrl: null, addedAt: 1 },
+  { id: "proj_repo", canonicalId: "u1", name: "repo", repoRoot: "/repo", repoSlug: "repo", originUrl: null, originRevision: 0, addedAt: 1 },
+  { id: "proj_plain", canonicalId: "u2", name: "notes", repoRoot: "/notes", repoSlug: "notes", originUrl: null, originRevision: 0, addedAt: 1 },
 ];
 
 function index(managed: Workspace[], options: { failing?: boolean } = {}) {

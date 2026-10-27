@@ -9,6 +9,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { deleteWorkspaceRow, insertWorkspace, reassignLocalWorkspaceOrganization } from "../state";
+import { WorkspaceService } from "../../workspace/service";
 
 import {
   closeState,
@@ -206,11 +207,17 @@ describe("syncWorkspacePr", () => {
     expect(getWorkspace(workspaceId).prNumber).toBe(before.prNumber);
   });
 
-  it.each([
-    ["NewOwner", "widgets"],
-    ["Acme", "renamed-widgets"],
-    ["NewOwner", "renamed-widgets"],
-  ])("discovers a PR after the repository moves to %s/%s with the old remote retained", async (owner, repo) => {
+  it.each([null, "fixture-organization"].flatMap(organizationId => [
+    { organizationId, owner: "NewOwner", repo: "widgets" },
+    { organizationId, owner: "Acme", repo: "renamed-widgets" },
+    { organizationId, owner: "NewOwner", repo: "renamed-widgets" },
+    { organizationId, owner: "acme", repo: "widgets" },
+  ]))("discovers and loads a PR at $owner/$repo with the old remote retained (organization: $organizationId)", async ({ owner, repo, organizationId }) => {
+    if (organizationId) {
+      const workspace = getWorkspace(workspaceId);
+      deleteWorkspaceRow(workspaceId);
+      insertWorkspace({ ...workspace, organizationId });
+    }
     octokitMock = makeOctokitMock(owner, repo);
     setOctokitFactoryForTesting(() => octokitMock.octokit as never);
     const created = await createPr({ workspaceId, title: "Transferred repository", body: "" });
@@ -224,6 +231,12 @@ describe("syncWorkspacePr", () => {
       prNumber: created.number, prUrl: `https://github.com/${owner}/${repo}/pull/${created.number}`, status: "in-review",
     });
     expect(list).toHaveBeenCalledWith(expect.objectContaining({ owner, repo, head: `${owner}:${getWorkspace(workspaceId).branch}` }));
+    // Discovery bypasses the forge adapter. Drive the same dispatcher as Review
+    // so a valid redirected URL cannot be rejected after discovery succeeds.
+    const service = new WorkspaceService(repoRoot);
+    await expect(service.handle("gh.prGet", {
+      workspaceId, prNumber: created.number,
+    })).resolves.toMatchObject({ number: created.number, url: created.url, title: created.title });
     // Discovery is an observation; it must not rewrite the user's Git remote.
     const remote = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: repoRoot });
     expect(remote.stdout.trim()).toBe("git@github.com:Acme/widgets.git");
