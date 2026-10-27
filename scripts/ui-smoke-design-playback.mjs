@@ -324,8 +324,9 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
       frame.sourceVersion,
     );
     const document = documents.getSnapshot(key).data;
+    // Every opt-in method newer than stylesheet previews is absent.
     const srcDoc = document.srcDoc.replace(
-      'var OPT_IN_METHODS = ["previewStylesheet", "setPlayback"];',
+      /var OPT_IN_METHODS = \[[^\]]*"setPlayback"[^\]]*\];/,
       'var OPT_IN_METHODS = ["previewStylesheet"];',
     );
     if (srcDoc === document.srcDoc)

@@ -742,6 +742,7 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("const intentFile = useDesignFrameIntent(active ? workspaceId : null);");
     expect(source).toContain("...(intentFile && !currentPlayback ? [intentFile] : []),");
     expect(source).toContain("onPointerOver={(event) => {");
+    expect(source).toContain(`target?.closest("[data-design-frame-chrome]")`);
     expect(source).toContain("if (!active && workspaceId) clearDesignFrameIntent(workspaceId);");
     expect(layersSource).toContain("noteDesignFrameIntent(workspaceId, frame.file);");
   });

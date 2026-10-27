@@ -2022,10 +2022,13 @@ Admission retries once after an owner-switch commit before declaring a frame
 unavailable, so outgoing layout cleanups can return capacity. Full editing
 runtimes remain separately bounded to 12, with selection and open layer trees
 taking priority; unprepared metadata does not reserve a prospective editor.
-The frame the pointer rests on (crossing into it on the canvas, or pointing at
-or focusing its Layers row, after an 80 ms dwell) is one latest intent per
+The frame the pointer rests on (its title on the canvas, or pointing at or
+focusing its Layers row, after a 120 ms dwell) is one latest intent per
 workspace owner, ranked with that explicit demand, so its editor boots before
-the click; leaving the canvas or deactivating the surface clears it. A warm
+the click; selecting that frame fulfils it, and leaving the canvas or
+deactivating the surface clears it, so an overview with nothing selected keeps
+no editor. Passing over a frame's pixels is not intent: it never turns a
+passive frame into an editor. A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
 prepared through the same bounded lane, then publishes once.

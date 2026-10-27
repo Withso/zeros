@@ -6,7 +6,7 @@
 
 import { useCallback, useSyncExternalStore } from "react";
 
-export const DESIGN_FRAME_INTENT_DWELL_MS = 80;
+export const DESIGN_FRAME_INTENT_DWELL_MS = 120;
 const MAX_INTENT_OWNERS = 8;
 
 const intentByWorkspace = new Map<string, string>();

@@ -931,8 +931,11 @@ export function DesignCanvas({
       : null;
   const publishMotionDraft = useCallback(
     (draft: DesignMotionTimelineDraft | null) => {
+      // No draft reads the same for every owner; a closed timeline switching
+      // selection must not re-render the canvas to say so again.
       setMotionOverlayState((current) =>
-        current.owner === motionOverlayOwner && current.draft === draft
+        (current.owner === motionOverlayOwner || (draft === null && current.draft === null)) &&
+        current.draft === draft
           ? current
           : {
               owner: motionOverlayOwner,
@@ -1214,6 +1217,12 @@ export function DesignCanvas({
   useEffect(() => {
     if (!active && workspaceId) clearDesignFrameIntent(workspaceId);
   }, [active, workspaceId]);
+  // Selecting the frame fulfils the intent; selection demand owns it now, and
+  // clearing the selection later must retire an editor nothing else needs.
+  useEffect(() => {
+    if (workspaceId && intentFile && view.selectedTargets.some((target) => target.frame === intentFile))
+      clearDesignFrameIntent(workspaceId);
+  }, [intentFile, view.selectedTargets, workspaceId]);
   const layersOpenFiles = useMemo(
     () => [
       ...(currentPlayback ? [currentPlayback.file] : []),
@@ -7526,8 +7535,14 @@ export function DesignCanvas({
         onPointerOver={(event) => {
           if (!workspaceId || !active) return;
           const target = event.target instanceof Element ? event.target : null;
-          noteDesignFrameIntent(workspaceId,
-            target?.closest<HTMLElement>("[data-design-frame]")?.dataset.designFrame ?? null);
+          // Only a frame's own chrome (its title) is selection intent. Passing
+          // over a frame's pixels must not turn a passive frame into an editor.
+          const file = target?.closest("[data-design-frame-chrome]")
+            ? target.closest<HTMLElement>("[data-design-frame]")?.dataset.designFrame ?? null
+            : null;
+          // A selected frame already has its editor.
+          if (file && view.selectedTargets.some((selected) => selected.frame === file)) return;
+          noteDesignFrameIntent(workspaceId, file);
         }}
         onPointerLeave={() => {
           if (workspaceId) clearDesignFrameIntent(workspaceId);
