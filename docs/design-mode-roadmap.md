@@ -1589,7 +1589,20 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   New children start with None and participate in their parent's Stack/Grid
   when enabled. Runtime child coordinate maps account for transformed ancestors,
   reflections, borders, and scroll. Parent positioning and insertion share one
-  undoable transaction.
+  undoable transaction. A capable runtime (opt-in `previewInsert`) appends the
+  drawn child on release, built from validated fields rather than parsed
+  markup, so the child, its Layers row and its inspector values appear before
+  the write confirms; the transaction's reply adopts the saved generation in
+  place (`commitStyles` patch `inserts`, only when every append matches its
+  structured twin), keeping the same element, and Undo/Redo restore it in
+  place. A pending preview survives earlier queued commits and retires only
+  through its own commit, a scoped `clearPreviewInserts`, or a same-id
+  replacement; a failed write removes it and restores the previous selection.
+  Older runtimes keep the document reload. A new canvas frame keeps the drawn
+  rectangle until its exact ready document or pixels take over (bounded to
+  2 s), boots its editor at once and is selected when that runtime reports
+  (bounded to 1 s) unless the person selected something else meanwhile, so the
+  inspector moves straight to its full properties.
 - **Inline text:** one uncontrolled plaintext editor owns caret, selection,
   composition, and the draft. Latest-wins runtime previews mutate the exact
   text node without broad React publication. Paste strips markup but preserves
@@ -1617,7 +1630,10 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   real child layers, even when they fill the viewport or have no descendants.
   Until a frame's runtime reports its tree, its disclosure follows the engine's
   `layerCount` (the same rule, so a new frame shows no chevron); older engines
-  send only `nodeCount`.
+  send only `nodeCount`. A frame with no layers never shows a loading row, even
+  when a reveal opens it. While a frame revalidates its source, its row and the
+  inspector present its last confirmed generation (`designPresentedFrame`);
+  writes made from it stay engine-checked and retry once on a stale generation.
   A selection made for the user — a canvas click, marquee, keyboard travel,
   the hit-stack menu, a frame label, a new or moved layer — opens its frame
   and every container above it in the same update and brings its row into
@@ -2006,6 +2022,13 @@ Admission retries once after an owner-switch commit before declaring a frame
 unavailable, so outgoing layout cleanups can return capacity. Full editing
 runtimes remain separately bounded to 12, with selection and open layer trees
 taking priority; unprepared metadata does not reserve a prospective editor.
+The frame the pointer rests on (crossing into it on the canvas, or pointing at
+or focusing its Layers row, after an 80 ms dwell) is one latest intent per
+workspace owner, ranked with that explicit demand, so its editor boots before
+the click; leaving the canvas or deactivating the surface clears it. A warm
+revalidation (a watcher echo after a save, a style build or a tab return)
+keeps the confirmed aggregate visible while the frames the surface demands are
+prepared through the same bounded lane, then publishes once.
 
 A single application-wide incoming generation may overlap steady admission;
 both generations' source costs and vector bytes remain charged until removal.
@@ -2505,7 +2528,12 @@ hidden documents. Budget pressure can retire them earlier. An active editor,
 rename, drop or unresolved mutation protects its document; expiry never commits
 or discards a draft. Retirement removes live documents, hydrated source and
 reconstructible projections while retaining semantic state and bounded cover
-pixels. These policies keep the existing active live-frame limit.
+pixels. A retired frame also keeps its last confirmed layer tree, root and
+eight most recent readbacks for that exact source generation, so Layers and
+the inspector paint at once when the frame or its workspace returns; retired
+presentation shares an 8 MiB estimate, oldest retirement evicted first, and a
+live runtime is never charged. These policies keep the existing active
+live-frame limit.
 
 Capable Local engines advertise optional `design.preparation.v1` and
 `design.preview.jobs.v1` capabilities. Registered-directory navigation reads the
