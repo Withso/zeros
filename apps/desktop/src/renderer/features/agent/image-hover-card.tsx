@@ -10,6 +10,9 @@ import {
   useWorkspaceFileReadSnapshot,
 } from "@/renderer/shell/workspace-file-data-cache";
 import { filePillPath } from "@/renderer/shell/workbench/file-pill-navigation";
+import type { FileMediaDescriptor } from "@zeros/protocol/file-media";
+import { openWorkspaceMedia, type FileMediaLease } from "@/renderer/platform/file-media";
+import { workspaceFileAccessKey } from "@/renderer/platform/workspace-file-scope";
 
 const IMAGE_MIME: Record<string, string> = {
   png: "image/png",
@@ -27,8 +30,8 @@ const IMAGE_MIME: Record<string, string> = {
   tif: "image/tiff",
   tiff: "image/tiff",
 };
-// Match the existing bounded Files reader; a 500 MB attachment is still a
-// valid file reference, but must not be decoded in a transient hover surface.
+// Hover keeps its own small bound; larger images can be opened in Files without
+// decoding them just because the pointer crossed an attachment.
 const MAX_IMAGE_PREVIEW_BYTES = 5 * 1024 * 1024;
 
 export function imagePreviewMimeType(
@@ -182,11 +185,24 @@ function DiskImagePreview({
       () => {},
     );
   }, [cwd, path]);
+  if (snapshot.data?.kind === "image" && snapshot.data.bytes > MAX_IMAGE_PREVIEW_BYTES)
+    return <PreviewUnavailable message="Image is too large to preview" />;
   if (snapshot.data?.kind === "image" && snapshot.data.dataUrl)
     return (
       <PreviewImage
         key={snapshot.data.dataUrl}
         source={snapshot.data.dataUrl}
+        name={name}
+      />
+    );
+  if (snapshot.data?.kind === "image" && snapshot.data.media)
+    return (
+      <StreamedImagePreview
+        key={JSON.stringify([workspaceFileAccessKey(cwd), path, snapshot.data.bytes, snapshot.data.media])}
+        cwd={cwd}
+        path={path}
+        bytes={snapshot.data.bytes}
+        media={snapshot.data.media}
         name={name}
       />
     );
@@ -201,6 +217,31 @@ function DiskImagePreview({
       }
     />
   );
+}
+
+/** The shared read cache retains metadata. The open hover alone owns this
+ * native URL, including when a pending open finishes after dismissal. */
+function StreamedImagePreview({ cwd, path, bytes, media: { version, mimeType }, name }: {
+  cwd: string;
+  path: string;
+  bytes: number;
+  media: FileMediaDescriptor;
+  name: string;
+}) {
+  const [source, setSource] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    let lease: FileMediaLease | undefined;
+    void openWorkspaceMedia({ cwd, path, bytes, media: { version, mimeType } }).then(value => {
+      lease = value;
+      if (cancelled) value.release();
+      else setSource(value.url);
+    }, () => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; lease?.release(); };
+  }, [cwd, path, bytes, version, mimeType]);
+  return source ? <PreviewImage source={source} name={name} /> :
+    <PreviewUnavailable message={failed ? "Image preview unavailable" : "Loading image…"} />;
 }
 
 function PreviewImage({ source, name }: { source: string; name: string }) {

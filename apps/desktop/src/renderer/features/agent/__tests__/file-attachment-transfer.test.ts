@@ -224,6 +224,7 @@ describe("reference attachment staging", () => {
     const a = attachment({ size: bytes.length, sourceFile: new Blob([bytes]) });
     let attempt = 0;
     write.mockImplementation(async (args) => {
+      if (args.resolve) throw new Error("The saved attachment is not available");
       if (args.abort || (attempt === 1 && args.offset > 0)) {
         throw new Error("WebSocket connection closed");
       }
@@ -252,7 +253,7 @@ describe("reference attachment staging", () => {
 
     await ensureFileAttachment("/repo", a);
     const requests = write.mock.calls.map(([args]) => args);
-    const starts = requests.filter((args) => !args.abort && !args.base64);
+    const starts = requests.filter((args) => !args.abort && !args.resolve && !args.base64);
     expect(starts).toHaveLength(2);
     expect(starts[1].uploadId).not.toBe(starts[0].uploadId);
     const chunks = requests.filter(
@@ -262,8 +263,52 @@ describe("reference attachment staging", () => {
     expect(Buffer.concat(chunks.map((args) => Buffer.from(args.base64, "base64"))))
       .toEqual(Buffer.from(bytes));
     expect(requests.every((args) => args.attachmentId === a.id)).toBe(true);
-    expect(a.sourceRecoveryId).toBe(recoveryId);
+    expect(a.sourceRecoveryId).toBeUndefined();
+    expect(a.sourceFile).toBeUndefined();
     expect(a.diskPath).toBe(final.relativePath);
     expect(getFileAttachmentProgress("/repo", a.id)?.phase).toBe("ready");
+  });
+
+  it("resolves a lost final acknowledgement before retrying the file bytes", async () => {
+    const a = attachment();
+    let saved = false;
+    write.mockImplementation(async args => {
+      if (args.resolve && saved) return { ...final, skipped: true };
+      if (args.abort) return { ...final, bytes: 0, pending: true };
+      if (!args.base64) return { ...final, bytes: 0, pending: true };
+      saved = true;
+      throw new Error("Connection lost after publication");
+    });
+    await expect(ensureFileAttachment("/repo", a)).rejects.toThrow(/Connection lost/);
+    expect(a.sourceFile).toBeDefined();
+    expect(await ensureFileAttachment("/repo", a)).toMatchObject({ skipped: true });
+    expect(write.mock.calls.filter(([args]) => args.base64)).toHaveLength(1);
+    expect(write).toHaveBeenLastCalledWith(expect.objectContaining({ resolve: true }));
+  });
+
+  it("keeps a queued destination's source when another destination completes the same attachment", async () => {
+    const releases = new Map<string, () => void>();
+    write.mockImplementation(async args => {
+      if (args.cwd.startsWith("/busy")) await new Promise<void>(resolve => { releases.set(args.cwd, resolve); });
+      else if (args.resolve) throw new Error("The saved attachment is not available");
+      if (args.nativeSourceId) throw new Error("The original source is unavailable");
+      if (!args.resolve && !args.base64) return { ...final, bytes: 0, pending: true };
+      return { ...final, absolutePath: `${args.cwd}/${final.relativePath}` };
+    });
+    const first = ensureFileAttachment("/busy-a", attachment({ sourceFile: undefined }));
+    const second = ensureFileAttachment("/busy-b", attachment({ sourceFile: undefined }));
+    const shared = attachment();
+    const savedA = ensureFileAttachment("/a", shared);
+    const between = ensureFileAttachment("/busy-between", attachment({ sourceFile: undefined }));
+    const savedB = ensureFileAttachment("/b", shared);
+    // Attach a rejection handler immediately so a regression isn't an unhandled
+    // rejection while the two deliberate queue blockers are still retiring.
+    const outcomeB = savedB.then(value => ({ value }), error => ({ error }));
+    releases.get("/busy-a")!(); await first; await savedA;
+    await vi.waitFor(() => expect(releases.has("/busy-between")).toBe(true));
+    releases.get("/busy-b")!(); await second;
+    const outcome = await outcomeB;
+    releases.get("/busy-between")!(); await between;
+    expect(outcome).toMatchObject({ value: { absolutePath: `/b/${final.relativePath}` } });
   });
 });

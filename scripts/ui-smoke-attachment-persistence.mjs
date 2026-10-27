@@ -261,4 +261,58 @@ export async function runAttachmentPersistenceSmoke({ page, check }) {
     "legacy raw-Blob recovery records migrate without losing their bytes",
     cleanup.legacyText === '{"legacy":true}\n',
   );
+
+  const completed = await page.evaluate(async () => {
+    const sources = await import("/apps/desktop/src/renderer/features/agent/attachment-sources.ts");
+    const retention = await import("/apps/desktop/src/renderer/features/agent/attachment-source-retention.ts");
+    const { attachmentOwner } = await import("/apps/desktop/src/renderer/features/agent/attachment-owner.ts");
+    const get = id => new Promise((resolve, reject) => {
+      const open = indexedDB.open("zeros:attachment-sources:v1", 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result, tx = db.transaction("sources", "readonly"), read = tx.objectStore("sources").get(id);
+        tx.oncomplete = () => { db.close(); resolve(read.result); };
+        tx.onabort = () => { db.close(); reject(tx.error); };
+      };
+    });
+    const attachment = () => ({ id: crypto.randomUUID(), name: "clip.mp4", kind: "file", mimeType: "video/mp4",
+      size: 8, data: "", validation: { ok: true }, sourceFile: new Blob(["original"]), owner: attachmentOwner("/other-workspace") });
+    const confirm = item => { item.diskPath = `.context/attachments/${item.id}/clip.mp4`; item.delivery = "reference"; };
+    const first = attachment(), preparing = sources.prepareAttachmentSource(first), firstId = first.sourceRecoveryId;
+    confirm(first);
+    // Completion must join an unfinished snapshot; the write cannot recreate
+    // an orphan after cleanup has already checked the database.
+    await sources.completeAttachmentSource(first); await preparing;
+    const immediate = !await get(firstId) && !first.sourceFile && !first.sourceRecoveryId;
+
+    const shared = attachment(); await sources.prepareAttachmentSource(shared);
+    const sharedId = shared.sourceRecoveryId, queued = { ...shared };
+    const release = retention.registerAttachmentSourceOwner(() => [queued]);
+    confirm(shared); await sources.completeAttachmentSource(shared);
+    const retainedForQueue = !!await get(sharedId) && (await sources.prepareAttachmentSource(queued)).blob.size === 8;
+    release(); confirm(queued); await sources.completeAttachmentSource(queued);
+    const lastOwnerReleased = !await get(sharedId);
+
+    const copied = attachment(); await sources.prepareAttachmentSource(copied);
+    const copyId = copied.sourceRecoveryId;
+    retention.rememberAttachmentClipboardSources([copied]);
+    confirm(copied); await sources.completeAttachmentSource(copied);
+    const retainedForClipboard = !!await get(copyId);
+    retention.rememberAttachmentClipboardSources([]);
+    await sources.completeAttachmentSource({ ...copied, sourceRecoveryId: copyId });
+    const clipboardReleased = !await get(copyId);
+
+    const failed = attachment(); await sources.prepareAttachmentSource(failed);
+    const failedId = failed.sourceRecoveryId;
+    const stop = sources.onAttachmentSourceConfirmed(() => { throw new Error("Fixture draft storage failure"); });
+    confirm(failed);
+    await sources.completeAttachmentSource(failed).catch(() => {}); stop();
+    const retainedOnPersistenceFailure = !!await get(failedId);
+    await sources.completeAttachmentSource({ ...failed, sourceRecoveryId: failedId });
+    return { immediate, retainedForQueue, lastOwnerReleased, retainedForClipboard, clipboardReleased, retainedOnPersistenceFailure };
+  });
+  check("confirmed uploads remove recovery bytes after their pending snapshot finishes", completed.immediate);
+  check("completed-source cleanup preserves another queued transfer until its own confirmation", completed.retainedForQueue && completed.lastOwnerReleased);
+  check("completed-source cleanup preserves clipboard recovery and releases it after ownership ends", completed.retainedForClipboard && completed.clipboardReleased);
+  check("failed draft persistence keeps recovery bytes available", completed.retainedOnPersistenceFailure);
 }

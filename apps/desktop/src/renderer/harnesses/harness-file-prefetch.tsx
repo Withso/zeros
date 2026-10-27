@@ -21,6 +21,7 @@ const workspaceId = "/workspace-prefetch";
 const requests: { op: string; path: string }[] = [];
 const pending: (() => void)[] = [];
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   on: () => () => {},
   onStatusChange: () => () => {},

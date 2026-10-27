@@ -7,6 +7,8 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { Toaster } from "../shared/ui/primitives/elements";
+import { Button } from "../shared/ui/primitives/button";
+import { ImageHoverCard } from "../features/agent/image-hover-card";
 import { FileViewer } from "../shell/workbench/tabs/file-viewer";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { ReadFileResult } from "../platform/files";
@@ -15,6 +17,7 @@ import {
   primeWorkspaceFileRead,
 } from "../shell/workspace-file-data-cache";
 import { FILE_MEDIA_VIDEO } from "./harness-file-media-fixtures";
+import { nativeInvoke } from "../platform/runtime";
 
 const owners = {
   personal: "/media-personal",
@@ -26,6 +29,7 @@ type Owner = keyof typeof owners;
 const requests: { op: string; params: Record<string, unknown> }[] = [];
 const pending: { key: string; finish: () => void }[] = [];
 const held = new Set<string>();
+const nativeMedia = new URLSearchParams(location.search).has("native-media");
 const images = new Map<string, string>();
 function image(owner: string) {
   let source = images.get(owner);
@@ -102,6 +106,7 @@ const fixtureResult = (cwd: string, path: string): ReadFileResult =>
           };
 
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   on: () => () => {},
   onStatusChange: () => () => {},
@@ -113,7 +118,9 @@ setActiveBridge({
       params = message.params ?? {};
     requests.push({ op, params });
     let result: unknown = {};
-    if (op === "file.read") {
+    if (nativeMedia && (op === "file.read" || op === "file.readRange")) {
+      result = await nativeInvoke(op === "file.read" ? "read_file" : "read_file_range", { ...params, cwd: params.workspaceId });
+    } else if (op === "file.read") {
       const cwd = String(params.workspaceId),
         path = String(params.path);
       result = fixtureResult(cwd, path);
@@ -162,6 +169,17 @@ const harness = {
         </TooltipProvider>,
       ),
     );
+  },
+  hover(owner: Owner, path: string, active = true) {
+    flushSync(() => root.render(
+      <TooltipProvider>
+        <main className="bg-bg1 text-fg1 h-screen p-4">
+          <ImageHoverCard cwd={owners[owner]} path={path} name={path} enabled={active}>
+            <Button>Saved image</Button>
+          </ImageHoverCard>
+        </main>
+      </TooltipProvider>,
+    ));
   },
   source: (owner: Owner = "personal") => image(owners[owner]),
   video(source: string) {

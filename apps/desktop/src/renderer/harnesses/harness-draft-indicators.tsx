@@ -81,6 +81,7 @@ for (const workspace of workspaces)
     deletions: 0,
   });
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   onStatusChange: () => () => {},
   onMessage: () => () => {},

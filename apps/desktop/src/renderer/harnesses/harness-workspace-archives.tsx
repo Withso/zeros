@@ -74,6 +74,7 @@ const requests: { op: string; params?: Record<string, unknown> }[] = [];
 const pendingHistoryReads = new Map<string, { promise: Promise<void>; finish(): void; readers: number }>();
 const archiveFlights = new Map<string, (fail: boolean) => void>();
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   onStatusChange: () => () => {},
   onMessage: () => () => {},

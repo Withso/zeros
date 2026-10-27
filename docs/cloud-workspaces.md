@@ -265,10 +265,15 @@ A checkpoint holds:
   file that is not ignored;
 - ignored files of up to 1 MiB outside ignored directories, such as
   `.env.local`, 32 MiB in total;
+- completed composer attachments up to 500 MB each in the current
+  `.context/attachments/<id>/<file>` layout and the legacy `local/shared`
+  layouts under `.context` or `.context-graph`, even when those directories
+  are ignored;
 - the worker's state directory and the agents' session files (`.claude/projects`,
   `.codex/sessions`, `.cursor/chats` and `.cursor/projects`).
 
-It never holds credential files, the worker token, setup status, or ignored
+It never holds credential files, the worker token, setup status, incomplete
+attachment uploads, or other ignored
 directories such as dependencies and build outputs. Those come back from the
 Cloud Computer, the setup script and credential delivery. Git objects that the
 base branch already has stay out, so a checkpoint normally holds only the
@@ -280,6 +285,13 @@ settings. A restored workspace has a full checkout, even if the new Cloud
 Computer checkout was sparse, and every saved file comes back. Untracked files
 that the new checkout itself has, from the Cloud Computer, stay, as in any new
 workspace.
+Ignored attachments use a separate archive, avoiding large Git objects and
+duplicate copies of files already captured by Git. Capture visits only the
+registered layout's fixed depth, skips symlinks and rejects oversized files
+instead of reporting a successful checkpoint without them. Restore validates
+regular-file entries and refuses symlink parents in the replacement checkout.
+Attachments share the existing combined 4 GiB checkpoint limit; exceeding it
+records the existing checkpoint failure rather than silently omitting files.
 An in-progress merge, rebase or cherry-pick comes back as its files, with
 conflicts as unstaged changes, not as the operation itself. The capture and
 restore technique follows Conductor's checkpointer (a scratch index, private

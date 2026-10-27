@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { commandRunner, type CommandRunner } from "./commands";
 import { FileService } from "./files";
+import { AttachmentTransfers } from "./attachments";
 import { GitService } from "./git";
 import { unsupported, WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./scope";
 import { CheckoutWatch } from "./watch";
@@ -25,6 +26,7 @@ export interface WorkspaceServiceOptions {
 export class WorkspaceService {
   readonly git: GitService;
   readonly files: FileService;
+  private readonly attachments: AttachmentTransfers;
   private readonly run: CommandRunner;
   private readonly watcher?: CheckoutWatch;
   private state!: State;
@@ -40,6 +42,7 @@ export class WorkspaceService {
     this.git = new GitService(scope, { run: this.run, historyDiff: options.historyDiff, baseBranch: () => this.state.baseBranch,
       setBaseBranch: branch => this.update(state => ({ ...state, baseBranch: branch })), changed: () => this.invalidate(true) });
     this.files = new FileService(scope, this.run, () => this.invalidate(false));
+    this.attachments = new AttachmentTransfers(scope, join(directory, "attachment-uploads"), () => this.invalidate(false));
     if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content));
   }
 
@@ -71,6 +74,7 @@ export class WorkspaceService {
     if (op.startsWith("git.")) return this.git.handle(op, params);
     if (op.startsWith("file.") || op.startsWith("fs.")) return this.files.handle(op, params);
     switch (op) {
+      case "attachment.write": return this.attachments.write(params);
       case "skills.list": return listWorkspaceSkills(this.scope, params.agentId);
       case "workspace.list": {
         if (params.archived === true || (params.status !== undefined && params.status !== "in-progress") || (params.repoSlug !== undefined && params.repoSlug !== this.scope.workspace.repository)) return { workspaces: [] };
@@ -92,8 +96,10 @@ export class WorkspaceService {
     if (refsChanged || content) this.publish(refsChanged);
   }
   async flush(): Promise<void> { await this.git.flush(); await this.metadataQueue; await this.watcher?.flush(); }
+  get uploading(): boolean { return this.attachments.busy; }
+  stopAttachmentTransfers(): Promise<void> { return this.attachments.dispose(); }
   githubChanged(): void { this.invalidate(true); }
-  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; await this.watcher?.dispose(); await this.git.flush(); await this.metadataQueue; }
+  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; await this.watcher?.dispose(); await this.attachments.dispose(); await this.git.flush(); await this.metadataQueue; }
 
   private invalidate(refs: boolean): void {
     if (refs) { this.prEpoch++; this.prs.clear(); }

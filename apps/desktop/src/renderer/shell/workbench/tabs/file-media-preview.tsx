@@ -19,10 +19,14 @@ import { WORKBENCH_TITLE_ACTION_CLS } from "../tab-chrome";
 import { copyFileMediaImage } from "./file-media-actions";
 import { useFileMediaViewport } from "./file-media-viewport";
 import { cn } from "@/renderer/shared/ui/cn";
+import type { FileMediaDescriptor } from "@zeros/protocol/file-media";
+import { openWorkspaceMedia, type FileMediaLease } from "@/renderer/platform/file-media";
 
 interface FileMediaPreviewProps {
   kind: "image" | "video";
-  source: string;
+  source?: string;
+  sourceIdentity?: string;
+  mediaSource?: { cwd: string; bytes: number; media: FileMediaDescriptor };
   path: string;
   active: boolean;
   actionsContainer: HTMLElement | null;
@@ -33,23 +37,30 @@ interface FileMediaPreviewProps {
 export function FileMediaPreview({
   kind,
   source,
+  sourceIdentity,
+  mediaSource,
   path,
   active,
   actionsContainer,
 }: FileMediaPreviewProps) {
   const visible = useDocumentActive(active);
-  const [displayedSource, setDisplayedSource] = useState<string | null>(
-    visible ? source : null,
-  );
-  // A warm file snapshot must not start a hidden decoder. Admit in the same
-  // render when selected; retain a visited source only while it is still current.
-  const nextDisplayedSource = visible
-    ? source
-    : displayedSource === source
-      ? displayedSource
-      : null;
-  if (displayedSource !== nextDisplayedSource)
-    setDisplayedSource(nextDisplayedSource);
+  const identity = sourceIdentity ?? source ?? JSON.stringify([mediaSource?.cwd, path, mediaSource?.media.version]);
+  const [stream, setStream] = useState<{ identity: string; lease: FileMediaLease } | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const cwd = mediaSource?.cwd, bytes = mediaSource?.bytes, version = mediaSource?.media.version, mimeType = mediaSource?.media.mimeType;
+  useEffect(() => {
+    if (!visible || !cwd || bytes === undefined || !version || !mimeType) return;
+    let cancelled = false, lease: FileMediaLease | undefined;
+    setStreamError(null);
+    void openWorkspaceMedia({ cwd, path, bytes, media: { version, mimeType } }).then(value => {
+      lease = value;
+      if (cancelled) value.release();
+      else setStream({ identity, lease: value });
+    }, () => { if (!cancelled) setStreamError(identity); });
+    return () => { cancelled = true; lease?.release(); setStream(current => current?.lease === lease ? null : current); };
+  }, [visible, cwd, path, bytes, version, mimeType, identity]);
+  const lease = stream?.identity === identity ? stream.lease : null;
+  const displayedSource = visible ? source ?? lease?.url ?? null : null;
   const [media, setMedia] = useState<
     HTMLImageElement | HTMLVideoElement | null
   >(null);
@@ -57,12 +68,14 @@ export function FileMediaPreview({
     source: string;
     error: boolean;
   } | null>(null);
-  if (loaded && loaded.source !== source) setLoaded(null);
+  if (loaded && loaded.source !== displayedSource) setLoaded(null);
   const [copying, setCopying] = useState<AbortController | null>(null);
   const pendingCopy = useRef<AbortController | null>(null);
-  const ready = loaded?.source === source && !loaded.error;
-  const failed = loaded?.source === source && loaded.error;
-  const camera = useFileMediaViewport(media, source, visible, ready);
+  const ready = !!displayedSource && loaded?.source === displayedSource && !loaded.error;
+  const failed = streamError === identity || (loaded?.source === displayedSource && loaded?.error);
+  const camera = useFileMediaViewport(media, identity, visible, ready);
+  const playback = useRef({ identity, time: 0, muted: false });
+  if (playback.current.identity !== identity) playback.current = { identity, time: 0, muted: false };
 
   useLayoutEffect(() => {
     if (!visible && media?.tagName === "VIDEO")
@@ -70,16 +83,22 @@ export function FileMediaPreview({
     return () => {
       pendingCopy.current?.abort();
       pendingCopy.current = null;
-      if (media?.tagName === "VIDEO") (media as HTMLVideoElement).pause();
+      if (media?.tagName === "VIDEO") {
+        const video = media as HTMLVideoElement;
+        if (video.hasAttribute("src") && playback.current.identity === identity) playback.current = { identity, time: video.currentTime, muted: video.muted };
+        video.pause();
+        // Release buffered ranges and decoder surfaces when parked/hidden.
+        video.removeAttribute("src"); video.load();
+      }
     };
-  }, [media, source, visible]);
+  }, [media, identity, visible]);
 
   const copy = () => {
-    if (!media || !visible || !ready || pendingCopy.current) return;
+    if (!media || !visible || !ready || !displayedSource || pendingCopy.current) return;
     const controller = new AbortController();
     pendingCopy.current = controller;
     setCopying(controller);
-    void copyFileMediaImage(media, source, controller.signal)
+    void copyFileMediaImage(media, displayedSource, controller.signal)
       .then(() => {
         if (!controller.signal.aborted)
           toast.success(
@@ -134,16 +153,22 @@ export function FileMediaPreview({
               </IconButton>
             </Tooltip>
             <Tooltip label={downloadLabel}>
-              <IconButton
+              {lease ? <IconButton
+                label={downloadLabel}
+                size="compact"
+                className={WORKBENCH_TITLE_ACTION_CLS}
+                onClick={() => { void lease.download(path.split("/").pop() ?? path).catch(() => toast.error("Couldn't download this file.")); }}
+              ><Download className="size-3.5" /></IconButton> : <IconButton
                 label={downloadLabel}
                 size="compact"
                 className={WORKBENCH_TITLE_ACTION_CLS}
                 asChild
+                disabled={!source}
               >
                 <a href={source} download={path.split("/").pop()}>
                   <Download className="size-3.5" />
                 </a>
-              </IconButton>
+              </IconButton>}
             </Tooltip>
           </>,
           actionsContainer,
@@ -171,6 +196,7 @@ export function FileMediaPreview({
             <img
               ref={setMedia}
               src={displayedSource}
+              crossOrigin="anonymous"
               alt={path}
               draggable={false}
               onLoad={loadedMedia}
@@ -182,11 +208,19 @@ export function FileMediaPreview({
             <video
               ref={setMedia}
               src={displayedSource}
+              crossOrigin="anonymous"
               aria-label={path}
               playsInline
               preload="metadata"
               draggable={false}
               onLoadedData={loadedMedia}
+              onLoadedMetadata={event => {
+                const saved = playback.current, video = event.currentTarget;
+                if (saved.identity === identity) {
+                  video.muted = saved.muted;
+                  if (saved.time > 0) video.currentTime = Math.min(saved.time, Number.isFinite(video.duration) ? video.duration : saved.time);
+                }
+              }}
               onError={failedMedia}
               className="max-h-full max-w-full shrink-0 object-contain select-none"
               hidden={!!failed}
@@ -245,7 +279,7 @@ export function FileMediaPreview({
             video={media as HTMLVideoElement}
             active={visible}
             ready={ready}
-            source={source}
+            source={identity}
           />
         )}
       </div>

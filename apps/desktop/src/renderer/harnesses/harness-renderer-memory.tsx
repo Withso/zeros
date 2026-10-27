@@ -76,6 +76,7 @@ const agents = [
 ];
 window.__ZEROS_NATIVE__ = { on: subscribe, invoke: async <T,>() => null as T };
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   on: subscribe,
   onStatusChange: subscribe,

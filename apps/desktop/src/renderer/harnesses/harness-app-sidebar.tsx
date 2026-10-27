@@ -311,6 +311,7 @@ Object.assign(window, {
 
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
 const fixtureBridge = {
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   onStatusChange: () => () => {},
   onMessage: () => () => {},

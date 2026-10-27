@@ -29,6 +29,8 @@ import {
 } from "./attachment-file-reader";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
+import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
+import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import {
   bridgeAttachmentWrite,
@@ -409,9 +411,15 @@ type ContextAttachmentWriteArgs = AttachmentTransferOptions & {
 export function createContextAttachmentWriter(cwd: string): (args: ContextAttachmentWriteArgs) => Promise<AttachmentWriteResult> {
   const bridge = getActiveBridge();
   const executionKey = bridge ? runtimeExecutionKey(bridge.executionIdentity) : null;
+  const cloud = parseCloudWorkspaceKey(cwd);
+  const workspaceBridge = bridge instanceof WorkspaceRuntimeClient ? bridge : null;
+  const accessKey = workspaceBridge?.workspaceAccessKey(cwd);
+  let admittedKey: string | undefined;
   let workspace: Promise<string> | undefined;
   const assertTarget = () => {
-    if (bridge !== getActiveBridge() || (bridge && runtimeExecutionKey(bridge.executionIdentity) !== executionKey)) {
+    if (bridge !== getActiveBridge() || (bridge && runtimeExecutionKey(bridge.executionIdentity) !== executionKey) ||
+      (workspaceBridge && (workspaceBridge.workspaceAccessKey(cwd) !== accessKey ||
+        (admittedKey !== undefined && workspaceBridge.workspaceExecutionKey(cwd) !== admittedKey)))) {
       throw new Error("The attachment workspace changed — return to its workspace and retry");
     }
   };
@@ -419,7 +427,14 @@ export function createContextAttachmentWriter(cwd: string): (args: ContextAttach
     assertTarget();
     let result: AttachmentWriteResult;
     if (bridge) {
-      workspace ??= resolveBridgeWorkspaceIdForCwd(bridge, cwd).then(id => id ?? cwd);
+      workspace ??= (async () => {
+        // Selecting a file is explicit work. Wake before chunk transfer so a
+        // stopped VM never waits for a prompt that is itself waiting on upload.
+        if (cloud && workspaceBridge) await workspaceBridge.openWorkspace(cloud, { reason: "interaction" });
+        assertTarget();
+        admittedKey = workspaceBridge?.workspaceExecutionKey(cwd);
+        return await resolveBridgeWorkspaceIdForCwd(bridge, cwd) ?? cwd;
+      })();
       const workspaceId = await workspace;
       assertTarget();
       result = await bridgeAttachmentWrite(bridge, workspaceId, args);

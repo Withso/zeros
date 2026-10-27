@@ -5155,6 +5155,7 @@ describe("WorkspaceService", () => {
       "messages.search",
       "file.tree",
       "file.read",
+      "file.readRange",
       "git.status",
       "git.changeCounts",
       "git.changeLineCounts",

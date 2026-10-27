@@ -40,6 +40,7 @@
     "smoke:engine": "node scripts/smoke-engine.mjs",
     "smoke:attachment-storage": "tsx scripts/smoke-attachment-storage.mts",
     "smoke:attachment-electron": "node scripts/smoke-attachment-electron.mjs",
+    "smoke:file-media-electron": "node scripts/smoke-file-media-electron.mjs",
     "smoke:browser-service": "node scripts/browser-service-smoke.mjs",
     "smoke:packaged-pty": "node scripts/packaged-pty-smoke.mjs",
     "version:current": "node scripts/compute-version.mjs",

@@ -1,6 +1,7 @@
-import { CLOUD_V2_MAX_PROMPT_BYTES, cloudPromptAttachmentFile } from "@zeros/protocol/cloud-v2-prompts";
+import { parseContextAttachmentPath, validateAttachmentFile } from "@zeros/protocol/attachment-policy";
 import { attachmentOwner, sameAttachmentOwner } from "./attachment-owner";
-import { prepareAttachmentSource, supplyLegacyAttachmentBytes } from "./attachment-sources";
+import { supplyLegacyAttachmentBytes } from "./attachment-sources";
+import { ensureFileAttachment } from "./file-attachment-transfer";
 import type { ComposerAttachment } from "./composer-attachments";
 import type { EncodedAttachments } from "./encode-attachments";
 
@@ -9,36 +10,35 @@ const reference = (name: string, path: string, mime: string) => ({ type: "text" 
   text: [`Attached file: ${JSON.stringify(name)} (${mime})`, `Path: ${JSON.stringify(path)}`,
     mime.startsWith("image/") ? "Open this image with an image-reading tool before using it." : "Read this file with the appropriate tools; inspect the portions needed for the request."].join("\n") });
 
-/** Byte preparation stays on the desktop. It needs neither a running VM nor
- * a live bridge. Confirmed references are reusable only for their exact cloud
- * owner; all other attachments must carry bytes in the committed HTTP body. */
+/** Attach-time and Send share bounded uploads. Only complete workspace file
+ * references enter the durable HTTP outbox; its 8 MiB message limit stays small.
+ * Already-confirmed same-owner references also work while the VM is asleep. */
 export async function encodeCloudPromptAttachments(attachments: ComposerAttachment[], cwd: string): Promise<EncodedAttachments> {
   const result: EncodedAttachments = { blocks: [], bubbleAttachments: [], bubbleAttachmentById: new Map(), skipped: [] };
-  let total = 0;
-  for (const original of attachments) {
-    if (original.unavailable || !original.validation.ok) throw missing();
-    const attachment = { ...original }; supplyLegacyAttachmentBytes(attachment);
-    let bytes: Blob | undefined;
-    try { bytes = (await prepareAttachmentSource(attachment, true)).blob; } catch { /* exact confirmed references may still be used */ }
-    let id = attachment.contextAttachmentId ?? attachment.id, path: string;
-    if (bytes) {
-      total += bytes.size;
-      if (total > CLOUD_V2_MAX_PROMPT_BYTES * 0.7) throw new Error("These attachments are too large. Send fewer files.");
-      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(id)) id = crypto.randomUUID();
-      const uri = `zeros-attachment://${id}/${encodeURIComponent(attachment.name)}`;
-      path = cloudPromptAttachmentFile(uri).path;
-      const data = new Uint8Array(await bytes.arrayBuffer()); let binary = "";
-      for (let i = 0; i < data.length; i += 0x8000) binary += String.fromCharCode(...data.subarray(i, i + 0x8000));
-      result.blocks.push({ type: "resource", resource: { uri, mimeType: attachment.mimeType, blob: btoa(binary) } });
-    } else {
-      if (attachment.delivery !== "reference" || !sameAttachmentOwner(attachment.owner, attachmentOwner(cwd)) ||
-          !attachment.diskPath || !/^\.context(?:-graph)?\/(?:local|shared)\/attachments\//.test(attachment.diskPath) ||
-          attachment.diskPath.includes("\\") || [...attachment.diskPath].some(char => char.charCodeAt(0) < 0x20) || attachment.diskPath.split("/").some(part => part === "..")) throw missing();
-      path = attachment.diskPath; result.blocks.push(reference(attachment.name, path, attachment.mimeType));
+  for (const attachment of attachments) {
+    if (attachment.unavailable || !attachment.validation.ok) throw missing();
+    const verdict = validateAttachmentFile({ name: attachment.name, mimeType: attachment.mimeType, size: attachment.size });
+    if (!verdict.ok) throw new Error(verdict.reason);
+    const owner = attachmentOwner(cwd), owned = sameAttachmentOwner(attachment.owner, owner);
+    const parsed = attachment.diskPath ? parseContextAttachmentPath(attachment.diskPath) : null;
+    if (attachment.diskPath && !parsed) throw missing();
+    const id = attachment.contextAttachmentId ?? attachment.id;
+    const confirmed = owned && attachment.delivery === "reference" && parsed?.folderId === id && ![".", ".."].includes(parsed.filename);
+    let path = confirmed ? attachment.diskPath! : undefined;
+    let size = attachment.size;
+    if (!path) {
+      supplyLegacyAttachmentBytes(attachment);
+      if (attachment.owner && !owned && !attachment.sourceFile && !attachment.sourceRecoveryId) throw missing();
+      // An external saved path cannot become this workspace's upload target.
+      const upload = !owned && attachment.owner ? { ...attachment, diskPath: undefined, absolutePath: undefined } : attachment;
+      const saved = await ensureFileAttachment(cwd, upload);
+      path = saved.relativePath; size = saved.bytes;
+      Object.assign(attachment, { diskPath: path, absolutePath: saved.absolutePath, contextAttachmentId: id, owner, delivery: "reference" });
     }
+    result.blocks.push(reference(attachment.name, path, attachment.mimeType));
     const bubble = { name: attachment.name, mimeType: attachment.mimeType, kind: attachment.kind,
-      size: bytes?.size ?? attachment.size, delivery: "reference" as const, diskPath: path, attachmentId: id };
-    result.bubbleAttachments.push(bubble); result.bubbleAttachmentById.set(original.id, bubble);
+      size, delivery: "reference" as const, diskPath: path, attachmentId: id };
+    result.bubbleAttachments.push(bubble); result.bubbleAttachmentById.set(attachment.id, bubble);
   }
   return result;
 }

@@ -14,6 +14,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type { FileMediaDescriptor } from "@zeros/protocol/file-media";
+import { readWorkspaceMediaMetadata } from "./file-media";
 
 const MAX_TEXT_BYTES = 2_000_000; // 2 MB
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // same boundary as composer images
@@ -44,6 +46,7 @@ export interface ReadFileResult {
   bytes: number;
   content?: string;
   dataUrl?: string;
+  media?: FileMediaDescriptor;
   error?: string;
   /** True when this path is Design territory, so the viewer must not offer an
    *  Edit affordance that `file.write` is going to refuse. Advisory only: the
@@ -159,7 +162,7 @@ export function isInside(target: string, root: string): boolean {
 export function readWorkspaceFile(
   cwd: string,
   relPath: string,
-  opts?: { remote?: boolean; includeVideo?: boolean },
+  opts?: { remote?: boolean; includeVideo?: boolean; streamMedia?: boolean },
 ): ReadFileResult {
   const remote = opts?.remote === true;
   const rel = relPath;
@@ -224,6 +227,9 @@ export function readWorkspaceFile(
   const videoMime = opts?.includeVideo === true ? VIDEO_MIME[ext] : undefined;
 
   try {
+    if (opts?.streamMedia && (imageMime || videoMime)) {
+      return readWorkspaceMediaMetadata(cwd, rel, remote);
+    }
     if (videoMime) {
       // Resolve within the same trust boundary, then inspect and read one held
       // descriptor. A file growing during the read cannot bypass the byte cap.

@@ -56,6 +56,7 @@ useWorkspaceStore.setState({
 });
 let revision = 0;
 const bridge = {
+  executionIdentity: { kind: "local", sidecar: "active" },
   request: async (message: { params: { mode: "code" | "design" } }) => ({
     type: "WORKSPACE_RESPONSE",
     result: { mode: message.params.mode, revision: ++revision },

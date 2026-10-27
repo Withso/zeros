@@ -13,7 +13,7 @@ export async function runComposerEditorSmoke({ page, check }) {
   await editor.waitFor();
   await page.evaluate(() => document.fonts.ready);
 
-  await page.evaluate(async () => {
+  const originalImageBytes = await page.evaluate(async () => {
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = 1;
     const blob = await new Promise((resolve) => canvas.toBlob(resolve));
@@ -26,6 +26,7 @@ export async function runComposerEditorSmoke({ page, check }) {
           }),
       ),
     );
+    return [...new Uint8Array(await blob.arrayBuffer())];
   });
   await pills.last().waitFor();
   const firstPill = pills.first();
@@ -121,7 +122,7 @@ export async function runComposerEditorSmoke({ page, check }) {
   );
 
   // Hover owns image preview; click owns exact file navigation. Removing an
-  // attachment still leaves focus and staged bytes intact for undo.
+  // attachment still leaves focus and its confirmed file reference intact for undo.
   const imageButton = firstPill.getByRole("button", { name: /^Open / });
   await expect(imageButton).toBeEnabled();
   await imageButton.hover();
@@ -140,6 +141,8 @@ export async function runComposerEditorSmoke({ page, check }) {
   const expectedPath = await imageButton.getAttribute("data-file-path");
   check("image click opens the exact saved file in a workbench tab", opened?.type === "files" && opened?.filePath === expectedPath);
   await expect(page.getByRole("dialog", { name: "Image preview" })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__composerHarness.serialize().attachments.every(a => a.diskPath && !a.sourceFile))).toBe(true);
+  const originalReferences = await page.evaluate(() => window.__composerHarness.serialize().attachments.map(({ id, diskPath, absolutePath, owner }) => ({ id, diskPath, absolutePath, owner })));
   const beforeRemove = await page.evaluate(() => {
     const ed = window.__composerHarness.editor;
     ed.commands.focus();
@@ -166,14 +169,21 @@ export async function runComposerEditorSmoke({ page, check }) {
     return {
       ...snapshot,
       sourceBytes: snapshot.attachments.map((a) => a.sourceFile?.size ?? 0),
+      saved: snapshot.attachments.map((a) => window.__composerAttachmentTransport.read(a.diskPath)),
     };
   });
   check(
-    "undo restores the removed attachment with its source Blob",
+    "undo restores exact saved references and bytes without retaining uploaded Blobs",
     restored.attachments.length === 3 &&
-      restored.sourceBytes.every((bytes) => bytes > 0) &&
+      restored.sourceBytes.every((bytes) => bytes === 0) &&
+      restored.saved.every((file) => file.kind === "image" &&
+        file.bytes === originalImageBytes.length &&
+        Buffer.from(file.dataUrl.split(",", 2)[1], "base64").equals(Buffer.from(originalImageBytes))) &&
       restored.attachments.every(
-        (a) => a.delivery === "reference" && a.data.length === 0,
+        (a, index) => a.delivery === "reference" && a.data.length === 0 &&
+          a.owner?.cwd === "/composer-editor-harness" &&
+          a.absolutePath === `/composer-editor-harness/${a.diskPath}` &&
+          JSON.stringify({ id: a.id, diskPath: a.diskPath, absolutePath: a.absolutePath, owner: a.owner }) === JSON.stringify(originalReferences[index]),
       ),
     JSON.stringify({
       count: restored.attachments.length,

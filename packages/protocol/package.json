@@ -11,6 +11,7 @@
     "./cloud-runtime-connection": "./src/cloud-runtime-connection.ts",
     "./composer-mode": "./src/composer-mode.ts",
     "./attachment-policy": "./src/attachment-policy.ts",
+    "./file-media": "./src/file-media.ts",
     "./tool-artwork": "./src/tool-artwork.ts",
     ".": "./src/index.ts",
     "./messages": "./src/messages.ts",

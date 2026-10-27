@@ -180,8 +180,8 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
   });
   await settle();
   check(
-    "Hidden retained previews detach wheel ownership and keep their camera",
-    !hidden && JSON.stringify(await camera()) === JSON.stringify(retained),
+    "Hidden retained previews detach wheel ownership and release their decoder",
+    !hidden && (await page.locator("[data-file-media-preview] img").count()) === 0,
   );
   await render();
   check(
@@ -295,20 +295,21 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
     });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  await page.waitForFunction(() => document.querySelector("video").paused);
+  await page.waitForFunction(() => !document.querySelector("video"));
   check(
-    "Document visibility pauses a selected video",
-    await page.locator("video").evaluate((video) => video.paused),
+    "Document visibility releases a selected video's decoder",
+    (await page.locator("video").count()) === 0,
   );
   await page.evaluate(() => {
     delete document.visibilityState;
     document.dispatchEvent(new Event("visibilitychange"));
   });
+  await page.waitForFunction(() => document.querySelector("video")?.readyState >= 2);
   await button("Play video").click();
   await render("personal", "clip.webm", false);
   check(
-    "Hiding a retained video pauses playback",
-    await page.locator("video").evaluate((video) => video.paused),
+    "Hiding a retained video releases playback buffers",
+    (await page.locator("video").count()) === 0,
   );
   await render("personal", "clip.webm");
   check(
@@ -420,4 +421,75 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
       });
   }
   if (initialViewport) await page.setViewportSize(initialViewport);
+  await runPendingMediaUploadSmoke({ page, check });
+}
+
+async function runPendingMediaUploadSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  const workspaces = ["/media-personal", "/media-organization", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"];
+  for (const cwd of workspaces) {
+    const url = new URL(`${origin}/apps/desktop/src/renderer/harnesses/harness-composer-editor.html`);
+    url.searchParams.set("workspace", cwd); url.searchParams.set("hold-uploads", ""); url.searchParams.set("media-preview", "");
+    await page.goto(url.href, { waitUntil: "networkidle" });
+    await page.locator(".composer-pm").waitFor();
+    const source = await page.evaluate(async () => {
+      const canvas = document.createElement("canvas"); canvas.width = 96; canvas.height = 64;
+      const context = canvas.getContext("2d"); context.fillRect(0, 0, 96, 64);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve)); canvas.width = canvas.height = 0;
+      await window.__composerHarness.insertFiles([new File([blob], "uploading.png", { type: "image/png" })]);
+      const attachment = window.__composerHarness.serialize().attachments[0];
+      return { id: attachment.id, sourceId: attachment.sourceRecoveryId };
+    });
+    await page.waitForFunction(() => window.__composerAttachmentTransport.pending().includes("uploading.png"));
+    await page.getByRole("button", { name: "Open uploading.png", exact: true }).click();
+    const image = page.locator("[data-file-media-preview] img");
+    await image.waitFor();
+    await page.waitForFunction(() => document.querySelector("[data-file-media-preview] img")?.naturalWidth === 96);
+    const objectUrl = await image.getAttribute("src");
+    check(`Uploading media opens immediately from a Blob in ${cwd}`, objectUrl.startsWith("blob:") && await page.evaluate(() => window.__composerAttachmentTransport.reads().length === 0));
+    await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+    await page.evaluate(() => window.__setComposerActive(false));
+    await page.waitForFunction(() => !document.querySelector("[data-file-media-preview] img"));
+    await page.evaluate(() => window.__setComposerActive(true));
+    await page.waitForFunction(() => document.querySelector("[data-file-media-preview] img")?.naturalWidth === 96);
+    check("An unfinished preview restores its camera after releasing a hidden Blob URL", await page.getByLabel("Zoom percentage", { exact: true }).textContent() === "125%");
+    const displayedUrl = await image.getAttribute("src");
+    for (let part = 0; part < 2; part++) {
+      await page.waitForFunction(() => window.__composerAttachmentTransport.pending().includes("uploading.png"));
+      await page.evaluate(() => window.__composerAttachmentTransport.releaseNext("uploading.png"));
+    }
+    await page.waitForFunction(() => !!window.__composerHarness.serialize().attachments[0].diskPath);
+    check("Upload completion keeps the open preview intact without a second read", await image.getAttribute("src") === displayedUrl && await page.evaluate(() => window.__composerAttachmentTransport.reads().length === 0));
+    await page.waitForFunction(async id => {
+      const open = indexedDB.open("zeros:attachment-sources:v1", 1);
+      return await new Promise(resolve => {
+        open.onsuccess = () => { const db = open.result, tx = db.transaction("sources", "readonly"), read = tx.objectStore("sources").get(id);
+          tx.oncomplete = () => { db.close(); resolve(read.result === undefined); }; };
+      });
+    }, source.sourceId);
+    check("The active composer releases its completed recovery snapshot", true);
+    await page.evaluate(() => window.__setComposerActive(false));
+    await page.waitForFunction(() => !document.querySelector("[data-file-media-preview] img"));
+    const retired = await page.evaluate(async ({ cwd, id }) => {
+      const { hasPendingFilePreview } = await import("/apps/desktop/src/renderer/platform/pending-file-preview.ts");
+      return !hasPendingFilePreview(cwd, `.context/attachments/${id}/uploading.png`) && window.__composerAttachmentTransport.reads().length === 0;
+    }, { cwd, id: source.id });
+    check("Closing a completed preview drops its final local Blob lease without a hidden remote read", retired);
+
+    // Native file pickers can report text/plain for SVG. Preview MIME follows
+    // the same filename policy as the saved workspace reader, before upload.
+    await page.goto(url.href, { waitUntil: "networkidle" });
+    await page.evaluate(async () => {
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="120"><rect width="180" height="120" fill="teal"/></svg>';
+      await window.__composerHarness.insertFiles([new File([svg], "uploading.SVG", { type: "text/plain" })]);
+    });
+    await page.waitForFunction(() => window.__composerAttachmentTransport.pending().includes("uploading.SVG"));
+    await page.getByRole("button", { name: "Open uploading.SVG", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector("[data-file-media-preview] img")?.naturalWidth === 180, undefined, { timeout: 5000 });
+    const svgPreview = await page.evaluate(() => ({
+      local: document.querySelector("[data-file-media-preview] img").src.startsWith("blob:"),
+      reads: window.__composerAttachmentTransport.reads().filter(path => path.endsWith("/uploading.SVG")),
+    }));
+    check(`Pending SVG previews use filename MIME in ${cwd}`, svgPreview.local && svgPreview.reads.length === 0, JSON.stringify(svgPreview));
+  }
 }

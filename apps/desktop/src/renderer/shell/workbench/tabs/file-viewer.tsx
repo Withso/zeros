@@ -103,6 +103,8 @@ import { statusForGeneration } from "./changes-tab";
 import type { SkillSource } from "../../../platform/skill-source";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 import { FileMediaPreview } from "./file-media-preview";
+import { usePendingFilePreview } from "@/renderer/platform/pending-file-preview";
+import { useDocumentActive } from "@/renderer/state/use-document-active";
 
 interface FileViewerProps {
   /** Owning workbench tab. Used to close only this tab if an external delete leaves
@@ -348,6 +350,9 @@ export function FileViewer({
   // useSyncExternalStore gives the destination its exact cached snapshot in
   // the selection render. There is no component-local "loading reset" paint.
   const readSnapshot = useWorkspaceFileReadSnapshot(readQuery);
+  const visible = useDocumentActive(active);
+  const pendingPreview = usePendingFilePreview(cwd, path, active);
+  const hasPendingPreview = pendingPreview !== null;
   const diffSnapshot = useWorkspaceFileDiffSnapshot(diffQuery);
   const readKey = workspaceFileReadKey(readQuery);
   useInstantViewSwitch(
@@ -376,12 +381,12 @@ export function FileViewer({
   // Hover/workspace-intent prefetch usually makes this a background refresh;
   // concurrent callers share the same keyed request.
   useEffect(() => {
-    if (!active || !cwd) return;
+    if (!visible || !cwd) return;
     // Explicit pointer/workspace intent owns prefetch. Hidden viewers only
     // observe those results, including on a cold mount; fetching here would
     // bypass the speculative request bound while moving across Changes rows.
-    void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(() => {});
-  }, [active, cwd, readQuery, readKey, refreshKey]);
+    if (!hasPendingPreview) void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(() => {});
+  }, [visible, cwd, readQuery, readKey, refreshKey, hasPendingPreview]);
 
   // Fetch the file's diff for the filter it was opened from: "all" = worktree vs
   // base (committed + uncommitted), "uncommitted" = worktree vs HEAD, "commit" =
@@ -400,10 +405,11 @@ export function FileViewer({
   const diskResult =
     readSnapshot.data?.path === path ? readSnapshot.data : null;
   const fileMissing =
+    !pendingPreview &&
     diskResult?.path === path &&
     diskResult?.kind === "error" &&
     diskResult.error === "file no longer exists on disk";
-  const result = diskResult;
+  const result = pendingPreview ?? diskResult;
   const isText = result?.kind === "text";
   const readLoading = !result && readSnapshot.loading;
   const readFailed = !result && !readSnapshot.loading && !!readSnapshot.error;
@@ -414,8 +420,8 @@ export function FileViewer({
     {
       active,
       error:
-        readSnapshot.error ?? (result?.kind === "error" ? result.error : null),
-      pending: readSnapshot.loading || readSnapshot.refreshing,
+        hasPendingPreview ? null : readSnapshot.error ?? (result?.kind === "error" ? result.error : null),
+      pending: !hasPendingPreview && (readSnapshot.loading || readSnapshot.refreshing),
       primary: true,
       hasContent: !!result && result.kind !== "error",
       retry: () => loadWorkspaceFileRead(readQuery, { force: true }),
@@ -844,9 +850,11 @@ export function FileViewer({
               <Placeholder Icon={FileX2} text="file no longer exists on disk" />
             )}
             {(result?.kind === "image" || result?.kind === "video") && !diffShown && (
-              result.dataUrl ? (
+              result.dataUrl || result.media || hasPendingPreview ? (
                 <FileMediaPreview key={JSON.stringify([tabId, readKey])} kind={result.kind}
-                  source={result.dataUrl} path={path} active={active} actionsContainer={mediaActionsContainer} />
+                  sourceIdentity={hasPendingPreview ? readKey : undefined}
+                  source={result.dataUrl} mediaSource={result.media && cwd ? { cwd, bytes: result.bytes, media: result.media } : undefined}
+                  path={path} active={active} actionsContainer={mediaActionsContainer} />
               ) : <Placeholder Icon={ImageOff} text="Media unavailable" />
             )}
             {diffShown &&

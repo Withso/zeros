@@ -24,6 +24,8 @@ import {
 // ──────────────────────────────────────────────────────────
 
 import { useCallback, useSyncExternalStore } from "react";
+import { fileMediaType } from "@zeros/protocol/file-media";
+import { isNativeRuntime } from "@/renderer/platform/runtime";
 
 import { gitDiff } from "@/renderer/platform/git";
 import {
@@ -148,7 +150,9 @@ async function fetchWorkspaceFileRead(
 ): Promise<ReadFileResult> {
   const result = query.skillSource
     ? await readSkillSource(query.cwd, query.skillSource)
-    : /\.(mp4|m4v|webm|mov|ogv|mkv)$/i.test(query.path)
+    : isNativeRuntime() && fileMediaType(query.path)
+      ? await readWorkspaceFile(query.cwd, query.path, { includeVideo: true, streamMedia: true })
+      : /\.(mp4|m4v|webm|mov|ogv|mkv)$/i.test(query.path)
       ? await readWorkspaceFile(query.cwd, query.path, { includeVideo: true })
       : await readWorkspaceFile(query.cwd, query.path);
   if (!result) throw new Error("Workspace file reader unavailable");

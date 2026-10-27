@@ -22,9 +22,8 @@ export function useFileMediaViewport(
 
   useLayoutEffect(() => {
     camera.current = initialCamera();
-    if (media) media.style.transform = "translate(0px, 0px) scale(1)";
     if (percentage.current) percentage.current.textContent = "100%";
-  }, [source, media]);
+  }, [source]);
 
   useLayoutEffect(() => {
     const node = viewport.current;

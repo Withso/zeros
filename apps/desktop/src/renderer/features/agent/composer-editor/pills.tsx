@@ -46,6 +46,9 @@ import { validSkillSource } from "../../../platform/skill-source";
 import { closeHistory } from "@tiptap/pm/history";
 import { attachmentOwner, sameAttachmentOwner } from "../attachment-owner";
 import { useAttachmentPillFile } from "../attachment-pill-file";
+import { contextAttachmentPath, safeAttachmentFilename } from "@zeros/protocol/attachment-policy";
+import { fileMediaType } from "@zeros/protocol/file-media";
+import { hasPendingFilePreview, offerPendingFilePreview } from "@/renderer/platform/pending-file-preview";
 import {
   getFileAttachmentProgress,
   subscribeFileAttachmentProgress,
@@ -204,7 +207,9 @@ export function AttachmentPill(props: NodeViewProps) {
     () => undefined,
   );
   const ownedAttachment = !att?.owner || (!!ctx.cwd && sameAttachmentOwner(att.owner, attachmentOwner(ctx.cwd)));
-  const storedPath = progress?.diskPath ?? (ownedAttachment ? att?.diskPath : undefined);
+  const pendingPath = ctx.cwd && att?.sourceFile && fileMediaType(att.name)
+    ? contextAttachmentPath(att.contextAttachmentId ?? att.id, safeAttachmentFilename(att.name)) : undefined;
+  const storedPath = progress?.diskPath ?? (ownedAttachment ? att?.diskPath : undefined) ?? pendingPath;
   const restoredFile = useAttachmentPillFile({
     cwd: ctx.cwd,
     diskPath: storedPath,
@@ -212,9 +217,10 @@ export function AttachmentPill(props: NodeViewProps) {
     enabled: ctx.attachmentImagesActive && !ctx.onOpenAttachment && !!att && !att.sourceFile && !att.data && !progress,
   });
   const diskPath = restoredFile.path;
+  const canPreviewPending = !!ctx.cwd && !!diskPath && !!att?.sourceFile && !!fileMediaType(att.name) && (pendingPath === diskPath || hasPendingFilePreview(ctx.cwd, diskPath));
   const canOpenSource = ctx.attachmentImagesActive && !!ctx.onOpenAttachment && !!att && !att.unavailable;
   const canOpen = ctx.attachmentImagesActive && !restoredFile.resolving && !att?.unavailable &&
-    progress?.phase !== "saving" && !!diskPath && !!filePillPath(ctx.cwd, diskPath);
+    (progress?.phase !== "saving" || canPreviewPending) && !!diskPath && !!filePillPath(ctx.cwd, diskPath);
   const invalid =
     (att ? !att.validation.ok : false) || progress?.phase === "error";
   const tooltip =
@@ -237,7 +243,7 @@ export function AttachmentPill(props: NodeViewProps) {
   const preview =
     att?.preview && att.kind === "text" && !invalid ? att.preview : null;
   const warmPreview = () => {
-    if (canOpen && diskPath) warmFilePill(ctx.cwd, diskPath);
+    if (canOpen && diskPath && !canPreviewPending) warmFilePill(ctx.cwd, diskPath);
     if (preview && att && ctx.attachmentImagesActive) {
       void warmAttachmentTextPreview(ctx.cwd, att).catch(() => {});
     }
@@ -280,7 +286,10 @@ export function AttachmentPill(props: NodeViewProps) {
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => {
           if (canOpenSource && att) ctx.onOpenAttachment?.(att);
-          else if (canOpen && diskPath) openFilePill(ctx.cwd, diskPath);
+          else if (canOpen && diskPath) {
+            if (canPreviewPending && ctx.cwd && att?.sourceFile) offerPendingFilePreview(ctx.cwd, diskPath, att.sourceFile);
+            openFilePill(ctx.cwd, diskPath);
+          }
         }}
         disabled={!canOpenSource && !canOpen}
         aria-label={`Open ${attrs.name}`}

@@ -810,6 +810,7 @@ async function main() {
   }> = [];
   const layoutRedo: typeof layoutUndo = [];
   setActiveBridge({
+    executionIdentity: { kind: "local", sidecar: "active" },
     status: "connected",
     on: () => () => {},
     onStatusChange: () => () => {},

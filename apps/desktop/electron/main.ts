@@ -212,6 +212,7 @@ import {
 // this cannot read ZEROS_CHANNEL before the seeding block below sets it.
 import { CHANNELS, isChannel, type Channel } from "../src/engine/runtime";
 import { migrateElectronIdentity } from "./migrate-identity";
+import { installFileMediaProtocol, registerFileMediaProtocolPrivileges } from "./file-media-protocol";
 import {
   installDesignProtocol,
   registerDesignProtocolPrivileges,
@@ -265,6 +266,7 @@ let designCaptureService: DesignCaptureService | null = null;
 // Custom schemes must be privileged before Electron reaches ready. The handler
 // itself is installed after ready, before the first renderer window loads.
 registerDesignProtocolPrivileges();
+registerFileMediaProtocolPrivileges();
 
 // Release channel baked at electron:compile time by apps/desktop/electron/tsup.config.ts's
 // `define`. "" in a normal dev compile; "beta" when the beta release workflow
@@ -976,9 +978,9 @@ function createMainWindow(): BrowserWindow {
       "default-src 'self'",
       "script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob: https:",
+      "img-src 'self' data: blob: https: zeros-media:",
       "font-src 'self' data:",
-      "media-src 'self' blob: data:",
+      "media-src 'self' blob: data: zeros-media:",
       "connect-src 'self' https: wss: ws://127.0.0.1:* ws://localhost:*",
       "worker-src 'self' blob:",
       "frame-src 'self' https: http: data: blob: about: zeros-design:",
@@ -1294,6 +1296,7 @@ app.whenReady().then(async () => {
   registerAllCommands();
   const keepAwake = installKeepAwake();
   installDesignProtocol();
+  installFileMediaProtocol();
 
   const trustedBrowserWindow = (event: IpcMainInvokeEvent): BrowserWindow => {
     const current = getMainWindow();

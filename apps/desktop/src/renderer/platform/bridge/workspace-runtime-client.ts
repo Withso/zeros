@@ -1,5 +1,5 @@
 import type { BridgeMessage } from "./messages";
-import { RuntimeClient, type ConnectionStatus } from "./ws-client";
+import { RuntimeClient, runtimeExecutionKey, type ConnectionStatus } from "./ws-client";
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import type { CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
@@ -462,6 +462,20 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   private identity(target: CloudWorkspaceTarget): string {
     return `${this.accountEpoch}:${this.routing.identity?.(target) ?? ""}`;
+  }
+
+  /** Long-lived file sources and transfers fence each chunk against the exact
+   * account/placement/generation captured at admission, including A → B → A. */
+  workspaceExecutionKey(cwd: string): string {
+    const target = parseCloudWorkspaceKey(cwd);
+    return target ? `${cloudWorkspaceKey(target)}:${this.identity(target)}` : runtimeExecutionKey(this.executionIdentity);
+  }
+
+  workspaceAccessKey(cwd: string): string {
+    const target = parseCloudWorkspaceKey(cwd);
+    if (!target) return runtimeExecutionKey(this.executionIdentity);
+    const owner = this.routing.wakeOwner?.(target);
+    return JSON.stringify([cloudWorkspaceKey(target), this.accountEpoch, owner?.account, owner?.stopVersion, this.routing.canAccess?.(target)]);
   }
 
   private warmHistorySnapshot(target: CloudWorkspaceTarget): Promise<WireRecord> {
