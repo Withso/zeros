@@ -48,6 +48,8 @@ function notImpl(cmd: string, _order: number): CommandHandler {
 const commandTable: Record<string, CommandHandler> = {
   // ── App info (runtime mode / version) — for analytics routing ──
   app_info: notImpl("app_info", 1),
+  full_disk_access_status: notImpl("full_disk_access_status", 1),
+  full_disk_access_open_settings: notImpl("full_disk_access_open_settings", 1),
   local_navigation_ready: notImpl("local_navigation_ready", 1),
   cursor_subscription: notImpl("cursor_subscription", 1),
   provider_subscription: notImpl("provider_subscription", 1),

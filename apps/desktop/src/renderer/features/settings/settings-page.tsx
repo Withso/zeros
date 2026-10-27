@@ -131,6 +131,7 @@ import {
 } from "./dashboard-settings";
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import { FollowUpBehaviorSetting } from "./follow-up-behavior-setting";
+import { FullDiskAccessRow } from "./full-disk-access-row";
 import {
   setRestartAutomaticallyOnUpdate,
   useRestartAutomaticallyOnUpdate,
@@ -915,7 +916,7 @@ function SectionNavButton({
 
 // ── General ─────────────────────────────────────────────
 
-function GeneralPanel() {
+function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const showHidden = useShowHiddenWorkspaces();
   const restartAutomatically = useRestartAutomaticallyOnUpdate();
   // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
@@ -946,7 +947,7 @@ function GeneralPanel() {
           />
         </SettingsRow>
       </SettingsGroup>
-      <PrivacyGroup />
+      <PrivacyGroup surfaceActive={surfaceActive} />
     </div>
   );
 }
@@ -1112,15 +1113,12 @@ function AccountPanel() {
   );
 }
 
-// ── Privacy — anonymous usage analytics (opt-out) ──
+// ── Privacy — native file access and anonymous usage analytics ──
 //
-// Single consent control for metadata-only product analytics. Opt-out model:
-// on by default, anonymous, and never sends user content. Rendered as the
-// "Privacy" group on the General tab (2026-09-14; it previously sat under
-// Account). Device-level consent, not account-level, so it never depends on
-// sign-in state.
+// Both controls belong to this device, independently of sign-in. Analytics
+// remains opt-out and metadata-only; macOS owns the Full Disk Access grant.
 
-function PrivacyGroup() {
+function PrivacyGroup({ surfaceActive }: { surfaceActive: boolean }) {
   const [optedOut, setOptedOut] = useState<boolean>(() =>
     isAnalyticsOptedOut(),
   );
@@ -1131,6 +1129,7 @@ function PrivacyGroup() {
 
   return (
     <SettingsGroup title="Privacy">
+      <FullDiskAccessRow surfaceActive={surfaceActive} />
       <SettingsRow
         label="Share anonymous usage data"
         hint="Anonymous feature and performance metadata. Never your code, prompts, or keys."

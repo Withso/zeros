@@ -36,6 +36,8 @@ const ALLOWED_COMMANDS = new Set<string>([
   "appearance_set_mode",
   "agent_context_files",
   "app_info",
+  "full_disk_access_status",
+  "full_disk_access_open_settings",
   "keep_awake_get",
   "keep_awake_set",
   "keep_awake_activity",
