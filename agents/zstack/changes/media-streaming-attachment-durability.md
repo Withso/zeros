@@ -55,6 +55,10 @@
   separate path through an exclusive descriptor before checking the original,
   then rename it atomically over the original without reopening that pathname
   → engine `file-media-stream.test.ts`, preserving the replacement rejection.
+- A PR-linked replay hid an unsupported package-script alias until its merge
+  revision became available → the replay runner accepts explicit Vitest recipes
+  → record `exec vitest run` and validate recipe parsing before a pending fix can
+  resolve → `cloud-checkpoint-ignored-attachments`, with the same test selection.
 
 The verification skill now requires real native range/seek evidence and
 checkpoint/source-owner tests before recovery reclamation. Linux Electron
