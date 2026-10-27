@@ -29,7 +29,20 @@ import type {
 import { createDesignPagesHarness } from "./harness-design-pages";
 import { LAYERED_LAYOUT_SOURCE } from "./harness-design-layered-layout";
 
-const lazyPreparationHarness = new URLSearchParams(window.location.search).has("lazyPreparation");
+// Opt-in continuity measurements use the same lazy engine boundary, with
+// request latency instead of a manually released preparation barrier.
+const measureContinuityHarness = new URLSearchParams(window.location.search).has("measureContinuity");
+const profileContinuityHarness = measureContinuityHarness && new URLSearchParams(window.location.search).has("profileContinuity");
+const attributeContinuityHarness = profileContinuityHarness && new URLSearchParams(window.location.search).has("attributeContinuity");
+const retainedContinuityHarness = measureContinuityHarness && new URLSearchParams(window.location.search).has("retainedContinuity");
+const profilerCommits: Array<{ id: string; phase: string; actualDuration: number; baseDuration: number; startTime: number; commitTime: number }> = [];
+const requestedEngineDelay = Number(new URLSearchParams(window.location.search).get("engineDelayMs") ?? 400);
+const engineDelayMs = measureContinuityHarness
+  ? Math.max(0, Math.min(500, Number.isFinite(requestedEngineDelay) ? requestedEngineDelay : 400)) : 0;
+const delayedOperations = new Set(["design.frames.prepare", "design.navigation.read", "design.frame.create", "design.transaction.apply", "design.node.styles"]);
+const delayedRequests: Array<{ op: string; workspaceId: string; started: number; released: number | null }> = [];
+const measurementHolds = new Map<string, { promise: Promise<void>; release(): void }>();
+const lazyPreparationHarness = measureContinuityHarness || new URLSearchParams(window.location.search).has("lazyPreparation");
 const HOME_SOURCE_VERSION = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const PRICING_SOURCE_VERSION = "bbbbbbbbbbbbbbbbbbbbbbbb";
 const HARNESS_LAYER_COUNT = new URLSearchParams(window.location.search).has(
@@ -292,6 +305,7 @@ async function main() {
   const { Toaster } = await import("../shared/ui/primitives/elements/toast");
   const { DesignWorkspaceColumn } =
     await import("../features/design-workspace/design-workspace");
+  const RetainedDesignDeck = retainedContinuityHarness ? (await import("../shell/workbench/design-deck")).RetainedDesignDeck : null;
   const {
     applyDesignWorkspaceRefreshVersion,
     designFoundationCache,
@@ -299,6 +313,7 @@ async function main() {
     designFrameDocumentCache,
     designFrameDocumentKey,
     designWorkspaceSnapshotCache,
+    hasPendingDesignEdits,
     setDesignNodeTextCached,
     updateDesignNodeStylesCached,
   } = await import("../features/design-workspace/state/design-workspace-cache");
@@ -315,6 +330,20 @@ async function main() {
   const { setActiveBridge } = await import("../platform/bridge/active-bridge");
   const { setWorkspaceRowsForTesting } = await import("../state/use-projects");
   const { useWorkspaceStore } = await import("../state/store");
+  if (attributeContinuityHarness) {
+    const { installDesignAttribution } = await import("./harness-design-attribution");
+    const { useDesignLayerDisclosureStore } = await import("../features/design-workspace/state/design-layer-disclosure");
+    const { designHiddenDocuments } = await import("../features/design-workspace/state/design-hidden-documents");
+    const { subscribeDesignFrameIntent } = await import("../features/design-workspace/state/design-frame-intent");
+    const { designCheckoutStatusCache, designDirectoryTargetCache, designDirectoryListingCache } = await import("../state/read-caches");
+    const dispose = installDesignAttribution({
+      stores: { ui: useDesignWorkspaceUiStore, runtime: useDesignRuntimeStore, disclosure: useDesignLayerDisclosureStore, workspace: useWorkspaceStore },
+      caches: { aggregate: designWorkspaceSnapshotCache, documents: designFrameDocumentCache, foundation: designFoundationCache,
+        checkout: designCheckoutStatusCache, directory: designDirectoryTargetCache, directories: designDirectoryListingCache },
+      previews: designFramePreviews, hiddenDocuments: designHiddenDocuments, subscribeIntent: subscribeDesignFrameIntent,
+    });
+    window.addEventListener("pagehide", dispose, { once: true });
+  }
   if (workbenchHarness) {
     (window as Window & {
       __zerosHarnessSelectWorkspace?: (id: string) => void;
@@ -333,6 +362,13 @@ async function main() {
     activeChatId: null,
     newAgentFolder: workspacePath,
   });
+  const retainMeasurementScope = (folder: string) => {
+    if (retainedContinuityHarness) useWorkspaceStore.getState().dispatch({
+      type: "ADD_WORKBENCH_TAB", scope: folder,
+      tab: { id: "design", type: "design", title: "Design" },
+    });
+  };
+  retainMeasurementScope(workspacePath);
   const reviewFindings = Array.from({ length: 95 }, (_, index) => ({
     ruleId: "spacing-scale" as const,
     severity: "warning" as const,
@@ -680,7 +716,7 @@ async function main() {
   };
   if (lazyPreparationHarness) {
     const near = currentWorkspaceSnapshot.frames.map((frame, index) => ({ ...frame, frameId: `f${index}`, pageId: "main", kind: "frame" as const }));
-    const distant = Array.from({ length: 254 }, (_, index) => ({ ...near[0]!, file: `distant-${index}.html`, frameId: `d${index}`,
+    const distant = Array.from({ length: measureContinuityHarness ? 0 : 254 }, (_, index) => ({ ...near[0]!, file: `distant-${index}.html`, frameId: `d${index}`,
       title: `Distant ${index}`, x: 20_000 + index * 1600, z: 0 }));
     for (const frame of distant) performanceSources.set(frame.file, homeSource);
     const frames = [...near, ...distant];
@@ -690,7 +726,7 @@ async function main() {
     designWorkspaceSnapshotCache.forget(workspaceId);
     designFrameDocumentCache.clear();
     useDesignRuntimeStore.getState().forgetWorkspace(workspaceId);
-    holdPreparation();
+    if (!measureContinuityHarness) holdPreparation();
   }
   const lazyCatalogOwner = (id: string) => ({ workspaceId: id, directoryId: "design_harness", placement: "local", organizationId: id === workspaceId ? null : "organization-local" });
   const pagesFixture = pagesHarness ? createDesignPagesHarness(currentWorkspaceSnapshot, homeSource) : null;
@@ -829,11 +865,21 @@ async function main() {
       params?: Record<string, unknown>;
     }) => {
       if (message.op) workbenchOperations.push(message.op);
+      if (measureContinuityHarness && message.op && delayedOperations.has(message.op)) {
+        const request = { op: message.op, workspaceId: String(message.params?.workspaceId), started: performance.now(), released: null as number | null };
+        delayedRequests.push(request);
+        if (delayedRequests.length > 256) delayedRequests.shift();
+        await new Promise(resolve => window.setTimeout(resolve, engineDelayMs));
+        await measurementHolds.get(message.op)?.promise;
+        request.released = performance.now();
+      }
       if (lazyPreparationHarness && message.op === "design.navigation.read") {
         const owner = lazyCatalogOwner(String(message.params?.workspaceId));
         return { type: "WORKSPACE_RESPONSE", result: { owner, catalogRevision: lazyRevision,
           snapshot: { ...currentWorkspaceSnapshot, frames: [], lint: { ...currentWorkspaceSnapshot.lint,
-            workspacePath: workspaces.find((row) => row.id === owner.workspaceId)?.path ?? workspacePath } } } };
+            workspacePath: workspaces.find((row) => row.id === owner.workspaceId)?.path ?? workspacePath },
+            ...(measureContinuityHarness ? { pages: [{ id: "main", title: "Design", folder: "",
+              frameFiles: currentWorkspaceSnapshot.frames.map(frame => frame.file), frameIds: currentWorkspaceSnapshot.frames.map(frame => frame.frameId) }] } : {}) } } };
       }
       if (lazyPreparationHarness && message.op === "design.frames.prepare") {
         const files = message.params?.files as string[];
@@ -1748,6 +1794,7 @@ async function main() {
         const frame = {
           file,
           title: String(message.params?.title ?? "Frame"),
+          ...(measureContinuityHarness ? { frameId: `created_${htmlFrameCounter}`, pageId: "main" } : {}),
           kind: "frame" as const,
           width: drawn ? Number(message.params!.w) : 1440,
           height: drawn ? Number(message.params!.h) : 900,
@@ -1760,9 +1807,16 @@ async function main() {
           sourceVersion,
         };
         const source = `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0}</style></head><body><main data-oid="f-${htmlFrameCounter}-main" data-zeros-frame-root style="display:block; position:relative; width:100%; height:100vh; box-sizing:border-box; background-color:white; opacity:1;"></main></body></html>`;
+        if (measureContinuityHarness) performanceSources.set(file, source);
         currentWorkspaceSnapshot = {
           ...currentWorkspaceSnapshot,
           frames: [...currentWorkspaceSnapshot.frames, frame],
+        };
+        if (measureContinuityHarness) currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          pages: [{ id: "main", title: "Design", folder: "",
+            frameFiles: currentWorkspaceSnapshot.frames.map(candidate => candidate.file),
+            frameIds: currentWorkspaceSnapshot.frames.flatMap(candidate => candidate.frameId ? [candidate.frameId] : []) }],
         };
         designFrameDocumentCache.setData(
           designFrameDocumentKey(workspaceId, file, sourceVersion),
@@ -2100,6 +2154,20 @@ async function main() {
         documentKey: designFrameDocumentKey,
         resources: designRendererResources,
         previews: designFramePreviews,
+        measurement: measureContinuityHarness ? {
+          engineDelayMs, retained: retainedContinuityHarness, requests: delayedRequests, runtime: useDesignRuntimeStore, commits: profilerCommits,
+          snapshot: () => currentWorkspaceSnapshot,
+          refresh: (id: string) => designWorkspaceSnapshotCache.invalidate(id),
+          editing: hasPendingDesignEdits,
+          hold(op: string) {
+            if (!delayedOperations.has(op)) throw new Error("Only measured fixture operations can be held.");
+            if (measurementHolds.has(op)) return;
+            let release!: () => void;
+            const promise = new Promise<void>(resolve => { release = resolve; });
+            measurementHolds.set(op, { promise, release });
+          },
+          release(op: string) { measurementHolds.get(op)?.release(); measurementHolds.delete(op); },
+        } : undefined,
         textCommit: { hold: holdTextCommit, release: () => releaseTextCommit?.(), started: () => heldTextCommits },
         lazy: lazyPreparationHarness ? {
           calls: preparationCalls,
@@ -2126,11 +2194,13 @@ async function main() {
           designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
         },
         owner(id: string) {
+          retainMeasurementScope(id === workspaceId ? workspacePath : `${workspacePath}-${id}`);
           if (id !== workspaceId) {
             const ownerPath = `${workspacePath}-${id}`;
             if (!workspaces.some((row) => row.id === id)) workspaces.push({ ...workspace, id, path: ownerPath });
-            if (lazyPreparationHarness) designWorkspaceSnapshotCache.forget(id);
-            else designWorkspaceSnapshotCache.setData(id, {
+            if (lazyPreparationHarness) {
+              if (!measureContinuityHarness || !designWorkspaceSnapshotCache.peekSnapshot(id).data) designWorkspaceSnapshotCache.forget(id);
+            } else designWorkspaceSnapshotCache.setData(id, {
               ...structuredClone(currentWorkspaceSnapshot),
               lint: { ...currentWorkspaceSnapshot.lint, workspacePath: ownerPath },
             });
@@ -2146,20 +2216,25 @@ async function main() {
     }, []);
     const visibleWorkspace = ownerId === workspaceId && rootPath === workspacePath ? workspace :
       { ...workspace, id: ownerId, path: ownerId === workspaceId ? rootPath : `${rootPath}-${ownerId}` };
+    const designColumn = RetainedDesignDeck
+      ? <RetainedDesignDeck workspace={visibleWorkspace} folder={visibleWorkspace.path} active={surfaceActive} />
+      : <DesignWorkspaceColumn workspace={visibleWorkspace} folder={visibleWorkspace.path} surfaceActive={surfaceActive} />;
     return (
       <ActionsCtx.Provider value={new Proxy({
         setRetainedChatIds: () => {}, getSession: () => undefined, getCloseActivity: () => ({ running: false, queuedCount: 0 }),
         hydrateChat: async () => {}, listAgents: async () => [],
       }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => Promise.resolve() }) as unknown as import("../features/agent/sessions-context").SessionsCtx}>
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
-        <main data-harness-design-root={rootPath} className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
+        <main data-harness-design-root={rootPath} data-harness-design-owner={measureContinuityHarness ? ownerId : undefined}
+          data-harness-design-active={measureContinuityHarness ? String(surfaceActive) : undefined}
+          {...(measureContinuityHarness && !surfaceActive ? { inert: "" as const, "aria-hidden": true, style: { visibility: "hidden" as const } } : {})}
+          className="bg-bg1 relative flex h-screen min-h-0 overflow-hidden">
           {WorkbenchPane && ConversationPane ? <><ConversationPane workspace={workspace} /><WorkbenchPane surfaceActive onToggleWorkbench={() => {}} /></> : <>
           {ReferenceFixture && <ReferenceFixture folder={workspacePath} />}
-          <DesignWorkspaceColumn
-            workspace={visibleWorkspace}
-            folder={visibleWorkspace.path}
-            surfaceActive={surfaceActive}
-          />
+          {profileContinuityHarness ? <React.Profiler id="DesignWorkspaceColumn" onRender={(id, phase, actualDuration, baseDuration, startTime, commitTime) => {
+            profilerCommits.push({ id, phase, actualDuration, baseDuration, startTime, commitTime });
+            if (profilerCommits.length > 512) profilerCommits.shift();
+          }}>{designColumn}</React.Profiler> : designColumn}
           </>}
         </main>
         <Toaster />
