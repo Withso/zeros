@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/state/use-read-recovery.ts",
+  "before": "? isCloudUnavailable(error) ? error : status.failure as Error | null",
+  "after": "? status.failure as Error | null"
+}

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import type { ProviderSubscriptionStatus } from "@zeros/protocol/provider-auth";
 import { useNativeRuntime } from "../../platform/runtime";
 import { subscribeProviderAuth } from "../../platform/provider-auth-state";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import { documentIsVisible, useDocumentActive } from "../../state/use-document-active";
 import { isSubscriptionProvider, readSubscription, subscriptionCache } from "./subscription-connection";
 
@@ -71,8 +71,9 @@ export function useSubscriptionStatus(provider: string, surfaceActive: boolean) 
   const active = native && surfaceActive && isSubscriptionProvider(provider);
   const visible = useDocumentActive(active);
   useEffect(() => active ? observe(provider) : undefined, [active, provider]);
-  return useCachedRead(subscriptionCache, provider, readObservedSubscription, {
+  return useRecoveringRead(subscriptionCache, provider, readObservedSubscription, {
     enabled: visible,
+    connected: native,
     maxAgeMs: 15_000,
   });
 }

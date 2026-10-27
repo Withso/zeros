@@ -43,7 +43,7 @@ import {
   filesToCopyPreviewRequest,
   invalidateFilesToCopyForRepo,
 } from "../../state/read-caches";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import { useSettingsChanged, useSettingsLayer } from "../settings/use-settings";
 import { SettingsSection } from "../settings/settings-ui";
 import {
@@ -180,7 +180,7 @@ export function FilesToCopySection({
     surfaceActive && connected && root
       ? filesToCopyPreviewKey(root, previewPatterns)
       : null;
-  const read = useCachedRead(
+  const read = useRecoveringRead(
     filesToCopyPreviewCache,
     previewKey,
     // Read the request back OUT of the key being loaded rather than off the

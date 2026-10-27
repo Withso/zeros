@@ -157,6 +157,9 @@ export interface AgentSessionState {
    *  `loading` is an explicit cold-read state so an empty array can never be
    *  mistaken for a genuinely new chat while SQLite is being rehydrated. */
   transcriptState: "resident" | "cold" | "loading";
+  /** A rejected history read, separate from provider/session failure. Only
+   * used for recovery presentation; never persisted or execution authority. */
+  transcriptReadError?: string | null;
   /** A cached window may paint while authoritative hydration is
    * pending. It never grants admission, completes a turn or drains a queue.
    * `empty`: a Local chat known to be empty paints its empty state. */

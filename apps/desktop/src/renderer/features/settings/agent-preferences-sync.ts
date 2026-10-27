@@ -27,7 +27,10 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
     epoch = 0;
   let running: Promise<void> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  let cancelSilentRetry: (() => void) | undefined;
   let failures = 0;
+  let notified = false;
+  const noticeId = "agent-preferences-sync";
   const legacy = {
     models: legacyModelPreferences(),
     providers: legacyProviderPreferences(),
@@ -73,6 +76,24 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
           }
         } catch (error) {
           if (generation !== epoch) continue;
+          if (!local()) break;
+          failures += 1;
+          if (failures === 1) {
+            // A passive restore and explicit flush share this flight. Keep
+            // both pending through one retry so a momentary read/save failure
+            // cannot become a terminal chat error before recovery finishes.
+            requested = true;
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(finish, 1_500);
+              function finish() {
+                clearTimeout(timer);
+                cancelSilentRetry = undefined;
+                resolve();
+              }
+              cancelSilentRetry = finish;
+            });
+            continue;
+          }
           throw error;
         }
         if (!local()) break;
@@ -82,22 +103,28 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
         hydrateProviderPreferences(doc.providers ?? {});
         initialized = true;
         failures = 0;
+        if (notified) {
+          toast.dismiss(noticeId);
+          notified = false;
+        }
         if (pendingAgentPreferences().size) requested = true;
       }
     })()
       .catch((error: unknown) => {
         if (local()) {
-          failures += 1;
-          if (failures === 1)
+          if (!notified) {
+            notified = true;
             toast.error(
               "Agent settings could not be saved or refreshed. Pending choices are kept on this device and will retry.",
+              { id: noticeId, duration: Infinity },
             );
+          }
           retry = setTimeout(
             () => {
               retry = undefined;
               trigger();
             },
-            Math.min(30_000, 1000 * 2 ** Math.min(failures - 1, 5)),
+            Math.min(30_000, 1_500 * 2 ** Math.min(failures - 1, 5)),
           );
         }
         throw error;
@@ -115,6 +142,10 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
   const offPending = onPendingAgentPreferences(trigger);
   const offStatus = bridge.onStatusChange((status) => {
     epoch += 1;
+    cancelSilentRetry?.();
+    if (retry) clearTimeout(retry);
+    retry = undefined;
+    failures = 0;
     if (status === "connected") {
       initialized = false;
       trigger();
@@ -153,7 +184,9 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
   return () => {
     disposed = true;
     lifetime.abort();
+    cancelSilentRetry?.();
     if (retry) clearTimeout(retry);
+    if (notified) toast.dismiss(noticeId);
     offPending();
     offStatus();
     offDb();

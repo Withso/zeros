@@ -4,7 +4,7 @@ import { Button, GithubIcon } from "../../shared/ui";
 import { SettingsSection, SettingsList, SettingsRow } from "./settings-ui";
 import { ghAppConnect, onGithubAppConnected } from "../../platform/git";
 import { shellOpenUrl } from "../../platform/app";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import {
   cloudGithubCatalogCache,
   cloudGithubRepositoriesCache,
@@ -24,7 +24,7 @@ export function CloudGithubSection({
   surfaceActive: boolean;
 }) {
   const key = cloudGithubScopeKey(userId, organizationId);
-  const snapshot = useCachedRead(
+  const snapshot = useRecoveringRead(
     cloudGithubCatalogCache,
     key,
     (value) =>

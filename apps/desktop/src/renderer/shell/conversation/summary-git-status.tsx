@@ -57,7 +57,7 @@ export function SummaryGitStatus({
   onNavigate: () => void;
 }) {
   const nativeReady = useNativeRuntime().ready;
-  const { git, pr, refresh } = useSummaryGitStatus(
+  const { git, pr, refresh, error } = useSummaryGitStatus(
     workspace,
     active && nativeReady,
   );
@@ -77,9 +77,9 @@ export function SummaryGitStatus({
   });
   const unavailable = !nativeReady
     ? "The engine is reconnecting"
-    : git.error
+    : error
       ? "Refresh Git status before continuing"
-      : !facts
+      : git.error || !facts
         ? "Reading Git status…"
         : undefined;
   const createReason =
@@ -238,7 +238,7 @@ export function SummaryGitStatus({
           </div>
         );
       })}
-      {git.error && (
+      {error && (
         <div className={ROW_CLASS}>
           <span className={LABEL_CLASS}>Git status unavailable</span>
           <Button
@@ -252,7 +252,7 @@ export function SummaryGitStatus({
           </Button>
         </div>
       )}
-      {facts && !git.error && rows.length === 0 && (
+      {facts && !error && rows.length === 0 && (
         <p className="text-fg1 truncate px-1.5 py-1 text-xs">Working tree clean</p>
       )}
     </section>

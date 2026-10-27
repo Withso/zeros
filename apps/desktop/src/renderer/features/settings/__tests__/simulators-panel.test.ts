@@ -9,6 +9,8 @@ import type {
 import type { Workspace } from "../../../platform/git";
 import type { SimulatorHubState } from "../../simulators/simulator-hub-store";
 
+vi.mock("react", async original => ({ ...await original<typeof import("react")>(), useLayoutEffect: () => {} }));
+
 const state = vi.hoisted(() => ({
   organization: { id: "org-a", isPersonal: false } as {
     id: string;
@@ -58,6 +60,7 @@ vi.mock("../../../shared/ui/primitives/elements", () => ({
 }));
 
 import { SimulatorsPanel } from "../simulators-panel";
+import { workbenchSourcesFor } from "../../../shell/workbench/tab-status-model";
 
 const PHONE: SimulatorDevice = {
   id: "FBF8387E-9B7A-4F2A-9ACE-6BDF338E0108",
@@ -96,6 +99,11 @@ beforeEach(() => {
 });
 
 describe("Simulators settings panel", () => {
+  it("does not show a transient native hub failure before its bounded retry", () => {
+    state.workspace = { path: "/workspace", organizationId: "org-a", placement: "local" };
+    state.hub = { snapshot: null, loading: false, error: "temporary device read failure" };
+    expect(render()).not.toContain("temporary device read failure");
+  });
   it("shows placement guidance for a cloud workspace without reading Local settings or devices", () => {
     const html = render();
     expect(html).toContain("Unavailable in cloud workspaces");
@@ -199,11 +207,15 @@ describe("Simulators settings panel", () => {
       expect(html).toContain("Cancel");
     });
 
-    it("offers another read when the first one failed", () => {
+    it("offers another read when recovery confirms a persistent failure", () => {
       state.hub = { snapshot: null, error: "Zeros couldn't read the simulators.", loading: false };
-      const html = render();
-      expect(html).toContain("Zeros couldn&#x27;t read the simulators.");
-      expect(html).toContain("Check again");
+      const sources = workbenchSourcesFor("read:simulator-settings-hub", "");
+      sources.update("persistent", { error: new Error(state.hub.error!), pending: false });
+      try {
+        const html = render();
+        expect(html).toContain("Zeros couldn&#x27;t read the simulators.");
+        expect(html).toContain("Check again");
+      } finally { sources.remove("persistent"); }
     });
 
     it("lists Android only once the hub reports it", () => {

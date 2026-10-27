@@ -14,7 +14,7 @@ import {
   providerAuthRevision,
   subscribeProviderAuth,
 } from "../../platform/provider-auth-state";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import {
   documentIsVisible,
   useDocumentActive,
@@ -68,8 +68,10 @@ export function ProviderInformation({
         )
       : null;
   const active = visible && native && key !== null;
-  const read = useCachedRead(providerUsageCache, key, readProviderUsage, {
+  const read = useRecoveringRead(providerUsageCache, key, readProviderUsage, {
     enabled: active,
+    connected: native,
+    retryFetcher: key => readProviderUsage(key, true),
     maxAgeMs: PROVIDER_USAGE_MAX_AGE_MS,
   });
   const [now, setNow] = useState(Date.now);

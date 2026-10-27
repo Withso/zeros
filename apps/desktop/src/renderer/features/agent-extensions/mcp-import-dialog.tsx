@@ -10,7 +10,7 @@
 // settings) so tokens don't land in the file in plain text.
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check } from "lucide-react";
 
 import { Button } from "../../shared/ui";
@@ -26,7 +26,9 @@ import {
 } from "../../shared/ui/primitives/dialog";
 import { toast } from "../../shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
-import { useBridge } from "../../platform/bridge/use-bridge";
+import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
+import { useReadRecovery } from "../../state/use-read-recovery";
+import { useDocumentActive } from "../../state/use-document-active";
 import { useProjects } from "../../state/use-projects";
 import {
   bridgeMcpGatewaySetHeaderSecret,
@@ -160,7 +162,10 @@ function TransportPill({ transport }: { transport: "stdio" | "http" | "sse" }) {
 export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const bridge = useBridge();
   const { projects } = useProjects();
-  const { layer, write } = useSettingsLayer("user");
+  const {
+    layer, loading: settingsLoading, error: settingsError,
+    readError: settingsReadError, refresh: refreshSettings, write,
+  } = useSettingsLayer("user");
   const existing = useMemo(() => readRawServers(layer?.doc), [layer?.doc]);
   // Names already configured in Zeros (user + managed — the only MCP layers),
   // so an already-configured server shows as "Already added" instead of
@@ -173,22 +178,37 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
   }, [existing, composedNames]);
 
   const [sources, setSources] = useState<DiscoveredMcpSourceWire[] | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [scanAttempt, setScanAttempt] = useState(0);
+  const retryWaiters = useRef<Array<() => void>>([]);
+  const bridgeStatus = useBridgeStatus();
+  const connected = !!bridge && bridgeStatus === "connected";
+  const active = useDocumentActive(open);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const retry = useCallback(() => new Promise<void>(resolve => {
+    retryWaiters.current.push(resolve);
+    setLoading(true);
+    setScanAttempt(value => value + 1);
+  }), []);
 
   // Scan each time the dialog opens.
   useEffect(() => {
-    if (!open) return;
-    if (!bridge) {
-      setScanError("Not connected to the engine.");
+    if (!open) {
+      setSources(null);
+      setScanError(null);
+      return;
+    }
+    if (!active) return;
+    if (!bridge || !connected) {
+      setLoading(true);
+      setScanError(null);
       return;
     }
     let live = true;
     setLoading(true);
     setScanError(null);
-    setSources(null);
     // Names already in Zeros (user + managed), so an already-configured server
     // shows as "Already added".
     void bridgeMcpResolveComposed(bridge)
@@ -211,7 +231,7 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
             if (!existingNames.has(srv.name)) sel.add(keyOf(src.source, srv.name));
           }
         }
-        setSelected(sel);
+        if (!sources) setSelected(sel);
       })
       .catch((e) => live && setScanError(e instanceof Error ? e.message : String(e)))
       .finally(() => live && setLoading(false));
@@ -221,7 +241,25 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
     // existingNames intentionally omitted — re-scan only on open, not on every
     // settings refetch (which would clobber the user's checkbox selection).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, bridge]);
+  }, [open, active, bridge, connected, scanAttempt]);
+  const readError = useMemo(() => scanError ? new Error(scanError) : null, [scanError]);
+  const recovery = useReadRecovery("mcp-import-scan", {
+    error: readError,
+    pending: loading,
+    hasContent: sources !== null,
+    connected,
+    active,
+    retry,
+  });
+  // An effect trigger is not a completed retry. Settle only after the actual
+  // scan's result has committed, or the dialog/connection retires it.
+  useLayoutEffect(() => {
+    if (!loading || !active || !connected)
+      for (const resolve of retryWaiters.current.splice(0)) resolve();
+  }, [loading, active, connected]);
+  useEffect(() => () => {
+    for (const resolve of retryWaiters.current.splice(0)) resolve();
+  }, []);
 
   const toggle = (key: string) =>
     setSelected((prev) => {
@@ -234,9 +272,11 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
   const selectedCount = selected.size;
   const found = sources?.flatMap((s) => s.servers) ?? [];
   const hasAny = found.length > 0;
+  const importError = recovery.error?.message ?? settingsError ?? layer?.error;
 
   const handleImport = async () => {
-    if (!sources) return;
+    if (!sources || !connected || scanError || loading || busy ||
+        !layer || settingsLoading || settingsReadError || layer.error) return;
     setBusy(true);
     try {
       // Collect the selected servers, dedup by name (vs existing + each other).
@@ -305,17 +345,19 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
         </DialogHeader>
         <DialogBody>
           <div className="flex max-h-[50vh] flex-col gap-4 overflow-y-auto">
-            {loading ? (
+            {importError && (
+              <div className="flex items-center gap-2 py-4 text-sm text-red-primary">
+                <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
+                <p>{importError}</p>
+                <Button variant="ghost" size="sm" onClick={() => void (recovery.error ? retry() : refreshSettings())}>Retry</Button>
+              </div>
+            )}
+            {!sources && !importError ? (
               <div className="flex items-center gap-2 py-8 text-sm text-fg2">
                 <ZerosSpinner size={16} />
                 Scanning…
               </div>
-            ) : scanError ? (
-              <p className="flex items-center gap-1.5 py-4 text-sm text-red-primary">
-                <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
-                {scanError}
-              </p>
-            ) : !hasAny ? (
+            ) : !sources ? null : !hasAny ? (
               <p className="py-8 text-center text-sm text-fg2">
                 No MCP servers found in Cursor, Claude, Codex, or Factory configs.
               </p>
@@ -394,7 +436,7 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
           <Button
             variant="default"
             size="sm"
-            disabled={busy || loading || selectedCount === 0}
+            disabled={busy || loading || !connected || !!scanError || !layer || settingsLoading || !!settingsReadError || !!layer.error || selectedCount === 0}
             onClick={() => void handleImport()}
           >
             {busy && <ZerosSpinner size={16} tone="inverted" />}

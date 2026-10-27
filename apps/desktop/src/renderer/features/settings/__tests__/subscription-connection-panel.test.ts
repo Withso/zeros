@@ -3,13 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserSubscriptionProvider } from "@zeros/protocol/provider-auth";
 
-const fixture = vi.hoisted(() => ({ state: "expired", email: undefined as string | undefined }));
+const fixture = vi.hoisted(() => ({ state: "expired", email: undefined as string | undefined, readError: null as Error | null }));
+vi.mock("react", async original => ({ ...await original<typeof import("react")>(), useLayoutEffect: () => {} }));
 
 vi.mock("../../../platform/runtime", () => ({
   useNativeRuntime: () => ({ ready: true }),
 }));
 vi.mock("../../../state/use-cached-read", () => ({
   useCachedRead: () => ({
+    error: fixture.readError,
     data: {
       state: fixture.state,
       email: fixture.email,
@@ -40,9 +42,19 @@ import { SubscriptionConnectionPanel } from "../subscription-connection-panel";
 beforeEach(() => {
   fixture.state = "expired";
   fixture.email = undefined;
+  fixture.readError = null;
 });
 
 describe("saved account recovery controls", () => {
+  it("keeps a saved account visible without a transient native status error", () => {
+    fixture.state = "connected";
+    fixture.email = "saved@example.test";
+    fixture.readError = new Error("temporary status failure");
+    const html = renderToStaticMarkup(React.createElement(SubscriptionConnectionPanel, { provider: "claude", surfaceActive: true }));
+    expect(html).toContain("saved@example.test is connected");
+    expect(html).not.toContain("temporary status failure");
+    expect(html).not.toContain("Could not check the connection");
+  });
   it.each(["claude", "codex", "cursor"] as BrowserSubscriptionProvider[])(
     "shows one simple connected-account sentence for %s",
     provider => {

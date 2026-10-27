@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/state/use-recovering-read.ts",
+  "before": "readError: recovery.readError,",
+  "after": "readError: read.error,"
+}

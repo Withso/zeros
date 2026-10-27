@@ -194,7 +194,7 @@ import {
   sessionToolsResource,
   warmPreparedSessionTools,
 } from "./session-tools-cache";
-import { useBridge } from "../../platform/bridge/use-bridge";
+import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
@@ -1994,12 +1994,18 @@ function AgentChatBody({
     session.messages.length === 0 &&
     !session.error &&
     !!chatThread?.folder;
+  const historyFolder = chatThread?.folder ?? session.cwd;
+  const historyConnection = useBridgeStatus(historyFolder);
   const transcriptHistoryStatus = useTranscriptHistoryStatus({
     identity: JSON.stringify([chatThread?.folder ?? session.cwd, chatId]),
     active: surfaceActive,
     hasMessages: session.messages.length > 0,
     hasTranscript: session.hasTranscript,
     resident: session.transcriptState === "resident",
+    error: session.transcriptReadError,
+    // Cloud history reads the control-plane mirror even while its VM sleeps.
+    connected: isCloudWorkspace(historyFolder) || historyConnection === "connected",
+    retry: session.hydrateChat,
   });
   const transcriptLoadingVisible = transcriptHistoryStatus === "loading";
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
@@ -4949,6 +4955,11 @@ function AgentChatBody({
                   className="shrink-0"
                 />
                 <span aria-hidden="true">Loading conversation…</span>
+              </div>
+            )}
+            {transcriptHistoryStatus === "waiting" && (
+              <div role="status" aria-label="Waiting for conversation" className="text-fg3 py-2 text-xs">
+                Loading conversation…
               </div>
             )}
             {transcriptHistoryStatus === "unavailable" && (

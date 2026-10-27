@@ -101,6 +101,25 @@ afterEach(() => {
 });
 
 describe("resource monitor activity", () => {
+  it("does not announce a single failed sample that recovers on the next poll", async () => {
+    native.snapshot.mockRejectedValueOnce(new Error("temporary sample failure"));
+    render(true); await settle();
+    expect(hooks.writes).not.toHaveBeenCalledWith("temporary sample failure");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(hooks.states[1]).toEqual(snapshot(1));
+    expect(hooks.writes).not.toHaveBeenCalledWith("temporary sample failure");
+  });
+  it("reports repeated sampling failures and clears them on a confirmed sample", async () => {
+    native.snapshot.mockRejectedValueOnce(new Error("sample failed")).mockRejectedValueOnce(new Error("sample failed"));
+    render(true); await settle();
+    expect(hooks.writes).not.toHaveBeenCalledWith("sample failed");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(hooks.writes).toHaveBeenCalledWith("sample failed");
+    hooks.writes.mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(hooks.writes).toHaveBeenCalledWith(null);
+    expect(hooks.states[1]).toEqual(snapshot(1));
+  });
   it("does no process scans, census reads or registry work while closed", async () => {
     render(false); await vi.advanceTimersByTimeAsync(60_000);
     console.info(JSON.stringify({ closedMs: 60_000, scans: native.snapshot.mock.calls.length,

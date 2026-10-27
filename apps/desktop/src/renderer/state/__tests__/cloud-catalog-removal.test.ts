@@ -5,6 +5,12 @@ const harness = vi.hoisted(() => ({
   effects: [] as Array<() => void | (() => void)>,
   list: vi.fn(),
 }));
+// These tests drive cache subscriptions outside React. Presentation recovery
+// is exercised with mounted readers in read-recovery.test.ts.
+vi.mock("../../platform/bridge/use-bridge", () => ({ useBridgeStatus: () => "connected" }));
+vi.mock("../use-read-recovery", () => ({
+  useReadRecovery: (_key: string, read: { error: Error | null; pending: boolean }) => read,
+}));
 vi.mock("../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => false, hasCloudWorkspaceAccountAccess: () => false }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),

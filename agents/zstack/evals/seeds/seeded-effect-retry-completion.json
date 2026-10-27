@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/features/agent-extensions/mcp-import-dialog.tsx",
+  "before": "const retry = useCallback(() => new Promise<void>(resolve => {\n    retryWaiters.current.push(resolve);\n    setLoading(true);\n    setScanAttempt(value => value + 1);\n  }), []);",
+  "after": "const retry = useCallback(() => {\n    setScanAttempt(value => value + 1);\n  }, []);"
+}

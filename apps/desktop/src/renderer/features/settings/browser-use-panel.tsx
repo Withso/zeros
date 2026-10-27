@@ -285,7 +285,7 @@ function LocalBrowserUsePanel() {
     [layer, resolved],
   );
 
-  const settingsUnavailable = !resolved.resolved || Boolean(resolved.error);
+  const settingsUnavailable = !resolved.resolved || Boolean(resolved.readError);
   const switchDisabled = (key: BrowserBooleanSetting) =>
     settingsUnavailable || managed(key) || pending[key]?.settled === false;
   const sharedRowsOff = !inAppBrowserInUse(values, { zerosBrowser });

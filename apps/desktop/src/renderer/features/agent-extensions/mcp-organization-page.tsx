@@ -3,7 +3,7 @@ import { ChevronRight, Plus, Trash2 } from "lucide-react";
 import { Button } from "../../shared/ui/primitives/button";
 import { Switch } from "../../shared/ui/primitives/switch";
 import { toast } from "../../shared/ui/primitives/elements";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { shellOpenUrl } from "../../platform/app";
 import type { OrganizationSummary } from "../team/control-plane";
@@ -40,8 +40,8 @@ function OrganizationMcpRow({ row, ownerKey, observedAt, busy, onEdit, onConnect
 
 export function OrganizationMcpPage({ organization, surfaceActive }: { organization: OrganizationSummary; surfaceActive: boolean }) {
   const key = cloudMcpKey(organization.id);
-  const read = useCachedRead(cloudMcpCache, key, readCloudMcp, { enabled: surfaceActive, maxAgeMs: 30_000 });
-  const repositories = useCachedRead(repositoriesCache, key, readCloudMcpRepositories, { enabled: surfaceActive, maxAgeMs: 30_000 });
+  const read = useRecoveringRead(cloudMcpCache, key, readCloudMcp, { enabled: surfaceActive, maxAgeMs: 30_000 });
+  const repositories = useRecoveringRead(repositoriesCache, key, readCloudMcpRepositories, { enabled: surfaceActive, maxAgeMs: 30_000 });
   const [view, setView] = useState<{ kind: "list" } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean }>({ kind: "list" });
   const [busy, setBusy] = useState<string | null>(null);
   const mutating = useRef(false);

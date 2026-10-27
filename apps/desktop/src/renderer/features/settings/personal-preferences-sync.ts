@@ -20,6 +20,10 @@ export function startPersonalPreferencesSync(
     requested = false,
     initialized = false;
   let connectionEpoch = 0;
+  let failures = 0;
+  let notified = false;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  const noticeId = "personal-preferences-sync";
   const local = () =>
     !disposed &&
     isNativeRuntime() &&
@@ -28,6 +32,8 @@ export function startPersonalPreferencesSync(
   const refresh = () => {
     requested = true;
     if (running || !local()) return;
+    if (retry) clearTimeout(retry);
+    retry = undefined;
     running = true;
     void (async () => {
       try {
@@ -63,13 +69,28 @@ export function startPersonalPreferencesSync(
             acceptPersonalPreferences(read.doc.preferences ?? {}, sent);
           } else acceptPersonalPreferences(result, sent);
           initialized = true;
+          failures = 0;
+          if (notified) {
+            toast.dismiss(noticeId);
+            notified = false;
+          }
           if (pendingPreferences().size) requested = true;
         }
-      } catch (error) {
-        if (local())
-          toast.error(
-            `Personal preferences could not be saved or refreshed. Your pending choices are kept on this device. ${error instanceof Error ? error.message : String(error)}`,
-          );
+      } catch {
+        if (local()) {
+          failures += 1;
+          if (failures > 1 && !notified) {
+            notified = true;
+            toast.error(
+              "Personal preferences could not be saved or refreshed. Pending choices are kept on this device and will retry.",
+              { id: noticeId, duration: Infinity },
+            );
+          }
+          retry = setTimeout(() => {
+            retry = undefined;
+            refresh();
+          }, Math.min(30_000, 1_500 * 2 ** Math.min(failures - 1, 5)));
+        }
       } finally {
         running = false;
       }
@@ -78,6 +99,9 @@ export function startPersonalPreferencesSync(
   const offPending = onPendingPreferences(refresh);
   const offStatus = bridge.onStatusChange((status) => {
     connectionEpoch += 1;
+    if (retry) clearTimeout(retry);
+    retry = undefined;
+    failures = 0;
     if (status === "connected") {
       initialized = false;
       refresh();
@@ -91,6 +115,8 @@ export function startPersonalPreferencesSync(
   refresh();
   return () => {
     disposed = true;
+    if (retry) clearTimeout(retry);
+    if (notified) toast.dismiss(noticeId);
     offPending();
     offStatus();
     offDb();

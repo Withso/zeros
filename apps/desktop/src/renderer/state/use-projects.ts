@@ -1,5 +1,7 @@
 import { cloudProjectForFolder, isCloudWorkspaceCatalogOnlyRow } from "./cloud-workspace-catalog";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
+import { useBridgeStatus } from "../platform/bridge/use-bridge";
+import { useReadRecovery } from "./use-read-recovery";
 import { isCloudRepositorySlug, isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 // ──────────────────────────────────────────────────────────
 // React bindings for projects + per-project workspaces
@@ -1261,11 +1263,16 @@ export function useArchivedWorkspaces(repoSlug?: string): {
     );
   }, [revalidate]);
 
+  const connected = useBridgeStatus() === "connected";
+  const recovery = useReadRecovery(`workspace-archives:${key}`, {
+    error: snapshot.error, pending: snapshot.loading || snapshot.refreshing,
+    hasContent: snapshot.data !== undefined, retry: refresh, connected,
+  });
   return {
     workspaces: snapshot.data ?? EMPTY_WORKSPACES,
     resolved: snapshot.data !== undefined,
-    loading: snapshot.loading,
-    error: snapshot.error,
+    loading: snapshot.data === undefined && recovery.pending,
+    error: recovery.error,
     refresh,
   };
 }

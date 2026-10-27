@@ -4,7 +4,9 @@ import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { RuntimeClient } from "../platform/bridge/ws-client";
+import { RuntimeClient } from "../platform/bridge/ws-client";
+import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
+import { BridgeProvider } from "../platform/bridge/use-bridge";
 import type { StatusResult } from "../platform/git";
 import type { SessionsActions } from "../features/agent/sessions-context";
 import type { AuthContextValue } from "../features/auth/auth-context";
@@ -150,7 +152,7 @@ Object.assign(window, {
   },
 });
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
-setActiveBridge({
+const fixtureBridge = {
   status: "connected",
   onStatusChange: () => () => {},
   onMessage: () => () => {},
@@ -253,7 +255,14 @@ setActiveBridge({
     }
     return { type: "WORKSPACE_RESPONSE", result };
   },
-} as unknown as RuntimeClient);
+} as unknown as RuntimeClient;
+// Readiness belongs to the same fixture as the request double. Production
+// consumers observe BridgeProvider's connection instead of assuming that a
+// native API implies an already-connected engine.
+Object.defineProperty(RuntimeClient.prototype, "status", { get: () => "connected" });
+RuntimeClient.prototype.connect = () => Promise.resolve();
+WorkspaceRuntimeClient.prototype.request = fixtureBridge.request;
+setActiveBridge(fixtureBridge);
 const { useWorkspaceStore, selectActiveFolder } =
   await import("../state/store");
 // This focused harness omits app-shell's chat persistence. Supply its first
@@ -505,13 +514,15 @@ function Harness() {
   );
 }
 createRoot(document.getElementById("root")!).render(
-  <AuthContext.Provider value={auth}>
-    <ActionsCtx.Provider value={sessions}>
-      <TooltipProvider>
-        <AddProjectProvider>
-          <Harness />
-        </AddProjectProvider>
-      </TooltipProvider>
-    </ActionsCtx.Provider>
-  </AuthContext.Provider>,
+  <BridgeProvider>
+    <AuthContext.Provider value={auth}>
+      <ActionsCtx.Provider value={sessions}>
+        <TooltipProvider>
+          <AddProjectProvider>
+            <Harness />
+          </AddProjectProvider>
+        </TooltipProvider>
+      </ActionsCtx.Provider>
+    </AuthContext.Provider>
+  </BridgeProvider>,
 );
