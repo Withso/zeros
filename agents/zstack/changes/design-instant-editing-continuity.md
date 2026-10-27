@@ -18,8 +18,11 @@
   editor in an overview; warm only from explicit chrome (titles, Layers rows)
   and clear intent once its frame is selected.
 - Rule: identity does not survive postMessage. Compare runtime payloads by
-  their semantic generation (revision, root readback, viewport) before
-  publishing, or every structured clone re-renders the whole surface.
+  content before publishing, or every structured clone re-renders the whole
+  surface: equal revision, tree, warnings, root readback and viewport. Every
+  runtime path that changes the tree without an observed mutation (insert
+  previews and their cancellation) must advance the revision; a root-only
+  comparison dropped a child drawn inside a nested container.
 - Rule: attribute React commits to store publications before optimizing
   (production profiling build, scheduled-updater identities); most frame-switch
   commits were equal state re-set by effects, closed panels and loading flags.

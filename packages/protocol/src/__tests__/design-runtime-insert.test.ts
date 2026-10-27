@@ -18,7 +18,7 @@ beforeEach(async () => {
   page = await browser.newPage();
   await page.evaluate(async (source) => {
     document.head.innerHTML = "<style>body{margin:0}</style>";
-    document.body.innerHTML = `<main data-oid="root" style="display:block;width:600px;height:400px">\n  <div data-oid="a" style="width:100px;height:80px"></div>\n</main>`;
+    document.body.innerHTML = `<main data-oid="root" style="display:block;width:600px;height:400px">\n  <div data-oid="a" style="width:300px;height:200px"></div>\n</main>`;
     let sourceVersion = "b".repeat(24);
     Object.assign(window, { __zerosDesignSourceVersion: sourceVersion });
     const channel = new MessageChannel();
@@ -206,6 +206,45 @@ describe("runtime child insertion", () => {
       };
     }, { insert });
     expect(result).toEqual({ both: true, remaining: ["frame-second"], tree: ["a", "frame-second"] });
+  });
+
+  it("advances the runtime revision when a nested preview or its cancellation changes the tree", async () => {
+    // A child drawn inside a nested container leaves the root readback, the
+    // root count and the warnings unchanged; only the revision can say so.
+    const result = await page.evaluate(async ({ insert }) => {
+      const before = await window.layoutRequest("getSnapshot", {});
+      const nested = { ...insert, parentId: "a" };
+      const preview = await window.layoutRequest("previewInsert", { inserts: [nested], updates: [{ nodeId: "a", styles: { position: "relative" } }] });
+      const cleared = await window.layoutRequest("clearPreviewInserts", { nodeIds: ["frame-child"] });
+      return { before: before.revision, preview: preview.snapshot.revision, cleared: cleared.snapshot.revision };
+    }, { insert });
+    expect(result.preview).toBeGreaterThan(result.before);
+    expect(result.cleared).toBeGreaterThan(result.preview);
+  });
+
+  it("keeps a parent property another pending insert still needs when one is cancelled", async () => {
+    const result = await page.evaluate(async ({ insert, parentStyles }) => {
+      const second = { ...insert, nodeId: "frame-second" };
+      await window.layoutRequest("previewInsert", { inserts: [insert], updates: parentStyles });
+      await window.layoutRequest("previewInsert", { inserts: [second], updates: parentStyles });
+      const root = document.querySelector('[data-oid="root"]') as HTMLElement;
+      await window.layoutRequest("clearPreviewInserts", { nodeIds: ["frame-child"] });
+      const whileSecond = getComputedStyle(root).position;
+      await window.layoutRequest("clearPreviewInserts", { nodeIds: ["frame-second"] });
+      return { whileSecond, after: getComputedStyle(root).position };
+    }, { insert, parentStyles });
+    expect(result).toEqual({ whileSecond: "relative", after: "static" });
+  });
+
+  it("bounds pending inserts to eight across batches", async () => {
+    const result = await page.evaluate(async ({ insert }) => {
+      const batch = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => ({ ...insert, nodeId: `${prefix}-${index}` }));
+      await window.layoutRequest("previewInsert", { inserts: batch("first", 7) });
+      const second = await window.layoutRequest("previewInsert", { inserts: batch("second", 2) }).then(() => "ok", (error: Error) => error.message);
+      return { second, pending: document.querySelectorAll('[data-oid^="first-"], [data-oid^="second-"]').length };
+    }, { insert });
+    expect(result.second).not.toBe("ok");
+    expect(result.pending).toBe(7);
   });
 
   it("rejects inserts into void parents, duplicate ids and unbounded styles", async () => {

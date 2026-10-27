@@ -1,4 +1,4 @@
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeNodeDetails, DesignRuntimeTreeNode, DesignRuntimeWarning } from "@zeros/protocol/design-runtime";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -264,6 +264,29 @@ describe("design runtime store", () => {
     expect(notifications).toBe(retiredCount + 1);
     expect(designRuntimeFrameState("workspace-a", "home.html")?.retiredAt).toBeUndefined();
     unsubscribe();
+  });
+
+  it("publishes a same-revision snapshot whose nested tree or warnings changed", () => {
+    const snapshot = {
+      sourceVersion: SOURCE_VERSION,
+      revision: 4,
+      tree: [{ oid: "root", tag: "main", name: "Main", text: null, visible: true, children: [
+        { oid: "a", tag: "div", name: "A", text: null, visible: true, children: [] },
+      ] }] as DesignRuntimeTreeNode[],
+      frame: { ...details(), oid: "root" },
+      warnings: [] as DesignRuntimeWarning[],
+      viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 },
+    };
+    const store = useDesignRuntimeStore.getState();
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", snapshot, SOURCE_VERSION);
+    const nested = structuredClone(snapshot);
+    nested.tree[0]!.children[0]!.children.push({ oid: "child", tag: "div", name: "Child", text: null, visible: true, children: [] });
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", nested, SOURCE_VERSION);
+    expect(designRuntimeFrameState("workspace-a", "home.html")?.snapshot?.tree[0]?.children[0]?.children.map((node) => node.oid)).toEqual(["child"]);
+    const warned = structuredClone(nested);
+    warned.warnings = [{ ruleId: "contrast", oid: "child", message: "Low contrast", fix: "Darken" }];
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", warned, SOURCE_VERSION);
+    expect(designRuntimeFrameState("workspace-a", "home.html")?.snapshot?.warnings).toHaveLength(1);
   });
 
   it("reuses semantically equal node details without notifying subscribers", () => {

@@ -357,9 +357,28 @@ function sameNodeDetails(
   );
 }
 
-/** The runtime's revision is its semantic generation counter: a cloned
- * snapshot of the same revision, root readback and viewport is the same
- * snapshot, even though the port delivered a new object. */
+function sameTree(
+  left: readonly DesignRuntimeTreeNode[],
+  right: readonly DesignRuntimeTreeNode[],
+): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) {
+    const a = left[index]!;
+    const b = right[index]!;
+    if (
+      a.oid !== b.oid || a.tag !== b.tag || a.name !== b.name ||
+      a.layerName !== b.layerName || a.text !== b.text || a.visible !== b.visible ||
+      a.display !== b.display || a.flexDirection !== b.flexDirection ||
+      !sameTree(a.children, b.children)
+    ) return false;
+  }
+  return true;
+}
+
+/** The port structured-clones every payload, so an unchanged runtime
+ * snapshot arrives as a new object. Equal generation, tree, warnings, root
+ * readback and viewport is the same snapshot; anything else publishes. */
 function sameRuntimeSnapshot(
   left: DesignRuntimeSnapshot,
   right: DesignRuntimeSnapshot,
@@ -368,13 +387,18 @@ function sameRuntimeSnapshot(
     left === right ||
     (left.sourceVersion === right.sourceVersion &&
       left.revision === right.revision &&
-      left.tree.length === right.tree.length &&
-      left.warnings.length === right.warnings.length &&
       left.viewport.width === right.viewport.width &&
       left.viewport.height === right.viewport.height &&
       left.viewport.scrollX === right.viewport.scrollX &&
       left.viewport.scrollY === right.viewport.scrollY &&
-      sameNodeDetails(left.frame, right.frame))
+      left.warnings.length === right.warnings.length &&
+      left.warnings.every((warning, index) => {
+        const other = right.warnings[index]!;
+        return warning.ruleId === other.ruleId && warning.oid === other.oid &&
+          warning.message === other.message && warning.fix === other.fix;
+      }) &&
+      sameNodeDetails(left.frame, right.frame) &&
+      sameTree(left.tree, right.tree))
   );
 }
 

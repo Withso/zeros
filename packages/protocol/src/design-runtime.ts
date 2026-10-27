@@ -3558,16 +3558,22 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return element;
   }
 
-  /** Restore only the parent properties an insert preview wrote; other
-   * previews on the same parent keep their own baseline. */
+  /** Restore only the parent properties an insert preview wrote and no other
+   * live insert preview still claims; other previews keep their baseline. */
   function restoreInsertParentStyles(parentStyles) {
     parentStyles.forEach(function (entry) {
       var element = elementsByOid.get(entry.oid);
       var priorByProperty = previewStyleOverridesByOid.get(entry.oid);
       if (!element || !priorByProperty) return;
+      var claimed = new Set();
+      previewInsertsByOid.forEach(function (preview) {
+        preview.parentStyles.forEach(function (other) {
+          if (other.oid === entry.oid) other.properties.forEach(function (property) { claimed.add(property); });
+        });
+      });
       entry.properties.forEach(function (property) {
         var prior = priorByProperty.get(property);
-        if (!prior) return;
+        if (!prior || claimed.has(property)) return;
         restorePreviewStyle(element, prior);
         priorByProperty.delete(property);
       });
@@ -3586,12 +3592,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         if (only && !only.has(entry[0])) return;
         var preview = entry[1];
         if (preview.element.parentNode) preview.element.parentNode.removeChild(preview.element);
-        restoreInsertParentStyles(preview.parentStyles);
         previewInsertsByOid.delete(entry[0]);
+        restoreInsertParentStyles(preview.parentStyles);
         removed = true;
       });
     });
-    if (removed) refreshElementMap();
+    // The tree changed without an observed mutation: advance the semantic
+    // generation so hosts never mistake this snapshot for the previous one.
+    if (removed) {
+      refreshElementMap();
+      revision += 1;
+    }
     return removed;
   }
 
@@ -3604,8 +3615,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (Array.isArray(args.inserts)) {
       clearInsertPreviews(new Set(args.inserts.map(function (insert) { return insert && insert.nodeId; })));
     }
-    if (previewInsertsByOid.size >= 8) throw new Error("Too many pending layer inserts.");
     var plans = prepareInserts(args.inserts);
+    if (previewInsertsByOid.size + plans.length > 8) throw new Error("Too many pending layer inserts.");
     var parentStyles = updates.map(function (update) {
       if (!update || typeof update !== "object" || typeof update.nodeId !== "string" ||
           !update.styles || typeof update.styles !== "object" || Array.isArray(update.styles)) {
@@ -3616,13 +3627,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var inserted = [];
     withoutObservedMutations(function () {
       parentStyles.forEach(function (entry) { applyPreviewStyles(entry.element, entry.oid, entry.styles); });
-      plans.forEach(function (plan, index) {
+      plans.forEach(function (plan) {
         var element = insertedElement(plan);
         plan.parent.insertBefore(element, plan.before);
-        previewInsertsByOid.set(plan.oid, { element: element, parentStyles: index === 0 ? parentStyles : [] });
+        // Every insert of the batch claims the parent styles it needs, so
+        // cancelling one keeps them while a sibling preview remains.
+        previewInsertsByOid.set(plan.oid, { element: element, parentStyles: parentStyles });
         inserted.push(element);
       });
     });
+    revision += 1;
     var nextSnapshot = snapshot();
     return { snapshot: nextSnapshot, details: inserted.map(function (element) { return detailsOf(element); }) };
   }
