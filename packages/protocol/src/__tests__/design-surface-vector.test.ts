@@ -3,7 +3,12 @@ import { chromium, type Browser } from "@playwright/test";
 import { DESIGN_SURFACE_VECTOR_SOURCE } from "../design-surface-vector";
 
 let browser: Browser;
-beforeAll(async () => { browser = await chromium.launch({ headless: true }); });
+beforeAll(async () => {
+  // SVG images use grayscale text antialiasing. Match the HTML reference to
+  // that mode so Linux LCD font smoothing cannot masquerade as a layout or
+  // paint mismatch; keep the same strict pixel comparison on every platform.
+  browser = await chromium.launch({ headless: true, args: ["--disable-lcd-text"] });
+});
 afterAll(async () => { await browser?.close(); });
 
 const cases: Array<{ name: string; css: string; body?: string; fallback?: boolean }> = [

@@ -187,3 +187,21 @@ integration checkout. Earlier full-root, browser-shard and macOS-engine evidence
 is recorded above with its limits. Final CI and merge state belong to the
 latest head of [PR #695](https://github.com/Withso/zeros/pull/695); this receipt
 records local verification before that delivery commit.
+
+### CI fidelity-test follow-up
+
+The first delivery head, `2449e55d25fa445b93d0f8e0d09b60cee9f662ac`,
+passed the browser, macOS and security checks. Both attempts of
+[CI run 40443340421](https://github.com/Withso/zeros/actions/runs/40443340421)
+failed the same HTML/SVG pixel case with 285 different pixels. The retry did
+not resolve that failure.
+
+An isolated fontconfig setting reproduced the exact 285 pixels locally:
+slight hinting with RGB subpixel rendering enabled. The HTML reference used
+LCD text antialiasing while the SVG image used grayscale. Disabling LCD text
+in the comparison browser produced zero differences in all six repetitions;
+re-enabling it restored all 285 differences. The whole surface suite then
+passed 43 tests with the previously failing fontconfig setting and its
+original pixel threshold unchanged. This test-only change does not alter
+application rendering or establish another native performance result. The
+CI playbook now records this environment distinction.
