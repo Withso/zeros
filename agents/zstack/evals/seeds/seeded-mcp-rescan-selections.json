@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/features/agent-extensions/mcp-import-dialog.tsx",
+  "before": "setSelected(current => sources === null\n          ? sel\n          : new Set([...current].filter(key => sel.has(key))));",
+  "after": "if (!sources) setSelected(sel);"
+}

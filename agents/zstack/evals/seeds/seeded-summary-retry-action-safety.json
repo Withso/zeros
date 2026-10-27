@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/shell/conversation/summary-git-status.tsx",
+  "before": ": readError || !facts",
+  "after": ": git.error || !facts"
+}

@@ -57,7 +57,7 @@ export function SummaryGitStatus({
   onNavigate: () => void;
 }) {
   const nativeReady = useNativeRuntime().ready;
-  const { git, pr, refresh, error } = useSummaryGitStatus(
+  const { git, pr, refresh, error, readError, connected } = useSummaryGitStatus(
     workspace,
     active && nativeReady,
   );
@@ -75,11 +75,11 @@ export function SummaryGitStatus({
     pr: pr.data ?? null,
     baseBranch: workspace.baseBranch,
   });
-  const unavailable = !nativeReady
+  const unavailable = !nativeReady || !connected
     ? "The engine is reconnecting"
     : error
       ? "Refresh Git status before continuing"
-      : git.error || !facts
+      : readError || !facts
         ? "Reading Git status…"
         : undefined;
   const createReason =
@@ -246,7 +246,7 @@ export function SummaryGitStatus({
             size="compact"
             className={ACTION_CLASS}
             onClick={refresh}
-            disabled={!active || !nativeReady}
+            disabled={!active || !nativeReady || !connected}
           >
             Retry
           </Button>

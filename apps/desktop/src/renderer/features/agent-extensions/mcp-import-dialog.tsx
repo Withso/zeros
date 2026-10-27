@@ -224,14 +224,17 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
       .then((found) => {
         if (!live) return;
         setSources(found);
-        // Pre-select everything not already in Zeros.
+        // Pre-select on open. Rescans keep the user's choices only while the
+        // servers remain available, without selecting newly discovered rows.
         const sel = new Set<string>();
         for (const src of found) {
           for (const srv of src.servers) {
             if (!existingNames.has(srv.name)) sel.add(keyOf(src.source, srv.name));
           }
         }
-        if (!sources) setSelected(sel);
+        setSelected(current => sources === null
+          ? sel
+          : new Set([...current].filter(key => sel.has(key))));
       })
       .catch((e) => live && setScanError(e instanceof Error ? e.message : String(e)))
       .finally(() => live && setLoading(false));

@@ -15,6 +15,17 @@ Transient read presentation across desktop surfaces
   before replacing the server list, including malformed document responses.
   Starting a retry clears the cache error before data is confirmed; retain the
   observed read failure for write/access guards until the retry settles.
+- Follow that retained safety signal through each consumer, not only the
+  shared hook. Hold a failed Summary refresh's retry while confirmed Git rows
+  remain rendered; mutation buttons must stay disabled until a successful read.
+  Keep ordinary healthy revalidation usable and gate actions on the owning
+  connection. The Summary hook lifecycle and action-render tests cover both
+  Personal Local and organization-local workspaces.
+- A successful picker rescan must intersect retained selections with the new
+  eligible rows. Keeping the Set unchanged can leave "Import 1" enabled after
+  its only server disappeared; replacing it with every row undoes unchecked
+  choices. The MCP reconnect regression covers removals, additions and empty
+  results while preserving surviving choices.
 - A callback that only schedules an effect has not finished retrying. Keep the
   retry promise pending until the real result commits or observation retires;
   record every React commit to catch a one-frame error before eventual success.

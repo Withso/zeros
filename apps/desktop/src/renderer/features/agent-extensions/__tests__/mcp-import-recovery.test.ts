@@ -15,21 +15,24 @@ const script = buildSync({
     import { flushSync } from "react-dom";
     import { useReadRecovery } from "./state/use-read-recovery";
     import { useDocumentActive } from "./state/use-document-active";
-    const f = window.scan = { open: true, status: "connected", attempts: 0, paints: [], settled: null };
+    const f = window.scan = { open: true, status: "connected", attempts: 0, paints: [], settled: null, plans: ["fail", "hold"] };
     const bridge = {}, projects = [], existingNames = new Set();
-    const keyOf = (source, name) => source + ":" + name;
+    const keyOf = (source, name) => source + "::" + name;
     const useBridgeStatus = () => f.status;
     const bridgeMcpResolveComposed = async () => [];
     const bridgeMcpScanNative = () => {
       f.attempts++;
-      if (f.attempts === 1) return Promise.reject(new Error("temporary scan failure"));
-      return new Promise(resolve => f.settled = resolve);
+      const plan = f.plans.shift() ?? [];
+      if (plan === "fail") return Promise.reject(new Error("temporary scan failure"));
+      if (plan === "hold") return new Promise(resolve => f.settled = resolve);
+      return Promise.resolve(plan);
     };
     function Probe() {
       const open = f.open;
       const setComposedNames = () => {};
       ${scan}
-      const view = { error: recovery.error?.message ?? null, pending: recovery.pending, sources };
+      f.setSelected = setSelected;
+      const view = { error: recovery.error?.message ?? null, pending: recovery.pending, sources, selected: [...selected] };
       useLayoutEffect(() => { f.paints.push(view); });
       return <output>{JSON.stringify(view)}</output>;
     }
@@ -55,5 +58,36 @@ it("does not report a persistent MCP scan failure before its effect-driven retry
     await page.evaluate(() => (window as any).scan.settled([]));
     await page.waitForFunction(() => document.querySelector("output")?.textContent?.includes('"sources":[]'));
     expect(await page.evaluate(() => (window as any).scan.paints.every((paint: any) => paint.error === null))).toBe(true);
+  } finally { await browser.close(); }
+});
+
+it("prunes removed MCP selections after reconnect without selecting new or unchecked servers", async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div id="app"></div>');
+    await page.addScriptTag({ content: script });
+    await page.evaluate(() => {
+      const f = (window as any).scan;
+      f.plans = [[{ source: "cursor", servers: ["keep", "removed", "unchecked"].map(name => ({ name })) }]];
+      f.render();
+    });
+    await page.waitForFunction(() => JSON.parse(document.querySelector("output")!.textContent!).selected.length === 3);
+    await page.evaluate(() => {
+      const f = (window as any).scan;
+      f.setSelected(new Set(["cursor::keep", "cursor::removed"]));
+      f.status = "connecting"; f.render();
+    });
+    await page.evaluate(() => {
+      const f = (window as any).scan;
+      f.plans = [[{ source: "cursor", servers: ["keep", "unchecked", "new"].map(name => ({ name })) }]];
+      f.status = "connected"; f.render();
+    });
+    await page.waitForFunction(() => JSON.parse(document.querySelector("output")!.textContent!).sources[0].servers.some((s: any) => s.name === "new"));
+    expect(JSON.parse(await page.locator("output").innerText()).selected).toEqual(["cursor::keep"]);
+    await page.evaluate(() => { const f = (window as any).scan; f.status = "connecting"; f.render(); });
+    await page.evaluate(() => { const f = (window as any).scan; f.status = "connected"; f.render(); });
+    await page.waitForFunction(() => JSON.parse(document.querySelector("output")!.textContent!).sources.length === 0);
+    expect(JSON.parse(await page.locator("output").innerText()).selected).toEqual([]);
   } finally { await browser.close(); }
 });

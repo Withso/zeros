@@ -1,0 +1,9 @@
+{
+  "id": "seeded-mcp-rescan-selections",
+  "kind": "seeded",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:738",
+  "symptom": "MCP import retains a removed server's selection after reconnect, showing an enabled Import count that saves nothing.",
+  "rule": "Intersect retained picker selections with newly confirmed eligible rows while preserving unchecked choices. See agents/zstack/changes/transient-read-presentation.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-import-recovery.test.ts -t 'prunes removed MCP selections'"
+}

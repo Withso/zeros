@@ -189,7 +189,7 @@ export function useSummaryGitStatus(workspace: Workspace, active: boolean) {
     active: observing,
     folder: workspace.path,
   });
-  return { git, pr, refresh, error: recovery.error };
+  return { git, pr, refresh, connected, error: recovery.error, readError: recovery.readError };
 }
 
 registerPrWorkspaceCacheForget((workspaceId) => {
