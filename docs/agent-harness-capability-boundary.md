@@ -47,6 +47,60 @@ Design, browser and simulator capabilities are unavailable. See
 [Cloud workspaces](cloud-workspaces.md) for the current runtime and credential
 boundary.
 
+## macOS Full Disk Access
+
+Settings → Local → General → Privacy exposes the Mac's Full Disk Access setup.
+The user grants or revokes access in System Settings → Privacy & Security →
+Full Disk Access, then quits and reopens the app when macOS requests it.
+"Show App in Finder" selects the running bundle, including its release channel
+or checkout-specific Local/Dev identity. Add that bundle with the system pane's
+`+` button if it is missing. Granting another installed Zeros channel, an engine
+executable, or a terminal is not the same choice.
+
+Electron main launches the Local engine, which launches provider runtimes and
+terminal hosts. macOS attributes their file access to the responsible app in
+that process chain. Full Disk Access lets these local processes access protected
+files as the current macOS user; it does not provide root access, bypass System
+Integrity Protection, or grant Accessibility, Screen Recording, or Automation.
+The existing app shutdown and parent-death handling retire this process tree
+when the app quits. Reopen the whole app after changing a grant; restarting only
+an agent may retain the old process permission state.
+
+The grant is device-wide for Zeros's personal and organization-owned local
+workspaces. It does not expose the Mac to a cloud workspace or add any command
+to the cloud worker/relay. Provider sandboxing, Plan mode, tool approvals, and
+workspace/path authorization remain independent. Users who intentionally want
+broader agent execution still select the appropriate agent permission mode;
+opening the macOS pane never changes that selection or a managed policy.
+
+There is no public macOS API for reading or setting an app's Full Disk Access
+toggle. The status therefore reports **effective access**, with "Available"
+meaning that the current desktop process can open the current user's protected
+`~/Library/Application Support/com.apple.TCC/TCC.db` read-only. It immediately
+closes the descriptor without reading any bytes. `O_NOFOLLOW`, `O_NONBLOCK`, and
+a descriptor-level regular-file check prevent misleading symlink/directory
+results. Permission refusals report "Not enabled"; missing files, unexpected
+errors and inconclusive checks report "Could not verify", never "Available".
+There is no ordinary-file fallback or private TCC API. A development app may
+inherit access from its launcher, so "Available" does not assert that its own
+toggle is enabled in System Settings.
+
+Status is neither persisted nor sent to telemetry. Visible Settings panels
+share one device-scoped read and recheck on focus/visibility return or explicit
+"Check again". Hidden surfaces stop observation; invalidations fence late
+responses while retaining the last confirmed snapshot. Native commands accept
+no arguments and require the app's main frame. The setup action opens one fixed
+system URL and the Finder action resolves only `process.execPath`'s app bundle;
+neither exposes arbitrary paths, URLs, commands, nor permission writes.
+
+macOS qualification must use the real app on a Mac: check the denied state,
+open the correct system pane, add the running bundle, grant access, quit/reopen,
+then verify both native status and a descendant engine/terminal read without
+printing private contents. Repeat after revocation and verify normal agent
+approval modes remain in effect. Browser fixtures and Linux unit tests cannot
+prove a user-controlled TCC grant. Apple documents the consent boundary in
+[Controlling app access to files](https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web).
+
 ## Turn failure and explicit recovery
 
 Every started provider turn must settle once. Normal stream EOF without a

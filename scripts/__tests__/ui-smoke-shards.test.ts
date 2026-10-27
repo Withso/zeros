@@ -15,6 +15,7 @@ import { checkPageErrors, runSmokeScenarios } from "../ui-smoke/runner.mjs";
 // Frozen from the serial runner, including the design-workspace dispatcher's
 // children. Core's later phases stay after file-prefetch in the execution plan.
 const originalOrder = [
+  "full-disk-access",
   "local-links",
   "text-selection",
   "git-review-actions",
