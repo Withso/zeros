@@ -1,0 +1,9 @@
+{
+  "id": "design-retired-frame-layers-loading",
+  "kind": "replay",
+  "area": "desktop-design-state",
+  "fixedBy": "pending",
+  "symptom": "Returning to a Design frame (or its workspace) more than 10 s after its document retired painted \"Loading frame\u2026\" in Layers and an empty inspector until a new runtime booted for the same source.",
+  "rule": "agents/zstack/changes/design-instant-editing-continuity.md: retirement keeps the last confirmed exact-generation tree and a bounded set of readbacks within a byte budget; only presentation is evicted, oldest retirement first.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-runtime-store.test.ts"
+}

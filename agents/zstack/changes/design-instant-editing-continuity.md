@@ -1,0 +1,34 @@
+# Design instant editing: presentation continuity and render work
+
+- Symptom: Layers showed "Loading frame…" and the inspector emptied after
+  every save, tab return or a frame's 10 s document retirement; nested frame
+  creation reloaded the document; the inspector flashed "Nothing selected" or
+  a minimal frame view on fast selections.
+- Cause: presentation was tied to authority. Retirement wiped the runtime tree;
+  revalidation published all frames unprepared; structural writes always
+  navigated a new document; selection details were read after publication.
+- Rule: keep the last confirmed exact-generation presentation (tree, root and
+  recent readbacks) through retirement and revalidation, bounded by bytes, and
+  keep writes engine-checked. Adopt structural edits in place only through a
+  structured, validated twin of the exact source edit. Name a new selection
+  from its tree at once; never hold another target's properties behind a
+  timeout (AGENTS "do not hide a data waterfall behind a … timeout").
+- Rule: intent warming must respect passive ownership. Booting editors for
+  frames the pointer merely crosses swapped vectors for live HTML and kept an
+  editor in an overview; warm only from explicit chrome (titles, Layers rows)
+  and clear intent once its frame is selected.
+- Rule: identity does not survive postMessage. Compare runtime payloads by
+  their semantic generation (revision, root readback, viewport) before
+  publishing, or every structured clone re-renders the whole surface.
+- Rule: attribute React commits to store publications before optimizing
+  (production profiling build, scheduled-updater identities); most frame-switch
+  commits were equal state re-set by effects, closed panels and loading flags.
+- Verification gotchas: ad-hoc smoke servers must run `vite --mode ui-smoke`
+  (dependency pre-scan includes harness entries) or a smoke's dynamic
+  `import()` of a store hits a second module instance; fixtures that
+  string-patch runtime source must match structurally, not one exact list;
+  run `test:git` under `umask 022`.
+- Encoded in: `design-runtime-store.test.ts`, `design-layer-panel-rows.test.ts`,
+  `design-runtime-insert.test.ts`, `design-frame-intent.test.ts`,
+  `design-node-warming.test.ts`, and the frame-children, selection and
+  playback UI smokes.

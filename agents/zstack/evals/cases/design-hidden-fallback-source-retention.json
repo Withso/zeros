@@ -1,0 +1,9 @@
+{
+  "id": "design-hidden-fallback-source-retention",
+  "kind": "replay",
+  "area": "desktop-design-state",
+  "fixedBy": "pending",
+  "symptom": "Hiding a retained bridge-fallback Design surface cleared its loaded srcDoc, navigating the same iframe to an empty document and causing a blank handshake interval on a warm owner return.",
+  "rule": "agents/zstack/changes/design-continuity-error-fences-and-measurement.md: retain exact cached fallback source through a passive peek while hidden, without subscriptions, loads, cache admission, LRU changes or a longer document lifetime; verify source and load continuity as well as DOM identity.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-frame-document-presentation.test.ts"
+}

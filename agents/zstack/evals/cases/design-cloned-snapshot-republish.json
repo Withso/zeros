@@ -1,0 +1,9 @@
+{
+  "id": "design-cloned-snapshot-republish",
+  "kind": "replay",
+  "area": "desktop-design-state",
+  "fixedBy": "pending",
+  "symptom": "Each Design selection switch republished every live frame's identical runtime snapshot, because the port structured-clones the runtime's cached object, re-rendering Layers, canvas and inspector.",
+  "rule": "agents/zstack/changes/design-instant-editing-continuity.md: compare runtime snapshots by semantic generation (revision, root readback, viewport); identity cannot cross postMessage.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-runtime-store.test.ts"
+}
